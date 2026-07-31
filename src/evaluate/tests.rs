@@ -75,6 +75,128 @@ fn every_flag_is_captured_and_a_trailing_url_slash_is_trimmed() {
     assert_eq!(parsed.out, PathBuf::from("out.json"));
 }
 
+// ============================= #308: --assembly ============================
+
+#[test]
+fn without_assembly_or_budget_flags_the_run_config_is_untouched() {
+    let parsed = args(&["--eval", "a.jsonl", "--context", "sake"]).unwrap();
+    assert!(!parsed.assembly);
+    assert!(parsed.budget.is_none());
+    assert!(parsed.rerank.is_none());
+}
+
+#[test]
+fn assembly_alone_is_accepted_with_no_budget() {
+    let parsed = args(&["--eval", "a.jsonl", "--context", "sake", "--assembly"]).unwrap();
+    assert!(parsed.assembly);
+    assert!(parsed.budget.is_none());
+}
+
+#[test]
+fn one_budget_flag_is_enough_to_populate_budget() {
+    let parsed = args(&["--eval", "a.jsonl", "--context", "sake", "--max-items", "5"]).unwrap();
+    let budget = parsed.budget.expect("--max-items alone must set budget");
+    assert_eq!(budget.max_items, Some(5));
+    assert_eq!(budget.max_bytes, None);
+    assert_eq!(budget.max_tokens, None);
+}
+
+#[test]
+fn zero_or_non_numeric_budget_values_are_rejected_for_every_flag() {
+    for flag in ["--max-items", "--max-bytes", "--max-tokens"] {
+        for value in ["0", "abc"] {
+            assert_eq!(
+                args(&["--eval", "a.jsonl", "--context", "sake", flag, value]).unwrap_err(),
+                2,
+                "{flag} {value}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_duplicate_assembly_flag_is_refused() {
+    assert_eq!(
+        args(&[
+            "--eval",
+            "a.jsonl",
+            "--context",
+            "sake",
+            "--assembly",
+            "--assembly"
+        ])
+        .unwrap_err(),
+        2
+    );
+}
+
+#[test]
+fn a_duplicate_budget_or_rerank_flag_is_refused() {
+    for flag in ["--max-items", "--max-bytes", "--max-tokens"] {
+        assert_eq!(
+            args(&[
+                "--eval",
+                "a.jsonl",
+                "--context",
+                "sake",
+                flag,
+                "5",
+                flag,
+                "5"
+            ])
+            .unwrap_err(),
+            2,
+            "{flag}"
+        );
+    }
+    assert_eq!(
+        args(&[
+            "--eval",
+            "a.jsonl",
+            "--context",
+            "sake",
+            "--assembly",
+            "--rerank",
+            "m",
+            "--rerank",
+            "m"
+        ])
+        .unwrap_err(),
+        2
+    );
+}
+
+#[test]
+fn rerank_without_assembly_is_a_usage_error() {
+    assert_eq!(
+        args(&[
+            "--eval",
+            "a.jsonl",
+            "--context",
+            "sake",
+            "--rerank",
+            "some-model"
+        ])
+        .unwrap_err(),
+        2
+    );
+}
+
+#[test]
+fn rerank_with_assembly_is_accepted() {
+    let parsed = args(&[
+        "--eval",
+        "a.jsonl",
+        "--context",
+        "sake",
+        "--assembly",
+        "--rerank",
+        "some-model",
+    ])
+    .unwrap();
+    assert_eq!(parsed.rerank.as_deref(), Some("some-model"));
+}
+
 // ================================ Dispatch ================================
 
 #[test]
@@ -305,6 +427,54 @@ fn hit_locator_never_carries_the_passage_body_text() {
     assert_no_body_text(&value, "TOP-SECRET-PASSAGE-BODY-TEXT", "$");
 }
 
+/// #308: an assembled package's `items[]` embeds the *existing*
+/// `PassageHit` (with its full body `text`) verbatim as its
+/// kind-specific payload (ADR 0006 §10) — neither of #308's two
+/// projections of that item, [`evidence_locators`] (the diagnostic
+/// `EvidenceOutcome.items` block) nor [`hits_from_evidence_items`]
+/// (the scoring-facing `HitLocator` projection), may let that text
+/// reach `evaluation.json` (ADR 0004 §11's no-corpus-text rule).
+#[test]
+fn evidence_locator_never_carries_the_passage_body_text() {
+    let item = EvidenceItem {
+        candidate_id: "passage::corpus/brewery.md::0".to_string(),
+        kind: "passage".to_string(),
+        fused_rank: 1,
+        lane_ranks: vec![crate::api::evidence::LaneRank {
+            lane: "passage_bm25".to_string(),
+            rank: 1,
+        }],
+        citation_refs: vec![CitationRef {
+            source: "corpus/brewery.md".to_string(),
+            paragraph: 0,
+        }],
+        corroboration: None,
+        contradicts: Vec::new(),
+        bytes: 0,
+        estimated_tokens: 0,
+        association: None,
+        passage: Some(PassageHit {
+            source: "corpus/brewery.md".to_string(),
+            paragraph: 0,
+            score: 1.0,
+            text: "TOP-SECRET-PASSAGE-BODY-TEXT".to_string(),
+            lanes: PassageLanes {
+                bm25: None,
+                vector: None,
+            },
+        }),
+        community: None,
+    };
+
+    let locators = evidence_locators(std::slice::from_ref(&item));
+    let locators_value = serde_json::to_value(&locators).unwrap();
+    assert_no_body_text(&locators_value, "TOP-SECRET-PASSAGE-BODY-TEXT", "$");
+
+    let hits = hits_from_evidence_items(std::slice::from_ref(&item));
+    let hits_value = serde_json::to_value(&hits).unwrap();
+    assert_no_body_text(&hits_value, "TOP-SECRET-PASSAGE-BODY-TEXT", "$");
+}
+
 // ========================= metrics <-> definitions agreement =========================
 
 #[test]
@@ -393,6 +563,7 @@ fn evaluate_module_never_names_an_extraction_or_embedding_seam() {
     let sources = [
         production_only(include_str!("../evaluate.rs")),
         production_only(include_str!("../evaluate/compare.rs")),
+        production_only(include_str!("../evaluate/evidence.rs")),
         production_only(include_str!("../evaluate/thresholds.rs")),
     ];
     // Built by concatenation so this assertion's own literals never
@@ -440,7 +611,7 @@ fn the_seam_scan_names_every_production_submodule_evaluate_rs_declares() {
         .collect();
     assert_eq!(
         declared,
-        BTreeSet::from(["compare", "thresholds"]),
+        BTreeSet::from(["compare", "evidence", "thresholds"]),
         "evaluate.rs declares a submodule the seam-scan test's `sources` array does not name — \
          add it there too"
     );
@@ -1275,6 +1446,9 @@ fn matching_block_does_not_claim_a_normalize_entry_comparison_for_associations()
 fn evaluate_only_touches_read_role_endpoints() {
     for (method, route) in [
         (Method::POST, "/contexts/{name}/sources/search"),
+        // #308 (ADR 0006 §5.4): --assembly's own passage-lane
+        // substitute, `POST /contexts/{name}/evidence`.
+        (Method::POST, "/contexts/{name}/evidence"),
         (Method::POST, "/contexts/{name}/resolve"),
         (Method::POST, "/contexts/{name}/resolve_label"),
         (Method::POST, "/contexts/{name}/query"),

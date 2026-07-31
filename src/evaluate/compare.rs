@@ -42,6 +42,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::api::evidence::budget::BudgetLimits;
 use crate::clock::{iso8601_utc, now_unix_secs};
 use crate::config::subcommand_usage_error;
 use crate::measure::{Count, Distribution, MetricValue, Ratio};
@@ -204,6 +205,11 @@ struct EvaluationView {
 #[serde(default)]
 struct InputsView {
     context: String,
+    /// #308 (ADR 0006 §14): `None` when the run carried no
+    /// `--max-items`/`--max-bytes`/`--max-tokens` — read (never
+    /// written) here so [`mismatch_warnings`] can tell a genuine
+    /// equal-budget comparison from one that silently wasn't.
+    budget: Option<BudgetLimits>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -232,6 +238,11 @@ struct CaseView {
     recall: Option<RecallView>,
     coverage: Option<CoverageView>,
     citations: Option<CitationsView>,
+    /// #308 (ADR 0006 §14): `CaseBlock.diversity_sources`, read as
+    /// `f64` the same way every other `case_metric_value` field is —
+    /// an older `evaluation.json` with no such field parses as `None`
+    /// (`#[serde(default)]`), never a hard error.
+    diversity_sources: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -311,6 +322,7 @@ fn case_metric_value(case: &CaseView, metric: &str) -> Option<f64> {
         "coverage.associations" => case.coverage.as_ref()?.associations.as_ref()?.value,
         "citations.recall" => case.citations.as_ref()?.recall.value,
         "citations.locator_validity" => case.citations.as_ref()?.validity.value,
+        "diversity.sources" => case.diversity_sources,
         _ => None,
     }
 }
@@ -655,6 +667,42 @@ fn mismatch_warnings(base: &LoadedReport, head: &LoadedReport, warnings: &mut Ve
             "taguru_evaluation stamp differs: BASE {} vs HEAD {}",
             base.view.taguru_evaluation, head.view.taguru_evaluation
         ));
+    }
+    // #308 (ADR 0006 §14): comparing two runs whose --max-items/
+    // --max-bytes/--max-tokens differ (including one side having no
+    // budget flag at all) is exactly the dishonest comparison an
+    // equal-budget evaluation exists to catch — warned, never refused,
+    // matching every other mismatch above (ADR 0002 §10).
+    let base_budget = base.view.inputs.budget;
+    let head_budget = head.view.inputs.budget;
+    if budget_key(base_budget) != budget_key(head_budget) {
+        warnings.push(format!(
+            "budget differs: BASE {} vs HEAD {} — not an equal-budget comparison",
+            describe_budget(base_budget),
+            describe_budget(head_budget),
+        ));
+    }
+}
+
+/// A `PartialEq`-able projection of [`BudgetLimits`] — that type
+/// itself derives no `PartialEq` (it is #304/#305's wire type, not
+/// this module's to extend), so [`mismatch_warnings`] compares this
+/// instead.
+fn budget_key(limits: Option<BudgetLimits>) -> Option<(usize, usize, usize)> {
+    limits.map(|limits| (limits.max_items, limits.max_bytes, limits.max_tokens))
+}
+
+fn describe_budget(limits: Option<BudgetLimits>) -> String {
+    match limits {
+        Some(limits) => format!(
+            "max_items={} max_bytes={} max_tokens={}",
+            limits.max_items, limits.max_bytes, limits.max_tokens
+        ),
+        // Only reachable for a `baseline` run with no --max-* flag —
+        // `assembly` always carries Some(limits), even the server's
+        // own defaults, since POST /contexts/{name}/evidence has no
+        // unbudgeted mode (InputsBlock.budget's own doc comment).
+        None => "none (untruncated baseline)".to_string(),
     }
 }
 

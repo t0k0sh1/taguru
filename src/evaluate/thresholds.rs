@@ -103,6 +103,14 @@ pub(super) const CASE_SCOPED_METRICS: &[&str] = &[
     "citations.recall",
     "citations.locator_validity",
     "latency.passage_ms",
+    // #308 (ADR 0006 §14): the one metric #216/ADR 0006 name
+    // explicitly ("source diversity at equal evidence budget"). The
+    // `budget.*`/`latency.evidence_ms`/`rerank.ran` metrics stay
+    // aggregate-only, matching `latency.passage_ms`'s own precedent of
+    // a per-case value that is nonetheless not compared case-by-case
+    // (see COMPARISON_METRICS below) — nothing in #308's acceptance
+    // criteria asks for a per-case budget/rerank threshold override.
+    "diversity.sources",
 ];
 
 /// [`CASE_SCOPED_METRICS`] minus `latency.passage_ms` — the set
@@ -123,6 +131,7 @@ pub(super) const COMPARISON_METRICS: &[&str] = &[
     "coverage.associations",
     "citations.recall",
     "citations.locator_validity",
+    "diversity.sources",
 ];
 
 /// One case's value for a [`CASE_SCOPED_METRICS`] name — `None` when
@@ -149,6 +158,7 @@ fn case_metric_value(case: &CaseBlock, metric: &str) -> Option<f64> {
             PassageOutcome::Searched { latency_ms, .. } => *latency_ms as f64,
             PassageOutcome::Failed { latency_ms, .. } => *latency_ms as f64,
         }),
+        "diversity.sources" => case.diversity_sources.map(|n| n as f64),
         _ => None,
     }
 }
@@ -609,6 +619,9 @@ mod tests {
             citations: None,
             missed: Vec::new(),
             missed_truncated: 0,
+            evidence: None,
+            budget: None,
+            diversity_sources: None,
         }
     }
 

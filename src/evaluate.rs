@@ -47,6 +47,9 @@ use serde_json::Value;
 use taguru::context::normalize_entry;
 
 use crate::api::MatchPage;
+use crate::api::evidence::budget::{BudgetLimits, BudgetUsage};
+use crate::api::evidence::rerank::RerankerPlan;
+use crate::api::evidence::select::{CitationRef, EvidenceItem, SelectionPlan};
 use crate::api::resolve::TieredResolution;
 use crate::api::sources::{Citation, PassageHit, PassageLanes, PassagePage, SearchContextPlan};
 use crate::cli::default_base_url;
@@ -80,6 +83,8 @@ const DEFAULT_OUT: &str = "evaluation.json";
 const USAGE: &str = "\
 usage: taguru evaluate --eval FILE --context NAME [--url URL]
                         [--config FILE] [--out FILE] [--thresholds FILE]
+                        [--assembly] [--max-items N] [--max-bytes N]
+                        [--max-tokens N] [--rerank MODEL]
        taguru evaluate compare BASE.json HEAD.json [--out FILE]
 
 Runs eval.jsonl's cases (ADR 0003 §11's shared dataset, #215's own
@@ -102,6 +107,27 @@ validity, corpus revision bracketing, and run metadata.
                         one exits 3. Without --thresholds every
                         completed run exits 0 and is report-only (a
                         stderr line says so).
+  --assembly             #308 (ADR 0006 §14): replaces the passage
+                        lane's `sources/search` call with
+                        `POST /contexts/{name}/evidence` — the same
+                        structural lane runs either way, so a
+                        baseline/assembly pair of runs stays
+                        comparable. Without --assembly, evaluate's
+                        behavior is unchanged from before this flag
+                        existed.
+  --max-items N          #308's equal-budget contract: the same three
+  --max-bytes N          ceilings apply to both an --assembly run (via
+  --max-tokens N          the request's own `budget`) and a baseline
+                        run (truncated client-side with the identical
+                        accounting `crate::api::evidence::budget` uses
+                        server-side). Any one given truncates every
+                        case; none given leaves both modes untruncated,
+                        matching every run before this flag existed.
+  --rerank MODEL         opts an --assembly run into a configured
+                        reranker (ADR 0006 §12); usage error without
+                        --assembly. No provider configured, or a model
+                        mismatch, degrades to the deterministic order
+                        and is recorded, never a failure.
 
 `taguru evaluate compare BASE.json HEAD.json [--out FILE]` (ADR 0004
 §9.2) reads two evaluation.json runs and writes changes.jsonl: one
@@ -116,8 +142,9 @@ written · 2 usage or input error, including a malformed --thresholds
 file or a malformed evaluation.json given to compare · 3 the run
 completed and a threshold was violated.
 
-Contract and discipline: docs/evaluate.html,
-adr/0004-retrieval-citation-quality-gate.md.
+Contract and discipline: docs/evaluate.html, docs/evidence.html,
+adr/0004-retrieval-citation-quality-gate.md,
+adr/0006-budgeted-evidence-assembly.md §14.
 ";
 
 pub fn run(args: &[String]) -> i32 {
@@ -159,6 +186,30 @@ fn run_evaluate(args: &[String]) -> i32 {
     if let Err(message) = validate_limits(&loaded.cases) {
         eprintln!("taguru: evaluate: {message}");
         return 2;
+    }
+
+    // #308 (ADR 0006 §14): `POST /contexts/{name}/evidence` has no
+    // `tags`/`since`/`until` request fields at all (§5.1) — a case
+    // declaring any of them still runs under --assembly (never a
+    // usage error; a dataset shared with a baseline run must still
+    // load), but the filter it named is silently not applied unless
+    // this is said out loud.
+    let mut extra_warnings: Vec<String> = Vec::new();
+    if eval_args.assembly {
+        for case in &loaded.cases {
+            let unsupported = !case.options.tags.is_empty()
+                || case.options.since.is_some()
+                || case.options.until.is_some();
+            if unsupported {
+                let warning = format!(
+                    "case '{}': options.tags/since/until are not applied under --assembly \
+                     (POST /contexts/{{name}}/evidence has no such request fields)",
+                    case.case_id
+                );
+                eprintln!("taguru: evaluate: {warning}");
+                extra_warnings.push(warning);
+            }
+        }
     }
 
     // Validated before any network call: a malformed --thresholds file
@@ -287,11 +338,30 @@ fn run_evaluate(args: &[String]) -> i32 {
         return 2;
     }
 
+    // Always resolved (defaulted 40/65536/4000 when no --max-* flag
+    // was given) — an --assembly run always sends this to
+    // POST /contexts/{name}/evidence, since that endpoint has no
+    // unbudgeted mode (ADR 0006 §8). `budget_given` below is what
+    // decides whether `baseline` mode additionally truncates to the
+    // same ceilings, and whether either mode's artifact carries a
+    // `budget` block at all.
+    let budget_given = eval_args.budget.is_some();
+    let limits: BudgetLimits = match &eval_args.budget {
+        Some(budget) => budget.resolve(),
+        None => BudgetLimits::resolve(None),
+    };
+    let run_config = RunConfig {
+        assembly: eval_args.assembly,
+        limits,
+        budget_given,
+        rerank: eval_args.rerank.as_deref(),
+    };
+
     let default_limit = DEFAULT_LIMIT;
     let cases: Vec<CaseBlock> = loaded
         .cases
         .iter()
-        .map(|case| build_case_block(&api, context, case, default_limit))
+        .map(|case| build_case_block(&api, context, case, default_limit, &run_config))
         .collect();
 
     let entry_after_value = match api.get_envelope(&["contexts", context]) {
@@ -336,6 +406,14 @@ fn run_evaluate(args: &[String]) -> i32 {
             out: eval_args.out.display().to_string(),
             default_limit,
             resolve_limit: RESOLVE_LIMIT,
+            mode: if eval_args.assembly {
+                "assembly"
+            } else {
+                "baseline"
+            }
+            .to_string(),
+            budget: (eval_args.assembly || budget_given).then_some(limits),
+            rerank: eval_args.rerank.clone(),
         },
         corpus: CorpusBlock {
             revision_before: entry_before.revision,
@@ -355,7 +433,12 @@ fn run_evaluate(args: &[String]) -> i32 {
             .as_ref()
             .map(|loaded| loaded.evaluate(&cases, &metrics, stable)),
         definitions,
-        warnings: loaded.warnings.clone(),
+        warnings: loaded
+            .warnings
+            .iter()
+            .cloned()
+            .chain(extra_warnings)
+            .collect(),
         cases,
         metrics,
     };
@@ -392,6 +475,46 @@ struct EvaluateArgs {
     config: Option<PathBuf>,
     out: PathBuf,
     thresholds: Option<PathBuf>,
+    /// #308: swaps the passage lane from `sources/search` to
+    /// `POST /contexts/{name}/evidence` (ADR 0006). The structural
+    /// lane never changes between the two modes — coverage/lane-cross
+    /// stay comparable across a `baseline`/`assembly` pair.
+    assembly: bool,
+    /// #308's equal-budget contract: when any of the three is given,
+    /// both modes are truncated to the identical ceiling — `assembly`
+    /// via the request's own `budget` object, `baseline` by reusing
+    /// the server's own accounting (`crate::api::evidence::budget`)
+    /// client-side. Absent entirely, `baseline` behaves exactly as it
+    /// did before this flag existed (no truncation, no `budget` block
+    /// in the artifact) — this default is what keeps every archived
+    /// `evaluation.json` and every existing caller unaffected.
+    /// `assembly` has no such unbudgeted mode: `POST
+    /// /contexts/{name}/evidence` always enforces *some* budget, so an
+    /// `--assembly` run with none of these flags still runs — and
+    /// still carries a `budget` block — under the server's own
+    /// defaults (`max_items: 40, max_bytes: 65536, max_tokens: 4000`).
+    budget: Option<evidence::EvidenceBudgetArgs>,
+    /// `--rerank MODEL`: usage error (exit 2) without `--assembly`.
+    rerank: Option<String>,
+}
+
+/// The per-run mode settings [`build_case_block`] threads through to
+/// [`run_passage_lane`]/[`evidence::run_evidence_lane`] — resolved
+/// once from [`EvaluateArgs`] rather than re-derived per case.
+struct RunConfig<'a> {
+    assembly: bool,
+    /// Always a resolved value (defaulted when no `--max-*` flag was
+    /// given) — `assembly` mode always sends it; `budget_given` below
+    /// gates whether `baseline` mode uses it at all.
+    limits: BudgetLimits,
+    /// Whether `--max-items`/`--max-bytes`/`--max-tokens` was actually
+    /// given. In `assembly` mode this only decides between the
+    /// caller's own ceilings and the server's own defaults — the
+    /// request always carries a `budget` object either way. In
+    /// `baseline` mode it decides whether truncation (and a `budget`
+    /// block in the artifact) happens at all.
+    budget_given: bool,
+    rerank: Option<&'a str>,
 }
 
 fn parse_args(args: &[String]) -> Result<EvaluateArgs, i32> {
@@ -402,6 +525,11 @@ fn parse_args(args: &[String]) -> Result<EvaluateArgs, i32> {
     let mut config: Option<PathBuf> = None;
     let mut out: Option<PathBuf> = None;
     let mut thresholds: Option<PathBuf> = None;
+    let mut assembly = false;
+    let mut max_items: Option<usize> = None;
+    let mut max_bytes: Option<usize> = None;
+    let mut max_tokens: Option<usize> = None;
+    let mut rerank: Option<String> = None;
 
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
@@ -440,6 +568,32 @@ fn parse_args(args: &[String]) -> Result<EvaluateArgs, i32> {
                 Some(_) => return Err(usage("--thresholds given twice")),
                 None => return Err(usage("--thresholds needs a file path")),
             },
+            "--assembly" => {
+                if assembly {
+                    return Err(usage("--assembly given twice"));
+                }
+                assembly = true;
+            }
+            "--max-items" => match rest.next().and_then(|value| value.parse::<usize>().ok()) {
+                Some(_) if max_items.is_some() => return Err(usage("--max-items given twice")),
+                Some(n) if n >= 1 => max_items = Some(n),
+                _ => return Err(usage("--max-items needs a positive integer")),
+            },
+            "--max-bytes" => match rest.next().and_then(|value| value.parse::<usize>().ok()) {
+                Some(_) if max_bytes.is_some() => return Err(usage("--max-bytes given twice")),
+                Some(n) if n >= 1 => max_bytes = Some(n),
+                _ => return Err(usage("--max-bytes needs a positive integer")),
+            },
+            "--max-tokens" => match rest.next().and_then(|value| value.parse::<usize>().ok()) {
+                Some(_) if max_tokens.is_some() => return Err(usage("--max-tokens given twice")),
+                Some(n) if n >= 1 => max_tokens = Some(n),
+                _ => return Err(usage("--max-tokens needs a positive integer")),
+            },
+            "--rerank" => match rest.next() {
+                Some(model) if rerank.is_none() => rerank = Some(model.clone()),
+                Some(_) => return Err(usage("--rerank given twice")),
+                None => return Err(usage("--rerank needs a model name")),
+            },
             flag if flag.starts_with("--") => {
                 return Err(usage(&format!("unknown flag '{flag}' for evaluate")));
             }
@@ -449,6 +603,18 @@ fn parse_args(args: &[String]) -> Result<EvaluateArgs, i32> {
 
     let eval = eval.ok_or_else(|| usage("--eval FILE is required"))?;
     let context = context.ok_or_else(|| usage("--context NAME is required"))?;
+    if rerank.is_some() && !assembly {
+        return Err(usage("--rerank requires --assembly"));
+    }
+    let budget = if max_items.is_some() || max_bytes.is_some() || max_tokens.is_some() {
+        Some(evidence::EvidenceBudgetArgs {
+            max_items,
+            max_bytes,
+            max_tokens,
+        })
+    } else {
+        None
+    };
 
     Ok(EvaluateArgs {
         eval,
@@ -457,6 +623,9 @@ fn parse_args(args: &[String]) -> Result<EvaluateArgs, i32> {
         config,
         out: out.unwrap_or_else(|| PathBuf::from(DEFAULT_OUT)),
         thresholds,
+        assembly,
+        budget,
+        rerank,
     })
 }
 
@@ -578,6 +747,34 @@ fn list_all_sources(api: &Api, context: &str) -> Result<BTreeSet<String>, String
 // ============================== Passage lane ==============================
 
 fn run_passage_lane(api: &Api, context: &str, case: &EvalCase, limit: usize) -> PassageOutcome {
+    match fetch_passage_hits(api, context, case, limit) {
+        Ok((hits, plan, latency_ms)) => PassageOutcome::Searched {
+            plan,
+            hits: hits.into_iter().map(HitLocator::from).collect(),
+            latency_ms,
+        },
+        Err((message, latency_ms)) => PassageOutcome::Failed {
+            message,
+            latency_ms,
+        },
+    }
+}
+
+/// The passage lane's raw fetch, kept separate from [`run_passage_lane`]
+/// so #308's `baseline` truncation path
+/// ([`evidence::truncate_to_budget`]) can measure each hit's real
+/// `PassageHit.text` byte/token cost — the same content
+/// `crate::api::evidence::budget` accounts for server-side — before
+/// [`HitLocator::from`] strips it. Truncating already-stripped
+/// locators would undercount every hit's true size and make the
+/// "equal budget" comparison dishonest.
+/// `Ok((hits, plan, latency_ms))` on success, `Err((message,
+/// latency_ms))` on failure — named so [`fetch_passage_hits`]'s
+/// signature reads clearly instead of tripping clippy's
+/// `type_complexity` lint on the raw nested tuple type.
+type PassageFetch = Result<(Vec<PassageHit>, Option<SearchContextPlan>, u64), (String, u64)>;
+
+fn fetch_passage_hits(api: &Api, context: &str, case: &EvalCase, limit: usize) -> PassageFetch {
     let body = serde_json::json!({
         "query": case.query,
         "limit": limit,
@@ -590,22 +787,11 @@ fn run_passage_lane(api: &Api, context: &str, case: &EvalCase, limit: usize) -> 
     match api.post(&["contexts", context, "sources", "search"], &body) {
         Ok(value) => {
             let latency_ms = elapsed_ms(started_at);
-            match extract_passages(&value) {
-                Ok((hits, plan)) => PassageOutcome::Searched {
-                    plan,
-                    hits: hits.into_iter().map(HitLocator::from).collect(),
-                    latency_ms,
-                },
-                Err(message) => PassageOutcome::Failed {
-                    message,
-                    latency_ms,
-                },
-            }
+            extract_passages(&value)
+                .map(|(hits, plan)| (hits, plan, latency_ms))
+                .map_err(|message| (message, latency_ms))
         }
-        Err(message) => PassageOutcome::Failed {
-            message: truncate_message(&message),
-            latency_ms: elapsed_ms(started_at),
-        },
+        Err(message) => Err((truncate_message(&message), elapsed_ms(started_at))),
     }
 }
 
@@ -1441,9 +1627,121 @@ fn score_case(
 
 // ================================ Per case ================================
 
-fn build_case_block(api: &Api, context: &str, case: &EvalCase, default_limit: usize) -> CaseBlock {
+/// #308 (ADR 0006 §14): builds the passage lane's `PassageOutcome`
+/// (what every scoring function below reads) plus the two mode-
+/// specific diagnostics — `EvidenceOutcome` (`assembly` only) and
+/// `BudgetAccounting` (either mode, once a budget flag was given).
+/// `assembly` mode always sends `run_config.limits` to
+/// `POST /contexts/{name}/evidence` (that endpoint has no unbudgeted
+/// mode, ADR 0006 §8); `baseline` mode only truncates — and only then
+/// carries a `budget` block at all — when `run_config.budget_given`.
+fn run_passage_or_evidence_lane(
+    api: &Api,
+    context: &str,
+    case: &EvalCase,
+    limit: usize,
+    run_config: &RunConfig,
+) -> (
+    PassageOutcome,
+    Option<EvidenceOutcome>,
+    Option<BudgetAccounting>,
+) {
+    if run_config.assembly {
+        match evidence::run_evidence_lane(
+            api,
+            context,
+            case,
+            limit,
+            &run_config.limits,
+            run_config.rerank,
+        ) {
+            evidence::LaneResult::Assembled {
+                package,
+                latency_ms,
+            } => {
+                let hits = hits_from_evidence_items(&package.items);
+                let locators = evidence_locators(&package.items);
+                let passage = PassageOutcome::Searched {
+                    plan: None,
+                    hits,
+                    latency_ms,
+                };
+                let budget = BudgetAccounting {
+                    usage: package.budget,
+                    omitted_total: package.omitted_total,
+                };
+                let outcome = EvidenceOutcome::Assembled {
+                    latency_ms,
+                    items: locators,
+                    omitted_by_reason: package.omitted_by_reason,
+                    selection: package.plan.selection,
+                    reranker: package.plan.reranker,
+                };
+                (passage, Some(outcome), Some(budget))
+            }
+            evidence::LaneResult::Failed {
+                message,
+                latency_ms,
+            } => {
+                let passage = PassageOutcome::Failed {
+                    message: message.clone(),
+                    latency_ms,
+                };
+                let outcome = EvidenceOutcome::Failed {
+                    message,
+                    latency_ms,
+                };
+                (passage, Some(outcome), None)
+            }
+        }
+    } else if run_config.budget_given {
+        match fetch_passage_hits(api, context, case, limit) {
+            Ok((hits, plan, latency_ms)) => {
+                let truncated = evidence::truncate_to_budget(hits, &run_config.limits);
+                let passage = PassageOutcome::Searched {
+                    plan,
+                    hits: truncated.hits.into_iter().map(HitLocator::from).collect(),
+                    latency_ms,
+                };
+                let budget = BudgetAccounting {
+                    usage: truncated.usage,
+                    omitted_total: truncated.omitted_total,
+                };
+                (passage, None, Some(budget))
+            }
+            Err((message, latency_ms)) => (
+                PassageOutcome::Failed {
+                    message,
+                    latency_ms,
+                },
+                None,
+                None,
+            ),
+        }
+    } else {
+        (run_passage_lane(api, context, case, limit), None, None)
+    }
+}
+
+fn build_case_block(
+    api: &Api,
+    context: &str,
+    case: &EvalCase,
+    default_limit: usize,
+    run_config: &RunConfig,
+) -> CaseBlock {
     let limit = case.options.limit.unwrap_or(default_limit);
-    let passage = run_passage_lane(api, context, case, limit);
+    let (passage, evidence_outcome, budget) =
+        run_passage_or_evidence_lane(api, context, case, limit, run_config);
+    let diversity_sources = match &passage {
+        PassageOutcome::Searched { hits, .. } => Some(
+            hits.iter()
+                .map(|hit| hit.source.as_str())
+                .collect::<BTreeSet<_>>()
+                .len(),
+        ),
+        PassageOutcome::Failed { .. } => None,
+    };
     let structural = runs_structural_lane(case).then(|| build_structural_block(api, context, case));
     // Citation recall needs to know what the first two lanes already
     // served BEFORE the citation lane's own network calls run, so the
@@ -1470,6 +1768,9 @@ fn build_case_block(api: &Api, context: &str, case: &EvalCase, default_limit: us
         citations: scores.citations,
         missed: scores.missed,
         missed_truncated: scores.missed_truncated,
+        evidence: evidence_outcome,
+        budget,
+        diversity_sources,
     }
 }
 
@@ -1514,6 +1815,17 @@ fn build_metrics(cases: &[CaseBlock]) -> MetricsMap {
     let mut citation_section_matched = 0u64;
     let mut citation_quote_checked = 0u64;
     let mut citation_quote_matched = 0u64;
+
+    // #308 (ADR 0006 §14)
+    let mut diversity_sources = Vec::new();
+    let mut evidence_latencies = Vec::new();
+    let mut budget_items_used = Vec::new();
+    let mut budget_bytes_used = Vec::new();
+    let mut budget_tokens_used = Vec::new();
+    let mut budget_omitted_n = 0u64;
+    let mut budget_considered_n = 0u64;
+    let mut rerank_requested_n = 0u64;
+    let mut rerank_ran_n = 0u64;
 
     for case in cases {
         match &case.passage {
@@ -1601,6 +1913,47 @@ fn build_metrics(cases: &[CaseBlock]) -> MetricsMap {
                     },
                 }
             }
+        }
+
+        // #308 (ADR 0006 §14)
+        if let Some(sources) = case.diversity_sources {
+            diversity_sources.push(sources as f64);
+        }
+        if let Some(evidence) = &case.evidence {
+            match evidence {
+                EvidenceOutcome::Assembled {
+                    latency_ms,
+                    reranker,
+                    ..
+                } => {
+                    evidence_latencies.push(*latency_ms as f64);
+                    // A case only carries a rerank outcome at all when
+                    // this run's `--rerank MODEL` actually put a
+                    // `rerank` object on the wire — `RerankerPlan`'s
+                    // "not requested" path (`assemble.rs`'s `None` arm)
+                    // leaves `reason` absent, the same shape a case
+                    // with no `--rerank` produces; every degrade
+                    // `rerank::drive` itself can reach always names a
+                    // `reason` token, so `ran || reason.is_some()`
+                    // isolates exactly the cases where reranking was
+                    // actually attempted, independent of this run's
+                    // own CLI flags.
+                    if reranker.ran || reranker.reason.is_some() {
+                        rerank_requested_n += 1;
+                        rerank_ran_n += u64::from(reranker.ran);
+                    }
+                }
+                EvidenceOutcome::Failed { latency_ms, .. } => {
+                    evidence_latencies.push(*latency_ms as f64);
+                }
+            }
+        }
+        if let Some(budget) = &case.budget {
+            budget_items_used.push(budget.usage.items_used as f64);
+            budget_bytes_used.push(budget.usage.bytes_used as f64);
+            budget_tokens_used.push(budget.usage.tokens_used as f64);
+            budget_omitted_n += budget.omitted_total as u64;
+            budget_considered_n += budget.omitted_total as u64 + budget.usage.items_used as u64;
         }
     }
 
@@ -1704,6 +2057,35 @@ fn build_metrics(cases: &[CaseBlock]) -> MetricsMap {
     metrics.insert(
         "lanes.neither".to_string(),
         MetricValue::Ratio(ratio_metric(neither_n, lane_cross_n)),
+    );
+    // #308 (ADR 0006 §14)
+    metrics.insert(
+        "diversity.sources".to_string(),
+        MetricValue::Distribution(Distribution::from_samples(diversity_sources)),
+    );
+    metrics.insert(
+        "latency.evidence_ms".to_string(),
+        MetricValue::Distribution(Distribution::from_samples(evidence_latencies)),
+    );
+    metrics.insert(
+        "budget.items_used".to_string(),
+        MetricValue::Distribution(Distribution::from_samples(budget_items_used)),
+    );
+    metrics.insert(
+        "budget.bytes_used".to_string(),
+        MetricValue::Distribution(Distribution::from_samples(budget_bytes_used)),
+    );
+    metrics.insert(
+        "budget.tokens_used".to_string(),
+        MetricValue::Distribution(Distribution::from_samples(budget_tokens_used)),
+    );
+    metrics.insert(
+        "budget.omitted_rate".to_string(),
+        MetricValue::Ratio(ratio_metric(budget_omitted_n, budget_considered_n)),
+    );
+    metrics.insert(
+        "rerank.ran".to_string(),
+        MetricValue::Ratio(ratio_metric(rerank_ran_n, rerank_requested_n)),
     );
     metrics
 }
@@ -2048,6 +2430,107 @@ fn build_definitions() -> BTreeMap<String, MetricDef> {
             None,
         ),
     );
+    // #308 (ADR 0006 §14): equal-budget comparison metrics —
+    // `diversity.sources` is the one metric #216/ADR 0006 name
+    // explicitly ("source diversity at equal evidence budget") that
+    // ADR 0004 does not already define; the rest let a `--thresholds`
+    // file and `evaluate compare` see budget consumption and reranker
+    // degrade rate the same way they already see recall/citations.
+    d.insert(
+        "diversity.sources".to_string(),
+        def(
+            "source",
+            "distribution",
+            &["case"],
+            "Count of distinct source locators among a case's admitted \
+             evidence: baseline's (possibly budget-truncated) passage \
+             hits, or assembly's admitted items' citation_refs.",
+            "POST /contexts/{name}/sources/search, POST /contexts/{name}/evidence",
+            Some("empty when the passage/evidence lane failed outright"),
+        ),
+    );
+    d.insert(
+        "latency.evidence_ms".to_string(),
+        def(
+            "ms",
+            "distribution",
+            &["case"],
+            "Wall-clock round trip of an --assembly run's own \
+             POST /contexts/{name}/evidence call.",
+            "POST /contexts/{name}/evidence",
+            Some("empty in baseline mode"),
+        ),
+    );
+    d.insert(
+        "budget.items_used".to_string(),
+        def(
+            "item",
+            "distribution",
+            &["case"],
+            "A case's own items_used against its resolved budget ceiling \
+             — baseline's client-side truncation accounting or \
+             assembly's server-returned BudgetUsage, computed with the \
+             identical ADR 0006 §8 formula either way.",
+            "crate::api::evidence::budget",
+            Some("empty when no --max-items/--max-bytes/--max-tokens flag was given"),
+        ),
+    );
+    d.insert(
+        "budget.bytes_used".to_string(),
+        def(
+            "byte",
+            "distribution",
+            &["case"],
+            "A case's own bytes_used against its resolved budget ceiling \
+             (ADR 0006 §8: the items array's compact JSON length plus \
+             the citations array's, excluding each item's own bytes/ \
+             estimated_tokens fields).",
+            "crate::api::evidence::budget",
+            Some("empty when no --max-items/--max-bytes/--max-tokens flag was given"),
+        ),
+    );
+    d.insert(
+        "budget.tokens_used".to_string(),
+        def(
+            "token",
+            "distribution",
+            &["case"],
+            "A case's own tokens_used against its resolved budget \
+             ceiling — ADR 0006 §8's fixed estimator (0.25 tokens per \
+             Basic Latin scalar, 1.0 otherwise), never a real tokenizer \
+             count.",
+            "crate::api::evidence::budget",
+            Some("empty when no --max-items/--max-bytes/--max-tokens flag was given"),
+        ),
+    );
+    d.insert(
+        "budget.omitted_rate".to_string(),
+        def(
+            "ratio",
+            "ratio",
+            &["run"],
+            "Share of every candidate a budget-truncated case considered \
+             (admitted plus omitted, either mode) that a budget ceiling \
+             dropped — the equal-budget \"how much got left out\" \
+             counterpart to items_used/bytes_used/tokens_used.",
+            "crate::api::evidence::budget, POST /contexts/{name}/evidence",
+            Some("empty when no --max-items/--max-bytes/--max-tokens flag was given"),
+        ),
+    );
+    d.insert(
+        "rerank.ran".to_string(),
+        def(
+            "ratio",
+            "ratio",
+            &["run"],
+            "Share of --rerank cases whose configured reranker actually \
+             reordered the pool (plan.reranker.ran); the complement is \
+             the degrade rate — no provider configured, a model \
+             mismatch, or any other ADR 0006 §12 fallback reason.",
+            "POST /contexts/{name}/evidence plan.reranker",
+            Some("empty when --rerank was not given"),
+        ),
+    );
     d
 }
 
@@ -2298,6 +2781,30 @@ struct InputsBlock {
     out: String,
     default_limit: usize,
     resolve_limit: usize,
+    /// #308 (ADR 0006 §14): `"baseline"` (unchanged passage lane) or
+    /// `"assembly"` (`--assembly`, ADR 0006's evidence-assembly
+    /// passage lane) — an open string, not a closed Rust enum, per
+    /// this codebase's convention for wire-visible mode tags.
+    mode: String,
+    /// The equal-budget ceilings this run enforced. Always present in
+    /// `assembly` mode — `POST /contexts/{name}/evidence` has no
+    /// unbudgeted mode, so this records the server's own defaults
+    /// (`max_items: 40, max_bytes: 65536, max_tokens: 4000`) even when
+    /// no `--max-*` flag was given. `None` only in `baseline` mode,
+    /// when no `--max-items`/`--max-bytes`/`--max-tokens` flag was
+    /// given — that mode alone has a genuinely unbudgeted state
+    /// (unchanged from before this flag existed).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    budget: Option<BudgetLimits>,
+    /// The `--rerank MODEL` value, when given — `None` in `baseline`
+    /// mode, and `None` in `assembly` mode when `--rerank` was not
+    /// given (a fully deterministic assembly run, ADR 0006 §14
+    /// configuration 2). Whether the requested model actually reranked
+    /// is per-case, in `CaseBlock.evidence`'s `reranker` block — a
+    /// server with no `TAGURU_RERANK_URL`/`_MODEL` configured, or a
+    /// model mismatch, degrades every case the same way.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rerank: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2363,6 +2870,29 @@ struct CaseBlock {
     /// [`build_missed`].
     missed: Vec<String>,
     missed_truncated: usize,
+    /// #308 (ADR 0006 §14): the assembly lane's own diagnostic detail
+    /// — selection trace, reranker outcome, omission breakdown. `Some`
+    /// only in `assembly` mode; `passage` above (built from the same
+    /// admitted package, see [`evidence_hits`]) is what recall/
+    /// citation/lane-cross scoring actually reads, so this block never
+    /// duplicates scoring logic — only what `passage`'s `HitLocator`
+    /// projection cannot carry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    evidence: Option<EvidenceOutcome>,
+    /// #308's equal-budget accounting — `Some` in both modes when a
+    /// budget flag was given, `None` when none was (both modes then
+    /// run untruncated, matching every run before this flag existed).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    budget: Option<BudgetAccounting>,
+    /// #308's `diversity.sources` metric input (ADR 0006 §14's own new
+    /// metric): the count of distinct `source` locators among this
+    /// case's admitted evidence — `baseline`'s (possibly truncated)
+    /// passage hits, or `assembly`'s admitted items' citation
+    /// locators. `None` when the passage/evidence lane failed
+    /// outright, matching `recall`/`coverage`'s own not-applicable
+    /// convention.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diversity_sources: Option<usize>,
 }
 
 /// Recall@k/MRR/nDCG against `expected_sources`' graded relevance (ADR
@@ -2533,6 +3063,150 @@ impl From<PassageHit> for HitLocator {
     }
 }
 
+/// #308: flattens an assembled package's admitted `items[]` into the
+/// same `HitLocator` shape the baseline passage lane produces, in
+/// `fused_rank` order — one `HitLocator` per `citation_refs` entry, so
+/// an item with several independent attributions (ADR 0006 §9's
+/// corroboration) contributes one locator per source, and an item with
+/// none (a zero-attribution association — `EvidenceCandidate`'s own
+/// documented case) contributes none. This is what lets
+/// `score_recall`/`served_locators`/`build_missed` — every scoring
+/// function the baseline passage lane already feeds — run unchanged
+/// against an assembled package: they only ever compare
+/// `(source, paragraph)` pairs and rank order, never a lane's own
+/// score, and RRF's `fused_score` is deliberately never serialized at
+/// all (ADR 0006 §7) — `score: 0.0` below is a placeholder, not a
+/// discarded real value.
+/// #308: the diagnostic-locator projection of an assembled package's
+/// admitted `items[]` — [`EvidenceLocator`], stripped of
+/// `association`/`passage`/`community` (which can carry passage body
+/// text) the same way [`hits_from_evidence_items`] strips it from the
+/// scoring-facing `HitLocator` projection.
+/// One [`EvidenceItem`]'s own `(source, paragraph)` locator — `None`
+/// for an association item, whose locator instead lives entirely in
+/// `citation_refs` ([`EvidenceCandidate::citation_refs`],
+/// `src/api/evidence.rs`: an association's own payload carries no
+/// single source/paragraph of its own, only a set of attributions).
+/// `Some` for a passage item (`PassageHit.source`/`.paragraph`
+/// directly) or a community item (`community:{id}`, matching the
+/// artifact-source-id convention `CommunityHit`'s own doc comment
+/// names, and its own `.paragraph`).
+fn evidence_item_locator(item: &EvidenceItem) -> Option<(String, u32)> {
+    if let Some(passage) = &item.passage {
+        return Some((passage.source.clone(), passage.paragraph));
+    }
+    if let Some(community) = &item.community {
+        return Some((
+            format!("community:{}", community.community),
+            community.paragraph,
+        ));
+    }
+    None
+}
+
+fn evidence_locators(items: &[EvidenceItem]) -> Vec<EvidenceLocator> {
+    items
+        .iter()
+        .map(|item| {
+            let (source, paragraph) = match evidence_item_locator(item) {
+                Some((source, paragraph)) => (Some(source), Some(paragraph)),
+                None => (None, None),
+            };
+            EvidenceLocator {
+                candidate_id: item.candidate_id.clone(),
+                kind: item.kind.clone(),
+                fused_rank: item.fused_rank,
+                source,
+                paragraph,
+                citation_refs: item.citation_refs.clone(),
+            }
+        })
+        .collect()
+}
+
+/// [`HitLocator`]s for scoring: each item's own locator
+/// ([`evidence_item_locator`]) union its `citation_refs` (an
+/// association's corroborating attributions) — a passage/community
+/// item without this union would never enter recall/citation/
+/// diversity scoring at all, since `citation_refs` is empty for both
+/// kinds by design (their locator lives on the payload itself, not as
+/// a separate attribution list).
+fn hits_from_evidence_items(items: &[EvidenceItem]) -> Vec<HitLocator> {
+    items
+        .iter()
+        .flat_map(|item| {
+            let own = evidence_item_locator(item).into_iter();
+            let attributed = item
+                .citation_refs
+                .iter()
+                .map(|reference| (reference.source.clone(), reference.paragraph));
+            own.chain(attributed)
+        })
+        .map(|(source, paragraph)| HitLocator {
+            source,
+            paragraph,
+            score: 0.0,
+            lanes: PassageLanes {
+                bm25: None,
+                vector: None,
+            },
+        })
+        .collect()
+}
+
+/// #308's diagnostic locator for one admitted assembly item — stripped
+/// of `association`/`passage`/`community` (which can carry passage
+/// body text) the same way [`HitLocator`] strips `PassageHit.text`
+/// (ADR 0004 §11's no-corpus-text rule). `source`/`paragraph` is the
+/// item's own locator ([`evidence_item_locator`]) — absent for an
+/// association item, whose locators live in `citation_refs` instead.
+#[derive(Serialize)]
+struct EvidenceLocator {
+    candidate_id: String,
+    kind: String,
+    fused_rank: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    paragraph: Option<u32>,
+    citation_refs: Vec<CitationRef>,
+}
+
+/// #308's per-case assembly diagnostics (ADR 0006 §14) — everything
+/// `CaseBlock.passage`'s `HitLocator` projection (built by
+/// [`hits_from_evidence_items`]) cannot carry. `selection`/`reranker`
+/// are the *existing* `EvidencePackage` wire blocks, embedded verbatim
+/// — no parallel mirror — matching how `items[]` itself embeds
+/// `AssociationOut`/`PassageHit`/`CommunityHit` verbatim upstream.
+#[derive(Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+enum EvidenceOutcome {
+    Assembled {
+        latency_ms: u64,
+        items: Vec<EvidenceLocator>,
+        #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+        omitted_by_reason: BTreeMap<String, usize>,
+        selection: SelectionPlan,
+        reranker: RerankerPlan,
+    },
+    Failed {
+        message: String,
+        latency_ms: u64,
+    },
+}
+
+/// #308's equal-budget accounting for one case, shared by both modes —
+/// `crate::api::evidence::budget::BudgetUsage` (the same wire shape a
+/// configured request already returns) flattened alongside how many
+/// candidates this case's budget dropped, so the artifact reads as one
+/// object rather than a nested `usage` key.
+#[derive(Serialize)]
+struct BudgetAccounting {
+    #[serde(flatten)]
+    usage: BudgetUsage,
+    omitted_total: usize,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct StructuralBlock {
     cues: Vec<CueResolution>,
@@ -2622,6 +3296,7 @@ struct AttributionLocator {
 }
 
 mod compare;
+mod evidence;
 mod thresholds;
 
 #[cfg(test)]

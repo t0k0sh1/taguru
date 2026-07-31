@@ -24,10 +24,10 @@ playbook for clients itself: `GET /protocol` (the content of
 
 **Documentation: <https://t0k0sh1.github.io/taguru/>** — getting
 started, concepts, context & group modeling, the import/extract/
-evaluate references, deployment guides (Docker Compose, Kubernetes,
-Amazon Bedrock), a compatibility and local-RAG troubleshooting guide,
-the internal architecture, and a walkthrough of an LLM retrieving over
-MCP.
+evaluate/evidence-assembly references, deployment guides (Docker
+Compose, Kubernetes, Amazon Bedrock), a compatibility and local-RAG
+troubleshooting guide, the internal architecture, and a walkthrough of
+an LLM retrieving over MCP.
 
 ## Install
 
@@ -95,8 +95,8 @@ ranks those summaries with an honest staleness verdict when the graph
 has moved on since.
 
 Handing retrieved evidence to an external answer model with a bounded
-context window? `POST /contexts/{name}/evidence` (MCP:
-`assemble_evidence`) is opt-in evidence assembly: it runs the same
+context window? [`POST /contexts/{name}/evidence`](https://t0k0sh1.github.io/taguru/evidence.html)
+(MCP: `assemble_evidence`) is opt-in evidence assembly: it runs the same
 graph/passage/community fan-out as the composed retrieval loop, then
 ranks (reciprocal-rank fusion, never comparing raw graph/BM25/vector
 scores against each other), deduplicates, and greedily selects a
@@ -106,12 +106,16 @@ collapsed to a majority view. No reranker provider is required or
 configured by default; the deterministic ordering is the whole
 feature in that configuration, and every existing endpoint's behavior
 is unchanged whether or not you ever call it.
+[`taguru evaluate --assembly`](https://t0k0sh1.github.io/taguru/evidence.html#equal-budget)
+proves this against fixed-limit retrieval at the same context-window
+budget — citation recall, source diversity, and reranker degrade rate,
+never a subjective demo.
 
 For the endpoint list and the ingest/retrieval discipline, ask the
 running server: `GET /protocol`. A guided tour is
 [Getting started](https://t0k0sh1.github.io/taguru/getting-started.html).
 
-Five entrances, depending on what you're building:
+Six entrances, depending on what you're building:
 
 | What you want | Start here |
 |---|---|
@@ -119,6 +123,7 @@ Five entrances, depending on what you're building:
 | Your own code, over HTTP or the Python/TypeScript SDKs | [Getting started](https://t0k0sh1.github.io/taguru/getting-started.html), then [SDKs and examples](#sdks-and-examples) |
 | A pile of documents, loaded all at once | [Loading knowledge in bulk](#loading-knowledge-in-bulk), below |
 | A fixed, fully local RAG corpus built with LangChain and Ollama | [Local RAG walkthrough](https://t0k0sh1.github.io/taguru/local-rag-walkthrough.html) |
+| A budgeted, deduplicated evidence package for an external answer model | [Budgeted evidence assembly](https://t0k0sh1.github.io/taguru/evidence.html) |
 | Whether a config change improved or regressed retrieval over your own corpus | [Retrieval & citation quality gate](https://t0k0sh1.github.io/taguru/evaluate.html) |
 
 ## Using it from an LLM agent (MCP)
@@ -503,7 +508,8 @@ npm install taguru        # or: npm install langchain-taguru
 Library-level examples live in [examples/](examples/) — one directory
 per example, each with its own README. Runnable LangChain use cases
 (RAG QA with citations, governed ingestion, conversational long-term
-memory) live in [examples/langchain/](examples/langchain/); each is a
+memory, [budgeted evidence assembly](examples/langchain/evidence_assembly/))
+live in [examples/langchain/](examples/langchain/); each is a
 Python and a TypeScript program mirrored line for line, and
 [local_rag](examples/langchain/local_rag/) builds a fixed, fully local
 RAG corpus from PDFs with Ollama — the reference code for the [local RAG
