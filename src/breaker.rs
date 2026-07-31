@@ -49,6 +49,20 @@ struct BreakerInner {
     /// Every half-open probe slot claim (fresh or reclaimed) mints the
     /// next value here — see [`BreakerState::HalfOpen`]'s doc.
     next_probe_generation: AtomicU64,
+    /// The generation of the most recently MINTED probe claim, kept
+    /// even after the breaker leaves `HalfOpen` (unlike
+    /// `BreakerState::HalfOpen`'s own `generation` field, which is
+    /// gone the moment `record` transitions to `Open`/`Closed`).
+    /// [`ProviderBreaker::record`] compares an [`Admission::Probe`]
+    /// against THIS, not against whatever the CURRENT state happens to
+    /// be: a probe is stale only when a FRESHER probe has been minted
+    /// since (a reclaim) — never merely because the breaker moved to
+    /// Open/Closed for some other reason (an unrelated stale `Normal`
+    /// admission's success, say) while this probe was still the latest
+    /// one in flight. Always written and read while `state`'s lock is
+    /// held, so `Relaxed` is sufficient — the mutex is the only
+    /// ordering this needs.
+    latest_probe_generation: AtomicU64,
 }
 
 enum BreakerState {
@@ -122,15 +136,22 @@ impl ProviderBreaker {
             opened_total: AtomicU64::new(0),
             short_circuits_total: AtomicU64::new(0),
             next_probe_generation: AtomicU64::new(0),
+            latest_probe_generation: AtomicU64::new(0),
         }))
     }
 
     /// A fresh generation for a probe slot claim — every `Open →
     /// HalfOpen` transition and every reclaim of an already-`HalfOpen`
     /// slot mints one, so [`Admission::Probe`] always names exactly
-    /// which claim granted it.
+    /// which claim granted it. Also advances the breaker's
+    /// `latest_probe_generation` — the value [`Self::record`] judges
+    /// staleness against — see that field's doc.
     fn next_probe_generation(&self) -> u64 {
-        self.0.next_probe_generation.fetch_add(1, Ordering::Relaxed)
+        let generation = self.0.next_probe_generation.fetch_add(1, Ordering::Relaxed);
+        self.0
+            .latest_probe_generation
+            .store(generation, Ordering::Relaxed);
+        generation
     }
 
     /// Gate one provider attempt. `Err` is the refusal message the
@@ -212,25 +233,26 @@ impl ProviderBreaker {
     /// more evidence, and a stale straggler must not kill a pending
     /// probe).
     ///
-    /// A [`Admission::Probe`] whose generation no longer matches the
-    /// breaker's current `HalfOpen` slot — reclaimed by a fresher probe
-    /// after this one's caller went quiet, or already settled into
-    /// `Open`/`Closed` off that fresher probe's own outcome — is a
-    /// no-op: a late straggler must not overwrite what the slot's
-    /// current claimant already decided, success or failure alike.
+    /// A [`Admission::Probe`] is a no-op ONLY when a FRESHER probe has
+    /// been minted since (a reclaim — `generation` no longer matches
+    /// `latest_probe_generation`): that fresher probe's own outcome is
+    /// this breaker's real answer, and a late straggler must not
+    /// overwrite it, success or failure alike. Critically, this is
+    /// judged against the latest MINTED generation, not against
+    /// whatever `BreakerState` variant the breaker currently sits in —
+    /// an intervening stale `Normal` admission's success can close the
+    /// breaker out from under a still-current (never reclaimed) probe
+    /// (the unconditional `if ok` below applies to `Normal` too, by
+    /// design), but that is not a fresher probe's decision, and this
+    /// probe's own outcome — still the latest one minted — must still
+    /// land normally afterward, exactly as if the interruption never
+    /// happened.
     pub(crate) fn record(&self, admission: Admission, ok: bool) {
         let mut state = self.0.state.lock();
-        if let Admission::Probe(generation) = admission {
-            let current = match &*state {
-                BreakerState::HalfOpen {
-                    generation: current,
-                    ..
-                } => Some(*current),
-                _ => None,
-            };
-            if current != Some(generation) {
-                return;
-            }
+        if let Admission::Probe(generation) = admission
+            && generation != self.0.latest_probe_generation.load(Ordering::Relaxed)
+        {
+            return;
         }
         if ok {
             *state = BreakerState::Closed {
@@ -505,6 +527,62 @@ mod tests {
         assert!(
             breaker.admit().is_err(),
             "the stale straggler's abandon must not free the fresh probe's slot"
+        );
+    }
+
+    /// The staleness guard is keyed on "has a FRESHER probe been
+    /// minted since" — never on "did the breaker's `BreakerState`
+    /// variant change for some other reason." A `Normal` admission
+    /// granted before the breaker opened can still be in flight once
+    /// it reaches `HalfOpen` (the provider's own per-attempt timeout
+    /// can outlast `cooldown`); its success unconditionally closes the
+    /// breaker (by design — "a success closes the breaker whatever
+    /// granted the attempt"), but that is NOT a fresher probe's
+    /// decision. The probe itself — still the only, still the latest,
+    /// probe ever minted — must still land its own outcome normally
+    /// once it arrives, exactly as if the stale `Normal` success had
+    /// never interrupted it.
+    #[test]
+    fn a_probes_own_outcome_still_lands_after_an_unrelated_stale_normal_success_closes_it() {
+        let breaker = ProviderBreaker::with_policy("test provider", 1, Duration::ZERO);
+
+        // Admitted while Closed, before the breaker ever opens — kept
+        // unresolved to stand in for a slow provider call that outlives
+        // the breaker's own state changes.
+        let stale_normal = breaker.admit().unwrap();
+        assert!(matches!(stale_normal, Admission::Normal));
+
+        // A DIFFERENT normal attempt fails and opens the breaker
+        // (threshold 1).
+        let opener = breaker.admit().unwrap();
+        breaker.record(opener, false);
+        assert_eq!(breaker.snapshot().state, 1, "the opener opens it");
+
+        // Cooldown is zero, so the very next admit claims the half-open
+        // probe — the only, and so far the LATEST, probe minted.
+        let probe = breaker.admit().unwrap();
+        assert!(matches!(probe, Admission::Probe(_)));
+
+        // The stale `Normal` call FINALLY returns, successfully,
+        // closing the breaker out from under the still-in-flight probe.
+        breaker.record(stale_normal, true);
+        assert_eq!(
+            breaker.snapshot().state,
+            0,
+            "a Normal success always closes the breaker, by design"
+        );
+
+        // The probe's own (real) outcome arrives after: since no
+        // fresher probe superseded it, it must still land — reopening
+        // the breaker — not be discarded as if it were a stale
+        // straggler.
+        breaker.record(probe, false);
+        assert_eq!(
+            breaker.snapshot().state,
+            1,
+            "the probe is still the latest one minted, so its own failure \
+             must reopen the breaker despite the unrelated stale success \
+             that closed it in between"
         );
     }
 

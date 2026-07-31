@@ -344,6 +344,37 @@ fn a_userinfo_url_or_a_valueless_url_flag_is_a_usage_error() {
     let _ = std::fs::remove_dir_all(&batches);
 }
 
+/// A malformed `--url`, or one using a scheme `ureq` cannot speak
+/// (`file://`, `ftp://` — `url::Url::parse` alone accepts both), is a
+/// usage error caught up front — exit 2, never the exit-1
+/// "connection lost" shape a request that actually reached `ureq`'s
+/// transport would produce. Both checked before any file is even
+/// read, so a bad `--url` cannot slip past an otherwise-empty batch
+/// stream and exit 0.
+#[test]
+fn a_malformed_or_non_http_url_is_a_usage_error_not_a_transport_failure() {
+    let batches = batch_dir("remote-import-bad-url");
+    let file = batches.join("seed.jsonl");
+    std::fs::write(
+        &file,
+        "{\"taguru_batch\": 1, \"context\": \"a\", \"source\": \"a.md\", \"create\": {}}\n",
+    )
+    .expect("fixture must be writable");
+
+    for (url, needle) in [
+        ("not a url at all", "is not a usable base URL"),
+        ("file:///etc/passwd", "only supports http/https"),
+        ("ftp://127.0.0.1:9/", "only supports http/https"),
+    ] {
+        let (code, _stdout, stderr) =
+            run_cli(&["import", "--url", url, file.to_str().unwrap()], &[]);
+        assert_eq!(code, 2, "{url}: {stderr}");
+        assert!(stderr.contains(needle), "{url}: {stderr}");
+    }
+
+    let _ = std::fs::remove_dir_all(&batches);
+}
+
 /// ADR 0002 §5: `--no-embed` only means something offline; combined
 /// with `--url` it is a usage error caught before any request leaves
 /// the process — proven by pointing `--url` at a port nothing listens
