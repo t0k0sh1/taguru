@@ -824,3 +824,174 @@ class RetrievalResult:
     """The fallback search's :class:`SearchPlan` — ``None`` when no text
     fallback ran, so "the search never happened" and "the semantic lane
     was skipped" stay distinguishable."""
+
+
+# --- assemble_evidence (#216, #305, #306; ADR 0006 §10) ---
+
+
+@dataclass(slots=True, frozen=True)
+class LaneRank:
+    """One lane's contribution to an :class:`EvidenceItem`'s fused rank.
+    ``lane`` is an open string: ``"graph_query"``, ``"graph_activate"``,
+    ``"passage_bm25"``, ``"passage_vector"``, ``"passage_fused"``, or
+    ``"community"`` today, with more possible later."""
+
+    lane: str
+    rank: int
+
+
+@dataclass(slots=True, frozen=True)
+class CitationRef:
+    """A ``(source, paragraph)`` locator with no citation text attached
+    — the text itself lives exactly once, keyed the same way, in the
+    package's top-level ``citations``."""
+
+    source: str
+    paragraph: int
+
+
+@dataclass(slots=True, frozen=True)
+class Corroboration:
+    """Every independent source an admitted association/activation
+    item's underlying evidence traces back to. Present only for that
+    item kind, and only when it has at least one citation."""
+
+    sources: list[str] = field(default_factory=list)
+    attributions: list[CitationRef] = field(default_factory=list)
+
+
+@dataclass(slots=True, frozen=True)
+class EvidenceItem:
+    """One admitted piece of evidence from ``assemble_evidence`` (ADR
+    0006 §10). Exactly one of ``association``/``passage``/``community``
+    is set, selected by ``kind`` — an open string (``"association"``,
+    ``"passage"``, ``"community"``, or a future value) — embedding the
+    *existing* wire type verbatim rather than a parallel evidence-only
+    type. ``bytes``/``estimated_tokens`` are this item's own content-only
+    contribution, excluding those two fields themselves."""
+
+    candidate_id: str
+    kind: str
+    fused_rank: int
+    lane_ranks: list[LaneRank]
+    citation_refs: list[CitationRef]
+    bytes: int
+    estimated_tokens: int
+    corroboration: Corroboration | None = None
+    contradicts: list[str] = field(default_factory=list)
+    """The ``candidate_id`` of every other item in this item's
+    contradiction group (ADR 0006 §9) — empty when it contradicts
+    nothing, never omitted-vs-empty ambiguity."""
+    association: Association | None = None
+    passage: PassageHit | None = None
+    community: CommunityHit | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class CitationEntry:
+    """One resolved citation, keyed by ``(source, paragraph)``, shared
+    by every :class:`EvidenceItem` whose ``citation_refs`` names it."""
+
+    source: str
+    paragraph: int
+    citation: Citation
+
+
+@dataclass(slots=True, frozen=True)
+class BudgetLimits:
+    """The three resolved, independent hard ceilings a call ran under —
+    what actually applied, not only the request's raw input."""
+
+    max_items: int
+    max_bytes: int
+    max_tokens: int
+
+
+@dataclass(slots=True, frozen=True)
+class BudgetUsage:
+    """The three-budget account after selection finished."""
+
+    items_used: int
+    bytes_used: int
+    tokens_used: int
+    limits: BudgetLimits
+
+
+@dataclass(slots=True, frozen=True)
+class OmittedCandidate:
+    """A candidate that did not make it into ``items``. ``reason`` is
+    one of ``"duplicate_passage"``, ``"budget_exceeded"``, or
+    ``"contradiction_group_exceeds_budget"`` (open string).
+    ``duplicate_of`` is present only for ``reason ==
+    "duplicate_passage"`` and names the *surviving* ``candidate_id``,
+    never a locator."""
+
+    candidate_id: str
+    kind: str
+    reason: str
+    duplicate_of: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class EvidenceLanesPlan:
+    """One :class:`LanePlan` per retrieval lane ``assemble_evidence``
+    fans out to — the same shape ``search_passages``'s own
+    ``plan.contexts[].lanes`` already uses."""
+
+    resolve: LanePlan
+    query: LanePlan
+    activate: LanePlan
+    passages: LanePlan
+    communities: LanePlan
+    citations: LanePlan
+
+
+@dataclass(slots=True, frozen=True)
+class SelectionPlan:
+    """The selection pipeline's own account of what it did, beyond the
+    per-item/per-omission detail."""
+
+    dedup_dropped: int
+    contradiction_groups: int
+    diversity_tier_width: int
+
+
+@dataclass(slots=True, frozen=True)
+class RerankerPlan:
+    """Whether a reranker is configured, whether it actually ran for
+    this call, its model identity on success, and a machine-readable
+    ``reason`` token on any degrade (never a non-2xx error): one of
+    ``"not_configured"``, ``"model_mismatch"``, ``"empty_pool"``,
+    ``"invalid_permutation"``, ``"circuit_open"``, ``"timeout"``, or
+    ``"provider_error"`` (open string)."""
+
+    configured: bool
+    ran: bool
+    model: str | None = None
+    reason: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class EvidencePlan:
+    """Everything ``assemble_evidence``'s response carries beyond the
+    selected items/citations/budget themselves."""
+
+    lanes: EvidenceLanesPlan
+    selection: SelectionPlan
+    reranker: RerankerPlan
+
+
+@dataclass(slots=True, frozen=True)
+class EvidencePackage:
+    """The full result of one ``assemble_evidence`` call (ADR 0006
+    §10). ``omitted`` is capped like other issue lists;
+    ``omitted_total``/``omitted_by_reason`` are always exact, so
+    truncation of the itemized list is never silent."""
+
+    items: list[EvidenceItem]
+    citations: list[CitationEntry]
+    budget: BudgetUsage
+    omitted: list[OmittedCandidate]
+    omitted_total: int
+    omitted_by_reason: dict[str, int]
+    plan: EvidencePlan

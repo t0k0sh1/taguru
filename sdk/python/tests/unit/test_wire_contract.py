@@ -5,17 +5,20 @@
 
 - every fixture whose response this SDK already has a typed model for
   (``MatchPage``, ``PassagePage``, ``ContextPage``, ``ExplorePage``,
-  ``ActivationPage``, ``CommunityPage``) decodes through the real
-  ``taguru._decode.decode`` — the same function every live call uses —
-  without error;
+  ``ActivationPage``, ``CommunityPage``, and the five ``evidence_*``
+  operations decoding into ``EvidencePackage``, #306) decodes through the
+  real ``taguru._decode.decode`` — the same function every live call
+  uses — without error;
 - every fixture's declared enum-like fields only carry values
   ``shapes.json`` knows about, reusing ``sdk/spec/check_contract.py``'s
   own path matcher so the two checkers cannot silently disagree about
   what a path expression means.
 
-#216's evidence-assembly package and the MCP-specific envelope have no
-SDK model yet (#306 adds them); those fixtures are covered here only by
-the shapes-driven structural check below, not a typed decode.
+The MCP-specific envelope (``assemble_evidence_call``/``tool_schema``/
+``tool_error``) has no SDK model — the whole HTTP body rides inside
+``content[0].text`` as an opaque string (ADR 0005 §2.4) — so those three
+fixtures are covered here only by the shapes-driven structural check
+below, not a typed decode.
 """
 
 from __future__ import annotations
@@ -32,6 +35,7 @@ from taguru._models import (
     ActivationPage,
     CommunityPage,
     ContextPage,
+    EvidencePackage,
     ExplorePage,
     MatchPage,
     PassagePage,
@@ -71,6 +75,11 @@ TYPED_OPERATIONS = {
     "explore": ExplorePage,
     "activate": ActivationPage,
     "communities_search": CommunityPage,
+    "evidence_mixed_lanes": EvidencePackage,
+    "evidence_budget_constrained": EvidencePackage,
+    "evidence_duplicate_passage": EvidencePackage,
+    "evidence_contradiction_group": EvidencePackage,
+    "evidence_communities_degrade_and_rerank_reason": EvidencePackage,
 }
 
 

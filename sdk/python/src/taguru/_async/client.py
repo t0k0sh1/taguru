@@ -41,6 +41,7 @@ from .._models import (
     CrossPassagePage,
     DirectoryEntry,
     DriftAudit,
+    EvidencePackage,
     ExplorePage,
     GroupEntry,
     GroupPage,
@@ -90,10 +91,12 @@ from .._shared import (
 )
 from .._types import (
     AssocOp,
+    BudgetRequest,
     CrossMatchCursor,
     ExploreCursor,
     MatchCursor,
     QuestionSpec,
+    RerankRequest,
     SectionSpec,
 )
 
@@ -1343,6 +1346,61 @@ class AsyncContext:
         finally:
             await stream.aclose()
         tmp.replace(target)
+
+    # -- evidence assembly ---------------------------------------------------------------
+
+    async def assemble_evidence(
+        self,
+        origins: str | Sequence[str],
+        *,
+        labels: str | Sequence[str] | None = None,
+        dice_floor: float | None = None,
+        semantic_floor: float | None = None,
+        resolve_limit: int | None = None,
+        activate_decay: float | None = None,
+        activate_limit: int | None = None,
+        text_fallback_query: str | None = None,
+        search_limit: int | None = None,
+        include_communities: bool | None = None,
+        budget: BudgetRequest | None = None,
+        rerank: RerankRequest | None = None,
+    ) -> EvidencePackage:
+        """Server-side evidence assembly (#216, ADR 0006): the same five
+        lanes ``retrieve`` composes client-side — resolve, query (only
+        when ``labels`` pins the facets), activate, search passages, and
+        optionally search community summaries — fused, deduplicated, and
+        selected within an explicit byte/token/item budget in one round
+        trip.
+
+        Unlike ``retrieve``, this is opt-in per call and never mutates
+        default behavior: omitting ``budget``/``rerank`` still returns a
+        deterministic package under the server's own defaults (40 items /
+        65536 bytes / 4000 tokens), and a configured reranker that fails
+        degrades to that same deterministic order rather than raising —
+        see ``EvidencePackage.plan.reranker``.
+        """
+        body = drop_none(
+            {
+                "origins": [origins] if isinstance(origins, str) else list(origins),
+                "labels": (
+                    None
+                    if labels is None
+                    else ([labels] if isinstance(labels, str) else list(labels))
+                ),
+                "dice_floor": dice_floor,
+                "semantic_floor": semantic_floor,
+                "resolve_limit": resolve_limit,
+                "activate_decay": activate_decay,
+                "activate_limit": activate_limit,
+                "text_fallback_query": text_fallback_query,
+                "search_limit": search_limit,
+                "include_communities": include_communities,
+                "budget": budget,
+                "rerank": rerank,
+            }
+        )
+        result = await self._post("/evidence", body)
+        return decode(EvidencePackage, result)  # type: ignore[no-any-return]
 
     # -- high-level retrieval loop -------------------------------------------------------
 

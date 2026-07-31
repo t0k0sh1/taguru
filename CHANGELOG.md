@@ -32,6 +32,26 @@ Entries that change an on-disk format or a response shape say so.
   configured and ran. `retrieve` and every direct endpoint this
   feature composes are unchanged; `http_contract`/`mcp_contract` stay
   `1` (a purely additive endpoint and MCP tool, per ADR 0005 §4).
+- Python/TypeScript SDK parity for evidence assembly (#306, implementing
+  ADR 0006 §5.3/§10): `Context.assemble_evidence()` (Python, both sync
+  and async) / `Context.assembleEvidence()` (TypeScript) call `POST
+  /contexts/{name}/evidence` with the same typed request options MCP's
+  `assemble_evidence` tool already exposes (`budget`, `rerank`,
+  `include_communities`, …) and decode into a typed `EvidencePackage` —
+  `items`/`citations`/`budget`/`omitted`/`omitted_total`/
+  `omitted_by_reason`/`plan`, embedding the existing `Association`/
+  `PassageHit`/`CommunityHit`/`Citation`/`LanePlan` models verbatim
+  rather than minting parallel evidence-only types. `kind`, every
+  `lane`, `omitted[].reason`, and `plan.reranker.reason` decode as open
+  strings (Python: plain `str`; TypeScript: `Open<T>`), never a closed
+  enum, so a future server-added value never breaks either SDK. Both
+  SDKs' golden wire-contract tests now decode the five `evidence_*`
+  fixtures (#301) through the real decoder/`unwrapEnvelope`, not just
+  the structural enum check. `sdk/spec/surface.yaml` gains a matching
+  `assemble_evidence` entry, CI-enforced identically to every other
+  method. MCP itself needed no change — #305 already shipped
+  `assemble_evidence` on both the stdio bridge and remote MCP from one
+  shared tool schema.
 - Optional evidence reranker (#307, implementing ADR 0006 §12): `POST
   /contexts/{name}/evidence` accepts `rerank?: {model?}` and, when a
   provider is configured (`TAGURU_RERANK_URL`/`_MODEL`/`_API_KEY`/

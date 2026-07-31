@@ -611,6 +611,35 @@ describe("retrieve end to end", () => {
   });
 });
 
+describe("assembleEvidence end to end", () => {
+  it("assembles a budgeted evidence package from a live corpus", async () => {
+    const name = fresh();
+    await seed(name);
+    const ctx = client.context(name);
+
+    const pkg = await ctx.assembleEvidence("青嶺酒造", { text_fallback_query: "杜氏は高瀬である" });
+    expect(pkg.items.length).toBeGreaterThan(0);
+    const kinds = new Set(pkg.items.map((item) => item.kind));
+    expect(kinds.has("association")).toBe(true);
+    expect(pkg.plan.lanes.communities.ran).toBe(false);
+    expect(pkg.plan.reranker.configured).toBe(false);
+    expect(pkg.budget.limits.max_items).toBe(40);
+    expect(pkg.budget.items_used).toBe(pkg.items.length);
+    // `omitted` is capped; `omitted_total` never is (ADR 0006 §10).
+    expect(pkg.omitted_total).toBeGreaterThanOrEqual(pkg.omitted.length);
+
+    // A tiny item budget forces omissions, observably (never an error).
+    const tight = await ctx.assembleEvidence("青嶺酒造", { budget: { max_items: 1 } });
+    expect(tight.items.length).toBeLessThanOrEqual(1);
+    if (tight.omitted_total > 0) {
+      const total = Object.values(tight.omitted_by_reason).reduce((a, b) => a + b, 0);
+      expect(total).toBe(tight.omitted_total);
+    }
+
+    await client.contexts.delete(name);
+  });
+});
+
 describe("groups and cross-context search", () => {
   /** Two contexts holding one distinct fact (graph + passage) each. */
   async function seededPair(base: string): Promise<[string, string]> {

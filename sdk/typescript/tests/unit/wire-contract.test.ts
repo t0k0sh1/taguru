@@ -5,18 +5,20 @@
 //
 // - every fixture whose response this SDK already has a typed
 //   interface for (MatchPage, PassagePage, ContextPage, ExplorePage,
-//   ActivationPage, CommunityPage) unwraps through the real
+//   ActivationPage, CommunityPage, and the five evidence_* operations
+//   now that EvidencePackage exists, #306) unwraps through the real
 //   `unwrapEnvelope` — the same function every live call uses —
 //   without throwing;
 // - every fixture's declared enum-like fields only carry values
 //   shapes.json knows about.
 //
-// #216's evidence-assembly package and the MCP-specific envelope have
-// no SDK model yet (#306 adds them); those fixtures are covered here
-// only by the enum check below, not a typed unwrap — matching this
-// SDK's own documented posture (ADR 0005 §2.5): no runtime schema
-// validation beyond the envelope, so there is nothing stronger to run
-// those fixtures through yet.
+// The MCP-specific envelope (assemble_evidence_call/tool_schema/
+// tool_error) has no SDK model — the whole HTTP body rides inside
+// content[0].text as an opaque string (ADR 0005 §2.4) — so those three
+// fixtures are covered here only by the enum check below, not a typed
+// unwrap. This matches this SDK's own documented posture (ADR 0005
+// §2.5): no runtime schema validation beyond the envelope, so there is
+// nothing stronger to run those fixtures through anyway.
 
 import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -105,6 +107,11 @@ const TYPED_OPERATIONS = [
   "explore",
   "activate",
   "communities_search",
+  "evidence_mixed_lanes",
+  "evidence_budget_constrained",
+  "evidence_duplicate_passage",
+  "evidence_contradiction_group",
+  "evidence_communities_degrade_and_rerank_reason",
 ];
 
 describe("golden wire-contract fixtures (#301)", () => {

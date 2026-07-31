@@ -153,6 +153,21 @@ classes:
     export: { route: "GET /contexts/{name}/export" }
     export_stream: { route: "GET /contexts/{name}/export" }
     export_to_file: { route: "GET /contexts/{name}/export", args: [path] }
+    assemble_evidence:
+      route: "POST /contexts/{name}/evidence"
+      args: [origins]
+      options:
+        - labels
+        - dice_floor
+        - semantic_floor
+        - resolve_limit
+        - activate_decay
+        - activate_limit
+        - text_fallback_query
+        - search_limit
+        - include_communities
+        - budget
+        - rerank
     retrieve:
       args: [origins]
       options:

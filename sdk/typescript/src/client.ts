@@ -15,6 +15,7 @@ import type {
   AssocOp,
   Association,
   BatchApplyResult,
+  BudgetRequest,
   Citation,
   CommunityPage,
   CompactOutcome,
@@ -26,6 +27,7 @@ import type {
   CrossPassagePage,
   DirectoryEntry,
   DriftAudit,
+  EvidencePackage,
   ExploreCursor,
   ExplorePage,
   GroupEntry,
@@ -40,6 +42,7 @@ import type {
   PassagePage,
   QuestionSpec,
   RefreshOutcome,
+  RerankRequest,
   ResolveExplanation,
   RetractAssociationOutcome,
   RetractOutcome,
@@ -1463,6 +1466,58 @@ export class Context {
       throw error;
     }
     await rename(tmpPath, path);
+  }
+
+  // -- evidence assembly ---------------------------------------------------------------
+
+  /**
+   * Server-side evidence assembly (#216, ADR 0006): the same five lanes
+   * `retrieve` composes client-side — resolve, query (only when `labels`
+   * pins the facets), activate, search passages, and optionally search
+   * community summaries — fused, deduplicated, and selected within an
+   * explicit byte/token/item budget in one round trip.
+   *
+   * Unlike `retrieve`, this is opt-in per call and never mutates default
+   * behavior: omitting `budget`/`rerank` still returns a deterministic
+   * package under the server's own defaults (40 items / 65536 bytes / 4000
+   * tokens), and a configured reranker that fails degrades to that same
+   * deterministic order rather than throwing — see
+   * `EvidencePackage.plan.reranker`.
+   */
+  async assembleEvidence(
+    origins: OneOrMany,
+    options: {
+      labels?: OneOrMany;
+      dice_floor?: number;
+      semantic_floor?: number;
+      resolve_limit?: number;
+      activate_decay?: number;
+      activate_limit?: number;
+      text_fallback_query?: string;
+      search_limit?: number;
+      include_communities?: boolean;
+      budget?: BudgetRequest;
+      rerank?: RerankRequest;
+    } = {},
+  ): Promise<EvidencePackage> {
+    const result = await this.post(
+      "/evidence",
+      dropUndefined({
+        origins,
+        labels: options.labels,
+        dice_floor: options.dice_floor,
+        semantic_floor: options.semantic_floor,
+        resolve_limit: options.resolve_limit,
+        activate_decay: options.activate_decay,
+        activate_limit: options.activate_limit,
+        text_fallback_query: options.text_fallback_query,
+        search_limit: options.search_limit,
+        include_communities: options.include_communities,
+        budget: options.budget,
+        rerank: options.rerank,
+      }),
+    );
+    return result as EvidencePackage;
   }
 
   // -- high-level retrieval loop -------------------------------------------------------
