@@ -280,28 +280,23 @@ fn resolve_tiers(
     })
 }
 
-/// The full entry ladder: [`resolve_tiers`], then the merge, the trim,
-/// and the gloss decoration of what survived.
-fn resolve_with_fallback(
+/// [`resolve_tiers`] plus the merge, the trim, the gloss decoration,
+/// and the metrics/logging every resolve serve produces — everything
+/// `resolve_with_fallback` needs short of wrapping the result in the
+/// `ApiResponse` envelope. Split out for #305's `assemble_evidence`,
+/// which needs the served candidates themselves (to auto-pick an
+/// anchor) rather than a `Response` to return verbatim.
+#[allow(clippy::result_large_err)] // the Err IS the response served next
+pub(super) fn resolve_served(
     state: &AppState,
     name: &str,
     request: &ResolveRequest,
     labels: bool,
     deadline: Deadline,
     started_at: Instant,
-) -> Response {
-    // Both resolve handlers land here first, and the lexical read alone
-    // takes the registry lock and sweeps the vocabulary before the
-    // semantic tier's own deadline checks ever run — fail a spent
-    // request fast, the way every other handler pre-flights.
-    if deadline.expired() {
-        return deadline_exceeded(started_at);
-    }
+) -> Result<Vec<TieredResolution>, Response> {
     let limit = clamp(request.limit, MAX_MATCH_LIMIT, MAX_MATCH_LIMIT);
-    let tiers = match resolve_tiers(state, name, request, labels, deadline, started_at) {
-        Ok(tiers) => tiers,
-        Err(response) => return response,
-    };
+    let tiers = resolve_tiers(state, name, request, labels, deadline, started_at)?;
     let served = trim_to_limit(merge_tiers(tiers.bounded, &tiers.semantic), limit);
     let served = attach_glosses(state, name, labels, served);
     let op = if labels {
@@ -324,7 +319,31 @@ fn resolve_with_fallback(
             "search",
         );
     }
-    ok(served, started_at)
+    Ok(served)
+}
+
+/// The full entry ladder: [`resolve_served`], wrapped in the
+/// `ApiResponse` envelope — or the `Response` [`resolve_tiers`]
+/// already built for an early exit.
+fn resolve_with_fallback(
+    state: &AppState,
+    name: &str,
+    request: &ResolveRequest,
+    labels: bool,
+    deadline: Deadline,
+    started_at: Instant,
+) -> Response {
+    // Both resolve handlers land here first, and the lexical read alone
+    // takes the registry lock and sweeps the vocabulary before the
+    // semantic tier's own deadline checks ever run — fail a spent
+    // request fast, the way every other handler pre-flights.
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
+    }
+    match resolve_served(state, name, request, labels, deadline, started_at) {
+        Ok(served) => ok(served, started_at),
+        Err(response) => response,
+    }
 }
 
 /// Classifies a resolve by what was actually served, so every serve

@@ -351,6 +351,31 @@ pub fn route_tool(
                 )),
             )
         }
+        "assemble_evidence" => {
+            let path = format!("{}/evidence", context_path("context")?);
+            need_present(arguments, "origins")?;
+            (
+                "POST",
+                path,
+                Some(pick(
+                    arguments,
+                    &[
+                        "origins",
+                        "labels",
+                        "dice_floor",
+                        "semantic_floor",
+                        "resolve_limit",
+                        "activate_decay",
+                        "activate_limit",
+                        "text_fallback_query",
+                        "search_limit",
+                        "include_communities",
+                        "budget",
+                        "rerank",
+                    ],
+                )),
+            )
+        }
         "explain_search" => {
             let path = format!("{}/sources/search/explain", context_path("context")?);
             need(arguments, "query")?;

@@ -261,6 +261,266 @@ pub struct CommunityHitMember {
     pub strength: f64,
 }
 
+/// One passage hit kept for the response, pre-join: its community id,
+/// the ranking evidence, and which lanes surfaced it.
+struct RankedSummary {
+    id: String,
+    score: f32,
+    text: String,
+    paragraph: u32,
+    bm25: bool,
+    vector: bool,
+}
+
+/// [`community_hits`]'s success case: a real artifact was found and
+/// searched. Carries everything both callers need to build their own
+/// response shape — [`search_communities`]'s `CommunityPage`, #305's
+/// `assemble_evidence` communities lane — without either recomputing
+/// it.
+pub(crate) struct CommunityLaneFound {
+    pub(crate) algorithm: String,
+    pub(crate) stale: bool,
+    pub(crate) recorded_graph: u64,
+    pub(crate) hits: Vec<CommunityHit>,
+    /// The artifact search's own lane account — `search_communities`
+    /// serializes this into `plan.contexts[0].lanes` and uses
+    /// `embedding_failed()` to keep a transiently degraded semantic
+    /// lane out of the retrieval cache; #305 folds it into one
+    /// coarser `LanePlan`.
+    pub(crate) lanes: crate::registry::PassageSearchLanes,
+    /// Per-lane hit counts (bm25-only, fused, vector-only), for the
+    /// same `taguru_passage_hits_total` metric `search_passages`
+    /// feeds — recorded inside [`community_hits`] itself since it is
+    /// ordinary per-hit lane accounting, not caching.
+    pub(crate) lane_hits: [u64; 3],
+}
+
+/// [`community_hits`]'s result: either [`CommunityLaneFound`], or "no
+/// artifact" — the manifest context, or its manifest record, does not
+/// exist. Every OTHER failure (a malformed manifest, an artifact
+/// derived from a different source context, a read error, or the
+/// deadline running out) is returned as a ready-to-serve `Response`
+/// instead, identical to what this function's own callers built
+/// before this extraction — `search_communities` returns it unchanged;
+/// #305's `assemble_evidence` propagates it as the whole call's
+/// failure rather than degrading, since ADR 0006 §11 names only "no
+/// artifact" as this lane's degrade.
+pub(crate) enum CommunityLaneOutcome {
+    Found(CommunityLaneFound),
+    NoArtifact(String),
+}
+
+/// The shared half of a communities search: manifest lookup and
+/// validation, the artifact search itself, and per-hit membership —
+/// everything between a cache miss and a response shape, which
+/// [`search_communities`] and #305's `assemble_evidence` both need.
+/// Caching, `note_search`, and structured logging stay in each caller,
+/// since the two observe this lane differently (one context vs. two,
+/// and `assemble_evidence` has no retrieval cache of its own for this
+/// feature — ADR 0006 §5.4). `current_graph` is the source context's
+/// revision the caller already read (`state.context_revision`), passed
+/// in rather than re-read here so both callers snapshot it exactly
+/// once, before this function's own work begins.
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::result_large_err)] // the Err IS the response served next
+pub(crate) fn community_hits(
+    state: &AppState,
+    name: &str,
+    derived: &str,
+    query: &str,
+    limit: usize,
+    semantic_floor: Option<f32>,
+    current_graph: u64,
+    deadline: Deadline,
+    started_at: Instant,
+) -> Result<CommunityLaneOutcome, Response> {
+    // No artifact context at all — the shared verdict both the
+    // manifest lookup and the artifact search below answer with,
+    // since either one finding the context gone means the same thing.
+    let no_artifact_context = || {
+        CommunityLaneOutcome::NoArtifact(format!(
+            "no communities artifact for '{name}': context '{derived}' does not \
+             exist — run `taguru communities` to build it"
+        ))
+    };
+
+    // The manifest is the artifact's identity: no artifact context, or
+    // an artifact without its record, both answer "build one" rather
+    // than an empty result — absence of analysis is not an empty
+    // corpus.
+    let manifest = tokio::task::block_in_place(|| {
+        state.lookup_passages(derived, std::slice::from_ref(&MANIFEST_SOURCE.to_string()))
+    });
+    let manifest = match manifest {
+        None => return Ok(no_artifact_context()),
+        Some(Err(io_error)) => return Err(passages_unreadable(state, io_error, started_at)),
+        Some(Ok((mut passages, _missing))) => match passages.remove(MANIFEST_SOURCE) {
+            None => {
+                return Ok(CommunityLaneOutcome::NoArtifact(format!(
+                    "context '{derived}' holds no '{MANIFEST_SOURCE}' record — run \
+                     `taguru communities` to (re)build the artifact"
+                )));
+            }
+            Some(text) => match serde_json::from_str::<CommunitiesManifest>(&text) {
+                Err(parse_error) => {
+                    return Err(error(
+                        ErrorCode::Conflict,
+                        format!(
+                            "the '{MANIFEST_SOURCE}' record in '{derived}' does not parse \
+                             ({parse_error}) — rebuild the artifact with `taguru communities`"
+                        ),
+                        started_at,
+                    ));
+                }
+                Ok(manifest) => manifest,
+            },
+        },
+    };
+    if manifest.source_context != name {
+        return Err(error(
+            ErrorCode::Conflict,
+            format!(
+                "artifact '{derived}' was derived from '{}', not '{name}'",
+                manifest.source_context
+            ),
+            started_at,
+        ));
+    }
+    let stale = manifest.revision.graph != current_graph;
+    let facts: BTreeMap<&str, &ManifestCommunity> = manifest
+        .communities
+        .iter()
+        .map(|community| (community.id.as_str(), community))
+        .collect();
+
+    // The ranking IS search_passages against the artifact — one extra
+    // slot absorbs the manifest source ranking for the query, which is
+    // filtered out below. No source filter: the artifact's sources are
+    // synthetic `community:{id}` rows that carry no user metadata, so
+    // a filter here could only ever exclude everything.
+    let outcome = tokio::task::block_in_place(|| {
+        state.search_passages(derived, query, limit + 1, semantic_floor, None, deadline)
+    });
+    let found = match outcome {
+        None => return Ok(no_artifact_context()),
+        Some(Err(_)) if deadline.expired() => return Err(deadline_exceeded(started_at)),
+        Some(Err(io_error)) => return Err(passages_unreadable(state, io_error, started_at)),
+        Some(Ok(found)) => found,
+    };
+
+    let mut lane_hits = [0u64; 3];
+    let mut ranked: Vec<RankedSummary> = Vec::new();
+    for hit in &found.hits {
+        let Some(id) = hit.source.strip_prefix(COMMUNITY_SOURCE_PREFIX) else {
+            continue;
+        };
+        ranked.push(RankedSummary {
+            id: id.to_string(),
+            score: hit.score,
+            text: hit.text.clone(),
+            paragraph: hit.index,
+            bm25: hit.bm25.is_some(),
+            vector: hit.vector.is_some(),
+        });
+    }
+    ranked.truncate(limit);
+    for summary in &ranked {
+        state
+            .metrics()
+            .record_passage_hit(summary.bm25, summary.vector);
+        match (summary.bm25, summary.vector) {
+            (true, false) => lane_hits[0] += 1,
+            (true, true) => lane_hits[1] += 1,
+            (false, true) => lane_hits[2] += 1,
+            (false, false) => {}
+        }
+    }
+
+    // Membership for the served hits, straight off the artifact's own
+    // graph — `contains` edges, strongest members first.
+    let members = tokio::task::block_in_place(|| {
+        state.read_context(derived, |context| {
+            ranked
+                .iter()
+                .map(|summary| {
+                    let subject = format!("{COMMUNITY_SOURCE_PREFIX}{}", summary.id);
+                    let mut all: Vec<(String, f64)> = context
+                        .query(Some(&subject), Some(CONTAINS_LABEL), None)
+                        .into_iter()
+                        .map(|association| (association.object, association.weight))
+                        .collect();
+                    all.sort_by(|a, b| b.1.abs().total_cmp(&a.1.abs()).then_with(|| a.0.cmp(&b.0)));
+                    let truncated = all.len() > MEMBERS_PER_HIT;
+                    all.truncate(MEMBERS_PER_HIT);
+                    (all, truncated)
+                })
+                .collect::<Vec<_>>()
+        })
+    });
+    let members = match members {
+        Ok(members) => members,
+        Err(failure) => return Err(access_error(state, failure, derived, started_at)),
+    };
+
+    let hits: Vec<CommunityHit> = ranked
+        .into_iter()
+        .zip(members)
+        .map(|(summary, (members, members_truncated))| {
+            let fact = facts.get(summary.id.as_str());
+            CommunityHit {
+                level: fact.map(|fact| fact.level),
+                parent: fact.and_then(|fact| fact.parent.clone()),
+                concept_count: fact.map(|fact| fact.concept_count),
+                community: summary.id,
+                score: summary.score,
+                text: summary.text,
+                paragraph: summary.paragraph,
+                members: members
+                    .into_iter()
+                    .map(|(name, strength)| CommunityHitMember { name, strength })
+                    .collect(),
+                members_truncated,
+            }
+        })
+        .collect();
+
+    Ok(CommunityLaneOutcome::Found(CommunityLaneFound {
+        algorithm: manifest.algorithm,
+        stale,
+        recorded_graph: manifest.revision.graph,
+        hits,
+        lanes: found.lanes,
+        lane_hits,
+    }))
+}
+
+/// The auth middleware checked the PATH context; `derived` is a second
+/// read target (a communities artifact) and gets the same per-context
+/// grant check — otherwise a scoped key could read any context by
+/// naming it here. Shared by `search_communities` and #305's
+/// `assemble_evidence` communities lane, the two callers that ever
+/// name a second, derived context this way.
+pub(crate) fn check_derived_scope(
+    scope: &Option<axum::Extension<crate::auth::KeyScope>>,
+    name: &str,
+    derived: &str,
+    started_at: Instant,
+) -> Option<Response> {
+    let Some(axum::Extension(scope)) = scope else {
+        return None;
+    };
+    (!scope.allows_context(derived)).then(|| {
+        error(
+            ErrorCode::Forbidden,
+            format!(
+                "this key's scope does not extend to the artifact context \
+                 '{derived}' — grant it alongside '{name}'"
+            ),
+            started_at,
+        )
+    })
+}
+
 pub async fn search_communities(
     State(state): State<AppState>,
     AppPath(name): AppPath<String>,
@@ -277,20 +537,8 @@ pub async fn search_communities(
         .derived
         .clone()
         .unwrap_or_else(|| derived_context_name(&name));
-    // The auth middleware checked the PATH context; `derived` is a
-    // second read target and gets the same per-context grant check —
-    // otherwise a scoped key could read any context by naming it here.
-    if let Some(axum::Extension(scope)) = &scope
-        && !scope.allows_context(&derived)
-    {
-        return error(
-            ErrorCode::Forbidden,
-            format!(
-                "this key's scope does not extend to the artifact context \
-                 '{derived}' — grant it alongside '{name}'"
-            ),
-            started_at,
-        );
+    if let Some(refusal) = check_derived_scope(&scope, &name, &derived, started_at) {
+        return refusal;
     }
     // The source context anchors the staleness verdict; its absence is
     // this verb's 404 whatever the artifact holds.
@@ -332,186 +580,25 @@ pub async fn search_communities(
         return ok(found.payload.as_ref(), started_at);
     }
 
-    // The manifest is the artifact's identity: no artifact context, or
-    // an artifact without its record, both answer "build one" rather
-    // than an empty result — absence of analysis is not an empty
-    // corpus.
-    let manifest = tokio::task::block_in_place(|| {
-        state.lookup_passages(&derived, std::slice::from_ref(&MANIFEST_SOURCE.to_string()))
-    });
-    let manifest = match manifest {
-        None => {
-            return error(
-                ErrorCode::NoContext,
-                format!(
-                    "no communities artifact for '{name}': context '{derived}' does not \
-                     exist — run `taguru communities` to build it"
-                ),
-                started_at,
-            );
+    let found = match community_hits(
+        &state,
+        &name,
+        &derived,
+        &request.query,
+        limit,
+        request.semantic_floor,
+        current.graph,
+        deadline,
+        started_at,
+    ) {
+        Ok(CommunityLaneOutcome::Found(found)) => found,
+        Ok(CommunityLaneOutcome::NoArtifact(reason)) => {
+            return error(ErrorCode::NoContext, reason, started_at);
         }
-        Some(Err(io_error)) => return passages_unreadable(&state, io_error, started_at),
-        Some(Ok((mut passages, _missing))) => match passages.remove(MANIFEST_SOURCE) {
-            None => {
-                return error(
-                    ErrorCode::NoSource,
-                    format!(
-                        "context '{derived}' holds no '{MANIFEST_SOURCE}' record — run \
-                         `taguru communities` to (re)build the artifact"
-                    ),
-                    started_at,
-                );
-            }
-            Some(text) => match serde_json::from_str::<CommunitiesManifest>(&text) {
-                Err(parse_error) => {
-                    return error(
-                        ErrorCode::Conflict,
-                        format!(
-                            "the '{MANIFEST_SOURCE}' record in '{derived}' does not parse \
-                             ({parse_error}) — rebuild the artifact with `taguru communities`"
-                        ),
-                        started_at,
-                    );
-                }
-                Ok(manifest) => manifest,
-            },
-        },
-    };
-    if manifest.source_context != name {
-        return error(
-            ErrorCode::Conflict,
-            format!(
-                "artifact '{derived}' was derived from '{}', not '{name}'",
-                manifest.source_context
-            ),
-            started_at,
-        );
-    }
-    let stale = manifest.revision.graph != current.graph;
-    let facts: BTreeMap<&str, &ManifestCommunity> = manifest
-        .communities
-        .iter()
-        .map(|community| (community.id.as_str(), community))
-        .collect();
-
-    // The ranking IS search_passages against the artifact — one extra
-    // slot absorbs the manifest source ranking for the query, which is
-    // filtered out below. No source filter: the artifact's sources are
-    // synthetic `community:{id}` rows that carry no user metadata, so
-    // a filter here could only ever exclude everything.
-    let outcome = tokio::task::block_in_place(|| {
-        state.search_passages(
-            &derived,
-            &request.query,
-            limit + 1,
-            request.semantic_floor,
-            None,
-            deadline,
-        )
-    });
-    let found = match outcome {
-        None => {
-            return error(
-                ErrorCode::NoContext,
-                format!(
-                    "no communities artifact for '{name}': context '{derived}' does not \
-                     exist — run `taguru communities` to build it"
-                ),
-                started_at,
-            );
-        }
-        Some(Err(_)) if deadline.expired() => return deadline_exceeded(started_at),
-        Some(Err(io_error)) => return passages_unreadable(&state, io_error, started_at),
-        Some(Ok(found)) => found,
+        Err(response) => return response,
     };
 
-    // One passage hit kept for the response, pre-join: its community
-    // id, the ranking evidence, and which lanes surfaced it.
-    struct RankedSummary {
-        id: String,
-        score: f32,
-        text: String,
-        paragraph: u32,
-        bm25: bool,
-        vector: bool,
-    }
-    let mut lane_hits = [0u64; 3];
-    let mut ranked: Vec<RankedSummary> = Vec::new();
-    for hit in &found.hits {
-        let Some(id) = hit.source.strip_prefix(COMMUNITY_SOURCE_PREFIX) else {
-            continue;
-        };
-        ranked.push(RankedSummary {
-            id: id.to_string(),
-            score: hit.score,
-            text: hit.text.clone(),
-            paragraph: hit.index,
-            bm25: hit.bm25.is_some(),
-            vector: hit.vector.is_some(),
-        });
-    }
-    ranked.truncate(limit);
-    for summary in &ranked {
-        state
-            .metrics()
-            .record_passage_hit(summary.bm25, summary.vector);
-        match (summary.bm25, summary.vector) {
-            (true, false) => lane_hits[0] += 1,
-            (true, true) => lane_hits[1] += 1,
-            (false, true) => lane_hits[2] += 1,
-            (false, false) => {}
-        }
-    }
-
-    // Membership for the served hits, straight off the artifact's own
-    // graph — `contains` edges, strongest members first.
-    let members = tokio::task::block_in_place(|| {
-        state.read_context(&derived, |context| {
-            ranked
-                .iter()
-                .map(|summary| {
-                    let subject = format!("{COMMUNITY_SOURCE_PREFIX}{}", summary.id);
-                    let mut all: Vec<(String, f64)> = context
-                        .query(Some(&subject), Some(CONTAINS_LABEL), None)
-                        .into_iter()
-                        .map(|association| (association.object, association.weight))
-                        .collect();
-                    all.sort_by(|a, b| b.1.abs().total_cmp(&a.1.abs()).then_with(|| a.0.cmp(&b.0)));
-                    let truncated = all.len() > MEMBERS_PER_HIT;
-                    all.truncate(MEMBERS_PER_HIT);
-                    (all, truncated)
-                })
-                .collect::<Vec<_>>()
-        })
-    });
-    let members = match members {
-        Ok(members) => members,
-        Err(failure) => return access_error(&state, failure, &derived, started_at),
-    };
-
-    let hits: Vec<CommunityHit> = ranked
-        .into_iter()
-        .zip(members)
-        .map(|(summary, (members, members_truncated))| {
-            let fact = facts.get(summary.id.as_str());
-            CommunityHit {
-                level: fact.map(|fact| fact.level),
-                parent: fact.and_then(|fact| fact.parent.clone()),
-                concept_count: fact.map(|fact| fact.concept_count),
-                community: summary.id,
-                score: summary.score,
-                text: summary.text,
-                paragraph: summary.paragraph,
-                members: members
-                    .into_iter()
-                    .map(|(name, strength)| CommunityHitMember { name, strength })
-                    .collect(),
-                members_truncated,
-            }
-        })
-        .collect();
-
-    let empty = hits.is_empty();
+    let empty = found.hits.is_empty();
     state.note_search(SearchOp::SearchCommunities, &derived, empty);
     state.note_search(SearchOp::SearchCommunities, &name, empty);
     if search_log_enabled() {
@@ -520,9 +607,9 @@ pub async fn search_communities(
             context = %name,
             op = "search_communities",
             cue = %request.query,
-            hits = hits.len(),
-            top_score = hits.first().map_or(0.0, |hit| f64::from(hit.score)),
-            stale,
+            hits = found.hits.len(),
+            top_score = found.hits.first().map_or(0.0, |hit| f64::from(hit.score)),
+            stale = found.stale,
             "search",
         );
     }
@@ -531,10 +618,10 @@ pub async fn search_communities(
     let key = key.filter(|_| !found.lanes.embedding_failed());
     let payload = CommunityPage {
         derived,
-        algorithm: manifest.algorithm,
-        stale,
+        algorithm: found.algorithm,
+        stale: found.stale,
         revision: CommunityRevisions {
-            recorded_graph: manifest.revision.graph,
+            recorded_graph: found.recorded_graph,
             current_graph: current.graph,
         },
         // The plan entry names the SOURCE context — the caller asked
@@ -542,7 +629,7 @@ pub async fn search_communities(
         plan: SearchPlan {
             contexts: vec![SearchContextPlan::of(&name, &found.lanes, None)],
         },
-        hits,
+        hits: found.hits,
     };
     let top_score = payload.hits.first().map_or(0.0, |hit| hit.score);
     let log_hits = payload.hits.len();
@@ -551,7 +638,7 @@ pub async fn search_communities(
         key,
         &payload,
         vec![empty, empty],
-        lane_hits,
+        found.lane_hits,
         log_hits,
         top_score,
         None,

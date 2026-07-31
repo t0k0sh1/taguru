@@ -32,7 +32,7 @@ pub(crate) const DEFAULT_MAX_TOKENS: usize = 4000;
 /// optional, resolved through [`BudgetLimits::resolve`]. #305 wires
 /// this into the HTTP request body; #304 only needs the shape to
 /// exercise [`BudgetLimits::resolve`] against what #305 will send.
-#[derive(Default, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub(crate) struct BudgetRequest {
     pub(crate) max_bytes: Option<usize>,
     pub(crate) max_tokens: Option<usize>,
