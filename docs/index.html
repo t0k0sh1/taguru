@@ -38,6 +38,7 @@
       <a href="extract.html">Document extraction</a>
       <a href="benchmark.html">Extraction benchmark</a>
       <a href="evaluate.html">Retrieval quality gate</a>
+      <a href="evidence.html">Evidence assembly</a>
       <a href="long-running.html">Long-running ingestion</a>
     </div>
     <div class="side-group">
@@ -144,6 +145,10 @@
       <a class="nav-card" href="evaluate.html">
         <span class="nc-title">Retrieval &amp; citation quality gate (evaluate)</span>
         <p>Measure one populated context's search and citation quality against a labeled eval.jsonl and turn it into a CI pass/fail gate. Lane execution, the metric catalog, evaluation.json/changes.jsonl, thresholds, and how this differs from calibrate, explain_*, and benchmark.</p>
+      </a>
+      <a class="nav-card" href="evidence.html">
+        <span class="nc-title">Budgeted evidence assembly (evidence)</span>
+        <p>Rank graph facts, passages, and community summaries into one deduplicated, citation-complete package under an explicit byte/token/item budget — dedup, diversity, corroboration/contradiction, the optional reranker's fallback boundary, and taguru evaluate --assembly's equal-budget comparison against fixed-limit retrieval.</p>
       </a>
       <a class="nav-card" href="long-running.html">
         <span class="nc-title">Long-running ingestion</span>

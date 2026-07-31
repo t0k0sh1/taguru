@@ -77,6 +77,38 @@ Entries that change an on-disk format or a response shape say so.
   `taguru_rerank_duration_seconds` carry only outcome tokens and
   timings. `http_contract`/`mcp_contract` stay `1` — a purely additive
   request field and response fragment (ADR 0005 §4).
+- `taguru evaluate --assembly`/`--max-items`/`--max-bytes`/`--max-tokens`/
+  `--rerank` (#308, implementing ADR 0006 §14): proves evidence assembly
+  helps at equal budget instead of on a subjective demo, reusing #215's
+  own `eval.jsonl`/`taguru evaluate` harness rather than a second
+  evaluation path. `--assembly` swaps the passage lane for `POST
+  /contexts/{name}/evidence`; the structural lane (`resolve` →
+  `query`) never changes, so a `baseline`/`assembly` run pair stays
+  comparable on coverage and lane cross-tab. `--max-items`/
+  `--max-bytes`/`--max-tokens` apply the identical three ceilings to
+  *both* modes — `--assembly` via the request's own `budget`, and
+  `baseline` truncated client-side with the exact accounting
+  `crate::api::evidence::budget` computes server-side, never a
+  reimplemented approximation. Without any budget flag, `baseline`
+  behaves exactly as it did before this release — no truncation, no
+  `budget` block in `evaluation.json`. New metrics:
+  `diversity.sources` (distinct source locators among a case's
+  admitted evidence — the one metric #216 names explicitly, "source
+  diversity at equal evidence budget"), `budget.items_used`/
+  `.bytes_used`/`.tokens_used`/`.omitted_rate`, `latency.evidence_ms`,
+  and `rerank.ran` (the configured-reranker success rate; its
+  complement is the degrade rate). `diversity.sources` joins the nine
+  existing case-scoped/comparison-eligible metrics as the tenth;
+  `evaluate compare` now also warns (never refuses) when two runs'
+  budgets differ, including one side having no budget flag at all.
+  Regression thresholds for the new metrics use ADR 0004 §9.3's
+  existing thresholds-file format — no new format. The default
+  repository gate stays offline, deterministic, and provider-free — a
+  configured reranker is opt-in exactly like ADR 0004's own
+  embedding-provider suites, never required to pass. `evaluation.json`'s
+  schema grows additively (`taguru_evaluation` stays `1`): `inputs.mode`/
+  `.budget`/`.rerank`, and per-case `evidence`/`budget`/
+  `diversity_sources`.
 - `GET /version` (#300, implementing ADR 0005 §3/§6): contract-version
   discovery, auth-exempt like the other probes and answering `200`
   even while `/health` reports degraded — a compatibility check has to

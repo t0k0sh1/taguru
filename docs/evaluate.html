@@ -38,6 +38,7 @@
       <a href="extract.html">Document extraction</a>
       <a href="benchmark.html">Extraction benchmark</a>
       <a href="evaluate.html" aria-current="page">Retrieval quality gate</a>
+      <a href="evidence.html">Evidence assembly</a>
       <a href="long-running.html">Long-running ingestion</a>
     </div>
     <div class="side-group">
@@ -93,7 +94,20 @@
                     <a href="#thresholds">below</a>); a completed run that violates one
                     exits 3. Without it every completed run exits 0 and is
                     report-only — a stderr line says so, so a CI job that
-                    forgot the flag does not pass silently.</code></pre>
+                    forgot the flag does not pass silently.
+--assembly           swap the passage lane for POST /contexts/{name}/evidence
+                    (see <a href="evidence.html">evidence assembly</a>) — the
+                    structural lane never changes, so a baseline/assembly run
+                    pair stays comparable on coverage and lane cross-tab.
+                    Without it, behavior is unchanged from before this flag
+                    existed.
+--max-items N
+--max-bytes N        equal-budget ceilings applied to BOTH modes — see
+--max-tokens N        <a href="evidence.html#equal-budget">proving assembly
+                    helps at equal budget</a>. None given leaves both modes
+                    untruncated, matching every run before this flag existed.
+--rerank MODEL        opts an --assembly run into a configured reranker;
+                    usage error without --assembly.</code></pre>
     <p>
       This is a hand-rolled parser, like every other verb in this tree — no argument-parsing
       library. Because the default mode has no subcommand name of its own,
@@ -386,7 +400,7 @@
           <tr><td><code>expected_citations[]</code></td><td><code>{source, paragraph, section?, quote?}</code> — drives the citation lane. See below for <code>section</code>'s three-valued semantics.</td></tr>
           <tr><td><code>options.limit</code></td><td>Per-case search limit, <code>1..=1000</code>; omitted means 10. Also the <i>k</i> in this case's own <code>recall_at_k</code> — there is no fixed recall@1/@5/@10 family, one value per case at that case's own limit.</td></tr>
           <tr><td><code>options.floor</code></td><td>Passage-lane <code>semantic_floor</code> override.</td></tr>
-          <tr><td><code>options.tags</code>, <code>.since</code>, <code>.until</code></td><td>Passage-lane filters, forwarded to <code>sources/search</code> verbatim.</td></tr>
+          <tr><td><code>options.tags</code>, <code>.since</code>, <code>.until</code></td><td>Passage-lane filters, forwarded to <code>sources/search</code> verbatim. Under <code>--assembly</code> (#308), <code>POST /contexts/{name}/evidence</code> has no matching request field — a case declaring any of these still runs, but the filter is silently not applied unless said out loud, so <code>evaluate</code> emits one warning per such case.</td></tr>
         </tbody>
       </table>
     </div>
@@ -430,8 +444,11 @@
           <tr><td><code>citations.resolved</code>, <code>.no_source</code>, <code>.no_paragraph</code></td><td>ratio (run)</td><td>Outcome share across every citation call made, regardless of case.</td></tr>
           <tr><td><code>citations.section_match</code>, <code>.quote_match</code></td><td>ratio (run)</td><td>Narrower denominators: only checks that declared <code>section</code> (explicit <code>null</code> included) or <code>quote</code>.</td></tr>
           <tr><td><code>lanes.structural_hit</code>, <code>.passage_hit</code>, <code>.both</code>, <code>.neither</code></td><td>ratio (run)</td><td>The lane cross-tab, denominator restricted to cases declaring both a structural and a source expectation whose passage lane completed.</td></tr>
-          <tr><td><code>latency.passage_ms</code>, <code>.resolve_ms</code>, <code>.query_ms</code>, <code>.citation_ms</code></td><td>distribution</td><td>Wall time per call, by lane.</td></tr>
+          <tr><td><code>latency.passage_ms</code>, <code>.resolve_ms</code>, <code>.query_ms</code>, <code>.citation_ms</code>, <code>.evidence_ms</code></td><td>distribution</td><td>Wall time per call, by lane — <code>.evidence_ms</code> only in <code>--assembly</code> mode.</td></tr>
           <tr><td><code>passage.failure_rate</code>, <code>structural.case_rate</code></td><td>ratio (run)</td><td>Share of passage-lane calls that failed; share of cases that ran the structural lane at all.</td></tr>
+          <tr><td><code>diversity.sources</code></td><td>distribution (per case)</td><td>Distinct source locators among a case's admitted evidence — see <a href="evidence.html#equal-budget">evidence assembly</a>.</td></tr>
+          <tr><td><code>budget.items_used</code>, <code>.bytes_used</code>, <code>.tokens_used</code>, <code>.omitted_rate</code></td><td>distribution / ratio (run)</td><td>What a case's own <code>--max-items</code>/<code>--max-bytes</code>/<code>--max-tokens</code> budget spent and dropped, in either mode — empty unless a budget flag was given.</td></tr>
+          <tr><td><code>rerank.ran</code></td><td>ratio (run)</td><td>Share of <code>--rerank</code> cases whose configured reranker actually reordered the pool; the complement is the degrade rate — empty unless <code>--rerank</code> was given.</td></tr>
         </tbody>
       </table>
     </div>
@@ -562,12 +579,15 @@
     </div>
     <p>
       A bound needs at least one of <code>min</code>/<code>max</code>, both finite, and
-      <code>min &lt;= max</code> when both are given. Only nine metric names are legal inside
+      <code>min &lt;= max</code> when both are given. Only ten metric names are legal inside
       <code>cases.*</code> — <code>recall.recall_at_k</code>, <code>.mrr</code>,
       <code>.ndcg</code>, <code>coverage.concepts</code>, <code>.labels</code>,
       <code>.associations</code>, <code>citations.recall</code>,
-      <code>.locator_validity</code>, and <code>latency.passage_ms</code>. The three per-call
-      latencies (<code>resolve_ms</code>/<code>query_ms</code>/<code>citation_ms</code>) are
+      <code>.locator_validity</code>, <code>latency.passage_ms</code>, and
+      <code>diversity.sources</code> (#308, ADR 0006 §14 — the one <code>--assembly</code>-era
+      metric compared case-by-case; <code>budget.*</code>/<code>rerank.ran</code> stay
+      aggregate-only). The three per-call latencies
+      (<code>resolve_ms</code>/<code>query_ms</code>/<code>citation_ms</code>) are
       deliberately excluded: a single case can make more than one resolve/query/citation call, so
       there is no one per-case value to bound. <code>deny_unknown_fields</code> cannot catch an
       unknown <i>metric name</i> inside <code>aggregate</code>, or an unknown <code>case_id</code>
@@ -613,14 +633,17 @@
       <code>kind</code> ∈ <code>improved | regressed | added | removed</code>. Unchanged cases
       are counted in the header's <code>counts.unchanged</code>, never emitted per case, keeping
       the file's size bounded by the number of cases whose outcome actually moved. Classification
-      reads only eight of the nine <code>--thresholds</code>-scoped metrics — every one except
+      reads only nine of the ten <code>--thresholds</code>-scoped metrics — every one except
       <code>latency.passage_ms</code>, whose single-run noise would flag most cases on a mere
       rerun rather than on a genuine quality change. A case with one metric down and another up
       is classified <b><code>regressed</code></b>, quality-gate-first, and the record still lists
       both directions. <code>added</code>/<code>removed</code> cases carry one-sided metrics
       (<code>direction: "not_comparable"</code>). A mismatched <code>context</code>, corpus
       revision, threshold-file identity, or <code>taguru_evaluation</code> stamp between the two
-      files is a <b>warning, never a refusal</b>.
+      files is a <b>warning, never a refusal</b> — and so is a mismatched <code>inputs.budget</code>
+      between the two runs (#308, ADR 0006 §14): comparing citation recall or source diversity
+      across different budgets is exactly the dishonest comparison an equal-budget evaluation
+      exists to catch.
     </p>
   </section>
 

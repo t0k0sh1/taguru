@@ -19,6 +19,7 @@ mod directory;
 mod directory_labels_compact;
 mod errors;
 mod evaluate;
+mod evaluate_assembly;
 mod evaluate_fixture;
 mod evidence;
 mod explore_audit;

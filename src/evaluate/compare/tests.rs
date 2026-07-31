@@ -70,6 +70,7 @@ fn base_case(id: &str) -> CaseView {
         recall: None,
         coverage: None,
         citations: None,
+        diversity_sources: None,
     }
 }
 
@@ -96,6 +97,7 @@ fn evaluation_view(context: &str, taguru_evaluation: u64, cases: Vec<CaseView>) 
         generated_at: "2026-07-29T00:00:00Z".to_string(),
         inputs: InputsView {
             context: context.to_string(),
+            budget: None,
         },
         corpus: CorpusView {
             revision_after: ContextRevision::default(),
@@ -373,6 +375,45 @@ fn a_taguru_evaluation_stamp_mismatch_warns() {
         warnings
             .iter()
             .any(|w| w.contains("taguru_evaluation stamp differs"))
+    );
+}
+
+#[test]
+fn a_budget_mismatch_including_one_unbudgeted_side_warns() {
+    let mut head_view = evaluation_view("ctx", 1, vec![]);
+    head_view.inputs.budget = Some(BudgetLimits {
+        max_items: 40,
+        max_bytes: 65536,
+        max_tokens: 4000,
+    });
+    let base = loaded("base.json", evaluation_view("ctx", 1, vec![]));
+    let head = loaded("head.json", head_view);
+    let mut warnings = Vec::new();
+    mismatch_warnings(&base, &head, &mut warnings);
+    assert!(
+        warnings.iter().any(|w| w.contains("budget differs")),
+        "{warnings:?}"
+    );
+}
+
+#[test]
+fn a_baseline_vs_assembly_pair_under_the_same_budget_does_not_warn() {
+    let budget = Some(BudgetLimits {
+        max_items: 40,
+        max_bytes: 65536,
+        max_tokens: 4000,
+    });
+    let mut base_view = evaluation_view("ctx", 1, vec![]);
+    base_view.inputs.budget = budget;
+    let mut head_view = evaluation_view("ctx", 1, vec![]);
+    head_view.inputs.budget = budget;
+    let base = loaded("base.json", base_view);
+    let head = loaded("head.json", head_view);
+    let mut warnings = Vec::new();
+    mismatch_warnings(&base, &head, &mut warnings);
+    assert!(
+        !warnings.iter().any(|w| w.contains("budget")),
+        "{warnings:?}"
     );
 }
 

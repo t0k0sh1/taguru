@@ -12,6 +12,7 @@ if you're porting.
 | [document_ingestion](document_ingestion/) | The write path's governance: dry-run review of the exact NDJSON, apply the reviewed batch, re-ingest as per-source REPLACE (no double counting), retract |
 | [conversational_memory](conversational_memory/) | Taguru as an assistant's long-term memory: one source per session, recall in later sessions, correction by negative weight |
 | [local_rag](local_rag/) | A fixed, fully local RAG corpus from PDFs: `TaguruIngester(context=...)` switched per paper section, groups searched across papers, source id vs. citation label kept separate |
+| [evidence_assembly](evidence_assembly/) | `Context.assemble_evidence()`: ranked, deduplicated, budgeted evidence for an external answer model — the same call `taguru evaluate --assembly` compares against fixed-limit retrieval at equal budget |
 
 ## Running them
 
