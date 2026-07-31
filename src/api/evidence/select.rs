@@ -72,9 +72,19 @@ pub(crate) struct EvidenceItem {
     pub(crate) contradicts: Vec<String>,
     /// This item's own content-only §8 byte contribution — excludes
     /// this field and `estimated_tokens` themselves (ADR 0006 §8, to
-    /// avoid a field whose value depends on its own length).
-    pub(crate) bytes: usize,
-    pub(crate) estimated_tokens: usize,
+    /// avoid a field whose value depends on its own length). `None`
+    /// only in the instant between construction and measurement in
+    /// [`prepare_item`]: `content_metrics` measures the struct with
+    /// both fields still absent (via `skip_serializing_if`) so the
+    /// measured bytes are the real, f32-shortest wire text — not
+    /// `serde_json::Value`'s f64-widened one with these two keys
+    /// removed after the fact — then both are filled in before the
+    /// item is ever returned; every item this module hands out has
+    /// both `Some`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) bytes: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) estimated_tokens: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) association: Option<AssociationOut>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -705,15 +715,15 @@ fn prepare_item(
         citation_refs,
         corroboration,
         contradicts,
-        bytes: 0,
-        estimated_tokens: 0,
+        bytes: None,
+        estimated_tokens: None,
         association,
         passage,
         community,
     };
-    let (item_bytes, item_quarters) = content_metrics(&item, &["bytes", "estimated_tokens"]);
-    item.bytes = item_bytes;
-    item.estimated_tokens = tokens_from_quarters(item_quarters);
+    let (item_bytes, item_quarters) = content_metrics(&item);
+    item.bytes = Some(item_bytes);
+    item.estimated_tokens = Some(tokens_from_quarters(item_quarters));
 
     let citation_contributions = resolved
         .into_iter()
@@ -728,7 +738,7 @@ fn prepare_item(
                 paragraph,
                 citation: &citation,
             };
-            let (bytes, quarters) = content_metrics(&probe, &[]);
+            let (bytes, quarters) = content_metrics(&probe);
             CitationContribution {
                 source,
                 paragraph,
@@ -933,6 +943,132 @@ mod tests {
     ) -> SelectedEvidence {
         let (fused, dedup_dropped) = super::super::fuse(pool);
         select(fused, dedup_dropped, &generous_limits(), citation_lookup)
+    }
+
+    /// Independently recomputes `BudgetUsage.bytes_used`/`tokens_used`
+    /// from a finished `items`/`citations` pair, through the same
+    /// public `array_overhead`/`content_metrics`/`tokens_from_quarters`
+    /// helpers `select` itself uses internally — the shared
+    /// recomputation both `budgets_are_hard_ceilings_and_every_
+    /// omission_is_counted` and `reorder_can_change_admission_but_
+    /// budgets_still_hold` below check the reported `BudgetUsage`
+    /// against, catching any internal running-sum drift from what the
+    /// output actually serializes to. Each item is measured with its
+    /// own `bytes`/`estimated_tokens` set back to `None` first — the
+    /// same state [`prepare_item`] measures under — so this goes
+    /// through the real f32-shortest serialization `content_metrics`
+    /// requires, never a `serde_json::Value`-widened approximation of
+    /// it (the regression this recomputation exists to catch: see
+    /// `budget::tests::content_metrics_does_not_widen_f32_to_f64_precision`).
+    fn recomputed_budget_usage(
+        items: Vec<EvidenceItem>,
+        citations: &[CitationEntry],
+    ) -> (usize, usize) {
+        let items_len = items.len();
+        let citations_len = citations.len();
+
+        let (items_bytes, items_quarters) = items
+            .into_iter()
+            .map(|item| {
+                let EvidenceItem {
+                    candidate_id,
+                    kind,
+                    fused_rank,
+                    lane_ranks,
+                    citation_refs,
+                    corroboration,
+                    contradicts,
+                    association,
+                    passage,
+                    community,
+                    ..
+                } = item;
+                let probe = EvidenceItem {
+                    candidate_id,
+                    kind,
+                    fused_rank,
+                    lane_ranks,
+                    citation_refs,
+                    corroboration,
+                    contradicts,
+                    bytes: None,
+                    estimated_tokens: None,
+                    association,
+                    passage,
+                    community,
+                };
+                content_metrics(&probe)
+            })
+            .fold((0usize, 0u64), |(b, q), (ib, iq)| (b + ib, q + iq));
+
+        let (citations_bytes, citations_quarters) = citations
+            .iter()
+            .map(content_metrics)
+            .fold((0usize, 0u64), |(b, q), (ib, iq)| (b + ib, q + iq));
+
+        let bytes_used = array_overhead(items_len)
+            + items_bytes
+            + array_overhead(citations_len)
+            + citations_bytes;
+        let total_quarters = array_overhead(items_len) as u64
+            + items_quarters
+            + array_overhead(citations_len) as u64
+            + citations_quarters;
+        (bytes_used, tokens_from_quarters(total_quarters))
+    }
+
+    /// Regression case for the bug fixed alongside `budget::content_
+    /// metrics`'s own `content_metrics_does_not_widen_f32_to_f64_
+    /// precision`: a passage carrying a score whose f32-shortest form
+    /// (`0.86304635`) is shorter than its f64-widened one
+    /// (`0.8630463480949402`) must have its admitted item's `bytes`/
+    /// `estimated_tokens` reflect the former, end to end through
+    /// `select` — not just at the `content_metrics` unit level.
+    /// Verified against the item's own REAL wire serialization (`bytes`/
+    /// `estimated_tokens` populated, as a caller actually receives it):
+    /// strip the exact `,"bytes":N,"estimated_tokens":M` span — the two
+    /// fields are always adjacent, in field-declaration order — and the
+    /// remainder's length must equal what `select` reported as `N`.
+    #[test]
+    fn admitted_item_bytes_reflect_the_real_f32_shortest_score_not_an_f64_widened_one() {
+        let hit = PassageHit {
+            source: "s".to_string(),
+            paragraph: 0,
+            score: 0.86304635,
+            text: "hit".to_string(),
+            lanes: PassageLanes {
+                bm25: Some(LaneEvidence {
+                    rank: 1,
+                    score: 0.86304635,
+                }),
+                vector: None,
+            },
+        };
+        let candidate = EvidenceCandidate::from_passage("ctx", hit, 1);
+        let result = select_all(vec![candidate], &empty_lookup());
+        let item = result.items.into_iter().next().expect("one item survives");
+        let reported_bytes = item.bytes.expect("select always measures admitted items");
+        let reported_tokens = item
+            .estimated_tokens
+            .expect("select always measures admitted items");
+
+        let full_text = serde_json::to_string(&item).unwrap();
+        let marker = format!(",\"bytes\":{reported_bytes},\"estimated_tokens\":{reported_tokens}");
+        assert!(
+            full_text.contains(&marker),
+            "expected {marker:?} in {full_text}"
+        );
+        let content_only = full_text.replacen(&marker, "", 1);
+        assert_eq!(content_only.len(), reported_bytes);
+
+        assert!(
+            content_only.contains("0.86304635"),
+            "f32's own shortest decimal form: {content_only}"
+        );
+        assert!(
+            !content_only.contains("0.8630463480949402"),
+            "must never widen through f64: {content_only}"
+        );
     }
 
     // --- Mixed pool, determinism ---
@@ -1617,22 +1753,16 @@ mod tests {
                 let result = select(fused, dropped, &budget_limits, &lookup);
 
                 prop_assert!(result.items.len() <= max_items);
+                let items_len = result.items.len();
+                let SelectedEvidence { items, citations, budget, omitted_total, .. } = result;
 
-                let items_bytes: usize = result.items.iter().map(|item| content_metrics(item, &["bytes", "estimated_tokens"]).0).sum();
-                let citations_bytes: usize = result.citations.iter().map(|entry| content_metrics(entry, &[]).0).sum();
-                let bytes_used = array_overhead(result.items.len()) + items_bytes + array_overhead(result.citations.len()) + citations_bytes;
-                prop_assert!(bytes_used <= max_bytes || result.items.is_empty());
-                prop_assert_eq!(bytes_used, result.budget.bytes_used);
+                let (bytes_used, tokens_used) = recomputed_budget_usage(items, &citations);
+                prop_assert!(bytes_used <= max_bytes || items_len == 0);
+                prop_assert_eq!(bytes_used, budget.bytes_used);
+                prop_assert!(tokens_used <= max_tokens || items_len == 0);
+                prop_assert_eq!(tokens_used, budget.tokens_used);
 
-                let items_quarters: u64 = result.items.iter().map(|item| content_metrics(item, &["bytes", "estimated_tokens"]).1).sum();
-                let citations_quarters: u64 = result.citations.iter().map(|entry| content_metrics(entry, &[]).1).sum();
-                let total_quarters = array_overhead(result.items.len()) as u64 + items_quarters
-                    + array_overhead(result.citations.len()) as u64 + citations_quarters;
-                let tokens_used = tokens_from_quarters(total_quarters);
-                prop_assert!(tokens_used <= max_tokens || result.items.is_empty());
-                prop_assert_eq!(tokens_used, result.budget.tokens_used);
-
-                prop_assert_eq!(result.items.len() + result.omitted_total, fused_count);
+                prop_assert_eq!(items_len + omitted_total, fused_count);
             }
 
             /// I3: the same logical pool — same candidates, same ranks
@@ -1718,22 +1848,16 @@ mod tests {
                 );
 
                 prop_assert!(result.items.len() <= max_items);
+                let items_len = result.items.len();
+                let SelectedEvidence { items, citations, budget, omitted_total, .. } = result;
 
-                let items_bytes: usize = result.items.iter().map(|item| content_metrics(item, &["bytes", "estimated_tokens"]).0).sum();
-                let citations_bytes: usize = result.citations.iter().map(|entry| content_metrics(entry, &[]).0).sum();
-                let bytes_used = array_overhead(result.items.len()) + items_bytes + array_overhead(result.citations.len()) + citations_bytes;
-                prop_assert!(bytes_used <= max_bytes || result.items.is_empty());
-                prop_assert_eq!(bytes_used, result.budget.bytes_used);
+                let (bytes_used, tokens_used) = recomputed_budget_usage(items, &citations);
+                prop_assert!(bytes_used <= max_bytes || items_len == 0);
+                prop_assert_eq!(bytes_used, budget.bytes_used);
+                prop_assert!(tokens_used <= max_tokens || items_len == 0);
+                prop_assert_eq!(tokens_used, budget.tokens_used);
 
-                let items_quarters: u64 = result.items.iter().map(|item| content_metrics(item, &["bytes", "estimated_tokens"]).1).sum();
-                let citations_quarters: u64 = result.citations.iter().map(|entry| content_metrics(entry, &[]).1).sum();
-                let total_quarters = array_overhead(result.items.len()) as u64 + items_quarters
-                    + array_overhead(result.citations.len()) as u64 + citations_quarters;
-                let tokens_used = tokens_from_quarters(total_quarters);
-                prop_assert!(tokens_used <= max_tokens || result.items.is_empty());
-                prop_assert_eq!(tokens_used, result.budget.tokens_used);
-
-                prop_assert_eq!(result.items.len() + result.omitted_total, fused_count);
+                prop_assert_eq!(items_len + omitted_total, fused_count);
             }
         }
     }
