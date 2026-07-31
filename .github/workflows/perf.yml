@@ -1,9 +1,19 @@
 name: Perf
 
 # Base/head comparison needs a PR; push-to-main has nothing to compare
-# against.
+# against. Push-to-main still triggers this workflow so the
+# `callgrind-regression` job runs once against main and saves a
+# `Swatinem/rust-cache` entry scoped to the main branch — GitHub Actions
+# caches are branch-scoped, and PR runs fall back to their base branch's
+# cache when their own PR-ref cache is empty (always true for a PR's
+# first run). Without this, every PR's first Perf run compiled
+# gungraun-runner and the full release bench binary from scratch (~6
+# minutes), because a pull_request-only trigger never leaves a cache on
+# main to fall back to.
 on:
   pull_request:
+  push:
+    branches: [main]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -31,8 +41,14 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
+      # Deliberately the same job id (callgrind-regression) for both
+      # triggers: Swatinem/rust-cache derives its cache key from the job
+      # id by default, so a push-to-main run and a pull_request run must
+      # share a job id for the PR run's cache restore to ever match what
+      # the push run saved.
       - uses: Swatinem/rust-cache@v2
       - name: Install valgrind
+        if: github.event_name == 'pull_request'
         run: sudo apt-get update && sudo apt-get install -y valgrind
       # A PR that adds (or temporarily removes) the `context` bench
       # target itself has nothing on the base side to compare against —
@@ -50,6 +66,7 @@ jobs:
       # version is already the one installed, so this is free when they
       # agree.
       - name: Benchmark base branch
+        if: github.event_name == 'pull_request'
         run: |
           git checkout ${{ github.event.pull_request.base.sha }}
           if cargo metadata --format-version=1 --no-deps \
@@ -66,6 +83,7 @@ jobs:
       # soft_limits in benches/context.rs fails this step (exit code 3)
       # when Ir moves outside the configured regression margin.
       - name: Benchmark PR head
+        if: github.event_name == 'pull_request'
         run: |
           git checkout ${{ github.event.pull_request.head.sha }}
           version=$(cargo metadata --format-version=1 | jq -r '.packages[] | select(.name == "gungraun").version')
@@ -75,3 +93,14 @@ jobs:
           else
             cargo bench --bench context
           fi
+      # No PR to compare against on a plain push to main — just compile
+      # gungraun-runner and the release bench binary so Swatinem/rust-cache
+      # saves them under a main-branch-scoped cache entry (see the header
+      # comment). Intentionally skips actually running the benchmark
+      # under valgrind; that cost buys nothing here.
+      - name: Warm gungraun-runner + bench build cache
+        if: github.event_name == 'push'
+        run: |
+          version=$(cargo metadata --format-version=1 | jq -r '.packages[] | select(.name == "gungraun").version')
+          cargo install gungraun-runner --version "$version"
+          cargo bench --bench context --no-run
