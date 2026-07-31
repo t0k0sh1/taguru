@@ -14,15 +14,13 @@
 //! comparison is allowed, and it compares ranks, never raw scores
 //! (ADR 0006 §7).
 //!
-//! This module is internal groundwork only — no endpoint, MCP tool, or
-//! SDK method exists yet. The `select` submodule (#304) is now the
-//! real, non-test caller of [`fuse`]/[`CitationEntry`]/
-//! [`CitationCollector`] below; the four `EvidenceCandidate::from_*`
-//! constructors remain exercised only by tests until #305's HTTP
-//! handler builds real candidates from a live corpus, so the
-//! crate-wide allow below stays in place until then.
-#![allow(dead_code)] // first real HTTP caller is #305
+//! #305's `assemble` submodule is this module's first real, non-test
+//! caller: its `POST /contexts/{name}/evidence` handler builds
+//! [`EvidenceCandidate`]s from a live corpus, runs them through
+//! [`fuse`] and `select::select`, and serializes the result as ADR
+//! 0006 §10's `EvidencePackage`.
 
+pub(crate) mod assemble;
 pub(crate) mod budget;
 pub(crate) mod select;
 
@@ -454,6 +452,7 @@ pub(crate) struct FusedCandidate {
     /// rather than something #305's eventual wire projection has to
     /// remember to leave out.
     #[serde(skip)]
+    #[allow(dead_code)] // read by tests only — never serialized, and #305 has no other reader
     pub(crate) fused_score: f64,
 }
 

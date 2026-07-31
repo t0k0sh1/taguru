@@ -523,7 +523,7 @@ pub struct SearchLanesPlan {
 /// names the effective cosine `floor` it swept under — the resolved
 /// override → context setting → server default chain), or it did not
 /// and `reason` says why, in the same prose the explain endpoint uses.
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct LanePlan {
     pub ran: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -533,7 +533,7 @@ pub struct LanePlan {
 }
 
 impl LanePlan {
-    fn ran() -> Self {
+    pub(crate) fn ran() -> Self {
         Self {
             ran: true,
             reason: None,
@@ -541,14 +541,22 @@ impl LanePlan {
         }
     }
 
-    fn skipped(reason: String) -> Self {
+    pub(crate) fn skipped(reason: impl Into<String>) -> Self {
         Self {
             ran: false,
-            reason: Some(reason),
+            reason: Some(reason.into()),
             floor: None,
         }
     }
 }
+
+/// The two reasons neither lane ran at all — before either one could
+/// start, so there is nothing lane-specific to say (ADR 0006 §10:
+/// evidence assembly's own single-lane `plan.lanes.passages` account
+/// shares this exact wording via [`SearchContextPlan::of`]'s own use
+/// of them, so the two surfaces cannot drift apart in prose).
+pub(crate) const NO_QUERY_TERMS_REASON: &str = "the query yields no searchable terms";
+pub(crate) const ZERO_LIMIT_REASON: &str = "the requested limit is 0";
 
 impl SearchContextPlan {
     /// One context's plan entry from the registry's account of its
@@ -564,13 +572,13 @@ impl SearchContextPlan {
     ) -> Self {
         use crate::registry::{PassageSearchLanes, VectorLaneStatus};
 
-        let both = |reason: &str| SearchLanesPlan {
-            bm25: LanePlan::skipped(reason.to_string()),
-            vector: LanePlan::skipped(reason.to_string()),
+        let both = |reason: &'static str| SearchLanesPlan {
+            bm25: LanePlan::skipped(reason),
+            vector: LanePlan::skipped(reason),
         };
         let lanes = match lanes {
-            PassageSearchLanes::NoQueryTerms => both("the query yields no searchable terms"),
-            PassageSearchLanes::ZeroLimit => both("the requested limit is 0"),
+            PassageSearchLanes::NoQueryTerms => both(NO_QUERY_TERMS_REASON),
+            PassageSearchLanes::ZeroLimit => both(ZERO_LIMIT_REASON),
             PassageSearchLanes::Ran { vector } => SearchLanesPlan {
                 bm25: LanePlan::ran(),
                 vector: match vector {

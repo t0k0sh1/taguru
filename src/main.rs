@@ -858,6 +858,7 @@ fn routes(
             "/contexts/{name}/communities/search",
             post(api::search_communities),
         )
+        .route("/contexts/{name}/evidence", post(api::assemble_evidence))
         .route(
             "/contexts/{name}/sources/retract",
             post(api::retract_source),

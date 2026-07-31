@@ -94,6 +94,19 @@ unchanged graph re-runs without a single LLM call — and
 ranks those summaries with an honest staleness verdict when the graph
 has moved on since.
 
+Handing retrieved evidence to an external answer model with a bounded
+context window? `POST /contexts/{name}/evidence` (MCP:
+`assemble_evidence`) is opt-in evidence assembly: it runs the same
+graph/passage/community fan-out as the composed retrieval loop, then
+ranks (reciprocal-rank fusion, never comparing raw graph/BM25/vector
+scores against each other), deduplicates, and greedily selects a
+package under an explicit byte/token/item budget — corroborating and
+contradicting evidence both preserved intentionally, never silently
+collapsed to a majority view. No reranker provider is required or
+configured by default; the deterministic ordering is the whole
+feature in that configuration, and every existing endpoint's behavior
+is unchanged whether or not you ever call it.
+
 For the endpoint list and the ingest/retrieval discipline, ask the
 running server: `GET /protocol`. A guided tour is
 [Getting started](https://t0k0sh1.github.io/taguru/getting-started.html).

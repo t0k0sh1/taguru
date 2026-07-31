@@ -86,6 +86,19 @@ fn key_scopes_gate_roles_contexts_the_directory_and_mcp() {
         call("POST", "/contexts/sake/drift/audit", None, "rtok").0,
         200
     );
+    // #305's evidence assembly is Role::Read too — an unclassified
+    // route would fail closed to Admin (auth.rs's own rule), so this
+    // pins it reaches a scoped reader directly.
+    assert_eq!(
+        call(
+            "POST",
+            "/contexts/sake/evidence",
+            Some(json!({"origins": "蔵"})),
+            "rtok"
+        )
+        .0,
+        200
+    );
     let (status, refusal) = call(
         "POST",
         "/contexts/sake/associations",

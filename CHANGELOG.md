@@ -8,6 +8,31 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- `POST /contexts/{name}/evidence` (#305, MCP: `assemble_evidence`,
+  implementing ADR 0006 §5/§10/§11/§13.1-13.2): opt-in evidence
+  assembly over the composed resolve/query/activate/search_passages/
+  cite_passage fan-out `retrieve` already runs, plus an opt-in
+  community-summary search — normalizes every graph association, graph
+  activation, passage hit, and community hit into one ranked
+  (reciprocal-rank fusion over each lane's own rank, never comparing
+  raw BM25/cosine/graph-weight/community scores against each other),
+  deduplicated, citation-complete package under three independent hard
+  budgets (item count, byte length, estimated tokens). Contradictory
+  and corroborating evidence are both preserved intentionally — a
+  disagreement is admitted or omitted as one atomic group, never
+  split, and a fact several sources assert keeps every source named,
+  never collapsed to a count. A budget too small for even the smallest
+  candidate answers `200` with an empty package and every candidate
+  accounted for under `omitted`/`omitted_total`/`omitted_by_reason`,
+  never an error; `include_communities: true` without a derived
+  artifact degrades the same way (`plan.lanes.communities.ran: false`)
+  rather than refusing, since community evidence is one opt-in input
+  here, not the whole point of the call the way `communities/search`
+  is. `plan.reranker` is always `{configured: false, ran: false}` —
+  no reranker provider exists in this tree yet (#307); selection stays
+  fully deterministic. `retrieve` and every direct endpoint this
+  feature composes are unchanged; `http_contract`/`mcp_contract` stay
+  `1` (a purely additive endpoint and MCP tool, per ADR 0005 §4).
 - `GET /version` (#300, implementing ADR 0005 §3/§6): contract-version
   discovery, auth-exempt like the other probes and answering `200`
   even while `/health` reports degraded — a compatibility check has to

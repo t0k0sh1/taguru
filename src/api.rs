@@ -55,6 +55,7 @@ pub use contexts::{
     protocol, protocol_text, protocol_trailer, rename_context, update_context,
 };
 pub use coverage::{embeddings_status, labels, refresh_embeddings, unreachable_from};
+pub use evidence::assemble::assemble_evidence;
 pub use explore::{activate, describe, explore};
 pub use groups::{create_group, delete_group, get_group, list_groups, rename_group, update_group};
 pub use import::{compact_context, export_context, export_group, import_batch};
@@ -103,7 +104,7 @@ impl<T> ApiResponse<T> {
 /// and a migration note (ADR 0005 §7).
 pub(crate) const HTTP_CONTRACT: u64 = 1;
 
-/// The MCP-owned wire shape version (ADR 0005 §3.3): the 46-tool
+/// The MCP-owned wire shape version (ADR 0005 §3.3): the 47-tool
 /// name/`inputSchema` table, `retrieve`'s composed output shape (the
 /// one tool result with no HTTP counterpart to inherit from), the
 /// `isError`/`structuredContent` convention, and the JSON-RPC

@@ -522,6 +522,47 @@ pub(super) fn tool_definitions() -> Vec<Value> {
             ),
         ),
         (
+            "assemble_evidence",
+            "Opt-in evidence assembly: runs the same resolve/query/activate/search_passages/cite_passage fan-out `retrieve` runs, then normalizes every graph association, graph activation, passage hit, and (opt-in) community hit into one ranked, deduplicated, citation-complete package under an explicit byte/token/item budget — for a caller that will hand the result to an external answer model with a bounded context window, unlike `retrieve`'s raw, unranked results. `origins` and `labels` share `retrieve`'s own contract; the passage/community lanes search `text_fallback_query` when given, otherwise `origins` joined with '; '. Contradictory and corroborating evidence are both preserved intentionally — never silently collapsed to a majority view or a single opaque count. `budget` bounds the response (defaults: 40 items, 64 KiB, ~4000 estimated tokens); a budget too small for even the smallest candidate still answers 200 with an empty package and every candidate accounted for under `omitted`/`omitted_total`/`omitted_by_reason`, never an error. `plan` reports which lanes ran and why not when they did not, plus the selection/reranker trace — no reranker is configured on this server today, so `plan.reranker` is always `{configured: false, ran: false}` and selection is fully deterministic. Does not change `retrieve` or any direct endpoint's behavior.",
+            object_schema(
+                json!({
+                    "context": context,
+                    "origins": {
+                        "type": ["string", "array"],
+                        "items": { "type": "string" },
+                        "description": "cue(s) to resolve into anchors"
+                    },
+                    "labels": {
+                        "type": ["string", "array"],
+                        "items": { "type": "string" },
+                        "description": "relation labels to query on, alongside the always-run activate"
+                    },
+                    "dice_floor": { "type": "number", "description": "one-call override of the resolve fuzzy floor" },
+                    "semantic_floor": { "type": "number", "description": "one-call override of the resolve/search/communities semantic floor" },
+                    "resolve_limit": { "type": "integer", "minimum": 0, "description": "max resolve candidates per origin (default/ceiling 1000)" },
+                    "activate_decay": { "type": "number", "description": "activate's decay (default 0.5)" },
+                    "activate_limit": { "type": "integer", "minimum": 0, "description": "activate's limit (default 20)" },
+                    "text_fallback_query": { "type": "string", "description": "passage/community lanes' query text; omitted means 'origins' joined with '; '" },
+                    "search_limit": { "type": "integer", "minimum": 0, "description": "the passage/community search calls' limit (default 5)" },
+                    "include_communities": { "type": "boolean", "description": "also search the context's derived community-summary artifact (default false); no artifact is a degrade (plan.lanes.communities.ran = false), never a refusal" },
+                    "budget": {
+                        "type": "object",
+                        "description": "three independent hard ceilings on the returned package; an omitted field takes its own default",
+                        "properties": {
+                            "max_items": { "type": "integer", "minimum": 0, "description": "default 40, ceiling 1000" },
+                            "max_bytes": { "type": "integer", "minimum": 0, "description": "default 65536 (64 KiB), ceiling 1048576 (1 MiB)" },
+                            "max_tokens": { "type": "integer", "minimum": 0, "description": "default 4000, an estimate — no separate ceiling beyond max_items/max_bytes" }
+                        }
+                    },
+                    "rerank": {
+                        "type": "object",
+                        "description": "accepted but not yet acted on — no reranker provider is configured on this server; selection stays fully deterministic"
+                    }
+                }),
+                &["context", "origins"],
+            ),
+        ),
+        (
             "explain_search",
             "Why didn't (or did) a source appear in search_passages — one call instead of orchestrating search, citations, and lowered limits by hand. Name the query AND the source (optionally which paragraph) you expected; the answer is the first verdict that applies: not_stored (never ingested here, or retracted), filtered_out (the request's tags/since/until filter excludes the source — the search never considered it), no_term_overlap (the query's terms and the paragraph's terms side by side, as strings — the spelling-mismatch case: stored under 酒蔵, you searched 酒造 — register an alias or reword), below_cutoff (its actual rank, the score cutoff at your limit, and a verified limit that reaches it), or served (its rank — it WAS there). Evidence carries per-term tf/df/BM25 contributions and the vector lane's cosine or the reason that lane never ran. Pass the SAME tags/since/until as the search being explained, or the explanation accounts for a call nobody made. One context per call.",
             object_schema(
