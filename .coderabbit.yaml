@@ -1,0 +1,86 @@
+language: "ja-JP"
+early_access: true
+reviews:
+  profile: "chill"
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  auto_review:
+    enabled: true
+    drafts: false
+  path_instructions:
+    - path: "src/**/*.rs"
+      instructions: |
+        Rustサーバー本体のコード。以下の観点を重点的に指摘してください:
+        - ロジックの正しさ、境界条件の見落とし、パニックしうる箇所(unwrap/expect/
+          index out of range/整数オーバーフローなど)。
+        - ADRやモジュール冒頭のdocコメントが宣言している不変条件(決定的な出力順序、
+          budget上限の遵守、omitted件数の整合性など)を壊す変更。該当する不変条件が
+          docコメントやテストで保証されているかどうかも確認してください。
+        - 機密情報(APIキー、認証情報)や利用者データ(候補テキスト、corpus本文)が
+          ログ・エラーメッセージ・メトリクスラベル・Debug実装経由で漏れる変更。
+          既存コードは意図的にDebugを実装しない型や、URLを含まないエラー文言など
+          でそれを防いでいるので、同種の漏洩リスクがないか確認してください。
+        - HTTP/MCPレスポンス形状の変更が `HTTP_CONTRACT`/`MCP_CONTRACT`
+          (`src/api.rs`) や `tests/fixtures/wire/` のgolden fixture更新を
+          伴っているか(ADR 0005の互換性ルール)。
+        - 並行処理・ロックの取得順序・breaker/timeout/retryの境界条件。
+
+        以下は指摘しないでください:
+        - `cargo fmt`/`cargo clippy -D warnings` がCIで強制しているフォーマットや
+          命名規則などの純粋なスタイル上の指摘。
+        - 既存のコードで十分に説明されている自明な処理に対して「コメントを追加すべき」
+          という指摘(このプロジェクトはWHATではなくWHYのみをコメントする方針)。
+        - 要求されていない抽象化・汎用化・ヘルパー関数の新設を提案すること
+          (このプロジェクトは必要最小限の変更を好み、将来の拡張性のための
+          先回りした設計を避ける方針)。
+        - 発生しえない入力に対する追加のバリデーションや、内部関数間の
+          防御的なエラーハンドリングの提案(信頼境界の外側でのみ検証する方針)。
+    - path: "{src,tests}/**/*.rs"
+      instructions: |
+        テストコード(`#[cfg(test)] mod tests` を含む)は説明的で長いテスト関数名
+        や、アサーション失敗時に文脈を出力する `"{package}"` 形式のメッセージを
+        意図的に使っています。冗長・長すぎるという指摘や、名前を短縮すべきという
+        指摘はしないでください。代わりに、テストされていないエッジケース・失敗系
+        (エラー・タイムアウト・不正な入力)の欠落や、アサーションが実質的に何も
+        検証していない(tautological)ケースを指摘してください。
+    - path: "adr/*.md"
+      instructions: |
+        ADR(Architecture Decision Record)。ファイル冒頭に "Status: Accepted"
+        とある場合、そのDecisionセクションは不変であり、内容を書き換える提案は
+        しないでください(変更したい場合は新しいADRファイルを作る運用です)。
+        代わりに、実装コード・CHANGELOG・READMEとの間で記述が矛盾していないか、
+        参照しているファイルパスや行番号が実際に存在するかを確認してください。
+    - path: "CHANGELOG.md"
+      instructions: |
+        Keep a Changelog形式に従っているか、`[Unreleased]` セクションの
+        `### Added`/`### Changed`/`### Fixed`/`### Security` の分類が変更内容
+        と一致しているか、オンディスク形式やレスポンス形状の変更が明記されて
+        いるかを確認してください。文章の言い回しに対する軽微なスタイル指摘は
+        不要です。
+    - path: "tests/fixtures/wire/**"
+      instructions: |
+        `TAGURU_UPDATE_WIRE_FIXTURES=1 cargo test --test http_api contract` で
+        自動生成されるgolden fixtureです。JSONの整形・フィールド順序・改行など
+        生成ツールが決めるスタイルへの指摘は一切不要です。確認してほしいのは、
+        `shapes.json` の `enums`/`required_request_fields` が実際の変更点と
+        整合しているか、および対応するテストで破壊的変更として分類・記録されて
+        いるかどうかのみです。
+    - path: "sdk/**/*.{py,ts}"
+      instructions: |
+        Python/TypeScript SDK。`sdk/python/src/taguru/_sync/**` は
+        `scripts/generate_sync.py` の自動生成物なので、直接編集する提案は
+        せず「`_async` 側を直して再生成すべき」と指摘してください。
+        `sdk/spec/surface.yaml` に定義されたメソッド/引数からの逸脱、
+        TypeScript側で列挙的なフィールドがクローズドな literal union に
+        なっている(`Open<T>` を使うべき)箇所を重点的に確認してください。
+    - path: "Cargo.toml"
+      instructions: |
+        既存の依存関係にはそれぞれ追加理由を説明するコメントが付与されています。
+        新規依存の追加時は同様の理由コメントがあるか、ライセンス・保守状況・
+        supply chainリスクの観点で妥当かを確認してください。
+    - path: ".github/workflows/*.yml"
+      instructions: |
+        CIワークフロー。シークレットの取り扱い、権限(permissions)の最小化、
+        ジョブ間の依存関係やゲーティングロジックの正しさを確認してください。
+        YAMLのインデントや命名などの軽微なスタイル指摘は不要です。
