@@ -57,6 +57,7 @@
       "duplicate_passage",
       "budget_exceeded",
       "contradiction_group_exceeds_budget"
-    ]
+    ],
+    "response.result.omitted[].kind": ["association", "passage", "community"]
   }
 }

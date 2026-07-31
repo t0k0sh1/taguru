@@ -57,13 +57,34 @@ def collect_by_path(value: object, segments: list[str]) -> list[object]:
     head, *rest = segments
     is_array = head.endswith("[]")
     key = head[:-2] if is_array else head
-    if not isinstance(value, dict) or key not in value:
+    if not isinstance(value, dict):
         return []
+    if key not in value:
+        # MCP pass-through (ADR 0005 §2.4): a tool result carries the
+        # whole HTTP body a second time as JSON text inside
+        # `content[].text`, so the shape this path expects (e.g.
+        # `result.items[]...`) lives one level deeper than a plain
+        # object walk reaches. Retry the SAME unconsumed segments
+        # (`key` included) against each parsed `content[].text` — it
+        # takes the place of `value` at this level, not `value[key]`.
+        content = value.get("content")
+        if not isinstance(content, list):
+            return []
+        collected: list[object] = []
+        for item in content:
+            if not (isinstance(item, dict) and isinstance(item.get("text"), str)):
+                continue
+            try:
+                parsed = json.loads(item["text"])
+            except ValueError:
+                continue
+            collected += collect_by_path(parsed, segments)
+        return collected
     nxt = value[key]
     if is_array:
         if not isinstance(nxt, list):
             return []
-        collected: list[object] = []
+        collected = []
         for item in nxt:
             collected += collect_by_path(item, rest)
         return collected
@@ -241,8 +262,12 @@ def classify_request(
     upgraded = []
     for severity, finding_path, detail in findings:
         if severity == "compatible" and detail == "field added":
-            field = finding_path.rsplit(".", 1)[-1]
-            if field in required:
+            # Match the exact top-level path, not just the last
+            # segment — a NESTED field sharing a name with a
+            # top-level required one (`request.filter.query` vs. a
+            # required top-level `query`) is not the same field.
+            prefix, _, field = finding_path.rpartition(".")
+            if prefix == path and field in required:
                 severity = "BREAKING"
                 detail = "field added AND required — old clients never send it"
         upgraded.append((severity, finding_path, detail))

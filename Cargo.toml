@@ -2,6 +2,11 @@
 name = "taguru"
 version = "0.5.0"
 edition = "2024"
+# `cargo clippy`'s own `incompatible_msrv` lint is the source of
+# truth here, not a guess: 1.88 (edition 2024's let-chains, already
+# used throughout src/) undershoots it — `File::try_lock`
+# (src/storage.rs) needs 1.89.
+rust-version = "1.89"
 license = "MIT"
 description = "Long-term semantic memory for LLMs: an association-graph server with structural recall, plus an MCP stdio bridge"
 repository = "https://github.com/t0k0sh1/taguru"

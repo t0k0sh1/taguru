@@ -756,16 +756,31 @@ fn mcp_assemble_evidence_missing_origins_is_a_tool_error() {
 /// `path`'s dotted segments, `[]` meaning "every element of the array
 /// at this point" — the one small path language `shapes.json`'s
 /// `enums` keys use, matched against a fixture's own JSON tree.
-fn collect_by_path<'a>(value: &'a Value, path: &[&str]) -> Vec<&'a Value> {
+///
+/// An MCP tool result carries the whole HTTP body a second time as
+/// JSON text inside `content[].text` (ADR 0005 §2.4's pass-through
+/// convention), one level deeper than a plain object walk reaches —
+/// when `key` isn't found directly, each `content[].text` is parsed
+/// and the SAME unconsumed `path` (not `rest`) is retried against it,
+/// since the parsed value takes `value`'s own place at this level.
+fn collect_by_path(value: &Value, path: &[&str]) -> Vec<Value> {
     let Some((head, rest)) = path.split_first() else {
-        return vec![value];
+        return vec![value.clone()];
     };
     let (key, is_array) = match head.strip_suffix("[]") {
         Some(key) => (key, true),
         None => (*head, false),
     };
     let Some(next) = value.get(key) else {
-        return Vec::new();
+        let Some(content) = value.get("content").and_then(Value::as_array) else {
+            return Vec::new();
+        };
+        return content
+            .iter()
+            .filter_map(|item| item.get("text")?.as_str())
+            .filter_map(|text| serde_json::from_str::<Value>(text).ok())
+            .flat_map(|parsed| collect_by_path(&parsed, path))
+            .collect();
     };
     if is_array {
         match next.as_array() {
@@ -786,31 +801,36 @@ fn load_shapes() -> Value {
     serde_json::from_str(&text).expect("shapes.json must be valid JSON")
 }
 
-fn http_fixtures() -> Vec<(PathBuf, Value)> {
-    let dir = wire_dir().join("http");
+/// Every fixture under `tests/fixtures/wire/{http,mcp}/` — both
+/// transports, so the two self-consistency checks below cover the MCP
+/// pass-through shape too, not just the HTTP one it inherits from.
+fn wire_fixtures() -> Vec<(PathBuf, Value)> {
     let mut fixtures = Vec::new();
-    for entry in std::fs::read_dir(&dir).expect("tests/fixtures/wire/http must exist") {
-        let path = entry.expect("readable dir entry").path();
-        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
-            continue;
+    for transport in ["http", "mcp"] {
+        let dir = wire_dir().join(transport);
+        for entry in std::fs::read_dir(&dir).unwrap_or_else(|_| panic!("{dir:?} must exist")) {
+            let path = entry.expect("readable dir entry").path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("fixture must be readable");
+            let value: Value = serde_json::from_str(&text).expect("fixture must be valid JSON");
+            fixtures.push((path, value));
         }
-        let text = std::fs::read_to_string(&path).expect("fixture must be readable");
-        let value: Value = serde_json::from_str(&text).expect("fixture must be valid JSON");
-        fixtures.push((path, value));
     }
     fixtures
 }
 
 /// Every string value a declared `enums` path reaches, across every
-/// `http/*.json` fixture, must be one of the declared values — so
-/// introducing a new `kind`/`lane`/`reason`/`ErrorCode` without adding
-/// it to `shapes.json` fails locally, before `check_contract.py` ever
+/// fixture (HTTP and MCP alike), must be one of the declared values —
+/// so introducing a new `kind`/`lane`/`reason`/`ErrorCode` without
+/// adding it to `shapes.json` fails locally, before `check_contract.py` ever
 /// runs against a base ref.
 #[test]
 fn shapes_enums_cover_every_value_every_fixture_actually_emits() {
     let shapes = load_shapes();
     let enums = shapes["enums"].as_object().expect("enums object");
-    for (path, fixture) in http_fixtures() {
+    for (path, fixture) in wire_fixtures() {
         for (path_expr, allowed) in enums {
             let allowed: Vec<&str> = allowed
                 .as_array()
@@ -842,7 +862,7 @@ fn shapes_required_request_fields_are_present_in_every_matching_fixture() {
         .as_object()
         .expect("required_request_fields object");
     let mut routes_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for (path, fixture) in http_fixtures() {
+    for (path, fixture) in wire_fixtures() {
         let Some(route) = fixture["route"].as_str() else {
             continue;
         };

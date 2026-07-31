@@ -62,13 +62,33 @@ const SHAPES = JSON.parse(readFileSync(join(WIRE_DIR, "shapes.json"), "utf-8")) 
  * in sdk/spec/check_contract.py and tests/http_api/contract.rs: each
  * language keeps its own ~15-line copy rather than a cross-language
  * import.
+ *
+ * An MCP tool result carries the whole HTTP body a second time as
+ * JSON text inside `content[].text` (ADR 0005 §2.4's pass-through
+ * convention), one level deeper than a plain object walk reaches —
+ * when `key` isn't found directly, each `content[].text` is parsed
+ * and the SAME unconsumed `segments` (not `rest`) is retried against
+ * it, since the parsed value takes `value`'s own place at this level.
  */
 function collectByPath(value: unknown, segments: string[]): unknown[] {
   if (segments.length === 0) return [value];
   const [head, ...rest] = segments;
   const isArray = head!.endsWith("[]");
   const key = isArray ? head!.slice(0, -2) : head!;
-  if (typeof value !== "object" || value === null || !(key in value)) return [];
+  if (typeof value !== "object" || value === null) return [];
+  if (!(key in value)) {
+    const content = (value as Record<string, unknown>)["content"];
+    if (!Array.isArray(content)) return [];
+    return content.flatMap((item: unknown) => {
+      const text = (item as Record<string, unknown> | null)?.["text"];
+      if (typeof text !== "string") return [];
+      try {
+        return collectByPath(JSON.parse(text), segments);
+      } catch {
+        return [];
+      }
+    });
+  }
   const next = (value as Record<string, unknown>)[key];
   if (isArray) {
     if (!Array.isArray(next)) return [];

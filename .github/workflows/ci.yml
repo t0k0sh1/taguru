@@ -69,14 +69,18 @@ jobs:
         run: python3 sdk/spec/check_contract.py --check
       - name: Determine base ref
         id: base
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          if [ -n "${{ github.event.pull_request.base.sha }}" ]; then
-            echo "ref=${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT"
+          if [ -n "$PR_BASE_SHA" ]; then
+            echo "ref=$PR_BASE_SHA" >> "$GITHUB_OUTPUT"
           else
             echo "ref=HEAD^" >> "$GITHUB_OUTPUT"
           fi
       - name: Breaking-change guard
-        run: python3 sdk/spec/check_contract.py --base "${{ steps.base.outputs.ref }}"
+        env:
+          BASE_REF: ${{ steps.base.outputs.ref }}
+        run: python3 sdk/spec/check_contract.py --base "$BASE_REF"
 
   # Coverage and per-PR mutation testing used to run here too. Both
   # retired to keep CI at the signals that gate a merge: coverage
