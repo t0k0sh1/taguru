@@ -12,9 +12,13 @@ import { describe, expect, it } from "vitest";
 
 import type {
   AliasEntry,
+  EvidenceItem,
   GroupImportOutcome,
+  LaneRank,
   LexicalExplain,
   NearestResolution,
+  OmittedCandidate,
+  RerankerPlan,
   ResolveExplanation,
   ResolveRanking,
   SearchExplanation,
@@ -35,6 +39,11 @@ describe("open enum-like unions", () => {
     const expectedKind: ResolveExplanation["expected_kind"] = "future_kind";
     const searchVerdict: SearchExplanation["verdict"] = "future_verdict";
     const outcome: GroupImportOutcome["outcome"] = "future_outcome";
+    // #216/#306: assembleEvidence's own open fields (ADR 0006 §10).
+    const evidenceKind: EvidenceItem["kind"] = "future_kind";
+    const lane: LaneRank["lane"] = "future_lane";
+    const omittedReason: OmittedCandidate["reason"] = "future_reason";
+    const rerankerReason: RerankerPlan["reason"] = "future_reason";
 
     for (const value of [
       tier,
@@ -46,6 +55,10 @@ describe("open enum-like unions", () => {
       expectedKind,
       searchVerdict,
       outcome,
+      evidenceKind,
+      lane,
+      omittedReason,
+      rerankerReason,
     ]) {
       // No runtime validation exists anywhere in this SDK (ADR 0005
       // §2.5) — the point of Open<T> is that nothing throws here.

@@ -25,6 +25,7 @@ await ctx.storePassages({ "docs/aomine.md": "青嶺酒造は1907年創業。代�
 
 const result = await ctx.retrieve("青嶺酒造");            // resolve → describe → activate → citations
 const hits = await ctx.searchPassages("1907年に創業した"); // text lane (phrase as an answer)
+const pkg = await ctx.assembleEvidence("青嶺酒造", { budget: { max_items: 10 } }); // server-side budgeted package
 ```
 
 Prefer one `addAssociations` call per document. Above the 10,000-association

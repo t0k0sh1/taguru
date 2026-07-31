@@ -492,6 +492,31 @@ def test_retrieve_end_to_end(client: Taguru, fresh_name: str) -> None:
     client.contexts.delete(fresh_name)
 
 
+def test_assemble_evidence_end_to_end(client: Taguru, fresh_name: str) -> None:
+    seed(client, fresh_name)
+    ctx = client.context(fresh_name)
+
+    package = ctx.assemble_evidence("青嶺酒造", text_fallback_query="杜氏は高瀬である")
+    assert package.items
+    kinds = {item.kind for item in package.items}
+    assert "association" in kinds
+    # Communities were never opted into.
+    assert package.plan.lanes.communities.ran is False
+    assert package.plan.reranker.configured is False
+    assert package.budget.limits.max_items == 40
+    assert package.budget.items_used == len(package.items)
+    # `omitted` is capped; `omitted_total` never is (ADR 0006 §10).
+    assert package.omitted_total >= len(package.omitted)
+
+    # A tiny item budget forces omissions, observably (never an error).
+    tight = ctx.assemble_evidence("青嶺酒造", budget={"max_items": 1})
+    assert len(tight.items) <= 1
+    if tight.omitted_total:
+        assert sum(tight.omitted_by_reason.values()) == tight.omitted_total
+
+    client.contexts.delete(fresh_name)
+
+
 async def test_async_client_full_smoke(server, fresh_name: str) -> None:
     from taguru import AsyncTaguru
 

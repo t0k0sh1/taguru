@@ -490,9 +490,10 @@ the manifests themselves are in [deploy/](deploy/).
 
 Official clients live in [sdk/](sdk/): `taguru` for Python and for
 TypeScript (one identical surface — typed models, retries, pagination,
-batched writes, the `retrieve()` loop), and `langchain-taguru` for
-Python and JS/TS (a retriever that merges both lanes, and an ingester
-that decomposes LangChain Documents into the graph).
+batched writes, the `retrieve()` loop, and the opt-in budgeted
+`assemble_evidence()` package), and `langchain-taguru` for Python and
+JS/TS (a retriever that merges both lanes, and an ingester that
+decomposes LangChain Documents into the graph).
 
 ```sh
 pip install taguru        # or: pip install langchain-taguru

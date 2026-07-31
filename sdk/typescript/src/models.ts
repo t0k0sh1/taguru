@@ -101,6 +101,26 @@ export interface ExploreCursor {
   object: string;
 }
 
+/**
+ * Explicit ceilings for one `assembleEvidence` call. Each field falls back
+ * to the server default (40 items / 65536 bytes / 4000 tokens) when
+ * omitted.
+ */
+export interface BudgetRequest {
+  max_items?: number;
+  max_bytes?: number;
+  max_tokens?: number;
+}
+
+/**
+ * Opt into a configured reranker for one `assembleEvidence` call. Omitting
+ * `rerank` entirely leaves every provider untouched; a failure degrades to
+ * the deterministic order and is reported in `EvidencePlan.reranker.reason`.
+ */
+export interface RerankRequest {
+  model?: string;
+}
+
 /** One name or an OR-set of names, for query() positions. */
 export type OneOrMany = string | string[];
 
@@ -837,4 +857,164 @@ export interface RetrievalResult {
  */
 export function citationKey(source: string, paragraph: number): string {
   return `${source}\u0000${paragraph}`;
+}
+
+// -- assembleEvidence (#216, #305, #306; ADR 0006 §10) -------------------------
+
+/**
+ * One lane's contribution to an `EvidenceItem`'s fused rank. `lane` is open:
+ * `"graph_query"`, `"graph_activate"`, `"passage_bm25"`, `"passage_vector"`,
+ * `"passage_fused"`, or `"community"` today, with more possible later.
+ */
+export interface LaneRank {
+  lane: Open<"graph_query" | "graph_activate" | "passage_bm25" | "passage_vector" | "passage_fused" | "community">;
+  rank: number;
+}
+
+/**
+ * A `(source, paragraph)` locator with no citation text attached — the text
+ * itself lives exactly once, keyed the same way, in the package's top-level
+ * `citations`.
+ */
+export interface CitationRef {
+  source: string;
+  paragraph: number;
+}
+
+/**
+ * Every independent source an admitted association/activation item's
+ * underlying evidence traces back to. Present only for that item kind, and
+ * only when it has at least one citation.
+ */
+export interface Corroboration {
+  sources: string[];
+  attributions: CitationRef[];
+}
+
+/**
+ * One admitted piece of evidence from `assembleEvidence` (ADR 0006 §10).
+ * Exactly one of `association`/`passage`/`community` is set, selected by
+ * `kind` — embedding the *existing* wire type verbatim rather than a
+ * parallel evidence-only type. `bytes`/`estimated_tokens` are this item's own
+ * content-only contribution, excluding those two fields themselves.
+ */
+export interface EvidenceItem {
+  candidate_id: string;
+  kind: Open<"association" | "passage" | "community">;
+  fused_rank: number;
+  lane_ranks: LaneRank[];
+  citation_refs: CitationRef[];
+  corroboration?: Corroboration;
+  /**
+   * The `candidate_id` of every other item in this item's contradiction
+   * group (ADR 0006 §9) — omitted when it contradicts nothing.
+   */
+  contradicts?: string[];
+  bytes: number;
+  estimated_tokens: number;
+  association?: Association;
+  passage?: PassageHit;
+  community?: CommunityHit;
+}
+
+/**
+ * One resolved citation, keyed by `(source, paragraph)`, shared by every
+ * `EvidenceItem` whose `citation_refs` names it.
+ */
+export interface CitationEntry {
+  source: string;
+  paragraph: number;
+  citation: Citation;
+}
+
+/** The three resolved, independent hard ceilings a call ran under. */
+export interface BudgetLimits {
+  max_items: number;
+  max_bytes: number;
+  max_tokens: number;
+}
+
+/** The three-budget account after selection finished. */
+export interface BudgetUsage {
+  items_used: number;
+  bytes_used: number;
+  tokens_used: number;
+  limits: BudgetLimits;
+}
+
+/**
+ * A candidate that did not make it into `items`. `duplicate_of` is present
+ * only for `reason: "duplicate_passage"` and names the *surviving*
+ * `candidate_id`, never a locator.
+ */
+export interface OmittedCandidate {
+  candidate_id: string;
+  kind: Open<"association" | "passage" | "community">;
+  reason: Open<"duplicate_passage" | "budget_exceeded" | "contradiction_group_exceeds_budget">;
+  duplicate_of?: string;
+}
+
+/**
+ * One `LanePlan` per retrieval lane `assembleEvidence` fans out to — the
+ * same shape `searchPassages`'s own `plan.contexts[].lanes` already uses.
+ */
+export interface EvidenceLanesPlan {
+  resolve: LanePlan;
+  query: LanePlan;
+  activate: LanePlan;
+  passages: LanePlan;
+  communities: LanePlan;
+  citations: LanePlan;
+}
+
+/**
+ * The selection pipeline's own account of what it did, beyond the
+ * per-item/per-omission detail.
+ */
+export interface SelectionPlan {
+  dedup_dropped: number;
+  contradiction_groups: number;
+  diversity_tier_width: number;
+}
+
+/**
+ * Whether a reranker is configured, whether it actually ran for this call,
+ * its model identity on success, and a machine-readable `reason` token on
+ * any degrade (never a non-2xx error).
+ */
+export interface RerankerPlan {
+  configured: boolean;
+  ran: boolean;
+  model?: string;
+  reason?: Open<
+    | "not_configured"
+    | "model_mismatch"
+    | "empty_pool"
+    | "invalid_permutation"
+    | "circuit_open"
+    | "timeout"
+    | "provider_error"
+  >;
+}
+
+/** Everything `assembleEvidence`'s response carries beyond the selected items/citations/budget themselves. */
+export interface EvidencePlan {
+  lanes: EvidenceLanesPlan;
+  selection: SelectionPlan;
+  reranker: RerankerPlan;
+}
+
+/**
+ * The full result of one `assembleEvidence` call (ADR 0006 §10). `omitted`
+ * is capped like other issue lists; `omitted_total`/`omitted_by_reason` are
+ * always exact, so truncation of the itemized list is never silent.
+ */
+export interface EvidencePackage {
+  items: EvidenceItem[];
+  citations: CitationEntry[];
+  budget: BudgetUsage;
+  omitted: OmittedCandidate[];
+  omitted_total: number;
+  omitted_by_reason: Record<string, number>;
+  plan: EvidencePlan;
 }

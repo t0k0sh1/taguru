@@ -16,6 +16,8 @@ __all__ = [
     "MatchCursor",
     "CrossMatchCursor",
     "ExploreCursor",
+    "BudgetRequest",
+    "RerankRequest",
 ]
 
 
@@ -84,3 +86,22 @@ class ExploreCursor(TypedDict):
     subject: str
     label: str
     object: str
+
+
+class BudgetRequest(TypedDict, total=False):
+    """Explicit ceilings for one ``assemble_evidence`` call. Each field
+    falls back to the server default (40 items / 65536 bytes / 4000
+    tokens) when omitted."""
+
+    max_items: int
+    max_bytes: int
+    max_tokens: int
+
+
+class RerankRequest(TypedDict, total=False):
+    """Opt into a configured reranker for one ``assemble_evidence`` call.
+    Omitting ``rerank`` entirely leaves every provider untouched; a
+    failure degrades to the deterministic order and is reported in
+    ``EvidencePlan.reranker.reason``."""
+
+    model: str

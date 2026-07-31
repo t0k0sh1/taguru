@@ -24,6 +24,7 @@ ctx.store_passages({"docs/aomine.md": "青嶺酒造は1907年創業。代表銘�
 
 result = ctx.retrieve("青嶺酒造")           # resolve → describe → activate → citations
 hits = ctx.search_passages("1907年に創業した")  # text lane (phrase as an answer)
+package = ctx.assemble_evidence("青嶺酒造", budget={"max_items": 10})  # server-side budgeted package
 ```
 
 Prefer one `add_associations` call per document. Above the 10,000-association

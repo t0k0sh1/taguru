@@ -7,7 +7,7 @@ only by each language's casing convention (`search_passages` ↔
 
 | Package | Registry | Directory | What it is |
 |---|---|---|---|
-| `taguru` | PyPI | [`python/`](python/) | Core client: sync `Taguru` + async `AsyncTaguru`, typed models for every endpoint, idempotency-aware retry, keyset auto-pagination, batched writes, the `retrieve()` loop. Depends on `httpx` only. |
+| `taguru` | PyPI | [`python/`](python/) | Core client: sync `Taguru` + async `AsyncTaguru`, typed models for every endpoint, idempotency-aware retry, keyset auto-pagination, batched writes, the `retrieve()` loop, and the opt-in budgeted `assemble_evidence()` package (#216). Depends on `httpx` only. |
 | `taguru` | npm | [`typescript/`](typescript/) | The same core client, `fetch`-based, zero runtime dependencies, ESM+CJS, Node 20+. |
 | `langchain-taguru` | PyPI | [`python-langchain/`](python-langchain/) | `TaguruRetriever` (graph lane + text lane, RRF-merged) and `TaguruIngester` (the LangChain twin of `taguru extract`: an LLM decomposes Documents into the graph via `POST /import`). |
 | `langchain-taguru` | npm | [`typescript-langchain/`](typescript-langchain/) | The LangChain.js mirror of the above. |
