@@ -195,7 +195,7 @@ mod tests {
             estimated_tokens: 999,
         };
         let (bytes, quarters) = content_metrics(&item, &["bytes", "estimated_tokens"]);
-        // Expected: {"text":"hi"} — 15 bytes, all ASCII => 15 quarters.
+        // Expected: {"text":"hi"} — 13 bytes, all ASCII => 13 quarters.
         let expected = serde_json::json!({"text": "hi"});
         let expected_text = serde_json::to_string(&expected).unwrap();
         assert_eq!(bytes, expected_text.len());

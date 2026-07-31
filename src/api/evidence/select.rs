@@ -68,7 +68,7 @@ pub(crate) struct EvidenceItem {
     pub(crate) citation_refs: Vec<CitationRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) corroboration: Option<Corroboration>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) contradicts: Vec<String>,
     /// This item's own content-only §8 byte contribution — excludes
     /// this field and `estimated_tokens` themselves (ADR 0006 §8, to
@@ -1302,6 +1302,30 @@ mod tests {
         assert_eq!(result.items.len(), 1);
         assert!(result.items[0].citation_refs.is_empty());
         assert!(result.citations.is_empty());
+    }
+
+    // --- Serde round-trip ---
+
+    #[test]
+    fn an_item_with_no_contradictions_round_trips_through_serde() {
+        // `contradicts` is skipped on the wire when empty
+        // (`skip_serializing_if = "Vec::is_empty"`), so the JSON a real
+        // admitted item without a contradiction produces omits the key
+        // entirely — deserializing that JSON back must not fail with a
+        // "missing field" error.
+        let pool = vec![EvidenceCandidate::from_passage(
+            "ctx",
+            passage_hit("s", 0, "no contradictions here"),
+            1,
+        )];
+        let result = select_all(pool, &empty_lookup());
+        let json = serde_json::to_string(&result.items[0]).expect("serialize");
+        assert!(
+            !json.contains("contradicts"),
+            "empty contradicts must be omitted from the wire, not asserting a bug in this test: {json}"
+        );
+        let restored: EvidenceItem = serde_json::from_str(&json).expect("deserialize");
+        assert!(restored.contradicts.is_empty());
     }
 
     mod proptests {
