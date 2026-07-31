@@ -190,8 +190,13 @@ async function main(): Promise<void> {
     printPackage("tight budget (max_items=1)", tight);
 
     // -- handing the generous package to an (fake) answer model --------
+    const evidenceContext = generous.items.map(describeItem).join("\n");
+    const prompt =
+      `Context (assembled by Taguru):\n${evidenceContext}\n\n` +
+      `Question: ${QUERY}\n\nAnswer in Japanese using ONLY the context above, ` +
+      "with bracketed citations.";
     const llm = await makeLlm([FAKE_ANSWER]);
-    const answer = (await llm.invoke(QUERY)).content;
+    const answer = (await llm.invoke(prompt)).content;
     console.log(`\nanswer: ${answer}`);
     console.log(
       "(everything above 'answer:' is evidence Taguru assembled and budgeted; " +

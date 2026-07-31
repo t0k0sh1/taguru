@@ -102,11 +102,16 @@ fn one_budget_flag_is_enough_to_populate_budget() {
 }
 
 #[test]
-fn max_items_zero_is_rejected() {
-    assert_eq!(
-        args(&["--eval", "a.jsonl", "--context", "sake", "--max-items", "0"]).unwrap_err(),
-        2
-    );
+fn zero_or_non_numeric_budget_values_are_rejected_for_every_flag() {
+    for flag in ["--max-items", "--max-bytes", "--max-tokens"] {
+        for value in ["0", "abc"] {
+            assert_eq!(
+                args(&["--eval", "a.jsonl", "--context", "sake", flag, value]).unwrap_err(),
+                2,
+                "{flag} {value}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -119,6 +124,42 @@ fn a_duplicate_assembly_flag_is_refused() {
             "sake",
             "--assembly",
             "--assembly"
+        ])
+        .unwrap_err(),
+        2
+    );
+}
+
+#[test]
+fn a_duplicate_budget_or_rerank_flag_is_refused() {
+    for flag in ["--max-items", "--max-bytes", "--max-tokens"] {
+        assert_eq!(
+            args(&[
+                "--eval",
+                "a.jsonl",
+                "--context",
+                "sake",
+                flag,
+                "5",
+                flag,
+                "5"
+            ])
+            .unwrap_err(),
+            2,
+            "{flag}"
+        );
+    }
+    assert_eq!(
+        args(&[
+            "--eval",
+            "a.jsonl",
+            "--context",
+            "sake",
+            "--assembly",
+            "--rerank",
+            "m",
+            "--rerank",
+            "m"
         ])
         .unwrap_err(),
         2

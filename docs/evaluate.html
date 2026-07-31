@@ -104,8 +104,13 @@
 --max-items N
 --max-bytes N        equal-budget ceilings applied to BOTH modes — see
 --max-tokens N        <a href="evidence.html#equal-budget">proving assembly
-                    helps at equal budget</a>. None given leaves both modes
-                    untruncated, matching every run before this flag existed.
+                    helps at equal budget</a>. None given leaves baseline
+                    untruncated, matching every run before this flag
+                    existed — but --assembly always sends a budget to
+                    POST /contexts/{name}/evidence (that endpoint has no
+                    unbudgeted mode), so an --assembly run with no flag
+                    still runs under the server's own defaults
+                    (max_items 40, max_bytes 65536, max_tokens 4000).
 --rerank MODEL        opts an --assembly run into a configured reranker;
                     usage error without --assembly.</code></pre>
     <p>
@@ -447,7 +452,7 @@
           <tr><td><code>latency.passage_ms</code>, <code>.resolve_ms</code>, <code>.query_ms</code>, <code>.citation_ms</code>, <code>.evidence_ms</code></td><td>distribution</td><td>Wall time per call, by lane — <code>.evidence_ms</code> only in <code>--assembly</code> mode.</td></tr>
           <tr><td><code>passage.failure_rate</code>, <code>structural.case_rate</code></td><td>ratio (run)</td><td>Share of passage-lane calls that failed; share of cases that ran the structural lane at all.</td></tr>
           <tr><td><code>diversity.sources</code></td><td>distribution (per case)</td><td>Distinct source locators among a case's admitted evidence — see <a href="evidence.html#equal-budget">evidence assembly</a>.</td></tr>
-          <tr><td><code>budget.items_used</code>, <code>.bytes_used</code>, <code>.tokens_used</code>, <code>.omitted_rate</code></td><td>distribution / ratio (run)</td><td>What a case's own <code>--max-items</code>/<code>--max-bytes</code>/<code>--max-tokens</code> budget spent and dropped, in either mode — empty unless a budget flag was given.</td></tr>
+          <tr><td><code>budget.items_used</code>, <code>.bytes_used</code>, <code>.tokens_used</code>, <code>.omitted_rate</code></td><td>distribution / ratio (run)</td><td>What a case's own budget spent and dropped. In <code>baseline</code> mode, empty unless <code>--max-items</code>/<code>--max-bytes</code>/<code>--max-tokens</code> was given. In <code>--assembly</code> mode, always populated — the endpoint has no unbudgeted mode, so an unflagged run is measured against the server's own defaults.</td></tr>
           <tr><td><code>rerank.ran</code></td><td>ratio (run)</td><td>Share of <code>--rerank</code> cases whose configured reranker actually reordered the pool; the complement is the degrade rate — empty unless <code>--rerank</code> was given.</td></tr>
         </tbody>
       </table>

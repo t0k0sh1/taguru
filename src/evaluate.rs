@@ -484,10 +484,15 @@ struct EvaluateArgs {
     /// both modes are truncated to the identical ceiling — `assembly`
     /// via the request's own `budget` object, `baseline` by reusing
     /// the server's own accounting (`crate::api::evidence::budget`)
-    /// client-side. Absent entirely, a run behaves exactly as it did
-    /// before this flag existed (no truncation, no budget block in the
-    /// artifact) — this default is what keeps every archived
+    /// client-side. Absent entirely, `baseline` behaves exactly as it
+    /// did before this flag existed (no truncation, no `budget` block
+    /// in the artifact) — this default is what keeps every archived
     /// `evaluation.json` and every existing caller unaffected.
+    /// `assembly` has no such unbudgeted mode: `POST
+    /// /contexts/{name}/evidence` always enforces *some* budget, so an
+    /// `--assembly` run with none of these flags still runs — and
+    /// still carries a `budget` block — under the server's own
+    /// defaults (`max_items: 40, max_bytes: 65536, max_tokens: 4000`).
     budget: Option<evidence::EvidenceBudgetArgs>,
     /// `--rerank MODEL`: usage error (exit 2) without `--assembly`.
     rerank: Option<String>,
@@ -2781,10 +2786,14 @@ struct InputsBlock {
     /// passage lane) — an open string, not a closed Rust enum, per
     /// this codebase's convention for wire-visible mode tags.
     mode: String,
-    /// The equal-budget ceilings this run enforced in both modes —
-    /// `None` when no `--max-items`/`--max-bytes`/`--max-tokens` flag
-    /// was given, in which case neither mode truncates (unchanged from
-    /// before this flag existed).
+    /// The equal-budget ceilings this run enforced. Always present in
+    /// `assembly` mode — `POST /contexts/{name}/evidence` has no
+    /// unbudgeted mode, so this records the server's own defaults
+    /// (`max_items: 40, max_bytes: 65536, max_tokens: 4000`) even when
+    /// no `--max-*` flag was given. `None` only in `baseline` mode,
+    /// when no `--max-items`/`--max-bytes`/`--max-tokens` flag was
+    /// given — that mode alone has a genuinely unbudgeted state
+    /// (unchanged from before this flag existed).
     #[serde(skip_serializing_if = "Option::is_none")]
     budget: Option<BudgetLimits>,
     /// The `--rerank MODEL` value, when given — `None` in `baseline`

@@ -200,8 +200,14 @@ def main() -> int:
         print_package("tight budget (max_items=1)", tight)
 
         # -- handing the generous package to an (fake) answer model --------
+        evidence_context = "\n".join(describe_item(item) for item in generous.items)
+        prompt = (
+            f"Context (assembled by Taguru):\n{evidence_context}\n\n"
+            f"Question: {QUERY}\n\nAnswer in Japanese using ONLY the context above, "
+            "with bracketed citations."
+        )
         llm = make_llm([FAKE_ANSWER])
-        answer = llm.invoke(QUERY).content
+        answer = llm.invoke(prompt).content
         print(f"\nanswer: {answer}")
         print(
             "(everything above 'answer:' is evidence Taguru assembled and budgeted; "

@@ -698,7 +698,11 @@ fn describe_budget(limits: Option<BudgetLimits>) -> String {
             "max_items={} max_bytes={} max_tokens={}",
             limits.max_items, limits.max_bytes, limits.max_tokens
         ),
-        None => "none".to_string(),
+        // Only reachable for a `baseline` run with no --max-* flag —
+        // `assembly` always carries Some(limits), even the server's
+        // own defaults, since POST /contexts/{name}/evidence has no
+        // unbudgeted mode (InputsBlock.budget's own doc comment).
+        None => "none (untruncated baseline)".to_string(),
     }
 }
 
