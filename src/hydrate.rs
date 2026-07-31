@@ -1090,10 +1090,26 @@ impl Hydrator {
                 }
                 return Ok(false);
             }
+            // Fetch + verify as one attempt, exactly like
+            // fetch_lane_if_stale's: a live lineage can move the object
+            // out from under this download (the writer replaces it,
+            // ships a new manifest) between the pre-read check above and
+            // the download landing, and `ship::fetch` deliberately keeps
+            // that as `NotFound` (see its own doc) so the SAME arbiter
+            // that already handles a bytes/manifest mismatch also
+            // catches "the object moved" — a `?` straight out of this
+            // loop (as this used to do) skipped `refreshed_extent`
+            // entirely and turned a normal mid-cycle move into a boot
+            // refusal.
             let key = root.clone().join("files").join(name);
-            let bytes = ship::fetch(self.store.as_ref(), &key).await?;
-            match ship::verify_file_bytes(name, &bytes, expect) {
-                Ok(()) => {
+            let attempt = async {
+                let bytes = ship::fetch(self.store.as_ref(), &key).await?;
+                ship::verify_file_bytes(name, &bytes, expect)?;
+                Ok::<Vec<u8>, io::Error>(bytes)
+            }
+            .await;
+            match attempt {
+                Ok(bytes) => {
                     ship::write_restored_file(&self.data_dir, name, &bytes)?;
                     // Post-write stat, not the pre-fetch one above: the
                     // atomic rename just gave this file a new mtime/ino.
@@ -1493,6 +1509,75 @@ mod tests {
             String::from_utf8_lossy(&lane).contains("\"b\""),
             "the healed lane carries cycle 2's records"
         );
+        let _ = std::fs::remove_dir_all(&bucket);
+        let _ = std::fs::remove_dir_all(&writer);
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    /// The `ship::fetch` failure itself — not just a bytes/manifest
+    /// mismatch after a successful download — must reach
+    /// [`Hydrator::refreshed_extent`]'s arbiter for a PUBLISHED file,
+    /// exactly like it already does for a log lane
+    /// (`fetch_lane_if_stale`). Simulates the transient-NotFound window
+    /// `ship::fetch`'s own doc names ("the lineage moved and took this
+    /// object with it"): the published object is missing when the
+    /// first fetch attempt runs, then reappears — under the SAME
+    /// generation, SAME manifest entry — well inside the arbiter's
+    /// retry window. Before the fix this `?`-ed straight out of
+    /// `fetch_published_if_stale` as a hard `NotFound` error, refusing
+    /// `hydrate_shared` (and so a replica's boot) outright instead of
+    /// retrying.
+    #[tokio::test]
+    async fn a_published_files_transient_not_found_heals_through_the_same_arbiter_as_a_lane() {
+        let (bucket, writer) = shipped_bucket("published-notfound", false).await;
+        let store = local_store(&bucket);
+        let root = ship::gen_root(&StorePath::default(), 1);
+        let manifest = ship::read_manifest(store.as_ref(), &root)
+            .await
+            .unwrap()
+            .expect("generation 1 shipped a manifest");
+
+        // The published object vanishes out from under the reader —
+        // indistinguishable, from here, from a lineage move that
+        // dropped it (see `ship::fetch`'s own doc on why it keeps
+        // `NotFound` as its own `io::ErrorKind`).
+        let object_path = bucket
+            .join(format!("gen-{:020}", 1))
+            .join("files")
+            .join("ctx_a.meta.json");
+        assert!(object_path.is_file(), "the shipper published this object");
+        let original = std::fs::read(&object_path).unwrap();
+        std::fs::remove_file(&object_path).unwrap();
+
+        // Reappears well inside `FETCH_REFRESH_ROUNDS` *
+        // `FETCH_REFRESH_PAUSE`'s retry window — the manifest entry
+        // itself never changes, matching a lineage move that simply
+        // hadn't finished landing yet.
+        let restore_path = object_path.clone();
+        let restore_bytes = original.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            std::fs::write(&restore_path, &restore_bytes).unwrap();
+        });
+
+        let target = scratch("published-notfound-target");
+        let hydrator = Hydrator::new(
+            Arc::clone(&store),
+            1,
+            root,
+            target.clone(),
+            manifest,
+            LanePolicy::ShippedExact,
+        );
+        hydrator
+            .hydrate_shared()
+            .await
+            .expect("a transiently-missing published object heals through the arbiter");
+        assert_eq!(
+            std::fs::read(target.join("ctx_a.meta.json")).unwrap(),
+            original
+        );
+
         let _ = std::fs::remove_dir_all(&bucket);
         let _ = std::fs::remove_dir_all(&writer);
         let _ = std::fs::remove_dir_all(&target);

@@ -2234,6 +2234,51 @@ fn compact_and_extract_flags_given_twice_are_usage_errors() {
     }
 }
 
+/// `export --out`/`--config`/`--url` reject a second occurrence, same
+/// convention as `compact`/`extract` above — and a value that itself
+/// looks like a flag (`--out --out DIR`, the first `--out` swallowing
+/// the second AS ITS PATH) does not silently slip past that guard by
+/// masquerading as a legitimate first value.
+#[test]
+fn export_flags_given_twice_are_usage_errors() {
+    for (args, flag) in [
+        (vec!["export", "--out", "dir1", "--out", "dir2"], "--out"),
+        (
+            vec!["export", "--config", "a.env", "--config", "b.env"],
+            "--config",
+        ),
+        (
+            vec!["export", "--url", "http://a", "--url", "http://b"],
+            "--url",
+        ),
+    ] {
+        let output = run(&args);
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(&format!("{flag} given twice")),
+            "{args:?}: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn export_flag_values_that_look_like_flags_are_rejected_not_swallowed() {
+    for (args, needs) in [
+        (vec!["export", "--out", "--out", "dir"], "--out needs"),
+        (
+            vec!["export", "--config", "--config", "a.env"],
+            "--config needs",
+        ),
+        (vec!["export", "--url", "--url", "http://a"], "--url needs"),
+    ] {
+        let output = run(&args);
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(needs), "{args:?}: {stderr}");
+    }
+}
+
 #[test]
 fn evaluate_thresholds_file_that_cannot_be_read_is_a_usage_error() {
     let dir = eval_scratch_dir("missing-thresholds-file");

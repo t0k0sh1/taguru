@@ -582,6 +582,25 @@ fn oversized_unit_error(label: &str, size: usize, budget: usize) -> i32 {
     1
 }
 
+/// The hard failure for a single batch (or group record) that already
+/// fit under this client's own packing budget — it passed the pre-send
+/// check [`oversized_unit_error`] guards — but the SERVER still
+/// answered 413 for it. Unlike that client-side refusal, this one IS
+/// the server's own body-size cap, so raising `TAGURU_MAX_BODY_BYTES`
+/// server-side is a real fix here, not the dead end
+/// [`oversized_unit_error`]'s wording correctly rules out for its own
+/// (client-fixed-budget) case.
+fn server_refused_single_unit_error(label: &str, size: usize) -> i32 {
+    eprintln!(
+        "taguru: import: {label} ({size} byte(s)) was refused by the server as too \
+         large, and cannot be split further — splitting a batch's own record set \
+         client-side would break the retract-then-apply contract's atomicity \
+         boundary. Raise the server's TAGURU_MAX_BODY_BYTES, or reduce what this \
+         source's batch carries (split the source upstream of import)."
+    );
+    1
+}
+
 /// One chunk's landed `ImportOutcome` array (`POST /import`'s response
 /// shape, src/api/import.rs), summarized into the same vocabulary
 /// [`report`] uses for the local path's per-batch line — one line per
@@ -631,6 +650,42 @@ fn run_remote(base: &str, files: &[PathBuf], dry_run: bool) -> i32 {
     if let Err(message) = crate::remote::reject_userinfo(base) {
         return crate::config::subcommand_usage_error("import", &message);
     }
+    // A malformed `--url` is a usage problem, not a partial apply — it
+    // must exit 2 (`cli.rs`'s own documented usage-error code, and
+    // `evaluate --url`'s precedent) rather than fall through to
+    // `Api::url`'s per-request `InvalidUrl` failure, which used to
+    // surface later as an exit-1 "nothing landed" message that reads
+    // like a network problem. Checked up front rather than relying on
+    // the chunk loop to hit it: an input with zero batches and zero
+    // groups (every batch failed the earlier owner-uniqueness check,
+    // say) never enters that loop at all, so a bad URL would otherwise
+    // go entirely undetected and exit 0.
+    // `http`/`https` only: `url::Url::parse` alone happily accepts
+    // `file://`/`ftp://` and anything else with a well-formed
+    // authority, but `ureq` (the transport underneath `Api`) speaks
+    // only HTTP — a non-http(s) scheme would otherwise sail through
+    // this check and only fail once the request reaches `ureq`, as
+    // `ImportFailure::Transport` (exit 1, "connection lost"), exactly
+    // the network-problem-shaped message this upfront check exists to
+    // avoid for a usage mistake.
+    match url::Url::parse(base) {
+        Ok(parsed) if matches!(parsed.scheme(), "http" | "https") => {}
+        Ok(parsed) => {
+            return crate::config::subcommand_usage_error(
+                "import",
+                &format!(
+                    "'{base}' uses '{}', but --url only supports http/https",
+                    parsed.scheme()
+                ),
+            );
+        }
+        Err(_) => {
+            return crate::config::subcommand_usage_error(
+                "import",
+                &format!("'{base}' is not a usable base URL"),
+            );
+        }
+    }
 
     // Pass 1 — every file parses, or nothing applies (same contract as
     // run_local's own Pass 1). File bytes are held past this point
@@ -664,11 +719,31 @@ fn run_remote(base: &str, files: &[PathBuf], dry_run: bool) -> i32 {
         match parse_stream(&bytes[..]) {
             Ok(stream) => {
                 let ranges = split_batches(&bytes);
-                debug_assert_eq!(
-                    ranges.len(),
-                    stream.batches.len(),
-                    "split_batches must slice exactly one range per parsed batch"
-                );
+                // `split_batches` and `parse_stream` are two
+                // independent scanners over the same bytes; they agree
+                // today, but a `zip` below silently truncates to the
+                // shorter side if they ever diverge — dropping trailing
+                // batches from this remote import with no error and no
+                // non-zero exit (the `--dry-run` summary's batch count
+                // is computed inside this same truncated loop, so it
+                // would agree with the loss and hide it completely).
+                // Checked here, always — not `debug_assert_eq!`, which
+                // release builds (what an operator actually runs)
+                // compile out — so a divergence refuses this file
+                // loudly instead of restoring a silently incomplete
+                // backup.
+                if ranges.len() != stream.batches.len() {
+                    eprintln!(
+                        "taguru: import: {}: internal error: split_batches sliced {} \
+                         range(s) for {} parsed batch(es) — refusing rather than risk \
+                         silently dropping batches",
+                        path.display(),
+                        ranges.len(),
+                        stream.batches.len()
+                    );
+                    broken += 1;
+                    continue;
+                }
                 for (batch, range) in stream.batches.iter().zip(ranges) {
                     if !owners.insert((batch.context.clone(), batch.source.clone())) {
                         eprintln!(
@@ -756,6 +831,13 @@ fn run_remote(base: &str, files: &[PathBuf], dry_run: bool) -> i32 {
 
     let mut queue = pack_chunks(units, REMOTE_IMPORT_BUDGET_BYTES);
 
+    // A LIVE estimate, not a fixed denominator: every 413-adaptive
+    // halve (below, and at the loop's own proactive check) replaces
+    // one queued chunk with two, growing this by one. A chunk printed
+    // "N/M" before a later halving can end up describing a since-grown
+    // M — the display always reflects "M chunks planned as of THIS
+    // line," matching every other adaptive-retry progress display's
+    // convention, not a promise that stays fixed for the whole run.
     let mut total = queue.len();
     let mut landed_chunks = 0usize;
     let mut budget = REMOTE_IMPORT_BUDGET_BYTES;
@@ -785,12 +867,22 @@ fn run_remote(base: &str, files: &[PathBuf], dry_run: bool) -> i32 {
                     }
                 }
                 batches_landed += outcomes.len();
-                if !outcomes.is_empty() {
-                    println!(
-                        "chunk {landed_chunks}/{total}: {}",
+                // One line per LANDED chunk, always — every group unit
+                // rides after every batch unit (the append above), so
+                // the tail chunk(s) of a run can carry only group
+                // records and `outcomes` is empty for those. Skipping
+                // the line there (as this used to do) made `chunk N/M`
+                // visibly jump a number, and an operator watching the
+                // log cannot tell that apart from a crash between
+                // prints.
+                println!(
+                    "chunk {landed_chunks}/{total}: {}",
+                    if outcomes.is_empty() {
+                        "group record(s) only".to_string()
+                    } else {
                         summarize_chunk_outcomes(&outcomes)
-                    );
-                }
+                    }
+                );
                 if let Some(groups) = result.get("groups").and_then(Value::as_array) {
                     for group in groups {
                         let name = group.get("name").and_then(Value::as_str).unwrap_or("?");
@@ -809,16 +901,16 @@ fn run_remote(base: &str, files: &[PathBuf], dry_run: bool) -> i32 {
             Err(ImportFailure::TooLarge(message)) => {
                 if chunk.units.len() == 1 {
                     eprintln!("taguru: import: {message}");
-                    return oversized_unit_error(
+                    return server_refused_single_unit_error(
                         &chunk.units[0].label,
                         chunk.units[0].len(),
-                        budget,
                     );
                 }
                 // Pre-application rejection (ADR 0002 §8): safe to
                 // adapt to and resend automatically — repeatedly, if
                 // a further 413 keeps arriving, until this chunk is
-                // a single batch (oversized_unit_error) or lands.
+                // a single batch (server_refused_single_unit_error) or
+                // lands.
                 budget = (chunk.size() / 2).max(1);
                 let (first, second) = chunk.halve();
                 queue.push_front(second);
@@ -828,9 +920,12 @@ fn run_remote(base: &str, files: &[PathBuf], dry_run: bool) -> i32 {
             Err(ImportFailure::InvalidUrl(message)) => {
                 // No request was ever sent — nothing landed, nothing
                 // to resume; this is a usage problem, not a partial
-                // apply.
-                eprintln!("taguru: import: {message}");
-                return 1;
+                // apply, so it exits like one (2, not 1) — the same
+                // fix as the upfront `--url` check above, for the
+                // narrower "parses but cannot carry a path" shape that
+                // check does not itself catch (e.g. a `data:`/`mailto:`
+                // URL).
+                return crate::config::subcommand_usage_error("import", &message);
             }
             Err(ImportFailure::Transport(message)) => {
                 eprintln!("taguru: import: {message}");

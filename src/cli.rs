@@ -505,7 +505,13 @@ fn health(args: &[String]) -> i32 {
         .build()
         .into();
     match agent.get(&url).call() {
-        Ok(mut response) if response.status().as_u16() < 400 => {
+        // Exactly 200, matching this fn's own doc ("exit 0 iff a
+        // running server's /health answers 200") — a 2xx/3xx that
+        // isn't literally 200 (a 204/202 from a load balancer or
+        // service-mesh sidecar sitting in front of the port, say) is
+        // not this server itself answering healthy, and must not read
+        // as one to a HEALTHCHECK.
+        Ok(mut response) if response.status().as_u16() == 200 => {
             let body = response.body_mut().read_to_string().unwrap_or_default();
             println!("{}", body.trim());
             0

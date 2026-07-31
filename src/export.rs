@@ -527,8 +527,31 @@ pub(crate) fn run(args: &[String]) -> i32 {
                 print!("{USAGE}");
                 return 0;
             }
+            // A flag given twice is a usage error, never a silent
+            // last-wins — matching `serve`/`route`'s own `--config`
+            // guard and `benchmark`'s convention throughout: a
+            // scripted invocation that accidentally concatenates two
+            // flag sets (e.g. two `--out`s) must not silently export
+            // to whichever one happened to land last. A value that
+            // itself looks like a flag (`--out --out DIR`, the first
+            // `--out` swallowing the second AS ITS PATH) is rejected
+            // the same way a missing value is, rather than accepted
+            // literally — otherwise the duplicate-flag guard above is
+            // trivial to route around, and `DIR` silently becomes a
+            // context name instead of the export directory.
             "--out" => match rest.next() {
-                Some(path) => out = Some(PathBuf::from(path)),
+                Some(path) if out.is_none() && !path.starts_with('-') => {
+                    out = Some(PathBuf::from(path));
+                }
+                Some(_) if out.is_none() => {
+                    return crate::config::subcommand_usage_error(
+                        "export",
+                        "--out needs a directory path",
+                    );
+                }
+                Some(_) => {
+                    return crate::config::subcommand_usage_error("export", "--out given twice");
+                }
                 None => {
                     return crate::config::subcommand_usage_error(
                         "export",
@@ -537,7 +560,18 @@ pub(crate) fn run(args: &[String]) -> i32 {
                 }
             },
             "--config" => match rest.next() {
-                Some(path) => config = Some(PathBuf::from(path)),
+                Some(path) if config.is_none() && !path.starts_with('-') => {
+                    config = Some(PathBuf::from(path));
+                }
+                Some(_) if config.is_none() => {
+                    return crate::config::subcommand_usage_error(
+                        "export",
+                        "--config needs a file path",
+                    );
+                }
+                Some(_) => {
+                    return crate::config::subcommand_usage_error("export", "--config given twice");
+                }
                 None => {
                     return crate::config::subcommand_usage_error(
                         "export",
@@ -548,7 +582,18 @@ pub(crate) fn run(args: &[String]) -> i32 {
             // Trailing '/' trimmed the same way calibrate/communities
             // already do — a joined path segment must not double up.
             "--url" => match rest.next() {
-                Some(value) => url = Some(value.trim_end_matches('/').to_string()),
+                Some(value) if url.is_none() && !value.starts_with('-') => {
+                    url = Some(value.trim_end_matches('/').to_string());
+                }
+                Some(_) if url.is_none() => {
+                    return crate::config::subcommand_usage_error(
+                        "export",
+                        "--url needs a server URL",
+                    );
+                }
+                Some(_) => {
+                    return crate::config::subcommand_usage_error("export", "--url given twice");
+                }
                 None => {
                     return crate::config::subcommand_usage_error(
                         "export",

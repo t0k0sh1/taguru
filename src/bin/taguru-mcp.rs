@@ -35,6 +35,16 @@ use serde_json::Value;
 
 const FALLBACK_INSTRUCTIONS: &str = include_str!("../llm-protocol.md");
 
+/// [`Bridge::call`]'s response cap. `dispatch_tool`'s doc calls this
+/// composition "left uncapped on purpose" (nothing server-side bounds
+/// it but the operator's own handler) — but `ureq::Body::read_to_string()`
+/// silently applies its OWN 10 MiB default the moment no explicit
+/// `limit()` is set, which is not "uncapped," just an unadvertised one.
+/// This is sized as a generous sanity backstop against a runaway or
+/// buggy response, not a real business limit — large enough that no
+/// realistic `recall`/`retrieve`/`export` result should ever reach it.
+const BRIDGE_RESPONSE_CAP_BYTES: u64 = 1024 * 1024 * 1024;
+
 fn main() {
     let base = std::env::var("TAGURU_URL").unwrap_or_else(|_| "http://127.0.0.1:8248".to_string());
     let token = std::env::var("TAGURU_API_TOKEN").ok();
@@ -655,10 +665,23 @@ impl Bridge {
         if code < 400 {
             response
                 .body_mut()
+                .with_config()
+                .limit(BRIDGE_RESPONSE_CAP_BYTES)
                 .read_to_string()
                 .map_err(|error| mcp::ToolError::from(format!("response unreadable: {error}")))
         } else {
-            let detail = response.body_mut().read_to_string().unwrap_or_default();
+            // A read failure here (oversized past the cap above, or a
+            // stream that broke mid-read) must not collapse to an empty
+            // string: this fn's own doc says the server's error body
+            // becomes the Err text, and `unwrap_or_default()` used to
+            // erase exactly that detail, leaving the agent with a bare
+            // "HTTP 500: " and no explanation at all.
+            let detail = response
+                .body_mut()
+                .with_config()
+                .limit(BRIDGE_RESPONSE_CAP_BYTES)
+                .read_to_string()
+                .unwrap_or_else(|error| format!("(error body unreadable: {error})"));
             let structured = serde_json::from_str::<Value>(&detail)
                 .ok()
                 .filter(Value::is_object);
