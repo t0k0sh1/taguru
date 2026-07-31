@@ -86,7 +86,7 @@
               "type": "integer"
             },
             "search_limit": {
-              "description": "the passage/community search calls' limit (default 5)",
+              "description": "the passage/community search calls' limit (default 5, ceiling 200)",
               "minimum": 0,
               "type": "integer"
             },

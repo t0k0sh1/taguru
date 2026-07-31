@@ -104,7 +104,8 @@ USAGE:
                                         runs/*.jsonl (ADR 0003; see: taguru
                                         benchmark extract --help)
   taguru evaluate --eval FILE --context NAME [--url URL] [--config FILE]
-                  [--thresholds FILE]
+                  [--thresholds FILE] [--assembly] [--max-items N]
+                  [--max-bytes N] [--max-tokens N] [--rerank MODEL]
                                         run eval.jsonl's cases against one
                                         context's live retrieval endpoints
                                         (passage search, then resolve/query)
@@ -112,8 +113,12 @@ USAGE:
                                         gate that calls no answer-generation
                                         LLM (ADR 0004). Report-only (exit 0)
                                         without --thresholds; with it, exits
-                                        3 on a violated bound (see: taguru
-                                        evaluate --help)
+                                        3 on a violated bound. --assembly
+                                        swaps the passage lane for budgeted
+                                        evidence assembly (ADR 0006 §14) at
+                                        equal --max-items/--max-bytes/
+                                        --max-tokens against a baseline run
+                                        (see: taguru evaluate --help)
   taguru evaluate compare BASE.json HEAD.json [--out FILE]
                                         compare two evaluation.json runs and
                                         write changes.jsonl: improved/

@@ -3,7 +3,14 @@
 //! machinery it shares with the unmodified `baseline` mode. Nothing
 //! here touches the structural lane (`resolve` → `query`) — that runs
 //! identically in both modes, so a `baseline`/`assembly` pair of runs
-//! stays comparable on coverage and lane cross-tab.
+//! stays comparable on coverage and on `lanes.structural_hit`
+//! specifically. `lanes.passage_hit` is **not** identical across
+//! modes: `hits_from_evidence_items` (`src/evaluate.rs`) unions each
+//! admitted item's own locator with its `citation_refs` — a graph
+//! association's corroborating attributions — into the same `hits`
+//! recall/lane-cross scoring reads, so a case whose evidence is
+//! entirely structural can read `passage_hit: true` under `--assembly`
+//! where `baseline` (a pure passage-lane call) would read it `false`.
 //!
 //! **Assembly mode** replaces `POST /contexts/{name}/sources/search`
 //! with `POST /contexts/{name}/evidence` ([`run_evidence_lane`]),
@@ -14,17 +21,30 @@
 //! **Baseline mode**, when a budget flag is given, truncates the
 //! already-fetched `sources/search` hits to the identical three
 //! ceilings ([`truncate_to_budget`]) using the *exact* accounting
-//! `crate::api::evidence::budget` computes server-side — never a
-//! reimplemented approximation of it, since ADR 0006 §8 fixes the
-//! token estimator itself as part of the wire contract this equal-
-//! budget comparison depends on agreeing with. A baseline hit array
-//! carries no `citations` array of its own (unlike an assembled
-//! package's `items` + `citations` pair), so truncation accounts for
-//! one array (`hits`) plus a permanently-empty `citations` array's
-//! `array_overhead(0)` floor — the same floor an assembled package
-//! pays even when it selects zero citations, which is what makes the
-//! two modes' ceilings comparable at all despite their different
-//! response shapes.
+//! `crate::api::evidence::budget`/`select` computes server-side —
+//! never a reimplemented approximation of it, since ADR 0006 §8 fixes
+//! the token estimator itself as part of the wire contract this
+//! equal-budget comparison depends on agreeing with. Concretely, each
+//! baseline `PassageHit` is wrapped in the same `EvidenceItem` envelope
+//! ([`envelope_for`]) a real assembled package would produce for it —
+//! `candidate_id`, `kind`, `fused_rank`, `lane_ranks`, empty
+//! `citation_refs` (a passage item always self-cites, ADR 0006 §6) —
+//! and measured with the real, server-side `content_metrics` function,
+//! not the bare `PassageHit` alone. A bare-`PassageHit` measurement
+//! undercounts every hit by the envelope's own overhead (the
+//! `candidate_id` string alone routinely runs over a hundred bytes),
+//! which would let baseline admit roughly twice as many hits as
+//! assembly under the identical nominal `--max-bytes` — the opposite
+//! of "equal budget". A baseline hit array never carries a `citations`
+//! array of its own (unlike an assembled package's `items` +
+//! `citations` pair — a passage item's `citation_refs` is always
+//! empty, so a real assembled package built from passage-only
+//! candidates would carry an empty `citations` array too), so
+//! truncation accounts for one array (`hits`) plus a
+//! permanently-empty `citations` array's `array_overhead(0)` floor —
+//! the same floor an assembled package pays even when it selects zero
+//! citations, which is what makes the two modes' ceilings comparable
+//! at all despite their different response shapes.
 
 use std::time::Instant;
 
@@ -34,6 +54,8 @@ use crate::api::evidence::assemble::EvidencePackage;
 use crate::api::evidence::budget::{
     BudgetLimits, BudgetRequest, BudgetUsage, array_overhead, content_metrics, tokens_from_quarters,
 };
+use crate::api::evidence::select::EvidenceItem;
+use crate::api::evidence::{CandidatePayload, EvidenceCandidate, LaneRank};
 use crate::api::sources::PassageHit;
 use crate::evalset::EvalCase;
 use crate::remote::Api;
@@ -145,14 +167,65 @@ pub(super) struct TruncatedHits {
     pub(super) omitted_total: usize,
 }
 
+/// Wraps a baseline `PassageHit` in the same `EvidenceItem` envelope a
+/// real assembled package would produce for it — built by calling
+/// [`EvidenceCandidate::from_passage`] itself (the same constructor
+/// `src/api/evidence/assemble.rs`'s live pipeline calls) for
+/// `candidate_id`/`kind`/`lane` rather than re-deriving that NUL-joined
+/// format and lane-selection rule a second time: one definition, two
+/// consumers, the same discipline ADR 0006 §7 already applies to
+/// `canonical_key`. `citation_refs` is always empty — a passage item
+/// always self-cites (ADR 0006 §6), so it never contributes a
+/// `citations` array entry, matching `truncate_to_budget`'s own
+/// permanently-empty `citations` floor. `rank` is the hit's 1-based
+/// position in the incoming (already fused-order) list, matching how a
+/// single-lane pool's `fused_rank` would read with nothing upstream to
+/// re-rank it against.
+fn envelope_for(context: &str, hit: PassageHit, rank: usize) -> EvidenceItem {
+    let EvidenceCandidate {
+        kind,
+        candidate_id,
+        lane,
+        lane_rank,
+        payload,
+        ..
+    } = EvidenceCandidate::from_passage(context, hit, rank);
+    let CandidatePayload::Passage(hit) = payload else {
+        unreachable!("EvidenceCandidate::from_passage always produces a Passage payload")
+    };
+    EvidenceItem {
+        candidate_id,
+        kind,
+        fused_rank: rank,
+        lane_ranks: vec![LaneRank {
+            lane,
+            rank: lane_rank,
+        }],
+        citation_refs: Vec::new(),
+        corroboration: None,
+        contradicts: Vec::new(),
+        bytes: None,
+        estimated_tokens: None,
+        association: None,
+        passage: Some(hit),
+        community: None,
+    }
+}
+
 /// Walks `hits` in the order `sources/search` already ranked them,
 /// admitting each into the budget if it still fits — skipping an
 /// over-budget hit and continuing to the next, never stopping at the
 /// first one that doesn't fit (ADR 0006 §3 D/§9's "skip, don't stop"
 /// rule, applied here so a baseline run's own budget floor never
 /// looks artificially exhausted by one large early hit that a smaller
-/// later one would have fit around).
-pub(super) fn truncate_to_budget(hits: Vec<PassageHit>, limits: &BudgetLimits) -> TruncatedHits {
+/// later one would have fit around). `context` is the searched context
+/// name — needed only to build each hit's [`envelope_for`] `candidate_id`
+/// with the identical string a real assembled package would carry.
+pub(super) fn truncate_to_budget(
+    context: &str,
+    hits: Vec<PassageHit>,
+    limits: &BudgetLimits,
+) -> TruncatedHits {
     let mut admitted: Vec<PassageHit> = Vec::new();
     let mut items_bytes_sum = 0usize;
     let mut items_quarters_sum: u64 = 0u64;
@@ -166,8 +239,9 @@ pub(super) fn truncate_to_budget(hits: Vec<PassageHit>, limits: &BudgetLimits) -
     let empty_citations_bytes = array_overhead(0);
     let empty_citations_quarters = array_overhead(0) as u64;
 
-    for hit in hits {
-        let (bytes, quarters) = content_metrics(&hit);
+    for (index, hit) in hits.into_iter().enumerate() {
+        let envelope = envelope_for(context, hit, index + 1);
+        let (bytes, quarters) = content_metrics(&envelope);
         let candidate_items = admitted.len() + 1;
         let candidate_bytes =
             array_overhead(candidate_items) + items_bytes_sum + bytes + empty_citations_bytes;
@@ -183,7 +257,7 @@ pub(super) fn truncate_to_budget(hits: Vec<PassageHit>, limits: &BudgetLimits) -
         if fits {
             items_bytes_sum += bytes;
             items_quarters_sum += quarters;
-            admitted.push(hit);
+            admitted.push(envelope.passage.expect("envelope_for always sets passage"));
         } else {
             omitted_total += 1;
         }

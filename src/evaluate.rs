@@ -48,8 +48,8 @@ use taguru::context::normalize_entry;
 
 use crate::api::MatchPage;
 use crate::api::evidence::budget::{BudgetLimits, BudgetUsage};
-use crate::api::evidence::rerank::RerankerPlan;
-use crate::api::evidence::select::{CitationRef, EvidenceItem, SelectionPlan};
+use crate::api::evidence::rerank::{REASON_EMPTY_POOL, RerankerPlan};
+use crate::api::evidence::select::{CitationRef, EvidenceItem, SelectionPlan, budget_only_omitted};
 use crate::api::resolve::TieredResolution;
 use crate::api::sources::{Citation, PassageHit, PassageLanes, PassagePage, SearchContextPlan};
 use crate::cli::default_base_url;
@@ -517,6 +517,37 @@ struct RunConfig<'a> {
     rerank: Option<&'a str>,
 }
 
+/// Shared by `--max-items`/`--max-bytes`/`--max-tokens` in
+/// [`parse_args`]: the "given twice" check runs BEFORE the value is
+/// parsed, so a second occurrence whose value fails to parse (e.g.
+/// `--max-items 5 --max-items abc`) is still diagnosed as a duplicate
+/// flag, not the generic "needs a positive integer" message a
+/// `Some(_) if already_set` guard on the parsed `Option` would fall
+/// through to instead (a failed parse collapses the whole `and_then`
+/// chain to `None`, which never matches that guard at all).
+fn parse_positive_usize_flag<'a>(
+    rest: &mut impl Iterator<Item = &'a String>,
+    flag: &str,
+    slot: &mut Option<usize>,
+) -> Result<(), i32> {
+    if slot.is_some() {
+        return Err(subcommand_usage_error(
+            "evaluate",
+            &format!("{flag} given twice"),
+        ));
+    }
+    match rest.next().and_then(|value| value.parse::<usize>().ok()) {
+        Some(n) if n >= 1 => *slot = Some(n),
+        _ => {
+            return Err(subcommand_usage_error(
+                "evaluate",
+                &format!("{flag} needs a positive integer"),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn parse_args(args: &[String]) -> Result<EvaluateArgs, i32> {
     let usage = |message: &str| subcommand_usage_error("evaluate", message);
     let mut eval: Option<PathBuf> = None;
@@ -574,21 +605,11 @@ fn parse_args(args: &[String]) -> Result<EvaluateArgs, i32> {
                 }
                 assembly = true;
             }
-            "--max-items" => match rest.next().and_then(|value| value.parse::<usize>().ok()) {
-                Some(_) if max_items.is_some() => return Err(usage("--max-items given twice")),
-                Some(n) if n >= 1 => max_items = Some(n),
-                _ => return Err(usage("--max-items needs a positive integer")),
-            },
-            "--max-bytes" => match rest.next().and_then(|value| value.parse::<usize>().ok()) {
-                Some(_) if max_bytes.is_some() => return Err(usage("--max-bytes given twice")),
-                Some(n) if n >= 1 => max_bytes = Some(n),
-                _ => return Err(usage("--max-bytes needs a positive integer")),
-            },
-            "--max-tokens" => match rest.next().and_then(|value| value.parse::<usize>().ok()) {
-                Some(_) if max_tokens.is_some() => return Err(usage("--max-tokens given twice")),
-                Some(n) if n >= 1 => max_tokens = Some(n),
-                _ => return Err(usage("--max-tokens needs a positive integer")),
-            },
+            "--max-items" => parse_positive_usize_flag(&mut rest, "--max-items", &mut max_items)?,
+            "--max-bytes" => parse_positive_usize_flag(&mut rest, "--max-bytes", &mut max_bytes)?,
+            "--max-tokens" => {
+                parse_positive_usize_flag(&mut rest, "--max-tokens", &mut max_tokens)?
+            }
             "--rerank" => match rest.next() {
                 Some(model) if rerank.is_none() => rerank = Some(model.clone()),
                 Some(_) => return Err(usage("--rerank given twice")),
@@ -829,9 +850,22 @@ fn extract_passages(value: &Value) -> Result<(Vec<PassageHit>, Option<SearchCont
             source,
             paragraph,
             score,
-            // Never read downstream (see HitLocator::from) — no corpus
-            // body text is written into evaluation.json (ADR 0004 §11).
-            text: String::new(),
+            // `HitLocator::from` still strips this before anything
+            // reaches evaluation.json (ADR 0004 §11 — no corpus body
+            // text written to disk), but #308's `--max-bytes`/
+            // `--max-tokens` truncation (`evidence::truncate_to_budget`)
+            // measures this same field's real byte/token cost BEFORE
+            // that stripping happens. Recovering it here when the raw
+            // hit still carries it (the common case even when the
+            // whole response fails to match `PassagePage`'s stricter
+            // lane shape) keeps that measurement honest; a server that
+            // omits `text` entirely still degrades to an undercount,
+            // which is unavoidable with no data to measure.
+            text: raw
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
             lanes: PassageLanes {
                 bm25: None,
                 vector: None,
@@ -1659,7 +1693,7 @@ fn run_passage_or_evidence_lane(
                 package,
                 latency_ms,
             } => {
-                let hits = hits_from_evidence_items(&package.items);
+                let hits = hits_from_evidence_items(&package.items, limit);
                 let locators = evidence_locators(&package.items);
                 let passage = PassageOutcome::Searched {
                     plan: None,
@@ -1697,7 +1731,7 @@ fn run_passage_or_evidence_lane(
     } else if run_config.budget_given {
         match fetch_passage_hits(api, context, case, limit) {
             Ok((hits, plan, latency_ms)) => {
-                let truncated = evidence::truncate_to_budget(hits, &run_config.limits);
+                let truncated = evidence::truncate_to_budget(context, hits, &run_config.limits);
                 let passage = PassageOutcome::Searched {
                     plan,
                     hits: truncated.hits.into_iter().map(HitLocator::from).collect(),
@@ -1919,26 +1953,47 @@ fn build_metrics(cases: &[CaseBlock]) -> MetricsMap {
         if let Some(sources) = case.diversity_sources {
             diversity_sources.push(sources as f64);
         }
+        // Assembly-mode `omitted_by_reason` can carry `duplicate_passage`
+        // (near-duplicate suppression, which runs BEFORE budget
+        // admission and would drop the same candidate at any budget)
+        // alongside the budget-driven reasons — `budget_only_omitted`
+        // (select.rs) isolates just the latter, so the loop below can
+        // report `budget.omitted_rate`'s numerator as exactly what its
+        // own documented definition promises ("share … a budget ceiling
+        // dropped"), not `omitted_total`'s every-reason count. `None`
+        // for a baseline case (no `EvidenceOutcome` at all), which falls
+        // back to `BudgetAccounting::omitted_total` below — already
+        // budget-only there, since baseline truncation has no other
+        // omission reason.
+        let mut budget_only_omitted_n: Option<u64> = None;
         if let Some(evidence) = &case.evidence {
             match evidence {
                 EvidenceOutcome::Assembled {
                     latency_ms,
                     reranker,
+                    omitted_by_reason,
                     ..
                 } => {
                     evidence_latencies.push(*latency_ms as f64);
+                    budget_only_omitted_n = Some(budget_only_omitted(omitted_by_reason) as u64);
                     // A case only carries a rerank outcome at all when
                     // this run's `--rerank MODEL` actually put a
                     // `rerank` object on the wire — `RerankerPlan`'s
                     // "not requested" path (`assemble.rs`'s `None` arm)
-                    // leaves `reason` absent, the same shape a case
-                    // with no `--rerank` produces; every degrade
-                    // `rerank::drive` itself can reach always names a
-                    // `reason` token, so `ran || reason.is_some()`
-                    // isolates exactly the cases where reranking was
-                    // actually attempted, independent of this run's
-                    // own CLI flags.
-                    if reranker.ran || reranker.reason.is_some() {
+                    // leaves both `configured: false` and `reason`
+                    // absent, the same shape a case with no `--rerank`
+                    // produces. The denominator is scoped to `configured
+                    // && reason != empty_pool`: `not_configured`
+                    // (`configured: false`) and `empty_pool` (fewer than
+                    // two survivors — nothing a reranker could have
+                    // reordered either way) are both non-events, not a
+                    // configured reranker's failure path firing, so
+                    // neither belongs in "the configured-reranker
+                    // success rate" this metric documents itself as.
+                    let attempted = reranker.ran
+                        || (reranker.configured
+                            && reranker.reason.as_deref() != Some(REASON_EMPTY_POOL));
+                    if attempted {
                         rerank_requested_n += 1;
                         rerank_ran_n += u64::from(reranker.ran);
                     }
@@ -1952,7 +2007,8 @@ fn build_metrics(cases: &[CaseBlock]) -> MetricsMap {
             budget_items_used.push(budget.usage.items_used as f64);
             budget_bytes_used.push(budget.usage.bytes_used as f64);
             budget_tokens_used.push(budget.usage.tokens_used as f64);
-            budget_omitted_n += budget.omitted_total as u64;
+            let omitted = budget_only_omitted_n.unwrap_or(budget.omitted_total as u64);
+            budget_omitted_n += omitted;
             budget_considered_n += budget.omitted_total as u64 + budget.usage.items_used as u64;
         }
     }
@@ -2443,8 +2499,12 @@ fn build_definitions() -> BTreeMap<String, MetricDef> {
             "distribution",
             &["case"],
             "Count of distinct source locators among a case's admitted \
-             evidence: baseline's (possibly budget-truncated) passage \
-             hits, or assembly's admitted items' citation_refs.",
+             evidence — read from the same hits[] recall/citation \
+             scoring itself uses: baseline's (possibly budget-truncated) \
+             passage hits, or assembly's admitted items' own locators \
+             union their citation_refs (an association's corroborating \
+             attributions; a passage/community item's own locator, \
+             since its citation_refs is always empty by design).",
             "POST /contexts/{name}/sources/search, POST /contexts/{name}/evidence",
             Some("empty when the passage/evidence lane failed outright"),
         ),
@@ -2873,7 +2933,7 @@ struct CaseBlock {
     /// #308 (ADR 0006 §14): the assembly lane's own diagnostic detail
     /// — selection trace, reranker outcome, omission breakdown. `Some`
     /// only in `assembly` mode; `passage` above (built from the same
-    /// admitted package, see [`evidence_hits`]) is what recall/
+    /// admitted package, see [`hits_from_evidence_items`]) is what recall/
     /// citation/lane-cross scoring actually reads, so this block never
     /// duplicates scoring logic — only what `passage`'s `HitLocator`
     /// projection cannot carry.
@@ -2886,11 +2946,13 @@ struct CaseBlock {
     budget: Option<BudgetAccounting>,
     /// #308's `diversity.sources` metric input (ADR 0006 §14's own new
     /// metric): the count of distinct `source` locators among this
-    /// case's admitted evidence — `baseline`'s (possibly truncated)
-    /// passage hits, or `assembly`'s admitted items' citation
-    /// locators. `None` when the passage/evidence lane failed
-    /// outright, matching `recall`/`coverage`'s own not-applicable
-    /// convention.
+    /// case's `passage.hits` — `baseline`'s (possibly truncated)
+    /// passage hits, or `assembly`'s admitted items' own locators
+    /// union their `citation_refs` (the identical set
+    /// [`hits_from_evidence_items`] builds for recall/citation
+    /// scoring, so this reads the same evidence those metrics do).
+    /// `None` when the passage/evidence lane failed outright, matching
+    /// `recall`/`coverage`'s own not-applicable convention.
     #[serde(skip_serializing_if = "Option::is_none")]
     diversity_sources: Option<usize>,
 }
@@ -3130,8 +3192,18 @@ fn evidence_locators(items: &[EvidenceItem]) -> Vec<EvidenceLocator> {
 /// item without this union would never enter recall/citation/
 /// diversity scoring at all, since `citation_refs` is empty for both
 /// kinds by design (their locator lives on the payload itself, not as
-/// a separate attribution list).
-fn hits_from_evidence_items(items: &[EvidenceItem]) -> Vec<HitLocator> {
+/// a separate attribution list). `limit` is the case's own configured
+/// limit (`options.limit`/`default_limit`, the same value the baseline
+/// passage lane's own `sources/search` call already bounds its `hits`
+/// response to server-side): `items[]` can carry up to `budget.max_items`
+/// admitted candidates (default 40) plus one `citation_refs` entry per
+/// association's attribution, structurally unrelated to `limit` — left
+/// unbounded, that would size an assembly-mode case's `hits[]` (and
+/// therefore its `k` for `recall_at_k`/`mrr`/`ndcg`, and its
+/// `lane_cross.passage_hit` classification, ADR 0004 §8) differently
+/// from the identical-`limit` baseline case it exists to compare
+/// against.
+fn hits_from_evidence_items(items: &[EvidenceItem], limit: usize) -> Vec<HitLocator> {
     items
         .iter()
         .flat_map(|item| {
@@ -3142,6 +3214,7 @@ fn hits_from_evidence_items(items: &[EvidenceItem]) -> Vec<HitLocator> {
                 .map(|reference| (reference.source.clone(), reference.paragraph));
             own.chain(attributed)
         })
+        .take(limit)
         .map(|(source, paragraph)| HitLocator {
             source,
             paragraph,

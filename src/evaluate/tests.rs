@@ -389,6 +389,35 @@ fn extract_passages_rejects_a_response_with_no_recognizable_hits() {
     assert!(extract_passages(&value).is_err());
 }
 
+/// #308's `--max-bytes`/`--max-tokens` baseline truncation
+/// (`evidence::truncate_to_budget`) measures each hit's real
+/// `PassageHit.text` byte/token cost — the fallback path must recover
+/// that text when the raw hit still carries it, not silently zero it
+/// out the way the (now-removed) "never read downstream" shortcut did.
+/// Regression for a bug that made every fallback-path hit measure as
+/// ~55-60 bytes regardless of its real size, letting `--max-bytes`
+/// admit far more hits than the ceiling should allow.
+#[test]
+fn extract_passages_fallback_recovers_text_when_the_raw_hit_still_carries_it() {
+    let value = serde_json::json!([
+        {"source": "corpus/brewery.md", "paragraph": 0, "score": 0.5, "text": "青嶺酒造は雲居県霧沢町の蔵元である。"}
+    ]);
+    let (hits, _plan) = extract_passages(&value).expect("a bare hits array must still parse");
+    assert_eq!(hits[0].text, "青嶺酒造は雲居県霧沢町の蔵元である。");
+}
+
+/// A server whose bare hit objects carry no `text` field at all
+/// degrades to an empty string — unavoidable with no data to measure,
+/// but a documented degrade rather than a panic or an error.
+#[test]
+fn extract_passages_fallback_degrades_to_empty_text_when_absent() {
+    let value = serde_json::json!([
+        {"source": "corpus/brewery.md", "paragraph": 0, "score": 0.5}
+    ]);
+    let (hits, _plan) = extract_passages(&value).expect("a bare hits array must still parse");
+    assert_eq!(hits[0].text, "");
+}
+
 // ========================= No corpus body text in hits[] =========================
 
 fn assert_no_body_text(value: &Value, needle: &str, path: &str) {
@@ -470,9 +499,60 @@ fn evidence_locator_never_carries_the_passage_body_text() {
     let locators_value = serde_json::to_value(&locators).unwrap();
     assert_no_body_text(&locators_value, "TOP-SECRET-PASSAGE-BODY-TEXT", "$");
 
-    let hits = hits_from_evidence_items(std::slice::from_ref(&item));
+    let hits = hits_from_evidence_items(std::slice::from_ref(&item), 10);
     let hits_value = serde_json::to_value(&hits).unwrap();
     assert_no_body_text(&hits_value, "TOP-SECRET-PASSAGE-BODY-TEXT", "$");
+}
+
+/// A minimal passage-kind `EvidenceItem` — one `HitLocator` when
+/// flattened, since a passage's `citation_refs` is always empty
+/// (ADR 0006 §6, self-citing).
+fn passage_evidence_item(source: &str, paragraph: u32, rank: usize) -> EvidenceItem {
+    EvidenceItem {
+        candidate_id: format!("passage\u{0}ctx\u{0}{source}\u{0}{paragraph}"),
+        kind: "passage".to_string(),
+        fused_rank: rank,
+        lane_ranks: vec![crate::api::evidence::LaneRank {
+            lane: "passage_bm25".to_string(),
+            rank,
+        }],
+        citation_refs: Vec::new(),
+        corroboration: None,
+        contradicts: Vec::new(),
+        bytes: Some(0),
+        estimated_tokens: Some(0),
+        association: None,
+        passage: Some(PassageHit {
+            source: source.to_string(),
+            paragraph,
+            score: 1.0,
+            text: String::new(),
+            lanes: PassageLanes {
+                bm25: None,
+                vector: None,
+            },
+        }),
+        community: None,
+    }
+}
+
+/// Regression: an assembly-mode case's `items[]` can carry up to
+/// `budget.max_items` (default 40) admitted candidates — structurally
+/// unrelated to the case's own `options.limit`/`default_limit` — so
+/// `hits_from_evidence_items` must cap its output at `limit` the same
+/// way baseline's `sources/search` call already bounds its `hits`
+/// response server-side. Without the cap, `hits.len()` could exceed
+/// `limit`, changing the effective `k` for `recall_at_k`/`mrr`/`ndcg`
+/// between a `baseline`/`assembly` run pair at the identical `--limit`.
+#[test]
+fn hits_from_evidence_items_never_exceeds_the_case_limit() {
+    let items: Vec<EvidenceItem> = (0..5)
+        .map(|i| passage_evidence_item("corpus/brewery.md", i, i as usize + 1))
+        .collect();
+    let hits = hits_from_evidence_items(&items, 3);
+    assert_eq!(hits.len(), 3);
+    assert_eq!(hits[0].paragraph, 0);
+    assert_eq!(hits[2].paragraph, 2);
 }
 
 // ========================= metrics <-> definitions agreement =========================
