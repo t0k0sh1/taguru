@@ -597,7 +597,7 @@ fn run_local(out: &std::path::Path, names: Vec<String>) -> i32 {
     // operator; stdout stays reserved for the report lines.
     crate::ingest::init_logging();
     // Export reads; it never embeds, whatever the environment says.
-    let state = match crate::registry::BootConfig::from_env().boot(None, None, None, None) {
+    let state = match crate::registry::BootConfig::from_env().boot(None, None, None, None, None) {
         Ok(state) => state,
         Err(error) => {
             eprintln!("taguru: export: {error}");

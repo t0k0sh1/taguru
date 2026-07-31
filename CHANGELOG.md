@@ -28,11 +28,35 @@ Entries that change an on-disk format or a response shape say so.
   artifact degrades the same way (`plan.lanes.communities.ran: false`)
   rather than refusing, since community evidence is one opt-in input
   here, not the whole point of the call the way `communities/search`
-  is. `plan.reranker` is always `{configured: false, ran: false}` —
-  no reranker provider exists in this tree yet (#307); selection stays
-  fully deterministic. `retrieve` and every direct endpoint this
+  is. `plan.reranker` reports whether an optional reranker (#307) is
+  configured and ran. `retrieve` and every direct endpoint this
   feature composes are unchanged; `http_contract`/`mcp_contract` stay
   `1` (a purely additive endpoint and MCP tool, per ADR 0005 §4).
+- Optional evidence reranker (#307, implementing ADR 0006 §12): `POST
+  /contexts/{name}/evidence` accepts `rerank?: {model?}` and, when a
+  provider is configured (`TAGURU_RERANK_URL`/`_MODEL`/`_API_KEY`/
+  `_TIMEOUT_SECS`, a Cohere/Jina-compatible `POST /rerank` endpoint —
+  the same "any compatible adapter plugs in" posture the embedding
+  tier already takes), reorders the already fused, deduplicated,
+  near-duplicate-suppressed candidate pool immediately before
+  diversity-aware admission — strictly a permutation; a reranker can
+  never add, drop, or edit a candidate, and every selection invariant
+  holds identically whether or not one ran. No credential or network
+  access is required by default: absent `rerank`, or with no provider
+  configured, selection stays exactly as deterministic as before this
+  release. Any failure — unreachable, timeout, an open circuit
+  breaker (mirroring the embedding tier's own, `taguru_rerank_breaker_*`
+  on `/metrics`), a non-2xx status, or a response that is not a
+  complete permutation — degrades to the same deterministic order
+  rather than ever answering a non-2xx `POST /contexts/{name}/evidence`
+  call; `plan.reranker.reason` names why in a fixed, machine-readable
+  vocabulary (`not_configured`/`model_mismatch`/`empty_pool`/
+  `invalid_permutation`/`circuit_open`/`timeout`/`provider_error`).
+  Candidate text reaches a configured provider and nowhere else — never
+  a log line, an error message, or a metric label; `taguru_rerank_outcomes_total`/
+  `taguru_rerank_duration_seconds` carry only outcome tokens and
+  timings. `http_contract`/`mcp_contract` stay `1` — a purely additive
+  request field and response fragment (ADR 0005 §4).
 - `GET /version` (#300, implementing ADR 0005 §3/§6): contract-version
   discovery, auth-exempt like the other probes and answering `200`
   even while `/health` reports degraded — a compatibility check has to

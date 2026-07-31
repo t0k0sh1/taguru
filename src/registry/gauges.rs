@@ -277,6 +277,11 @@ impl AppState {
                 .embed_breaker
                 .as_ref()
                 .map(crate::embedding::EmbedBreaker::snapshot),
+            rerank_breaker: self
+                .0
+                .rerank_breaker
+                .as_ref()
+                .map(crate::breaker::ProviderBreaker::snapshot),
             retrieval_cache_entries,
             retrieval_cache_bytes,
             semantic_cache_entries,

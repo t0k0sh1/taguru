@@ -52,6 +52,7 @@ use serde::{Deserialize, Serialize};
 use taguru::context::{AliasError, CompactionError, Context, LabelUsage, dead_ratio_of};
 use taguru::deadline::Deadline;
 
+use crate::api::evidence::rerank::{EvidenceReranker, RerankOutcome};
 use crate::embedding::{EmbedPurpose, EmbeddingProvider, PassageVectorStore, VectorStore};
 use crate::groups::{self, GroupRecord};
 use crate::metrics::{ContextGaugeRow, GaugeSnapshot, Metrics, PerContextMetrics};
@@ -1553,6 +1554,14 @@ pub struct BootOptions {
     /// Present under `serve --replica` (issue #129): reads only, the
     /// tailer owns the disk — see the `StateInner` field.
     pub(crate) replica: Option<Arc<crate::replica::ReplicaInfo>>,
+    /// The optional evidence reranker (#307, ADR 0006 §12); `None`
+    /// keeps `POST /contexts/{name}/evidence` fully deterministic, at
+    /// no network or credential cost. Bundled into `BootOptions`
+    /// (rather than `boot_with`'s own positional parameter, the way
+    /// `embedder` is) so the many tests that construct
+    /// `BootOptions { .., ..Default::default() }` for an unrelated knob
+    /// need no changes.
+    pub(crate) reranker: Option<Arc<dyn EvidenceReranker>>,
 }
 
 impl Default for BootOptions {
@@ -1571,6 +1580,7 @@ impl Default for BootOptions {
             ship_progress: None,
             hydrator: None,
             replica: None,
+            reranker: None,
         }
     }
 }
@@ -1635,6 +1645,7 @@ impl BootConfig {
     pub fn boot(
         &self,
         embedder: Option<Arc<dyn EmbeddingProvider>>,
+        reranker: Option<Arc<dyn EvidenceReranker>>,
         ship_progress: Option<Arc<crate::ship::ShipProgress>>,
         hydrator: Option<Arc<crate::hydrate::Hydrator>>,
         replica: Option<Arc<crate::replica::ReplicaInfo>>,
@@ -1657,6 +1668,7 @@ impl BootConfig {
                 ship_progress,
                 hydrator,
                 replica,
+                reranker,
             },
         )
     }
@@ -1776,6 +1788,14 @@ struct StateInner {
     /// breaker the provider itself consults — one shared state, two
     /// readers.
     embed_breaker: Option<crate::embedding::EmbedBreaker>,
+    /// The optional evidence reranker (#307, ADR 0006 §12); `None`
+    /// keeps `POST /contexts/{name}/evidence` selection fully
+    /// deterministic.
+    reranker: Option<Arc<dyn EvidenceReranker>>,
+    /// The reranker's own circuit breaker, mirroring `embed_breaker`'s
+    /// shared-clone shape — one instance the provider consults and the
+    /// registry reads for `taguru_rerank_breaker_*` on /metrics.
+    rerank_breaker: Option<crate::breaker::ProviderBreaker>,
     /// Fallback semantic floor when neither the call nor the context
     /// sets one — the server default ([`DEFAULT_SEMANTIC_FLOOR`] unless
     /// `TAGURU_SEMANTIC_FLOOR` recalibrates it for the configured
@@ -2047,6 +2067,27 @@ impl AppState {
         let store = Arc::new(store);
         *slot = Some(Arc::clone(&store));
         Ok(store)
+    }
+
+    /// The optional evidence reranker (#307, ADR 0006 §12), cloned out
+    /// so `assemble_evidence` can hold it across a `block_in_place`
+    /// call without borrowing `self`. `None` on a server with no
+    /// `TAGURU_RERANK_URL`/`_MODEL` configured — mirrors
+    /// `embeddings_configured`'s "just check the `Option`" shape.
+    pub(crate) fn reranker(&self) -> Option<Arc<dyn EvidenceReranker>> {
+        self.0.reranker.clone()
+    }
+
+    /// Records one `rerank::drive` call's outcome and duration onto
+    /// `taguru_rerank_outcomes_total`/`_duration_seconds` — the one
+    /// place `assemble_evidence` needs to reach into `Metrics` for
+    /// this feature, kept out of `rerank.rs` itself so that module
+    /// stays as free of HTTP/registry concerns as `select.rs` (ADR
+    /// 0006 §9's module doc) already is.
+    pub(crate) fn record_rerank(&self, outcome: RerankOutcome) {
+        self.0
+            .metrics
+            .record_rerank(outcome.token, outcome.duration);
     }
 
     /// One provider round trip, timed into the embed-latency histogram
