@@ -20,11 +20,19 @@ use std::collections::HashMap;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use parking_lot::Mutex;
 use taguru::deadline::{Deadline, DeadlineExceeded};
+
+pub(crate) use crate::breaker::BreakerSnapshot;
+use crate::breaker::ProviderBreaker;
+
+/// The embedding provider's circuit breaker: [`crate::breaker::ProviderBreaker`]
+/// with `subject = "embedding provider"` (ADR 0006 §12 gives the
+/// reranker its own instance of the same shared type, `rerank provider`).
+pub(crate) type EmbedBreaker = ProviderBreaker;
 
 /// Why a batch is being embedded: glosses entering the store (`Index`)
 /// or a live cue looking things up (`Query`). Modern embedding APIs
@@ -65,219 +73,6 @@ impl ShutdownFlag {
         self.0.load(Ordering::Relaxed)
     }
 }
-
-/// Consecutive provider-attempt failures that open the breaker. Counted
-/// per ATTEMPT, not per `embed()` call, so one full retry ladder against
-/// a dead provider is enough to open it — the next caller fails fast
-/// instead of paying the timeout again.
-const BREAKER_THRESHOLD: u32 = 3;
-/// How long an open breaker refuses before letting one probe through.
-const BREAKER_COOLDOWN: Duration = Duration::from_secs(30);
-
-/// A minimal circuit breaker over the embedding provider: open after
-/// [`BREAKER_THRESHOLD`] consecutive attempt failures, then one probe
-/// per [`BREAKER_COOLDOWN`] until a success closes it. Exists so a dead
-/// provider costs each request a refusal instead of a full timeout —
-/// the lanes behind it already know how to degrade; this makes the
-/// degradation cheap. Shared by handle: [`HttpEmbeddings`] holds one
-/// and the registry reads the same one for /metrics and its own
-/// fast-fail gate.
-#[derive(Clone)]
-pub struct EmbedBreaker(Arc<BreakerInner>);
-
-struct BreakerInner {
-    threshold: u32,
-    cooldown: Duration,
-    state: Mutex<BreakerState>,
-    opened_total: AtomicU64,
-    short_circuits_total: AtomicU64,
-}
-
-enum BreakerState {
-    Closed {
-        consecutive_failures: u32,
-    },
-    Open {
-        since: Instant,
-    },
-    /// One probe at a time: `probing` is the in-flight claim, released
-    /// by the probe's outcome (or [`EmbedBreaker::abandon`]).
-    HalfOpen {
-        probing: bool,
-    },
-}
-
-/// What [`EmbedBreaker::admit`] granted: an ordinary call, or the one
-/// half-open probe whose outcome decides the breaker's next state.
-#[derive(Clone, Copy, Debug)]
-pub enum Admission {
-    Normal,
-    Probe,
-}
-
-/// One scrape's view of the breaker, rendered under
-/// `taguru_embedding_breaker_*` on /metrics.
-pub struct BreakerSnapshot {
-    /// 0 = closed, 1 = open, 2 = half-open.
-    pub state: u8,
-    pub consecutive_failures: u64,
-    pub opened_total: u64,
-    pub short_circuits_total: u64,
-}
-
-impl Default for EmbedBreaker {
-    fn default() -> Self {
-        Self::with_policy(BREAKER_THRESHOLD, BREAKER_COOLDOWN)
-    }
-}
-
-impl EmbedBreaker {
-    /// The production policy is the constants above; tests shrink the
-    /// cooldown to keep the half-open walk fast.
-    pub fn with_policy(threshold: u32, cooldown: Duration) -> Self {
-        Self(Arc::new(BreakerInner {
-            threshold: threshold.max(1),
-            cooldown,
-            state: Mutex::new(BreakerState::Closed {
-                consecutive_failures: 0,
-            }),
-            opened_total: AtomicU64::new(0),
-            short_circuits_total: AtomicU64::new(0),
-        }))
-    }
-
-    /// Gate one provider attempt. `Err` is the refusal message the
-    /// caller returns without touching the provider; `Ok` says whether
-    /// this attempt is the half-open probe.
-    fn admit(&self) -> Result<Admission, String> {
-        let mut state = self.0.state.lock();
-        match &mut *state {
-            BreakerState::Closed { .. } => Ok(Admission::Normal),
-            BreakerState::Open { since } => {
-                let elapsed = since.elapsed();
-                if elapsed >= self.0.cooldown {
-                    *state = BreakerState::HalfOpen { probing: true };
-                    Ok(Admission::Probe)
-                } else {
-                    self.0.short_circuits_total.fetch_add(1, Ordering::Relaxed);
-                    Err(self.open_refusal(self.0.cooldown - elapsed))
-                }
-            }
-            BreakerState::HalfOpen { probing } => {
-                if *probing {
-                    self.0.short_circuits_total.fetch_add(1, Ordering::Relaxed);
-                    Err(PROBE_BUSY_REFUSAL.to_string())
-                } else {
-                    *probing = true;
-                    Ok(Admission::Probe)
-                }
-            }
-        }
-    }
-
-    /// The same refusal arms as [`Self::admit`], WITHOUT claiming the
-    /// probe slot — the registry's pre-flight gate, so a short-circuit
-    /// never lands in the provider-latency histogram as a ~0s sample.
-    /// `None` means "call the provider" (whose own `admit` then claims
-    /// the probe if one is due).
-    pub fn refusal(&self) -> Option<String> {
-        let state = self.0.state.lock();
-        let refusal = match &*state {
-            BreakerState::Closed { .. } => None,
-            BreakerState::Open { since } => {
-                let elapsed = since.elapsed();
-                (elapsed < self.0.cooldown).then(|| self.open_refusal(self.0.cooldown - elapsed))
-            }
-            BreakerState::HalfOpen { probing } => probing.then(|| PROBE_BUSY_REFUSAL.to_string()),
-        };
-        if refusal.is_some() {
-            self.0.short_circuits_total.fetch_add(1, Ordering::Relaxed);
-        }
-        refusal
-    }
-
-    /// One admitted attempt's outcome. A success closes the breaker
-    /// whatever granted the attempt; a failed probe re-opens for a
-    /// fresh cooldown; failed normal attempts count toward the
-    /// threshold only while closed (an already-open breaker needs no
-    /// more evidence, and a stale straggler must not kill a pending
-    /// probe).
-    fn record(&self, admission: Admission, ok: bool) {
-        let mut state = self.0.state.lock();
-        if ok {
-            *state = BreakerState::Closed {
-                consecutive_failures: 0,
-            };
-            return;
-        }
-        match (admission, &mut *state) {
-            (Admission::Probe, _) => {
-                *state = BreakerState::Open {
-                    since: Instant::now(),
-                };
-                self.0.opened_total.fetch_add(1, Ordering::Relaxed);
-            }
-            (
-                Admission::Normal,
-                BreakerState::Closed {
-                    consecutive_failures,
-                },
-            ) => {
-                *consecutive_failures += 1;
-                if *consecutive_failures >= self.0.threshold {
-                    *state = BreakerState::Open {
-                        since: Instant::now(),
-                    };
-                    self.0.opened_total.fetch_add(1, Ordering::Relaxed);
-                }
-            }
-            (Admission::Normal, _) => {}
-        }
-    }
-
-    /// Releases an admitted attempt that produced NO outcome (the
-    /// shutdown abandon): a claimed probe slot must not wedge the
-    /// breaker half-open forever, and an abandoned wait is no evidence
-    /// about the provider either way.
-    fn abandon(&self, admission: Admission) {
-        if let Admission::Probe = admission
-            && let BreakerState::HalfOpen { probing } = &mut *self.0.state.lock()
-        {
-            *probing = false;
-        }
-    }
-
-    pub fn snapshot(&self) -> BreakerSnapshot {
-        let state = self.0.state.lock();
-        let (state_code, consecutive_failures) = match &*state {
-            BreakerState::Closed {
-                consecutive_failures,
-            } => (0, u64::from(*consecutive_failures)),
-            BreakerState::Open { .. } => (1, u64::from(self.0.threshold)),
-            BreakerState::HalfOpen { .. } => (2, u64::from(self.0.threshold)),
-        };
-        BreakerSnapshot {
-            state: state_code,
-            consecutive_failures,
-            opened_total: self.0.opened_total.load(Ordering::Relaxed),
-            short_circuits_total: self.0.short_circuits_total.load(Ordering::Relaxed),
-        }
-    }
-
-    /// The open-state refusal. Client-facing (it rides 502 bodies and
-    /// explain reasons), so it names the recovery path, never the URL.
-    fn open_refusal(&self, retry_in: Duration) -> String {
-        format!(
-            "the embedding provider circuit is open after {} consecutive failures; \
-             the next probe is allowed in {}s",
-            self.0.threshold,
-            retry_in.as_secs().max(1)
-        )
-    }
-}
-
-const PROBE_BUSY_REFUSAL: &str = "the embedding provider circuit is half-open with a probe already in flight; \
-     not adding load until it settles";
 
 /// Anything that can turn short strings into vectors. The HTTP provider
 /// is the real one; tests inject a deterministic mock.
@@ -364,7 +159,7 @@ impl HttpEmbeddings {
                 .into(),
             timeout,
             shutdown,
-            breaker: EmbedBreaker::default(),
+            breaker: EmbedBreaker::new("embedding provider"),
         })
     }
 }
@@ -1438,7 +1233,7 @@ mod tests {
                 .into(),
             timeout,
             shutdown: ShutdownFlag::default(),
-            breaker: EmbedBreaker::default(),
+            breaker: EmbedBreaker::new("embedding provider"),
         }
     }
 
@@ -1836,7 +1631,7 @@ mod tests {
         });
 
         let mut provider = stub_provider(addr, Duration::from_secs(5));
-        provider.breaker = EmbedBreaker::with_policy(3, Duration::ZERO);
+        provider.breaker = EmbedBreaker::with_policy("embedding provider", 3, Duration::ZERO);
         let error = provider
             .embed(&["x"], EmbedPurpose::Query, Deadline::unbounded())
             .unwrap_err();
@@ -1855,53 +1650,12 @@ mod tests {
         );
     }
 
-    /// The state machine itself: a success resets the consecutive
-    /// count, one probe flies at a time, a failed probe re-opens, an
-    /// abandoned probe releases its slot without judging the provider.
-    #[test]
-    fn the_breaker_state_machine_counts_probes_and_resets() {
-        let breaker = EmbedBreaker::with_policy(2, Duration::from_secs(1000));
-        let first = breaker.admit().unwrap();
-        breaker.record(first, false);
-        let second = breaker.admit().unwrap();
-        breaker.record(second, true);
-        let third = breaker.admit().unwrap();
-        breaker.record(third, false);
-        assert_eq!(
-            breaker.snapshot().state,
-            0,
-            "one failure after a reset stays closed"
-        );
-        let fourth = breaker.admit().unwrap();
-        breaker.record(fourth, false);
-        assert_eq!(breaker.snapshot().state, 1, "the second in a row opens");
-        assert!(breaker.admit().is_err(), "cooling: nothing admitted");
-        assert!(
-            breaker.refusal().is_some(),
-            "the pre-flight gate refuses too"
-        );
-
-        let breaker = EmbedBreaker::with_policy(1, Duration::ZERO);
-        let only = breaker.admit().unwrap();
-        breaker.record(only, false);
-        let probe = breaker.admit().unwrap();
-        assert!(matches!(probe, Admission::Probe));
-        assert!(breaker.admit().is_err(), "one probe at a time");
-        breaker.record(probe, false);
-        assert_eq!(
-            breaker.snapshot().opened_total,
-            2,
-            "a failed probe re-opens"
-        );
-        let probe = breaker.admit().unwrap();
-        breaker.abandon(probe);
-        let probe = breaker
-            .admit()
-            .expect("an abandoned probe's slot frees immediately");
-        breaker.record(probe, true);
-        assert_eq!(breaker.snapshot().state, 0);
-        assert!(breaker.refusal().is_none());
-    }
+    // The state machine itself now lives in `src/breaker.rs`'s own
+    // tests (`the_breaker_state_machine_counts_probes_and_resets`),
+    // since `EmbedBreaker` is just `crate::breaker::ProviderBreaker`
+    // with `subject = "embedding provider"`. What stays here is the
+    // end-to-end behavior through `HttpEmbeddings::embed` above and
+    // below.
 
     /// The HTTP provider must tell a bridging proxy WHY it is embedding
     /// (Cohere-style asymmetric models need `input_type`), and must

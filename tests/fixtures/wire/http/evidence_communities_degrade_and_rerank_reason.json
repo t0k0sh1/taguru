@@ -77,7 +77,7 @@
         "reranker": {
           "configured": false,
           "ran": false,
-          "reason": "no reranker provider is configured on this server (#307); the deterministic order was used"
+          "reason": "not_configured"
         },
         "selection": {
           "contradiction_groups": 0,

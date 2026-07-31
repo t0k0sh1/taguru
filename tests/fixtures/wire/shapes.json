@@ -58,6 +58,15 @@
       "budget_exceeded",
       "contradiction_group_exceeds_budget"
     ],
-    "response.result.omitted[].kind": ["association", "passage", "community"]
+    "response.result.omitted[].kind": ["association", "passage", "community"],
+    "response.result.plan.reranker.reason": [
+      "not_configured",
+      "model_mismatch",
+      "empty_pool",
+      "invalid_permutation",
+      "circuit_open",
+      "timeout",
+      "provider_error"
+    ]
   }
 }

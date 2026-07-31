@@ -2,6 +2,7 @@ mod api;
 mod auth;
 mod benchmark;
 mod bm25;
+mod breaker;
 mod calibrate;
 mod cli;
 mod clock;
@@ -48,6 +49,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
+use api::evidence::rerank::{EvidenceReranker, HttpReranker};
 use axum::Router;
 use axum::routing::{get, post};
 use embedding::EmbeddingProvider;
@@ -323,6 +325,17 @@ async fn serve(serve_args: cli::ServeArgs, auth_source: auth::AuthSource) {
         info!("auto embedding refresh enabled (runs with each flush)");
     }
     let embedder = embedder.map(|provider| Arc::new(provider) as Arc<dyn EmbeddingProvider>);
+
+    // The optional evidence reranker (#307, ADR 0006 §12) — absent
+    // config disables the tier entirely, at no network or credential
+    // cost; `POST /contexts/{name}/evidence` selection stays fully
+    // deterministic either way.
+    let reranker = HttpReranker::from_env();
+    if let Some(reranker) = &reranker {
+        info!(model = reranker.model(), "evidence reranker enabled");
+    }
+    let reranker = reranker.map(|provider| Arc::new(provider) as Arc<dyn EvidenceReranker>);
+
     // /protocol tells connecting agents which optional tiers are live;
     // the model name is captured here because the provider itself moves
     // into the state.
@@ -409,6 +422,7 @@ async fn serve(serve_args: cli::ServeArgs, auth_source: auth::AuthSource) {
 
     let state = match config.boot(
         embedder,
+        reranker,
         ship_progress.clone(),
         hydrator.clone(),
         replica_info.clone(),

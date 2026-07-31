@@ -22,6 +22,7 @@
 
 pub(crate) mod assemble;
 pub(crate) mod budget;
+pub(crate) mod rerank;
 pub(crate) mod select;
 
 use std::collections::{BTreeSet, HashMap, HashSet};

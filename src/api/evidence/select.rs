@@ -158,13 +158,86 @@ const NEAR_DUPLICATE_DICE_THRESHOLD: f64 = 0.9;
 /// locator traces back to an attribution the graph engine itself
 /// produced, so this path is a defensive guarantee, not a real degrade
 /// mode.
+///
+/// `order` names a complete reordering of `0..len`: same length, every
+/// index in range, no index repeated. A private copy of the same check
+/// [`super::rerank`] itself already runs on a provider's raw response —
+/// duplicated deliberately, so [`select_with_reorder`] never trusts a
+/// permutation's validity to whichever caller happened to construct it.
+fn is_valid_permutation(order: &[usize], len: usize) -> bool {
+    if order.len() != len {
+        return false;
+    }
+    let mut seen = vec![false; len];
+    for &index in order {
+        if index >= len || seen[index] {
+            return false;
+        }
+        seen[index] = true;
+    }
+    true
+}
+
 pub(crate) fn select(
     fused: Vec<FusedCandidate>,
     dedup_dropped: usize,
     limits: &BudgetLimits,
     citation_lookup: &HashMap<(String, u32), Citation>,
 ) -> SelectedEvidence {
-    let (survivors, mut omitted, mut omitted_by_reason) = suppress_near_duplicate_passages(fused);
+    select_with_reorder(fused, dedup_dropped, limits, citation_lookup, None)
+}
+
+/// [`select_with_reorder`]'s optional reorder callback: given the
+/// survivor pool in its current order, returns a permutation to apply,
+/// or `None` to leave it untouched. A named alias purely to keep the
+/// function signature below readable — `clippy::type_complexity` flags
+/// the unaliased form.
+pub(crate) type ReorderHook<'a> = &'a mut dyn FnMut(&[FusedCandidate]) -> Option<Vec<usize>>;
+
+/// [`select`], plus one optional reorder hook (#307, ADR 0006 §12): a
+/// reranker's entire effect on this pipeline. `reorder`, when present,
+/// is called exactly once with the survivor pool in its §7
+/// RRF/near-duplicate-suppressed order — the same pool `meta`/
+/// `groups_by_key`/`units` below are about to be derived from — and may
+/// return a permutation of `0..survivors.len()` to apply before that
+/// derivation happens. Grouping and diversity tiering then run over the
+/// *reordered* pool, so a promoted candidate can become its
+/// contradiction group's representative and can land in an earlier
+/// diversity tier — reordering the input to an otherwise-unchanged,
+/// invariant-preserving admission process, exactly ADR 0006 §12's
+/// boundary ("a reranker may only reorder").
+///
+/// A `None` return, or anything [`is_valid_permutation`] rejects
+/// (wrong length, a repeated index, an out-of-range index), leaves
+/// `survivors` untouched — the caller is expected to have already
+/// classified that failure into `plan.reranker.reason`
+/// (`invalid_permutation` or otherwise); this is a second, defensive
+/// check so a malformed permutation can never reach `meta` regardless
+/// of what produced it.
+pub(crate) fn select_with_reorder(
+    fused: Vec<FusedCandidate>,
+    dedup_dropped: usize,
+    limits: &BudgetLimits,
+    citation_lookup: &HashMap<(String, u32), Citation>,
+    reorder: Option<ReorderHook<'_>>,
+) -> SelectedEvidence {
+    let (mut survivors, mut omitted, mut omitted_by_reason) =
+        suppress_near_duplicate_passages(fused);
+
+    if let Some(reorder) = reorder
+        && let Some(order) = reorder(&survivors)
+        && is_valid_permutation(&order, survivors.len())
+    {
+        let mut slots: Vec<Option<FusedCandidate>> = survivors.into_iter().map(Some).collect();
+        survivors = order
+            .into_iter()
+            .map(|index| {
+                slots[index]
+                    .take()
+                    .expect("permutation visits every index once")
+            })
+            .collect();
+    }
 
     let meta: Vec<SurvivorMeta> = survivors.iter().map(SurvivorMeta::of).collect();
     let groups_by_key = group_by_subject_label(&meta);
@@ -1584,6 +1657,83 @@ mod tests {
                     serde_json::to_string(&result_a).unwrap(),
                     serde_json::to_string(&result_b).unwrap()
                 );
+            }
+
+            /// #307, ADR 0006 §12: an arbitrary reorder hook — standing
+            /// in for a reranker's permutation — can change WHICH
+            /// candidates get admitted (a promoted candidate can win a
+            /// tie-break, an omission budget can land differently), but
+            /// can never break the invariants that hold with no
+            /// reorder at all: every budget ceiling, the items/omitted
+            /// count reconciling to the fused pool's size, and every
+            /// admitted item's `bytes`/`estimated_tokens` still
+            /// matching its own independently recomputed content
+            /// metrics. Reordering the input to an invariant-preserving
+            /// admission process cannot itself violate an invariant.
+            #[test]
+            fn reordering_the_pool_before_admission_preserves_every_selection_invariant(
+                recipes in pool_strategy(),
+                seed: u64,
+                max_items in 0usize..8,
+                max_bytes in 0usize..2000,
+                max_tokens in 0usize..400,
+            ) {
+                let lookup = citation_lookup_for(&recipes);
+                let (fused, dropped) = super::super::super::fuse(build_pool(&recipes));
+                let fused_count = fused.len();
+                let budget_limits = limits(max_items, max_bytes, max_tokens);
+
+                // A self-contained splitmix64-seeded Fisher-Yates shuffle
+                // — no `rand` dev-dependency exists in this tree, and the
+                // permutation only needs to be arbitrary, not
+                // cryptographically random. Sized against `survivors`
+                // (post near-duplicate-suppression) at call time, inside
+                // the closure, rather than pre-built against
+                // `fused_count` — suppression can drop specific
+                // candidates rather than only truncate a tail, so a
+                // pre-built permutation would not line up.
+                let mut state = seed;
+                let mut next_u64 = move || {
+                    state = state.wrapping_add(0x9E3779B97F4A7C15);
+                    let mut z = state;
+                    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+                    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+                    z ^ (z >> 31)
+                };
+
+                let result = select_with_reorder(
+                    fused,
+                    dropped,
+                    &budget_limits,
+                    &lookup,
+                    Some(&mut |survivors: &[FusedCandidate]| {
+                        let len = survivors.len();
+                        let mut order: Vec<usize> = (0..len).collect();
+                        for i in (1..order.len()).rev() {
+                            let j = (next_u64() as usize) % (i + 1);
+                            order.swap(i, j);
+                        }
+                        Some(order)
+                    }),
+                );
+
+                prop_assert!(result.items.len() <= max_items);
+
+                let items_bytes: usize = result.items.iter().map(|item| content_metrics(item, &["bytes", "estimated_tokens"]).0).sum();
+                let citations_bytes: usize = result.citations.iter().map(|entry| content_metrics(entry, &[]).0).sum();
+                let bytes_used = array_overhead(result.items.len()) + items_bytes + array_overhead(result.citations.len()) + citations_bytes;
+                prop_assert!(bytes_used <= max_bytes || result.items.is_empty());
+                prop_assert_eq!(bytes_used, result.budget.bytes_used);
+
+                let items_quarters: u64 = result.items.iter().map(|item| content_metrics(item, &["bytes", "estimated_tokens"]).1).sum();
+                let citations_quarters: u64 = result.citations.iter().map(|entry| content_metrics(entry, &[]).1).sum();
+                let total_quarters = array_overhead(result.items.len()) as u64 + items_quarters
+                    + array_overhead(result.citations.len()) as u64 + citations_quarters;
+                let tokens_used = tokens_from_quarters(total_quarters);
+                prop_assert!(tokens_used <= max_tokens || result.items.is_empty());
+                prop_assert_eq!(tokens_used, result.budget.tokens_used);
+
+                prop_assert_eq!(result.items.len() + result.omitted_total, fused_count);
             }
         }
     }

@@ -186,6 +186,12 @@ pub struct Metrics {
     /// `+Inf`/`_count`, so a provider crawling toward its timeout is
     /// visible as a growing tail.
     embed_latency: Histogram,
+    /// Reranker round-trip latency (retries included), and how each
+    /// `rerank::drive` call ended — the #307 twin of `embed_latency`/
+    /// `searches` above. Both stay entirely at zero on a server with no
+    /// reranker configured, or where no caller ever names `rerank`.
+    rerank_latency: Histogram,
+    rerank_outcomes: [AtomicU64; RerankOutcomeKind::ALL.len()],
     /// Requests currently inside the stack (probes exempt) — the load
     /// signal behind the in-flight ceiling, and a gauge on /metrics
     /// either way.
@@ -436,6 +442,68 @@ impl SemanticCacheOutcome {
     }
 }
 
+/// How one `rerank::drive` call ended (#307) — the label vocabulary of
+/// `taguru_rerank_outcomes_total`, one closed variant per reason token
+/// `src/api/evidence/rerank.rs` itself defines (`REASON_NOT_CONFIGURED`
+/// and siblings), plus `Ok` for a successful reorder. Kept as a closed
+/// metrics-only enum, the same discipline [`SemanticCacheOutcome`]
+/// uses, so every label renders from zero rather than only appearing
+/// once its first outcome fires.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum RerankOutcomeKind {
+    Ok,
+    NotConfigured,
+    ModelMismatch,
+    EmptyPool,
+    InvalidPermutation,
+    CircuitOpen,
+    Timeout,
+    ProviderError,
+}
+
+impl RerankOutcomeKind {
+    const ALL: [RerankOutcomeKind; 8] = [
+        RerankOutcomeKind::Ok,
+        RerankOutcomeKind::NotConfigured,
+        RerankOutcomeKind::ModelMismatch,
+        RerankOutcomeKind::EmptyPool,
+        RerankOutcomeKind::InvalidPermutation,
+        RerankOutcomeKind::CircuitOpen,
+        RerankOutcomeKind::Timeout,
+        RerankOutcomeKind::ProviderError,
+    ];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            RerankOutcomeKind::Ok => "ok",
+            RerankOutcomeKind::NotConfigured => "not_configured",
+            RerankOutcomeKind::ModelMismatch => "model_mismatch",
+            RerankOutcomeKind::EmptyPool => "empty_pool",
+            RerankOutcomeKind::InvalidPermutation => "invalid_permutation",
+            RerankOutcomeKind::CircuitOpen => "circuit_open",
+            RerankOutcomeKind::Timeout => "timeout",
+            RerankOutcomeKind::ProviderError => "provider_error",
+        }
+    }
+
+    /// `rerank::drive`'s outcome token, verbatim from
+    /// `src/api/evidence/rerank.rs`'s `REASON_*` constants — matched by
+    /// value rather than shared as one enum across both modules so
+    /// `rerank.rs` (ADR 0006 §12's boundary) never has to import a
+    /// metrics-only type. Falls back to `ProviderError`, the closest
+    /// "something the provider did" bucket, for any token this list has
+    /// not been kept in sync with — a debug assertion catches that drift
+    /// in tests instead of silently mislabeling in production.
+    fn from_token(token: &str) -> Self {
+        let found = Self::ALL.into_iter().find(|kind| kind.as_str() == token);
+        debug_assert!(
+            found.is_some(),
+            "unrecognized rerank outcome token: {token}"
+        );
+        found.unwrap_or(RerankOutcomeKind::ProviderError)
+    }
+}
+
 /// Which tier ultimately answered a resolve (or resolve_label) —
 /// classified from the served payload, so every serve path lands in
 /// exactly one bucket. The drift signal lives here: a rising
@@ -577,6 +645,10 @@ pub struct GaugeSnapshot {
     /// lexical-only server's scrape, like the replica family off a
     /// writer.
     pub embed_breaker: Option<crate::embedding::BreakerSnapshot>,
+    /// The reranker provider's circuit breaker (#307), present exactly
+    /// when a provider is configured — the same "absent, not
+    /// zeroed" gating [`Self::embed_breaker`] uses.
+    pub rerank_breaker: Option<crate::breaker::BreakerSnapshot>,
     /// Entries resident in the exact-match retrieval cache, and the
     /// bytes they hold — read from the cache at scrape time like every
     /// other gauge here, so they cannot drift.
@@ -650,6 +722,19 @@ impl Metrics {
 
     pub(crate) fn record_embed_latency(&self, elapsed: Duration) {
         self.embed_latency.observe(elapsed);
+    }
+
+    /// One `rerank::drive` call (#307): its wall-clock duration —
+    /// including a short-circuit that never touched the provider
+    /// (`not_configured`/`model_mismatch`/`empty_pool`/`circuit_open`
+    /// all land here too, as near-zero samples, unlike
+    /// `embed_latency`'s own call site which gates the histogram on a
+    /// breaker pre-check before ever timing anything) — and which of
+    /// [`RerankOutcomeKind`]'s fixed labels it ended as.
+    pub(crate) fn record_rerank(&self, token: &str, elapsed: Duration) {
+        self.rerank_latency.observe(elapsed);
+        self.rerank_outcomes[RerankOutcomeKind::from_token(token) as usize]
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     pub(crate) fn record_shed(&self) {
@@ -1250,6 +1335,86 @@ impl Metrics {
             );
             out.push_str(&format!(
                 "taguru_embedding_breaker_short_circuits_total {}\n",
+                breaker.short_circuits_total
+            ));
+        }
+
+        push_header(
+            &mut out,
+            "taguru_rerank_duration_seconds",
+            "histogram",
+            "Reranker provider round-trip latency (#307), retries included \
+             (calls past the top bucket land in +Inf). A short-circuit that \
+             never reached the provider (no reranker configured, a model \
+             mismatch, fewer than two candidates, or an open circuit) is \
+             still one sample, near zero.",
+        );
+        let rerank_snapshot = self.rerank_latency.snapshot();
+        push_histogram(
+            &mut out,
+            "taguru_rerank_duration_seconds",
+            "",
+            &rerank_snapshot,
+        );
+        push_header(
+            &mut out,
+            "taguru_rerank_outcomes_total",
+            "counter",
+            "Requested reranks by how they ended (ADR 0006 §12): `ok` \
+             reordered the pool; every other label is a degrade back to \
+             the deterministic order, matching `plan.reranker.reason`. \
+             Absent entirely from a call that never named `rerank`.",
+        );
+        for outcome in RerankOutcomeKind::ALL {
+            out.push_str(&format!(
+                "taguru_rerank_outcomes_total{{outcome=\"{}\"}} {}\n",
+                outcome.as_str(),
+                self.rerank_outcomes[outcome as usize].load(Ordering::Relaxed)
+            ));
+        }
+        if let Some(breaker) = &gauges.rerank_breaker {
+            push_header(
+                &mut out,
+                "taguru_rerank_breaker_state",
+                "gauge",
+                "Reranker provider circuit breaker: 0 = closed, 1 = open \
+                 (calls refused until the cooldown lets a probe through), \
+                 2 = half-open (probing).",
+            );
+            out.push_str(&format!("taguru_rerank_breaker_state {}\n", breaker.state));
+            push_header(
+                &mut out,
+                "taguru_rerank_breaker_consecutive_failures",
+                "gauge",
+                "Consecutive provider-attempt failures counted toward the \
+                 breaker's opening threshold (pinned at the threshold while \
+                 open or half-open).",
+            );
+            out.push_str(&format!(
+                "taguru_rerank_breaker_consecutive_failures {}\n",
+                breaker.consecutive_failures
+            ));
+            push_header(
+                &mut out,
+                "taguru_rerank_breaker_opened_total",
+                "counter",
+                "Times the breaker opened (threshold of consecutive attempt \
+                 failures reached, or a half-open probe failed).",
+            );
+            out.push_str(&format!(
+                "taguru_rerank_breaker_opened_total {}\n",
+                breaker.opened_total
+            ));
+            push_header(
+                &mut out,
+                "taguru_rerank_breaker_short_circuits_total",
+                "counter",
+                "Reranker calls refused without touching the provider \
+                 because the breaker was open (or a probe was already in \
+                 flight).",
+            );
+            out.push_str(&format!(
+                "taguru_rerank_breaker_short_circuits_total {}\n",
                 breaker.short_circuits_total
             ));
         }
@@ -2144,6 +2309,7 @@ mod tests {
             unsourced_edges_total: 0,
             unsourced_weight_total: 0.0,
             embed_breaker: None,
+            rerank_breaker: None,
             retrieval_cache_entries: 0,
             retrieval_cache_bytes: 0,
             semantic_cache_entries: 0,
@@ -2231,6 +2397,94 @@ mod tests {
             with.contains("taguru_embedding_breaker_short_circuits_total 4"),
             "{with}"
         );
+    }
+
+    /// The #307 reranker breaker family gates on its own snapshot,
+    /// independently of the embedding breaker's — a server with a
+    /// reranker configured but no embedder (or vice versa) renders
+    /// exactly one of the two families, never both or neither.
+    #[test]
+    fn the_rerank_breaker_family_gates_on_the_snapshot() {
+        let metrics = Metrics::default();
+        let without = metrics.render_prometheus(&empty_gauges());
+        assert!(!without.contains("taguru_rerank_breaker"), "{without}");
+
+        let mut gauges = empty_gauges();
+        gauges.rerank_breaker = Some(crate::breaker::BreakerSnapshot {
+            state: 2,
+            consecutive_failures: 3,
+            opened_total: 1,
+            short_circuits_total: 4,
+        });
+        let with = metrics.render_prometheus(&gauges);
+        assert!(with.contains("taguru_rerank_breaker_state 2"), "{with}");
+        assert!(
+            with.contains("taguru_rerank_breaker_consecutive_failures 3"),
+            "{with}"
+        );
+        assert!(
+            with.contains("taguru_rerank_breaker_opened_total 1"),
+            "{with}"
+        );
+        assert!(
+            with.contains("taguru_rerank_breaker_short_circuits_total 4"),
+            "{with}"
+        );
+    }
+
+    /// `taguru_rerank_outcomes_total`/`_duration_seconds` render at zero
+    /// on a server that never ran a rerank — the same "the family
+    /// exists but every label is zero" discipline `searches`/
+    /// `semantic_cache` use, distinct from the breaker gauges above
+    /// (which are entirely ABSENT without a configured provider).
+    #[test]
+    fn rerank_outcomes_render_from_zero_and_bucket_by_token() {
+        let metrics = Metrics::default();
+        metrics.record_rerank("ok", Duration::from_millis(5));
+        metrics.record_rerank("provider_error", Duration::from_millis(1));
+        metrics.record_rerank("provider_error", Duration::from_millis(1));
+        let rendered = metrics.render_prometheus(&empty_gauges());
+        assert!(rendered.contains("taguru_rerank_outcomes_total{outcome=\"ok\"} 1"));
+        assert!(rendered.contains("taguru_rerank_outcomes_total{outcome=\"provider_error\"} 2"));
+        assert!(rendered.contains("taguru_rerank_outcomes_total{outcome=\"timeout\"} 0"));
+        assert!(rendered.contains("taguru_rerank_duration_seconds_count 3"));
+    }
+
+    /// The reranker's own #307 vocabulary must not silently drift from
+    /// this metrics-side enum — `from_token` falls back to
+    /// `ProviderError` for anything unrecognized, but every one of
+    /// `rerank.rs`'s actual constants must round-trip through it as
+    /// itself.
+    #[test]
+    fn every_rerank_reason_token_maps_to_its_own_outcome_kind() {
+        // The real REASON_* constants, not string literals re-typed
+        // here — `RerankOutcomeKind::from_token`'s own doc comment
+        // promises this test catches drift from `rerank.rs`'s
+        // vocabulary; a hardcoded literal would still pass after
+        // `rerank.rs` renamed a token out from under it, since nothing
+        // would fail to compile or diverge. "ok" has no named constant
+        // in `rerank.rs` (it is not a failure reason), so it stays a
+        // literal.
+        use crate::api::evidence::rerank::{
+            REASON_CIRCUIT_OPEN, REASON_EMPTY_POOL, REASON_INVALID_PERMUTATION,
+            REASON_MODEL_MISMATCH, REASON_NOT_CONFIGURED, REASON_PROVIDER_ERROR, REASON_TIMEOUT,
+        };
+        let pairs = [
+            ("ok", RerankOutcomeKind::Ok),
+            (REASON_NOT_CONFIGURED, RerankOutcomeKind::NotConfigured),
+            (REASON_MODEL_MISMATCH, RerankOutcomeKind::ModelMismatch),
+            (REASON_EMPTY_POOL, RerankOutcomeKind::EmptyPool),
+            (
+                REASON_INVALID_PERMUTATION,
+                RerankOutcomeKind::InvalidPermutation,
+            ),
+            (REASON_CIRCUIT_OPEN, RerankOutcomeKind::CircuitOpen),
+            (REASON_TIMEOUT, RerankOutcomeKind::Timeout),
+            (REASON_PROVIDER_ERROR, RerankOutcomeKind::ProviderError),
+        ];
+        for (token, expected) in pairs {
+            assert_eq!(RerankOutcomeKind::from_token(token), expected, "{token}");
+        }
     }
 
     /// The replica family renders only in replica mode, and the lag
@@ -2796,6 +3050,7 @@ mod tests {
         let metrics = Metrics::default();
         metrics.record_http("GET", "/a", 200, Duration::from_millis(1));
         metrics.record_flush("a", true);
+        metrics.record_rerank("ok", Duration::from_millis(2));
         let rendered = metrics.render_prometheus(&GaugeSnapshot {
             contexts_registered: 2,
             groups_registered: 1,
@@ -2813,6 +3068,12 @@ mod tests {
                 consecutive_failures: 3,
                 opened_total: 2,
                 short_circuits_total: 7,
+            }),
+            rerank_breaker: Some(crate::breaker::BreakerSnapshot {
+                state: 0,
+                consecutive_failures: 0,
+                opened_total: 0,
+                short_circuits_total: 0,
             }),
             retrieval_cache_entries: 3,
             retrieval_cache_bytes: 4096,
@@ -2864,6 +3125,9 @@ mod tests {
         assert!(rendered.contains("taguru_keyring_reloads_total 0"));
         assert!(rendered.contains("taguru_keyring_reload_refusals_total 0"));
         assert!(rendered.contains("taguru_contexts_resident 1"));
+        assert!(rendered.contains("taguru_rerank_outcomes_total{outcome=\"ok\"} 1"));
+        assert!(rendered.contains("taguru_rerank_outcomes_total{outcome=\"not_configured\"} 0"));
+        assert!(rendered.contains("taguru_rerank_breaker_state 0"));
         assert!(rendered.contains(&format!(
             "taguru_build_info{{version=\"{}\"}} 1",
             env!("CARGO_PKG_VERSION")

@@ -43,8 +43,9 @@ use crate::api::{
 };
 
 use super::budget::{BudgetLimits, BudgetRequest, BudgetUsage};
-use super::select::{EvidenceItem, OmittedCandidate, SelectionPlan, select};
-use super::{CitationEntry, EvidenceCandidate, fuse};
+use super::rerank::{self, RerankRequest, RerankerPlan};
+use super::select::{self, EvidenceItem, OmittedCandidate, SelectionPlan, select_with_reorder};
+use super::{CitationEntry, EvidenceCandidate, FusedCandidate, fuse};
 
 /// `origins`/`labels` accept `"..."` and `["...", ...]` interchangeably
 /// (the same contract `retrieve`'s own arguments use); flattened to an
@@ -83,15 +84,13 @@ pub struct AssembleEvidenceRequest {
     #[serde(default)]
     pub include_communities: bool,
     pub budget: Option<BudgetRequest>,
-    /// Accepted and reported back in `plan.reranker`, but not yet
-    /// acted on — #307 implements the reranker itself (ADR 0006 §12).
-    /// No server in this tree has a reranker provider configured today
-    /// (§12: "no reranker configured … is not merely a fallback, it is
-    /// the whole feature in that configuration"), so `plan.reranker`
-    /// is always `{configured: false, ran: false}` regardless of this
-    /// field — a caller naming one still gets a deterministic package
-    /// back, with `reason` saying why no reranker ran.
-    pub rerank: Option<serde_json::Value>,
+    /// Opt-in reranking (#307, ADR 0006 §12): absent means the §7
+    /// deterministic RRF order is used untouched, at no network or
+    /// credential cost. Present but no provider configured, a model
+    /// mismatch, or any provider failure all degrade to that same
+    /// deterministic order — `plan.reranker.reason` names why, and the
+    /// call still answers 200 either way (ADR 0006 §11).
+    pub rerank: Option<RerankRequest>,
 }
 
 /// ADR 0006 §10's `EvidencePlan`: everything [`select::SelectedEvidence`]
@@ -118,20 +117,6 @@ pub struct EvidenceLanesPlan {
     pub passages: LanePlan,
     pub communities: LanePlan,
     pub citations: LanePlan,
-}
-
-/// ADR 0006 §12's placeholder shape: no reranker provider exists in
-/// this tree yet (#307), so this is always `{configured: false, ran:
-/// false}` — the deterministic §9 pipeline is the whole feature in
-/// that configuration, not merely its fallback.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct RerankerPlan {
-    pub configured: bool,
-    pub ran: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
 }
 
 /// ADR 0006 §10's `EvidencePackage`: [`select::SelectedEvidence`] with
@@ -411,22 +396,54 @@ pub async fn assemble_evidence(
     };
     let citations_plan = LanePlan::ran();
 
-    // --- Fuse and select (#303 §7, #304 §8-§9) ---
+    // --- Fuse and select (#303 §7, #304 §8-§9), with an optional
+    // reorder pass (#307, ADR 0006 §12) applied by `select_with_reorder`
+    // itself, immediately before diversity-aware admission. `rerank`
+    // absent is the overwhelmingly common case and costs nothing beyond
+    // this one `is_none()` check — no provider touched, no `block_in_place`,
+    // no metrics.
     let mut pool = association_pool;
     pool.extend(passage_candidates);
     pool.extend(community_candidates);
     let (fused, dedup_dropped) = fuse(pool);
-    let selected = select(fused, dedup_dropped, &limits, &citation_lookup);
 
-    let reranker = RerankerPlan {
-        configured: false,
-        ran: false,
-        model: None,
-        reason: request.rerank.is_some().then(|| {
-            "no reranker provider is configured on this server (#307); the \
-             deterministic order was used"
-                .to_string()
-        }),
+    let reranker_configured = state.reranker().is_some();
+    let (selected, reranker) = match &request.rerank {
+        None => (
+            select::select(fused, dedup_dropped, &limits, &citation_lookup),
+            RerankerPlan::not_requested(reranker_configured),
+        ),
+        Some(rerank_request) => {
+            let mut reranker_plan = None;
+            let mut reorder = |survivors: &[FusedCandidate]| {
+                let (order, plan, outcome) = tokio::task::block_in_place(|| {
+                    rerank::drive(
+                        state.reranker().as_deref(),
+                        rerank_request,
+                        &canonical_query,
+                        survivors,
+                        deadline,
+                    )
+                });
+                state.record_rerank(outcome);
+                reranker_plan = Some(plan);
+                order
+            };
+            let selected = select_with_reorder(
+                fused,
+                dedup_dropped,
+                &limits,
+                &citation_lookup,
+                Some(&mut reorder),
+            );
+            let reranker = reranker_plan.unwrap_or(RerankerPlan {
+                configured: reranker_configured,
+                ran: false,
+                model: None,
+                reason: None,
+            });
+            (selected, reranker)
+        }
     };
 
     let package = EvidencePackage {

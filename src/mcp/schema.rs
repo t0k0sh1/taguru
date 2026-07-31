@@ -523,7 +523,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "assemble_evidence",
-            "Opt-in evidence assembly: runs the same resolve/query/activate/search_passages/cite_passage fan-out `retrieve` runs, then normalizes every graph association, graph activation, passage hit, and (opt-in) community hit into one ranked, deduplicated, citation-complete package under an explicit byte/token/item budget — for a caller that will hand the result to an external answer model with a bounded context window, unlike `retrieve`'s raw, unranked results. `origins` and `labels` share `retrieve`'s own contract; the passage/community lanes search `text_fallback_query` when given, otherwise `origins` joined with '; '. Contradictory and corroborating evidence are both preserved intentionally — never silently collapsed to a majority view or a single opaque count. `budget` bounds the response (defaults: 40 items, 64 KiB, ~4000 estimated tokens); a budget too small for even the smallest candidate still answers 200 with an empty package and every candidate accounted for under `omitted`/`omitted_total`/`omitted_by_reason`, never an error. `plan` reports which lanes ran and why not when they did not, plus the selection/reranker trace — no reranker is configured on this server today, so `plan.reranker` is always `{configured: false, ran: false}` and selection is fully deterministic. Does not change `retrieve` or any direct endpoint's behavior.",
+            "Opt-in evidence assembly: runs the same resolve/query/activate/search_passages/cite_passage fan-out `retrieve` runs, then normalizes every graph association, graph activation, passage hit, and (opt-in) community hit into one ranked, deduplicated, citation-complete package under an explicit byte/token/item budget — for a caller that will hand the result to an external answer model with a bounded context window, unlike `retrieve`'s raw, unranked results. `origins` and `labels` share `retrieve`'s own contract; the passage/community lanes search `text_fallback_query` when given, otherwise `origins` joined with '; '. Contradictory and corroborating evidence are both preserved intentionally — never silently collapsed to a majority view or a single opaque count. `budget` bounds the response (defaults: 40 items, 64 KiB, ~4000 estimated tokens); a budget too small for even the smallest candidate still answers 200 with an empty package and every candidate accounted for under `omitted`/`omitted_total`/`omitted_by_reason`, never an error. `plan` reports which lanes ran and why not when they did not, plus the selection/reranker trace. `rerank` optionally reorders the pool through a server-configured reranker (may only reorder — never adds, drops, or edits a candidate); with no `TAGURU_RERANK_URL`/`_MODEL` configured, or on any provider failure, selection stays fully deterministic and `plan.reranker.reason` names why in a fixed, machine-readable vocabulary — never a call-ending error. Does not change `retrieve` or any direct endpoint's behavior.",
             object_schema(
                 json!({
                     "context": context,
@@ -556,7 +556,10 @@ pub(super) fn tool_definitions() -> Vec<Value> {
                     },
                     "rerank": {
                         "type": "object",
-                        "description": "accepted but not yet acted on — no reranker provider is configured on this server; selection stays fully deterministic"
+                        "description": "opts into reordering the pool through a configured reranker (ADR 0006 §12); when absent, when no provider is configured, or on any failure, selection stays fully deterministic and plan.reranker.reason names why",
+                        "properties": {
+                            "model": { "type": "string", "description": "pins the call to this exact model; a mismatch with the configured provider degrades with reason 'model_mismatch'" }
+                        }
                     }
                 }),
                 &["context", "origins"],

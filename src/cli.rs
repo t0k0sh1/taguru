@@ -254,6 +254,15 @@ ENVIRONMENT (every knob; unset = the shown default):
                                the context sets one (0.35, calibrated for
                                text-embedding-3-large; model-dependent —
                                'taguru calibrate' measures the right value)
+  TAGURU_RERANK_URL            Cohere/Jina-compatible /rerank endpoint for
+                               opt-in evidence reranking (#307); off keeps
+                               POST /contexts/{name}/evidence fully
+                               deterministic (off)
+  TAGURU_RERANK_MODEL          reranker model name
+  TAGURU_RERANK_API_KEY        reranker provider credential
+  TAGURU_RERANK_TIMEOUT_SECS   per-attempt provider ceiling (5); a request's
+                               remaining budget bounds an attempt further,
+                               and one transient failure retries with backoff
   TAGURU_EXTRACT_URL           OpenAI-compatible /chat/completions endpoint,
                                read only by 'taguru extract' (off)
   TAGURU_EXTRACT_MODEL         extraction model name

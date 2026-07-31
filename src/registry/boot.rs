@@ -125,6 +125,10 @@ impl AppState {
         let embed_breaker = embedder
             .as_ref()
             .and_then(|provider| provider.breaker().cloned());
+        let rerank_breaker = options
+            .reranker
+            .as_ref()
+            .and_then(|provider| provider.breaker().cloned());
         let state = Self(Arc::new(StateInner {
             data_dir,
             _dir_lock: dir_lock,
@@ -134,6 +138,8 @@ impl AppState {
             clock: AtomicU64::new(0),
             embedder,
             embed_breaker,
+            reranker: options.reranker,
+            rerank_breaker,
             default_semantic_floor: options
                 .default_semantic_floor
                 .unwrap_or(DEFAULT_SEMANTIC_FLOOR)

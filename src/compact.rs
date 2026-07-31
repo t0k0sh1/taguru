@@ -151,7 +151,7 @@ pub(crate) fn run(args: &[String]) -> i32 {
 
 fn run_local(names: Vec<String>, parallel: usize) -> i32 {
     crate::ingest::init_logging();
-    let state = match crate::registry::BootConfig::from_env().boot(None, None, None, None) {
+    let state = match crate::registry::BootConfig::from_env().boot(None, None, None, None, None) {
         Ok(state) => state,
         Err(error) => {
             eprintln!("taguru: compact: {error}");
