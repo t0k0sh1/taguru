@@ -1090,10 +1090,26 @@ impl Hydrator {
                 }
                 return Ok(false);
             }
+            // Fetch + verify as one attempt, exactly like
+            // fetch_lane_if_stale's: a live lineage can move the object
+            // out from under this download (the writer replaces it,
+            // ships a new manifest) between the pre-read check above and
+            // the download landing, and `ship::fetch` deliberately keeps
+            // that as `NotFound` (see its own doc) so the SAME arbiter
+            // that already handles a bytes/manifest mismatch also
+            // catches "the object moved" — a `?` straight out of this
+            // loop (as this used to do) skipped `refreshed_extent`
+            // entirely and turned a normal mid-cycle move into a boot
+            // refusal.
             let key = root.clone().join("files").join(name);
-            let bytes = ship::fetch(self.store.as_ref(), &key).await?;
-            match ship::verify_file_bytes(name, &bytes, expect) {
-                Ok(()) => {
+            let attempt = async {
+                let bytes = ship::fetch(self.store.as_ref(), &key).await?;
+                ship::verify_file_bytes(name, &bytes, expect)?;
+                Ok::<Vec<u8>, io::Error>(bytes)
+            }
+            .await;
+            match attempt {
+                Ok(bytes) => {
                     ship::write_restored_file(&self.data_dir, name, &bytes)?;
                     // Post-write stat, not the pre-fetch one above: the
                     // atomic rename just gave this file a new mtime/ino.

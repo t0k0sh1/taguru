@@ -46,6 +46,9 @@ struct BreakerInner {
     state: Mutex<BreakerState>,
     opened_total: AtomicU64,
     short_circuits_total: AtomicU64,
+    /// Every half-open probe slot claim (fresh or reclaimed) mints the
+    /// next value here — see [`BreakerState::HalfOpen`]'s doc.
+    next_probe_generation: AtomicU64,
 }
 
 enum BreakerState {
@@ -63,18 +66,32 @@ enum BreakerState {
     /// gives itself. Unlike `Open`, a stuck `HalfOpen` has no other
     /// path back to admitting calls, so this claim needs its own clock
     /// too, not the one it copied off `Open` when it was born.
+    ///
+    /// `generation` names WHICH claim of the slot this is: a probe
+    /// reclaimed after its original caller vanished is a fresh claim,
+    /// not a continuation, and [`Admission::Probe`] carries the
+    /// generation it was granted for so a straggler's outcome — the
+    /// original caller was merely slow, not dead, and finally answers
+    /// after being reclaimed — can be told apart from the reclaiming
+    /// probe's own outcome in [`ProviderBreaker::record`]/[`ProviderBreaker::abandon`].
+    /// Without it, a slow success closes a breaker a fresher probe
+    /// just correctly re-opened (or the reverse), and a slow abandon
+    /// frees a slot a fresher probe is still actively using.
     HalfOpen {
         probing: bool,
         since: Instant,
+        generation: u64,
     },
 }
 
 /// What [`ProviderBreaker::admit`] granted: an ordinary call, or the
-/// one half-open probe whose outcome decides the breaker's next state.
+/// half-open probe whose outcome decides the breaker's next state,
+/// carrying the generation (see [`BreakerState::HalfOpen`]) its slot
+/// claim was minted under.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Admission {
     Normal,
-    Probe,
+    Probe(u64),
 }
 
 /// One scrape's view of the breaker, rendered under
@@ -104,7 +121,16 @@ impl ProviderBreaker {
             }),
             opened_total: AtomicU64::new(0),
             short_circuits_total: AtomicU64::new(0),
+            next_probe_generation: AtomicU64::new(0),
         }))
+    }
+
+    /// A fresh generation for a probe slot claim — every `Open →
+    /// HalfOpen` transition and every reclaim of an already-`HalfOpen`
+    /// slot mints one, so [`Admission::Probe`] always names exactly
+    /// which claim granted it.
+    fn next_probe_generation(&self) -> u64 {
+        self.0.next_probe_generation.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Gate one provider attempt. `Err` is the refusal message the
@@ -117,17 +143,23 @@ impl ProviderBreaker {
             BreakerState::Open { since } => {
                 let elapsed = since.elapsed();
                 if elapsed >= self.0.cooldown {
+                    let generation = self.next_probe_generation();
                     *state = BreakerState::HalfOpen {
                         probing: true,
                         since: Instant::now(),
+                        generation,
                     };
-                    Ok(Admission::Probe)
+                    Ok(Admission::Probe(generation))
                 } else {
                     self.0.short_circuits_total.fetch_add(1, Ordering::Relaxed);
                     Err(self.open_refusal(self.0.cooldown - elapsed))
                 }
             }
-            BreakerState::HalfOpen { probing, since } => {
+            BreakerState::HalfOpen {
+                probing,
+                since,
+                generation,
+            } => {
                 if *probing && since.elapsed() < self.probe_reclaim_after() {
                     self.0.short_circuits_total.fetch_add(1, Ordering::Relaxed);
                     Err(self.probe_busy_refusal())
@@ -137,10 +169,14 @@ impl ProviderBreaker {
                     // dropped without `record`/`abandon`) and has sat
                     // past its own cooldown — reclaim the slot rather
                     // than wedge this breaker half-open for the rest
-                    // of the process.
+                    // of the process. A fresh generation means the
+                    // original claim's eventual (late) outcome, if it
+                    // ever arrives, is recognized as stale rather than
+                    // applied to this new claim.
                     *probing = true;
                     *since = Instant::now();
-                    Ok(Admission::Probe)
+                    *generation = self.next_probe_generation();
+                    Ok(Admission::Probe(*generation))
                 }
             }
         }
@@ -159,7 +195,7 @@ impl ProviderBreaker {
                 let elapsed = since.elapsed();
                 (elapsed < self.0.cooldown).then(|| self.open_refusal(self.0.cooldown - elapsed))
             }
-            BreakerState::HalfOpen { probing, since } => (*probing
+            BreakerState::HalfOpen { probing, since, .. } => (*probing
                 && since.elapsed() < self.probe_reclaim_after())
             .then(|| self.probe_busy_refusal()),
         };
@@ -175,8 +211,27 @@ impl ProviderBreaker {
     /// threshold only while closed (an already-open breaker needs no
     /// more evidence, and a stale straggler must not kill a pending
     /// probe).
+    ///
+    /// A [`Admission::Probe`] whose generation no longer matches the
+    /// breaker's current `HalfOpen` slot — reclaimed by a fresher probe
+    /// after this one's caller went quiet, or already settled into
+    /// `Open`/`Closed` off that fresher probe's own outcome — is a
+    /// no-op: a late straggler must not overwrite what the slot's
+    /// current claimant already decided, success or failure alike.
     pub(crate) fn record(&self, admission: Admission, ok: bool) {
         let mut state = self.0.state.lock();
+        if let Admission::Probe(generation) = admission {
+            let current = match &*state {
+                BreakerState::HalfOpen {
+                    generation: current,
+                    ..
+                } => Some(*current),
+                _ => None,
+            };
+            if current != Some(generation) {
+                return;
+            }
+        }
         if ok {
             *state = BreakerState::Closed {
                 consecutive_failures: 0,
@@ -184,7 +239,7 @@ impl ProviderBreaker {
             return;
         }
         match (admission, &mut *state) {
-            (Admission::Probe, _) => {
+            (Admission::Probe(_), _) => {
                 *state = BreakerState::Open {
                     since: Instant::now(),
                 };
@@ -211,10 +266,19 @@ impl ProviderBreaker {
     /// Releases an admitted attempt that produced NO outcome (e.g. a
     /// shutdown abandon): a claimed probe slot must not wedge the
     /// breaker half-open forever, and an abandoned wait is no evidence
-    /// about the provider either way.
+    /// about the provider either way. Generation-gated like
+    /// [`Self::record`]: a straggler's late abandon must not free a
+    /// slot a fresher probe (which reclaimed it after this one went
+    /// quiet) is still actively using — that would let a third caller
+    /// claim a SECOND concurrent probe, breaking "one probe at a time."
     pub(crate) fn abandon(&self, admission: Admission) {
-        if let Admission::Probe = admission
-            && let BreakerState::HalfOpen { probing, .. } = &mut *self.0.state.lock()
+        if let Admission::Probe(generation) = admission
+            && let BreakerState::HalfOpen {
+                probing,
+                generation: current,
+                ..
+            } = &mut *self.0.state.lock()
+            && *current == generation
         {
             *probing = false;
         }
@@ -301,7 +365,7 @@ mod tests {
         let only = breaker.admit().unwrap();
         breaker.record(only, false);
         let probe = breaker.admit().unwrap();
-        assert!(matches!(probe, Admission::Probe));
+        assert!(matches!(probe, Admission::Probe(_)));
         assert!(breaker.admit().is_err(), "one probe at a time");
         breaker.record(probe, false);
         assert_eq!(
@@ -338,7 +402,7 @@ mod tests {
         // dropped — simulating a panic mid-attempt: neither `record`
         // nor `abandon` ever runs.
         let stuck = breaker.admit().unwrap();
-        assert!(matches!(stuck, Admission::Probe));
+        assert!(matches!(stuck, Admission::Probe(_)));
         assert!(
             breaker.admit().is_err(),
             "still busy immediately after the leak"
@@ -350,7 +414,7 @@ mod tests {
         let reclaimed = breaker
             .admit()
             .expect("past its own reclaim window, the stuck slot is reclaimed");
-        assert!(matches!(reclaimed, Admission::Probe));
+        assert!(matches!(reclaimed, Admission::Probe(_)));
         // Reclaiming makes THIS call the new probe — a third
         // concurrent caller still sees it as busy, exactly as if the
         // original probe had never gone missing.
@@ -361,6 +425,87 @@ mod tests {
         breaker.record(reclaimed, true);
         assert_eq!(breaker.snapshot().state, 0, "the new probe closes it");
         assert!(breaker.refusal().is_none(), "closed, nothing in flight");
+    }
+
+    /// A reclaimed probe's own outcome, arriving late (its original
+    /// caller was merely slow, not dead — the request that made
+    /// `admit` reclaim its slot as "unsettled" eventually returns
+    /// anyway), must not overwrite what the FRESHER probe that
+    /// reclaimed the slot already decided — neither a late success
+    /// closing a breaker the fresher probe correctly re-opened, nor a
+    /// late failure re-opening one the fresher probe correctly closed.
+    /// Without the generation guard this recorded unconditionally,
+    /// silently defeating the breaker for as long as a straggler could
+    /// keep arriving after each reclaim.
+    #[test]
+    fn a_stale_reclaimed_probes_late_outcome_cannot_override_the_fresh_one() {
+        let breaker = ProviderBreaker::with_policy("test provider", 1, Duration::ZERO);
+        let only = breaker.admit().unwrap();
+        breaker.record(only, false);
+
+        // Claims the sole half-open probe slot, then goes quiet long
+        // enough to be reclaimed — same setup as
+        // `an_unsettled_probe_is_reclaimed_after_its_own_cooldown`.
+        let stale = breaker.admit().unwrap();
+        std::thread::sleep(MIN_PROBE_RECLAIM * 2);
+        let fresh = breaker
+            .admit()
+            .expect("past its own reclaim window, the stuck slot is reclaimed");
+
+        // The fresh probe fails and re-opens the breaker...
+        breaker.record(fresh, false);
+        assert_eq!(breaker.snapshot().state, 1, "the fresh probe re-opens it");
+
+        // ...and the stale straggler's SUCCESS, arriving after, must
+        // not close what the fresh probe just re-opened.
+        breaker.record(stale, true);
+        assert_eq!(
+            breaker.snapshot().state,
+            1,
+            "a stale straggler's late success must not close a breaker \
+             the fresh probe correctly re-opened"
+        );
+
+        // Mirror case: a fresh probe succeeds and closes the breaker;
+        // a DIFFERENT stale straggler's late failure must not re-open
+        // what it just closed.
+        let breaker = ProviderBreaker::with_policy("test provider", 1, Duration::ZERO);
+        let only = breaker.admit().unwrap();
+        breaker.record(only, false);
+        let stale = breaker.admit().unwrap();
+        std::thread::sleep(MIN_PROBE_RECLAIM * 2);
+        let fresh = breaker.admit().unwrap();
+        breaker.record(fresh, true);
+        assert_eq!(breaker.snapshot().state, 0, "the fresh probe closes it");
+        breaker.record(stale, false);
+        assert_eq!(
+            breaker.snapshot().state,
+            0,
+            "a stale straggler's late failure must not re-open a breaker \
+             the fresh probe correctly closed"
+        );
+    }
+
+    /// The same staleness guard applies to `abandon`: a straggler that
+    /// finally gives up AFTER its slot was reclaimed must not free the
+    /// fresh probe's still-in-flight slot — that would let a third
+    /// caller claim a second, concurrent probe.
+    #[test]
+    fn a_stale_reclaimed_probes_late_abandon_cannot_free_the_fresh_ones_slot() {
+        let breaker = ProviderBreaker::with_policy("test provider", 1, Duration::ZERO);
+        let only = breaker.admit().unwrap();
+        breaker.record(only, false);
+        let stale = breaker.admit().unwrap();
+        std::thread::sleep(MIN_PROBE_RECLAIM * 2);
+        let _fresh = breaker
+            .admit()
+            .expect("past its own reclaim window, the stuck slot is reclaimed");
+
+        breaker.abandon(stale);
+        assert!(
+            breaker.admit().is_err(),
+            "the stale straggler's abandon must not free the fresh probe's slot"
+        );
     }
 
     /// The refusal strings name the subject a caller configured this

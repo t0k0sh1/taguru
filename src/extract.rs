@@ -1298,7 +1298,7 @@ impl Run {
             )
             && out_path.is_file()
         {
-            self.absorb_vocabulary(&out_path);
+            self.absorb_vocabulary(source, &out_path);
             println!("{source}: unchanged, skipped (--force re-extracts)");
             return Ok(Outcome::Unchanged);
         }
@@ -1806,13 +1806,27 @@ impl Run {
     }
 
     /// A skipped document still contributes its labels, so later
-    /// documents keep reusing the same vocabulary.
-    fn absorb_vocabulary(&mut self, out_path: &Path) {
-        if let Ok(batch) = fs::File::open(out_path)
+    /// documents keep reusing the same vocabulary. Its batch file
+    /// already exists and the manifest says it matches this source, but
+    /// the file itself could still be unreadable or corrupt (truncated
+    /// by an interrupted write from an older version, hand-edited,
+    /// bit-rotted) — that failure is reported, not swallowed: a silent
+    /// miss here would shrink every LATER document's "relation labels
+    /// already in use" prompt with no diagnostic at all, degrading
+    /// label reuse for the rest of the run without a trace.
+    fn absorb_vocabulary(&mut self, source: &str, out_path: &Path) {
+        match fs::File::open(out_path)
             .map_err(|error| error.to_string())
             .and_then(|file| crate::ingest::parse_batch(std::io::BufReader::new(file)))
         {
-            self.vocabulary.extend(batch.label_vocabulary());
+            Ok(batch) => self.vocabulary.extend(batch.label_vocabulary()),
+            Err(error) => {
+                eprintln!(
+                    "taguru: extract: {source}: {}: unreadable, so its labels were not \
+                     absorbed into this run's vocabulary: {error}",
+                    out_path.display()
+                );
+            }
         }
     }
 
@@ -2230,41 +2244,23 @@ impl ChatClient {
             // lengthens THIS wait, never dilutes with jitter. `None`
             // means "use the computed jittered backoff instead."
             let retry_after = match request.send(&body) {
+                // Read/parse/shape failures here go through the SAME
+                // retry bookkeeping every other branch uses (`last =
+                // Some(..)`, loop around) instead of `?`-ing straight out
+                // of `complete` — a body that stops streaming or a
+                // truncated/garbled reply on an otherwise-200 response is
+                // exactly the transient trouble this loop exists to
+                // absorb (see this fn's own doc), and `parse_chat_completion`
+                // already tags every one of its failures `Timeout` or
+                // `Transport` to say so.
                 Ok(response) if response.status().as_u16() < 400 => {
-                    let body = read_capped_chat_body(response.into_body())?;
-                    let parsed: serde_json::Value =
-                        serde_json::from_slice(&body).map_err(|error| {
-                            ChatError::new(
-                                ChatFailure::Transport,
-                                format!("chat response unreadable: {error}"),
-                            )
-                        })?;
-                    let content = parsed["choices"][0]["message"]["content"]
-                        .as_str()
-                        .map(str::to_string)
-                        .ok_or_else(|| {
-                            ChatError::new(
-                                ChatFailure::Transport,
-                                "chat response carries no assistant text".to_string(),
-                            )
-                        })?;
-                    let finish_reason = parsed["choices"][0]["finish_reason"]
-                        .as_str()
-                        .map(str::to_string);
-                    let usage =
-                        parsed
-                            .get("usage")
-                            .filter(|value| value.is_object())
-                            .map(|usage| TokenUsage {
-                                input_tokens: usage["prompt_tokens"].as_u64(),
-                                output_tokens: usage["completion_tokens"].as_u64(),
-                                total_tokens: usage["total_tokens"].as_u64(),
-                            });
-                    return Ok(ChatCompletion {
-                        content,
-                        finish_reason,
-                        usage,
-                    });
+                    match parse_chat_completion(response.into_body()) {
+                        Ok(completion) => return Ok(completion),
+                        Err(error) => {
+                            last = Some(error);
+                            None
+                        }
+                    }
                 }
                 Ok(response) => {
                     let code = response.status().as_u16();
@@ -2312,6 +2308,49 @@ impl ChatClient {
             format!("after {RETRY_ATTEMPTS} attempts: {}", last.message),
         ))
     }
+}
+
+/// Parses a successful (status < 400) chat completion body: read, JSON
+/// parse, then pull `content`/`finish_reason`/`usage` out of the
+/// OpenAI-shaped envelope. Split out of [`ChatClient::complete`] so its
+/// failures — a body that stops streaming mid-read, a truncated or
+/// garbled JSON reply, one missing `choices[0].message.content` — return
+/// a plain [`ChatError`] instead of `?`-ing out of `complete` itself,
+/// which would skip its retry ladder entirely for exactly the kind of
+/// one-off transient trouble that ladder exists to absorb.
+fn parse_chat_completion(body: ureq::Body) -> Result<ChatCompletion, ChatError> {
+    let bytes = read_capped_chat_body(body)?;
+    let parsed: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
+        ChatError::new(
+            ChatFailure::Transport,
+            format!("chat response unreadable: {error}"),
+        )
+    })?;
+    let content = parsed["choices"][0]["message"]["content"]
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| {
+            ChatError::new(
+                ChatFailure::Transport,
+                "chat response carries no assistant text".to_string(),
+            )
+        })?;
+    let finish_reason = parsed["choices"][0]["finish_reason"]
+        .as_str()
+        .map(str::to_string);
+    let usage = parsed
+        .get("usage")
+        .filter(|value| value.is_object())
+        .map(|usage| TokenUsage {
+            input_tokens: usage["prompt_tokens"].as_u64(),
+            output_tokens: usage["completion_tokens"].as_u64(),
+            total_tokens: usage["total_tokens"].as_u64(),
+        });
+    Ok(ChatCompletion {
+        content,
+        finish_reason,
+        usage,
+    })
 }
 
 /// The `--diagnostics-out`/`TAGURU_EXTRACT_DIAGNOSTICS` JSONL sidecar

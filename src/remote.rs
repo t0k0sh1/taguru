@@ -30,6 +30,18 @@ const HEALTH_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(4);
 /// here instead of guessing at the server's default.
 const LIST_PAGE_LIMIT: usize = 1000;
 
+/// Every response this module reads is capped here, explicitly —
+/// `ureq::Body::read_to_string()`'s own default (10 MiB, wired into
+/// its `MAX_BODY_SIZE`) is otherwise silent and easy to forget about.
+/// An envelope response (an association batch, an error body) is
+/// small; `export --url`'s raw stream (`Api::get_raw`) is the one
+/// exception — a whole context in one response, with no server-side
+/// ceiling on how large a context may grow — so this is sized as a
+/// generous safety net against a runaway/malicious server rather than
+/// a real business limit. `BodyExceedsLimit` (not a silent truncation)
+/// is what a caller sees past it.
+const REMOTE_RESPONSE_CAP_BYTES: u64 = 256 * 1024 * 1024;
+
 /// ADR 0002 §7: a URL carrying userinfo (`https://user:token@host/`)
 /// is refused — credentials on the command line are readable from
 /// `ps` and shell history for the lifetime of the terminal, the exact
@@ -187,6 +199,8 @@ impl Api {
         let retry_after = retry_after_header(&response);
         let text = response
             .body_mut()
+            .with_config()
+            .limit(REMOTE_RESPONSE_CAP_BYTES)
             .read_to_string()
             .map_err(|error| format!("{url}: unreadable response: {error}"))?;
         if status != 200 {
@@ -345,19 +359,40 @@ impl Api {
         let url = self
             .url_with_query(&["import"], query)
             .map_err(ImportFailure::InvalidUrl)?;
+        // `Expect: 100-continue` (RFC 9110 §10.1.1): ureq waits up to 1s
+        // for either "100 Continue" or a final status before writing the
+        // body at all. A chunk can be a few MiB, and every real-world
+        // "body too large" front door (nginx `client_max_body_size`, an
+        // ALB) answers a too-large `Content-Length` with 413 during that
+        // wait, closing the connection without ever reading the body —
+        // which is exactly what makes the 413 safe to adapt to (ADR 0002
+        // §9). Without this header the write races the front door's
+        // rejection: the body starts flowing immediately, the 413 lands
+        // mid-write, and the client sees a bare connection reset instead
+        // of the 413 it was always going to get. A server that ignores
+        // the header (or answers 100-continue right away, as this
+        // server's own axum stack does) costs at most that 1s wait, once
+        // per chunk — `import --url` is a deliberate, infrequent CLI
+        // invocation, not a hot path.
         let request = self.bearer(
             self.agent
                 .post(&url)
-                .header("Content-Type", "application/x-ndjson"),
+                .header("Content-Type", "application/x-ndjson")
+                .header("Expect", "100-continue"),
         );
         let mut response = request
             .send(stream)
             .map_err(|error| ImportFailure::Transport(format!("{url}: {error}")))?;
         let status = response.status().as_u16();
         let retry_after = retry_after_header(&response);
-        let text = response.body_mut().read_to_string().map_err(|error| {
-            ImportFailure::Transport(format!("{url}: unreadable response: {error}"))
-        })?;
+        let text = response
+            .body_mut()
+            .with_config()
+            .limit(REMOTE_RESPONSE_CAP_BYTES)
+            .read_to_string()
+            .map_err(|error| {
+                ImportFailure::Transport(format!("{url}: unreadable response: {error}"))
+            })?;
         let parsed: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
         if status == 413 {
             return Err(ImportFailure::TooLarge(status_error(
@@ -408,7 +443,12 @@ impl Api {
         if response.status().as_u16() != 200 {
             return None;
         }
-        let body = response.body_mut().read_to_string().ok()?;
+        let body = response
+            .body_mut()
+            .with_config()
+            .limit(REMOTE_RESPONSE_CAP_BYTES)
+            .read_to_string()
+            .ok()?;
         skew_warning(verb, &self.base, env!("CARGO_PKG_VERSION"), &body)
     }
 
@@ -512,6 +552,8 @@ fn finish(
     let retry_after = retry_after_header(&response);
     let text = response
         .body_mut()
+        .with_config()
+        .limit(REMOTE_RESPONSE_CAP_BYTES)
         .read_to_string()
         .map_err(|error| ApiFailure::Other(format!("{url}: unreadable response: {error}")))?;
     let parsed: Value = serde_json::from_str(&text).unwrap_or(Value::Null);

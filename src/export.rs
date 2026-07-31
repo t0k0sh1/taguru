@@ -527,8 +527,17 @@ pub(crate) fn run(args: &[String]) -> i32 {
                 print!("{USAGE}");
                 return 0;
             }
+            // A flag given twice is a usage error, never a silent
+            // last-wins — matching `serve`/`route`'s own `--config`
+            // guard and `benchmark`'s convention throughout: a
+            // scripted invocation that accidentally concatenates two
+            // flag sets (e.g. two `--out`s) must not silently export
+            // to whichever one happened to land last.
             "--out" => match rest.next() {
-                Some(path) => out = Some(PathBuf::from(path)),
+                Some(path) if out.is_none() => out = Some(PathBuf::from(path)),
+                Some(_) => {
+                    return crate::config::subcommand_usage_error("export", "--out given twice");
+                }
                 None => {
                     return crate::config::subcommand_usage_error(
                         "export",
@@ -537,7 +546,10 @@ pub(crate) fn run(args: &[String]) -> i32 {
                 }
             },
             "--config" => match rest.next() {
-                Some(path) => config = Some(PathBuf::from(path)),
+                Some(path) if config.is_none() => config = Some(PathBuf::from(path)),
+                Some(_) => {
+                    return crate::config::subcommand_usage_error("export", "--config given twice");
+                }
                 None => {
                     return crate::config::subcommand_usage_error(
                         "export",
@@ -548,7 +560,12 @@ pub(crate) fn run(args: &[String]) -> i32 {
             // Trailing '/' trimmed the same way calibrate/communities
             // already do — a joined path segment must not double up.
             "--url" => match rest.next() {
-                Some(value) => url = Some(value.trim_end_matches('/').to_string()),
+                Some(value) if url.is_none() => {
+                    url = Some(value.trim_end_matches('/').to_string());
+                }
+                Some(_) => {
+                    return crate::config::subcommand_usage_error("export", "--url given twice");
+                }
                 None => {
                     return crate::config::subcommand_usage_error(
                         "export",
