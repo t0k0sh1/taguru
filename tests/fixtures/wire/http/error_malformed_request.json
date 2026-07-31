@@ -1,0 +1,19 @@
+{
+  "contract": "http_contract",
+  "method": "POST",
+  "operation": "error_malformed_request",
+  "request": {
+    "budget": "not-an-object",
+    "origins": [
+      "x"
+    ]
+  },
+  "response": {
+    "code": "malformed_request",
+    "error": "Failed to deserialize the JSON body into the target type: budget: invalid type: string \"not-an-object\", expected struct BudgetRequest at line 1 column 25",
+    "status": "error",
+    "time": 0.0
+  },
+  "route": "/contexts/{name}/evidence",
+  "status": 422
+}

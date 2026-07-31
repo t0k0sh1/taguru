@@ -1,0 +1,43 @@
+{
+  "contract": "http_contract",
+  "method": "POST",
+  "operation": "activate",
+  "request": {
+    "origins": [
+      "alpha"
+    ]
+  },
+  "response": {
+    "result": {
+      "matches": [
+        {
+          "association": {
+            "attributions": [
+              {
+                "count": 1,
+                "paragraph": 0,
+                "section": null,
+                "source": "doc.md",
+                "weight": 2.0
+              }
+            ],
+            "count": 1,
+            "label": "connects_to",
+            "object": "beta",
+            "subject": "alpha",
+            "weight": 2.0
+          },
+          "path": [
+            "alpha"
+          ],
+          "strength": 1.0
+        }
+      ],
+      "total": 1
+    },
+    "status": "ok",
+    "time": 0.0
+  },
+  "route": "/contexts/{name}/activate",
+  "status": 200
+}

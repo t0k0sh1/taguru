@@ -34,6 +34,26 @@ All three run in CI ([.github/workflows/sdk.yml](.github/workflows/sdk.yml));
 a change that adds or renames a public SDK method updates
 `surface.yaml` in the same commit.
 
+## Wire-contract fixtures
+
+`http_contract: 1`/`mcp_contract: 1`'s public shape — every enveloped
+HTTP response/request/error and the MCP-specific envelope, including
+#216's evidence-assembly package — is pinned as golden fixtures in
+[tests/fixtures/wire/](tests/fixtures/wire/), generated from a live
+server and read identically by Rust, Python, and TypeScript:
+
+```sh
+TAGURU_UPDATE_WIRE_FIXTURES=1 cargo test --test http_api contract  # regenerate + Rust check
+python sdk/spec/check_contract.py --check                          # fixtures <-> shapes.json
+python sdk/spec/check_contract.py --base origin/main                # breaking-change guard
+```
+
+All three run in CI (`check` and the new `contract-guard` job in
+[.github/workflows/ci.yml](.github/workflows/ci.yml)); a change to a
+pinned shape updates the fixtures in the same commit, classified per
+[tests/fixtures/wire/README.md](tests/fixtures/wire/README.md) — see
+that file before regenerating.
+
 ## Running the examples
 
 [examples/](examples/) holds library-level examples that drive

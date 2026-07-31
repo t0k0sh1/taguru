@@ -1,0 +1,184 @@
+{
+  "contract": "http_contract",
+  "method": "POST",
+  "operation": "evidence_contradiction_group",
+  "request": {
+    "origins": [
+      "猫"
+    ]
+  },
+  "response": {
+    "result": {
+      "budget": {
+        "bytes_used": 1322,
+        "items_used": 2,
+        "limits": {
+          "max_bytes": 65536,
+          "max_items": 40,
+          "max_tokens": 4000
+        },
+        "tokens_used": 343
+      },
+      "citations": [
+        {
+          "citation": {
+            "section": null,
+            "source": "s1.md",
+            "text": "猫は哺乳類である。"
+          },
+          "paragraph": 0,
+          "source": "s1.md"
+        },
+        {
+          "citation": {
+            "section": null,
+            "source": "s2.md",
+            "text": "猫は爬虫類だと主張する文献もある。"
+          },
+          "paragraph": 0,
+          "source": "s2.md"
+        }
+      ],
+      "items": [
+        {
+          "association": {
+            "attributions": [
+              {
+                "count": 1,
+                "paragraph": 0,
+                "section": null,
+                "source": "s1.md",
+                "weight": 1.0
+              }
+            ],
+            "count": 1,
+            "label": "is_a",
+            "object": "哺乳類",
+            "subject": "猫",
+            "weight": 1.0
+          },
+          "bytes": 532,
+          "candidate_id": "association\u0000猫\u0000is_a\u0000哺乳類",
+          "citation_refs": [
+            {
+              "paragraph": 0,
+              "source": "s1.md"
+            }
+          ],
+          "contradicts": [
+            "association\u0000猫\u0000is_a\u0000爬虫類"
+          ],
+          "corroboration": {
+            "attributions": [
+              {
+                "paragraph": 0,
+                "source": "s1.md"
+              }
+            ],
+            "sources": [
+              "s1.md"
+            ]
+          },
+          "estimated_tokens": 136,
+          "fused_rank": 1,
+          "kind": "association",
+          "lane_ranks": [
+            {
+              "lane": "graph_activate",
+              "rank": 1
+            }
+          ]
+        },
+        {
+          "association": {
+            "attributions": [
+              {
+                "count": 1,
+                "paragraph": 0,
+                "section": null,
+                "source": "s2.md",
+                "weight": 1.0
+              }
+            ],
+            "count": 1,
+            "label": "is_a",
+            "object": "爬虫類",
+            "subject": "猫",
+            "weight": 1.0
+          },
+          "bytes": 532,
+          "candidate_id": "association\u0000猫\u0000is_a\u0000爬虫類",
+          "citation_refs": [
+            {
+              "paragraph": 0,
+              "source": "s2.md"
+            }
+          ],
+          "contradicts": [
+            "association\u0000猫\u0000is_a\u0000哺乳類"
+          ],
+          "corroboration": {
+            "attributions": [
+              {
+                "paragraph": 0,
+                "source": "s2.md"
+              }
+            ],
+            "sources": [
+              "s2.md"
+            ]
+          },
+          "estimated_tokens": 136,
+          "fused_rank": 2,
+          "kind": "association",
+          "lane_ranks": [
+            {
+              "lane": "graph_activate",
+              "rank": 2
+            }
+          ]
+        }
+      ],
+      "omitted": [],
+      "omitted_by_reason": {},
+      "omitted_total": 0,
+      "plan": {
+        "lanes": {
+          "activate": {
+            "ran": true
+          },
+          "citations": {
+            "ran": true
+          },
+          "communities": {
+            "ran": false,
+            "reason": "include_communities was false"
+          },
+          "passages": {
+            "ran": true
+          },
+          "query": {
+            "ran": false,
+            "reason": "no 'labels' given"
+          },
+          "resolve": {
+            "ran": true
+          }
+        },
+        "reranker": {
+          "configured": false,
+          "ran": false
+        },
+        "selection": {
+          "contradiction_groups": 1,
+          "dedup_dropped": 0,
+          "diversity_tier_width": 10
+        }
+      }
+    },
+    "status": "ok",
+    "time": 0.0
+  },
+  "route": "/contexts/{name}/evidence",
+  "status": 200
+}

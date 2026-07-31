@@ -1,0 +1,18 @@
+{
+  "contract": "http_contract",
+  "method": "POST",
+  "operation": "error_no_context",
+  "request": {
+    "origins": [
+      "x"
+    ]
+  },
+  "response": {
+    "code": "no_context",
+    "error": "context 'does-not-exist' not found",
+    "status": "error",
+    "time": 0.0
+  },
+  "route": "/contexts/{name}/evidence",
+  "status": 404
+}

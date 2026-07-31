@@ -1,0 +1,94 @@
+{
+  "contract": "http_contract",
+  "method": "POST",
+  "operation": "evidence_communities_degrade_and_rerank_reason",
+  "request": {
+    "include_communities": true,
+    "origins": [
+      "alpha"
+    ],
+    "rerank": {
+      "model": "not-configured"
+    }
+  },
+  "response": {
+    "result": {
+      "budget": {
+        "bytes_used": 274,
+        "items_used": 1,
+        "limits": {
+          "max_bytes": 65536,
+          "max_items": 40,
+          "max_tokens": 4000
+        },
+        "tokens_used": 69
+      },
+      "citations": [],
+      "items": [
+        {
+          "association": {
+            "attributions": [],
+            "count": 1,
+            "label": "rel",
+            "object": "beta",
+            "subject": "alpha",
+            "weight": 1.0
+          },
+          "bytes": 270,
+          "candidate_id": "association\u0000alpha\u0000rel\u0000beta",
+          "citation_refs": [],
+          "estimated_tokens": 68,
+          "fused_rank": 1,
+          "kind": "association",
+          "lane_ranks": [
+            {
+              "lane": "graph_activate",
+              "rank": 1
+            }
+          ]
+        }
+      ],
+      "omitted": [],
+      "omitted_by_reason": {},
+      "omitted_total": 0,
+      "plan": {
+        "lanes": {
+          "activate": {
+            "ran": true
+          },
+          "citations": {
+            "ran": true
+          },
+          "communities": {
+            "ran": false,
+            "reason": "no communities artifact for 'comm-corpus': context 'comm-corpus::communities' does not exist — run `taguru communities` to build it"
+          },
+          "passages": {
+            "ran": true
+          },
+          "query": {
+            "ran": false,
+            "reason": "no 'labels' given"
+          },
+          "resolve": {
+            "ran": true
+          }
+        },
+        "reranker": {
+          "configured": false,
+          "ran": false,
+          "reason": "no reranker provider is configured on this server (#307); the deterministic order was used"
+        },
+        "selection": {
+          "contradiction_groups": 0,
+          "dedup_dropped": 0,
+          "diversity_tier_width": 10
+        }
+      }
+    },
+    "status": "ok",
+    "time": 0.0
+  },
+  "route": "/contexts/{name}/evidence",
+  "status": 200
+}

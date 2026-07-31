@@ -76,6 +76,26 @@ Entries that change an on-disk format or a response shape say so.
   against. Locked to the server's own version by
   `sdk/spec/check_versions.py`, the same way Python's
   `taguru.__version__` already is.
+- Golden wire-contract fixtures and a breaking-change CI guard (#301,
+  ADR 0005 §9): `tests/fixtures/wire/` pins the current `http_contract:
+  1`/`mcp_contract: 1` shapes — thirteen representative HTTP/MCP
+  operations, including five #216 evidence-assembly cases (mixed
+  lanes, budget-constrained, duplicate-passage suppression, a
+  contradiction group, and the communities/rerank degrade) — generated
+  from a live server (`tests/http_api/contract.rs`,
+  `TAGURU_UPDATE_WIRE_FIXTURES=1 cargo test --test http_api contract`)
+  and read identically by Python
+  (`sdk/python/tests/unit/test_wire_contract.py`) and TypeScript
+  (`sdk/typescript/tests/unit/wire-contract.test.ts`). New
+  `sdk/spec/check_contract.py` diffs the committed fixtures against a
+  base ref and fails a PR that ships a field removal, a container-shape
+  change (array ↔ object), a known enum value disappearing, a newly
+  required request field, or a removed operation without a matching
+  `HTTP_CONTRACT`/`MCP_CONTRACT` bump in `src/api.rs` — the mechanical
+  half of ADR 0005 §4's compatible/breaking table, run in CI's new
+  `contract-guard` job. `tests/fixtures/wire/README.md` documents the
+  update procedure, including the contract-version judgment call ADR
+  0005 §4/§7 already require.
 
 ### Changed
 - The pre-1.0 compatibility guarantee (`src/llm-protocol.md`

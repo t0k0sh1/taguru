@@ -1,0 +1,136 @@
+{
+  "contract": "http_contract",
+  "method": "POST",
+  "operation": "evidence_budget_constrained",
+  "request": {
+    "budget": {
+      "max_items": 2
+    },
+    "origins": [
+      "s0",
+      "s1",
+      "s2",
+      "s3",
+      "s4"
+    ]
+  },
+  "response": {
+    "result": {
+      "budget": {
+        "bytes_used": 525,
+        "items_used": 2,
+        "limits": {
+          "max_bytes": 65536,
+          "max_items": 2,
+          "max_tokens": 4000
+        },
+        "tokens_used": 132
+      },
+      "citations": [],
+      "items": [
+        {
+          "association": {
+            "attributions": [],
+            "count": 1,
+            "label": "rel",
+            "object": "o0",
+            "subject": "s0",
+            "weight": 1.0
+          },
+          "bytes": 260,
+          "candidate_id": "association\u0000s0\u0000rel\u0000o0",
+          "citation_refs": [],
+          "estimated_tokens": 65,
+          "fused_rank": 1,
+          "kind": "association",
+          "lane_ranks": [
+            {
+              "lane": "graph_activate",
+              "rank": 1
+            }
+          ]
+        },
+        {
+          "association": {
+            "attributions": [],
+            "count": 1,
+            "label": "rel",
+            "object": "o1",
+            "subject": "s1",
+            "weight": 1.0
+          },
+          "bytes": 260,
+          "candidate_id": "association\u0000s1\u0000rel\u0000o1",
+          "citation_refs": [],
+          "estimated_tokens": 65,
+          "fused_rank": 2,
+          "kind": "association",
+          "lane_ranks": [
+            {
+              "lane": "graph_activate",
+              "rank": 2
+            }
+          ]
+        }
+      ],
+      "omitted": [
+        {
+          "candidate_id": "association\u0000s2\u0000rel\u0000o2",
+          "kind": "association",
+          "reason": "budget_exceeded"
+        },
+        {
+          "candidate_id": "association\u0000s3\u0000rel\u0000o3",
+          "kind": "association",
+          "reason": "budget_exceeded"
+        },
+        {
+          "candidate_id": "association\u0000s4\u0000rel\u0000o4",
+          "kind": "association",
+          "reason": "budget_exceeded"
+        }
+      ],
+      "omitted_by_reason": {
+        "budget_exceeded": 3
+      },
+      "omitted_total": 3,
+      "plan": {
+        "lanes": {
+          "activate": {
+            "ran": true
+          },
+          "citations": {
+            "ran": true
+          },
+          "communities": {
+            "ran": false,
+            "reason": "include_communities was false"
+          },
+          "passages": {
+            "ran": true
+          },
+          "query": {
+            "ran": false,
+            "reason": "no 'labels' given"
+          },
+          "resolve": {
+            "ran": true
+          }
+        },
+        "reranker": {
+          "configured": false,
+          "ran": false
+        },
+        "selection": {
+          "contradiction_groups": 0,
+          "dedup_dropped": 0,
+          "diversity_tier_width": 1
+        }
+      }
+    },
+    "status": "ok",
+    "time": 0.0
+  },
+  "route": "/contexts/{name}/evidence",
+  "status": 200
+}

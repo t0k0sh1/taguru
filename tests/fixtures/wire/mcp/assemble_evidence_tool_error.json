@@ -1,0 +1,18 @@
+{
+  "contract": "mcp_contract",
+  "operation": "assemble_evidence_tool_error",
+  "request": {
+    "context": "mcp-error-corpus"
+  },
+  "response": {
+    "content": [
+      {
+        "text": "missing required argument 'origins'",
+        "type": "text"
+      }
+    ],
+    "isError": true
+  },
+  "route": "tools/call assemble_evidence",
+  "status": 200
+}
