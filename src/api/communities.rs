@@ -231,7 +231,7 @@ pub struct CommunityRevisions {
 /// fields are absent when the artifact is mid-rewrite and the summary
 /// landed before its manifest line — served honestly rather than
 /// dropped.
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CommunityHit {
     /// Community id (`L0-3`) — its summary source is
     /// `community:L0-3` on the artifact.
@@ -255,7 +255,7 @@ pub struct CommunityHit {
     pub members_truncated: bool,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CommunityHitMember {
     pub name: String,
     pub strength: f64,

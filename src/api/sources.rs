@@ -96,7 +96,7 @@ pub struct CitationRequest {
 /// paragraph falls outside every section the source has stored, or when
 /// it stored none at all; the key is never omitted, so callers can
 /// rely on it always being present.
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Citation {
     pub text: String,
     pub source: String,
@@ -422,7 +422,7 @@ fn filter_key_params(
 /// when the semantic lane ran, the raw BM25 score otherwise; `lanes`
 /// carries each lane's own rank and raw score — evidence for the
 /// reading LLM, the same posture as resolve's tiers.
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct PassageHit {
     pub source: String,
     pub paragraph: u32,
@@ -431,7 +431,7 @@ pub struct PassageHit {
     pub lanes: PassageLanes,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct PassageLanes {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bm25: Option<LaneEvidence>,
@@ -441,7 +441,7 @@ pub struct PassageLanes {
 
 /// Where one lane put this hit: 1-based rank within the lane's own
 /// candidate pool, and that lane's raw score (BM25, or cosine).
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct LaneEvidence {
     pub rank: usize,
     pub score: f32,

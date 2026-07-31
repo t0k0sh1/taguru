@@ -1518,7 +1518,7 @@ fn cross_search_concurrency() -> usize {
 /// paragraph locator, or when the locator falls outside every section
 /// marker the ingest batch recorded for that source — never a
 /// fabricated label.
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct AttributionOut {
     pub source: String,
     /// This source's raw cumulative contribution, NOT averaged — divide
@@ -1532,7 +1532,7 @@ pub struct AttributionOut {
 
 /// `Association`'s wire shape: identical, except its attributions carry
 /// a resolved section label (see [`AttributionOut`]).
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct AssociationOut {
     pub subject: String,
     pub label: String,
