@@ -1,0 +1,46 @@
+{
+  "contract": "http_contract",
+  "method": "POST",
+  "operation": "sources_search",
+  "request": {
+    "query": "酒造"
+  },
+  "response": {
+    "result": {
+      "hits": [
+        {
+          "lanes": {
+            "bm25": {
+              "rank": 1,
+              "score": 0.28768212
+            }
+          },
+          "paragraph": 0,
+          "score": 0.28768212,
+          "source": "doc.md",
+          "text": "青嶺酒造は雲居県霧沢町の蔵元である。"
+        }
+      ],
+      "plan": {
+        "contexts": [
+          {
+            "context": "corpus-c",
+            "lanes": {
+              "bm25": {
+                "ran": true
+              },
+              "vector": {
+                "ran": false,
+                "reason": "no embedding provider is configured"
+              }
+            }
+          }
+        ]
+      }
+    },
+    "status": "ok",
+    "time": 0.0
+  },
+  "route": "/contexts/{name}/sources/search",
+  "status": 200
+}

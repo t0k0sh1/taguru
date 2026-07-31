@@ -1,0 +1,103 @@
+{
+  "contract": "http_contract",
+  "method": "POST",
+  "operation": "evidence_duplicate_passage",
+  "request": {
+    "origins": [],
+    "text_fallback_query": "quick brown fox"
+  },
+  "response": {
+    "result": {
+      "budget": {
+        "bytes_used": 339,
+        "items_used": 1,
+        "limits": {
+          "max_bytes": 65536,
+          "max_items": 40,
+          "max_tokens": 4000
+        },
+        "tokens_used": 85
+      },
+      "citations": [],
+      "items": [
+        {
+          "bytes": 335,
+          "candidate_id": "passage\u0000dup-corpus\u0000a.md\u00000",
+          "citation_refs": [],
+          "estimated_tokens": 84,
+          "fused_rank": 1,
+          "kind": "passage",
+          "lane_ranks": [
+            {
+              "lane": "passage_bm25",
+              "rank": 1
+            }
+          ],
+          "passage": {
+            "lanes": {
+              "bm25": {
+                "rank": 1,
+                "score": 0.54696476
+              }
+            },
+            "paragraph": 0,
+            "score": 0.54696476,
+            "source": "a.md",
+            "text": "the quick brown fox jumps over the lazy dog"
+          }
+        }
+      ],
+      "omitted": [
+        {
+          "candidate_id": "passage\u0000dup-corpus\u0000b.md\u00000",
+          "duplicate_of": "passage\u0000dup-corpus\u0000a.md\u00000",
+          "kind": "passage",
+          "reason": "duplicate_passage"
+        }
+      ],
+      "omitted_by_reason": {
+        "duplicate_passage": 1
+      },
+      "omitted_total": 1,
+      "plan": {
+        "lanes": {
+          "activate": {
+            "ran": false,
+            "reason": "no anchors resolved from 'origins'"
+          },
+          "citations": {
+            "ran": true
+          },
+          "communities": {
+            "ran": false,
+            "reason": "include_communities was false"
+          },
+          "passages": {
+            "ran": true
+          },
+          "query": {
+            "ran": false,
+            "reason": "no anchors resolved from 'origins'"
+          },
+          "resolve": {
+            "ran": false,
+            "reason": "origins was empty"
+          }
+        },
+        "reranker": {
+          "configured": false,
+          "ran": false
+        },
+        "selection": {
+          "contradiction_groups": 0,
+          "dedup_dropped": 0,
+          "diversity_tier_width": 10
+        }
+      }
+    },
+    "status": "ok",
+    "time": 0.0
+  },
+  "route": "/contexts/{name}/evidence",
+  "status": 200
+}

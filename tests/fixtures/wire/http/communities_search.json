@@ -1,0 +1,59 @@
+{
+  "contract": "http_contract",
+  "method": "POST",
+  "operation": "communities_search",
+  "request": {
+    "query": "酒造りの歴史"
+  },
+  "response": {
+    "result": {
+      "algorithm": "louvain-cc/1",
+      "derived": "corpus-d::communities",
+      "hits": [
+        {
+          "community": "L0-0",
+          "concept_count": 2,
+          "level": 0,
+          "members": [
+            {
+              "name": "a1",
+              "strength": 6.0
+            },
+            {
+              "name": "a2",
+              "strength": 4.0
+            }
+          ],
+          "paragraph": 0,
+          "score": 3.9352872,
+          "text": "この共同体のテーマは酒造りの歴史です。"
+        }
+      ],
+      "plan": {
+        "contexts": [
+          {
+            "context": "corpus-d",
+            "lanes": {
+              "bm25": {
+                "ran": true
+              },
+              "vector": {
+                "ran": false,
+                "reason": "no embedding provider is configured"
+              }
+            }
+          }
+        ]
+      },
+      "revision": {
+        "current_graph": 1,
+        "recorded_graph": 1
+      },
+      "stale": false
+    },
+    "status": "ok",
+    "time": 0.0
+  },
+  "route": "/contexts/{name}/communities/search",
+  "status": 200
+}

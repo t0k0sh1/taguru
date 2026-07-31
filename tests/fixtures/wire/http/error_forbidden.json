@@ -1,0 +1,19 @@
+{
+  "contract": "http_contract",
+  "method": "POST",
+  "operation": "error_forbidden",
+  "request": {
+    "include_communities": true,
+    "origins": [
+      "a"
+    ]
+  },
+  "response": {
+    "code": "forbidden",
+    "error": "this key's scope does not extend to the artifact context 'forbidden-corpus::communities' — grant it alongside 'forbidden-corpus'",
+    "status": "error",
+    "time": 0.0
+  },
+  "route": "/contexts/{name}/evidence",
+  "status": 403
+}

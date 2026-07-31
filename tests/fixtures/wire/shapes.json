@@ -1,0 +1,63 @@
+{
+  "http_contract": 1,
+  "mcp_contract": 1,
+  "volatile_fields": [
+    "time",
+    "server",
+    "version",
+    "last_read_epoch",
+    "last_write_epoch"
+  ],
+  "required_request_fields": {
+    "/contexts/{name}/recall": ["cue"],
+    "/contexts/{name}/explore": ["origins"],
+    "/contexts/{name}/activate": ["origins"],
+    "/contexts/{name}/sources/search": ["query"],
+    "/contexts/{name}/communities/search": ["query"],
+    "/contexts/{name}/evidence": ["origins"]
+  },
+  "enums": {
+    "response.code": [
+      "malformed_request",
+      "invalid_argument",
+      "over_limit",
+      "unauthorized",
+      "forbidden",
+      "no_context",
+      "no_source",
+      "no_paragraph",
+      "no_group",
+      "unknown_path",
+      "method_not_allowed",
+      "timeout",
+      "already_exists",
+      "conflict",
+      "payload_too_large",
+      "rate_limited",
+      "internal",
+      "embeddings_unconfigured",
+      "embeddings_failed",
+      "overloaded",
+      "unhealthy",
+      "storage_full",
+      "maintenance",
+      "read_only_replica",
+      "shard_unreachable"
+    ],
+    "response.result.items[].kind": ["association", "passage", "community"],
+    "response.result.items[].lane_ranks[].lane": [
+      "graph_query",
+      "graph_activate",
+      "passage_bm25",
+      "passage_vector",
+      "passage_fused",
+      "community"
+    ],
+    "response.result.omitted[].reason": [
+      "duplicate_passage",
+      "budget_exceeded",
+      "contradiction_group_exceeds_budget"
+    ],
+    "response.result.omitted[].kind": ["association", "passage", "community"]
+  }
+}

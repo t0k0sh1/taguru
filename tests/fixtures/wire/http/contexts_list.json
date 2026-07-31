@@ -1,0 +1,62 @@
+{
+  "contract": "http_contract",
+  "method": "GET",
+  "operation": "contexts_list",
+  "request": null,
+  "response": {
+    "result": {
+      "contexts": [
+        {
+          "description": "wire-contract corpus",
+          "dice_floor": null,
+          "loaded": true,
+          "name": "corpus-a",
+          "pinned": false,
+          "revision": {
+            "config": 0,
+            "graph": 1,
+            "passages": 0
+          },
+          "semantic_floor": null,
+          "stats": {
+            "arena_slack": 0,
+            "associations": 1,
+            "concepts": 2,
+            "dead_attributions": 0,
+            "dead_edges": 0,
+            "footprint_bytes": 1804,
+            "label_sample": [
+              "connects_to"
+            ],
+            "labels": 1,
+            "sources": 1,
+            "top_concepts": [
+              {
+                "count": 1,
+                "label": "alpha"
+              },
+              {
+                "count": 1,
+                "label": "beta"
+              }
+            ],
+            "unsourced_edges": 0,
+            "unsourced_weight": 0.0
+          },
+          "usage": {
+            "empty_reads": 0,
+            "last_read_epoch": 0,
+            "last_write_epoch": 0,
+            "reads": 1,
+            "writes": 1
+          }
+        }
+      ],
+      "total": 1
+    },
+    "status": "ok",
+    "time": 0.0
+  },
+  "route": "/contexts",
+  "status": 200
+}

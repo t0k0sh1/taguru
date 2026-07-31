@@ -1,0 +1,12 @@
+{
+  "contract": "http_contract",
+  "method": "GET",
+  "operation": "health",
+  "request": null,
+  "response": {
+    "status": "ok",
+    "version": "0.0.0"
+  },
+  "route": "/health",
+  "status": 200
+}

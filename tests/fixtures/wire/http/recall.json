@@ -1,0 +1,40 @@
+{
+  "contract": "http_contract",
+  "method": "POST",
+  "operation": "recall",
+  "request": {
+    "cue": "alpha"
+  },
+  "response": {
+    "result": {
+      "matches": [
+        {
+          "attributions": [
+            {
+              "count": 1,
+              "paragraph": 0,
+              "section": null,
+              "source": "doc.md",
+              "weight": 2.0
+            }
+          ],
+          "count": 1,
+          "label": "connects_to",
+          "object": "beta",
+          "subject": "alpha",
+          "weight": 2.0
+        }
+      ],
+      "plan": {
+        "contexts": [
+          "corpus-a"
+        ]
+      },
+      "total": 1
+    },
+    "status": "ok",
+    "time": 0.0
+  },
+  "route": "/contexts/{name}/recall",
+  "status": 200
+}

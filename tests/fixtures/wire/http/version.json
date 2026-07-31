@@ -1,0 +1,44 @@
+{
+  "contract": "http_contract",
+  "method": "GET",
+  "operation": "version",
+  "request": null,
+  "response": {
+    "batch_formats": [
+      1
+    ],
+    "communities_formats": [
+      1
+    ],
+    "http_contract": {
+      "current": 1,
+      "supported": [
+        1
+      ]
+    },
+    "image_formats": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ],
+    "mcp_contract": {
+      "current": 1,
+      "supported": [
+        1
+      ]
+    },
+    "mcp_protocol": {
+      "supported": [
+        "2024-11-05",
+        "2025-03-26",
+        "2025-06-18"
+      ]
+    },
+    "server": "0.0.0"
+  },
+  "route": "/version",
+  "status": 200
+}

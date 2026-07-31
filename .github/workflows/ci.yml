@@ -52,6 +52,36 @@ jobs:
         with:
           command: check advisories
 
+  # Independent of `check`: no Rust toolchain needed, and this only
+  # reads the wire fixtures `cargo test` (in `check`, above) already
+  # verified match the live server — it does not re-run the server
+  # itself. `fetch-depth: 0` so `git show`/`git ls-tree` can reach the
+  # base ref's committed fixtures (ADR 0005 §9, #301).
+  contract-guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Fixtures <-> shapes.json self-consistency
+        run: python3 sdk/spec/check_contract.py --check
+      - name: Determine base ref
+        id: base
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ -n "$PR_BASE_SHA" ]; then
+            echo "ref=$PR_BASE_SHA" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=HEAD^" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Breaking-change guard
+        env:
+          BASE_REF: ${{ steps.base.outputs.ref }}
+        run: python3 sdk/spec/check_contract.py --base "$BASE_REF"
+
   # Coverage and per-PR mutation testing used to run here too. Both
   # retired to keep CI at the signals that gate a merge: coverage
   # produced a report nobody's decision hung on, and diff-scoped

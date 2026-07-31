@@ -1,0 +1,108 @@
+{
+  "contract": "mcp_contract",
+  "operation": "assemble_evidence_tool_schema",
+  "request": {},
+  "response": {
+    "tools": [
+      {
+        "description": "Opt-in evidence assembly: runs the same resolve/query/activate/search_passages/cite_passage fan-out `retrieve` runs, then normalizes every graph association, graph activation, passage hit, and (opt-in) community hit into one ranked, deduplicated, citation-complete package under an explicit byte/token/item budget — for a caller that will hand the result to an external answer model with a bounded context window, unlike `retrieve`'s raw, unranked results. `origins` and `labels` share `retrieve`'s own contract; the passage/community lanes search `text_fallback_query` when given, otherwise `origins` joined with '; '. Contradictory and corroborating evidence are both preserved intentionally — never silently collapsed to a majority view or a single opaque count. `budget` bounds the response (defaults: 40 items, 64 KiB, ~4000 estimated tokens); a budget too small for even the smallest candidate still answers 200 with an empty package and every candidate accounted for under `omitted`/`omitted_total`/`omitted_by_reason`, never an error. `plan` reports which lanes ran and why not when they did not, plus the selection/reranker trace — no reranker is configured on this server today, so `plan.reranker` is always `{configured: false, ran: false}` and selection is fully deterministic. Does not change `retrieve` or any direct endpoint's behavior.",
+        "inputSchema": {
+          "properties": {
+            "activate_decay": {
+              "description": "activate's decay (default 0.5)",
+              "type": "number"
+            },
+            "activate_limit": {
+              "description": "activate's limit (default 20)",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "budget": {
+              "description": "three independent hard ceilings on the returned package; an omitted field takes its own default",
+              "properties": {
+                "max_bytes": {
+                  "description": "default 65536 (64 KiB), ceiling 1048576 (1 MiB)",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "max_items": {
+                  "description": "default 40, ceiling 1000",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "max_tokens": {
+                  "description": "default 4000, an estimate — no separate ceiling beyond max_items/max_bytes",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "context": {
+              "description": "Context name (from list_contexts)",
+              "type": "string"
+            },
+            "dice_floor": {
+              "description": "one-call override of the resolve fuzzy floor",
+              "type": "number"
+            },
+            "include_communities": {
+              "description": "also search the context's derived community-summary artifact (default false); no artifact is a degrade (plan.lanes.communities.ran = false), never a refusal",
+              "type": "boolean"
+            },
+            "labels": {
+              "description": "relation labels to query on, alongside the always-run activate",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "string",
+                "array"
+              ]
+            },
+            "origins": {
+              "description": "cue(s) to resolve into anchors",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "string",
+                "array"
+              ]
+            },
+            "rerank": {
+              "description": "accepted but not yet acted on — no reranker provider is configured on this server; selection stays fully deterministic",
+              "type": "object"
+            },
+            "resolve_limit": {
+              "description": "max resolve candidates per origin (default/ceiling 1000)",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "search_limit": {
+              "description": "the passage/community search calls' limit (default 5)",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "semantic_floor": {
+              "description": "one-call override of the resolve/search/communities semantic floor",
+              "type": "number"
+            },
+            "text_fallback_query": {
+              "description": "passage/community lanes' query text; omitted means 'origins' joined with '; '",
+              "type": "string"
+            }
+          },
+          "required": [
+            "context",
+            "origins"
+          ],
+          "type": "object"
+        },
+        "name": "assemble_evidence"
+      }
+    ]
+  },
+  "route": "tools/list",
+  "status": 200
+}
