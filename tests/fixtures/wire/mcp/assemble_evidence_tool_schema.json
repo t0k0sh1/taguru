@@ -71,7 +71,7 @@
               ]
             },
             "rerank": {
-              "description": "opts into reordering the pool through a configured reranker (ADR 0006 §12); absent no provider or on any failure, selection stays fully deterministic and plan.reranker.reason names why",
+              "description": "opts into reordering the pool through a configured reranker (ADR 0006 §12); when absent, when no provider is configured, or on any failure, selection stays fully deterministic and plan.reranker.reason names why",
               "properties": {
                 "model": {
                   "description": "pins the call to this exact model; a mismatch with the configured provider degrades with reason 'model_mismatch'",

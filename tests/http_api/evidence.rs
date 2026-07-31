@@ -553,6 +553,65 @@ fn a_failing_or_unreachable_reranker_degrades_to_the_unconfigured_package() {
     }
 }
 
+/// A provider response that is not a complete permutation (here: a
+/// repeated index) degrades to the same deterministic package a fully
+/// unconfigured server would answer, with `reason: "invalid_permutation"`
+/// — the response was well-formed JSON, just not a valid reordering
+/// (ADR 0006 §12).
+///
+/// A `timeout` HTTP-level counterpart is deliberately not included
+/// here: `HttpReranker`'s per-attempt ureq timeout is
+/// `min(TAGURU_RERANK_TIMEOUT_SECS, deadline.remaining())`, so making
+/// the REQUEST's own deadline (not the reranker's) the binding
+/// constraint — the only way `plan.reranker.reason` becomes `"timeout"`
+/// rather than `"provider_error"` — necessarily races
+/// `enforce_timeout`'s own `tokio::time::timeout` in `src/limits.rs`,
+/// which is keyed to the exact same deadline. That race would make an
+/// HTTP-level test either flaky or a guaranteed 408 depending on
+/// scheduling, not a meaningful assertion. The identical branch is
+/// already covered deterministically at the unit level:
+/// `api::evidence::rerank::tests::a_deadline_driven_transport_timeout_is_reported_as_timeout`.
+#[test]
+fn an_invalid_permutation_degrades_to_the_unconfigured_package() {
+    let unconfigured = Server::start("evidence-rerank-invalid-baseline");
+    seed_mixed_corpus(&unconfigured, "sake");
+    let baseline = unconfigured.ok(
+        "POST",
+        "/contexts/sake/evidence",
+        Some(json!({"origins": ["青嶺酒造"]})),
+    );
+
+    let stub = spawn_reranker_stub(|_request, _headers| {
+        // A repeated index: not a complete permutation of 0..len for
+        // any pool of >= 2 candidates.
+        (
+            200,
+            json!({"results": [{"index": 0}, {"index": 0}]}).to_string(),
+        )
+    });
+    let server = start_with_owned_env(
+        "evidence-rerank-invalid",
+        &rerank_env(&stub, "stub-reranker", "5"),
+    );
+    seed_mixed_corpus(&server, "sake");
+    let degraded = server.ok(
+        "POST",
+        "/contexts/sake/evidence",
+        Some(json!({"origins": ["青嶺酒造"], "rerank": {}})),
+    );
+    assert_eq!(
+        degraded["plan"]["reranker"],
+        json!({"configured": true, "ran": false, "reason": "invalid_permutation"}),
+        "{degraded}"
+    );
+    assert_eq!(
+        without_reranker_plan(degraded),
+        without_reranker_plan(baseline),
+        "an invalid permutation must degrade byte-identically to the \
+         unconfigured package outside plan.reranker itself"
+    );
+}
+
 /// `rerank.model` naming a model the configured provider does not
 /// serve degrades without ever touching the provider.
 #[test]

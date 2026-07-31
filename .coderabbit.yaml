@@ -8,6 +8,13 @@ reviews:
   auto_review:
     enabled: true
     drafts: false
+  path_filters:
+    # `.codex/skills/**` はgraphifyツールのインストーラーが生成するベンダー
+    # 済みのスキル定義・プロンプト文書で、このRustサーバー自体のコード品質
+    # とは無関係。ツールを再インストール/更新するたびに内容が丸ごと入れ替わる
+    # ため、プロンプト文言の内部整合性といったレビューはノイズにしかならない。
+    # `.codex/hooks.json` など実行に関わる設定ファイルは対象から外さない。
+    - "!.codex/skills/**"
   path_instructions:
     - path: "src/**/*.rs"
       instructions: |
@@ -84,3 +91,9 @@ reviews:
         CIワークフロー。シークレットの取り扱い、権限(permissions)の最小化、
         ジョブ間の依存関係やゲーティングロジックの正しさを確認してください。
         YAMLのインデントや命名などの軽微なスタイル指摘は不要です。
+    - path: ".codex/hooks.json"
+      instructions: |
+        ローカルのエージェントツール(graphify)向けフック設定です。作成者
+        固有の絶対パス(例: `/Users/<user>/...`)やシークレットがコマンドに
+        ハードコードされていないか(PATH解決に任せるべきか)のみ確認して
+        ください。それ以外の指摘は不要です。

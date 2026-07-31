@@ -2457,15 +2457,30 @@ mod tests {
     /// itself.
     #[test]
     fn every_rerank_reason_token_maps_to_its_own_outcome_kind() {
+        // The real REASON_* constants, not string literals re-typed
+        // here — `RerankOutcomeKind::from_token`'s own doc comment
+        // promises this test catches drift from `rerank.rs`'s
+        // vocabulary; a hardcoded literal would still pass after
+        // `rerank.rs` renamed a token out from under it, since nothing
+        // would fail to compile or diverge. "ok" has no named constant
+        // in `rerank.rs` (it is not a failure reason), so it stays a
+        // literal.
+        use crate::api::evidence::rerank::{
+            REASON_CIRCUIT_OPEN, REASON_EMPTY_POOL, REASON_INVALID_PERMUTATION,
+            REASON_MODEL_MISMATCH, REASON_NOT_CONFIGURED, REASON_PROVIDER_ERROR, REASON_TIMEOUT,
+        };
         let pairs = [
             ("ok", RerankOutcomeKind::Ok),
-            ("not_configured", RerankOutcomeKind::NotConfigured),
-            ("model_mismatch", RerankOutcomeKind::ModelMismatch),
-            ("empty_pool", RerankOutcomeKind::EmptyPool),
-            ("invalid_permutation", RerankOutcomeKind::InvalidPermutation),
-            ("circuit_open", RerankOutcomeKind::CircuitOpen),
-            ("timeout", RerankOutcomeKind::Timeout),
-            ("provider_error", RerankOutcomeKind::ProviderError),
+            (REASON_NOT_CONFIGURED, RerankOutcomeKind::NotConfigured),
+            (REASON_MODEL_MISMATCH, RerankOutcomeKind::ModelMismatch),
+            (REASON_EMPTY_POOL, RerankOutcomeKind::EmptyPool),
+            (
+                REASON_INVALID_PERMUTATION,
+                RerankOutcomeKind::InvalidPermutation,
+            ),
+            (REASON_CIRCUIT_OPEN, RerankOutcomeKind::CircuitOpen),
+            (REASON_TIMEOUT, RerankOutcomeKind::Timeout),
+            (REASON_PROVIDER_ERROR, RerankOutcomeKind::ProviderError),
         ];
         for (token, expected) in pairs {
             assert_eq!(RerankOutcomeKind::from_token(token), expected, "{token}");

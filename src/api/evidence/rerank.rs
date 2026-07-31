@@ -242,8 +242,21 @@ impl HttpReranker {
             ureq::Error::StatusCode(code) => {
                 RerankFailure::new(REASON_PROVIDER_ERROR, *code == 429 || *code >= 500)
             }
-            // Dropped connections and transport-level timeouts are the
-            // blip the one retry exists for.
+            // The per-attempt timeout above is `min(self.timeout,
+            // deadline.remaining())` — when it fires AND the caller's
+            // own deadline has since expired, the deadline was almost
+            // certainly the binding ceiling, not the provider being
+            // slow in general: report `REASON_TIMEOUT` (no retry —
+            // another attempt would just find the deadline expired at
+            // the top of the loop) rather than the generic
+            // `provider_error` a real transport failure gets.
+            ureq::Error::Timeout(_) if deadline.expired() => {
+                RerankFailure::new(REASON_TIMEOUT, false)
+            }
+            // Dropped connections and every other transport-level
+            // failure (including a timeout that fired before the
+            // caller's own deadline did — genuinely a slow provider)
+            // are the blip the one retry exists for.
             _ => RerankFailure::new(REASON_PROVIDER_ERROR, true),
         })?;
         decode(response)
@@ -508,6 +521,7 @@ mod tests {
     use super::*;
     use crate::api::evidence::select::select_with_reorder;
     use crate::api::evidence::{EvidenceCandidate, fuse};
+    use serde_json::{Value, json};
     use std::collections::HashMap;
 
     /// A fake that returns a fixed permutation regardless of input —
@@ -789,6 +803,183 @@ mod tests {
             1,
             "no retry on a hard refusal"
         );
+    }
+
+    /// A ureq transport timeout that fires only because the caller's
+    /// own deadline ran out first is reported as `REASON_TIMEOUT`, not
+    /// the generic `REASON_PROVIDER_ERROR` a real transport failure
+    /// gets — the deadline, not the provider, is why this attempt
+    /// failed, and unlike a generic transport error it is not retried
+    /// (another attempt would just find the deadline already expired).
+    #[test]
+    fn a_deadline_driven_transport_timeout_is_reported_as_timeout() {
+        use std::sync::atomic::AtomicUsize;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let counted = std::sync::Arc::clone(&hits);
+        std::thread::spawn(move || {
+            while let Ok((mut stream, _)) = listener.accept() {
+                let _ = read_full_request(&mut stream);
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                // Never responds — outlives every deadline below, so
+                // the per-attempt ureq timeout is what actually fires.
+                std::thread::sleep(Duration::from_secs(5));
+            }
+        });
+
+        // A provider timeout longer than the deadline, so the
+        // deadline — not `self.timeout` — is what actually binds the
+        // per-attempt ceiling (`min(self.timeout, deadline.remaining())`).
+        let provider = stub_reranker(addr, Duration::from_secs(5));
+        let candidates = build_candidates(&fuse(pool(3)).0);
+        let error = provider
+            .rerank("q", &candidates, Deadline::after(Duration::from_millis(50)))
+            .unwrap_err();
+        assert_eq!(error.reason, REASON_TIMEOUT);
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a deadline-driven timeout is not retried"
+        );
+    }
+
+    /// `decode`'s own inputs come from a `ureq::http::Response`, which
+    /// nothing outside an actual round trip can construct — so every
+    /// failure branch here runs through the real stub listener rather
+    /// than calling `decode` directly, the same way every other
+    /// HTTP-level test in this module works.
+    fn respond_with(status_line: &'static str, body: &'static [u8]) -> std::net::SocketAddr {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            while let Ok((mut stream, _)) = listener.accept() {
+                let _ = read_full_request(&mut stream);
+                let head = format!(
+                    "HTTP/1.1 {status_line}\r\ncontent-type: application/json\r\n\
+                     content-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(body);
+            }
+        });
+        addr
+    }
+
+    #[test]
+    fn a_non_json_body_is_a_provider_error() {
+        let addr = respond_with("200 OK", b"not json at all");
+        let provider = stub_reranker(addr, Duration::from_secs(5));
+        let candidates = build_candidates(&fuse(pool(2)).0);
+        let error = provider
+            .rerank("q", &candidates, Deadline::unbounded())
+            .unwrap_err();
+        assert_eq!(error.reason, REASON_PROVIDER_ERROR);
+    }
+
+    #[test]
+    fn a_body_with_no_results_array_is_a_provider_error() {
+        let addr = respond_with("200 OK", br#"{"other":"shape"}"#);
+        let provider = stub_reranker(addr, Duration::from_secs(5));
+        let candidates = build_candidates(&fuse(pool(2)).0);
+        let error = provider
+            .rerank("q", &candidates, Deadline::unbounded())
+            .unwrap_err();
+        assert_eq!(error.reason, REASON_PROVIDER_ERROR);
+    }
+
+    #[test]
+    fn a_non_integer_or_negative_index_is_a_provider_error() {
+        for body in [
+            br#"{"results":[{"index":"not-a-number"}]}"#.as_slice(),
+            br#"{"results":[{"index":-1}]}"#.as_slice(),
+        ] {
+            let addr = respond_with("200 OK", body);
+            let provider = stub_reranker(addr, Duration::from_secs(5));
+            let candidates = build_candidates(&fuse(pool(2)).0);
+            let error = provider
+                .rerank("q", &candidates, Deadline::unbounded())
+                .unwrap_err();
+            assert_eq!(
+                error.reason,
+                REASON_PROVIDER_ERROR,
+                "{}",
+                String::from_utf8_lossy(body)
+            );
+        }
+    }
+
+    #[test]
+    fn a_body_over_the_response_cap_is_a_provider_error() {
+        // The size check runs before JSON parsing, so the filler need
+        // not be valid JSON — only larger than MAX_RESPONSE_BYTES.
+        let oversized: Vec<u8> = vec![b'x'; MAX_RESPONSE_BYTES as usize + 1024];
+        // `respond_with` needs a `'static` body; leak the one-off
+        // buffer this single test allocates rather than threading a
+        // lifetime through the shared helper for one caller.
+        let oversized: &'static [u8] = oversized.leak();
+        let addr = respond_with("200 OK", oversized);
+        let provider = stub_reranker(addr, Duration::from_secs(5));
+        let candidates = build_candidates(&fuse(pool(2)).0);
+        let error = provider
+            .rerank("q", &candidates, Deadline::unbounded())
+            .unwrap_err();
+        assert_eq!(error.reason, REASON_PROVIDER_ERROR);
+    }
+
+    /// The one real end-to-end success round trip in this module:
+    /// confirms the OUTGOING request shape (`model`/`query`/
+    /// `documents`/`top_n`) and that a well-formed 200 decodes into
+    /// the exact permutation the stub named — every other test either
+    /// fakes the provider (`EvidenceReranker` directly) or only
+    /// exercises a failure branch through the real HTTP client.
+    #[test]
+    fn a_successful_response_decodes_the_named_permutation_and_the_request_matches_the_contract() {
+        use std::io::Write;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let received: std::sync::Arc<std::sync::Mutex<Option<Value>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(None));
+        let captured = std::sync::Arc::clone(&received);
+        std::thread::spawn(move || {
+            while let Ok((mut stream, _)) = listener.accept() {
+                let request = read_full_request(&mut stream);
+                let body_start = request.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+                let parsed: Value = serde_json::from_slice(&request[body_start..]).unwrap();
+                *captured.lock().unwrap() = Some(parsed);
+                let body = br#"{"results":[{"index":1,"relevance_score":0.9},{"index":0,"relevance_score":0.1}]}"#;
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                     content-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(body);
+            }
+        });
+
+        let provider = stub_reranker(addr, Duration::from_secs(5));
+        let candidates = build_candidates(&fuse(pool(2)).0);
+        let order = match provider.rerank("the query text", &candidates, Deadline::unbounded()) {
+            Ok(order) => order,
+            // `RerankFailure` deliberately does not derive `Debug`
+            // (it never carries candidate text, but nothing here
+            // should need it to either) — `reason` alone is enough to
+            // fail loudly.
+            Err(failure) => panic!("a well-formed 200 must decode: {}", failure.reason),
+        };
+        assert_eq!(order, vec![1, 0]);
+
+        let request = received.lock().unwrap().take().expect("stub was called");
+        assert_eq!(request["model"], json!("stub-model"));
+        assert_eq!(request["query"], json!("the query text"));
+        assert_eq!(request["top_n"], json!(2));
+        let documents = request["documents"].as_array().expect("documents array");
+        assert_eq!(documents.len(), 2);
     }
 
     /// A breaker that opens after enough consecutive failures short-

@@ -24,6 +24,15 @@ use parking_lot::Mutex;
 pub(crate) const DEFAULT_THRESHOLD: u32 = 3;
 /// How long an open breaker refuses before letting one probe through.
 pub(crate) const DEFAULT_COOLDOWN: Duration = Duration::from_secs(30);
+/// A floor under how long a claimed half-open probe sits unsettled
+/// before [`ProviderBreaker::admit`] reclaims it (its caller panicked,
+/// or was otherwise dropped without `record`/`abandon`) — independent
+/// of `cooldown` itself, which tests routinely set to [`Duration::ZERO`]
+/// purely to make `Open`'s OWN recovery instant. Without this floor,
+/// that same zero would also make a probe reclaimable the instant it
+/// is claimed, breaking "one probe in flight at a time" for any
+/// zero-cooldown breaker.
+const MIN_PROBE_RECLAIM: Duration = Duration::from_millis(50);
 
 /// Shared by handle: a provider holds one and the registry reads the
 /// same one for /metrics and its own fast-fail gate.
@@ -47,9 +56,16 @@ enum BreakerState {
         since: Instant,
     },
     /// One probe at a time: `probing` is the in-flight claim, released
-    /// by the probe's outcome (or [`ProviderBreaker::abandon`]).
+    /// by the probe's outcome (or [`ProviderBreaker::abandon`]) —
+    /// or, if neither runs (a panic between [`ProviderBreaker::admit`]
+    /// and its outcome), reclaimed once `since.elapsed()` exceeds
+    /// `cooldown` (`admit`), the same recovery window `Open` already
+    /// gives itself. Unlike `Open`, a stuck `HalfOpen` has no other
+    /// path back to admitting calls, so this claim needs its own clock
+    /// too, not the one it copied off `Open` when it was born.
     HalfOpen {
         probing: bool,
+        since: Instant,
     },
 }
 
@@ -101,19 +117,29 @@ impl ProviderBreaker {
             BreakerState::Open { since } => {
                 let elapsed = since.elapsed();
                 if elapsed >= self.0.cooldown {
-                    *state = BreakerState::HalfOpen { probing: true };
+                    *state = BreakerState::HalfOpen {
+                        probing: true,
+                        since: Instant::now(),
+                    };
                     Ok(Admission::Probe)
                 } else {
                     self.0.short_circuits_total.fetch_add(1, Ordering::Relaxed);
                     Err(self.open_refusal(self.0.cooldown - elapsed))
                 }
             }
-            BreakerState::HalfOpen { probing } => {
-                if *probing {
+            BreakerState::HalfOpen { probing, since } => {
+                if *probing && since.elapsed() < self.probe_reclaim_after() {
                     self.0.short_circuits_total.fetch_add(1, Ordering::Relaxed);
                     Err(self.probe_busy_refusal())
                 } else {
+                    // Either idle, or a claimed probe nobody ever
+                    // settled (its caller panicked, or was otherwise
+                    // dropped without `record`/`abandon`) and has sat
+                    // past its own cooldown — reclaim the slot rather
+                    // than wedge this breaker half-open for the rest
+                    // of the process.
                     *probing = true;
+                    *since = Instant::now();
                     Ok(Admission::Probe)
                 }
             }
@@ -133,7 +159,9 @@ impl ProviderBreaker {
                 let elapsed = since.elapsed();
                 (elapsed < self.0.cooldown).then(|| self.open_refusal(self.0.cooldown - elapsed))
             }
-            BreakerState::HalfOpen { probing } => probing.then(|| self.probe_busy_refusal()),
+            BreakerState::HalfOpen { probing, since } => (*probing
+                && since.elapsed() < self.probe_reclaim_after())
+            .then(|| self.probe_busy_refusal()),
         };
         if refusal.is_some() {
             self.0.short_circuits_total.fetch_add(1, Ordering::Relaxed);
@@ -186,7 +214,7 @@ impl ProviderBreaker {
     /// about the provider either way.
     pub(crate) fn abandon(&self, admission: Admission) {
         if let Admission::Probe = admission
-            && let BreakerState::HalfOpen { probing } = &mut *self.0.state.lock()
+            && let BreakerState::HalfOpen { probing, .. } = &mut *self.0.state.lock()
         {
             *probing = false;
         }
@@ -207,6 +235,15 @@ impl ProviderBreaker {
             opened_total: self.0.opened_total.load(Ordering::Relaxed),
             short_circuits_total: self.0.short_circuits_total.load(Ordering::Relaxed),
         }
+    }
+
+    /// How long a claimed half-open probe may sit unsettled before
+    /// [`Self::admit`]/[`Self::refusal`] treat it as abandoned and
+    /// reclaim it — [`MIN_PROBE_RECLAIM`], or `cooldown` itself when
+    /// that is the longer of the two (production's 30s cooldown
+    /// dominates; a test's zero cooldown does not).
+    fn probe_reclaim_after(&self) -> Duration {
+        self.0.cooldown.max(MIN_PROBE_RECLAIM)
     }
 
     /// The open-state refusal. Client-facing (it rides 502 bodies and
@@ -280,6 +317,50 @@ mod tests {
         breaker.record(probe, true);
         assert_eq!(breaker.snapshot().state, 0);
         assert!(breaker.refusal().is_none());
+    }
+
+    /// A claimed probe that nobody ever settles (the caller panicked,
+    /// or was otherwise dropped between `admit` and `record`/`abandon`)
+    /// must not wedge the breaker half-open for the rest of the
+    /// process — `HalfOpen` has no other clock back to admitting calls
+    /// the way `Open` does, so it needs its own cooldown-bounded
+    /// self-heal.
+    #[test]
+    fn an_unsettled_probe_is_reclaimed_after_its_own_cooldown() {
+        // Duration::ZERO only fast-forwards `Open`'s own cooldown
+        // (matching every other test's convention); `probe_reclaim_after`
+        // still floors the half-open reclaim window at
+        // `MIN_PROBE_RECLAIM` regardless.
+        let breaker = ProviderBreaker::with_policy("test provider", 1, Duration::ZERO);
+        let only = breaker.admit().unwrap();
+        breaker.record(only, false);
+        // Claims the sole half-open probe slot, then is simply
+        // dropped — simulating a panic mid-attempt: neither `record`
+        // nor `abandon` ever runs.
+        let stuck = breaker.admit().unwrap();
+        assert!(matches!(stuck, Admission::Probe));
+        assert!(
+            breaker.admit().is_err(),
+            "still busy immediately after the leak"
+        );
+        assert!(breaker.refusal().is_some(), "the pre-flight gate agrees");
+
+        std::thread::sleep(MIN_PROBE_RECLAIM * 2);
+
+        let reclaimed = breaker
+            .admit()
+            .expect("past its own reclaim window, the stuck slot is reclaimed");
+        assert!(matches!(reclaimed, Admission::Probe));
+        // Reclaiming makes THIS call the new probe — a third
+        // concurrent caller still sees it as busy, exactly as if the
+        // original probe had never gone missing.
+        assert!(
+            breaker.refusal().is_some(),
+            "the reclaimed probe is itself in flight"
+        );
+        breaker.record(reclaimed, true);
+        assert_eq!(breaker.snapshot().state, 0, "the new probe closes it");
+        assert!(breaker.refusal().is_none(), "closed, nothing in flight");
     }
 
     /// The refusal strings name the subject a caller configured this
