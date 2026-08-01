@@ -8,6 +8,46 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- HTML connector (#349, implementing ADR 0007 §7/§8): `HtmlConnector` in
+  `taguru_langchain.ingest_connectors.html`, reading both a local
+  `.html`/`.htm`/`.xhtml` file and an `http(s)://` URL fetch (via `httpx`,
+  now a direct dependency of `langchain-taguru` — already transitive
+  through `taguru`) — no new optional extra, parsing is stdlib
+  `html.parser` only. Boilerplate (script/style/nav/aside/hidden regions,
+  and a page's own header/footer when no `<main>`/`<article>` scopes the
+  content) is stripped before `text` is built; the heading hierarchy
+  survives as a breadcrumb `section` per paragraph (`"Guide >
+  Installation"`, since `sections` is flat); and each heading's own `id`
+  (or its nearest `id`-bearing ancestor's) becomes a `{"kind": "fragment",
+  "value": ...}` locator on every paragraph up to the next heading —
+  combined with `metadata.canonical_url`, a citation can point at a real
+  in-page deep link. A URL fetch's source id is the *final*,
+  fragment-stripped, canonicalized URL (ADR 0007 §6.1); a page's own
+  `<link rel="canonical">`, when present, only ever populates
+  `metadata.canonical_url`, never substituted for the source id itself,
+  since a page can claim any canonical and two distinct pages claiming the
+  same one would otherwise collide. A page left with no extractable text
+  after boilerplate removal (image-only, an unrendered JS-shell SPA) is
+  reported `ocr_required` with empty `text`; a 4xx/5xx response, a
+  non-HTML `Content-Type`, a raw body over `max_file_bytes` (streamed,
+  refused mid-fetch), a per-phase `timeout`, or the total fetch exceeding
+  the separate `max_total_seconds` wall-clock budget are each their own
+  diagnostic (`unreadable`/`unsupported_format`/`content_too_large`) —
+  never a raised exception, including for a pathologically deep tree that
+  would otherwise raise `RecursionError`. By default, a URL fetch also
+  refuses any destination (including one reached only via a redirect)
+  that resolves to a private, loopback, link-local, or multicast address,
+  so an otherwise-trusted URL cannot be turned into a probe of
+  `localhost` or a cloud metadata endpoint by a redirect the origin
+  server controls; `allow_private_networks=True` disables this for a
+  caller that intentionally targets one. An `<iframe>`/`<frame>` whose
+  content was not fetched is named in a `partial_extraction` diagnostic
+  rather than silently dropped. A Windows drive-letter path
+  (`C:\docs\a.html`) is recognized as a local path rather than
+  misclassified by its `urlsplit` scheme. Nested `<table>`s and a
+  `{"kind": "table"}` locator are out of scope for this connector (ADR
+  0007 §7.3's table locator is left to a future revision). No change to
+  `src/`, `http_contract`, or `mcp_contract`.
 - PDF connector (#348, implementing ADR 0007 §7/§8/§10): `PdfConnector`
   in `taguru_langchain.ingest_connectors.pdf`, the first standard format
   connector built on #347's protocol — `pip install

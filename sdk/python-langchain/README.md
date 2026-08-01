@@ -152,9 +152,43 @@ if document.diagnostics:
 outcome = ingest_connector_document(ingester, document)
 ```
 
-HTML/DOCX/S3 connectors implementing the same `Connector` protocol are
-tracked as follow-up issues (#349-#351); the contract itself (ADR 0007 §5)
-is stable now.
+`HtmlConnector` (issue #349) reads both a local `.html`/`.htm`/`.xhtml` file
+and an `http(s)://` URL — no extra to install, parsing is stdlib
+`html.parser` only. Boilerplate (script/style/nav/aside, and a page's own
+header/footer when nothing scopes the content to a `<main>`/`<article>`) is
+stripped before `text` is built; the heading hierarchy survives as a
+breadcrumb `section` per paragraph (`"Guide > Installation"`, since
+`sections` is flat); and each heading's own `id` (or its nearest
+`id`-bearing ancestor's) becomes a `{"kind": "fragment", "value": ...}`
+locator on every paragraph up to the next heading — combined with
+`metadata.canonical_url`, a citation can point at a real in-page deep link.
+A URL fetch's source id is the *final*, fragment-stripped, canonicalized
+URL (ADR 0007 §6.1) — `<link rel="canonical">`, when present, only ever
+populates `metadata.canonical_url`, never the source id itself. A page with
+no extractable text after boilerplate removal (image-only, an unrendered
+JS-shell SPA) is `ocr_required` with empty `text`, and a 4xx/5xx response,
+a non-HTML `Content-Type`, or a raw body over `max_file_bytes` are each
+their own diagnostic — never a raised exception. By default, a URL fetch
+also refuses any destination (including one reached only via a redirect)
+that resolves to a private, loopback, link-local, or multicast address —
+`HtmlConnector` still assumes the caller controls or trusts the URL itself,
+but this stops an otherwise-trusted URL from being turned into a probe of
+`localhost` or a cloud metadata endpoint by a redirect the origin server
+controls. Pass `allow_private_networks=True` to fetch one intentionally
+(a local test server, an internal document server on a private network):
+
+```python
+from taguru_langchain.ingest_connectors import HtmlConnector
+
+document = HtmlConnector().read("https://example.com/guide")
+if document.diagnostics:
+    ...  # unreadable, unsupported_format, ocr_required, ... — never a silently empty passage
+outcome = ingest_connector_document(ingester, document)
+```
+
+DOCX/S3 connectors implementing the same `Connector` protocol are tracked
+as follow-up issues (#350-#351); the contract itself (ADR 0007 §5) is
+stable now.
 
 Three more constructor arguments bound how a chunk's structured-output
 retry behaves, all optional and all unchanged by default: `fact_budget`

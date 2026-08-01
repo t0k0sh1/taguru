@@ -20,9 +20,11 @@ Six pieces:
   :class:`~taguru_langchain.checkpoints.CheckpointStore`.
 - :class:`Connector` (``protocol.py``) — the structural interface a format
   connector implements.
-- :class:`TextFileConnector` (``text.py``) and :class:`PdfConnector`
+- :class:`TextFileConnector` (``text.py``), :class:`PdfConnector`
   (``pdf.py``, issue #348, optional ``pypdf`` dependency via the ``pdf``
-  extra) — the reference implementations.
+  extra), and :class:`HtmlConnector` (``html.py``, issue #349, local files
+  and ``http(s)://`` URLs, stdlib-only parsing) — the reference
+  implementations.
 - :func:`ingest_connector_document`/:func:`ingest_connector_documents`
   (``bridge.py``) — the one-way bridge from a :class:`ConnectorDocument`
   into ``TaguruIngester.ingest_text``; :func:`aingest_connector_document`/
@@ -51,6 +53,7 @@ from .document import (
     SectionEntry,
     options_digest,
 )
+from .html import HtmlConnector
 from .pdf import PdfConnector
 from .protocol import Connector
 from .sources import (
@@ -72,6 +75,7 @@ __all__ = [
     "Diagnostic",
     "DiagnosticCode",
     "FingerprintInputs",
+    "HtmlConnector",
     "LocatorEntry",
     "PdfConnector",
     "SectionEntry",

@@ -242,3 +242,58 @@ def test_pdf_connector_document_round_trips_page_locators_to_citations(
     finally:
         if client.contexts.exists("indigo-workshop"):
             client.contexts.delete("indigo-workshop")
+
+
+def test_html_connector_document_round_trips_fragment_locators_to_citations(
+    client: Taguru,
+) -> None:
+    """The HTML connector's own acceptance bar (issue #349), against the
+    real server: a fetched page's own heading `id` becomes a `fragment`
+    locator, and its heading hierarchy becomes a breadcrumb `section` —
+    both surviving storage and the `/citations` response round trip
+    unchanged, the same bar #348's PDF-page-locator test above clears for
+    page numbers instead."""
+    from taguru_langchain.ingest_connectors import HtmlConnector
+
+    from .._httpd import Route, serve
+
+    body = b"""<html><head><title>Weaving Studio</title></head><body><main>
+    <h1 id="top">Weaving Studio</h1>
+    <p>The studio preserves traditional loom weaving.</p>
+    <h2 id="products">Products</h2>
+    <p>Its best known product is an obi sash.</p>
+    </main></body></html>"""
+
+    with serve({"/studio": Route(body=body)}) as httpd:
+        document = HtmlConnector(allow_private_networks=True).read(f"{httpd.base_url}/studio")
+
+    assert document.diagnostics == ()
+    assert [(s.paragraph, s.section) for s in document.sections] == [
+        (0, "Weaving Studio"),
+        (2, "Weaving Studio > Products"),
+    ]
+    assert document.locators[2].locator == Locator(kind="fragment", value="products")
+
+    llm = FakeListChatModel(
+        responses=[json.dumps({"associations": [], "aliases": [], "questions": []})]
+    )
+    ingester = TaguruIngester(
+        context="weaving-studio",
+        llm=llm,
+        client=client,
+        create_context=True,
+        context_description="HTML connector round trip (issue #349)",
+    )
+    try:
+        outcome = ingest_connector_document(ingester, document)
+        assert outcome.ok
+        assert outcome.sections_stored == len(document.sections)
+        assert outcome.locators_stored == len(document.locators)
+
+        ctx = client.context("weaving-studio")
+        heading_citation = ctx.cite_passage(document.source, 2)
+        assert heading_citation.section == "Weaving Studio > Products"
+        assert heading_citation.locator == Locator(kind="fragment", value="products")
+    finally:
+        if client.contexts.exists("weaving-studio"):
+            client.contexts.delete("weaving-studio")

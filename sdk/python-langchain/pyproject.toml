@@ -20,6 +20,11 @@ classifiers = [
 dependencies = [
     "taguru>=0.6.0,<0.7.0",
     "langchain-core>=1.0.0,<2.0.0",
+    # Already in the tree transitively via `taguru` (its only runtime
+    # dependency); made direct because `HtmlConnector` (issue #349) imports
+    # it itself for URL fetches, so `pip-audit`'s tree shows the real
+    # importer rather than an implicit pass-through.
+    "httpx>=0.27,<1.0",
 ]
 
 [project.urls]
