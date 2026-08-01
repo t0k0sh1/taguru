@@ -13,6 +13,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlsplit
 
 
 @dataclass(frozen=True)
@@ -21,12 +22,19 @@ class Route:
     (`status`/`content_type`/`body` are then ignored); otherwise `status` is
     served with `body`, and `content_type` becomes the `Content-Type` header
     (omit to send no `Content-Type` header at all). `delay` (seconds) sleeps
-    before responding — enough to exercise a caller's `timeout`."""
+    before responding at all — enough to exercise a caller's per-phase
+    `timeout`. `chunk_delay` instead trickles `body` out in small pieces,
+    sleeping between each — every individual gap stays under a per-phase
+    `timeout`, so this is what exercises a caller's separate total-time
+    budget instead; no `Content-Length` is sent for a trickled response
+    (`protocol_version` defaults to HTTP/1.0, so the client reads until the
+    connection closes)."""
 
     status: int = 200
     content_type: str | None = "text/html; charset=utf-8"
     body: bytes = b""
     delay: float = 0.0
+    chunk_delay: float = 0.0
     location: str | None = None
     headers: dict[str, str] = field(default_factory=dict)
 
@@ -38,7 +46,11 @@ class _Handler(BaseHTTPRequestHandler):
         pass  # keep test output quiet; failures still show via assertions
 
     def do_GET(self) -> None:  # noqa: N802 - stdlib-mandated method name
-        route = self.server.routes.get(self.path)
+        # `self.path` is the full request target, query string included —
+        # route registration is by path only, so a request carrying a query
+        # string (the credential/token-stripping tests deliberately send
+        # one) must not be matched against it too.
+        route = self.server.routes.get(urlsplit(self.path).path)
         if route is None:
             self.send_response(404)
             self.end_headers()
@@ -55,6 +67,14 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", route.content_type)
         for name, value in route.headers.items():
             self.send_header(name, value)
+        if route.chunk_delay:
+            self.end_headers()
+            chunk_size = 16
+            for offset in range(0, len(route.body), chunk_size):
+                self.wfile.write(route.body[offset : offset + chunk_size])
+                self.wfile.flush()
+                time.sleep(route.chunk_delay)
+            return
         self.send_header("Content-Length", str(len(route.body)))
         self.end_headers()
         self.wfile.write(route.body)

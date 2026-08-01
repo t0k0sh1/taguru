@@ -28,6 +28,22 @@ when present, is recorded in `metadata.canonical_url` but never substituted
 for the fetch URL as the source id, since a page can claim any canonical
 and two distinct pages claiming the same one would otherwise collide.
 
+Fetching an arbitrary `http(s)://` URL is only ever safe when the caller
+controls (or trusts) the URL — `HtmlConnector` is not a defense against a
+malicious *caller* feeding it a URL chosen by an untrusted third party
+(user-submitted, scraped from an external feed, produced by an LLM). By
+default, though, it still refuses a destination that resolves to a
+private, loopback, link-local, multicast, or otherwise non-global IP
+address — including one reached only after following a redirect — so an
+*otherwise-trusted* URL cannot be turned into a probe of `localhost`, the
+caller's own internal network, or a cloud metadata endpoint
+(`169.254.169.254`) by a redirect the origin server controls. This check
+resolves DNS itself and cannot fully close a same-instant DNS-rebinding
+race against a hostile resolver; a deployment that fetches URLs supplied
+by a genuinely untrusted party should not rely on it alone. Pass
+`allow_private_networks=True` to disable the check entirely — this
+connector's own tests need it to reach their loopback test server.
+
 Out of scope, deliberately: ADR 0007 §7.3's `{"kind": "table", ...}`
 locator. At most one locator is stored per paragraph (§7.2), and this
 connector already spends that one slot on `fragment`; a `<table>` still
@@ -41,7 +57,10 @@ table-granular citations distinct from the enclosing section.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import re
+import socket
+import time
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Final
@@ -71,6 +90,13 @@ _SUPPORTED_SUFFIXES: Final = frozenset({".html", ".htm", ".xhtml"})
 _SUPPORTED_URL_SCHEMES: Final = frozenset({"http", "https"})
 _ALLOWED_CONTENT_TYPES: Final = frozenset({"text/html", "application/xhtml+xml"})
 
+# A Windows drive-letter path (`C:\docs\a.html`, `C:/docs/a.html`) parses
+# under `urlsplit` as scheme `"c"` — indistinguishable, by scheme alone,
+# from a genuine (if unusual) single-letter URL scheme. Checked before any
+# scheme dispatch so a Windows absolute path is never misrouted into the
+# URL-fetch path or refused as `unsupported_format`.
+_WINDOWS_DRIVE_RE: Final = re.compile(r"^[A-Za-z]:[\\/]")
+
 # The raw-file/fetch cap, checked before (local) or during (URL, streamed)
 # reading — independent of MAX_PASSAGE_BYTES (checked again below, against
 # the EXTRACTED text): markup overhead means a large-but-sparse page can
@@ -78,7 +104,12 @@ _ALLOWED_CONTENT_TYPES: Final = frozenset({"text/html", "application/xhtml+xml"}
 # bytes can still exceed a naive per-file cap. Same two-cap shape PdfConnector
 # uses for the same reason.
 _DEFAULT_MAX_FILE_BYTES: Final = 16 * 1024 * 1024
+# httpx's own `timeout` bounds each individual phase (connect/write/read) —
+# a server trickling a chunk every `timeout - epsilon` seconds forever never
+# trips it. This is the separate ceiling on the fetch's total wall-clock
+# time, enforced by hand in `_read_url` via `time.monotonic()`.
 _DEFAULT_TIMEOUT: Final = 30.0
+_DEFAULT_MAX_TOTAL_SECONDS: Final = 60.0
 
 # Dropped entirely, with every descendant: never rendered content, never
 # navigation chrome. `header`/`footer` are handled separately (below) since
@@ -176,6 +207,54 @@ def _url_display_name(url: str) -> str:
     if segments:
         return segments[-1]
     return parts.netloc or url
+
+
+def _is_windows_drive_path(reference: str) -> bool:
+    return _WINDOWS_DRIVE_RE.match(reference) is not None
+
+
+class _BlockedDestination(Exception):
+    """Raised from `_validate_public_destination` (an httpx `request` event
+    hook) to abort a fetch whose destination resolved to a non-global IP
+    address — caught in `_read_url` alongside `httpx.HTTPError` and mapped
+    to the same `unreadable` diagnostic every other fetch failure gets."""
+
+
+def _is_blocked_ip(raw_address: str) -> bool:
+    address = raw_address.split("%", 1)[0]  # drop a getaddrinfo IPv6 zone id
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return False  # unparseable: not this check's job to fail the fetch
+    # `is_global` already excludes private/loopback/link-local/reserved/
+    # unspecified (covering the cloud metadata endpoint 169.254.169.254,
+    # which is link-local); multicast is the one range stdlib still counts
+    # as "global" that is never a sane HTTP destination, so it needs its
+    # own explicit check.
+    return not ip.is_global or ip.is_multicast
+
+
+def _validate_public_destination(request: httpx.Request) -> None:
+    """An httpx `request` event hook — fires for the initial request AND
+    for every request a followed redirect issues, so a redirect to a
+    private/internal address is caught exactly like a direct one (verified:
+    httpx invokes `request` hooks per hop, not once per `client.stream`
+    call). A hostname that fails to resolve is left alone here — the
+    connection attempt that follows will fail on its own, through the
+    ordinary `httpx.HTTPError` path, so this hook only has an opinion once
+    resolution actually names a destination."""
+    host = request.url.host
+    port = request.url.port or (443 if request.url.scheme == "https" else 80)
+    try:
+        resolved = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+    except OSError:
+        return
+    for _family, _kind, _proto, _canon, sockaddr in resolved:
+        address = str(sockaddr[0])
+        if _is_blocked_ip(address):
+            raise _BlockedDestination(
+                f"refusing to fetch {host!r}: resolves to a private/internal address"
+            )
 
 
 def _resolve_charset(raw: bytes, content_type_header: str | None) -> str:
@@ -525,9 +604,18 @@ class HtmlConnector:
     paragraph either way). `heading_separator` (default `" > "`) joins a
     heading's ancestor chain into one `section` label. `max_file_bytes`
     (default 16 MiB) caps the raw HTML checked before (local file) or during
-    (URL, streamed) reading. `timeout`/`user_agent` bound a URL fetch only —
-    unlike the other three, they never change a document's own content and
-    so are excluded from `fingerprint_inputs.parse_options_digest`.
+    (URL, streamed) reading. `timeout` (default 30s) is httpx's own
+    per-phase (connect/write/read) timeout; `max_total_seconds` (default
+    60s) is the separate ceiling on the fetch's total wall-clock time, since
+    a per-phase timeout alone never trips against a server trickling data
+    slower than that but without ever going fully idle. `user_agent` names
+    this connector to the server. `allow_private_networks` (default
+    `False`) disables the destination check documented in this module's own
+    docstring — set `True` only for a caller (or a test) that intentionally
+    fetches from a private/loopback address. None of `timeout`/
+    `max_total_seconds`/`user_agent`/`allow_private_networks` change a
+    document's own content, so all four are excluded from
+    `fingerprint_inputs.parse_options_digest`.
     """
 
     def __init__(
@@ -537,13 +625,17 @@ class HtmlConnector:
         heading_separator: str = " > ",
         max_file_bytes: int = _DEFAULT_MAX_FILE_BYTES,
         timeout: float = _DEFAULT_TIMEOUT,
+        max_total_seconds: float = _DEFAULT_MAX_TOTAL_SECONDS,
         user_agent: str = f"taguru-html-connector/{PARSER_VERSION}",
+        allow_private_networks: bool = False,
     ) -> None:
         self._extract_headings = extract_headings
         self._heading_separator = heading_separator
         self._max_file_bytes = max_file_bytes
         self._timeout = timeout
+        self._max_total_seconds = max_total_seconds
         self._user_agent = user_agent
+        self._allow_private_networks = allow_private_networks
 
     @property
     def parser(self) -> str:
@@ -554,6 +646,8 @@ class HtmlConnector:
         return PARSER_VERSION
 
     def supports(self, reference: str) -> bool:
+        if _is_windows_drive_path(reference):
+            return Path(reference).suffix.lower() in _SUPPORTED_SUFFIXES
         scheme = urlsplit(reference).scheme.lower()
         if scheme in _SUPPORTED_URL_SCHEMES:
             return True
@@ -598,6 +692,8 @@ class HtmlConnector:
         )
 
     def read(self, reference: str) -> ConnectorDocument:
+        if _is_windows_drive_path(reference):
+            return self._read_file(reference)
         scheme = urlsplit(reference).scheme.lower()
         if scheme in _SUPPORTED_URL_SCHEMES:
             return self._read_url(reference)
@@ -684,8 +780,18 @@ class HtmlConnector:
         if pre_check is not None:
             return early_failure(pre_check.code, pre_check.message)
 
+        if self._allow_private_networks:
+            client = httpx.Client(follow_redirects=True, timeout=self._timeout)
+        else:
+            client = httpx.Client(
+                follow_redirects=True,
+                timeout=self._timeout,
+                event_hooks={"request": [_validate_public_destination]},
+            )
+
+        deadline = time.monotonic() + self._max_total_seconds
         try:
-            with httpx.Client(follow_redirects=True, timeout=self._timeout) as client:
+            with client:
                 headers = {"User-Agent": self._user_agent}
                 with client.stream("GET", reference, headers=headers) as response:
                     if response.status_code >= 400:
@@ -711,7 +817,18 @@ class HtmlConnector:
                                 message=f"exceeds the {self._max_file_bytes}-byte fetch cap",
                                 raw_content_sha256=_EMPTY_SHA256,
                             )
-        except (httpx.HTTPError, httpx.InvalidURL) as error:
+                        if time.monotonic() > deadline:
+                            return self._failure(
+                                source=canonicalize_url(_strip_fragment(final_url)),
+                                display_name=_url_display_name(final_url),
+                                code="unreadable",
+                                message=(
+                                    f"the fetch exceeded the {self._max_total_seconds}-second "
+                                    "total time budget"
+                                ),
+                                raw_content_sha256=_EMPTY_SHA256,
+                            )
+        except (httpx.HTTPError, httpx.InvalidURL, _BlockedDestination) as error:
             return early_failure("unreadable", str(error))
 
         raw = bytes(chunks)
@@ -770,17 +887,29 @@ class HtmlConnector:
         try:
             builder = _TreeBuilder()
             builder.feed(text_raw)
+            tree = builder.root
+            body_text, locators, sections, had_dropped_frame = _extract_body(
+                tree,
+                extract_headings=self._extract_headings,
+                heading_separator=self._heading_separator,
+            )
+            title = _extract_title(tree)
+            canonical_url = self._resolve_canonical(tree, canonical_base)
+        except RecursionError:
+            # A pathologically deep tree (thousands of nested <div>s) builds
+            # fine — `_TreeBuilder` is iterative — but every walk below it
+            # (`_extract_body`, `_extract_title`, `_resolve_canonical`) is
+            # recursive and can blow the interpreter's stack. `read` never
+            # raises for an ordinary parse failure (`protocol.py`'s
+            # `Connector.read` contract); this is that failure, structured.
+            return failure("corrupt", "the markup nests too deeply to extract")
         except Exception as error:  # noqa: BLE001 - html.parser is lenient
             # but not contractually exception-free on adversarial input;
             # any failure here is this document's own markup failing to
             # parse, the same bucket pypdf's PyPdfError lands in for
             # PdfConnector.
             return failure("corrupt", str(error))
-        tree = builder.root
 
-        body_text, locators, sections, had_dropped_frame = _extract_body(
-            tree, extract_headings=self._extract_headings, heading_separator=self._heading_separator
-        )
         if not body_text:
             return failure("ocr_required", "no extractable body text after boilerplate removal")
         if _byte_len(body_text) > MAX_PASSAGE_BYTES:
@@ -810,8 +939,8 @@ class HtmlConnector:
             metadata=ConnectorMetadata(
                 origin_uri=source,
                 display_name=display_name,
-                title=_extract_title(tree),
-                canonical_url=self._resolve_canonical(tree, canonical_base),
+                title=title,
+                canonical_url=canonical_url,
                 content_type="text/html",
             ),
             fingerprint_inputs=self._fingerprint(raw_content_sha256),

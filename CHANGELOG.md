@@ -28,13 +28,23 @@ Entries that change an on-disk format or a response shape say so.
   since a page can claim any canonical and two distinct pages claiming the
   same one would otherwise collide. A page left with no extractable text
   after boilerplate removal (image-only, an unrendered JS-shell SPA) is
-  reported `ocr_required` with empty `text`; a non-2xx response, a
+  reported `ocr_required` with empty `text`; a 4xx/5xx response, a
   non-HTML `Content-Type`, a raw body over `max_file_bytes` (streamed,
-  refused mid-fetch), or a fetch timeout are each their own diagnostic
-  (`unreadable`/`unsupported_format`/
-  `content_too_large`) — never a raised exception. An `<iframe>`/`<frame>`
-  whose content was not fetched is named in a `partial_extraction`
-  diagnostic rather than silently dropped. Nested `<table>`s and a
+  refused mid-fetch), a per-phase `timeout`, or the total fetch exceeding
+  the separate `max_total_seconds` wall-clock budget are each their own
+  diagnostic (`unreadable`/`unsupported_format`/`content_too_large`) —
+  never a raised exception, including for a pathologically deep tree that
+  would otherwise raise `RecursionError`. By default, a URL fetch also
+  refuses any destination (including one reached only via a redirect)
+  that resolves to a private, loopback, link-local, or multicast address,
+  so an otherwise-trusted URL cannot be turned into a probe of
+  `localhost` or a cloud metadata endpoint by a redirect the origin
+  server controls; `allow_private_networks=True` disables this for a
+  caller that intentionally targets one. An `<iframe>`/`<frame>` whose
+  content was not fetched is named in a `partial_extraction` diagnostic
+  rather than silently dropped. A Windows drive-letter path
+  (`C:\docs\a.html`) is recognized as a local path rather than
+  misclassified by its `urlsplit` scheme. Nested `<table>`s and a
   `{"kind": "table"}` locator are out of scope for this connector (ADR
   0007 §7.3's table locator is left to a future revision). No change to
   `src/`, `http_contract`, or `mcp_contract`.

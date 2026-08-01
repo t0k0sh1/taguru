@@ -166,9 +166,16 @@ A URL fetch's source id is the *final*, fragment-stripped, canonicalized
 URL (ADR 0007 §6.1) — `<link rel="canonical">`, when present, only ever
 populates `metadata.canonical_url`, never the source id itself. A page with
 no extractable text after boilerplate removal (image-only, an unrendered
-JS-shell SPA) is `ocr_required` with empty `text`, and a non-200 response,
+JS-shell SPA) is `ocr_required` with empty `text`, and a 4xx/5xx response,
 a non-HTML `Content-Type`, or a raw body over `max_file_bytes` are each
-their own diagnostic — never a raised exception:
+their own diagnostic — never a raised exception. By default, a URL fetch
+also refuses any destination (including one reached only via a redirect)
+that resolves to a private, loopback, link-local, or multicast address —
+`HtmlConnector` still assumes the caller controls or trusts the URL itself,
+but this stops an otherwise-trusted URL from being turned into a probe of
+`localhost` or a cloud metadata endpoint by a redirect the origin server
+controls. Pass `allow_private_networks=True` to fetch one intentionally
+(a local test server, an internal document server on a private network):
 
 ```python
 from taguru_langchain.ingest_connectors import HtmlConnector

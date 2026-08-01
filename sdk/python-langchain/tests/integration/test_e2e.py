@@ -265,7 +265,7 @@ def test_html_connector_document_round_trips_fragment_locators_to_citations(
     </main></body></html>"""
 
     with serve({"/studio": Route(body=body)}) as httpd:
-        document = HtmlConnector().read(f"{httpd.base_url}/studio")
+        document = HtmlConnector(allow_private_networks=True).read(f"{httpd.base_url}/studio")
 
     assert document.diagnostics == ()
     assert [(s.paragraph, s.section) for s in document.sections] == [

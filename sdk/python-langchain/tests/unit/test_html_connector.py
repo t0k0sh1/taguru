@@ -394,6 +394,22 @@ def test_unsupported_scheme_is_reported_without_touching_the_filesystem() -> Non
     assert [d.code for d in document.diagnostics] == ["unsupported_format"]
 
 
+def test_windows_drive_letter_path_is_treated_as_local_not_a_url_scheme() -> None:
+    # `urlsplit(r"C:\docs\a.html").scheme` is `"c"` — indistinguishable from
+    # a real (if unusual) single-letter URL scheme by scheme alone, so this
+    # must be special-cased before scheme dispatch, not inferred from
+    # scheme length.
+    connector = HtmlConnector()
+    assert connector.supports(r"C:\docs\a.html") is True
+    assert connector.supports(r"C:/docs/a.html") is True
+
+    # Routed to the local-file path, not refused as an unsupported "c://"
+    # scheme: a nonexistent local path is `unreadable`, never
+    # `unsupported_format`.
+    document = connector.read(r"C:\does\not\exist.html")
+    assert [d.code for d in document.diagnostics] == ["unreadable"]
+
+
 def test_parser_identity_is_stamped_into_the_fingerprint(tmp_path: Path) -> None:
     path = _write(tmp_path, "doc.html", "<html><body><p>Body.</p></body></html>")
     connector = HtmlConnector()
