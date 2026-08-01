@@ -196,6 +196,18 @@ fn seed_basic_corpus(server: &Server, name: &str) {
              "source": "doc.md", "paragraph": 0},
         ])),
     );
+    // A locator (ADR 0007 §7) on the same (source, paragraph) the
+    // association above names, so `attributions[].locator` in the
+    // recall/explore/activate wire fixtures carries a real value, not
+    // just an always-null field the golden could never actually prove.
+    server.ok(
+        "POST",
+        &format!("/contexts/{name}/sources"),
+        Some(json!({
+            "passages": {"doc.md": "alpha connects to beta."},
+            "locators": {"doc.md": [{"paragraph": 0, "locator": {"kind": "page", "value": "1"}}]}
+        })),
+    );
 }
 
 #[test]
@@ -376,9 +388,14 @@ fn seed_evidence_corpus(server: &Server, name: &str) {
     server.ok(
         "POST",
         &format!("/contexts/{name}/sources"),
-        Some(json!({"passages": {
-            "docs/kura.md": "青嶺酒造は雲居県霧沢町の蔵元である。杜氏は高瀬である。"
-        }})),
+        Some(json!({
+            "passages": {
+                "docs/kura.md": "青嶺酒造は雲居県霧沢町の蔵元である。杜氏は高瀬である。"
+            },
+            // A locator (ADR 0007 §7) so the citation/attribution wire
+            // fixtures below carry a real, non-null value.
+            "locators": {"docs/kura.md": [{"paragraph": 0, "locator": {"kind": "page", "value": "1"}}]}
+        })),
     );
     server.ok(
         "POST",
@@ -508,10 +525,16 @@ fn evidence_contradiction_group() {
     server.ok(
         "POST",
         "/contexts/contradiction-corpus/sources",
-        Some(json!({"passages": {
-            "s1.md": "猫は哺乳類である。",
-            "s2.md": "猫は爬虫類だと主張する文献もある。"
-        }})),
+        Some(json!({
+            "passages": {
+                "s1.md": "猫は哺乳類である。",
+                "s2.md": "猫は爬虫類だと主張する文献もある。"
+            },
+            // A locator (ADR 0007 §7) on one side, so this fixture's
+            // citations carry a real, non-null value alongside the
+            // other side's null.
+            "locators": {"s1.md": [{"paragraph": 0, "locator": {"kind": "page", "value": "1"}}]}
+        })),
     );
     server.ok(
         "POST",

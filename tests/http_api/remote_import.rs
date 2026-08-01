@@ -539,7 +539,7 @@ fn spawn_413_then_drop_stub() -> String {
         if let Ok((mut stream, _)) = listener.accept() {
             let mut buffer = [0u8; 8192];
             let _ = stream.read(&mut buffer);
-            let body = r#"{"status":"ok","result":{"batches":[{"context":"a","source":"a.md","created":true,"retracted":0,"associations":1,"aliases":0,"passage_stored":false,"passage_dropped":false,"questions_stored":0,"questions_dropped":0,"sections_stored":0,"sections_dropped":0,"association_paragraphs_dropped":0}]},"time":0.0}"#;
+            let body = r#"{"status":"ok","result":{"batches":[{"context":"a","source":"a.md","created":true,"retracted":0,"associations":1,"aliases":0,"passage_stored":false,"passage_dropped":false,"questions_stored":0,"questions_dropped":0,"sections_stored":0,"sections_dropped":0,"locators_stored":0,"locators_dropped":0,"association_paragraphs_dropped":0}]},"time":0.0}"#;
             let response = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                 body.len()

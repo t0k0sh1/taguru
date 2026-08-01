@@ -215,8 +215,8 @@ fn slot_cost(key: &RetrievalKey, value: &CachedRetrieval) -> usize {
 /// the whole point of keeping three counters instead of one scalar.
 fn op_lanes(op: RetrievalCacheOp, revision: ContextRevision) -> [u64; 2] {
     match op {
-        // Graph matches, plus section labels resolved through the
-        // passage store (`resolve_sections` enriches every
+        // Graph matches, plus section labels and locators resolved
+        // through the passage store (`resolve_markers` enriches every
         // association-bearing response) — config writes (a PATCH, an
         // embedding refresh) change neither.
         RetrievalCacheOp::Recall | RetrievalCacheOp::Query => [revision.graph, revision.passages],

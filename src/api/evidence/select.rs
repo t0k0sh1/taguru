@@ -944,6 +944,7 @@ mod tests {
             count: 1,
             paragraph: Some(paragraph),
             section: None,
+            locator: None,
         }];
         association
     }
@@ -986,6 +987,7 @@ mod tests {
             text: format!("excerpt of {source}"),
             source: source.to_string(),
             section: section.map(|s| s.to_string()),
+            locator: None,
         }
     }
 
@@ -1351,6 +1353,7 @@ mod tests {
                 count: 1,
                 paragraph: Some(1),
                 section: None,
+                locator: None,
             },
             AttributionOut {
                 source: "b.txt".to_string(),
@@ -1358,6 +1361,7 @@ mod tests {
                 count: 1,
                 paragraph: Some(2),
                 section: None,
+                locator: None,
             },
         ];
         let pool = vec![EvidenceCandidate::from_association("ctx", association, 1)];
@@ -1394,6 +1398,7 @@ mod tests {
             count: 1,
             paragraph: None,
             section: None,
+            locator: None,
         }];
         let pool = vec![EvidenceCandidate::from_association("ctx", association, 1)];
         let result = select_all(pool, &empty_lookup());
@@ -1526,6 +1531,7 @@ mod tests {
             count: 1,
             paragraph: Some(1),
             section: None,
+            locator: None,
         }];
         let activation = ActivationOut {
             strength: 0.5,
@@ -1820,6 +1826,7 @@ mod tests {
                             count: 1,
                             paragraph: Some(*paragraph),
                             section: None,
+                            locator: None,
                         }];
                     }
                     EvidenceCandidate::from_association("ctx", association, lane_rank)

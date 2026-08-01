@@ -165,7 +165,10 @@
       <code>source</code> and <code>paragraph</code> — which is what lets the <code>citations</code>
       API pull back the original sentence for verification. Give paragraphs a
       <code>section</code> (heading) and the resolved section name rides along on the
-      attributions of every graph read.
+      attributions of every graph read. A paragraph can also carry a typed
+      <code>locator</code> (a page/slide/sheet/table position, ADR 0007 §7) — independent of
+      <code>section</code>, and unlike it, naming only that exact paragraph rather than extending
+      to the next one; it resolves onto attributions and citations the same way.
     </p>
   </section>
 

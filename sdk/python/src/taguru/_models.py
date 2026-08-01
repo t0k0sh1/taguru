@@ -23,6 +23,7 @@ __all__ = [
     "ContextPage",
     "GroupEntry",
     "GroupPage",
+    "Locator",
     "Attribution",
     "Association",
     "MatchPage",
@@ -172,6 +173,21 @@ class GroupPage:
 
 
 @dataclass(slots=True, frozen=True)
+class Locator:
+    """A typed citation locator (page/slide/sheet/table position, ADR 0007 §7).
+
+    ``kind`` is an open string (``"page"``, ``"slide"``, ``"sheet"``,
+    ``"table"``, and whatever a future connector needs); ``value`` is
+    free text since its natural representation varies by kind
+    (``"12"``, ``"A1:C4"``). Independent of ``section`` — unlike it, a
+    locator does not extend to the next paragraph.
+    """
+
+    kind: str
+    value: str
+
+
+@dataclass(slots=True, frozen=True)
 class Attribution:
     """One source's contribution to an association. ``weight`` is raw cumulative."""
 
@@ -180,6 +196,7 @@ class Attribution:
     count: int
     paragraph: int | None = None
     section: str | None = None
+    locator: Locator | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -428,13 +445,15 @@ class SourcePage:
 
 @dataclass(slots=True, frozen=True)
 class StoredPassages:
-    """A dropped question/section named a paragraph its passage's split lacks."""
+    """A dropped question/section/locator named a paragraph its passage's split lacks."""
 
     stored: int
     questions_stored: int
     questions_dropped: int
     sections_stored: int
     sections_dropped: int
+    locators_stored: int
+    locators_dropped: int
 
 
 @dataclass(slots=True, frozen=True)
@@ -669,11 +688,12 @@ class SearchExplanation:
 
 @dataclass(slots=True, frozen=True)
 class Citation:
-    """One verbatim paragraph. ``section`` is null outside every stored section."""
+    """One verbatim paragraph. ``section``/``locator`` are null when absent."""
 
     text: str
     source: str
     section: str | None = None
+    locator: Locator | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -771,6 +791,8 @@ class ImportOutcome:
     questions_dropped: int
     sections_stored: int
     sections_dropped: int
+    locators_stored: int
+    locators_dropped: int
     association_paragraphs_dropped: int
 
 

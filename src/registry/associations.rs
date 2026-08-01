@@ -228,14 +228,15 @@ impl AppState {
 
     /// Drops a paragraph locator that falls outside its source's
     /// stored passage, the same silent-drop posture `StoreOutcome`
-    /// already applies to out-of-range questions and sections. This
+    /// already applies to out-of-range questions, sections, and
+    /// locators. This
     /// is the general-purpose backstop: callers that hand the batch's
     /// passage text to the ingest pipeline get a cheaper, unconditional
     /// clamp there, but a bare HTTP call or a later `add_associations`
     /// against an already-stored source has no such text in hand, so
     /// this checks the resident passage store instead.
     ///
-    /// Best-effort like [`AppState::resolve_sections`]: an unknown
+    /// Best-effort like [`AppState::resolve_markers`]: an unknown
     /// context, a deleted entry, a source with no stored passage, or a
     /// store load failure all leave `paragraph` as given rather than
     /// fail the write — an unresolved locator is still meaningful

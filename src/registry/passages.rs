@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::sync::atomic::Ordering;
 
-use super::{AppState, CitationLookup, file_stem};
+use super::{AppState, CitationLookup, Markers, file_stem};
 
 /// Why a passage store was refused — the write path's two failure
 /// families kept apart so a handler can answer 507 for the policy
@@ -116,9 +116,9 @@ impl AppState {
     /// whole-document dereference. Reuses `PassageRecord::paragraph`,
     /// the same slice `search_passages` goes through for its hits, so
     /// the two can never disagree about what a paragraph's text is.
-    /// The section label comes from the same resident record via
-    /// `section_for`, `None` when the index falls outside every
-    /// section the source's import stored.
+    /// The section label and locator (ADR 0007 §7) come from the same
+    /// resident record via `section_for`/`locator_for`, each `None`
+    /// when the index falls outside what the source's import stored.
     pub fn citation(
         &self,
         name: &str,
@@ -138,31 +138,42 @@ impl AppState {
             return Some(Ok(CitationLookup::IndexOutOfRange));
         };
         let section = record.section_for(index as usize).map(str::to_string);
-        Some(Ok(CitationLookup::Found(text.to_string(), section)))
+        let locator = record.locator_for(index as usize).cloned();
+        Some(Ok(CitationLookup::Found {
+            text: text.to_string(),
+            section,
+            locator,
+        }))
     }
 
-    /// Resolves `(source, paragraph)` locators — as found on
-    /// attributions — to the section label governing each, batching
-    /// every pair an association-bearing response needs into one
-    /// passage-store load rather than one per attribution. Best-effort:
-    /// an unknown context, a deleted entry, or a passage-store load
-    /// failure all resolve to an empty map rather than an error.
-    /// Association reads (recall, query, explore, activate,
-    /// unreachable_from) are graph reads first; a section label is
-    /// enrichment on top, not a hard dependency the way `citation`'s
-    /// text lookup is. A pair with no covering marker is simply absent
-    /// from the map — the same null-means-nothing contract
-    /// `Attribution::paragraph` already makes, never a fabricated
-    /// label. An empty `locators` skips the passage-store load
-    /// entirely, so a graph-only response (no attribution carries a
-    /// paragraph) never touches passages.
-    pub fn resolve_sections(
+    /// Resolves `(source, paragraph)` locator keys — as found on
+    /// attributions — to the section label and typed citation locator
+    /// (ADR 0007 §7) governing each, batching every pair an
+    /// association-bearing response needs into one passage-store load
+    /// rather than one per attribution. Best-effort: an unknown
+    /// context, a deleted entry, or a passage-store load failure all
+    /// resolve to an empty map rather than an error. Association reads
+    /// (recall, query, explore, activate, unreachable_from) are graph
+    /// reads first; these markers are enrichment on top, not a hard
+    /// dependency the way `citation`'s text lookup is. A pair with no
+    /// covering marker simply carries `None` in [`Markers`] — the same
+    /// null-means-nothing contract `Attribution::paragraph` already
+    /// makes, never a fabricated value. An empty `keys` iterator skips
+    /// the passage-store load entirely, so a graph-only response (no
+    /// attribution carries a paragraph) never touches passages.
+    ///
+    /// Not to be confused with `(source, paragraph)` "locator" keys
+    /// themselves (`keys`' own element type, also `api::locator_keys`'
+    /// output) — this resolves each key to the typed citation
+    /// [`crate::passages::Locator`] payload, a different sense of the
+    /// word.
+    pub fn resolve_markers(
         &self,
         name: &str,
-        locators: impl Iterator<Item = (String, u32)>,
-    ) -> HashMap<(String, u32), String> {
-        let mut locators = locators.peekable();
-        if locators.peek().is_none() {
+        keys: impl Iterator<Item = (String, u32)>,
+    ) -> HashMap<(String, u32), Markers> {
+        let mut keys = keys.peekable();
+        if keys.peek().is_none() {
             return HashMap::new();
         }
         let Some(entry) = self.lookup(name) else {
@@ -177,18 +188,22 @@ impl AppState {
                 tracing::warn!(
                     context = %name,
                     %error,
-                    "section resolution: passage store load failed; continuing without section labels"
+                    "marker resolution: passage store load failed; continuing without \
+                     section/locator labels"
                 );
                 return HashMap::new();
             }
         };
-        locators
-            .filter_map(|(source, paragraph)| {
-                let record = store.get(&source)?;
-                let section = record.section_for(paragraph as usize)?;
-                Some(((source, paragraph), section.to_string()))
-            })
-            .collect()
+        keys.filter_map(|(source, paragraph)| {
+            let record = store.get(&source)?;
+            let section = record.section_for(paragraph as usize).map(str::to_string);
+            let locator = record.locator_for(paragraph as usize).cloned();
+            if section.is_none() && locator.is_none() {
+                return None;
+            }
+            Some(((source, paragraph), Markers { section, locator }))
+        })
+        .collect()
     }
 
     /// The source ids that currently have a registered passage.

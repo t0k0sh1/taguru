@@ -50,6 +50,8 @@ pub struct ImportOutcome {
     pub questions_dropped: usize,
     pub sections_stored: usize,
     pub sections_dropped: usize,
+    pub locators_stored: usize,
+    pub locators_dropped: usize,
     /// Association paragraph locators dropped for naming a spot the
     /// batch's passage split does not have — the association itself
     /// still landed. Reported like `questions_dropped`/`sections_dropped`.
@@ -96,6 +98,8 @@ fn import_outcome(batch: &crate::ingest::Batch, applied: &crate::ingest::Applied
         questions_dropped: applied.questions_dropped,
         sections_stored: applied.sections_stored,
         sections_dropped: applied.sections_dropped,
+        locators_stored: applied.locators_stored,
+        locators_dropped: applied.locators_dropped,
         association_paragraphs_dropped: applied.association_paragraphs_dropped,
     }
 }

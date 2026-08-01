@@ -1301,9 +1301,23 @@ pub(crate) enum VectorLaneStatus {
 /// stays reserved for the store itself being unreachable.
 #[derive(Debug)]
 pub(crate) enum CitationLookup {
-    Found(String, Option<String>),
+    Found {
+        text: String,
+        section: Option<String>,
+        locator: Option<crate::passages::Locator>,
+    },
     UnknownSource,
     IndexOutOfRange,
+}
+
+/// The section label and typed citation locator (ADR 0007 §7) resolved
+/// for one `(source, paragraph)` pair — [`AppState::resolve_markers`]'s
+/// per-key result. Each half is independently `None` when that
+/// paragraph carries no such marker; never a fabricated value.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Markers {
+    pub(crate) section: Option<String>,
+    pub(crate) locator: Option<crate::passages::Locator>,
 }
 
 /// Accumulator behind the fusion: each lane keeps the (rank, score,

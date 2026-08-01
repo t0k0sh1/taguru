@@ -32,21 +32,24 @@ use crate::paragraph::{self, ParagraphSpan};
 use crate::wal;
 
 /// One source's submitted passage: the text, and optionally the
-/// doc2query questions and section markers riding with it —
-/// (paragraph index, question) and (paragraph index, label) pairs a
-/// producer (`taguru extract --questions`, the ingest batch format,
-/// or any client) attached so question-shaped queries can land on
-/// answer-shaped paragraphs, and paragraphs can carry a section
-/// label, from the index side too. `meta` is the source-level
-/// metadata (#167): a `meta.stored_at` of `None` asks the store to
-/// stamp the write time itself (the HTTP path); `Some` preserves a
-/// timestamp that already exists (the import path, so an
-/// export → import round trip is lossless).
+/// doc2query questions, section markers, and locators riding with it —
+/// (paragraph index, question) pairs, (paragraph index, label) pairs,
+/// and (paragraph index, locator) pairs a producer
+/// (`taguru extract --questions`, the ingest batch format, or any
+/// client) attached so question-shaped queries can land on
+/// answer-shaped paragraphs, paragraphs can carry a section label,
+/// and a paragraph can carry a typed citation locator (a page/slide/
+/// sheet position, ADR 0007 §7) — all from the index side too. `meta`
+/// is the source-level metadata (#167): a `meta.stored_at` of `None`
+/// asks the store to stamp the write time itself (the HTTP path);
+/// `Some` preserves a timestamp that already exists (the import path,
+/// so an export → import round trip is lossless).
 #[derive(Debug, Clone)]
 pub(crate) struct PassageSubmission {
     pub(crate) text: String,
     pub(crate) questions: Vec<(u32, String)>,
     pub(crate) sections: Vec<(u32, String)>,
+    pub(crate) locators: Vec<(u32, Locator)>,
     pub(crate) meta: SourceMeta,
 }
 
@@ -58,9 +61,27 @@ impl PassageSubmission {
             text: text.into(),
             questions: Vec::new(),
             sections: Vec::new(),
+            locators: Vec::new(),
             meta: SourceMeta::default(),
         }
     }
+}
+
+/// A typed citation locator (ADR 0007 §7.1): a page, slide, sheet, or
+/// other position independent of `section`'s free-text heading label.
+/// `kind` is an open string (`"page"`, `"slide"`, `"sheet"`, `"table"`,
+/// and whatever a future connector needs) — deliberately not a closed
+/// enum, so a new `kind` is an additive, compatible wire change. `value`
+/// is a free-text string (`"12"`, `"A1:C4"`) since a locator's natural
+/// representation varies by `kind`. Not to be confused with the
+/// `(source, paragraph)` sense of "locator" used elsewhere in this
+/// crate (e.g. `api::locator_keys`, `evaluate::AttributionLocator`) —
+/// this is the typed citation payload itself.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Locator {
+    pub kind: String,
+    pub value: String,
 }
 
 /// Source-level metadata riding beside one passage (#167): when the
@@ -125,10 +146,11 @@ impl SourceFilter {
     }
 }
 
-/// What one store call accomplished, question and section bookkeeping
-/// included: out-of-range questions and sections are dropped one by
-/// one (the paragraph they name does not exist in the text they rode
-/// in with), never failing the passages they accompanied.
+/// What one store call accomplished, question/section/locator
+/// bookkeeping included: out-of-range questions, sections, and
+/// locators are dropped one by one (the paragraph they name does not
+/// exist in the text they rode in with), never failing the passages
+/// they accompanied.
 #[derive(Debug, Default)]
 pub(crate) struct StoreOutcome {
     pub(crate) stored: usize,
@@ -136,64 +158,83 @@ pub(crate) struct StoreOutcome {
     pub(crate) questions_dropped: usize,
     pub(crate) sections_stored: usize,
     pub(crate) sections_dropped: usize,
+    pub(crate) locators_stored: usize,
+    pub(crate) locators_dropped: usize,
 }
 
-/// How many of `questions`/`sections` name a paragraph outside
-/// `paragraph_count` — the same range check [`PassageRecord::new`]
-/// applies when it filters, exposed standalone so a caller can get the
-/// count without building the record: `preview_batch`'s read-only
-/// twin of `apply_batch` calls this to report what a real store would
-/// drop. Sections additionally count paragraphs claimed more than
-/// once — see [`filter_sections`].
+/// How many of `questions`/`sections`/`locators` name a paragraph
+/// outside `paragraph_count` — the same range check
+/// [`PassageRecord::new`] applies when it filters, exposed standalone
+/// so a caller can get the counts without building the record:
+/// `preview_batch`'s read-only twin of `apply_batch` calls this to
+/// report what a real store would drop. Sections and locators
+/// additionally count paragraphs claimed more than once — see
+/// [`filter_markers`].
 pub(crate) fn preview_drops(
     paragraph_count: usize,
     questions: &[(u32, String)],
     sections: &[(u32, String)],
-) -> (usize, usize) {
+    locators: &[(u32, Locator)],
+) -> (usize, usize, usize) {
     let out_of_range = |&&(paragraph, _): &&(u32, String)| paragraph as usize >= paragraph_count;
     (
         questions.iter().filter(out_of_range).count(),
-        filter_sections(sections, paragraph_count).1,
+        filter_markers(sections, paragraph_count).1,
+        filter_markers(locators, paragraph_count).1,
     )
 }
 
-/// Keeps only sections naming a paragraph within `paragraph_count`,
-/// then collapses same-paragraph entries to the last one submitted —
-/// a section is a start marker, and [`PassageRecord::section_for`]'s
-/// binary search can only ever surface one label per paragraph, so an
+/// Keeps only markers (section labels, locators) naming a paragraph
+/// within `paragraph_count`, then collapses same-paragraph entries to
+/// the last one submitted — a marker is a start-or-only reference, and
+/// each resolver (`PassageRecord::section_for`, `PassageRecord::
+/// locator_for`) can only ever surface one value per paragraph, so an
 /// earlier marker for a paragraph that has a later one can never be
 /// reached again once stored. Dropping it here instead (rather than
-/// letting it ride into storage unreachable forever) matches the rest
-/// of the store's last-write-wins convention and keeps the drop count
-/// honest. Returns the survivors, sorted by paragraph as
-/// `PassageRecord` stores them, and how many entries — out of range or
-/// shadowed — were dropped. The one place this is decided, so
-/// `PassageRecord::new` and `preview_drops` can never disagree about
-/// which sections a submission keeps.
-fn filter_sections(
-    sections: &[(u32, String)],
+/// letting it ride into storage unreachable forever) matches the
+/// store's last-write-wins convention and keeps the drop count honest.
+/// Returns the survivors, sorted by paragraph as `PassageRecord`
+/// stores them, and how many entries — out of range or shadowed — were
+/// dropped. The one place this is decided, so `PassageRecord::new` and
+/// `preview_drops` can never disagree about which markers a submission
+/// keeps. Generic over the marker's payload (`String` for sections,
+/// [`Locator`] for locators) since both share the exact same
+/// filter/collapse/sort rule.
+fn filter_markers<T: Clone>(
+    markers: &[(u32, T)],
     paragraph_count: usize,
-) -> (Vec<(u32, String)>, usize) {
+) -> (Vec<(u32, T)>, usize) {
     let mut seen = std::collections::HashSet::new();
-    let mut kept: Vec<(u32, String)> = sections
+    let mut kept: Vec<(u32, T)> = markers
         .iter()
         .rev()
-        .filter(|&&(paragraph, _)| (paragraph as usize) < paragraph_count && seen.insert(paragraph))
+        .filter(|(paragraph, _)| (*paragraph as usize) < paragraph_count && seen.insert(*paragraph))
         .cloned()
         .collect();
     kept.sort_by_key(|&(paragraph, _)| paragraph);
-    let dropped = sections.len() - kept.len();
+    let dropped = markers.len() - kept.len();
     (kept, dropped)
+}
+
+/// How many questions/sections/locators [`PassageRecord::new`] (or its
+/// standalone twin [`preview_drops`]) dropped — a named struct rather
+/// than a same-typed `usize` tuple, since three positional counts this
+/// size apart are easy to transpose without the compiler noticing.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct DropCounts {
+    pub(crate) questions: usize,
+    pub(crate) sections: usize,
+    pub(crate) locators: usize,
 }
 
 /// One source's resident passage: the byte-exact text, its paragraph
 /// spans (computed once per residency, never persisted — the split
 /// function is deterministic, so the spans are as durable as the text
-/// they index), its stored questions, and its stored section markers
-/// — both validated against those spans and sorted by paragraph.
-/// Handed out as `Arc`, so search and the index/vector lanes walk
-/// paragraphs without holding the store lock and without copying
-/// text.
+/// they index), its stored questions, and its stored section and
+/// locator markers — all validated against those spans and sorted by
+/// paragraph. Handed out as `Arc`, so search and the index/vector
+/// lanes walk paragraphs without holding the store lock and without
+/// copying text.
 #[derive(Debug)]
 pub(crate) struct PassageRecord {
     pub(crate) text: Arc<str>,
@@ -204,28 +245,38 @@ pub(crate) struct PassageRecord {
     /// extends until the next marker or the end of the passage.
     /// Populated by the ingest batch format's `section` line (see
     /// `ingest.rs`); resolved through `section_for`. See
-    /// [`filter_sections`] for how a paragraph claimed more than once
+    /// [`filter_markers`] for how a paragraph claimed more than once
     /// is resolved before it ever reaches here.
     pub(crate) sections: Vec<(u32, String)>,
+    /// (paragraph index, [`Locator`]) pairs, sorted by paragraph, at
+    /// most one per paragraph — unlike `sections`, a locator does
+    /// **not** extend to the next paragraph (ADR 0007 §7.2): it names
+    /// only the paragraph a connector or batch line pinned it to.
+    /// Populated by the ingest batch format's `locator` line;
+    /// resolved through `locator_for`. See [`filter_markers`] for how
+    /// a paragraph claimed more than once is resolved before it ever
+    /// reaches here.
+    pub(crate) locators: Vec<(u32, Locator)>,
     /// Source-level metadata (#167); tags sorted and deduplicated by
     /// [`Self::new`], so [`SourceFilter::matches`] can binary-search.
     pub(crate) meta: SourceMeta,
 }
 
 impl PassageRecord {
-    /// Builds the record, keeping only questions and section markers
-    /// whose paragraph exists in THIS text's split — the one
+    /// Builds the record, keeping only questions, section markers, and
+    /// locators whose paragraph exists in THIS text's split — the one
     /// validation point both the live path and replay go through, so
-    /// they can never disagree. Sections are additionally collapsed to
-    /// one per paragraph (see [`filter_sections`]); metadata tags are
-    /// sorted and deduplicated here for the same reason. Returns how
-    /// many questions and how many sections were dropped.
+    /// they can never disagree. Sections and locators are additionally
+    /// collapsed to one per paragraph (see [`filter_markers`]);
+    /// metadata tags are sorted and deduplicated here for the same
+    /// reason. Returns how many of each were dropped.
     pub(crate) fn new(
         text: Arc<str>,
         questions: Vec<(u32, String)>,
         sections: Vec<(u32, String)>,
+        locators: Vec<(u32, Locator)>,
         mut meta: SourceMeta,
-    ) -> (Arc<Self>, usize, usize) {
+    ) -> (Arc<Self>, DropCounts) {
         let paragraphs = paragraph::split(&text);
         let questions_offered = questions.len();
         let mut questions: Vec<(u32, String)> = questions
@@ -234,7 +285,8 @@ impl PassageRecord {
             .collect();
         questions.sort_by_key(|&(paragraph, _)| paragraph);
         let questions_dropped = questions_offered - questions.len();
-        let (sections, sections_dropped) = filter_sections(&sections, paragraphs.len());
+        let (sections, sections_dropped) = filter_markers(&sections, paragraphs.len());
+        let (locators, locators_dropped) = filter_markers(&locators, paragraphs.len());
         meta.tags.sort();
         meta.tags.dedup();
         (
@@ -243,10 +295,14 @@ impl PassageRecord {
                 paragraphs,
                 questions,
                 sections,
+                locators,
                 meta,
             }),
-            questions_dropped,
-            sections_dropped,
+            DropCounts {
+                questions: questions_dropped,
+                sections: sections_dropped,
+                locators: locators_dropped,
+            },
         )
     }
 
@@ -255,6 +311,7 @@ impl PassageRecord {
     pub(crate) fn for_tests(text: &str) -> Arc<Self> {
         Self::new(
             Arc::from(text),
+            Vec::new(),
             Vec::new(),
             Vec::new(),
             SourceMeta::default(),
@@ -268,6 +325,7 @@ impl PassageRecord {
         Self::new(
             Arc::from(text),
             questions,
+            Vec::new(),
             Vec::new(),
             SourceMeta::default(),
         )
@@ -295,7 +353,7 @@ impl PassageRecord {
     /// or before `index`, extending until the next marker or the end
     /// of the passage. `None` before the first marker, past the end,
     /// or when the record carries no sections at all. Used by
-    /// `AppState::resolve_sections` to label attributions on
+    /// `AppState::resolve_markers` to label attributions on
     /// association reads (recall, query, explore, activate,
     /// unreachable_from), and by `AppState::citation` to label its
     /// single excerpt.
@@ -308,6 +366,25 @@ impl PassageRecord {
             .partition_point(|&(start, _)| (start as usize) <= index);
         pos.checked_sub(1).map(|i| self.sections[i].1.as_str())
     }
+
+    /// The locator naming a paragraph — an exact match on `index`,
+    /// never a nearest-marker walk-back like [`Self::section_for`]:
+    /// a locator (ADR 0007 §7.2) does not extend to the next
+    /// paragraph, since a table's or slide's locator names only the
+    /// paragraphs it itself produced. `None` when `index` is out of
+    /// range, or no locator was ever recorded for that exact
+    /// paragraph. Used the same way `section_for` is used, by
+    /// `AppState::resolve_markers` and `AppState::citation`.
+    pub(crate) fn locator_for(&self, index: usize) -> Option<&Locator> {
+        if index >= self.paragraphs.len() {
+            return None;
+        }
+        let index = index as u32;
+        self.locators
+            .binary_search_by_key(&index, |&(paragraph, _)| paragraph)
+            .ok()
+            .map(|i| &self.locators[i].1)
+    }
 }
 
 /// One passage mutation — this log's whole vocabulary. Same
@@ -316,9 +393,9 @@ impl PassageRecord {
 /// Both ops are last-write-wins, so a replay overlapping the snapshot
 /// re-applies harmlessly — the watermark still gates it, but a bug
 /// there degrades to wasted work, not corruption (unlike `associate`,
-/// which accumulates). `questions`, `sections`, and the metadata trio
-/// (`stored_at`/`date`/`tags`, #167) are all additive (older logs
-/// simply have none) and carry the submission AS OFFERED — validation
+/// which accumulates). `questions`, `sections`, `locators`, and the
+/// metadata trio (`stored_at`/`date`/`tags`, #167) are all additive
+/// (older logs simply have none) and carry the submission AS OFFERED — validation
 /// happens in `PassageRecord::new`, identically on the live path and
 /// on replay. `stored_at` is the exception that proves the rule: the
 /// live write stamps it ONCE while building this op, so replay reads
@@ -333,6 +410,8 @@ pub(crate) enum PassageOp {
         questions: Vec<(u32, String)>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         sections: Vec<(u32, String)>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        locators: Vec<(u32, Locator)>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stored_at: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -367,7 +446,10 @@ const COMPACT_FLOOR_BYTES: u64 = 4 * 1024 * 1024;
 /// (see the module doc for why a ratio, never a fixed threshold).
 const COMPACT_RATIO: u64 = 1;
 
-const SNAPSHOT_MAGIC: &[u8; 8] = b"TAGURUS5";
+const SNAPSHOT_MAGIC: &[u8; 8] = b"TAGURUS6";
+/// The pre-locator snapshot format: S6's layout minus the per-source
+/// locator block (ADR 0007 §7). Read forever, written never again.
+const S5_SNAPSHOT_MAGIC: &[u8; 8] = b"TAGURUS5";
 /// The pre-metadata snapshot format: S5's layout minus the per-source
 /// stored_at/date/tags block (#167). Read forever, written never
 /// again.
@@ -434,7 +516,7 @@ pub(crate) struct PassageStore {
 }
 
 /// Tally from one `append_and_apply_locked` call. A named struct
-/// rather than a same-typed `usize` tuple — four positional counts
+/// rather than a same-typed `usize` tuple — six positional counts
 /// this size apart are easy to transpose without the compiler
 /// noticing.
 #[derive(Debug, Default)]
@@ -443,6 +525,8 @@ struct AppliedCounts {
     questions_dropped: usize,
     sections_stored: usize,
     sections_dropped: usize,
+    locators_stored: usize,
+    locators_dropped: usize,
 }
 
 impl PassageStore {
@@ -499,6 +583,7 @@ impl PassageStore {
                             Arc::from(text),
                             Vec::new(),
                             Vec::new(),
+                            Vec::new(),
                             SourceMeta::default(),
                         )
                         .0,
@@ -527,6 +612,7 @@ impl PassageStore {
                     text,
                     questions,
                     sections,
+                    locators,
                     stored_at,
                     date,
                     tags,
@@ -538,6 +624,7 @@ impl PassageStore {
                             Arc::from(text),
                             questions,
                             sections,
+                            locators,
                             SourceMeta {
                                 stored_at,
                                 date,
@@ -621,6 +708,7 @@ impl PassageStore {
                 text: submission.text,
                 questions: submission.questions,
                 sections: submission.sections,
+                locators: submission.locators,
                 stored_at: submission.meta.stored_at.or_else(|| Some(now_epoch_secs())),
                 date: submission.meta.date,
                 tags: submission.meta.tags,
@@ -658,6 +746,8 @@ impl PassageStore {
             questions_dropped: counts.questions_dropped,
             sections_stored: counts.sections_stored,
             sections_dropped: counts.sections_dropped,
+            locators_stored: counts.locators_stored,
+            locators_dropped: counts.locators_dropped,
         })
     }
 
@@ -693,14 +783,16 @@ impl PassageStore {
                         text,
                         questions,
                         sections,
+                        locators,
                         stored_at,
                         date,
                         tags,
                     } => {
-                        let (record, questions_dropped, sections_dropped) = PassageRecord::new(
+                        let (record, drops) = PassageRecord::new(
                             Arc::from(text.as_str()),
                             questions.clone(),
                             sections.clone(),
+                            locators.clone(),
                             SourceMeta {
                                 stored_at: *stored_at,
                                 date: *date,
@@ -708,9 +800,11 @@ impl PassageStore {
                             },
                         );
                         counts.questions_stored += record.questions.len();
-                        counts.questions_dropped += questions_dropped;
+                        counts.questions_dropped += drops.questions;
                         counts.sections_stored += record.sections.len();
-                        counts.sections_dropped += sections_dropped;
+                        counts.sections_dropped += drops.sections;
+                        counts.locators_stored += record.locators.len();
+                        counts.locators_dropped += drops.locators;
                         inner.resident_bytes += record_bytes(source, &record);
                         if let Some(previous) = inner.sources.insert(source.clone(), record) {
                             inner.resident_bytes -= record_bytes(source, &previous);
@@ -963,8 +1057,8 @@ fn read_legacy(path: &Path) -> BTreeMap<String, String> {
 }
 
 /// What one resident record costs, for the running footprint: key,
-/// text, spans, questions, sections, and the per-entry overhead
-/// constant.
+/// text, spans, questions, sections, locators, and the per-entry
+/// overhead constant.
 pub(crate) fn record_bytes(source: &str, record: &PassageRecord) -> usize {
     source.len()
         + record.text.len()
@@ -978,6 +1072,11 @@ pub(crate) fn record_bytes(source: &str, record: &PassageRecord) -> usize {
             .sections
             .iter()
             .map(|(_, label)| label.len() + 8)
+            .sum::<usize>()
+        + record
+            .locators
+            .iter()
+            .map(|(_, locator)| locator.kind.len() + locator.value.len() + 8)
             .sum::<usize>()
         + record
             .meta
@@ -994,11 +1093,11 @@ fn snapshot_to_bytes(sources: &BTreeMap<String, Arc<PassageRecord>>, watermark: 
     out.extend_from_slice(SNAPSHOT_MAGIC);
     out.extend_from_slice(&watermark.to_le_bytes());
     out.extend_from_slice(&(sources.len() as u32).to_le_bytes());
-    // BTreeMap iterates sorted (and a record's questions/sections are
-    // sorted by paragraph at construction, its tags sorted and deduped
-    // the same way): identical content is byte-identical. Text,
-    // questions, sections, and metadata land on disk — spans are
-    // recomputed on load.
+    // BTreeMap iterates sorted (and a record's questions/sections/
+    // locators are sorted by paragraph at construction, its tags
+    // sorted and deduped the same way): identical content is
+    // byte-identical. Text, questions, sections, locators, and
+    // metadata land on disk — spans are recomputed on load.
     for (source, record) in sources {
         write_chunk(&mut out, source.as_bytes());
         write_chunk(&mut out, record.text.as_bytes());
@@ -1018,6 +1117,14 @@ fn snapshot_to_bytes(sources: &BTreeMap<String, Arc<PassageRecord>>, watermark: 
         for tag in &record.meta.tags {
             write_chunk(&mut out, tag.as_bytes());
         }
+        // Locators land last, after the metadata block — S5 and older
+        // snapshots simply end before this point.
+        out.extend_from_slice(&(record.locators.len() as u32).to_le_bytes());
+        for (paragraph, locator) in &record.locators {
+            out.extend_from_slice(&paragraph.to_le_bytes());
+            write_chunk(&mut out, locator.kind.as_bytes());
+            write_chunk(&mut out, locator.value.as_bytes());
+        }
     }
     // The CRC-32C footer, same discipline as the context image: the
     // snapshot holds acknowledged passages with no other copy, and
@@ -1032,20 +1139,22 @@ fn snapshot_from_bytes(bytes: &[u8]) -> Option<(BTreeMap<String, Arc<PassageReco
     let magic = bytes.get(..8)?;
     // TAGURUS1 predates questions and sections; TAGURUS2 predates only
     // sections; TAGURUS3 predates the checksum footer; TAGURUS4
-    // predates the source metadata block. Each older layout is the
-    // newest one minus its trailing pieces, so one parser reads all
-    // five.
-    let (questions_on_disk, sections_on_disk, meta_on_disk, checksummed) =
+    // predates the source metadata block; TAGURUS5 predates the
+    // locator block. Each older layout is the newest one minus its
+    // trailing pieces, so one parser reads all six.
+    let (questions_on_disk, sections_on_disk, meta_on_disk, locators_on_disk, checksummed) =
         if magic == SNAPSHOT_MAGIC {
-            (true, true, true, true)
+            (true, true, true, true, true)
+        } else if magic == S5_SNAPSHOT_MAGIC {
+            (true, true, true, false, true)
         } else if magic == S4_SNAPSHOT_MAGIC {
-            (true, true, false, true)
+            (true, true, false, false, true)
         } else if magic == S3_SNAPSHOT_MAGIC {
-            (true, true, false, false)
+            (true, true, false, false, false)
         } else if magic == S2_SNAPSHOT_MAGIC {
-            (true, false, false, false)
+            (true, false, false, false, false)
         } else if magic == LEGACY_SNAPSHOT_MAGIC {
-            (false, false, false, false)
+            (false, false, false, false, false)
         } else {
             return None;
         };
@@ -1106,9 +1215,22 @@ fn snapshot_from_bytes(bytes: &[u8]) -> Option<(BTreeMap<String, Arc<PassageReco
                 meta.tags.push(tag);
             }
         }
+        let mut locators = Vec::new();
+        if locators_on_disk {
+            let locator_count =
+                u32::from_le_bytes(bytes.get(pos..pos + 4)?.try_into().ok()?) as usize;
+            pos += 4;
+            for _ in 0..locator_count {
+                let paragraph = u32::from_le_bytes(bytes.get(pos..pos + 4)?.try_into().ok()?);
+                pos += 4;
+                let kind = String::from_utf8(read_chunk(bytes, &mut pos)?.to_vec()).ok()?;
+                let value = String::from_utf8(read_chunk(bytes, &mut pos)?.to_vec()).ok()?;
+                locators.push((paragraph, Locator { kind, value }));
+            }
+        }
         sources.insert(
             source,
-            PassageRecord::new(Arc::from(text), questions, sections, meta).0,
+            PassageRecord::new(Arc::from(text), questions, sections, locators, meta).0,
         );
     }
     (pos == bytes.len()).then_some((sources, watermark))
@@ -1482,6 +1604,7 @@ mod tests {
                         (9, "存在しない段落への質問?".to_string()),
                     ],
                     sections: Vec::new(),
+                    locators: Vec::new(),
                     meta: SourceMeta::default(),
                 },
             );
@@ -1508,7 +1631,7 @@ mod tests {
 
     #[test]
     fn passage_record_keeps_sections_validated_and_sorted_by_start() {
-        let (record, _questions_dropped, sections_dropped) = PassageRecord::new(
+        let (record, drops) = PassageRecord::new(
             Arc::from("一つ目。\n\n二つ目。"),
             Vec::new(),
             vec![
@@ -1516,6 +1639,7 @@ mod tests {
                 (0, "前編".to_string()),
                 (9, "存在しない段落への見出し".to_string()),
             ],
+            Vec::new(),
             SourceMeta::default(),
         );
         assert_eq!(
@@ -1523,7 +1647,61 @@ mod tests {
             vec![(0, "前編".to_string()), (1, "後編".to_string())],
             "the out-of-range section drops and the rest sort by paragraph"
         );
-        assert_eq!(sections_dropped, 1);
+        assert_eq!(drops.sections, 1);
+    }
+
+    #[test]
+    fn passage_record_keeps_locators_validated_and_sorted_by_paragraph() {
+        let (record, drops) = PassageRecord::new(
+            Arc::from("一つ目。\n\n二つ目。"),
+            Vec::new(),
+            Vec::new(),
+            vec![
+                (
+                    1,
+                    Locator {
+                        kind: "page".to_string(),
+                        value: "2".to_string(),
+                    },
+                ),
+                (
+                    0,
+                    Locator {
+                        kind: "page".to_string(),
+                        value: "1".to_string(),
+                    },
+                ),
+                (
+                    9,
+                    Locator {
+                        kind: "page".to_string(),
+                        value: "存在しない段落".to_string(),
+                    },
+                ),
+            ],
+            SourceMeta::default(),
+        );
+        assert_eq!(
+            record.locators,
+            vec![
+                (
+                    0,
+                    Locator {
+                        kind: "page".to_string(),
+                        value: "1".to_string()
+                    }
+                ),
+                (
+                    1,
+                    Locator {
+                        kind: "page".to_string(),
+                        value: "2".to_string()
+                    }
+                ),
+            ],
+            "the out-of-range locator drops and the rest sort by paragraph"
+        );
+        assert_eq!(drops.locators, 1);
     }
 
     #[test]
@@ -1533,10 +1711,11 @@ mod tests {
             (1, "後編".to_string()),
             (9, "存在しない段落への見出し".to_string()),
         ];
-        let (record, _questions_dropped, sections_dropped) = PassageRecord::new(
+        let (record, drops) = PassageRecord::new(
             Arc::from("一つ目。\n\n二つ目。"),
             Vec::new(),
             sections.clone(),
+            Vec::new(),
             SourceMeta::default(),
         );
         assert_eq!(
@@ -1546,7 +1725,7 @@ mod tests {
              not kept alongside it — only one label can ever govern a paragraph"
         );
         assert_eq!(
-            sections_dropped, 2,
+            drops.sections, 2,
             "one out-of-range plus one shadowed by a later marker for the same paragraph"
         );
         assert_eq!(
@@ -1555,10 +1734,103 @@ mod tests {
             "the surviving marker is the one section_for already resolved to"
         );
         assert_eq!(
-            preview_drops(2, &[], &sections).1,
-            sections_dropped,
+            preview_drops(2, &[], &sections, &[]).1,
+            drops.sections,
             "preview must count the same drops apply does"
         );
+    }
+
+    #[test]
+    fn passage_record_collapses_a_paragraph_claimed_by_more_than_one_locator() {
+        let locators = vec![
+            (
+                1,
+                Locator {
+                    kind: "page".to_string(),
+                    value: "前".to_string(),
+                },
+            ),
+            (
+                1,
+                Locator {
+                    kind: "page".to_string(),
+                    value: "後".to_string(),
+                },
+            ),
+            (
+                9,
+                Locator {
+                    kind: "page".to_string(),
+                    value: "存在しない段落".to_string(),
+                },
+            ),
+        ];
+        let (record, drops) = PassageRecord::new(
+            Arc::from("一つ目。\n\n二つ目。"),
+            Vec::new(),
+            Vec::new(),
+            locators.clone(),
+            SourceMeta::default(),
+        );
+        assert_eq!(
+            record.locators,
+            vec![(
+                1,
+                Locator {
+                    kind: "page".to_string(),
+                    value: "後".to_string()
+                }
+            )],
+            "the earlier locator for a paragraph that has a later one is dropped, \
+             not kept alongside it — only one locator can ever name a paragraph"
+        );
+        assert_eq!(
+            drops.locators, 2,
+            "one out-of-range plus one shadowed by a later locator for the same paragraph"
+        );
+        assert_eq!(
+            record.locator_for(1),
+            Some(&Locator {
+                kind: "page".to_string(),
+                value: "後".to_string()
+            }),
+            "the surviving marker is the one locator_for already resolved to"
+        );
+        assert_eq!(
+            preview_drops(2, &[], &[], &locators).2,
+            drops.locators,
+            "preview must count the same drops apply does"
+        );
+    }
+
+    /// Unlike `section_for`, `locator_for` does not walk back to a
+    /// nearest-preceding marker — a locator names exactly the
+    /// paragraph it was recorded for, and only that one (ADR 0007
+    /// §7.2).
+    #[test]
+    fn locator_for_never_extends_to_the_next_paragraph_unlike_section_for() {
+        let (record, _drops) = PassageRecord::new(
+            Arc::from("一つ目。\n\n二つ目。\n\n三つ目。"),
+            Vec::new(),
+            vec![(0, "前編".to_string())],
+            vec![(
+                0,
+                Locator {
+                    kind: "page".to_string(),
+                    value: "1".to_string(),
+                },
+            )],
+            SourceMeta::default(),
+        );
+        // section_for extends the paragraph-0 marker through paragraph 2.
+        assert_eq!(record.section_for(2), Some("前編"));
+        // locator_for does not: paragraphs 1 and 2 carry no locator of
+        // their own.
+        assert_eq!(record.locator_for(0).map(|l| l.value.as_str()), Some("1"));
+        assert_eq!(record.locator_for(1), None);
+        assert_eq!(record.locator_for(2), None);
+        // Out of range is still None, same as section_for.
+        assert_eq!(record.locator_for(99), None);
     }
 
     #[test]
@@ -1576,6 +1848,7 @@ mod tests {
                         (1, "本編".to_string()),
                         (9, "存在しない段落への見出し".to_string()),
                     ],
+                    locators: Vec::new(),
                     meta: SourceMeta::default(),
                 },
             );
@@ -1616,6 +1889,7 @@ mod tests {
                 text: "導入。\n\n本編。".to_string(),
                 questions: Vec::new(),
                 sections: vec![(1, "本編".to_string())],
+                locators: Vec::new(),
                 stored_at: None,
                 date: None,
                 tags: Vec::new(),
@@ -1634,6 +1908,123 @@ mod tests {
         assert_eq!(
             store.get("doc").unwrap().sections,
             vec![(1, "本編".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_passage_store_accepts_locators_and_reports_the_bookkeeping() {
+        let dir = scratch_dir("locators-store");
+        {
+            let store = open(&dir);
+            let mut passages = BTreeMap::new();
+            passages.insert(
+                "doc".to_string(),
+                PassageSubmission {
+                    text: "導入。\n\n本編。".to_string(),
+                    questions: Vec::new(),
+                    sections: Vec::new(),
+                    locators: vec![
+                        (
+                            1,
+                            Locator {
+                                kind: "page".to_string(),
+                                value: "12".to_string(),
+                            },
+                        ),
+                        (
+                            9,
+                            Locator {
+                                kind: "page".to_string(),
+                                value: "存在しない段落".to_string(),
+                            },
+                        ),
+                    ],
+                    meta: SourceMeta::default(),
+                },
+            );
+            let outcome = store.store(passages).unwrap();
+            assert_eq!(
+                (
+                    outcome.stored,
+                    outcome.locators_stored,
+                    outcome.locators_dropped
+                ),
+                (1, 1, 1),
+                "the out-of-range locator drops without failing its passage"
+            );
+            let record = store.get("doc").unwrap();
+            assert_eq!(
+                record.locators,
+                vec![(
+                    1,
+                    Locator {
+                        kind: "page".to_string(),
+                        value: "12".to_string(),
+                    },
+                )]
+            );
+        }
+        // Locators are acknowledged writes: the log replays them.
+        let reborn = open(&dir);
+        assert_eq!(
+            reborn.get("doc").unwrap().locators,
+            vec![(
+                1,
+                Locator {
+                    kind: "page".to_string(),
+                    value: "12".to_string(),
+                },
+            )]
+        );
+    }
+
+    #[test]
+    fn a_stored_locator_survives_a_restart_via_wal_replay() {
+        // Constructs the WAL op directly rather than through
+        // `store()` — the same shape `registry.rs`'s generation tests
+        // use to drive `PassageOp` without a live store, exercising
+        // `load()`'s replay path on its own.
+        let dir = scratch_dir("locators-wal");
+        let log_path = dir.join("t.passages.wal.jsonl");
+        wal::append_batch(
+            &log_path,
+            1,
+            &[PassageOp::Store {
+                source: "doc".to_string(),
+                text: "導入。\n\n本編。".to_string(),
+                questions: Vec::new(),
+                sections: Vec::new(),
+                locators: vec![(
+                    1,
+                    Locator {
+                        kind: "page".to_string(),
+                        value: "12".to_string(),
+                    },
+                )],
+                stored_at: None,
+                date: None,
+                tags: Vec::new(),
+            }],
+        )
+        .unwrap();
+        let store = PassageStore::load(
+            dir.join("t.passages.bin"),
+            &dir.join("t.sources.json"),
+            log_path,
+            0,
+            true,
+        )
+        .unwrap()
+        .0;
+        assert_eq!(
+            store.get("doc").unwrap().locators,
+            vec![(
+                1,
+                Locator {
+                    kind: "page".to_string(),
+                    value: "12".to_string(),
+                },
+            )]
         );
     }
 
@@ -1657,6 +2048,7 @@ mod tests {
                     text: "本文。".to_string(),
                     questions: Vec::new(),
                     sections: Vec::new(),
+                    locators: Vec::new(),
                     meta: meta.clone(),
                 },
             );
@@ -1712,6 +2104,7 @@ mod tests {
                 text: "旧版。".to_string(),
                 questions: Vec::new(),
                 sections: Vec::new(),
+                locators: Vec::new(),
                 meta: SourceMeta {
                     stored_at: Some(1_000),
                     date: Some(2_000),
@@ -1733,7 +2126,14 @@ mod tests {
     #[test]
     fn source_filter_matches_pins_absent_metadata_semantics() {
         let with = |meta: SourceMeta| {
-            PassageRecord::new(Arc::from("本文。"), Vec::new(), Vec::new(), meta).0
+            PassageRecord::new(
+                Arc::from("本文。"),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                meta,
+            )
+            .0
         };
         let bare = with(SourceMeta::default());
         let tagged = with(SourceMeta {
@@ -1793,6 +2193,7 @@ mod tests {
                     text: "本文。".to_string(),
                     questions: Vec::new(),
                     sections: Vec::new(),
+                    locators: Vec::new(),
                     meta: SourceMeta {
                         stored_at: None,
                         date: None,
@@ -1837,7 +2238,7 @@ mod tests {
         drop(store);
 
         let head = fs::read(dir.join("t.passages.bin")).unwrap();
-        assert_eq!(&head[..8], b"TAGURUS5", "the rewrite upgrades the format");
+        assert_eq!(&head[..8], b"TAGURUS6", "the rewrite upgrades the format");
         let reborn = open(&dir);
         assert_eq!(text(&reborn, "old-doc").as_deref(), Some("旧本文。"));
     }
@@ -1871,7 +2272,7 @@ mod tests {
         drop(store);
 
         let head = fs::read(dir.join("t.passages.bin")).unwrap();
-        assert_eq!(&head[..8], b"TAGURUS5", "the rewrite upgrades the format");
+        assert_eq!(&head[..8], b"TAGURUS6", "the rewrite upgrades the format");
         let reborn = open(&dir);
         assert_eq!(text(&reborn, "old-doc").as_deref(), Some("旧本文。"));
     }
@@ -1883,6 +2284,7 @@ mod tests {
             PassageRecord::new(
                 Arc::from("text"),
                 vec![(0, "何のtext?".to_string())],
+                Vec::new(),
                 Vec::new(),
                 SourceMeta::default(),
             )
@@ -1907,11 +2309,12 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_checksum_rejects_a_flipped_byte_and_s3_s4_load_without_meta() {
+    fn snapshot_checksum_rejects_a_flipped_byte_and_s3_s4_s5_load_without_locators_or_meta() {
         let sources: BTreeMap<String, Arc<PassageRecord>> = [(
             "doc".to_string(),
             PassageRecord::new(
                 Arc::from("第1段落。"),
+                Vec::new(),
                 Vec::new(),
                 Vec::new(),
                 SourceMeta::default(),
@@ -1934,12 +2337,27 @@ mod tests {
             "a parseable bitflip must fail the checksum"
         );
 
+        // The S5 layout is S6's minus the per-record locator block —
+        // for this locator-less single record, its trailing 4 bytes
+        // (an empty locator table) before the footer. Stripped and
+        // resealed under the S5 magic, it must load with no locators:
+        // the pre-#346 file, read forever.
+        let mut s5 = bytes[..bytes.len() - 4 - 4].to_vec();
+        s5[..8].copy_from_slice(S5_SNAPSHOT_MAGIC);
+        let crc = crate::crc32c::crc32c(&s5);
+        s5.extend_from_slice(&crc.to_le_bytes());
+        let (parsed, watermark) = snapshot_from_bytes(&s5).expect("S5 must keep loading");
+        assert_eq!(watermark, 7);
+        assert_eq!(parsed["doc"].text.as_ref(), "第1段落。");
+        assert!(parsed["doc"].locators.is_empty());
+
         // The S4 layout is S5's minus the per-record metadata block —
         // for this metadata-less single record, its trailing 6 bytes
-        // (two absent stamps, an empty tag table) before the footer.
-        // Stripped and resealed under the S4 magic, it must load with
-        // default metadata: the pre-#167 file, read forever.
-        let mut s4 = bytes[..bytes.len() - 4 - 6].to_vec();
+        // (two absent stamps, an empty tag table) on top of the
+        // locator block already stripped above. Stripped and resealed
+        // under the S4 magic, it must load with default metadata: the
+        // pre-#167 file, read forever.
+        let mut s4 = bytes[..bytes.len() - 4 - 4 - 6].to_vec();
         s4[..8].copy_from_slice(S4_SNAPSHOT_MAGIC);
         let crc = crate::crc32c::crc32c(&s4);
         s4.extend_from_slice(&crc.to_le_bytes());
@@ -1951,7 +2369,7 @@ mod tests {
         // The same body as an S3 snapshot — no footer, pre-checksum
         // magic — loads exactly as it did before the footer existed:
         // parsed, unverifiable.
-        let mut s3 = bytes[..bytes.len() - 4 - 6].to_vec();
+        let mut s3 = bytes[..bytes.len() - 4 - 4 - 6].to_vec();
         s3[..8].copy_from_slice(S3_SNAPSHOT_MAGIC);
         let (parsed, watermark) = snapshot_from_bytes(&s3).expect("S3 must keep loading");
         assert_eq!(watermark, 7);
@@ -1966,6 +2384,7 @@ mod tests {
                 Arc::from("導入。\n\n本編。"),
                 Vec::new(),
                 vec![(1, "本編".to_string())],
+                Vec::new(),
                 SourceMeta::default(),
             )
             .0,
@@ -1979,11 +2398,48 @@ mod tests {
     }
 
     #[test]
+    fn passage_snapshot_round_trips_populated_locators() {
+        let sources: BTreeMap<String, Arc<PassageRecord>> = [(
+            "a".to_string(),
+            PassageRecord::new(
+                Arc::from("導入。\n\n本編。"),
+                Vec::new(),
+                Vec::new(),
+                vec![(
+                    1,
+                    Locator {
+                        kind: "page".to_string(),
+                        value: "12".to_string(),
+                    },
+                )],
+                SourceMeta::default(),
+            )
+            .0,
+        )]
+        .into_iter()
+        .collect();
+        let bytes = snapshot_to_bytes(&sources, 3);
+        let (parsed, watermark) = snapshot_from_bytes(&bytes).unwrap();
+        assert_eq!(watermark, 3);
+        assert_eq!(
+            parsed["a"].locators,
+            vec![(
+                1,
+                Locator {
+                    kind: "page".to_string(),
+                    value: "12".to_string(),
+                },
+            )]
+        );
+    }
+
+    #[test]
     fn passage_snapshot_round_trips_populated_metadata() {
         let sources: BTreeMap<String, Arc<PassageRecord>> = [(
             "a".to_string(),
             PassageRecord::new(
                 Arc::from("本文。"),
+                Vec::new(),
                 Vec::new(),
                 Vec::new(),
                 SourceMeta {
@@ -2069,6 +2525,7 @@ mod tests {
             Arc::from("序。\n\n本編一。\n\n本編二。\n\n結び。"),
             Vec::new(),
             vec![(1, "本編".to_string()), (3, "結び".to_string())],
+            Vec::new(),
             SourceMeta::default(),
         )
         .0;
@@ -2152,15 +2609,31 @@ mod tests {
                 })
         }
 
+        /// (paragraph, locator) markers — same shape and same
+        /// out-of-range-exercising width as [`marker_strategy`], but
+        /// with a typed [`Locator`] payload instead of a bare string.
+        fn locator_marker_strategy() -> impl Strategy<Value = (u32, Locator)> {
+            (0u32..10, word_strategy()).prop_map(|(paragraph, value)| {
+                (
+                    paragraph,
+                    Locator {
+                        kind: "page".to_string(),
+                        value: value.to_string(),
+                    },
+                )
+            })
+        }
+
         fn record_strategy() -> impl Strategy<Value = Arc<PassageRecord>> {
             (
                 text_strategy(),
                 prop::collection::vec(marker_strategy(), 0..4),
                 prop::collection::vec(marker_strategy(), 0..4),
+                prop::collection::vec(locator_marker_strategy(), 0..4),
                 meta_strategy(),
             )
-                .prop_map(|(text, questions, sections, meta)| {
-                    PassageRecord::new(Arc::from(text), questions, sections, meta).0
+                .prop_map(|(text, questions, sections, locators, meta)| {
+                    PassageRecord::new(Arc::from(text), questions, sections, locators, meta).0
                 })
         }
 
@@ -2201,6 +2674,7 @@ mod tests {
                     prop_assert_eq!(&record.paragraphs, &original.paragraphs);
                     prop_assert_eq!(&record.questions, &original.questions);
                     prop_assert_eq!(&record.sections, &original.sections);
+                    prop_assert_eq!(&record.locators, &original.locators);
                     prop_assert_eq!(&record.meta, &original.meta);
                 }
             }

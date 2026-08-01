@@ -912,6 +912,7 @@ mod tests {
                 text: "前世代の本文".to_string(),
                 questions: Vec::new(),
                 sections: Vec::new(),
+                locators: Vec::new(),
                 stored_at: None,
                 date: None,
                 tags: Vec::new(),

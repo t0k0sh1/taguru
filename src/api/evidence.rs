@@ -697,6 +697,7 @@ mod tests {
             count: 1,
             paragraph,
             section: None,
+            locator: None,
         }
     }
 
@@ -1021,6 +1022,7 @@ mod tests {
                 text: "excerpt".to_string(),
                 source: "book.txt".to_string(),
                 section: None,
+                locator: None,
             }
         }
         let mut collector = CitationCollector::new();

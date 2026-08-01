@@ -14,12 +14,13 @@ use crate::registry::{AppState, CitationLookup, PassageExplainLookup, SemanticFi
 use super::aliases::KeysetQuery;
 use super::recall::cross_targets;
 use super::{
-    AppJson, AppPath, AppQuery, CrossMatch, ErrorCode, Issue, MAX_MATCH_LIMIT, MAX_NAME_BYTES,
-    MAX_PASSAGES_PER_REQUEST, MAX_QUESTION_BYTES, MAX_QUESTIONS_PER_PARAGRAPH, MAX_SECTION_BYTES,
-    MAX_TAG_BYTES, MAX_TAGS_PER_SOURCE, RefusalDetail, access_error, bounded_parallel_map,
-    cache_and_serve, clamp, collected_validation_message, cross_search_concurrency,
-    deadline_exceeded, empty, error, not_found, ok, overlong, oversized, replay_cached_search,
-    search_log_enabled, truncate_issues, validation_error,
+    AppJson, AppPath, AppQuery, CrossMatch, ErrorCode, Issue, MAX_LOCATOR_KIND_BYTES,
+    MAX_LOCATOR_VALUE_BYTES, MAX_MATCH_LIMIT, MAX_NAME_BYTES, MAX_PASSAGES_PER_REQUEST,
+    MAX_QUESTION_BYTES, MAX_QUESTIONS_PER_PARAGRAPH, MAX_SECTION_BYTES, MAX_TAG_BYTES,
+    MAX_TAGS_PER_SOURCE, RefusalDetail, access_error, bounded_parallel_map, cache_and_serve, clamp,
+    collected_validation_message, cross_search_concurrency, deadline_exceeded, empty, error,
+    not_found, ok, overlong, oversized, replay_cached_search, search_log_enabled, truncate_issues,
+    validation_error,
 };
 
 #[derive(Debug, Deserialize)]
@@ -94,13 +95,17 @@ pub struct CitationRequest {
 /// enough provenance to attribute it. `section` is the label governing
 /// this paragraph (see `PassageRecord::section_for`), `null` when the
 /// paragraph falls outside every section the source has stored, or when
-/// it stored none at all; the key is never omitted, so callers can
-/// rely on it always being present.
+/// it stored none at all; `locator` is the typed citation locator (a
+/// page/slide/sheet position, ADR 0007 §7, see `PassageRecord::
+/// locator_for`) — independent of `section`, and `null` under the same
+/// rule. Neither key is ever omitted, so callers can rely on both
+/// always being present.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Citation {
     pub text: String,
     pub source: String,
     pub section: Option<String>,
+    pub locator: Option<crate::passages::Locator>,
 }
 
 pub async fn citation(
@@ -141,13 +146,18 @@ pub async fn citation(
                 started_at,
             )
         }
-        Some(Ok(CitationLookup::Found(text, section))) => {
+        Some(Ok(CitationLookup::Found {
+            text,
+            section,
+            locator,
+        })) => {
             state.note_read(&name, false);
             ok(
                 Citation {
                     text,
                     source: request.source,
                     section,
+                    locator,
                 },
                 started_at,
             )
@@ -1533,6 +1543,11 @@ pub struct StorePassagesRequest {
     pub passages: BTreeMap<String, String>,
     pub questions: BTreeMap<String, Vec<QuestionSpec>>,
     pub sections: BTreeMap<String, Vec<SectionSpec>>,
+    /// Typed citation locators (ADR 0007 §7), per source in THIS
+    /// request — same orphan rule and wholesale-replace semantics as
+    /// `sections`, but independent of it: a locator does not extend to
+    /// the next paragraph.
+    pub locators: BTreeMap<String, Vec<LocatorSpec>>,
     /// Source tags (#167), per source in THIS request — the same
     /// source-must-name-a-passage rule as questions/sections, and the
     /// same wholesale-replace semantics: a re-store without tags
@@ -1556,22 +1571,22 @@ pub struct SectionSpec {
     pub section: String,
 }
 
-/// One `{paragraph, <text-field>}` item shared by questions and
-/// sections — reads the paragraph index, then the named bounded text
-/// field, collecting an [`Issue`] per problem instead of stopping at
-/// the first (issue #182).
-fn interpret_paragraph_and_text(
-    item: &Value,
+#[derive(Debug)]
+pub struct LocatorSpec {
+    pub paragraph: u32,
+    pub locator: crate::passages::Locator,
+}
+
+/// Reads the `paragraph` field alone — the index-only half of
+/// [`interpret_paragraph_and_text`], factored out so `locators` (whose
+/// payload is a nested `{kind, value}` object, not a single bounded-text
+/// field) can reuse the same paragraph-index validation.
+fn interpret_paragraph(
+    obj: &serde_json::Map<String, Value>,
     path: &str,
-    text_key: &str,
-    text_cap: usize,
     issues: &mut Vec<Issue>,
-) -> (u32, String) {
-    let Some(obj) = item.as_object() else {
-        issues.push(Issue::wrong_type(path, "an object", item));
-        return (0, String::new());
-    };
-    let paragraph = match obj.get("paragraph") {
+) -> u32 {
+    match obj.get("paragraph") {
         None | Some(Value::Null) => {
             issues.push(Issue::missing(
                 format!("{path}.paragraph"),
@@ -1600,9 +1615,76 @@ fn interpret_paragraph_and_text(
             ));
             0
         }
+    }
+}
+
+/// One `{paragraph, <text-field>}` item shared by questions and
+/// sections — reads the paragraph index, then the named bounded text
+/// field, collecting an [`Issue`] per problem instead of stopping at
+/// the first (issue #182).
+fn interpret_paragraph_and_text(
+    item: &Value,
+    path: &str,
+    text_key: &str,
+    text_cap: usize,
+    issues: &mut Vec<Issue>,
+) -> (u32, String) {
+    let Some(obj) = item.as_object() else {
+        issues.push(Issue::wrong_type(path, "an object", item));
+        return (0, String::new());
     };
+    let paragraph = interpret_paragraph(obj, path, issues);
     let text = interpret_bounded_text(obj, text_key, path, text_cap, issues);
     (paragraph, text)
+}
+
+/// One `{paragraph, locator: {kind, value}}` item (ADR 0007 §7.1) —
+/// `locators`' own shape, since a locator's payload is a nested object
+/// rather than the single bounded-text field `interpret_paragraph_and_text`
+/// handles for questions/sections. Always returns a full spec (empty
+/// strings where a field failed validation), matching the collect-all
+/// convention every other field here follows.
+fn interpret_locator_item(item: &Value, path: &str, issues: &mut Vec<Issue>) -> LocatorSpec {
+    let Some(obj) = item.as_object() else {
+        issues.push(Issue::wrong_type(path, "an object", item));
+        return LocatorSpec {
+            paragraph: 0,
+            locator: crate::passages::Locator::default(),
+        };
+    };
+    let paragraph = interpret_paragraph(obj, path, issues);
+    let locator_path = format!("{path}.locator");
+    let locator = match obj.get("locator") {
+        None | Some(Value::Null) => {
+            issues.push(Issue::missing(locator_path, "an object {kind, value}"));
+            crate::passages::Locator::default()
+        }
+        Some(Value::Object(locator_obj)) => crate::passages::Locator {
+            kind: interpret_bounded_text(
+                locator_obj,
+                "kind",
+                &locator_path,
+                MAX_LOCATOR_KIND_BYTES,
+                issues,
+            ),
+            value: interpret_bounded_text(
+                locator_obj,
+                "value",
+                &locator_path,
+                MAX_LOCATOR_VALUE_BYTES,
+                issues,
+            ),
+        },
+        Some(other) => {
+            issues.push(Issue::wrong_type(
+                locator_path,
+                "an object {kind, value}",
+                other,
+            ));
+            crate::passages::Locator::default()
+        }
+    };
+    LocatorSpec { paragraph, locator }
 }
 
 /// A required, non-empty, within-cap string field read from a JSON
@@ -1800,6 +1882,43 @@ fn interpret_sections(
     sections
 }
 
+/// Interprets `locators`: an object of source → `[{paragraph, locator:
+/// {kind, value}}]` (ADR 0007 §7) — same orphan rule as questions/
+/// sections, independent of `sections` (a locator never extends to the
+/// next paragraph).
+fn interpret_locators(
+    obj: &serde_json::Map<String, Value>,
+    passages: &BTreeMap<String, String>,
+    issues: &mut Vec<Issue>,
+) -> BTreeMap<String, Vec<LocatorSpec>> {
+    let mut locators = BTreeMap::new();
+    match obj.get("locators") {
+        None | Some(Value::Null) => {}
+        Some(Value::Object(map)) => {
+            for (source, list) in map {
+                let path = format!("locators['{source}']");
+                let Some(array) = list.as_array() else {
+                    issues.push(Issue::wrong_type(path, "an array", list));
+                    continue;
+                };
+                check_orphaned_source(path.clone(), source, passages, issues);
+                let mut specs = Vec::with_capacity(array.len());
+                for (index, item) in array.iter().enumerate() {
+                    let item_path = format!("{path}[{index}]");
+                    specs.push(interpret_locator_item(item, &item_path, issues));
+                }
+                locators.insert(source.clone(), specs);
+            }
+        }
+        Some(other) => issues.push(Issue::wrong_type(
+            "locators",
+            "an object of source -> [{paragraph, locator: {kind, value}}]",
+            other,
+        )),
+    }
+    locators
+}
+
 /// Interprets `tags`: an object of source → `[tag]` (#167) — the same
 /// orphan rule as questions/sections, plus the shared per-source count
 /// cap and per-tag byte cap.
@@ -1911,6 +2030,7 @@ fn interpret_store_passages(value: &Value) -> Result<StorePassagesRequest, Vec<I
     let passages = interpret_passages(obj, &mut issues);
     let questions = interpret_questions(obj, &passages, &mut issues);
     let sections = interpret_sections(obj, &passages, &mut issues);
+    let locators = interpret_locators(obj, &passages, &mut issues);
     let tags = interpret_tags(obj, &passages, &mut issues);
     let dates = interpret_dates(obj, &passages, &mut issues);
     if issues.is_empty() {
@@ -1918,6 +2038,7 @@ fn interpret_store_passages(value: &Value) -> Result<StorePassagesRequest, Vec<I
             passages,
             questions,
             sections,
+            locators,
             tags,
             dates,
         })
@@ -1939,6 +2060,8 @@ pub struct StoredPassages {
     pub questions_dropped: usize,
     pub sections_stored: usize,
     pub sections_dropped: usize,
+    pub locators_stored: usize,
+    pub locators_dropped: usize,
 }
 
 pub async fn store_passages(
@@ -1985,6 +2108,7 @@ pub async fn store_passages(
     };
     let mut questions = request.questions;
     let mut sections = request.sections;
+    let mut locators = request.locators;
     let mut tags = request.tags;
     let mut dates = request.dates;
     let passages: BTreeMap<String, crate::passages::PassageSubmission> = request
@@ -2003,6 +2127,12 @@ pub async fn store_passages(
                 .into_iter()
                 .map(|spec| (spec.paragraph, spec.section))
                 .collect();
+            let locators = locators
+                .remove(&source)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|spec| (spec.paragraph, spec.locator))
+                .collect();
             // `stored_at: None` on purpose: the HTTP path never
             // supplies a stamp — the store takes it once, at the
             // write (only import restores an existing one).
@@ -2017,6 +2147,7 @@ pub async fn store_passages(
                     text,
                     questions,
                     sections,
+                    locators,
                     meta,
                 },
             )
@@ -2039,6 +2170,8 @@ pub async fn store_passages(
                     questions_dropped: outcome.questions_dropped,
                     sections_stored: outcome.sections_stored,
                     sections_dropped: outcome.sections_dropped,
+                    locators_stored: outcome.locators_stored,
+                    locators_dropped: outcome.locators_dropped,
                 },
                 started_at,
             )

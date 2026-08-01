@@ -129,6 +129,49 @@ fn an_offline_import_carries_sections_through_and_drops_out_of_range_ones() {
     let _ = std::fs::remove_dir_all(&batches);
 }
 
+/// The locator line (ADR 0007 §7) rides the same batch shape and the
+/// same range-check-at-store-time rule as `section` above, independent
+/// of it.
+#[test]
+fn an_offline_import_carries_locators_through_and_drops_out_of_range_ones() {
+    let batches = batch_dir("import-locators");
+    let file = batches.join("guide.jsonl");
+    std::fs::write(
+        &file,
+        r#"{"taguru_batch": 1, "context": "sake", "source": "doc-guide", "create": {"description": "酒蔵の記憶"}}
+{"passage": "青嶺酒造は1907年に創業した。\n\n杜氏は高瀬。"}
+{"paragraph": 1, "locator": {"kind": "page", "value": "12"}}
+{"paragraph": 9, "locator": {"kind": "page", "value": "存在しない段落"}}
+"#,
+    )
+    .unwrap();
+
+    let data_dir = std::env::temp_dir().join(format!(
+        "taguru-http-import-locators-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&data_dir);
+    let (code, stdout, stderr) = run_import(&data_dir, &[file.to_str().unwrap()]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains("+1 locator(s) (1 dropped: no such paragraph)"),
+        "{stdout}"
+    );
+
+    let server = Server::start_on("import-locators", data_dir);
+    let citation = server.ok(
+        "POST",
+        "/contexts/sake/citations",
+        Some(json!({"source": "doc-guide", "paragraph": 1})),
+    );
+    assert_eq!(
+        citation["locator"],
+        json!({"kind": "page", "value": "12"}),
+        "{citation}"
+    );
+    let _ = std::fs::remove_dir_all(&batches);
+}
+
 /// Unlike questions/sections above, an association's paragraph is
 /// incidental metadata, not its reason for existing — so an out-of-range
 /// one clears just the locator and keeps the whole fact, where a
@@ -272,6 +315,7 @@ fn an_attributions_section_label_resolves_on_read_but_is_never_fabricated() {
         r#"{"taguru_batch": 1, "context": "sake", "source": "doc-guide", "create": {"description": "酒蔵の記憶"}}
 {"passage": "青嶺酒造は1907年に創業した。\n\n杜氏は高瀬。\n\n仕込み水は雲居山の伏流水である。"}
 {"paragraph": 1, "section": "杜氏"}
+{"paragraph": 1, "locator": {"kind": "page", "value": "12"}}
 {"subject": "青嶺酒造", "label": "創業年", "object": "1907年", "weight": 1.0, "paragraph": 0}
 {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0, "paragraph": 1}
 {"subject": "青嶺酒造", "label": "仕込み水源", "object": "雲居山", "weight": 1.0}
@@ -309,10 +353,19 @@ fn an_attributions_section_label_resolves_on_read_but_is_never_fabricated() {
         json!("杜氏"),
         "a paragraph inside a stored section must resolve its label: {brewer}"
     );
+    // The locator (ADR 0007 §7) stored at the very same paragraph
+    // resolves alongside the section — independent fields, one shared
+    // marker resolution pass.
+    assert_eq!(
+        brewer["attributions"][0]["locator"],
+        json!({"kind": "page", "value": "12"}),
+        "a paragraph carrying a locator must resolve it: {brewer}"
+    );
 
     // Paragraph 0 exists but sits BEFORE the first section marker: no
     // section governs it, so resolution must report null rather than
-    // guessing at the nearest one.
+    // guessing at the nearest one. The locator at paragraph 1 must not
+    // leak backward either — unlike section, a locator never extends.
     let founding = server.ok(
         "POST",
         "/contexts/sake/query",
@@ -327,6 +380,11 @@ fn an_attributions_section_label_resolves_on_read_but_is_never_fabricated() {
         founding["matches"][0]["attributions"][0]["section"],
         json!(null),
         "a paragraph before every marker must not resolve to a section: {founding}"
+    );
+    assert_eq!(
+        founding["matches"][0]["attributions"][0]["locator"],
+        json!(null),
+        "a paragraph with no locator of its own must not resolve to one: {founding}"
     );
 
     // No paragraph locator at all: section is null with nothing to
@@ -365,6 +423,11 @@ fn an_attributions_section_label_resolves_on_read_but_is_never_fabricated() {
         brewer_hop["association"]["attributions"][0]["section"],
         json!("杜氏"),
         "explore's nested association must resolve sections too: {brewer_hop}"
+    );
+    assert_eq!(
+        brewer_hop["association"]["attributions"][0]["locator"],
+        json!({"kind": "page", "value": "12"}),
+        "explore's nested association must resolve locators too: {brewer_hop}"
     );
 
     // activate nests associations the same one level deep
@@ -979,6 +1042,29 @@ fn the_import_endpoint_reports_section_bookkeeping() {
     );
 }
 
+#[test]
+fn the_import_endpoint_reports_locator_bookkeeping() {
+    let server = Server::start("http-import-locators");
+    let batch = "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-locators\", \
+                 \"create\": {\"description\": \"d\"}}\n\
+                 {\"passage\": \"蔵の杜氏は高瀬。\\n\\n創業は1907年。\"}\n\
+                 {\"paragraph\": 1, \"locator\": {\"kind\": \"page\", \"value\": \"12\"}}\n\
+                 {\"paragraph\": 9, \"locator\": {\"kind\": \"page\", \"value\": \"存在しない段落\"}}\n";
+
+    let (status, result) = post_import(&server, batch, None);
+    assert_eq!(status, 200, "{result}");
+    assert_eq!(
+        result["result"]["batches"][0]["locators_stored"],
+        json!(1),
+        "{result}"
+    );
+    assert_eq!(
+        result["result"]["batches"][0]["locators_dropped"],
+        json!(1),
+        "{result}"
+    );
+}
+
 /// The import endpoint surfaces a dropped association paragraph locator
 /// in its JSON just as the CLI report does: the fact still lands (unlike
 /// a dropped question or section, which vanishes whole), only the
@@ -1035,6 +1121,7 @@ fn a_context_round_trips_through_the_export_endpoint_and_import() {
             "passages": {"a.md": "青嶺酒造の紹介。\n\n代表銘柄は青嶺。"},
             "questions": {"a.md": [{"paragraph": 0, "question": "どこの蔵?"}]},
             "sections": {"a.md": [{"paragraph": 0, "section": "概要"}]},
+            "locators": {"a.md": [{"paragraph": 0, "locator": {"kind": "page", "value": "1"}}]},
         })),
     );
     server.ok(
@@ -1090,6 +1177,11 @@ fn a_context_round_trips_through_the_export_endpoint_and_import() {
     );
     assert_eq!(citation["text"], json!("青嶺酒造の紹介。"), "{citation}");
     assert_eq!(citation["section"], json!("概要"), "{citation}");
+    assert_eq!(
+        citation["locator"],
+        json!({"kind": "page", "value": "1"}),
+        "{citation}"
+    );
     let aliases = server.ok("GET", "/contexts/sake/aliases", None);
     assert_eq!(
         aliases["concepts"]["Aomine"],

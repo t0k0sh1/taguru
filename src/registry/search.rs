@@ -1407,6 +1407,7 @@ mod tests {
                 text: "TARGETMARKER".to_string(),
                 questions: Vec::new(),
                 sections: Vec::new(),
+                locators: Vec::new(),
                 meta: crate::passages::SourceMeta::default(),
             },
         );
@@ -1420,6 +1421,7 @@ mod tests {
                     text: "DECOYMARKER".to_string(),
                     questions,
                     sections: Vec::new(),
+                    locators: Vec::new(),
                     meta: crate::passages::SourceMeta::default(),
                 },
             );
@@ -1500,6 +1502,7 @@ mod tests {
                 text: "りんごは真っ赤に実った。".to_string(),
                 questions: vec![(0, "アップルはどんな色?".to_string())],
                 sections: Vec::new(),
+                locators: Vec::new(),
                 meta: crate::passages::SourceMeta::default(),
             },
         );

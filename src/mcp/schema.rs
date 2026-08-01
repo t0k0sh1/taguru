@@ -214,7 +214,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "store_passages",
-            "Register the original text behind each source id. Always finish an ingest with this; answers ground in originals looked up from attributions. Optionally attach doc2query questions per source ({source: [{paragraph, question}]}, paragraph = 0-based blank-line-separated position in THAT text): questions a user might type whose answer is that paragraph, phrased away from its wording — they embed beside the paragraph and catch question-shaped queries the text's own vector misses. Optionally attach section markers per source ({source: [{paragraph, section}]}, same paragraph numbering): a marker names where its section starts and the section implicitly governs every paragraph after it until the next marker or the passage's end — citation and every association read label their paragraph with the section that governs it. Optionally attach source metadata: tags ({source: [tag]}) and a document date ({source: epoch seconds} in dates) — search_passages can then pre-filter by tag and time; the server stamps stored_at itself. Storage replaces per source wholesale, metadata included. All-or-nothing: a rejected call writes nothing (`integrity: \"nothing_written\"`), and a rejection lists every offending path — `passages['src']`, `questions['src'][i].question`, `sections['src'][i].section`, `tags['src'][i]`, `dates['src']` — as a path-addressed issue naming the source AND the item index. Correct exactly those fields and resend the COMPLETE call (every source, every question/section/tag) rather than deleting an item or resending only the fixed ones — a partial resend silently drops whatever this call would have replaced wholesale.",
+            "Register the original text behind each source id. Always finish an ingest with this; answers ground in originals looked up from attributions. Optionally attach doc2query questions per source ({source: [{paragraph, question}]}, paragraph = 0-based blank-line-separated position in THAT text): questions a user might type whose answer is that paragraph, phrased away from its wording — they embed beside the paragraph and catch question-shaped queries the text's own vector misses. Optionally attach section markers per source ({source: [{paragraph, section}]}, same paragraph numbering): a marker names where its section starts and the section implicitly governs every paragraph after it until the next marker or the passage's end — citation and every association read label their paragraph with the section that governs it. Optionally attach typed citation locators per source ({source: [{paragraph, locator: {kind, value}}]}, same paragraph numbering): a page/slide/sheet/table position — independent of section, and unlike it, naming only that exact paragraph, never extending to the next one. Optionally attach source metadata: tags ({source: [tag]}) and a document date ({source: epoch seconds} in dates) — search_passages can then pre-filter by tag and time; the server stamps stored_at itself. Storage replaces per source wholesale, metadata included. All-or-nothing: a rejected call writes nothing (`integrity: \"nothing_written\"`), and a rejection lists every offending path — `passages['src']`, `questions['src'][i].question`, `sections['src'][i].section`, `locators['src'][i].locator`, `tags['src'][i]`, `dates['src']` — as a path-addressed issue naming the source AND the item index. Correct exactly those fields and resend the COMPLETE call (every source, every question/section/locator/tag) rather than deleting an item or resending only the fixed ones — a partial resend silently drops whatever this call would have replaced wholesale.",
             object_schema(
                 json!({
                     "context": context,
@@ -244,6 +244,27 @@ pub(super) fn tool_definitions() -> Vec<Value> {
                                     "section": { "type": "string" }
                                 },
                                 "required": ["paragraph", "section"]
+                            }
+                        }
+                    },
+                    "locators": {
+                        "type": "object",
+                        "additionalProperties": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "paragraph": { "type": "integer" },
+                                    "locator": {
+                                        "type": "object",
+                                        "properties": {
+                                            "kind": { "type": "string", "description": "e.g. \"page\", \"slide\", \"sheet\", \"table\"" },
+                                            "value": { "type": "string", "description": "e.g. \"12\", \"A1:C4\"" }
+                                        },
+                                        "required": ["kind", "value"]
+                                    }
+                                },
+                                "required": ["paragraph", "locator"]
                             }
                         }
                     },
@@ -585,7 +606,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "cite_passage",
-            "Fetch one located, verbatim excerpt from a registered source by paragraph position: the citation counterpart of lookup_passages' whole-document dereference. Returns the exact paragraph text plus source and section provenance.",
+            "Fetch one located, verbatim excerpt from a registered source by paragraph position: the citation counterpart of lookup_passages' whole-document dereference. Returns the exact paragraph text plus source, section, and typed locator (page/slide/sheet/table position) provenance.",
             json!({
                 "type": "object",
                 "properties": {

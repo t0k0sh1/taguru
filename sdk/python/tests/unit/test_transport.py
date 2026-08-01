@@ -195,6 +195,8 @@ def test_import_normalizes_to_batches_defaulting_groups_to_empty() -> None:
         "questions_dropped": 0,
         "sections_stored": 0,
         "sections_dropped": 0,
+        "locators_stored": 0,
+        "locators_dropped": 0,
         "association_paragraphs_dropped": 0,
     }
     client = sync_client(lambda _req: ok_response(outcome))
@@ -222,6 +224,8 @@ def test_import_carries_group_restore_outcomes() -> None:
         "questions_dropped": 0,
         "sections_stored": 0,
         "sections_dropped": 0,
+        "locators_stored": 0,
+        "locators_dropped": 0,
         "association_paragraphs_dropped": 0,
     }
     client = sync_client(
@@ -256,6 +260,8 @@ async def test_async_import_file_reads_off_the_event_loop_thread(tmp_path, monke
         "questions_dropped": 0,
         "sections_stored": 0,
         "sections_dropped": 0,
+        "locators_stored": 0,
+        "locators_dropped": 0,
         "association_paragraphs_dropped": 0,
     }
     client = async_client(lambda _req: ok_response(outcome))

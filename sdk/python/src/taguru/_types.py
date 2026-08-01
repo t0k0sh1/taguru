@@ -13,6 +13,8 @@ __all__ = [
     "AssocOp",
     "QuestionSpec",
     "SectionSpec",
+    "LocatorInput",
+    "LocatorSpec",
     "MatchCursor",
     "CrossMatchCursor",
     "ExploreCursor",
@@ -51,6 +53,24 @@ class SectionSpec(TypedDict):
 
     paragraph: int
     section: str
+
+
+class LocatorInput(TypedDict):
+    """A typed citation locator payload (ADR 0007 §7): ``kind`` is an
+    open string (``"page"``, ``"slide"``, ``"sheet"``, ``"table"``, ...);
+    ``value`` is free text (``"12"``, ``"A1:C4"``)."""
+
+    kind: str
+    value: str
+
+
+class LocatorSpec(TypedDict):
+    """A locator attached to one paragraph of a stored passage.
+    Independent of :class:`SectionSpec` — unlike a section, a locator
+    does not extend to the next paragraph."""
+
+    paragraph: int
+    locator: LocatorInput
 
 
 class MatchCursor(TypedDict):

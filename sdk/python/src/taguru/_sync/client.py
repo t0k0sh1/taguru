@@ -88,6 +88,7 @@ from .._types import (
     BudgetRequest,
     CrossMatchCursor,
     ExploreCursor,
+    LocatorSpec,
     MatchCursor,
     QuestionSpec,
     RerankRequest,
@@ -996,6 +997,7 @@ class Context:
         *,
         questions: Mapping[str, Sequence[QuestionSpec]] | None = None,
         sections: Mapping[str, Sequence[SectionSpec]] | None = None,
+        locators: Mapping[str, Sequence[LocatorSpec]] | None = None,
         tags: Mapping[str, Sequence[str]] | None = None,
         dates: Mapping[str, int] | None = None,
     ) -> StoredPassages:
@@ -1003,17 +1005,22 @@ class Context:
 
         Store the document as-is: the server splits paragraphs on blank
         lines. ``questions``/``sections`` attach per-paragraph doc2query
-        questions and section labels. ``tags`` and ``dates`` (epoch
-        seconds, the document's own time) attach per-source metadata that
-        ``search_passages`` can then filter on; the server stamps
-        ``stored_at`` itself. Storage replaces per source wholesale,
-        metadata included.
+        questions and section labels. ``locators`` attaches typed
+        citation locators (ADR 0007 §7 — a page/slide/sheet/table
+        position), independent of ``sections``: unlike a section, a
+        locator does not extend to the next paragraph. ``tags`` and
+        ``dates`` (epoch seconds, the document's own time) attach
+        per-source metadata that ``search_passages`` can then filter on;
+        the server stamps ``stored_at`` itself. Storage replaces per
+        source wholesale, metadata included.
         """
         body: dict[str, Any] = {"passages": dict(passages)}
         if questions is not None:
             body["questions"] = {key: list(value) for key, value in questions.items()}
         if sections is not None:
             body["sections"] = {key: list(value) for key, value in sections.items()}
+        if locators is not None:
+            body["locators"] = {key: list(value) for key, value in locators.items()}
         if tags is not None:
             body["tags"] = {key: list(value) for key, value in tags.items()}
         if dates is not None:

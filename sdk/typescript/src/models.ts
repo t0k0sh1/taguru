@@ -39,6 +39,16 @@ export interface SectionSpec {
 }
 
 /**
+ * A typed citation locator attached to one paragraph of a stored passage
+ * (ADR 0007 §7). Independent of {@link SectionSpec} — unlike a section, a
+ * locator does not extend to the next paragraph.
+ */
+export interface LocatorSpec {
+  paragraph: number;
+  locator: Locator;
+}
+
+/**
  * Resumes a `recall`/`query`/`unreachableFrom`/`auditDrift` page past its
  * last match: copy `weight`/`subject`/`label`/`object` verbatim from the
  * last match of the previous page (for `auditDrift`, that's the
@@ -231,6 +241,19 @@ export interface GroupPage {
 
 // -- graph shapes ---------------------------------------------------------------
 
+/**
+ * A typed citation locator (page/slide/sheet/table position, ADR 0007 §7).
+ * `kind` is an open string (`"page"`, `"slide"`, `"sheet"`, `"table"`, and
+ * whatever a future connector needs); `value` is free text since its
+ * natural representation varies by kind (`"12"`, `"A1:C4"`). Independent
+ * of `section` — unlike it, a locator does not extend to the next
+ * paragraph.
+ */
+export interface Locator {
+  kind: string;
+  value: string;
+}
+
 /** One source's contribution to an association. `weight` is raw cumulative. */
 export interface Attribution {
   source: string;
@@ -238,6 +261,7 @@ export interface Attribution {
   count: number;
   paragraph: number | null;
   section: string | null;
+  locator: Locator | null;
 }
 
 /** One (subject, label, object) edge. `weight` is the per-assertion average. */
@@ -489,6 +513,8 @@ export interface StoredPassages {
   questions_dropped: number;
   sections_stored: number;
   sections_dropped: number;
+  locators_stored: number;
+  locators_dropped: number;
 }
 
 export interface PassageLookup {
@@ -709,11 +735,12 @@ export interface SearchExplanation {
   ranking?: RankingExplain;
 }
 
-/** One verbatim paragraph. `section` is null outside every stored section. */
+/** One verbatim paragraph. `section`/`locator` are null when absent. */
 export interface Citation {
   text: string;
   source: string;
   section: string | null;
+  locator: Locator | null;
 }
 
 export interface RetractOutcome {
@@ -801,6 +828,8 @@ export interface ImportOutcome {
   questions_dropped: number;
   sections_stored: number;
   sections_dropped: number;
+  locators_stored: number;
+  locators_dropped: number;
   association_paragraphs_dropped: number;
 }
 
