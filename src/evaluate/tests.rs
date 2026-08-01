@@ -555,12 +555,69 @@ fn hits_from_evidence_items_never_exceeds_the_case_limit() {
     assert_eq!(hits[2].paragraph, 2);
 }
 
+// ========================= rerank.ran denominator =========================
+
+/// Regression: `RerankerPlan::not_requested` (`assemble.rs`) echoes the
+/// *server's* own configuration state (`state.reranker().is_some()`)
+/// into `configured`, even for a request whose body carried no
+/// `rerank` field at all — a run against a rerank-configured server
+/// that never itself passed `--rerank` still gets back
+/// `{configured: true, ran: false, reason: None}` for every case.
+/// `rerank.ran`'s denominator must gate on `rerank_requested_this_run`
+/// (this run's own `--rerank` flag), never on that echoed
+/// `reranker.configured`, or a `--rerank`-less run would wrongly count
+/// toward "empty when `--rerank` was not given" (`build_definitions`'
+/// own documented contract for this metric).
+#[test]
+fn rerank_ran_ignores_a_server_side_configured_reranker_when_this_run_never_asked_for_one() {
+    let case = CaseBlock {
+        case_id: "c1".to_string(),
+        query: "q".to_string(),
+        cues: Vec::new(),
+        limit: 10,
+        passage: PassageOutcome::Searched {
+            plan: None,
+            hits: Vec::new(),
+            latency_ms: 1,
+        },
+        structural: None,
+        recall: None,
+        coverage: None,
+        lane_cross: None,
+        citations: None,
+        missed: Vec::new(),
+        missed_truncated: 0,
+        evidence: Some(EvidenceOutcome::Assembled {
+            latency_ms: 1,
+            items: Vec::new(),
+            omitted_by_reason: BTreeMap::new(),
+            selection: SelectionPlan {
+                dedup_dropped: 0,
+                contradiction_groups: 0,
+                diversity_tier_width: 10,
+            },
+            reranker: RerankerPlan {
+                configured: true,
+                ran: false,
+                model: None,
+                reason: None,
+            },
+        }),
+        budget: None,
+        diversity_sources: None,
+    };
+
+    let metrics = build_metrics(&[case], false);
+    let rerank_ran = metrics.get("rerank.ran").expect("metric key exists");
+    assert_eq!(rerank_ran.sample_size(), 0, "{rerank_ran:?}");
+}
+
 // ========================= metrics <-> definitions agreement =========================
 
 #[test]
 fn every_metric_key_has_a_matching_definition_and_vice_versa() {
     let cases: Vec<CaseBlock> = Vec::new();
-    let metrics = build_metrics(&cases);
+    let metrics = build_metrics(&cases, false);
     let definitions = build_definitions();
     let metric_keys: BTreeSet<&String> = metrics.keys().collect();
     let definition_keys: BTreeSet<&String> = definitions.keys().collect();
@@ -1495,7 +1552,7 @@ fn assert_no_fused_scale_words(value: &Value, path: &str) {
 
 #[test]
 fn no_fused_scale_word_appears_in_a_metric_key_or_definition() {
-    let metrics = build_metrics(&[]);
+    let metrics = build_metrics(&[], false);
     let definitions = build_definitions();
     assert_no_fused_scale_words(&serde_json::to_value(&metrics).unwrap(), "$.metrics");
     assert_no_fused_scale_words(

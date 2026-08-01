@@ -390,7 +390,7 @@ fn run_evaluate(args: &[String]) -> i32 {
     // independent HTTP calls with no transactional boundary.
     let stable = entry_before.revision == entry_after.revision;
 
-    let metrics = build_metrics(&cases);
+    let metrics = build_metrics(&cases, run_config.rerank.is_some());
     let evaluation = EvaluationFile {
         taguru_evaluation: EVALUATION_VERSION,
         generated_at: crate::clock::iso8601_utc(crate::clock::now_unix_secs()),
@@ -1814,7 +1814,19 @@ fn elapsed_ms(started_at: Instant) -> u64 {
 
 // ================================ Metrics =================================
 
-fn build_metrics(cases: &[CaseBlock]) -> MetricsMap {
+/// `rerank_requested_this_run` is `run_config.rerank.is_some()` — whether
+/// THIS run's own `--rerank MODEL` flag was given, independent of
+/// whether the queried server happens to have a reranker configured.
+/// `RerankerPlan::not_requested` (`assemble.rs`) sets `configured` to
+/// the *server's* own state (`state.reranker().is_some()`) even when a
+/// case's request carried no `rerank` object at all — so a case's own
+/// `reranker.configured` cannot answer "did this run ask for
+/// reranking," only "could a reranker have run here if asked." Reading
+/// it as request detection (as an earlier version of this function did)
+/// let `rerank.ran`'s denominator count a `--rerank`-less run against a
+/// rerank-configured server, contradicting `build_definitions`' own
+/// "empty when `--rerank` was not given" contract for that metric.
+fn build_metrics(cases: &[CaseBlock], rerank_requested_this_run: bool) -> MetricsMap {
     let mut passage_latencies = Vec::new();
     let mut resolve_latencies = Vec::new();
     let mut query_latencies = Vec::new();
@@ -1976,23 +1988,22 @@ fn build_metrics(cases: &[CaseBlock]) -> MetricsMap {
                 } => {
                     evidence_latencies.push(*latency_ms as f64);
                     budget_only_omitted_n = Some(budget_only_omitted(omitted_by_reason) as u64);
-                    // A case only carries a rerank outcome at all when
-                    // this run's `--rerank MODEL` actually put a
-                    // `rerank` object on the wire — `RerankerPlan`'s
-                    // "not requested" path (`assemble.rs`'s `None` arm)
-                    // leaves both `configured: false` and `reason`
-                    // absent, the same shape a case with no `--rerank`
-                    // produces. The denominator is scoped to `configured
-                    // && reason != empty_pool`: `not_configured`
-                    // (`configured: false`) and `empty_pool` (fewer than
-                    // two survivors — nothing a reranker could have
-                    // reordered either way) are both non-events, not a
-                    // configured reranker's failure path firing, so
-                    // neither belongs in "the configured-reranker
-                    // success rate" this metric documents itself as.
-                    let attempted = reranker.ran
-                        || (reranker.configured
-                            && reranker.reason.as_deref() != Some(REASON_EMPTY_POOL));
+                    // Gated on `rerank_requested_this_run` (this run's
+                    // own `--rerank` flag), not `reranker.configured` —
+                    // that field reflects the *server's* configuration,
+                    // which stays `true` even on a case whose request
+                    // carried no `rerank` object at all when the
+                    // queried server happens to have one configured
+                    // (see this function's own doc comment). Within a
+                    // run that did pass `--rerank`, `empty_pool` (fewer
+                    // than two survivors — nothing a reranker could
+                    // have reordered either way) is still excluded: it
+                    // is not a configured reranker's failure path
+                    // firing, so it does not belong in "the
+                    // configured-reranker success rate" this metric
+                    // documents itself as.
+                    let attempted = rerank_requested_this_run
+                        && reranker.reason.as_deref() != Some(REASON_EMPTY_POOL);
                     if attempted {
                         rerank_requested_n += 1;
                         rerank_ran_n += u64::from(reranker.ran);
