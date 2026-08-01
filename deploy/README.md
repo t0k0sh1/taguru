@@ -61,7 +61,7 @@ release](../SECURITY.md#verifying-a-release), which also checks the
 signature and reads the SBOM/provenance) and append it to the image
 line of any manifest here:
 
-    image: ghcr.io/t0k0sh1/taguru:0.5.0@sha256:280fde9591aed05d14553203ed4146ad129b686f2ee6ef7c7a38658341f60482
+    image: ghcr.io/t0k0sh1/taguru:0.6.0@sha256:b9f5193f1a80f7bec6319b8fecb0dd8d9eab10b329a8d70037326f5169deb440
 
 The tag stays for humans; the digest is what the runtime resolves.
 With kustomize, the `images:` stanza takes `digest:` alongside
