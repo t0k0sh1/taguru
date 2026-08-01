@@ -60,10 +60,11 @@ def test_built_text_resplits_into_exactly_the_paragraphs_the_locators_index(
     document = PdfConnector().read(str(path))
 
     resplit = split_paragraphs(document.text)
-    assert resplit == list(resplit)
     assert len(resplit) == len(document.locators)
     for index, entry in enumerate(document.locators):
         assert entry.paragraph == index
+    # The joined text must round-trip: no paragraph gained or lost a break.
+    assert "\n\n".join(resplit) == document.text
 
 
 def test_outline_entries_become_sections_at_the_matching_paragraph(tmp_path: Path) -> None:

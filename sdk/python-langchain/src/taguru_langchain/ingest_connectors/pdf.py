@@ -352,10 +352,13 @@ class PdfConnector:
         seen_paragraphs: set[int] = set()
         titles: list[str] = []
         try:
-            outline = reader.outline
-        except Exception:  # noqa: BLE001 - a malformed outline degrades to none
-            outline = []
-        for raw_title, page_index in self._flatten_outline(reader, outline):
+            outline_items = list(self._flatten_outline(reader, reader.outline))
+        except Exception:  # noqa: BLE001 - a malformed/cyclic/deeply-nested
+            # outline (e.g. a RecursionError from _flatten_outline's own
+            # recursion) degrades to none, same as read()'s every other
+            # parse failure — never raised out of this connector.
+            outline_items = []
+        for raw_title, page_index in outline_items:
             titles.append(raw_title)
             if page_index is None:
                 continue

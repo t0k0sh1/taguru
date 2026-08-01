@@ -153,7 +153,7 @@ outcome = ingest_connector_document(ingester, document)
 ```
 
 HTML/DOCX/S3 connectors implementing the same `Connector` protocol are
-tracked as follow-up issues (#349-#352); the contract itself (ADR 0007 §5)
+tracked as follow-up issues (#349-#351); the contract itself (ADR 0007 §5)
 is stable now.
 
 Three more constructor arguments bound how a chunk's structured-output

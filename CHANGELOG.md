@@ -22,9 +22,11 @@ Entries that change an on-disk format or a response shape say so.
   whitespace normalization) is named in an `ocr_required` diagnostic with
   empty `text` for that page's contribution — never silently passed
   through as low-quality text — leaving the external OCR adapter
-  boundary to #352. Encrypted PDFs (including those already unlockable
-  with an empty user password) and structurally corrupt PDFs are
-  reported as `encrypted`/`corrupt`, a single page's own decode failure
+  boundary to #352. Encrypted PDFs requiring a user password this
+  connector does not have (a PDF unlockable with an empty user
+  password — owner-restrictions-only — extracts normally instead) and
+  structurally corrupt PDFs are reported as `encrypted`/`corrupt`, a
+  single page's own decode failure
   as `partial_extraction` without failing the rest of the document, and
   a raw file over `max_file_bytes` (default 64 MiB) or extracted text
   over `MAX_PASSAGE_BYTES` (8 MiB) as `content_too_large` — never a
