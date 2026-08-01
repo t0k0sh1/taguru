@@ -2547,6 +2547,8 @@ fn the_stdio_bridge_starts_a_fresh_trace_on_a_malformed_meta_traceparent() {
     let parts: Vec<&str> = traceparent.split('-').collect();
     assert_eq!(parts.len(), 4, "{traceparent}");
     assert_eq!(parts[0], "00", "{traceparent}");
+    assert_eq!(parts[1].len(), 32, "{traceparent}");
+    assert_eq!(parts[2].len(), 16, "{traceparent}");
 }
 
 #[test]

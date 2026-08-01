@@ -297,6 +297,10 @@ fn no_question_concept_source_or_passage_text_reaches_the_collector() {
     const SOURCE_NONCE: &str = "sentinel-source-7b2c.md";
     const PASSAGE_NONCE: &str = "SENTINEL-PASSAGE-TEXT-91de";
     const QUERY_NONCE: &str = "SENTINEL-QUERY-c4a1";
+    // `subject` and `object` are both concept identifiers (ADR 0008
+    // treats them uniformly) — a fixed `object` string would leave a
+    // leak specific to that field undetected.
+    const OBJECT_NONCE: &str = "SENTINEL-OBJECT-a821";
 
     server.ok(
         "PUT",
@@ -312,7 +316,7 @@ fn no_question_concept_source_or_passage_text_reaches_the_collector() {
         "POST",
         "/contexts/sentinel/associations",
         Some(json!([{
-            "subject": CONCEPT_NONCE, "label": "sentinel-label", "object": "sentinel-object",
+            "subject": CONCEPT_NONCE, "label": "sentinel-label", "object": OBJECT_NONCE,
             "weight": 1.0, "source": SOURCE_NONCE, "paragraph": 0
         }])),
     );
@@ -333,7 +337,13 @@ fn no_question_concept_source_or_passage_text_reaches_the_collector() {
     // failed, or never flushed) would pass the loop below vacuously —
     // proving nothing about the one thing this test exists to check.
     assert!(!bodies.is_empty(), "no OTLP payload was collected at all");
-    for nonce in [CONCEPT_NONCE, SOURCE_NONCE, PASSAGE_NONCE, QUERY_NONCE] {
+    for nonce in [
+        CONCEPT_NONCE,
+        SOURCE_NONCE,
+        PASSAGE_NONCE,
+        QUERY_NONCE,
+        OBJECT_NONCE,
+    ] {
         assert!(
             bodies.iter().all(|body| !body.contains(nonce)),
             "sentinel {nonce:?} leaked into an OTLP payload"

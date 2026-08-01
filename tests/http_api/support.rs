@@ -371,6 +371,11 @@ fn read_http_request(
     stream: &mut std::net::TcpStream,
 ) -> Option<(std::collections::HashMap<String, String>, Vec<u8>)> {
     use std::io::Read;
+    // `FakeCollector`/`FakeShard` serve one connection at a time on a
+    // single accept thread — a client that opens a connection and never
+    // finishes sending would otherwise block this call forever, stalling
+    // every later request to the same fake server.
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(30)));
     let mut buffer = Vec::new();
     let mut chunk = [0u8; 4096];
     let header_end = loop {

@@ -173,6 +173,10 @@ def test_skip_reasons_for_disabled_steps(exporter: InMemorySpanExporter) -> None
     )
 
     root = one(exporter, tracing.ROOT_SPAN)
+    # Length checked before the Set comparison below — a duplicate skip
+    # event (production trace noise the Set comparison alone would miss)
+    # must still fail this test.
+    assert len(skip_reasons(root)) == 4
     assert set(skip_reasons(root)) == {
         "describe_disabled",
         "labels_absent",

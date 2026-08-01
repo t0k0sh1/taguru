@@ -171,6 +171,10 @@ describe("retrieve() tracing", () => {
     await client.context("sake").retrieve("青嶺", { describe_first: false, fetch_citations: false });
 
     const root = one(tracing.ROOT_SPAN);
+    // Length checked before the Set comparison below — a duplicate skip
+    // event (production trace noise the Set comparison alone would miss)
+    // must still fail this test.
+    expect(skipReasons(root)).toHaveLength(4);
     expect(new Set(skipReasons(root))).toEqual(
       new Set(["describe_disabled", "labels_absent", "citations_disabled", "fallback_not_requested"]),
     );
