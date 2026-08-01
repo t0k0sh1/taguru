@@ -1,0 +1,33 @@
+{
+  "contract": "http_contract",
+  "method": "POST",
+  "operation": "import",
+  "request": "{\"taguru_batch\": 1, \"context\": \"corpus-f\", \"source\": \"doc.md\", \"create\": {\"description\": \"wire-contract import corpus\"}}\n{\"passage\": \"導入。\\n\\n本編。\"}\n{\"paragraph\": 1, \"locator\": {\"kind\": \"page\", \"value\": \"12\"}}\n{\"subject\": \"alpha\", \"label\": \"connects_to\", \"object\": \"beta\", \"weight\": 1.0}\n",
+  "response": {
+    "result": {
+      "batches": [
+        {
+          "aliases": 0,
+          "association_paragraphs_dropped": 0,
+          "associations": 1,
+          "context": "corpus-f",
+          "created": true,
+          "locators_dropped": 0,
+          "locators_stored": 1,
+          "passage_dropped": false,
+          "passage_stored": true,
+          "questions_dropped": 0,
+          "questions_stored": 0,
+          "retracted": 0,
+          "sections_dropped": 0,
+          "sections_stored": 0,
+          "source": "doc.md"
+        }
+      ]
+    },
+    "status": "ok",
+    "time": 0.0
+  },
+  "route": "/import",
+  "status": 200
+}

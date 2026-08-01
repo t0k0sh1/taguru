@@ -243,7 +243,7 @@ pub async fn audit_drift(
     // A graph read like unreachable_from — zero drift is the audit
     // succeeding, not a miss, so it never counts as an empty read.
     state.note_read(&name, false);
-    let sections = state.resolve_sections(
+    let markers = state.resolve_markers(
         &name,
         locator_keys(unsourced.iter().map(|edge| &edge.association)),
     );
@@ -252,7 +252,7 @@ pub async fn audit_drift(
         .map(|edge| UnsourcedEdgeOut {
             unsourced_weight: edge.weight,
             unsourced_count: edge.count,
-            association: association_out(edge.association, &sections),
+            association: association_out(edge.association, &markers),
         })
         .collect();
 

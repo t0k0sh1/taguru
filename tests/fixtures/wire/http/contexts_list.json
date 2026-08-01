@@ -15,7 +15,7 @@
           "revision": {
             "config": 0,
             "graph": 1,
-            "passages": 0
+            "passages": 1
           },
           "semantic_floor": null,
           "stats": {
@@ -48,7 +48,7 @@
             "last_read_epoch": 0,
             "last_write_epoch": 0,
             "reads": 1,
-            "writes": 1
+            "writes": 2
           }
         }
       ],

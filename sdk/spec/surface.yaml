@@ -120,7 +120,7 @@ classes:
     store_passages:
       route: "POST /contexts/{name}/sources"
       args: [passages]
-      options: [questions, sections, tags, dates]
+      options: [questions, sections, locators, tags, dates]
     lookup_passages: { route: "POST /contexts/{name}/sources/lookup", args: [sources] }
     search_passages:
       route: "POST /contexts/{name}/sources/search"

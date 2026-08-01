@@ -428,8 +428,9 @@ fn estimate_passages(plan: &Plan) -> PassageEstimate {
     for i in 0..sample_sources {
         let text = synthetic_passage_text(per_source_bytes);
         let source = synthetic_name('s', i, plan.name_bytes);
-        let (record, _, _) = PassageRecord::new(
+        let (record, _) = PassageRecord::new(
             Arc::from(text.as_str()),
+            Vec::new(),
             Vec::new(),
             Vec::new(),
             crate::passages::SourceMeta::default(),

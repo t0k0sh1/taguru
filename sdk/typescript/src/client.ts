@@ -34,6 +34,7 @@ import type {
   GroupPage,
   ImportResult,
   LabelPage,
+  LocatorSpec,
   MatchCursor,
   MatchPage,
   OneOrMany,
@@ -1067,13 +1068,16 @@ export class Context {
    * Register source-id → full-text passages (replaces per source). Store the
    * document as-is: the server splits paragraphs on blank lines.
    * `questions`/`sections` attach per-paragraph doc2query questions and
-   * section labels.
+   * section labels. `locators` attaches typed citation locators (ADR 0007
+   * §7 — a page/slide/sheet/table position), independent of `sections`:
+   * unlike a section, a locator does not extend to the next paragraph.
    */
   async storePassages(
     passages: Record<string, string>,
     options: {
       questions?: Record<string, QuestionSpec[]>;
       sections?: Record<string, SectionSpec[]>;
+      locators?: Record<string, LocatorSpec[]>;
       tags?: Record<string, string[]>;
       dates?: Record<string, number>;
     } = {},
@@ -1084,6 +1088,9 @@ export class Context {
     }
     if (options.sections !== undefined) {
       body["sections"] = options.sections;
+    }
+    if (options.locators !== undefined) {
+      body["locators"] = options.locators;
     }
     if (options.tags !== undefined) {
       body["tags"] = options.tags;

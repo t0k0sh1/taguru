@@ -531,6 +531,7 @@ mod tests {
                     text: "りんごは真っ赤に実った。".to_string(),
                     questions: vec![(0, question.to_string())],
                     sections: Vec::new(),
+                    locators: Vec::new(),
                     meta: crate::passages::SourceMeta::default(),
                 },
             );
@@ -581,6 +582,7 @@ mod tests {
                     (0, "みかんとの違いは?".to_string()),
                 ],
                 sections: Vec::new(),
+                locators: Vec::new(),
                 meta: crate::passages::SourceMeta::default(),
             },
         );

@@ -75,10 +75,11 @@ fn passage_search_serves_paragraph_hits_with_lane_evidence() {
 /// paragraph), it returns the exact verbatim excerpt `search_passages`
 /// would show for that same paragraph — sliced through the one shared
 /// `PassageRecord::paragraph` accessor, so the two can never disagree —
-/// plus the source, and `section` always present as a key (never
-/// omitted). This source stored no sections, so it resolves to `null`;
-/// `citation_resolves_the_section_governing_its_paragraph` covers the
-/// case where a section is actually stored.
+/// plus the source, and `section`/`locator` always present as keys
+/// (never omitted). This source stored neither, so both resolve to
+/// `null`; `citation_resolves_the_section_governing_its_paragraph` and
+/// `a_locator_stored_via_store_passages_resolves_on_citation` cover the
+/// cases where one is actually stored.
 #[test]
 fn citation_returns_the_verbatim_paragraph_named_by_source_and_paragraph() {
     let server = Server::start("citation-hit");
@@ -106,10 +107,57 @@ fn citation_returns_the_verbatim_paragraph_named_by_source_and_paragraph() {
         "{citation}"
     );
     assert_eq!(citation["source"], "docs/aomine.md");
+    let object = citation.as_object().unwrap();
     assert!(
-        citation.as_object().unwrap().contains_key("section") && citation["section"].is_null(),
+        object.contains_key("section") && citation["section"].is_null(),
         "section is present and null, never omitted: {citation}"
     );
+    assert!(
+        object.contains_key("locator") && citation["locator"].is_null(),
+        "locator is present and null, never omitted: {citation}"
+    );
+}
+
+/// A locator (ADR 0007 §7) stored via `store_passages` resolves on
+/// citation exactly like a section does, and is independent of it — a
+/// paragraph with no section marker can still carry a locator.
+#[test]
+fn a_locator_stored_via_store_passages_resolves_on_citation() {
+    let server = Server::start("locator-store");
+    server.ok(
+        "PUT",
+        "/contexts/sake",
+        Some(json!({"description": "蔵の知識"})),
+    );
+    server.ok(
+        "POST",
+        "/contexts/sake/sources",
+        Some(json!({
+            "passages": {"manual.pdf": "導入。\n\n本編。"},
+            "locators": {"manual.pdf": [{"paragraph": 1, "locator": {"kind": "page", "value": "12"}}]}
+        })),
+    );
+
+    let citation = server.ok(
+        "POST",
+        "/contexts/sake/citations",
+        Some(json!({"source": "manual.pdf", "paragraph": 1})),
+    );
+    assert_eq!(
+        citation["locator"],
+        json!({"kind": "page", "value": "12"}),
+        "{citation}"
+    );
+    assert!(citation["section"].is_null(), "{citation}");
+
+    // Paragraph 0 carries no locator of its own — never a fabricated
+    // value, and never the paragraph-1 locator extending backward.
+    let citation0 = server.ok(
+        "POST",
+        "/contexts/sake/citations",
+        Some(json!({"source": "manual.pdf", "paragraph": 0})),
+    );
+    assert!(citation0["locator"].is_null(), "{citation0}");
 }
 
 /// Unknown source, an out-of-range paragraph position, and an unknown
@@ -165,7 +213,7 @@ fn citation_reports_clear_errors_for_unknown_source_paragraph_and_context() {
 
 /// A section stored via import resolves on the citation endpoint too:
 /// `AppState::citation` reads it off the very same `PassageRecord` via
-/// `section_for`, the accessor `resolve_sections` uses for association
+/// `section_for`, the accessor `resolve_markers` uses for association
 /// attributions, so both report the same label for the same paragraph.
 /// The paragraph preceding the first marker still resolves to `null`.
 #[test]
@@ -274,6 +322,40 @@ fn store_passages_accepts_sections_and_reports_the_bookkeeping() {
         Some(json!({
             "passages": {},
             "sections": {"ghost": [{"paragraph": 0, "section": "幽霊"}]}
+        })),
+    );
+    assert_eq!(status, 400, "{body}");
+}
+
+#[test]
+fn store_passages_accepts_locators_and_reports_the_bookkeeping() {
+    let server = Server::start("passage-locators");
+    server.ok(
+        "PUT",
+        "/contexts/sake",
+        Some(json!({"description": "蔵の知識"})),
+    );
+    let result = server.ok(
+        "POST",
+        "/contexts/sake/sources",
+        Some(json!({
+            "passages": {"doc": "一つ目。\n\n二つ目。"},
+            "locators": {"doc": [
+                {"paragraph": 1, "locator": {"kind": "page", "value": "12"}},
+                {"paragraph": 9, "locator": {"kind": "page", "value": "存在しない段落"}}
+            ]}
+        })),
+    );
+    assert_eq!(result["stored"], 1, "{result}");
+    assert_eq!(result["locators_stored"], 1, "{result}");
+    assert_eq!(result["locators_dropped"], 1, "{result}");
+
+    let (status, body) = server.call(
+        "POST",
+        "/contexts/sake/sources",
+        Some(json!({
+            "passages": {},
+            "locators": {"ghost": [{"paragraph": 0, "locator": {"kind": "page", "value": "1"}}]}
         })),
     );
     assert_eq!(status, 400, "{body}");

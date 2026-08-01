@@ -189,6 +189,12 @@ struct SectionLine<'a> {
 }
 
 #[derive(Serialize)]
+struct LocatorLine<'a> {
+    paragraph: u32,
+    locator: &'a crate::passages::Locator,
+}
+
+#[derive(Serialize)]
 struct AssociationLine<'a> {
     subject: &'a str,
     label: &'a str,
@@ -444,6 +450,15 @@ pub(crate) fn render(
                         &SectionLine {
                             paragraph: *paragraph,
                             section,
+                        },
+                    );
+                }
+                for (paragraph, locator) in &record.locators {
+                    push_line(
+                        &mut stream,
+                        &LocatorLine {
+                            paragraph: *paragraph,
+                            locator,
                         },
                     );
                 }
@@ -1110,6 +1125,16 @@ mod tests {
                             text: "青嶺酒造は1907年創業。\n\n代表銘柄は青嶺。".to_string(),
                             questions: vec![(0, "いつ創業した?".to_string())],
                             sections: vec![(0, "沿革".to_string())],
+                            // A locator (ADR 0007 §7) rides beside the
+                            // section: the round trip below must
+                            // preserve both independently.
+                            locators: vec![(
+                                0,
+                                crate::passages::Locator {
+                                    kind: "page".to_string(),
+                                    value: "12".to_string(),
+                                },
+                            )],
                             // Populated metadata (#167): the round trip
                             // below must preserve it — stored_at
                             // included, or a backup would silently
@@ -1127,6 +1152,7 @@ mod tests {
                             text: "杜氏の紹介。\n\n代表銘柄の解説。".to_string(),
                             questions: Vec::new(),
                             sections: Vec::new(),
+                            locators: Vec::new(),
                             meta: crate::passages::SourceMeta::default(),
                         },
                     ),
@@ -1229,7 +1255,12 @@ mod tests {
             snapshot_b.label_aliases,
             vec![("とじ".to_string(), "杜氏".to_string())]
         );
-        type StoredPassage = (String, Vec<(u32, String)>, Vec<(u32, String)>);
+        type StoredPassage = (
+            String,
+            Vec<(u32, String)>,
+            Vec<(u32, String)>,
+            Vec<(u32, crate::passages::Locator)>,
+        );
         let passages_b: BTreeMap<String, StoredPassage> = snapshot_b
             .passages
             .iter()
@@ -1240,6 +1271,7 @@ mod tests {
                         record.text.to_string(),
                         record.questions.clone(),
                         record.sections.clone(),
+                        record.locators.clone(),
                     ),
                 )
             })
@@ -1251,6 +1283,13 @@ mod tests {
                 "青嶺酒造は1907年創業。\n\n代表銘柄は青嶺。".to_string(),
                 vec![(0, "いつ創業した?".to_string())],
                 vec![(0, "沿革".to_string())],
+                vec![(
+                    0,
+                    crate::passages::Locator {
+                        kind: "page".to_string(),
+                        value: "12".to_string(),
+                    },
+                )],
             )
         );
         assert_eq!(passages_b["b.md"].1, Vec::new());

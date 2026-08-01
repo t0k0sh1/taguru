@@ -161,7 +161,14 @@ pub fn route_tool(
                 path,
                 Some(pick(
                     arguments,
-                    &["passages", "questions", "sections", "tags", "dates"],
+                    &[
+                        "passages",
+                        "questions",
+                        "sections",
+                        "locators",
+                        "tags",
+                        "dates",
+                    ],
                 )),
             )
         }

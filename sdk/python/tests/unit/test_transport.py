@@ -195,17 +195,47 @@ def test_import_normalizes_to_batches_defaulting_groups_to_empty() -> None:
         "questions_dropped": 0,
         "sections_stored": 0,
         "sections_dropped": 0,
+        "locators_stored": 3,
+        "locators_dropped": 1,
         "association_paragraphs_dropped": 0,
     }
     client = sync_client(lambda _req: ok_response(outcome))
     result = client.import_batches('{"taguru_batch":1}')
     assert len(result.batches) == 1
     assert result.batches[0].context == "sake"
+    # The new locator counters (#346) must survive normalization, not just
+    # be accepted by the decoder — a regression could drop them silently.
+    assert result.batches[0].locators_stored == 3
+    assert result.batches[0].locators_dropped == 1
     assert result.groups == []
 
     client = sync_client(lambda _req: ok_response({"batches": [outcome, outcome]}))
     result = client.import_batches('{"taguru_batch":1}')
     assert [o.source for o in result.batches] == ["a", "a"]
+
+
+async def test_async_import_batches_decodes_locator_counts() -> None:
+    outcome = {
+        "context": "sake",
+        "source": "a",
+        "created": True,
+        "retracted": 0,
+        "associations": 2,
+        "aliases": 0,
+        "passage_stored": True,
+        "passage_dropped": False,
+        "questions_stored": 0,
+        "questions_dropped": 0,
+        "sections_stored": 0,
+        "sections_dropped": 0,
+        "locators_stored": 2,
+        "locators_dropped": 5,
+        "association_paragraphs_dropped": 0,
+    }
+    client = async_client(lambda _req: ok_response(outcome))
+    result = await client.import_batches('{"taguru_batch":1}')
+    assert result.batches[0].locators_stored == 2
+    assert result.batches[0].locators_dropped == 5
 
 
 def test_import_carries_group_restore_outcomes() -> None:
@@ -222,6 +252,8 @@ def test_import_carries_group_restore_outcomes() -> None:
         "questions_dropped": 0,
         "sections_stored": 0,
         "sections_dropped": 0,
+        "locators_stored": 0,
+        "locators_dropped": 0,
         "association_paragraphs_dropped": 0,
     }
     client = sync_client(
@@ -256,6 +288,8 @@ async def test_async_import_file_reads_off_the_event_loop_thread(tmp_path, monke
         "questions_dropped": 0,
         "sections_stored": 0,
         "sections_dropped": 0,
+        "locators_stored": 0,
+        "locators_dropped": 0,
         "association_paragraphs_dropped": 0,
     }
     client = async_client(lambda _req: ok_response(outcome))

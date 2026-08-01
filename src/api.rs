@@ -1161,6 +1161,15 @@ pub(crate) const MAX_QUESTIONS_PER_PARAGRAPH: usize = 8;
 /// there is no per-paragraph cap to match `MAX_QUESTIONS_PER_PARAGRAPH`.
 pub(crate) const MAX_SECTION_BYTES: usize = 512;
 
+/// Byte cap on a locator's `kind` (ADR 0007 §7.1) — an open but short
+/// tag like `"page"`/`"slide"`/`"sheet"`, never a document.
+pub(crate) const MAX_LOCATOR_KIND_BYTES: usize = 64;
+
+/// Byte cap on a locator's `value` — same bound as a section label,
+/// since both are short strings riding a paragraph index (`"12"`,
+/// `"A1:C4"`).
+pub(crate) const MAX_LOCATOR_VALUE_BYTES: usize = 512;
+
 /// Byte cap on one source tag (#167) — a label a filter selects on,
 /// not a description; anything longer is misuse of the field.
 pub(crate) const MAX_TAG_BYTES: usize = 128;
@@ -1323,7 +1332,7 @@ fn rank(a: (f64, &str, &str, &str), b: (f64, &str, &str, &str)) -> std::cmp::Ord
 /// Bounds a match list to one page: past `after` when given, ranked by
 /// [`rank`], cut at the limit. Returns the raw library `Association`s,
 /// not yet resolved to their wire shape — callers still need to run
-/// them through `resolve_sections`/`association_out`, and `page` itself
+/// them through `resolve_markers`/`association_out`, and `page` itself
 /// has no context name to resolve against.
 fn page(
     matches: Vec<Association>,
@@ -1514,11 +1523,11 @@ fn cross_search_concurrency() -> usize {
 }
 
 /// `Attribution`'s wire shape: everything the library exposes, plus the
-/// section label the server resolves from `paragraph` via
-/// `AppState::resolve_sections`. `null` when the attribution carries no
-/// paragraph locator, or when the locator falls outside every section
-/// marker the ingest batch recorded for that source — never a
-/// fabricated label.
+/// section label and typed citation locator (ADR 0007 §7) the server
+/// resolves from `paragraph` via `AppState::resolve_markers`. Each is
+/// `null` when the attribution carries no paragraph locator, or when
+/// the locator falls outside every section/locator marker the ingest
+/// batch recorded for that source — never a fabricated value.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AttributionOut {
     pub source: String,
@@ -1529,10 +1538,11 @@ pub struct AttributionOut {
     pub count: u64,
     pub paragraph: Option<u32>,
     pub section: Option<String>,
+    pub locator: Option<crate::passages::Locator>,
 }
 
 /// `Association`'s wire shape: identical, except its attributions carry
-/// a resolved section label (see [`AttributionOut`]).
+/// resolved section/locator markers (see [`AttributionOut`]).
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AssociationOut {
     pub subject: String,
@@ -1547,24 +1557,26 @@ pub struct AssociationOut {
 
 fn attribution_out(
     attribution: Attribution,
-    sections: &HashMap<(String, u32), String>,
+    markers: &HashMap<(String, u32), crate::registry::Markers>,
 ) -> AttributionOut {
-    let section = attribution
+    let found = attribution
         .paragraph
-        .and_then(|paragraph| sections.get(&(attribution.source.clone(), paragraph)))
-        .cloned();
+        .and_then(|paragraph| markers.get(&(attribution.source.clone(), paragraph)));
+    let section = found.and_then(|found| found.section.clone());
+    let locator = found.and_then(|found| found.locator.clone());
     AttributionOut {
         source: attribution.source,
         weight: attribution.weight,
         count: attribution.count,
         paragraph: attribution.paragraph,
         section,
+        locator,
     }
 }
 
 fn association_out(
     association: Association,
-    sections: &HashMap<(String, u32), String>,
+    markers: &HashMap<(String, u32), crate::registry::Markers>,
 ) -> AssociationOut {
     AssociationOut {
         subject: association.subject,
@@ -1575,13 +1587,13 @@ fn association_out(
         attributions: association
             .attributions
             .into_iter()
-            .map(|attribution| attribution_out(attribution, sections))
+            .map(|attribution| attribution_out(attribution, markers))
             .collect(),
     }
 }
 
 /// `Recollection`'s wire shape: identical, with `association` reshaped
-/// to carry resolved section labels (see [`AssociationOut`]).
+/// to carry resolved section/locator markers (see [`AssociationOut`]).
 #[derive(Serialize)]
 pub struct RecollectionOut {
     pub distance: usize,
@@ -1591,17 +1603,17 @@ pub struct RecollectionOut {
 
 fn recollection_out(
     recollection: Recollection,
-    sections: &HashMap<(String, u32), String>,
+    markers: &HashMap<(String, u32), crate::registry::Markers>,
 ) -> RecollectionOut {
     RecollectionOut {
         distance: recollection.distance,
         path: recollection.path,
-        association: association_out(recollection.association, sections),
+        association: association_out(recollection.association, markers),
     }
 }
 
 /// `Activation`'s wire shape: identical, with `association` reshaped to
-/// carry resolved section labels (see [`AssociationOut`]).
+/// carry resolved section/locator markers (see [`AssociationOut`]).
 #[derive(Serialize)]
 pub struct ActivationOut {
     pub strength: f64,
@@ -1611,20 +1623,24 @@ pub struct ActivationOut {
 
 fn activation_out(
     activation: Activation,
-    sections: &HashMap<(String, u32), String>,
+    markers: &HashMap<(String, u32), crate::registry::Markers>,
 ) -> ActivationOut {
     ActivationOut {
         strength: activation.strength,
         path: activation.path,
-        association: association_out(activation.association, sections),
+        association: association_out(activation.association, markers),
     }
 }
 
 /// Every `(source, paragraph)` locator across a batch of associations'
-/// attributions — the key set for one `resolve_sections` call, so a
+/// attributions — the key set for one `resolve_markers` call, so a
 /// page of N matches loads the passage store once rather than once per
 /// attribution. Attributions without a paragraph locator contribute
-/// nothing; they can never resolve to a section.
+/// nothing; they can never resolve to a section or citation locator.
+/// (Note: "locator" here is the `(source, paragraph)` sense already
+/// used throughout this module, distinct from the typed citation
+/// [`crate::passages::Locator`] `resolve_markers` resolves each key
+/// to.)
 fn locator_keys<'a>(
     associations: impl Iterator<Item = &'a Association> + 'a,
 ) -> impl Iterator<Item = (String, u32)> + 'a {
@@ -1637,18 +1653,19 @@ fn locator_keys<'a>(
     })
 }
 
-/// Resolve section labels for a page of associations and convert each
-/// to its wire shape — the `resolve_sections` + `locator_keys` + map
-/// sequence every association-returning endpoint needs.
+/// Resolve section/locator markers for a page of associations and
+/// convert each to its wire shape — the `resolve_markers` +
+/// `locator_keys` + map sequence every association-returning endpoint
+/// needs.
 fn associations_out(
     state: &AppState,
     name: &str,
     matches: Vec<Association>,
 ) -> Vec<AssociationOut> {
-    let sections = state.resolve_sections(name, locator_keys(matches.iter()));
+    let markers = state.resolve_markers(name, locator_keys(matches.iter()));
     matches
         .into_iter()
-        .map(|association| association_out(association, &sections))
+        .map(|association| association_out(association, &markers))
         .collect()
 }
 
@@ -1658,21 +1675,21 @@ fn recollections_out(
     name: &str,
     matches: Vec<Recollection>,
 ) -> Vec<RecollectionOut> {
-    let sections = state.resolve_sections(
+    let markers = state.resolve_markers(
         name,
         locator_keys(matches.iter().map(|recollection| &recollection.association)),
     );
     matches
         .into_iter()
-        .map(|recollection| recollection_out(recollection, &sections))
+        .map(|recollection| recollection_out(recollection, &markers))
         .collect()
 }
 
-/// [`associations_out`] for a cross-context page: section labels
-/// resolve against the context each match came from — one
-/// `resolve_sections` call per distinct context on the page, not one
+/// [`associations_out`] for a cross-context page: section/locator
+/// markers resolve against the context each match came from — one
+/// `resolve_markers` call per distinct context on the page, not one
 /// per match (and none for a context whose page entries carry no
-/// paragraph locator; `resolve_sections` short-circuits on an empty
+/// paragraph locator; `resolve_markers` short-circuits on an empty
 /// key set).
 fn cross_associations_out(
     state: &AppState,
@@ -1685,16 +1702,16 @@ fn cross_associations_out(
             .or_default()
             .extend(locator_keys(std::iter::once(association)));
     }
-    let sections: BTreeMap<String, HashMap<(String, u32), String>> = locators
+    let markers: BTreeMap<String, HashMap<(String, u32), crate::registry::Markers>> = locators
         .into_iter()
         .map(|(context, keys)| {
-            let resolved = state.resolve_sections(&context, keys.into_iter());
+            let resolved = state.resolve_markers(&context, keys.into_iter());
             (context, resolved)
         })
         .collect();
     page.into_iter()
         .map(|(context, association)| {
-            let inner = association_out(association, &sections[&context]);
+            let inner = association_out(association, &markers[&context]);
             CrossMatch { context, inner }
         })
         .collect()
@@ -1702,13 +1719,13 @@ fn cross_associations_out(
 
 /// Same as [`associations_out`], for activations (activate's results).
 fn activations_out(state: &AppState, name: &str, matches: Vec<Activation>) -> Vec<ActivationOut> {
-    let sections = state.resolve_sections(
+    let markers = state.resolve_markers(
         name,
         locator_keys(matches.iter().map(|activation| &activation.association)),
     );
     matches
         .into_iter()
-        .map(|activation| activation_out(activation, &sections))
+        .map(|activation| activation_out(activation, &markers))
         .collect()
 }
 

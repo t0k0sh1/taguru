@@ -1064,6 +1064,11 @@ pub(crate) struct Batch {
     /// Section start markers, (paragraph index, label) — same
     /// structure-here/range-at-store-time split as `questions`.
     sections: Vec<(u32, String)>,
+    /// Typed citation locators (ADR 0007 §7), (paragraph index,
+    /// locator) — same structure-here/range-at-store-time split as
+    /// `questions`/`sections`, but independent of `sections`: a
+    /// locator does not extend to the next paragraph.
+    locators: Vec<(u32, crate::passages::Locator)>,
     /// Source metadata (#167), riding the passage line. `stored_at`
     /// present means an export being restored — the original stamp is
     /// preserved; absent means the store stamps the import time.
@@ -1081,7 +1086,8 @@ impl Batch {
     }
 
     /// Whether applying this batch can grow the context: any passage
-    /// or graph payload counts (questions/sections ride the passage).
+    /// or graph payload counts (questions/sections/locators ride the
+    /// passage).
     /// A header-only batch is a pure source retraction — plus, at
     /// most, a create — which is the import-shaped way DOWN in size,
     /// so the storage-quota pre-check must let it through exactly as
@@ -1106,7 +1112,7 @@ impl Batch {
 
     fn describe(&self) -> String {
         format!(
-            "context '{}' ← source '{}': {} association(s), {} alias(es){}{}{}",
+            "context '{}' ← source '{}': {} association(s), {} alias(es){}{}{}{}",
             self.context,
             self.source,
             self.associations.len(),
@@ -1125,6 +1131,11 @@ impl Batch {
                 String::new()
             } else {
                 format!(", {} section(s)", self.sections.len())
+            },
+            if self.locators.is_empty() {
+                String::new()
+            } else {
+                format!(", {} locator(s)", self.locators.len())
             }
         )
     }
@@ -1267,6 +1278,13 @@ struct QuestionLine {
 struct SectionLine {
     paragraph: u32,
     section: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LocatorLine {
+    paragraph: u32,
+    locator: crate::passages::Locator,
 }
 
 /// Parses one single-batch file completely, or says which line refused
@@ -1495,6 +1513,15 @@ fn finish_batch(batch: Batch) -> Result<Batch, String> {
             batch.sections.len()
         ));
     }
+    // Locators attach to paragraphs the same way sections do, and need
+    // the same passage-to-attach-to guard.
+    if !batch.locators.is_empty() && batch.passage.is_none() {
+        return Err(format!(
+            "{} locator line(s) but no passage line — locators attach to this \
+             file's passage",
+            batch.locators.len()
+        ));
+    }
     // A paragraph locator on an association names a spot in THIS batch's
     // passage, exactly as a question or section does. With no passage
     // line there is nothing to name — and `apply_batch` retracts the
@@ -1547,6 +1574,7 @@ fn parse_header(value: serde_json::Value, number: usize) -> Result<Batch, String
         passage: None,
         questions: Vec::new(),
         sections: Vec::new(),
+        locators: Vec::new(),
         stored_at: None,
         date: None,
         tags: Vec::new(),
@@ -1683,11 +1711,29 @@ fn parse_op(
         )?;
         check_nonempty(number, "section", &op.section)?;
         batch.sections.push((op.paragraph, op.section));
+    } else if object.contains_key("locator") {
+        let op: LocatorLine = serde_json::from_value(value)
+            .map_err(|error| format!("line {number}: locator: {error}"))?;
+        check_size(
+            number,
+            "locator.kind",
+            &op.locator.kind,
+            crate::api::MAX_LOCATOR_KIND_BYTES,
+        )?;
+        check_nonempty(number, "locator.kind", &op.locator.kind)?;
+        check_size(
+            number,
+            "locator.value",
+            &op.locator.value,
+            crate::api::MAX_LOCATOR_VALUE_BYTES,
+        )?;
+        check_nonempty(number, "locator.value", &op.locator.value)?;
+        batch.locators.push((op.paragraph, op.locator));
     } else {
         return Err(format!(
             "line {number}: not an association (subject/label/object/weight), an alias \
              (alias/canonical/kind), a passage line, a question (paragraph/question) line, \
-             or a section (paragraph/section) line"
+             a section (paragraph/section) line, or a locator (paragraph/locator) line"
         ));
     }
     Ok(())
@@ -1739,6 +1785,14 @@ pub(crate) struct Applied {
     /// paragraph — a start marker governs until the next one, so only
     /// one can ever apply.
     pub(crate) sections_dropped: usize,
+    pub(crate) locators_stored: usize,
+    /// Locators naming a paragraph their passage's split does not have
+    /// (same convention and same likely cause as `sections_dropped`),
+    /// plus any but the last of two or more locators claiming the same
+    /// paragraph — unlike a section's start marker, a locator names
+    /// only its own paragraph, but the same one-per-paragraph
+    /// last-write-wins rule applies.
+    pub(crate) locators_dropped: usize,
     /// Association paragraph locators naming a spot this batch's own
     /// passage split does not have. Dropped exactly as `questions_dropped`
     /// and `sections_dropped` are — the association's fact still lands,
@@ -2076,6 +2130,8 @@ pub(crate) fn apply_batch(state: &AppState, batch: &Batch) -> Result<Applied, Ap
     let mut questions_dropped = 0;
     let mut sections_stored = 0;
     let mut sections_dropped = 0;
+    let mut locators_stored = 0;
+    let mut locators_dropped = 0;
     if let Some(text) = &batch.passage {
         let outcome = state
             .store_passages(
@@ -2086,6 +2142,7 @@ pub(crate) fn apply_batch(state: &AppState, batch: &Batch) -> Result<Applied, Ap
                         text: text.clone(),
                         questions: batch.questions.clone(),
                         sections: batch.sections.clone(),
+                        locators: batch.locators.clone(),
                         meta: crate::passages::SourceMeta {
                             stored_at: batch.stored_at,
                             date: batch.date,
@@ -2110,6 +2167,8 @@ pub(crate) fn apply_batch(state: &AppState, batch: &Batch) -> Result<Applied, Ap
         questions_dropped = outcome.questions_dropped;
         sections_stored = outcome.sections_stored;
         sections_dropped = outcome.sections_dropped;
+        locators_stored = outcome.locators_stored;
+        locators_dropped = outcome.locators_dropped;
     }
 
     // Same rule as questions/sections above, applied silently: a
@@ -2186,6 +2245,8 @@ pub(crate) fn apply_batch(state: &AppState, batch: &Batch) -> Result<Applied, Ap
         questions_dropped,
         sections_stored,
         sections_dropped,
+        locators_stored,
+        locators_dropped,
         association_paragraphs_dropped,
     })
 }
@@ -2237,11 +2298,14 @@ pub(crate) fn preview_batch(state: &AppState, batch: &Batch) -> Result<Applied, 
         .passage
         .as_deref()
         .map(|text| crate::paragraph::split(text).len());
-    let (questions_dropped, sections_dropped) = match paragraph_count {
-        Some(paragraph_count) => {
-            crate::passages::preview_drops(paragraph_count, &batch.questions, &batch.sections)
-        }
-        None => (0, 0),
+    let (questions_dropped, sections_dropped, locators_dropped) = match paragraph_count {
+        Some(paragraph_count) => crate::passages::preview_drops(
+            paragraph_count,
+            &batch.questions,
+            &batch.sections,
+            &batch.locators,
+        ),
+        None => (0, 0, 0),
     };
 
     let (corrected, association_paragraphs_dropped) =
@@ -2258,6 +2322,8 @@ pub(crate) fn preview_batch(state: &AppState, batch: &Batch) -> Result<Applied, 
         questions_dropped,
         sections_stored: batch.sections.len() - sections_dropped,
         sections_dropped,
+        locators_stored: batch.locators.len() - locators_dropped,
+        locators_dropped,
         association_paragraphs_dropped,
     })
 }
@@ -2266,7 +2332,7 @@ pub(crate) fn preview_batch(state: &AppState, batch: &Batch) -> Result<Applied, 
 fn report(batch: &Batch, applied: &Applied) -> String {
     format!(
         "context '{}'{} ← source '{}' ({} association(s) retracted): +{} \
-         association(s), +{} alias(es){}{}{}{}",
+         association(s), +{} alias(es){}{}{}{}{}",
         batch.context,
         if applied.created { " (created)" } else { "" },
         batch.source,
@@ -2290,6 +2356,13 @@ fn report(batch: &Batch, applied: &Applied) -> String {
             (stored, 0) => format!(", +{stored} section(s)"),
             (stored, dropped) => {
                 format!(", +{stored} section(s) ({dropped} dropped: no such paragraph)")
+            }
+        },
+        match (applied.locators_stored, applied.locators_dropped) {
+            (0, 0) => String::new(),
+            (stored, 0) => format!(", +{stored} locator(s)"),
+            (stored, dropped) => {
+                format!(", +{stored} locator(s) ({dropped} dropped: no such paragraph)")
             }
         },
         match applied.association_paragraphs_dropped {
@@ -2810,6 +2883,38 @@ mod tests {
     }
 
     #[test]
+    fn a_locator_line_rides_the_batch_and_needs_a_passage_to_attach_to() {
+        let batch = parse(&format!(
+            "{HEADER}\n\
+             {{\"passage\": \"導入。\\n\\n本編。\"}}\n\
+             {{\"paragraph\": 1, \"locator\": {{\"kind\": \"page\", \"value\": \"12\"}}}}\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            batch.locators,
+            vec![(
+                1,
+                crate::passages::Locator {
+                    kind: "page".to_string(),
+                    value: "12".to_string(),
+                }
+            )]
+        );
+        assert!(
+            batch.describe().contains("1 locator(s)"),
+            "{}",
+            batch.describe()
+        );
+
+        // The same locator line without a passage has nothing to name.
+        let error = parse(&format!(
+            "{HEADER}\n{{\"paragraph\": 1, \"locator\": {{\"kind\": \"page\", \"value\": \"12\"}}}}\n"
+        ))
+        .unwrap_err();
+        assert!(error.contains("no passage line"), "{error}");
+    }
+
+    #[test]
     fn an_association_with_a_paragraph_needs_a_passage_to_attach_to() {
         // A paragraph locator on an association resolves against THIS
         // batch's passage, so it parses fine when the passage is present.
@@ -2856,6 +2961,8 @@ mod tests {
             questions_dropped: 0,
             sections_stored: 0,
             sections_dropped: 0,
+            locators_stored: 0,
+            locators_dropped: 0,
             association_paragraphs_dropped: 0,
         };
         let line = report(&batch, &dropped);
@@ -2895,6 +3002,75 @@ mod tests {
             error.contains("line 3") && error.contains("section"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn a_locator_value_beyond_the_byte_cap_is_refused() {
+        let long = "s".repeat(crate::api::MAX_LOCATOR_VALUE_BYTES + 1);
+        let error = parse(&format!(
+            "{HEADER}\n{{\"passage\": \"本文。\"}}\n\
+             {{\"paragraph\": 0, \"locator\": {{\"kind\": \"page\", \"value\": \"{long}\"}}}}\n"
+        ))
+        .unwrap_err();
+        assert!(
+            error.contains("locator.value") && error.contains("cap"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_locator_kind_beyond_the_byte_cap_is_refused() {
+        let long = "k".repeat(crate::api::MAX_LOCATOR_KIND_BYTES + 1);
+        let error = parse(&format!(
+            "{HEADER}\n{{\"passage\": \"本文。\"}}\n\
+             {{\"paragraph\": 0, \"locator\": {{\"kind\": \"{long}\", \"value\": \"1\"}}}}\n"
+        ))
+        .unwrap_err();
+        assert!(
+            error.contains("locator.kind") && error.contains("cap"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_empty_locator_kind_or_value_is_refused() {
+        for locator in [
+            r#"{"kind": "", "value": "1"}"#,
+            r#"{"kind": "page", "value": ""}"#,
+        ] {
+            let error = parse(&format!(
+                "{HEADER}\n{{\"passage\": \"本文。\"}}\n\
+                 {{\"paragraph\": 0, \"locator\": {locator}}}\n"
+            ))
+            .unwrap_err();
+            assert!(
+                error.contains("line 3") && error.contains("must not be empty"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_malformed_locator_line_is_refused_by_line_number() {
+        let error = parse(&format!(
+            "{HEADER}\n{{\"passage\": \"本文。\"}}\n\
+             {{\"paragraph\": \"zero\", \"locator\": {{\"kind\": \"page\", \"value\": \"1\"}}}}\n"
+        ))
+        .unwrap_err();
+        assert!(
+            error.contains("line 3") && error.contains("locator"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_locator_line_with_an_unknown_field_is_refused() {
+        let error = parse(&format!(
+            "{HEADER}\n{{\"passage\": \"本文。\"}}\n\
+             {{\"paragraph\": 0, \"locator\": {{\"kind\": \"page\", \"value\": \"1\", \"page\": 1}}}}\n"
+        ))
+        .unwrap_err();
+        assert!(error.contains("line 3"), "{error}");
     }
 
     #[test]

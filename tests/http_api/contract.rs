@@ -196,6 +196,18 @@ fn seed_basic_corpus(server: &Server, name: &str) {
              "source": "doc.md", "paragraph": 0},
         ])),
     );
+    // A locator (ADR 0007 §7) on the same (source, paragraph) the
+    // association above names, so `attributions[].locator` in the
+    // recall/explore/activate wire fixtures carries a real value, not
+    // just an always-null field the golden could never actually prove.
+    server.ok(
+        "POST",
+        &format!("/contexts/{name}/sources"),
+        Some(json!({
+            "passages": {"doc.md": "alpha connects to beta."},
+            "locators": {"doc.md": [{"paragraph": 0, "locator": {"kind": "page", "value": "1"}}]}
+        })),
+    );
 }
 
 #[test]
@@ -364,6 +376,58 @@ fn communities_search_community_page() {
     );
 }
 
+// --- HTTP: passage storage and batch import (#346, ADR 0007 §7) — the
+// two write paths a citation `locator` can ride in on. ---
+
+#[test]
+fn store_passages_response_shape() {
+    let server = Server::start("contract-store-passages");
+    server.ok("PUT", "/contexts/corpus-e", None);
+
+    let request = json!({
+        "passages": {"doc.md": "導入。\n\n本編。"},
+        "sections": {"doc.md": [{"paragraph": 1, "section": "本編"}]},
+        "locators": {"doc.md": [{"paragraph": 1, "locator": {"kind": "page", "value": "12"}}]},
+    });
+    let (status, body) = server.call("POST", "/contexts/corpus-e/sources", Some(request.clone()));
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["result"]["locators_stored"], json!(1), "{body}");
+    http_fixture(
+        "store_passages",
+        "POST",
+        "/contexts/{name}/sources",
+        Some(request),
+        status,
+        body,
+    );
+}
+
+#[test]
+fn import_reports_locator_bookkeeping() {
+    let server = Server::start("contract-import");
+    let batch = "{\"taguru_batch\": 1, \"context\": \"corpus-f\", \"source\": \"doc.md\", \
+                 \"create\": {\"description\": \"wire-contract import corpus\"}}\n\
+                 {\"passage\": \"導入。\\n\\n本編。\"}\n\
+                 {\"paragraph\": 1, \"locator\": {\"kind\": \"page\", \"value\": \"12\"}}\n\
+                 {\"subject\": \"alpha\", \"label\": \"connects_to\", \"object\": \"beta\", \
+                 \"weight\": 1.0}\n";
+    let (status, body) = post_import(&server, batch, None);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body["result"]["batches"][0]["locators_stored"],
+        json!(1),
+        "{body}"
+    );
+    http_fixture(
+        "import",
+        "POST",
+        "/import",
+        Some(json!(batch)),
+        status,
+        body,
+    );
+}
+
 // --- HTTP: evidence assembly (#216, #305, ADR 0006 §10) — the public
 // shape #301's own issue names as the thing it must cover. ---
 
@@ -376,9 +440,14 @@ fn seed_evidence_corpus(server: &Server, name: &str) {
     server.ok(
         "POST",
         &format!("/contexts/{name}/sources"),
-        Some(json!({"passages": {
-            "docs/kura.md": "青嶺酒造は雲居県霧沢町の蔵元である。杜氏は高瀬である。"
-        }})),
+        Some(json!({
+            "passages": {
+                "docs/kura.md": "青嶺酒造は雲居県霧沢町の蔵元である。杜氏は高瀬である。"
+            },
+            // A locator (ADR 0007 §7) so the citation/attribution wire
+            // fixtures below carry a real, non-null value.
+            "locators": {"docs/kura.md": [{"paragraph": 0, "locator": {"kind": "page", "value": "1"}}]}
+        })),
     );
     server.ok(
         "POST",
@@ -508,10 +577,16 @@ fn evidence_contradiction_group() {
     server.ok(
         "POST",
         "/contexts/contradiction-corpus/sources",
-        Some(json!({"passages": {
-            "s1.md": "猫は哺乳類である。",
-            "s2.md": "猫は爬虫類だと主張する文献もある。"
-        }})),
+        Some(json!({
+            "passages": {
+                "s1.md": "猫は哺乳類である。",
+                "s2.md": "猫は爬虫類だと主張する文献もある。"
+            },
+            // A locator (ADR 0007 §7) on one side, so this fixture's
+            // citations carry a real, non-null value alongside the
+            // other side's null.
+            "locators": {"s1.md": [{"paragraph": 0, "locator": {"kind": "page", "value": "1"}}]}
+        })),
     );
     server.ok(
         "POST",

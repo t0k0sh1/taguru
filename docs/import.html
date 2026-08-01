@@ -133,6 +133,7 @@ taguru import --url http://127.0.0.1:8248 batch/   <span class="c"># send to a r
     <pre><code>{<span class="k">"taguru_batch"</span>: <span class="nu">1</span>, <span class="k">"context"</span>: <span class="s">"sake"</span>, <span class="k">"source"</span>: <span class="s">"docs/aomine.md"</span>, <span class="k">"create"</span>: {<span class="k">"description"</span>: <span class="s">"酒蔵の知識"</span>}}
 {<span class="k">"passage"</span>: <span class="s">"青嶺酒造は1907年創業。杜氏は高瀬。"</span>, <span class="k">"date"</span>: <span class="nu">1700000000</span>, <span class="k">"tags"</span>: [<span class="s">"会社概要"</span>]}
 {<span class="k">"paragraph"</span>: <span class="nu">0</span>, <span class="k">"section"</span>: <span class="s">"沿革"</span>}
+{<span class="k">"paragraph"</span>: <span class="nu">0</span>, <span class="k">"locator"</span>: {<span class="k">"kind"</span>: <span class="s">"page"</span>, <span class="k">"value"</span>: <span class="s">"12"</span>}}
 {<span class="k">"paragraph"</span>: <span class="nu">0</span>, <span class="k">"question"</span>: <span class="s">"青嶺酒造の酒造りの責任者は誰?"</span>}
 {<span class="k">"subject"</span>: <span class="s">"青嶺酒造"</span>, <span class="k">"label"</span>: <span class="s">"創業年"</span>, <span class="k">"object"</span>: <span class="s">"1907年"</span>, <span class="k">"weight"</span>: <span class="nu">1.0</span>}
 {<span class="k">"subject"</span>: <span class="s">"青嶺酒造"</span>, <span class="k">"label"</span>: <span class="s">"杜氏"</span>, <span class="k">"object"</span>: <span class="s">"高瀬"</span>, <span class="k">"weight"</span>: <span class="nu">2.0</span>}
@@ -215,6 +216,25 @@ taguru import --url http://127.0.0.1:8248 batch/   <span class="c"># send to a r
       what is stored — a separate follow-up.
     </p>
 
+    <h3>Locator lines</h3>
+    <p>
+      <code>paragraph</code> / <code>locator: {kind, value}</code>: a typed citation locator (ADR
+      0007 §7) — a page, slide, sheet, table, or other position, independent of
+      <code>section</code> and stored alongside it (0-based, same split convention as
+      questions/sections; refused without a passage line). <code>kind</code> is an open string
+      (<code>"page"</code>, <code>"slide"</code>, <code>"sheet"</code>, <code>"table"</code>, and
+      whatever a future connector needs); <code>value</code> is free text since its natural
+      representation varies by kind (<code>"12"</code> for a page, <code>"A1:C4"</code> for a
+      spreadsheet range). Unlike a section, a locator does <b>not</b> extend to the next paragraph
+      — it names only the exact paragraph it was recorded for. Locators naming paragraphs absent
+      from the split are dropped at store time and counted (<code>locators_dropped</code>; same
+      usual cause as questions/sections). The same resolution reaches
+      <code>attributions[].locator</code> on <code>recall</code>, <code>query</code>,
+      <code>explore</code>, <code>activate</code>, <code>unreachable_from</code>, and
+      <code>POST /contexts/{name}/citations</code>'s <code>locator</code>, exactly like
+      <code>section</code>.
+    </p>
+
     <h3>Group records</h3>
     <p>
       <code>{"taguru_group": 1, "name": "…", "description": "…", "contexts": […], "groups": […]}</code>
@@ -254,6 +274,8 @@ taguru import --url http://127.0.0.1:8248 batch/   <span class="c"># send to a r
           <tr><td>one question</td><td>512 bytes</td></tr>
           <tr><td>questions per paragraph</td><td>8</td></tr>
           <tr><td>one section</td><td>512 bytes</td></tr>
+          <tr><td>locator <code>kind</code></td><td>64 bytes</td></tr>
+          <tr><td>locator <code>value</code></td><td>512 bytes</td></tr>
           <tr><td>any single line</td><td>16 MiB</td></tr>
         </tbody>
       </table>

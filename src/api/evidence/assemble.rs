@@ -513,13 +513,18 @@ fn resolve_citations(
             // citation loop — the graph fact still stands.
             Some(Ok(crate::registry::CitationLookup::UnknownSource))
             | Some(Ok(crate::registry::CitationLookup::IndexOutOfRange)) => {}
-            Some(Ok(crate::registry::CitationLookup::Found(text, section))) => {
+            Some(Ok(crate::registry::CitationLookup::Found {
+                text,
+                section,
+                locator,
+            })) => {
                 citation_lookup.insert(
                     (source.clone(), paragraph),
                     Citation {
                         text,
                         source,
                         section,
+                        locator,
                     },
                 );
             }

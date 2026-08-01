@@ -7,6 +7,23 @@ Entries that change an on-disk format or a response shape say so.
 
 ## [Unreleased]
 
+### Added
+- Typed citation locators (#346, implementing ADR 0007 §7): a new,
+  independent, paragraph-indexed `locator: {kind, value}` — a page,
+  slide, sheet, table, or other position — alongside the existing
+  free-text `section` heading label. Unlike `section`, a locator does
+  not extend to the next paragraph. Landed as a new batch line
+  (`{"paragraph": N, "locator": {"kind": "page", "value": "12"}}`),
+  a new `locators` map on `POST /contexts/{name}/sources`, and a new
+  optional field on `Citation` and every `attributions[]` entry
+  (`recall`/`query`/`explore`/`activate`/`unreachable_from`/
+  `/retrieve`'s citations) — never omitted, `null` when absent, per
+  ADR 0005 §4's compatible-optional-field-addition classification.
+  `taguru export`/`taguru import` round-trip it losslessly. Python/
+  TypeScript SDKs gain the `Locator` type and `store_passages`/
+  `storePassages`'s new `locators` option. `http_contract`/
+  `mcp_contract` stay `1`.
+
 ## [0.6.0] - 2026-08-01
 
 ### Added

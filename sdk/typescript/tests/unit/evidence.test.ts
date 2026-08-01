@@ -17,7 +17,12 @@ const MIXED_LANES_RESULT: EvidencePackage = {
   },
   citations: [
     {
-      citation: { section: null, source: "docs/kura.md", text: "青嶺酒造は雲居県霧沢町の蔵元である。" },
+      citation: {
+        locator: null,
+        section: null,
+        source: "docs/kura.md",
+        text: "青嶺酒造は雲居県霧沢町の蔵元である。",
+      },
       paragraph: 0,
       source: "docs/kura.md",
     },
@@ -26,7 +31,14 @@ const MIXED_LANES_RESULT: EvidencePackage = {
     {
       association: {
         attributions: [
-          { count: 1, paragraph: 0, section: null, source: "docs/kura.md", weight: 1.0 },
+          {
+            count: 1,
+            locator: null,
+            paragraph: 0,
+            section: null,
+            source: "docs/kura.md",
+            weight: 1.0,
+          },
         ],
         count: 1,
         label: "杜氏",

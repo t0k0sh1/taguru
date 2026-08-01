@@ -12,7 +12,14 @@ describe("matchCursor", () => {
       weight: 1.0,
       count: 2,
       attributions: [
-        { source: "docs/aomine.md", weight: 1.0, count: 2, paragraph: null, section: null },
+        {
+          source: "docs/aomine.md",
+          weight: 1.0,
+          count: 2,
+          paragraph: null,
+          section: null,
+          locator: null,
+        },
       ],
     };
     // `Association` structurally satisfies `MatchCursor`, so passing it

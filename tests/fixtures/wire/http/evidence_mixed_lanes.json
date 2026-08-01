@@ -10,18 +10,22 @@
   "response": {
     "result": {
       "budget": {
-        "bytes_used": 1066,
+        "bytes_used": 1142,
         "items_used": 2,
         "limits": {
           "max_bytes": 65536,
           "max_items": 40,
           "max_tokens": 4000
         },
-        "tokens_used": 284
+        "tokens_used": 303
       },
       "citations": [
         {
           "citation": {
+            "locator": {
+              "kind": "page",
+              "value": "1"
+            },
             "section": null,
             "source": "docs/kura.md",
             "text": "青嶺酒造は雲居県霧沢町の蔵元である。杜氏は高瀬である。"
@@ -36,6 +40,10 @@
             "attributions": [
               {
                 "count": 1,
+                "locator": {
+                  "kind": "page",
+                  "value": "1"
+                },
                 "paragraph": 0,
                 "section": null,
                 "source": "docs/kura.md",
@@ -48,7 +56,7 @@
             "subject": "青嶺酒造",
             "weight": 1.0
           },
-          "bytes": 512,
+          "bytes": 550,
           "candidate_id": "association\u0000青嶺酒造\u0000杜氏\u0000高瀬",
           "citation_refs": [
             {
@@ -67,7 +75,7 @@
               "docs/kura.md"
             ]
           },
-          "estimated_tokens": 132,
+          "estimated_tokens": 142,
           "fused_rank": 1,
           "kind": "association",
           "lane_ranks": [
