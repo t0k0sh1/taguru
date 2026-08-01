@@ -45,6 +45,12 @@ taguru = { path = "../python", editable = true }
 pdf = [
     "pypdf>=5",
 ]
+# Same ADR 0007 §3/§4 decision, for DocxConnector (issue #350): only a
+# caller who actually uses DocxConnector needs python-docx. >=1.2 for its
+# bundled `py.typed` marker (this package's own mypy is `strict`).
+docx = [
+    "python-docx>=1.2",
+]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
@@ -59,6 +65,9 @@ dev = [
     # PdfConnector's own tests (tests/unit/test_pdf_connector.py) exercise
     # the real pypdf-backed path, not a mock.
     "pypdf>=5",
+    # DocxConnector's own tests (tests/unit/test_docx_connector.py) exercise
+    # the real python-docx-backed path, not a mock.
+    "python-docx>=1.2",
 ]
 
 [tool.hatch.build.targets.wheel]

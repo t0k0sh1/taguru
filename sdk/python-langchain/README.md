@@ -186,9 +186,39 @@ if document.diagnostics:
 outcome = ingest_connector_document(ingester, document)
 ```
 
-DOCX/S3 connectors implementing the same `Connector` protocol are tracked
-as follow-up issues (#350-#351); the contract itself (ADR 0007 §5) is
-stable now.
+`DocxConnector` (issue #350) reads `.docx` files — `pip install
+"langchain-taguru[docx]"` for its `python-docx` dependency, kept out of the
+default install per ADR 0007 §3/§4 for the same reason `PdfConnector`'s
+`pypdf` is. The document body is walked in real document order (paragraphs
+and tables interleaved, never `document.paragraphs`/`.tables` separately);
+a heading's breadcrumb becomes a `section`, the same `"Guide >
+Installation"` convention `HtmlConnector` uses. A table — top-level or
+nested inside another table's cell — becomes exactly one paragraph (rows
+joined with `\n`, cells with `" | "`) carrying a `{"kind": "table", "value":
+...}` locator (`"3"`, or `"3.1"` for a table nested inside table 3's own
+cell); an ordinary body paragraph never carries a locator, which is what
+makes "this paragraph has a locator" mean "this paragraph is a table" when
+reading this connector's `locators`. No OCR engine ships: a document left
+with no extractable text (an image-only `.docx`) is `ocr_required` with
+empty `text`. A password-protected `.docx` is recognized by its container's
+own signature and reported `encrypted` before ever being opened as a zip; a
+merely corrupt/truncated package is `corrupt`. Footnote/endnote/comment
+text and text-box content are each unreachable through this connector's own
+paragraph walk — named in a single `partial_extraction` diagnostic rather
+than silently short-changed. Only `.docx` is read; `.doc` (legacy binary)
+and `.docm` (macro-enabled) are both `unsupported_format`:
+
+```python
+from taguru_langchain.ingest_connectors import DocxConnector
+
+document = DocxConnector().read("docs/manual.docx")
+if document.diagnostics:
+    ...  # encrypted, corrupt, ocr_required, partial_extraction, ... — never a silently empty passage
+outcome = ingest_connector_document(ingester, document)
+```
+
+An S3 connector implementing the same `Connector` protocol is tracked as a
+follow-up issue (#351); the contract itself (ADR 0007 §5) is stable now.
 
 Three more constructor arguments bound how a chunk's structured-output
 retry behaves, all optional and all unchanged by default: `fact_budget`

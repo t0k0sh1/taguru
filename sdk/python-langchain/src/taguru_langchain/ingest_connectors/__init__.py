@@ -22,9 +22,10 @@ Six pieces:
   connector implements.
 - :class:`TextFileConnector` (``text.py``), :class:`PdfConnector`
   (``pdf.py``, issue #348, optional ``pypdf`` dependency via the ``pdf``
-  extra), and :class:`HtmlConnector` (``html.py``, issue #349, local files
-  and ``http(s)://`` URLs, stdlib-only parsing) — the reference
-  implementations.
+  extra), :class:`HtmlConnector` (``html.py``, issue #349, local files and
+  ``http(s)://`` URLs, stdlib-only parsing), and :class:`DocxConnector`
+  (``docx.py``, issue #350, optional ``python-docx`` dependency via the
+  ``docx`` extra) — the reference implementations.
 - :func:`ingest_connector_document`/:func:`ingest_connector_documents`
   (``bridge.py``) — the one-way bridge from a :class:`ConnectorDocument`
   into ``TaguruIngester.ingest_text``; :func:`aingest_connector_document`/
@@ -53,6 +54,7 @@ from .document import (
     SectionEntry,
     options_digest,
 )
+from .docx import DocxConnector
 from .html import HtmlConnector
 from .pdf import PdfConnector
 from .protocol import Connector
@@ -74,6 +76,7 @@ __all__ = [
     "ConnectorMetadata",
     "Diagnostic",
     "DiagnosticCode",
+    "DocxConnector",
     "FingerprintInputs",
     "HtmlConnector",
     "LocatorEntry",

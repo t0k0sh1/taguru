@@ -8,6 +8,40 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- DOCX connector (#350, implementing ADR 0007 §7/§8): `DocxConnector` in
+  `taguru_langchain.ingest_connectors.docx`, reading `.docx` files — `pip
+  install "langchain-taguru[docx]"` for its `python-docx` dependency, kept
+  optional per ADR 0007 §3/§4's packaging decision, the same one
+  `PdfConnector`'s `pypdf` already follows. The document body is walked in
+  real document order (paragraphs and tables interleaved via python-docx's
+  own `iter_inner_content()`, never `document.paragraphs`/`.tables`
+  separately); a heading is recognized by its `Heading N`-named style or,
+  falling back, its own `w:outlineLvl`, and its breadcrumb becomes a
+  `section` (`"Guide > Installation"`, the same convention `HtmlConnector`
+  already uses). A table — top-level or nested inside another table's own
+  cell — becomes exactly one paragraph (rows joined with `\n`, cells with
+  `" | "`) carrying a `{"kind": "table", "value": ...}` locator (`"3"`, or
+  `"3.1"` for a table nested inside table 3's own cell); an ordinary body
+  paragraph never carries a locator, so "this paragraph has a locator"
+  means "this paragraph is a table" for any citation reading this
+  connector's `locators` — the opposite trade-off from `HtmlConnector`'s own
+  `fragment` locator, since a DOCX has no page/anchor of its own to spend
+  ADR 0007 §7.2's one-locator-per-paragraph budget on instead. No OCR
+  engine ships (ADR 0007 §10): a document left with no extractable text (an
+  image-only `.docx`) is `ocr_required` with empty `text`. A
+  password-protected `.docx` is recognized by its own MS-OFFCRYPTO
+  OLE2/CFB container signature and reported `encrypted` before ever being
+  opened as a zip — never misreported as `corrupt` — while a
+  restricted-editing password (`w:documentProtection`, a weaker,
+  non-encrypting mechanism) is correctly left alone. Footnote/endnote/
+  comment text and text-box content are each unreachable through this
+  connector's own paragraph walk (`python-docx` has no read API for the
+  first three, and text-box content lives in a nested `w:txbxContent` a
+  paragraph's own run text never descends into) — named in a single
+  `partial_extraction` diagnostic rather than silently short-changed. Only
+  `.docx` is read; `.doc` (legacy binary) and `.docm` (macro-enabled) are
+  both `unsupported_format`. No change to `src/`, `http_contract`, or
+  `mcp_contract`.
 - HTML connector (#349, implementing ADR 0007 §7/§8): `HtmlConnector` in
   `taguru_langchain.ingest_connectors.html`, reading both a local
   `.html`/`.htm`/`.xhtml` file and an `http(s)://` URL fetch (via `httpx`,

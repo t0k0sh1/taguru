@@ -297,3 +297,62 @@ def test_html_connector_document_round_trips_fragment_locators_to_citations(
     finally:
         if client.contexts.exists("weaving-studio"):
             client.contexts.delete("weaving-studio")
+
+
+def test_docx_connector_document_round_trips_table_locators_to_citations(
+    client: Taguru, tmp_path: Path
+) -> None:
+    """The DOCX connector's own acceptance bar (issue #350), against the
+    real server: a table's own document position becomes a `table`
+    locator — unlike #349's HTML `fragment` locator (spent on the
+    surrounding heading instead), this is the one DOCX has no page/anchor
+    of its own to compete with (ADR 0007 §7.2) — and both it and the
+    heading hierarchy's breadcrumb `section` survive storage and the
+    `/citations` response round trip unchanged, the same bar #348's
+    PDF-page-locator test above clears for page numbers instead."""
+    pytest.importorskip("docx")
+    from taguru_langchain.ingest_connectors import DocxConnector
+
+    from .._docx import docx_bytes, heading, para, table
+
+    body = (
+        heading("Pottery Studio", 1)
+        + para("The studio preserves traditional raku firing.")
+        + heading("Products", 2)
+        + table([["Item", "Price"], ["Tea bowl", "3000"]])
+    )
+    path = tmp_path / "pottery.docx"
+    path.write_bytes(docx_bytes(body))
+
+    document = DocxConnector().read(str(path))
+    assert document.diagnostics == ()
+    assert [(s.paragraph, s.section) for s in document.sections] == [
+        (0, "Pottery Studio"),
+        (2, "Pottery Studio > Products"),
+    ]
+    assert document.locators[0].locator == Locator(kind="table", value="1")
+
+    llm = FakeListChatModel(
+        responses=[json.dumps({"associations": [], "aliases": [], "questions": []})]
+    )
+    ingester = TaguruIngester(
+        context="pottery-studio",
+        llm=llm,
+        client=client,
+        create_context=True,
+        context_description="DOCX connector round trip (issue #350)",
+    )
+    try:
+        outcome = ingest_connector_document(ingester, document)
+        assert outcome.ok
+        assert outcome.sections_stored == len(document.sections)
+        assert outcome.locators_stored == len(document.locators)
+
+        ctx = client.context("pottery-studio")
+        table_paragraph = document.locators[0].paragraph
+        table_citation = ctx.cite_passage(document.source, table_paragraph)
+        assert table_citation.section == "Pottery Studio > Products"
+        assert table_citation.locator == Locator(kind="table", value="1")
+    finally:
+        if client.contexts.exists("pottery-studio"):
+            client.contexts.delete("pottery-studio")
