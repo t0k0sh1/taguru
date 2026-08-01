@@ -86,7 +86,7 @@ its own retract-then-apply unit."
 
 Position information in a batch is exactly one kind today:
 
-```
+```jsonc
 {"paragraph": N, "section": "見出し名"}      // src/ingest.rs:1260-1273
 ```
 
@@ -145,7 +145,7 @@ deliberately"). Listing is `store.list(Some(&prefix))` drained with
 `futures_util::StreamExt`. Retry is `ShipError { Io(io::Error), Fenced }`
 where `Io` is transient-by-assumption because cursors never advance past
 unshipped data, so the next cycle retries for free
-(`ship.rs:400` and the `spawn` driver at `:1358`). Tests use a real
+(`src/ship.rs:400` and the `spawn` driver at `:1358`). Tests use a real
 `file://` bucket rather than minio/localstack
 (`tests/http_api/replication.rs:1`: "the store client is the same code for
 all four schemes; what differs per cloud is auth and the wire, which a test
@@ -253,7 +253,7 @@ reading files directly:
     "content_type": "application/pdf"
   },
   "fingerprint_inputs": {
-    "content_sha256": "…sha256 of `text` above, hex…",
+    "raw_content_sha256": "…sha256 of the fetched/opened raw bytes, before parsing, hex…",
     "parser": "taguru-pdf-connector",
     "parser_version": "1.0.0",
     "parse_options_digest": "…sha256 of the connector's own effective config, hex…"
@@ -273,12 +273,24 @@ Rules:
   already assumes for `--questions`/section lines.
 - `locators` and `sections` are independent, both optional, both
   paragraph-indexed — never merged into one field (§7 explains why).
+- A `locators`/`sections` entry naming a paragraph index outside the range
+  `paragraph.rs::split(text)` actually produces is dropped and counted —
+  `locators_dropped`/`sections_dropped` in the observability summary (§11) —
+  never a hard failure, matching the existing `questions_dropped`/
+  `sections_dropped` posture `src/ingest.rs` already takes for the same
+  out-of-range case (§7.2 defines the equivalent duplicate-paragraph rule).
 - `metadata` carries only what §2.3's `Citation`/`SourceEntry` can already
   represent or what §7 adds; a connector must not invent metadata the
   contract doesn't declare.
-- `fingerprint_inputs` is consumed by §6's connector-native checkpoint, not
-  by `taguru extract`'s own manifest (which continues to fingerprint `text`
-  only — see §6).
+- `fingerprint_inputs.raw_content_sha256` hashes the **raw bytes fetched
+  from the origin, before parsing** — deliberately not `text`, so a
+  connector can detect "the object is byte-identical to last time" without
+  re-parsing at all. It is consumed by §6's connector-native checkpoint,
+  never by `taguru extract`'s own manifest, which independently computes and
+  fingerprints `sha256_hex(text)` itself (§6.2) — the two hashes cover two
+  different, deliberately non-interchangeable questions ("did the source
+  object change" vs. "did the parsed text change") and neither substitutes
+  for the other.
 - `diagnostics` is `[]` on a clean parse; §8 defines its non-empty shape,
   and a non-empty `diagnostics` with an *empty* `text` is the required
   encoding of "nothing usable was extracted" (scanned PDF, encrypted file,
@@ -298,7 +310,7 @@ Extending the existing convention (§2.2) rather than inventing a new one:
 |---|---|
 | local file | `path.to_string_lossy()` — unchanged from `taguru extract` today |
 | local file, sub-document unit | `path#locator`, e.g. `manual.pdf#p12` or `manual.pdf#installation` — already documented in `docs/long-running.html` |
-| URL | the URL itself, e.g. `https://example.com/report.html` |
+| URL | the **canonicalized** URL (below), e.g. `https://example.com/report.html` |
 | S3 object | `s3://bucket/key`, sub-unit `s3://bucket/key#p12` |
 
 All capped at `MAX_NAME_BYTES` (1024 bytes, `src/api.rs:1137`) — a
@@ -306,17 +318,74 @@ connector that would exceed this refuses the object with a `source_id_too_
 long` diagnostic (§8) rather than silently truncating, since truncation
 would risk two distinct objects colliding on one source id.
 
-### 6.2 Why extract's fingerprint needs no connector-specific field
+**URL canonicalization is mandatory, not cosmetic.** A raw URL can carry
+`userinfo` (`https://user:pass@host/...`) or a signed/temporary query
+parameter (a presigned-URL signature, `?token=…`, `?X-Amz-Signature=…`) —
+both are credential-shaped, and §9's "credential never reaches Taguru data"
+rule (already stated there for S3) applies identically here, to source id,
+connector checkpoint, batch file, and log line alike. A URL connector
+therefore:
+
+- Always strips `userinfo` before deriving the source id — it is never
+  meaningful to identity and always a credential.
+- Strips a fixed, documented deny-list of well-known signed/temporary
+  auth query parameters (`signature`, `sig`, `token`, `access_token`,
+  `x-amz-signature`, `x-amz-credential`, `x-amz-security-token`, `apikey`,
+  `api_key`, matched case-insensitively) before deriving the source id —
+  not only for the credential rule, but because a rotating signature would
+  otherwise make the "same resource" produce a different source id on every
+  fetch, breaking §6.3's idempotency the same way an unstable id breaks it
+  anywhere else. The raw, uncanonicalized URL is used only transiently for
+  the fetch itself and is never persisted.
+- If two distinct fetches canonicalize to the same source id (a rare
+  collision, e.g. two otherwise-identical URLs differing only in a stripped
+  parameter), the connector refuses the later one with a diagnostic (§8)
+  rather than silently overwriting — the same collision-refusal `taguru
+  extract`'s `Run.claimed` map already applies for batch file names
+  (`src/extract.rs:1273`).
+- Any URL that must appear in a log line or the observability summary (§11)
+  uses this same canonicalized, credential-stripped form — there is no
+  separate "redacted display value," because canonicalization already
+  produces one value safe for every purpose (identity, storage, and
+  display).
+
+### 6.2 Extract's fingerprint covers `text` changes; `locators`/`sections` need one more field
 
 `taguru extract`'s manifest fingerprint is `sha256_hex` of the document
 **text it reads**. Once a connector's normalized `text` is what extract
 reads, any change in `text` — whether from new document content or from a
 parser upgrade that extracts differently — already changes the hash and
-already triggers re-extraction. A parser-version field inside
-`ManifestEntry`/`CheckpointFingerprint` is therefore unnecessary: the
-existing content hash *is* the correct signal, by construction, as long as
-"connector output changed" and "text changed" are the same event — which
-this contract makes true by putting parsing entirely upstream of extract.
+already triggers re-extraction. A bare parser-version field inside
+`ManifestEntry`/`CheckpointFingerprint` would therefore be redundant for
+`text` changes specifically: the existing content hash already is the
+correct signal there.
+
+That reasoning does **not** extend to `locators`/`sections` (§7): a parser
+upgrade can legitimately produce the *same* `text` with *different*
+positional metadata (a corrected page-boundary heuristic, say), and a batch
+file's `locator`/`section` lines are populated from `connector_document`
+regardless of whether extraction itself re-ran. If the manifest fingerprint
+only ever looks at `text`, that case is invisible to it — the manifest says
+"unchanged," extraction is skipped, and the previously-written batch file
+(and therefore the stored source) keeps its stale locators forever, which is
+exactly the silently-wrong outcome this ADR's whole citation-fidelity
+concern (§7) exists to prevent.
+
+The fix stays inside this ADR's own scope (`ManifestEntry`/
+`CheckpointFingerprint` are Taguru-internal structs, not the wire contract
+ADR 0005 governs, so no compatibility classification applies): both structs
+gain one more field, `locator_digest` — `sha256_hex` of a canonical
+serialization of `connector_document.locators` + `.sections` — compared for
+equality exactly like every other fingerprint field already is
+(`Manifest::matches`, `src/extract.rs:4982`). A locator-only change now
+correctly invalidates the manifest entry and re-triggers the write (not
+necessarily a full model re-call: the per-chunk checkpoint, keyed on chunk
+*text* content, still legitimately reuses the model's prior answers — only
+the manifest-level "is the written batch file already correct" decision
+needs to see `locators` too). `locator_digest` defaults to a fixed empty-set
+hash for any pre-#347 manifest entry, so an old entry degrades to "differs,
+re-extract once" rather than a false match, the same posture every other
+new field in this ADR takes.
 
 ### 6.3 The connector's own checkpoint
 
@@ -327,7 +396,7 @@ PDF/DOCX parse) is its own expensive, resumable stage — the same reasoning
 level upstream. A connector-native checkpoint therefore:
 
 - Is keyed by source id (§6.1), and stores `fingerprint_inputs` (§5) —
-  `content_sha256` of the **fetched raw bytes** (not the parsed `text` —
+  `raw_content_sha256` of the **fetched raw bytes** (not the parsed `text` —
   parsing itself is what's being skipped), `parser`, `parser_version`,
   `parse_options_digest`, plus (for S3 objects) §9's fingerprint fields.
 - Reuses `CheckpointStore`'s 3-method contract (§2.4) — `load`/`save`/
@@ -344,7 +413,7 @@ level upstream. A connector-native checkpoint therefore:
   your runner provides" split — the connector checkpoint is squarely a
   runner responsibility, the same category extract's own checkpoints
   already sit in from `taguru import`'s point of view.
-- On content change (same source id, different `content_sha256`), the
+- On content change (same source id, different `raw_content_sha256`), the
   connector re-parses and produces a new `text`; the downstream
   retract-then-apply contract (§2.2) is what makes that replacement safe —
   the connector does nothing source-identity-specific beyond emitting the
@@ -364,7 +433,7 @@ not string parsing).
 
 Instead, a new, independent, paragraph-indexed, optional line:
 
-```
+```json
 {"paragraph": N, "locator": {"kind": "page", "value": "12"}}
 ```
 
@@ -388,6 +457,15 @@ as valid as `"12"` for a page).
   itself produced, and each connector emits one locator line per paragraph
   it needs to place, not one per range boundary (avoiding the "does it
   extend" ambiguity `section` deliberately embraces).
+- At most one `locator` is stored per paragraph, mirroring `Citation.locator`
+  being singular (`Option<Locator>`, never a list). When a batch names two
+  `locator` lines for the same paragraph — a connector bug, or two connector
+  runs disagreeing — resolution follows the same mechanism
+  `PassageRecord::new`'s doc comment already cites for `sections`
+  (`src/passages.rs:203-207`, "see `filter_sections` for how a paragraph
+  claimed more than once is resolved"): the same last-write-wins rule
+  extended to `locators`, with every displaced duplicate dropped and counted
+  in `locators_dropped` (§5) rather than silently discarded.
 - `Citation` (`src/api/sources.rs:100`) gains `locator: Option<Locator>`,
   alongside its existing `section: Option<String>`, following the same
   "never omitted, `null` when absent" rule already documented for `section`.
@@ -426,11 +504,11 @@ boundaries), independent of and prior to extract's chunking.
 
 A closed, versioned code enum, following `ErrorCode`'s own declared posture
 ("a rename is a breaking change... like a response-shape change,"
-`src/api.rs:98-99`):
+`src/api.rs:154-159`):
 
 | Code | Meaning |
 |---|---|
-| `unreadable` | object could not be fetched/opened at all (I/O, permission, transport) |
+| `unreadable` | object could not be fetched/opened at all — transport/I/O (retryable per §9) or permission/credential/ACL denial (terminal per §9, never auto-retried) |
 | `unsupported_format` | extension/MIME/content sniffing found no matching connector |
 | `encrypted` | the document requires a password/key this connector does not have |
 | `corrupt` | the document's own structure fails to parse (truncated, malformed) |
@@ -470,10 +548,43 @@ repurposing an existing one is breaking, exactly like `ErrorCode`
   oversized or excess tag is dropped and counted, never truncated silently,
   matching the existing `questions_dropped`/`sections_dropped` posture
   (`src/ingest.rs`).
-- **Pagination/retry**: reuse `src/ship.rs`'s `store.list`/`ShipError`
-  pattern (§2.5) rather than a new retry policy — `Io` errors are
-  transient-by-assumption and retried on the next enumeration pass because
-  the connector checkpoint (§6.3) never advances past an unconfirmed object.
+- **Pagination/retry, and transient vs. permanent failure**: reuse
+  `src/ship.rs`'s `store.list`/`ShipError` pattern (§2.5), but `ShipError::
+  Io`'s "retry on the next pass" assumption does not transfer wholesale — it
+  holds for `src/ship.rs`'s own replication path only because every failure
+  it retries is transport-shaped (network blip, throttling, 5xx) under a
+  credential the caller controls end-to-end. A connector additionally faces
+  failures that are **not** transient: invalid/expired/revoked credentials,
+  and object-level permission denial (403/`AccessDenied`-shaped responses).
+  Retrying those on every future enumeration pass forever (§9's `Io`
+  default) would silently mask a real, fixable problem behind an endless
+  quiet retry loop. Connectors therefore classify object-storage failures
+  into exactly two kinds: **transient** (network/timeout/5xx/throttling —
+  keeps `src/ship.rs`'s existing retry-on-next-pass behavior) and
+  **permanent** (authentication/authorization failure — terminal
+  immediately, reported once as `unreadable` (§8) and not retried without an
+  explicit operator re-run). A connector-level retry counter or backoff
+  policy beyond this two-way split is left to #351's implementation, not
+  fixed here.
+- **Deletion detection needs a listable inventory, not just per-source
+  checkpoints**: §6.3's `CheckpointStore` is deliberately keyed by one
+  source id at a time (`load`/`save`/`delete`) — it has no "list every
+  source this connector has ever seen" operation, which is exactly what
+  detecting "an object present last run is absent from this run's listing"
+  requires, especially across a process restart. The S3 connector therefore
+  persists one additional, S3-connector-specific artifact alongside the
+  per-source checkpoints: a **prefix inventory** — the flat list of source
+  ids the connector's *last fully completed* enumeration of a given
+  bucket/prefix returned, written atomically (the same write-then-rename
+  discipline as `FilesystemCheckpointStore`, §2.4) only once a listing pass
+  finishes without error, never incrementally mid-pass. Each run diffs the
+  current listing against the prior inventory: an id present before and
+  absent now is a candidate deletion, handled per the policy below; the
+  inventory is then overwritten with the current listing. A missing or
+  corrupt inventory degrades to "no prior run to compare against" — every
+  object reads as newly discovered, never as a false deletion — the same
+  "unreadable state never masquerades as a confident answer" posture every
+  other checkpoint in this ADR already takes.
 - **Deletion policy**: default is `report-only` — a deleted object is named
   in the observability summary (§11) but never triggers a `retract`.
   `--retract` (explicit retraction of the corresponding source) and
@@ -500,19 +611,53 @@ repurposing an existing one is breaking, exactly like `ErrorCode`
 
 ## 11. Observability (for #353)
 
-- **Counts**: `discovered`, `unchanged`, `parsed`, `extracted`, `imported`,
-  `skipped`, `failed` — the same seven-state vocabulary #217 names verbatim,
-  computed per run across every connector uniformly.
-- **Per-source record**: `source`, `phase` (one of the seven states above),
-  `elapsed_ms`, `bytes`, `parser` (name + version, from `fingerprint_inputs`,
-  §5), and `diagnostic` (§8, when present) — one JSONL line per source,
-  mirroring `taguru extract`'s own `DocumentRecord` shape
-  (`src/extract.rs:2621`) closely enough that a consumer of one format needs
-  minimal adaptation for the other.
-- **`--dry-run`**: reports `discovered`/`unchanged`/planned `parsed` (i.e.
-  which sources *would* be fetched/parsed) without performing any network
-  fetch, parse, or write — the same "touches nothing" contract `taguru
-  import --dry-run` and `taguru extract --dry-run` already guarantee.
+- **Per-source record is an event log, not a snapshot**: a source moves
+  through the seven-state vocabulary #217 names verbatim (`discovered`,
+  `unchanged`, `parsed`, `extracted`, `imported`, `skipped`, `failed`) over
+  the course of one run — `discovered` then `parsed` then `extracted` then
+  `imported`, for example — so one JSONL line per *source* cannot hold one
+  `phase` field without losing every earlier transition. The per-source
+  JSONL is therefore append-only: **one line per phase transition**,
+  `{source, phase, elapsed_ms, bytes, parser, diagnostic}` (`diagnostic`,
+  §8, present only on `failed`/`skipped`), mirroring `taguru extract`'s own
+  `DocumentRecord` shape (`src/extract.rs:2621`) at the level of one record
+  per meaningful event, not one record per source.
+- **Counts** are derived, not independently tracked: the run summary's
+  `discovered`/`unchanged`/`parsed`/`extracted`/`imported`/`skipped`/
+  `failed` totals are a tally of each source's *last* phase event in the
+  run — a source that reached `imported` counts once, under `imported`,
+  never separately under `discovered`/`parsed`/`extracted` too. This keeps
+  "how many sources landed" and "what happened to source X, in order" as
+  two different, non-conflicting reads of the same event log rather than
+  two independently-maintained counters that could drift apart.
+- **`--dry-run`**: reports `discovered`/planned `parsed` (i.e. which sources
+  *would* be fetched/parsed) without performing any network fetch, parse,
+  or write — the same "touches nothing" contract `taguru import --dry-run`
+  and `taguru extract --dry-run` already guarantee. Whether a source can be
+  honestly reported as `unchanged` under `--dry-run` depends on what
+  comparison is available without a fetch (§6.3's checkpoint again, decided
+  per source kind):
+  - **Local file**: cheap metadata (size, mtime) is read without touching
+    file contents; `unchanged` is reported only when that metadata matches
+    what the connector checkpoint (§6.3) recorded from the last real run.
+    Metadata alone cannot prove content equality (a touch-without-edit
+    changes mtime; some tools preserve mtime across an edit) — the same
+    inherent limitation ETag-less HTTP caching already has — so a
+    metadata mismatch is reported as `parsed` (would re-fetch and compare
+    `raw_content_sha256`, §6.3), never a false `unchanged`, and a metadata
+    match is a best-effort `unchanged` that a real (non-dry-run) pass may
+    still revise if a hash comparison ever disagrees with it.
+  - **URL**: `--dry-run` performs no network access at all, including no
+    `HEAD` request, so there is no cheap signal to compare against and
+    `unchanged` can never be honestly reported. A URL source under
+    `--dry-run` is always reported as `parsed` (an unconditional "would
+    attempt to fetch") — never `unchanged`, and never a distinct `unknown`
+    state, since "would attempt to fetch" is already the correct, honest
+    answer without adding a fourth dry-run outcome to reason about.
+  - **S3 object**: the bucket listing itself already carries the
+    fingerprint fields §9 defines (version id / size / last-modified /
+    ETag) at no extra request cost, so `unchanged` under `--dry-run` is as
+    reliable as it is on a real run — no degradation needed here.
 - **Machine-readable summary**: one JSON object per run — total counts, run
   duration, and a reference to the per-source JSONL — emitted always, not
   behind an opt-in flag, since #353's whole purpose is making this the
