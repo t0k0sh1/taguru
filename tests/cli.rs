@@ -2507,3 +2507,85 @@ fn the_stdio_bridge_adopts_a_parent_from_meta() {
         "span id must be the bridge's own span, not the caller's: {traceparent}"
     );
 }
+
+#[test]
+fn the_stdio_bridge_starts_a_fresh_trace_on_a_malformed_meta_traceparent() {
+    let capture = HeaderCapture::start();
+
+    let mut bridge = Command::new(env!("CARGO_BIN_EXE_taguru-mcp"))
+        .env("TAGURU_URL", format!("http://{}", capture.addr))
+        .env_remove("TAGURU_API_TOKEN")
+        .env("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("bridge must spawn");
+
+    let reply = call_bridge_tool(
+        &mut bridge,
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {
+                "name": "list_contexts", "arguments": {},
+                "_meta": {"traceparent": "not-a-traceparent"}
+            }
+        }),
+    );
+    let headers = capture.wait_for("/contexts");
+
+    let _ = bridge.kill();
+    let _ = bridge.wait();
+
+    assert!(reply.contains(r#""id":1"#), "{reply}");
+    // Garbage in `_meta` is "no parent", not an error — the bridge
+    // still answers and still injects a `traceparent` of its own, just
+    // rooted in a fresh trace rather than the malformed one.
+    let traceparent = headers
+        .get("traceparent")
+        .unwrap_or_else(|| panic!("no traceparent header among {headers:?}"));
+    let parts: Vec<&str> = traceparent.split('-').collect();
+    assert_eq!(parts.len(), 4, "{traceparent}");
+    assert_eq!(parts[0], "00", "{traceparent}");
+}
+
+#[test]
+fn the_stdio_bridge_forwards_tracestate_from_meta() {
+    let capture = HeaderCapture::start();
+
+    let mut bridge = Command::new(env!("CARGO_BIN_EXE_taguru-mcp"))
+        .env("TAGURU_URL", format!("http://{}", capture.addr))
+        .env_remove("TAGURU_API_TOKEN")
+        .env("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("bridge must spawn");
+
+    let inbound_trace_id = "4bf92f3577b34da6a3ce929d0e0e4736";
+    let reply = call_bridge_tool(
+        &mut bridge,
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {
+                "name": "list_contexts", "arguments": {},
+                "_meta": {
+                    "traceparent": format!("00-{inbound_trace_id}-00f067aa0ba902b7-01"),
+                    "tracestate": "vendor=abc123",
+                }
+            }
+        }),
+    );
+    let headers = capture.wait_for("/contexts");
+
+    let _ = bridge.kill();
+    let _ = bridge.wait();
+
+    assert!(reply.contains(r#""id":1"#), "{reply}");
+    assert_eq!(
+        headers.get("tracestate").map(String::as_str),
+        Some("vendor=abc123"),
+        "{headers:?}"
+    );
+}

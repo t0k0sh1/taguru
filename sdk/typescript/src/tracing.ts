@@ -149,6 +149,14 @@ export async function span<T>(name: string, body: (span: SpanHandle) => Promise<
   return tracer.startActiveSpan(name, async (otelSpan) => {
     try {
       return await body(wrap(otelSpan));
+    } catch (error) {
+      // Unlike Python's `start_as_current_span` (record_exception /
+      // set_status_on_exception both default `True`), `startActiveSpan`
+      // does nothing on its own when the body throws — without this, a
+      // phase that genuinely failed (e.g. `resolve()` raising on a 5xx)
+      // would export looking exactly like a successful one.
+      otelSpan.setStatus({ code: otel.SpanStatusCode.ERROR });
+      throw error;
     } finally {
       otelSpan.end();
     }

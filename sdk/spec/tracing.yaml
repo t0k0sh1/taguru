@@ -8,7 +8,7 @@
 # one vocabulary rather than two that happen to look similar.
 #
 # Checked by each SDK's own test suite (`sdk/python/tests/unit/
-# test_tracing.py`, `sdk/typescript/tests/tracing.test.ts`), which load
+# test_tracing.py`, `sdk/typescript/tests/unit/tracing.test.ts`), which load
 # this file and assert their emitted spans/attributes/events are exactly
 # this set — no more, no fewer. There is no automated cross-check against
 # the Rust server's own vocabulary (ADR 0008 §6): the SDK sees a narrower

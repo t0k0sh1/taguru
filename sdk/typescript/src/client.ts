@@ -1595,7 +1595,7 @@ export class Context {
       let activations: Activation[] = [];
       const associations: Association[] = [];
       const seenTriples = new Set<string>();
-      const tripleKey = (a: Association) => `${a.subject} ${a.label} ${a.object}`;
+      const tripleKey = (a: Association) => `${a.subject}\u0000${a.label}\u0000${a.object}`;
       if (anchors.length > 0) {
         if (describeFirst) {
           await tracing.span(tracing.SPAN_DESCRIBE, async () => {

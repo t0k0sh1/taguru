@@ -552,6 +552,17 @@ fn retrieve_inner(
     }))
 }
 
+/// A request that never left the process because the outbound request
+/// builder itself refused it (a URI too long, an unencodable header) —
+/// before either transport's round trip, so no server-side
+/// [`ToolError::structured`](super::protocol::ToolError::structured)
+/// body is possible either way. Both `call_inner` (`src/remote_mcp.rs`)
+/// and `Bridge::call` (`src/bin/taguru-mcp.rs`) format their `Err` with
+/// this same prefix, rather than each spelling out its own wording, so
+/// a tool failure reads identically no matter which transport composed
+/// it — the invariant `call_inner`'s own doc comment already claims.
+pub const REQUEST_BUILD_FAILED_PREFIX: &str = "could not build the outbound request";
+
 /// Classifies a composed retrieval's own error text into ADR 0008
 /// §9's closed `taguru.error.kind` vocabulary. String-matched against
 /// the two transports' own error text — acceptable here specifically
@@ -580,8 +591,7 @@ pub fn error_kind(message: &str) -> &'static str {
     {
         "invalid_argument"
     } else if message.contains("failed to reach the taguru server")
-        || message.contains("could not build the in-process request")
-        || message.contains("request assembly failed")
+        || message.contains(REQUEST_BUILD_FAILED_PREFIX)
     {
         "transport"
     } else {
@@ -634,17 +644,31 @@ mod tests {
         );
         assert_eq!(error_kind("failed to reach the taguru server"), "transport");
         assert_eq!(
-            error_kind("could not build the in-process request: uri too long"),
-            "transport"
-        );
-        assert_eq!(
-            error_kind("request assembly failed: bad header"),
+            error_kind(&format!("{REQUEST_BUILD_FAILED_PREFIX}: uri too long")),
             "transport"
         );
         assert_eq!(error_kind("the request was cancelled"), "cancelled");
         assert_eq!(
             error_kind("tool 'resolve' returned invalid JSON: EOF"),
             "provider_error"
+        );
+    }
+
+    /// `call_inner` (`src/remote_mcp.rs`) and `Bridge::call`
+    /// (`src/bin/taguru-mcp.rs`) both format a request-build failure by
+    /// hand, out of this crate's reach to check at compile time (one
+    /// lives in the `taguru` binary, the other in `taguru-mcp`) — this
+    /// pins the shared constant itself, the one piece both call sites
+    /// actually import rather than each spelling out their own prefix.
+    #[test]
+    fn request_build_failed_prefix_is_shared_between_transports() {
+        assert_eq!(
+            REQUEST_BUILD_FAILED_PREFIX,
+            "could not build the outbound request"
+        );
+        assert_eq!(
+            error_kind(&format!("{REQUEST_BUILD_FAILED_PREFIX}: bad header")),
+            "transport"
         );
     }
 }

@@ -349,8 +349,11 @@ impl SearchOp {
     /// server-composed siblings, ADR 0008 §6). `src/mcp/retrieve.rs`
     /// cannot call this directly — it is dual-included into the stdio
     /// bridge, which has no `metrics` module — so its own phase spans
-    /// copy the same string literals instead; this stays the one place
-    /// that would fail to compile if the two ever drifted apart.
+    /// (and `src/api/evidence/assemble.rs`'s) copy the same string
+    /// literals instead. That copy is NOT compile-time checked against
+    /// this match — a renamed variant here would silently drift from
+    /// those literals — so `tests::taguru_op_literals_match_search_op`
+    /// below pins the two together at test time.
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             SearchOp::Resolve => "resolve",
@@ -3063,5 +3066,19 @@ mod tests {
             "taguru_build_info{{version=\"{}\"}} 1",
             env!("CARGO_PKG_VERSION")
         )));
+    }
+
+    /// Pins `SearchOp::as_str()` against the string literals
+    /// `src/mcp/retrieve.rs` and `src/api/evidence/assemble.rs` copy
+    /// for `taguru.op` (dual-included into the stdio bridge, which
+    /// has no `metrics` module — see the doc comment on `as_str`
+    /// above). A renamed variant here with no matching literal update
+    /// there would otherwise drift silently past compilation.
+    #[test]
+    fn taguru_op_literals_match_search_op() {
+        assert_eq!(SearchOp::Resolve.as_str(), "resolve");
+        assert_eq!(SearchOp::Query.as_str(), "query");
+        assert_eq!(SearchOp::Activate.as_str(), "activate");
+        assert_eq!(SearchOp::SearchPassages.as_str(), "search_passages");
     }
 }

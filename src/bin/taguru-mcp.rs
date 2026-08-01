@@ -745,7 +745,7 @@ impl Bridge {
             None => request.body(()).map(|request| self.agent.run(request)),
         };
         let mut response = response
-            .map_err(|error| format!("request assembly failed: {error}"))
+            .map_err(|error| format!("{}: {error}", mcp::REQUEST_BUILD_FAILED_PREFIX))
             .map_err(mcp::ToolError::from)?
             .map_err(|_error| {
                 // Neither `self.base` nor the raw transport error goes

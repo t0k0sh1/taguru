@@ -46,6 +46,7 @@ request span through injected `traceparent`/`tracestate` headers:
 
 ```sh
 pip install "taguru[otel]"  # pulls in opentelemetry-api; core install stays dependency-free otherwise
+pip install opentelemetry-sdk  # an actual TracerProvider — pick whichever OTel SDK/exporter you use instead if not this one
 ```
 
 ```python

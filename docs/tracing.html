@@ -69,8 +69,9 @@
     <h1>Tracing — the composed retrieval loop, made legible</h1>
     <p class="lede">
       One HTTP request span was never the question. <code>retrieve</code> and
-      <code>assemble_evidence</code> each fan out into resolve → describe → activate (and
-      <code>query</code>) → citations → passage fallback, and passage search itself fans further
+      <code>assemble_evidence</code> each fan out into resolve → describe →
+      <code>query</code> (only when <code>labels</code> pins the facets) → activate → citations →
+      passage fallback, and passage search itself fans further
       into BM25 / ANN / fuse lanes — all inside one round trip. <a href="#trees">The span tree</a>
       below is what turns "<code>POST /mcp</code> is slow" into "the semantic lane degraded and
       fell back to BM25 alone," from one trace.
@@ -115,7 +116,7 @@
     </p>
     <ul>
       <li><code>taguru.shard_call</code> (client, <code>otel.name</code> overridden to
-        <code>"{method} -> shard {n}"</code>) — the router's fan-out to each shard, parenting that
+        <code>"{method} -&gt; shard {n}"</code>) — the router's fan-out to each shard, parenting that
         shard's own <code>{method} {route}</code> span. A router deployment gets end-to-end traces
         across every shard, not just its own hop.</li>
       <li><code>taguru.tool_call</code> (server) — the stdio bridge's (<code>taguru-mcp</code>)

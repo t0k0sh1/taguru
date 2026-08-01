@@ -201,6 +201,19 @@ fn a_cache_hit_answers_with_one_span_and_no_lane_children() {
         .iter()
         .find(|span| attribute(span, "taguru.cache.result") == Some(&json!({"stringValue": "hit"})))
         .unwrap_or_else(|| panic!("no cache-hit span among {searches:?}"));
+    let miss = searches
+        .iter()
+        .find(|span| {
+            attribute(span, "taguru.cache.result") == Some(&json!({"stringValue": "miss"}))
+        })
+        .unwrap_or_else(|| panic!("no cache-miss span among {searches:?}"));
+    // Proves the childless assertion below actually distinguishes hit
+    // from miss, rather than both trivially having no children.
+    assert!(
+        !tree.children(miss).is_empty(),
+        "a cache miss must run lane children: {:?}",
+        tree.children(miss)
+    );
     assert!(
         tree.children(hit).is_empty(),
         "a cache hit must answer with no lane children: {:?}",
@@ -237,19 +250,16 @@ fn a_provider_degrade_leaves_the_root_and_lane_span_unset_not_error() {
     let tree = SpanTree::new(collector.spans());
 
     // Regression test for ADR 0008 §2.5(a): the degrade must not
-    // color the request span (or any ancestor) ERROR.
+    // color the request span (or any ancestor) ERROR — asserted as
+    // "UNSET" (code 0) via the span's real OTLP `status`, not the
+    // `otel.status_code` tracing FIELD, which `tracing-opentelemetry`
+    // consumes entirely into that status rather than leaving as an
+    // attribute (so `attribute(span, "otel.status_code")` is always
+    // `None`, regardless of the actual status).
     let request_span = tree.one("POST /contexts/{name}/sources/search");
-    assert_ne!(
-        attribute(request_span, "otel.status_code"),
-        Some(&json!({"stringValue": "ERROR"})),
-        "{request_span:?}"
-    );
+    assert_eq!(status_code(request_span), 0, "{request_span:?}");
     let passage_search = tree.one("taguru.passage_search");
-    assert_ne!(
-        attribute(passage_search, "otel.status_code"),
-        Some(&json!({"stringValue": "ERROR"})),
-        "{passage_search:?}"
-    );
+    assert_eq!(status_code(passage_search), 0, "{passage_search:?}");
 
     let degrade_reasons: Vec<&str> = passage_search["events"]
         .as_array()
@@ -319,6 +329,10 @@ fn no_question_concept_source_or_passage_text_reaches_the_collector() {
 
     let _ = server.stop_gracefully();
     let bodies = collector.raw_bodies();
+    // Without this, a collector that received nothing at all (export
+    // failed, or never flushed) would pass the loop below vacuously —
+    // proving nothing about the one thing this test exists to check.
+    assert!(!bodies.is_empty(), "no OTLP payload was collected at all");
     for nonce in [CONCEPT_NONCE, SOURCE_NONCE, PASSAGE_NONCE, QUERY_NONCE] {
         assert!(
             bodies.iter().all(|body| !body.contains(nonce)),

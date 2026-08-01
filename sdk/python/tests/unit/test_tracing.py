@@ -27,10 +27,12 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor  # noqa: E402
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import (  # noqa: E402
     InMemorySpanExporter,
 )
+from opentelemetry.trace import StatusCode  # noqa: E402
 
 import taguru._tracing as tracing  # noqa: E402
+from taguru import ServerError  # noqa: E402
 
-from .conftest import ok_response, sync_client  # noqa: E402
+from .conftest import err_response, ok_response, sync_client  # noqa: E402
 
 ASSOCIATION = {
     "subject": "青嶺酒造",
@@ -243,6 +245,31 @@ def test_outbound_requests_carry_traceparent_from_the_active_phase_span(
     assert span_id == f"{resolve_span.context.span_id:016x}"  # type: ignore[union-attr]
 
 
+def test_a_5xx_from_the_server_marks_the_failing_phase_and_root_error(
+    exporter: InMemorySpanExporter,
+) -> None:
+    """`start_as_current_span` marks a span ERROR on an unhandled
+    exception by default (`record_exception`/`set_status_on_exception`
+    both default `True`) — unlike the TypeScript SDK, which has to do
+    this by hand (see `tracing.ts`'s own `span()`). A genuine 5xx must
+    propagate as a raised `ServerError` AND leave both the failing phase
+    span and the root ERROR, not merely fail silently."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path.endswith("/resolve"):
+            return err_response(500, "boom")
+        raise AssertionError(req.url.path)
+
+    client = sync_client(handler, retries=0)
+    with pytest.raises(ServerError):
+        client.context("sake").retrieve("青嶺")
+
+    resolve_span = one(exporter, "taguru.resolve")
+    assert resolve_span.status.status_code == StatusCode.ERROR
+    root = one(exporter, tracing.ROOT_SPAN)
+    assert root.status.status_code == StatusCode.ERROR
+
+
 def test_no_raw_text_reaches_any_span(exporter: InMemorySpanExporter) -> None:
     """Sentinel: cue/label/fallback-query nonces must never appear as a
     span name or an attribute/event value — only counts, flags, and the
@@ -266,7 +293,14 @@ def test_no_raw_text_reaches_any_span(exporter: InMemorySpanExporter) -> None:
         ],
         ensure_ascii=False,
     )
-    for nonce in ["青嶺", "青嶺酒造", "杜氏", "SENTINEL-QUERY-9f2c"]:
+    for nonce in [
+        "青嶺",
+        "青嶺酒造",
+        "杜氏",
+        "SENTINEL-QUERY-9f2c",
+        "docs/aomine.md",
+        "unstored.md",
+    ]:
         assert nonce not in serialized, f"{nonce!r} leaked into a span"
 
 

@@ -143,3 +143,108 @@ fn the_router_injects_its_own_span_and_forwards_tracestate() {
         "span id must be the router's OWN span, not the caller's: {forwarded}"
     );
 }
+
+#[test]
+fn the_router_omits_tracestate_when_the_caller_sent_none() {
+    // Regression test: `TraceContextPropagator::inject_context` always
+    // sets `tracestate` alongside `traceparent`, even with nothing to
+    // carry — an empty-but-present header rather than an absent one.
+    // A shard that got no inbound `tracestate` must not receive an
+    // empty one just because export happens to be on.
+    let collector = FakeCollector::start();
+    let shard = FakeShard::start(json!({"result": {"total": 0, "contexts": []}}));
+    let router = Server::start_router(
+        "tracing-router-no-tracestate",
+        &format!("a = {}\n", shard.endpoint),
+        &[
+            ("OTEL_EXPORTER_OTLP_ENDPOINT", collector.endpoint.as_str()),
+            ("OTEL_EXPORTER_OTLP_PROTOCOL", "http/json"),
+            ("OTEL_BSP_SCHEDULE_DELAY", "100"),
+        ],
+    );
+
+    let request = ureq::http::Request::builder()
+        .method("GET")
+        .uri(format!("{}/contexts", router.base))
+        .header(
+            "traceparent",
+            "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+        )
+        // No `tracestate` header on the inbound request.
+        .body(())
+        .unwrap();
+    let response = test_agent().run(request).expect("router must answer");
+    assert_eq!(response.status(), 200);
+
+    let _ = router.stop_gracefully();
+    let received = shard.requests();
+    assert_eq!(received.len(), 1, "{received:?}");
+    let headers = &received[0];
+
+    assert!(
+        !headers.contains_key("tracestate"),
+        "no tracestate should have been forwarded: {headers:?}"
+    );
+    assert!(
+        headers.get("traceparent").is_some(),
+        "traceparent must still be injected: {headers:?}"
+    );
+}
+
+#[test]
+fn a_transport_failure_marks_the_shard_call_span_unreached_and_error() {
+    let collector = FakeCollector::start();
+    let router = Server::start_router(
+        "tracing-router-shard-unreached",
+        // Nothing listens on 9 (the discard service) — a synchronous
+        // connection refusal, not a hang.
+        "a = http://127.0.0.1:9\n",
+        &[
+            ("OTEL_EXPORTER_OTLP_ENDPOINT", collector.endpoint.as_str()),
+            ("OTEL_EXPORTER_OTLP_PROTOCOL", "http/json"),
+            ("OTEL_BSP_SCHEDULE_DELAY", "100"),
+        ],
+    );
+
+    let _ = router.call("GET", "/contexts", None);
+
+    let _ = router.stop_gracefully();
+    let tree = SpanTree::new(collector.spans());
+
+    let shard_call = tree.one("GET -> shard 0");
+    assert_eq!(
+        attribute(shard_call, "taguru.shard.outcome").map(|v| v["stringValue"].clone()),
+        Some(json!("unreached"))
+    );
+    assert_eq!(status_code(shard_call), 2, "{shard_call:?}");
+}
+
+#[test]
+fn a_shard_http_error_marks_the_shard_call_span_but_not_error() {
+    let collector = FakeCollector::start();
+    let shard = FakeShard::start_with_status(500, json!({"status": "error", "error": "boom"}));
+    let router = Server::start_router(
+        "tracing-router-shard-http-error",
+        &format!("a = {}\n", shard.endpoint),
+        &[
+            ("OTEL_EXPORTER_OTLP_ENDPOINT", collector.endpoint.as_str()),
+            ("OTEL_EXPORTER_OTLP_PROTOCOL", "http/json"),
+            ("OTEL_BSP_SCHEDULE_DELAY", "100"),
+        ],
+    );
+
+    let _ = router.call("GET", "/contexts", None);
+
+    let _ = router.stop_gracefully();
+    let tree = SpanTree::new(collector.spans());
+
+    let shard_call = tree.one("GET -> shard 0");
+    assert_eq!(
+        attribute(shard_call, "taguru.shard.outcome").map(|v| v["stringValue"].clone()),
+        Some(json!("http_error"))
+    );
+    // An HTTP error status from a shard is an answer, not a
+    // client-span failure — only a transport error marks this span
+    // ERROR (see the sibling test above).
+    assert_eq!(status_code(shard_call), 0, "{shard_call:?}");
+}

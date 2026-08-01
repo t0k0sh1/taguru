@@ -473,6 +473,16 @@ impl FakeCollector {
     }
 }
 
+/// A span's OTLP status code — `tracing-opentelemetry` consumes the
+/// `otel.status_code` tracing field entirely into this real `status`
+/// object, so it never shows up via [`attribute`] the way an ordinary
+/// field does. `0` (UNSET, the default when a span never touched
+/// status) / `1` (OK) / `2` (ERROR) per the OTLP `trace.proto`
+/// `StatusCode` enum.
+pub fn status_code(span: &Value) -> i64 {
+    span["status"]["code"].as_i64().unwrap_or(0)
+}
+
 /// One attribute value out of the OTLP attribute list shape
 /// `[{"key": ..., "value": {"stringValue": ...}}]`.
 pub fn attribute<'a>(span: &'a Value, key: &str) -> Option<&'a Value> {
@@ -555,6 +565,14 @@ pub struct FakeShard {
 
 impl FakeShard {
     pub fn start(body: Value) -> Self {
+        Self::start_with_status(200, body)
+    }
+
+    /// Same as [`Self::start`], but answering every request with
+    /// `status` instead of a hardcoded 200 — for tests exercising a
+    /// shard that answers with an HTTP error status (a router-side
+    /// `"http_error"` shard outcome, not a transport failure).
+    pub fn start_with_status(status: u16, body: Value) -> Self {
         use std::io::Write;
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("shard must bind");
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
@@ -569,7 +587,7 @@ impl FakeShard {
                 };
                 sink.lock().unwrap().push(headers);
                 let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                    "HTTP/1.1 {status} Status\r\nContent-Type: application/json\r\n\
                      Content-Length: {}\r\nConnection: close\r\n\r\n{}",
                     body_text.len(),
                     body_text

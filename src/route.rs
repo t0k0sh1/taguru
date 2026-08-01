@@ -864,6 +864,17 @@ fn forward_headers(headers: &HeaderMap) -> HeaderMap {
     // that spelling. A no-op with export off, which is what keeps the
     // copy above meaningful in that mode (ADR 0008 §10).
     crate::trace::inject_current(&mut forwarded);
+    // `TraceContextPropagator::inject_context` always sets `tracestate`
+    // alongside `traceparent`, even when there is none to carry — an
+    // empty-but-present header rather than an absent one. Drop it in
+    // that case so a shard that got no inbound `tracestate` doesn't
+    // receive an empty one just because export happens to be on.
+    if forwarded
+        .get(header::HeaderName::from_static("tracestate"))
+        .is_some_and(|value| value.is_empty())
+    {
+        forwarded.remove(header::HeaderName::from_static("tracestate"));
+    }
     forwarded
 }
 

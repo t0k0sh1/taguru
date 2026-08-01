@@ -345,7 +345,12 @@ pub(crate) async fn traced_request(
         otel.kind = "server",
         http.request.method = %method,
         http.route = %route,
-        url.path = %request.uri().path(),
+        // Deliberately not `url.path`: the templated `http.route` above
+        // already gives the low-cardinality shape a dashboard needs;
+        // the literal request path (`request.uri().path()`) can carry
+        // a caller-chosen context name (`/contexts/{name}/...`), which
+        // ADR 0008 §8 promises never lands on any span.
+        taguru.result.bytes = tracing::field::Empty,
         http.response.status_code = tracing::field::Empty,
         otel.status_code = tracing::field::Empty,
     );

@@ -39,7 +39,10 @@ pub use protocol::{
     response, tool_response, tools_result,
 };
 #[allow(unused_imports)]
-pub use retrieve::{Transport, error_kind, root_span, run_retrieve, run_retrieve_bounded};
+pub use retrieve::{
+    REQUEST_BUILD_FAILED_PREFIX, Transport, error_kind, root_span, run_retrieve,
+    run_retrieve_bounded,
+};
 pub use route::route_tool;
 
 #[cfg(test)]
@@ -905,6 +908,60 @@ mod tests {
             cancelled_request_id(&json!({"jsonrpc": "2.0", "method": "notifications/cancelled"})),
             None
         );
+    }
+
+    /// Absent, wrong-typed, or malformed `_meta` is "no parent", never
+    /// an error — an ordinary MCP client that sends no `_meta` at all
+    /// must see no difference from one whose header happens to be
+    /// garbage.
+    #[test]
+    fn meta_trace_headers_treats_every_malformed_shape_as_no_parent() {
+        // No params at all.
+        assert!(
+            meta_trace_headers(&json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call"}))
+                .is_empty()
+        );
+        // params present, but no _meta.
+        assert!(
+            meta_trace_headers(&json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "retrieve", "arguments": {}},
+            }))
+            .is_empty()
+        );
+        // traceparent present but not a string.
+        assert!(
+            meta_trace_headers(&json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"_meta": {"traceparent": 12345}},
+            }))
+            .is_empty()
+        );
+        // traceparent present but not a legal header value (control
+        // character) — dropped rather than passed through to panic
+        // deeper in `http::HeaderValue`.
+        assert!(
+            meta_trace_headers(&json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"_meta": {"traceparent": "00-\u{0}-01"}},
+            }))
+            .is_empty()
+        );
+        // tracestate alone, no traceparent: still not empty — each
+        // header is read independently, and a downstream consumer that
+        // only cares about tracestate must see it.
+        let tracestate_only = meta_trace_headers(&json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"_meta": {"tracestate": "vendor=abc"}},
+        }));
+        assert!(!tracestate_only.is_empty(), "{tracestate_only:?}");
+        assert_eq!(
+            tracestate_only
+                .get("tracestate")
+                .map(|v| v.to_str().unwrap()),
+            Some("vendor=abc")
+        );
+        assert!(tracestate_only.get("traceparent").is_none());
     }
 
     #[test]

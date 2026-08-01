@@ -185,8 +185,15 @@ pub async fn serve(
                 // The transport-owned size the `taguru.retrieve` span
                 // itself never records (ADR 0008 §3): the composed
                 // JSON's true byte length is only known here, after
-                // `to_string()` and this transport's own cap.
-                .inspect(|text| tracing::info!(taguru.result.bytes = text.len(), "taguru.result"))
+                // `to_string()` and this transport's own cap. Recorded
+                // on the ambient `POST /mcp` request span (declared
+                // `Empty` in `trace::traced_request`) — `taguru.retrieve`
+                // has already closed by the time this runs, the same
+                // reason the stdio bridge records its own copy of this
+                // field on `taguru.tool_call` rather than `taguru.retrieve`.
+                .inspect(|text| {
+                    tracing::Span::current().record("taguru.result.bytes", text.len());
+                })
                 .map_err(mcp::ToolError::from)
             };
             mcp::response(id, mcp::tool_response(outcome))
@@ -250,7 +257,7 @@ async fn call_inner(
     // into the URL. A long enough one exceeds `http::Uri`'s length limit,
     // which the builder reports here — fail this one call gracefully
     // rather than panic the task.
-    .map_err(|error| format!("could not build the in-process request: {error}"))
+    .map_err(|error| format!("{}: {error}", mcp::REQUEST_BUILD_FAILED_PREFIX))
     .map_err(mcp::ToolError::from)?;
     // The outer request's identity travels with the dispatched call:
     // the authorization layer on the dispatch router judges each tool

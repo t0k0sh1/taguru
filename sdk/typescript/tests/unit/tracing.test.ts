@@ -10,7 +10,11 @@
  * `test_tracing.py` — read together, not just here.
  */
 
-import { context as otelContext, propagation as otelPropagation } from "@opentelemetry/api";
+import {
+  context as otelContext,
+  propagation as otelPropagation,
+  SpanStatusCode,
+} from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import { W3CTraceContextPropagator } from "@opentelemetry/core";
 import {
@@ -21,6 +25,7 @@ import {
 } from "@opentelemetry/sdk-trace-base";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
+import { ServerError } from "../../src/errors.js";
 import * as tracing from "../../src/tracing.js";
 import { errBody, okBody, stubClient, type StubRequest } from "./stub.js";
 
@@ -232,6 +237,30 @@ describe("retrieve() tracing", () => {
     expect(spanId).toBe(resolveSpan.spanContext().spanId);
   });
 
+  it("marks the failing phase and root span ERROR on a genuine 5xx", async () => {
+    // Unlike Python's `start_as_current_span` (ERROR-on-exception by
+    // default), `startActiveSpan` does nothing on its own — this is
+    // exactly what `tracing.ts`'s own `span()` now does by hand. A
+    // real 5xx must propagate as a thrown `ServerError` AND leave both
+    // the failing phase span and the root ERROR, not fail silently.
+    const client = stubClient(
+      (req: StubRequest) => {
+        if (req.path.endsWith("/resolve")) {
+          return errBody(500, "boom");
+        }
+        throw new Error(req.path);
+      },
+      { retries: 0 },
+    );
+
+    await expect(client.context("sake").retrieve("青嶺")).rejects.toBeInstanceOf(ServerError);
+
+    const resolveSpan = one("taguru.resolve");
+    expect(resolveSpan.status.code).toBe(SpanStatusCode.ERROR);
+    const root = one(tracing.ROOT_SPAN);
+    expect(root.status.code).toBe(SpanStatusCode.ERROR);
+  });
+
   it("never leaks raw cue/label/query text into any span", async () => {
     const client = stubClient(routed([]), { retries: 0 });
     await client
@@ -245,7 +274,14 @@ describe("retrieve() tracing", () => {
         events: span.events.map((event) => ({ name: event.name, attributes: event.attributes })),
       })),
     );
-    for (const nonce of ["青嶺", "青嶺酒造", "杜氏", "SENTINEL-QUERY-9f2c"]) {
+    for (const nonce of [
+      "青嶺",
+      "青嶺酒造",
+      "杜氏",
+      "SENTINEL-QUERY-9f2c",
+      "docs/aomine.md",
+      "unstored.md",
+    ]) {
       expect(serialized.includes(nonce)).toBe(false);
     }
   });

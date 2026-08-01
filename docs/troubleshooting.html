@@ -350,7 +350,7 @@ docker compose up -d</code></pre>
     <p>
       Taguru ships the retrieval-side half of this natively: <code>OTEL_EXPORTER_OTLP_ENDPOINT</code>
       turns every request into a span tree, not one flat span — <code>taguru.retrieve</code> nests
-      a phase span per step of the documented loop (resolve, describe, activate, citations,
+      a phase span per step of the documented loop (resolve, describe, query, activate, citations,
       passage fallback), with the embedding provider call and the BM25/ANN/fuse lanes as further
       children, and a <code>trace_id</code> in the access log so logs and traces cross-reference.
       Full span-tree reference: <a href="tracing.html">Tracing</a>. Taguru has no visibility into

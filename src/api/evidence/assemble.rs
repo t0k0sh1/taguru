@@ -311,6 +311,7 @@ pub async fn assemble_evidence(
     // --- Step 3: activate — always, when there is at least one anchor
     // (retrieve's own Step 3, `src/mcp/retrieve.rs:207-233`).
     let activate_plan = if anchors.is_empty() {
+        tracing::info!(taguru.reason = "no_anchors", "taguru.skip");
         LanePlan::skipped(NO_ANCHORS_REASON)
     } else {
         if deadline.expired() {

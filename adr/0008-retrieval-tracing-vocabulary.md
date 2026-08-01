@@ -253,8 +253,16 @@ text — `src/metrics.rs:2199` already documents this trap): `taguru.operation`,
 `taguru.shard.index` / `.outcome`, `taguru.error.kind`.
 
 Semconv wins where it already exists — `http.request.method`, `http.route`,
-`url.path`, `http.response.status_code` — and is never duplicated under
-`taguru.*`.
+`http.response.status_code` — and is never duplicated under `taguru.*`.
+Deliberately not `url.path`: unlike `http.route`'s templated shape, the
+literal request path can carry a caller-chosen context name
+(`/contexts/{name}/...`), which §8 promises never lands on any span.
+
+`taguru.result.bytes` — the composed retrieval's true byte length, only
+known after the transport serializes and caps it, well after
+`taguru.retrieve` has already closed — is recorded on the ambient
+request span instead: the `POST /mcp` HTTP span for the remote MCP
+transport, `taguru.tool_call` for the stdio bridge.
 
 ## 7. Event vocabulary
 
