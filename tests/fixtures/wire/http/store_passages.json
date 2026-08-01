@@ -1,0 +1,44 @@
+{
+  "contract": "http_contract",
+  "method": "POST",
+  "operation": "store_passages",
+  "request": {
+    "locators": {
+      "doc.md": [
+        {
+          "locator": {
+            "kind": "page",
+            "value": "12"
+          },
+          "paragraph": 1
+        }
+      ]
+    },
+    "passages": {
+      "doc.md": "導入。\n\n本編。"
+    },
+    "sections": {
+      "doc.md": [
+        {
+          "paragraph": 1,
+          "section": "本編"
+        }
+      ]
+    }
+  },
+  "response": {
+    "result": {
+      "locators_dropped": 0,
+      "locators_stored": 1,
+      "questions_dropped": 0,
+      "questions_stored": 0,
+      "sections_dropped": 0,
+      "sections_stored": 1,
+      "stored": 1
+    },
+    "status": "ok",
+    "time": 0.0
+  },
+  "route": "/contexts/{name}/sources",
+  "status": 200
+}

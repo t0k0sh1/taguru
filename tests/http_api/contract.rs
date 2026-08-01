@@ -376,6 +376,58 @@ fn communities_search_community_page() {
     );
 }
 
+// --- HTTP: passage storage and batch import (#346, ADR 0007 §7) — the
+// two write paths a citation `locator` can ride in on. ---
+
+#[test]
+fn store_passages_response_shape() {
+    let server = Server::start("contract-store-passages");
+    server.ok("PUT", "/contexts/corpus-e", None);
+
+    let request = json!({
+        "passages": {"doc.md": "導入。\n\n本編。"},
+        "sections": {"doc.md": [{"paragraph": 1, "section": "本編"}]},
+        "locators": {"doc.md": [{"paragraph": 1, "locator": {"kind": "page", "value": "12"}}]},
+    });
+    let (status, body) = server.call("POST", "/contexts/corpus-e/sources", Some(request.clone()));
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["result"]["locators_stored"], json!(1), "{body}");
+    http_fixture(
+        "store_passages",
+        "POST",
+        "/contexts/{name}/sources",
+        Some(request),
+        status,
+        body,
+    );
+}
+
+#[test]
+fn import_reports_locator_bookkeeping() {
+    let server = Server::start("contract-import");
+    let batch = "{\"taguru_batch\": 1, \"context\": \"corpus-f\", \"source\": \"doc.md\", \
+                 \"create\": {\"description\": \"wire-contract import corpus\"}}\n\
+                 {\"passage\": \"導入。\\n\\n本編。\"}\n\
+                 {\"paragraph\": 1, \"locator\": {\"kind\": \"page\", \"value\": \"12\"}}\n\
+                 {\"subject\": \"alpha\", \"label\": \"connects_to\", \"object\": \"beta\", \
+                 \"weight\": 1.0}\n";
+    let (status, body) = post_import(&server, batch, None);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body["result"]["batches"][0]["locators_stored"],
+        json!(1),
+        "{body}"
+    );
+    http_fixture(
+        "import",
+        "POST",
+        "/import",
+        Some(json!(batch)),
+        status,
+        body,
+    );
+}
+
 // --- HTTP: evidence assembly (#216, #305, ADR 0006 §10) — the public
 // shape #301's own issue names as the thing it must cover. ---
 

@@ -3019,6 +3019,38 @@ mod tests {
     }
 
     #[test]
+    fn a_locator_kind_beyond_the_byte_cap_is_refused() {
+        let long = "k".repeat(crate::api::MAX_LOCATOR_KIND_BYTES + 1);
+        let error = parse(&format!(
+            "{HEADER}\n{{\"passage\": \"本文。\"}}\n\
+             {{\"paragraph\": 0, \"locator\": {{\"kind\": \"{long}\", \"value\": \"1\"}}}}\n"
+        ))
+        .unwrap_err();
+        assert!(
+            error.contains("locator.kind") && error.contains("cap"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_empty_locator_kind_or_value_is_refused() {
+        for locator in [
+            r#"{"kind": "", "value": "1"}"#,
+            r#"{"kind": "page", "value": ""}"#,
+        ] {
+            let error = parse(&format!(
+                "{HEADER}\n{{\"passage\": \"本文。\"}}\n\
+                 {{\"paragraph\": 0, \"locator\": {locator}}}\n"
+            ))
+            .unwrap_err();
+            assert!(
+                error.contains("line 3") && error.contains("must not be empty"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
     fn a_malformed_locator_line_is_refused_by_line_number() {
         let error = parse(&format!(
             "{HEADER}\n{{\"passage\": \"本文。\"}}\n\
