@@ -224,6 +224,16 @@ impl MetricValue {
             MetricValue::Count(c) => c.value,
         }
     }
+
+    /// A `Ratio`'s raw numerator — the count behind `value` — for a
+    /// reader reporting "X of N" rather than the share alone. `None`
+    /// for the other variants, which have no numerator.
+    pub(crate) fn numerator(&self) -> Option<u64> {
+        match self {
+            MetricValue::Ratio(r) => r.numerator,
+            MetricValue::Distribution(_) | MetricValue::Count(_) => None,
+        }
+    }
 }
 
 /// One `definitions` entry (ADR 0003 §9.3): unit, statistic shape,

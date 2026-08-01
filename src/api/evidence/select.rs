@@ -139,7 +139,10 @@ pub(crate) struct SelectedEvidence {
 }
 
 const REASON_DUPLICATE_PASSAGE: &str = "duplicate_passage";
-const REASON_BUDGET_EXCEEDED: &str = "budget_exceeded";
+/// `pub(crate)` so `evaluate`'s tests can build an assembly-mode
+/// `omitted_by_reason` against the real vocabulary instead of a
+/// literal that could silently drift from it.
+pub(crate) const REASON_BUDGET_EXCEEDED: &str = "budget_exceeded";
 const REASON_CONTRADICTION_GROUP_EXCEEDS_BUDGET: &str = "contradiction_group_exceeds_budget";
 
 /// How many of `omitted_by_reason`'s entries a budget ceiling

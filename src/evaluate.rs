@@ -2613,6 +2613,62 @@ fn write_evaluation(path: &Path, evaluation: &EvaluationFile) -> Result<(), Stri
         .map_err(|error| format!("writing {}: {error}", path.display()))
 }
 
+/// #308 (ADR 0006 §14): the assembly-lane summary lines — budget
+/// usage, source diversity, reranker outcome — that [`print_summary`]
+/// appends after the citation block. The budget and reranker lines key
+/// off the run's own configuration (`inputs.budget` / `inputs.rerank`),
+/// so a lane the operator asked for still reports its zero-sample
+/// state rather than vanishing — the same "measured, zero samples" vs
+/// "does not apply" distinction the artifact's metric shapes draw
+/// (see [`Distribution`]'s doc). The diversity line has no configuring
+/// flag, so it keys off its metric's sample count instead. A plain
+/// baseline run prints nothing new. Returned as lines rather than
+/// printed so tests can assert on them without capturing stdout.
+fn assembly_summary_lines(inputs: &InputsBlock, metrics: &MetricsMap) -> Vec<String> {
+    let mut lines = Vec::new();
+    let scalar = |name: &str| metrics.get(name).and_then(MetricValue::scalar);
+    if inputs.budget.is_some() {
+        let n = metrics
+            .get("budget.items_used")
+            .map_or(0, MetricValue::sample_size);
+        let mean = |name: &str| match scalar(name) {
+            Some(value) => format!("{value:.1}"),
+            None => "n/a".to_string(),
+        };
+        let omitted_rate = match scalar("budget.omitted_rate") {
+            Some(value) => format!("{value:.3}"),
+            None => "n/a".to_string(),
+        };
+        lines.push(format!(
+            "  budget over {n} case(s): mean {} item(s) / {} byte(s) / {} token(s) used, \
+             budget-omitted rate {omitted_rate}",
+            mean("budget.items_used"),
+            mean("budget.bytes_used"),
+            mean("budget.tokens_used"),
+        ));
+    }
+    if let Some(diversity) = metrics.get("diversity.sources")
+        && diversity.sample_size() > 0
+    {
+        lines.push(format!(
+            "  diversity over {} case(s): mean {:.1} distinct source(s) in admitted evidence",
+            diversity.sample_size(),
+            diversity.scalar().unwrap_or(0.0),
+        ));
+    }
+    if let Some(model) = &inputs.rerank {
+        let (ran, attempted) = match metrics.get("rerank.ran") {
+            Some(value) => (value.numerator().unwrap_or(0), value.sample_size()),
+            None => (0, 0),
+        };
+        lines.push(format!(
+            "  rerank '{model}' over {attempted} attempted case(s): {ran} ran, {} degraded",
+            attempted.saturating_sub(ran)
+        ));
+    }
+    lines
+}
+
 fn print_summary(evaluation: &EvaluationFile, masked_url: &str, context: &str) {
     let total = evaluation.cases.len();
     let passage_failed = evaluation
@@ -2717,6 +2773,9 @@ fn print_summary(evaluation: &EvaluationFile, masked_url: &str, context: &str) {
         if invalid.len() > 3 {
             println!("    ... and {} more invalid locator(s)", invalid.len() - 3);
         }
+    }
+    for line in assembly_summary_lines(&evaluation.inputs, &evaluation.metrics) {
+        println!("{line}");
     }
     if !evaluation.corpus.stable {
         println!(
