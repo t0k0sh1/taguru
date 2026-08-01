@@ -8,4 +8,4 @@
  * needs an unambiguous regex target, and this value is locked to the
  * server's own version exactly the way `taguru.__version__` is.
  */
-export const VERSION = "0.5.0";
+export const VERSION = "0.6.0";

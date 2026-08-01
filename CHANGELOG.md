@@ -7,6 +7,8 @@ Entries that change an on-disk format or a response shape say so.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-01
+
 ### Added
 - `POST /contexts/{name}/evidence` (#305, MCP: `assemble_evidence`,
   implementing ADR 0006 §5/§10/§11/§13.1-13.2): opt-in evidence
@@ -1911,7 +1913,8 @@ OTLP tracing, OAuth for remote MCP), the MCP stdio bridge, and the
 offline tooling (`import`, `extract`, `inspect`, `estimate`).
 Published to crates.io and GHCR.
 
-[Unreleased]: https://github.com/t0k0sh1/taguru/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/t0k0sh1/taguru/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/t0k0sh1/taguru/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/t0k0sh1/taguru/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/t0k0sh1/taguru/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/t0k0sh1/taguru/compare/v0.2.0...v0.3.0
