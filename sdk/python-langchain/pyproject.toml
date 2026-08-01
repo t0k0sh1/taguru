@@ -34,6 +34,12 @@ Repository = "https://github.com/t0k0sh1/taguru"
 taguru = { path = "../python", editable = true }
 
 [project.optional-dependencies]
+# ADR 0007 §3/§4's packaging decision, kept for PdfConnector (issue #348):
+# a connector's own parser dependency is never forced on every install —
+# only a caller who actually uses PdfConnector needs pypdf.
+pdf = [
+    "pypdf>=5",
+]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
@@ -45,6 +51,9 @@ dev = [
     # fixture corpus (../../tests/fixtures/model_output) — tests-only, never
     # imported by src/.
     "jsonschema>=4.18",
+    # PdfConnector's own tests (tests/unit/test_pdf_connector.py) exercise
+    # the real pypdf-backed path, not a mock.
+    "pypdf>=5",
 ]
 
 [tool.hatch.build.targets.wheel]

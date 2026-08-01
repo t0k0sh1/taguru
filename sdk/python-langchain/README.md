@@ -129,8 +129,31 @@ if cached is None:
     checkpoint.save(document)
 ```
 
-PDF/HTML/DOCX/S3 connectors implementing the same `Connector` protocol are
-tracked as follow-up issues (#348-#352); the contract itself (ADR 0007 §5)
+`PdfConnector` (issue #348) reads `.pdf` files the same way — `pip install
+"langchain-taguru[pdf]"` for its `pypdf` dependency, kept out of the
+default install per ADR 0007 §3/§4 so a caller ingesting nothing but
+`.md`/`.txt` never pays for a PDF parser. One `{"kind": "page", "value":
+...}` locator is emitted per paragraph, derived from the PDF's own page
+boundaries; its outline (bookmarks), if any, becomes `sections` and the
+document `title`. No OCR engine ships here: a page whose extracted text
+has fewer than `min_chars_per_page` (default 16) non-whitespace characters
+is named in an `ocr_required` diagnostic instead of silently passed
+through as low-quality text — raise the threshold for a corpus of
+mostly-image PDFs, or route pages it names to an external OCR step.
+Encrypted and corrupt PDFs are reported the same structured way
+(`encrypted`/`corrupt`), never a raised exception:
+
+```python
+from taguru_langchain.ingest_connectors import PdfConnector
+
+document = PdfConnector().read("docs/manual.pdf")
+if document.diagnostics:
+    ...  # encrypted, corrupt, ocr_required, ... — never a silently empty passage
+outcome = ingest_connector_document(ingester, document)
+```
+
+HTML/DOCX/S3 connectors implementing the same `Connector` protocol are
+tracked as follow-up issues (#349-#351); the contract itself (ADR 0007 §5)
 is stable now.
 
 Three more constructor arguments bound how a chunk's structured-output

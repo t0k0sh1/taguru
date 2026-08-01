@@ -6,6 +6,7 @@ import dataclasses
 import json
 from pathlib import Path
 
+import pytest
 from langchain_core.documents import Document
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from taguru import Locator, Taguru
@@ -187,3 +188,57 @@ def test_connector_document_round_trips_sections_and_locators_to_citations(
         # context, turning one failure into a second, unrelated one.
         if client.contexts.exists("aizome"):
             client.contexts.delete("aizome")
+
+
+def test_pdf_connector_document_round_trips_page_locators_to_citations(
+    client: Taguru, tmp_path: Path
+) -> None:
+    """The PDF connector's own acceptance bar (issue #348), against the
+    real server: unlike the synthetic locator #347's own round-trip test
+    above attaches by hand, this locator comes straight from
+    ``PdfConnector.read`` — the PDF's own page boundaries — and still
+    reaches ``Citation.locator`` unchanged."""
+    pytest.importorskip("pypdf")
+    from taguru_langchain.ingest_connectors import PdfConnector
+
+    from .._pdfs import text_pdf
+
+    # ASCII only: the hand-built test PDF (tests/_pdfs.py) uses the base14
+    # Helvetica font with no embedded CJK glyphs/ToUnicode CMap, unlike
+    # this suite's other fixtures.
+    path = tmp_path / "workshop.pdf"
+    path.write_bytes(
+        text_pdf(
+            [
+                "Indigo Workshop\n\nThe workshop preserves indigo dyeing techniques.",
+                "Its best known product is a noren curtain.",
+            ]
+        )
+    )
+
+    document = PdfConnector().read(str(path))
+    assert document.diagnostics == ()
+    assert len(document.locators) == 3
+    assert document.locators[2].locator == Locator(kind="page", value="2")
+
+    llm = FakeListChatModel(
+        responses=[json.dumps({"associations": [], "aliases": [], "questions": []})]
+    )
+    ingester = TaguruIngester(
+        context="indigo-workshop",
+        llm=llm,
+        client=client,
+        create_context=True,
+        context_description="PDF connector round trip (issue #348)",
+    )
+    try:
+        outcome = ingest_connector_document(ingester, document)
+        assert outcome.ok
+        assert outcome.locators_stored == len(document.locators)
+
+        ctx = client.context("indigo-workshop")
+        located_citation = ctx.cite_passage(document.source, 2)
+        assert located_citation.locator == Locator(kind="page", value="2")
+    finally:
+        if client.contexts.exists("indigo-workshop"):
+            client.contexts.delete("indigo-workshop")
