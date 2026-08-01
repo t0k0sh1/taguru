@@ -326,6 +326,48 @@ def test_render_strips_paragraph_locators_without_a_passage() -> None:
     assert "paragraph" not in lines[1]
 
 
+def test_render_batch_emits_section_and_locator_lines_after_questions() -> None:
+    """ADR 0007 §7/issue #347: sections/locators land right after the
+    question lines, in that order, mirroring src/export.rs's own
+    section-then-locator emission order (src/export.rs:447-464)."""
+    extraction = merge([ModelOutput(questions=[ModelQuestion(paragraph=0, question="q?")])], 1, 2)
+    body = render_batch(
+        "ctx",
+        "src",
+        None,
+        extraction,
+        "一段落目。\n\n二段落目。",
+        sections=[{"paragraph": 0, "section": "導入"}],
+        locators=[{"paragraph": 1, "locator": {"kind": "page", "value": "12"}}],
+    )
+    lines = [json.loads(line) for line in body.strip().split("\n")]
+    # header, passage, question, section, locator — nothing else was asked for.
+    assert len(lines) == 5
+    assert lines[3] == {"paragraph": 0, "section": "導入"}
+    assert lines[4] == {"paragraph": 1, "locator": {"kind": "page", "value": "12"}}
+
+
+def test_render_batch_drops_sections_and_locators_without_a_passage() -> None:
+    """Same dangling-reference rule §7.4 states for association paragraph
+    pointers: a locator/section attaches to THIS batch's passage line, so
+    stripping the passage (``include_passage=False``) must strip them too
+    — otherwise import refuses the batch outright (src/ingest.rs:1518-1524)."""
+    extraction = merge([], 0, 1)
+    body = render_batch(
+        "ctx",
+        "src",
+        None,
+        extraction,
+        None,
+        sections=[{"paragraph": 0, "section": "導入"}],
+        locators=[{"paragraph": 0, "locator": {"kind": "page", "value": "1"}}],
+    )
+    lines = [json.loads(line) for line in body.strip().split("\n")]
+    assert len(lines) == 1  # header only
+    assert "section" not in body
+    assert "locator" not in body
+
+
 def test_the_system_prompt_omits_the_fact_budget_clause_by_default() -> None:
     """Port of extract.rs the_system_prompt_omits_the_fact_budget_clause_by_default."""
     assert "association(s) total" not in system_prompt([], 0, 0)

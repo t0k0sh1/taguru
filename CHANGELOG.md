@@ -8,6 +8,35 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- Connector protocol and normalized document contract (#347, implementing
+  ADR 0007 §5/§6/§8): a `taguru_langchain.ingest_connectors` submodule
+  (no new Rust dependency, no new binary — `langchain-taguru` reuses
+  `TaguruIngester`/`CheckpointStore` directly, per ADR 0007 §3/§4's
+  packaging decision) defining `ConnectorDocument` — the one shape every
+  standard connector (PDF/HTML/DOCX/S3, tracked as #348-#352) produces:
+  paragraph-joined `text`, paragraph-indexed `sections`/`locators`,
+  `metadata`, `fingerprint_inputs`, and a closed `diagnostics` vocabulary
+  (`unreadable`, `unsupported_format`, `encrypted`, `corrupt`,
+  `ocr_required`, `source_id_too_long`, `content_too_large`,
+  `partial_extraction`) — a non-empty `diagnostics` with an empty `text`
+  is the required encoding of "nothing usable was extracted," never a
+  silently empty passage. Source id derivation follows ADR 0007 §6.1
+  (`path`, `path#fragment`, mandatory URL canonicalization stripping
+  userinfo and signed-query credentials); a connector's own fetch/parse
+  work gets an independently resumable `ConnectorCheckpoint` (§6.3),
+  layered over `CheckpointStore` under its own key namespace so it never
+  collides with `TaguruIngester`'s own chunk checkpoint. `.md`/`.txt`
+  ship as the reference connector (`TextFileConnector`, extracting ATX
+  headings as sections), wired end to end via
+  `ingest_connector_document(s)`/`aingest_connector_document(s)` into
+  `TaguruIngester.ingest_text`'s new `sections=`/`locators=` parameters —
+  which, in turn, `IngestOutcome.sections_stored`/`sections_dropped`/
+  `locators_stored`/`locators_dropped` now report. ADR 0007 §6.2's
+  `locator_digest` addition to `taguru extract`'s own manifest fingerprint
+  is deliberately not part of this issue: the staleness it guards against
+  is specific to `taguru extract`'s Rust-side manifest skip, which
+  `TaguruIngester` never takes (every ingest re-renders and re-imports
+  its batch). No change to `src/`, `http_contract`, or `mcp_contract`.
 - Typed citation locators (#346, implementing ADR 0007 §7): a new,
   independent, paragraph-indexed `locator: {kind, value}` — a page,
   slide, sheet, table, or other position — alongside the existing

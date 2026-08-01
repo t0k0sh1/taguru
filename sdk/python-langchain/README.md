@@ -92,6 +92,47 @@ For composing this with a bounded, resumable runner (time/item windows,
 signal handling, torn-import repair), see
 [long-running ingestion](https://t0k0sh1.github.io/taguru/long-running.html).
 
+## Standard ingest connectors (ADR 0007)
+
+`taguru_langchain.ingest_connectors` normalizes a source document — plain
+text plus paragraph-indexed section headings and typed citation locators
+(page/slide/sheet/table) — into the one shape `TaguruIngester` consumes,
+instead of a bare `page_content` string. The reference connector reads
+`.md`/`.txt`, extracting ATX headings as sections:
+
+```python
+from taguru_langchain.ingest_connectors import TextFileConnector, ingest_connector_document
+
+document = TextFileConnector().read("docs/manual.md")
+if document.diagnostics:
+    ...  # encrypted, corrupt, unsupported format, OCR required, ... — never a silently empty passage
+outcome = ingest_connector_document(ingester, document)
+```
+
+`ConnectorDocument.sections`/`.locators` round-trip losslessly through
+`/import` into `Citation.section`/`.locator` on every
+`recall`/`explore`/`activate`/`cite_passage` response. A connector's own
+fetch/parse work is independently resumable via `ConnectorCheckpoint`,
+layered over the same `CheckpointStore` `checkpoint_store=` already uses
+above — a distinct `namespace=` keeps the two from colliding when they
+share one `FilesystemCheckpointStore` directory:
+
+```python
+from taguru_langchain.ingest_connectors import ConnectorCheckpoint
+
+checkpoint = ConnectorCheckpoint(
+    FilesystemCheckpointStore(".taguru-checkpoints"), namespace="connector"
+)
+cached = checkpoint.load(source, fresh_fingerprint)  # None on any mismatch — never a false hit
+if cached is None:
+    document = TextFileConnector().read(path)
+    checkpoint.save(document)
+```
+
+PDF/HTML/DOCX/S3 connectors implementing the same `Connector` protocol are
+tracked as follow-up issues (#348-#352); the contract itself (ADR 0007 §5)
+is stable now.
+
 Three more constructor arguments bound how a chunk's structured-output
 retry behaves, all optional and all unchanged by default: `fact_budget`
 asks the model to keep a chunk's answer to at most N associations;

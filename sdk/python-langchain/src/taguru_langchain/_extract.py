@@ -12,10 +12,12 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
+from taguru import LocatorSpec, SectionSpec
 
 # Kept equal to src/extract.rs's PROMPT_VERSION: a prompt revision in either
 # producer must bump both.
@@ -1259,9 +1261,21 @@ def render_batch(
     description: str | None,
     extraction: Extraction,
     passage: str | None,
+    sections: Sequence[SectionSpec] = (),
+    locators: Sequence[LocatorSpec] = (),
 ) -> str:
-    """Header, passage (the document itself), questions, facts, then aliases —
-    one JSON object per line, the exact stream ``POST /import`` applies."""
+    """Header, passage (the document itself), questions, sections, locators,
+    facts, then aliases — one JSON object per line, the exact stream
+    ``POST /import`` applies.
+
+    ``sections``/``locators`` (ADR 0007 §7, issue #347) attach to THIS
+    batch's passage line exactly like a question or an association's
+    ``paragraph`` pointer does: with the passage stripped
+    (``passage is None``) there is nothing to locate into, and import
+    refuses the dangling reference (src/ingest.rs:1518-1524) — so both are
+    silently dropped rather than emitted, the same posture already taken
+    for association paragraph pointers a few lines below.
+    """
     header: dict[str, Any] = {"taguru_batch": 1, "context": context, "source": source}
     if description is not None:
         header["create"] = {"description": description}
@@ -1270,6 +1284,10 @@ def render_batch(
         lines.append(_line({"passage": passage}))
         for paragraph, question in extraction.questions:
             lines.append(_line({"paragraph": paragraph, "question": question}))
+        for section in sections:
+            lines.append(_line({"paragraph": section["paragraph"], "section": section["section"]}))
+        for locator in locators:
+            lines.append(_line({"paragraph": locator["paragraph"], "locator": locator["locator"]}))
     for fact in extraction.associations:
         entry: dict[str, Any] = {
             "subject": fact.subject,

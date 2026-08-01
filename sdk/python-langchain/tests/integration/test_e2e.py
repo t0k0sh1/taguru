@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
+from pathlib import Path
 
 from langchain_core.documents import Document
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
-from taguru import Taguru
+from taguru import Locator, Taguru
 
 from taguru_langchain import TaguruIngester, TaguruRetriever
+from taguru_langchain.ingest_connectors import (
+    LocatorEntry,
+    TextFileConnector,
+    ingest_connector_document,
+)
 
 
 def test_retriever_serves_both_lanes_from_the_seeded_context(
@@ -122,3 +129,55 @@ def test_ingester_end_to_end_and_idempotent(client: Taguru, server: object) -> N
     assert any("栗きんとん" in d.page_content for d in documents)
 
     client.contexts.delete("wagashi")
+
+
+def test_connector_document_round_trips_sections_and_locators_to_citations(
+    client: Taguru, tmp_path: Path
+) -> None:
+    """ADR 0007 (issue #347)'s own acceptance bar, against the real server
+    rather than the unit-test FakeServer mock: a connector's normalized
+    document reaches TaguruIngester end to end (``taguru_langchain.
+    ingest_connectors.TextFileConnector`` -> ``ingest_connector_document``
+    -> ``POST /import``), and both its section heading and a typed locator
+    survive storage and the ``/citations`` response round trip (ADR 0007
+    §7, landed by #346/PR #360)."""
+    text = "# 藍染工房\n\n藍染めの技法を伝える工房である。\n\n代表作は暖簾である。\n"
+    path = tmp_path / "aizome.md"
+    path.write_text(text, encoding="utf-8")
+
+    document = TextFileConnector().read(str(path))
+    assert document.diagnostics == ()
+    assert len(document.sections) == 1
+    assert document.sections[0].paragraph == 0
+    assert document.sections[0].section == "藍染工房"
+
+    # TextFileConnector never produces a locator (no natural page/slide in
+    # .md/.txt) — a synthetic one exercises the same wire path #348-#351's
+    # real page/slide/sheet connectors will use.
+    document = dataclasses.replace(
+        document, locators=(LocatorEntry(paragraph=2, locator=Locator(kind="page", value="1")),)
+    )
+
+    llm = FakeListChatModel(
+        responses=[json.dumps({"associations": [], "aliases": [], "questions": []})]
+    )
+    ingester = TaguruIngester(
+        context="aizome",
+        llm=llm,
+        client=client,
+        create_context=True,
+        context_description="connector round trip (issue #347)",
+    )
+    outcome = ingest_connector_document(ingester, document)
+    assert outcome.ok
+    assert outcome.sections_stored == 1
+    assert outcome.locators_stored == 1
+
+    ctx = client.context("aizome")
+    heading_citation = ctx.cite_passage(document.source, 0)
+    assert heading_citation.section == "藍染工房"
+
+    located_citation = ctx.cite_passage(document.source, 2)
+    assert located_citation.locator == Locator(kind="page", value="1")
+
+    client.contexts.delete("aizome")
