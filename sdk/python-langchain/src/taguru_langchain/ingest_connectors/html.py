@@ -70,6 +70,7 @@ import httpx
 from taguru import Locator
 
 from .._extract import MAX_PASSAGE_BYTES
+from ._structure import byte_len, fit_breadcrumb, sanitize_paragraph_text
 from .document import (
     MAX_SECTION_BYTES,
     ConnectorDocument,
@@ -187,13 +188,12 @@ _WS_RE: Final = re.compile(r"\s+")
 # offsetting every locator/section paragraph index after it. Collapsing to
 # a single `\n` keeps the line break (an interior line break stays IN a
 # paragraph, exactly as `<br>` intends) without ever producing that boundary.
-_BLANK_RUN_RE: Final = re.compile(r"\n\s*\n+")
+# The collapsing regex itself, and the `sanitize_paragraph_text` wrapper
+# around it, now live in `_structure.py` — shared with `docx.py` (#350),
+# which needs the exact same interior-blank-line collapse for its own
+# paragraph text.
 _CHARSET_RE: Final = re.compile(rb'charset\s*=\s*["\']?\s*([\w-]+)', re.IGNORECASE)
 _HEADER_CHARSET_RE: Final = re.compile(r'charset\s*=\s*["\']?\s*([\w-]+)', re.IGNORECASE)
-
-
-def _byte_len(text: str) -> int:
-    return len(text.encode("utf-8"))
 
 
 def _strip_fragment(url: str) -> str:
@@ -274,10 +274,6 @@ def _resolve_charset(raw: bytes, content_type_header: str | None) -> str:
     if meta_match:
         return meta_match.group(1).decode("ascii", errors="ignore")
     return "utf-8"
-
-
-def _sanitize_paragraph_text(text: str) -> str:
-    return _BLANK_RUN_RE.sub("\n", text).strip()
 
 
 class _Node:
@@ -458,7 +454,7 @@ class _Extractor:
         section's `fragment` locator, if any) and returns its index — or
         `None` if `text` sanitized to nothing, in which case no paragraph
         was appended."""
-        text = _sanitize_paragraph_text(text)
+        text = sanitize_paragraph_text(text)
         if not text:
             return None
         index = len(self.paragraphs)
@@ -521,7 +517,7 @@ class _Extractor:
         """Raw text, whitespace UNCOLLAPSED (unlike every other paragraph
         kind) — a `<pre>` block's own line breaks and indentation are
         content, not formatting. Still passed through
-        `_sanitize_paragraph_text` like every paragraph, so an internal
+        `sanitize_paragraph_text` like every paragraph, so an internal
         blank line collapses to a single `\\n` rather than covertly
         splitting into two paragraphs on resplit; this is `<pre>`'s one
         documented fidelity trade-off against that invariant."""
@@ -552,17 +548,13 @@ class _Extractor:
         while self._heading_stack and self._heading_stack[-1][0] >= level:
             self._heading_stack.pop()
         self._heading_stack.append((level, label))
-        breadcrumb = self._fit_breadcrumb([crumb for _, crumb in self._heading_stack])
+        breadcrumb = fit_breadcrumb(
+            [crumb for _, crumb in self._heading_stack],
+            separator=self._heading_separator,
+            max_bytes=MAX_SECTION_BYTES,
+        )
         if breadcrumb is not None:
             self.sections.append(SectionEntry(paragraph=index, section=breadcrumb))
-
-    def _fit_breadcrumb(self, crumbs: list[str]) -> str | None:
-        while crumbs:
-            candidate = self._heading_separator.join(crumbs)
-            if _byte_len(candidate) <= MAX_SECTION_BYTES:
-                return candidate
-            crumbs = crumbs[1:]  # drop the outermost (least specific) ancestor first
-        return None
 
     def _handle_table(self, node: _Node) -> None:
         rows: list[str] = []
@@ -912,10 +904,10 @@ class HtmlConnector:
 
         if not body_text:
             return failure("ocr_required", "no extractable body text after boilerplate removal")
-        if _byte_len(body_text) > MAX_PASSAGE_BYTES:
+        if byte_len(body_text) > MAX_PASSAGE_BYTES:
             return failure(
                 "content_too_large",
-                f"{_byte_len(body_text)} bytes of extracted text exceeds the "
+                f"{byte_len(body_text)} bytes of extracted text exceeds the "
                 f"{MAX_PASSAGE_BYTES}-byte passage cap",
             )
 
