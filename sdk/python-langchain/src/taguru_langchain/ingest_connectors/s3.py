@@ -317,6 +317,28 @@ class S3Connector:
                 )
             )
 
+        def oversized(candidate: FetchedObject) -> ReadResult | None:
+            # The listing's own size is authoritative when it exists (the
+            # pre-fetch check above) — but `read()` (the plain
+            # `Connector`-protocol entry point) synthesizes `size=-1` (no
+            # listing at all), which skips it entirely, and content-type
+            # fallback (below) always fetches before a connector is even
+            # chosen. Re-checking the FETCHED bytes here, at every call
+            # site right after a fetch, is what makes the cap hold
+            # regardless of which path reached it.
+            if len(candidate.body) <= self._max_file_bytes:
+                return None
+            return ReadResult(
+                document=_failure_document(
+                    source,
+                    display_name,
+                    "content_too_large",
+                    f"{len(candidate.body)} bytes exceeds the "
+                    f"{self._max_file_bytes}-byte object cap",
+                    content_type=candidate.content_type,
+                )
+            )
+
         suffix = _suffix_from_key(meta.key)
         connector = _connector_for_suffix(self._connectors, suffix) if suffix else None
         fetched: FetchedObject | None = None
@@ -329,6 +351,9 @@ class S3Connector:
             # the `pdf` extra) still gets one content-type check here
             # rather than assuming the extension is authoritative.
             fetched = self._store.get(meta.key, version_id=meta.version_id)
+            too_large = oversized(fetched)
+            if too_large is not None:
+                return too_large
             content_suffix = _suffix_from_content_type(fetched.content_type)
             if content_suffix is not None:
                 candidate = _connector_for_suffix(self._connectors, content_suffix)
@@ -357,23 +382,9 @@ class S3Connector:
 
         if fetched is None:
             fetched = self._store.get(meta.key, version_id=meta.version_id)
-
-        # The listing's own size is authoritative when it exists — but
-        # `read()` (the plain `Connector`-protocol entry point) synthesizes
-        # `size=-1` (no listing at all), which skips the pre-fetch check
-        # above entirely. Re-check the FETCHED bytes so the cap holds on
-        # every entry point, not only the listing-driven one
-        # `sync_object_storage` itself uses.
-        if len(fetched.body) > self._max_file_bytes:
-            return ReadResult(
-                document=_failure_document(
-                    source,
-                    display_name,
-                    "content_too_large",
-                    f"{len(fetched.body)} bytes exceeds the {self._max_file_bytes}-byte object cap",
-                    content_type=fetched.content_type,
-                )
-            )
+            too_large = oversized(fetched)
+            if too_large is not None:
+                return too_large
 
         tags, tags_dropped = _mapped_tags(self._store, meta.key)
         document = self._delegate(source, display_name, connector, suffix, fetched, tags)

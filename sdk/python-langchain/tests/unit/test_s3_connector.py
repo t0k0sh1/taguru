@@ -145,6 +145,26 @@ def test_missing_extension_and_unresolvable_content_type_is_unsupported() -> Non
     assert store.get_calls == {"data": 1}  # fetched once to consult content-type, never again
 
 
+def test_size_cap_still_applies_on_the_content_type_fallback_fetch() -> None:
+    """The content-type-fallback path (no extension match) fetches BEFORE
+    a connector is even chosen — that fetch must still respect
+    `max_file_bytes`, the same as the listing-driven pre-fetch check and
+    `read()`'s own post-fetch check. A prior fix only guarded the LATTER
+    two call sites, silently reading an oversized, extension-and-
+    content-type-unresolvable object fully into memory before reporting
+    `unsupported_format`. Uses `read()` (size=-1, no listing) so the
+    listing-driven pre-fetch check — which would otherwise catch this
+    100-byte object on its own — cannot mask the fallback-fetch site's own
+    gap."""
+    store = FakeObjectStore("reports")
+    store.put("data", b"x" * 100, content_type="application/octet-stream")
+    connector = S3Connector(store, max_file_bytes=10)
+
+    document = connector.read("s3://reports/data")
+
+    assert document.diagnostics[0].code == "content_too_large"
+
+
 def test_content_too_large_is_reported_without_any_fetch() -> None:
     store = FakeObjectStore()
     store.put("big.txt", b"x" * 100)
