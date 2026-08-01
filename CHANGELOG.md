@@ -8,6 +8,28 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- PDF connector (#348, implementing ADR 0007 §7/§8/§10): `PdfConnector`
+  in `taguru_langchain.ingest_connectors.pdf`, the first standard format
+  connector built on #347's protocol — `pip install
+  "langchain-taguru[pdf]"` for its `pypdf` dependency, kept optional per
+  ADR 0007 §3/§4's packaging decision. Emits one `{"kind": "page",
+  "value": N}` locator per paragraph, derived from the PDF's own page
+  boundaries (never from `taguru extract`'s chunking, ADR 0007 §7.4); its
+  outline (bookmarks), when present, becomes `sections` and the document
+  `title`. No OCR engine ships (ADR 0007 §10): a page whose extracted
+  text falls under a connector-documented, configurable per-page
+  character threshold (`min_chars_per_page`, default 16, after
+  whitespace normalization) is named in an `ocr_required` diagnostic with
+  empty `text` for that page's contribution — never silently passed
+  through as low-quality text — leaving the external OCR adapter
+  boundary to #352. Encrypted PDFs (including those already unlockable
+  with an empty user password) and structurally corrupt PDFs are
+  reported as `encrypted`/`corrupt`, a single page's own decode failure
+  as `partial_extraction` without failing the rest of the document, and
+  a raw file over `max_file_bytes` (default 64 MiB) or extracted text
+  over `MAX_PASSAGE_BYTES` (8 MiB) as `content_too_large` — never a
+  raised exception. No change to `src/`, `http_contract`, or
+  `mcp_contract`.
 - Connector protocol and normalized document contract (#347, implementing
   ADR 0007 §5/§6/§8): a `taguru_langchain.ingest_connectors` submodule
   (no new Rust dependency, no new binary — `langchain-taguru` reuses

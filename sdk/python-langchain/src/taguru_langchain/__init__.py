@@ -8,9 +8,9 @@ Three entry points:
   model decomposes Documents into associations under the protocol's ingest
   discipline, applied via ``POST /import`` (per-source replace, idempotent).
 - :mod:`taguru_langchain.ingest_connectors` (ADR 0007, issue #347) — the
-  normalized document contract standard ingest connectors (``.md``/``.txt``
-  today; PDF/HTML/DOCX/S3 in follow-up issues) produce, and the bridge that
-  feeds a :class:`~taguru_langchain.ingest_connectors.document.
+  normalized document contract standard ingest connectors (``.md``/``.txt``/
+  ``.pdf`` today; HTML/DOCX/S3 in follow-up issues) produce, and the bridge
+  that feeds a :class:`~taguru_langchain.ingest_connectors.document.
   ConnectorDocument` into :class:`TaguruIngester` instead of a bare string.
 
 Deliberately NOT provided: a VectorStore facade (Taguru's retrieval is
@@ -51,6 +51,7 @@ from .ingest_connectors import (
     DiagnosticCode,
     FingerprintInputs,
     LocatorEntry,
+    PdfConnector,
     SectionEntry,
     SourceIdRegistry,
     TextFileConnector,
@@ -98,6 +99,7 @@ __all__ = [
     "DiagnosticCode",
     "FingerprintInputs",
     "LocatorEntry",
+    "PdfConnector",
     "SectionEntry",
     "SourceIdRegistry",
     "TextFileConnector",
