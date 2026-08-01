@@ -50,10 +50,18 @@ class ConnectorCheckpoint:
 
     def load(self, source: str, fingerprint: FingerprintInputs) -> ConnectorDocument | None:
         """Returns the previously checkpointed document for ``source`` only
-        when its ``fingerprint_inputs`` exactly matches ``fingerprint`` —
-        i.e. the raw object is byte-identical to last time under the same
-        parser/parser_version/options. Any mismatch, corruption, or store
-        failure returns ``None``."""
+        when its own ``source`` field matches the one requested AND its
+        ``fingerprint_inputs`` exactly matches ``fingerprint`` — i.e. the
+        raw object is byte-identical to last time under the same
+        parser/parser_version/options. The ``source`` check is not
+        redundant with the namespaced key: a ``CheckpointStore``
+        implementation is only obligated to key by the string it was given
+        (``CheckpointStore``'s own contract, ``checkpoints.py``), not to
+        guarantee no two keys ever resolve to the same stored bytes — two
+        distinct sources whose fetched bytes happen to be byte-identical
+        would otherwise pass the fingerprint check alone and swap
+        checkpoints under a buggy or lossy custom store. Any mismatch,
+        corruption, or store failure returns ``None``."""
         try:
             data = self._store.load(self._key(source))
         except Exception as error:
@@ -70,7 +78,11 @@ class ConnectorCheckpoint:
         except (json.JSONDecodeError, UnicodeDecodeError):
             return None
         document = ConnectorDocument.from_dict(raw)
-        if document is None or document.fingerprint_inputs != fingerprint:
+        if (
+            document is None
+            or document.source != source
+            or document.fingerprint_inputs != fingerprint
+        ):
             return None
         return document
 

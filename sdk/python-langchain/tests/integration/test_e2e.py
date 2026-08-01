@@ -168,16 +168,22 @@ def test_connector_document_round_trips_sections_and_locators_to_citations(
         create_context=True,
         context_description="connector round trip (issue #347)",
     )
-    outcome = ingest_connector_document(ingester, document)
-    assert outcome.ok
-    assert outcome.sections_stored == 1
-    assert outcome.locators_stored == 1
+    try:
+        outcome = ingest_connector_document(ingester, document)
+        assert outcome.ok
+        assert outcome.sections_stored == 1
+        assert outcome.locators_stored == 1
 
-    ctx = client.context("aizome")
-    heading_citation = ctx.cite_passage(document.source, 0)
-    assert heading_citation.section == "藍染工房"
+        ctx = client.context("aizome")
+        heading_citation = ctx.cite_passage(document.source, 0)
+        assert heading_citation.section == "藍染工房"
 
-    located_citation = ctx.cite_passage(document.source, 2)
-    assert located_citation.locator == Locator(kind="page", value="1")
-
-    client.contexts.delete("aizome")
+        located_citation = ctx.cite_passage(document.source, 2)
+        assert located_citation.locator == Locator(kind="page", value="1")
+    finally:
+        # Guaranteed even if an assertion above fails — otherwise "aizome"
+        # is left behind on the shared real server and the next run starts
+        # from create_context=True colliding with an already-existing
+        # context, turning one failure into a second, unrelated one.
+        if client.contexts.exists("aizome"):
+            client.contexts.delete("aizome")

@@ -107,78 +107,60 @@ class TextFileConnector:
         )
 
     def read(self, reference: str) -> ConnectorDocument:
+        # `reference` itself is the source id — mirrors taguru extract's
+        # `path.to_string_lossy()` verbatim (ADR 0007 §6.1), never a
+        # `pathlib.Path`-normalized rewrite of it (Path silently drops a
+        # leading "./", collapses "a//b", ...), which would make the same
+        # caller-given reference mint two different source ids depending on
+        # incidental spelling. `Path(reference)` is still used below, but
+        # only for filesystem access (suffix/stat/read), never for identity.
         path = Path(reference)
-        source = file_source_id(str(path))
+        source = file_source_id(reference)
         display_name = path.name
         is_markdown = path.suffix.lower() == ".md"
         content_type = "text/markdown" if is_markdown else "text/plain"
 
-        source_diagnostic = check_source_id(source)
-        if source_diagnostic is not None:
+        def failure(
+            code: DiagnosticCode, message: str, raw_content_sha256: str = _EMPTY_SHA256
+        ) -> ConnectorDocument:
             return self._failure(
                 source=source,
                 display_name=display_name,
                 content_type=content_type,
-                code=source_diagnostic.code,
-                message=source_diagnostic.message,
-                raw_content_sha256=_EMPTY_SHA256,
+                code=code,
+                message=message,
+                raw_content_sha256=raw_content_sha256,
             )
 
+        source_diagnostic = check_source_id(source)
+        if source_diagnostic is not None:
+            return failure(source_diagnostic.code, source_diagnostic.message)
+
         if not self.supports(reference):
-            return self._failure(
-                source=source,
-                display_name=display_name,
-                content_type=content_type,
-                code="unsupported_format",
-                message=f"unsupported extension {path.suffix!r} (only .md/.txt)",
-                raw_content_sha256=_EMPTY_SHA256,
+            return failure(
+                "unsupported_format", f"unsupported extension {path.suffix!r} (only .md/.txt)"
             )
 
         try:
             size = path.stat().st_size
         except OSError as error:
-            return self._failure(
-                source=source,
-                display_name=display_name,
-                content_type=content_type,
-                code="unreadable",
-                message=str(error),
-                raw_content_sha256=_EMPTY_SHA256,
-            )
+            return failure("unreadable", str(error))
         if size > MAX_PASSAGE_BYTES:
-            return self._failure(
-                source=source,
-                display_name=display_name,
-                content_type=content_type,
-                code="content_too_large",
-                message=f"{size} bytes exceeds the {MAX_PASSAGE_BYTES}-byte passage cap",
-                raw_content_sha256=_EMPTY_SHA256,
+            return failure(
+                "content_too_large",
+                f"{size} bytes exceeds the {MAX_PASSAGE_BYTES}-byte passage cap",
             )
 
         try:
             raw = path.read_bytes()
         except OSError as error:
-            return self._failure(
-                source=source,
-                display_name=display_name,
-                content_type=content_type,
-                code="unreadable",
-                message=str(error),
-                raw_content_sha256=_EMPTY_SHA256,
-            )
+            return failure("unreadable", str(error))
         raw_content_sha256 = hashlib.sha256(raw).hexdigest()
 
         try:
             text = raw.decode("utf-8")
         except UnicodeDecodeError as error:
-            return self._failure(
-                source=source,
-                display_name=display_name,
-                content_type=content_type,
-                code="corrupt",
-                message=str(error),
-                raw_content_sha256=raw_content_sha256,
-            )
+            return failure("corrupt", str(error), raw_content_sha256)
 
         # paragraph.rs::split (and its Python twin, split_paragraphs) do no
         # normalization at all — a leading BOM would otherwise land inside

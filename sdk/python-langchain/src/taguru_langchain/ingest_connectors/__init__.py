@@ -21,9 +21,11 @@ Five pieces, one per file:
 - :class:`Connector` (``protocol.py``) — the structural interface a format
   connector implements, and :class:`TextFileConnector` (``text.py``), the
   reference implementation.
-- :func:`ingest_connector_document`/:func:`ingest_connector_documents` and
-  their async twins (``bridge.py``) — the one-way bridge from a
-  :class:`ConnectorDocument` into ``TaguruIngester.ingest_text``.
+- :func:`ingest_connector_document`/:func:`ingest_connector_documents`
+  (``bridge.py``) — the one-way bridge from a :class:`ConnectorDocument`
+  into ``TaguruIngester.ingest_text``; :func:`aingest_connector_document`/
+  :func:`aingest_connector_documents` are the async twins, bridging into
+  ``TaguruIngester.aingest_text`` instead.
 """
 
 from __future__ import annotations

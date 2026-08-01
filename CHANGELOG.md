@@ -27,9 +27,9 @@ Entries that change an on-disk format or a response shape say so.
   layered over `CheckpointStore` under its own key namespace so it never
   collides with `TaguruIngester`'s own chunk checkpoint. `.md`/`.txt`
   ship as the reference connector (`TextFileConnector`, extracting ATX
-  headings as sections), wired end to end via
-  `ingest_connector_document(s)`/`aingest_connector_document(s)` into
-  `TaguruIngester.ingest_text`'s new `sections=`/`locators=` parameters —
+  headings as sections), wired end to end via `ingest_connector_document(s)`
+  into `TaguruIngester.ingest_text`'s new `sections=`/`locators=`
+  parameters (`aingest_connector_document(s)` into `aingest_text`'s) —
   which, in turn, `IngestOutcome.sections_stored`/`sections_dropped`/
   `locators_stored`/`locators_dropped` now report. ADR 0007 §6.2's
   `locator_digest` addition to `taguru extract`'s own manifest fingerprint

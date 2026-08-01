@@ -4,6 +4,7 @@ and parse this object," composing with — never replacing —
 
 from __future__ import annotations
 
+import json
 import warnings
 from pathlib import Path
 
@@ -66,6 +67,23 @@ def test_load_is_none_on_a_fingerprint_mismatch() -> None:
     checkpoint.save(document)
     mismatched = _fingerprint(raw_content_sha256="different")
     assert checkpoint.load(document.source, mismatched) is None
+
+
+def test_load_is_none_when_the_stored_documents_source_does_not_match() -> None:
+    """A CheckpointStore is only obligated to key by the string it was
+    given (``CheckpointStore``'s own contract) — it is not guaranteed to
+    never return another key's bytes under a different key (a buggy or
+    lossy custom implementation). Two documents whose fetched bytes are
+    byte-identical share a fingerprint, so the fingerprint check alone
+    cannot catch this; the explicit ``document.source`` check does."""
+    document_a = _document(source="a.md")
+    payload = json.dumps(document_a.to_dict()).encode("utf-8")
+    # Seed the store so a lookup under "b.md"'s own key returns "a.md"'s
+    # checkpoint bytes verbatim — simulating a store bug/collision rather
+    # than reproducing one through ConnectorCheckpoint's own key derivation.
+    store = RecordingCheckpointStore(seed={"connector:b.md": payload})
+    checkpoint = ConnectorCheckpoint(store)
+    assert checkpoint.load("b.md", document_a.fingerprint_inputs) is None
 
 
 def test_load_is_none_when_nothing_was_ever_saved() -> None:
