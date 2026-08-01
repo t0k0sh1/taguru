@@ -167,10 +167,10 @@ class TextFileConnector:
         # paragraph 0 verbatim. Mirrors src/extract.rs's read_document.
         text = text.removeprefix("﻿")
 
-        sections: list[SectionEntry] = (
-            self._sections(text) if is_markdown and self._extract_headings else []
-        )
-        title = self._title(text) if is_markdown and self._extract_headings else None
+        sections: list[SectionEntry] = []
+        title: str | None = None
+        if is_markdown and self._extract_headings:
+            sections, title = self._headings(text)
 
         return ConnectorDocument(
             source=source,
@@ -185,32 +185,34 @@ class TextFileConnector:
             fingerprint_inputs=self._fingerprint(raw_content_sha256),
         )
 
-    def _sections(self, text: str) -> list[SectionEntry]:
-        """One entry per paragraph whose ENTIRE content is a single ATX
-        heading line — never a heading sharing a paragraph with body text,
-        since that would require guessing where the heading ends without a
-        blank-line boundary to trust. Paragraph indices are
-        ``split_paragraphs(text)``'s own indices, the exact contract ADR
-        0007 §5 requires (a connector never numbers its own paragraphs)."""
+    def _headings(self, text: str) -> tuple[list[SectionEntry], str | None]:
+        """One pass over ``split_paragraphs(text)`` yielding both the
+        section entries and the title, so a single-line-ATX-heading
+        paragraph is matched against ``_HEADING_RE`` once rather than
+        twice (previously two independent methods, one per result).
+
+        A section entry is one per paragraph whose ENTIRE content is a
+        single ATX heading line — never a heading sharing a paragraph
+        with body text, since that would require guessing where the
+        heading ends without a blank-line boundary to trust. Paragraph
+        indices are ``split_paragraphs(text)``'s own indices, the exact
+        contract ADR 0007 §5 requires (a connector never numbers its own
+        paragraphs).
+
+        The title is the first H1 (``# ...``) heading, if any — evaluated
+        independently of a section entry's ``MAX_SECTION_BYTES`` cap,
+        since a title is metadata, not a citation locator, and carries no
+        wire-level size limit of its own.
+        """
         entries: list[SectionEntry] = []
+        title: str | None = None
         for index, paragraph in enumerate(split_paragraphs(text)):
             match = _HEADING_RE.match(paragraph)
             if match is None:
                 continue
             label = match.group(2).strip()
-            if not label or _byte_len(label) > MAX_SECTION_BYTES:
-                continue
-            entries.append(SectionEntry(paragraph=index, section=label))
-        return entries
-
-    def _title(self, text: str) -> str | None:
-        """The first H1 (``# ...``) heading, if any — ``None`` otherwise.
-        Independent of :meth:`_sections`'s paragraph-indexed entries: a
-        title is metadata, not a citation locator."""
-        for paragraph in split_paragraphs(text):
-            match = _HEADING_RE.match(paragraph)
-            if match is not None and len(match.group(1)) == 1:
-                label = match.group(2).strip()
-                if label:
-                    return label
-        return None
+            if title is None and len(match.group(1)) == 1 and label:
+                title = label
+            if label and _byte_len(label) <= MAX_SECTION_BYTES:
+                entries.append(SectionEntry(paragraph=index, section=label))
+        return entries, title
