@@ -127,13 +127,27 @@ def table_with_nested_cell(
     must still end in a paragraph after a nested ``w:tbl`` (OOXML's own
     content model), so an empty one follows it, exactly as real Word emits
     for this shape."""
-    nested_xml = table(nested_rows)
+    return table_with_nested_cells(rows, nested={at: nested_rows})
+
+
+def table_with_nested_cells(
+    rows: Sequence[Sequence[str]],
+    *,
+    nested: dict[tuple[int, int], Sequence[Sequence[str]]],
+) -> str:
+    """``table(rows)``, except each cell keyed in ``nested`` (0-based
+    ``(row, col)``) holds its own nested ``table(...)`` instead of plain
+    text — one parent table with a nested table in more than one of its own
+    cells, the shape a locator-numbering bug can only surface against
+    (issue #350 review: a nested table's ordinal must count across every
+    cell of its parent, not reset per cell)."""
     row_xml = []
     for row_index, row in enumerate(rows):
         cells = []
         for col_index, cell in enumerate(row):
-            if (row_index, col_index) == at:
-                cells.append(f"<w:tc><w:tcPr/>{nested_xml}<w:p/></w:tc>")
+            nested_rows = nested.get((row_index, col_index))
+            if nested_rows is not None:
+                cells.append(f"<w:tc><w:tcPr/>{table(nested_rows)}<w:p/></w:tc>")
             else:
                 cells.append(f"<w:tc><w:tcPr/><w:p>{_run(cell)}</w:p></w:tc>")
         row_xml.append(f"<w:tr>{''.join(cells)}</w:tr>")

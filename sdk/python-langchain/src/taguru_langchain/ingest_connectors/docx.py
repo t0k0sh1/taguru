@@ -268,8 +268,8 @@ def _build_body(
             for cell in row.cells:
                 if not any(cell._tc is seen._tc for seen in seen_cells):  # noqa: SLF001
                     seen_cells.append(cell)
+        nested_index = 0
         for cell in seen_cells:
-            nested_index = 0
             for item in cell.iter_inner_content():
                 if isinstance(item, _DocxTable):
                     nested_index += 1
@@ -383,12 +383,13 @@ class DocxConnector:
         code: DiagnosticCode,
         message: str,
         raw_content_sha256: str,
+        content_type: str | None = _CONTENT_TYPE,
     ) -> ConnectorDocument:
         return ConnectorDocument(
             source=source,
             text="",
             metadata=ConnectorMetadata(
-                origin_uri=source, display_name=display_name, content_type=_CONTENT_TYPE
+                origin_uri=source, display_name=display_name, content_type=content_type
             ),
             fingerprint_inputs=self._fingerprint(raw_content_sha256),
             diagnostics=(Diagnostic(code=code, message=message, source=source),),
@@ -403,7 +404,11 @@ class DocxConnector:
         display_name = path.name
 
         def failure(
-            code: DiagnosticCode, message: str, raw_content_sha256: str = _EMPTY_SHA256
+            code: DiagnosticCode,
+            message: str,
+            raw_content_sha256: str = _EMPTY_SHA256,
+            *,
+            content_type: str | None = _CONTENT_TYPE,
         ) -> ConnectorDocument:
             return self._failure(
                 source=source,
@@ -411,6 +416,7 @@ class DocxConnector:
                 code=code,
                 message=message,
                 raw_content_sha256=raw_content_sha256,
+                content_type=content_type,
             )
 
         source_diagnostic = check_source_id(source)
@@ -418,8 +424,15 @@ class DocxConnector:
             return failure(source_diagnostic.code, source_diagnostic.message)
 
         if not self.supports(reference):
+            # Unlike every other failure below, the extension mismatch here
+            # is affirmative evidence the file is NOT a DOCX — content_type
+            # stays unclaimed (None), the same posture HtmlConnector's own
+            # `_failure` takes for its own unsupported-format case, rather
+            # than asserting a MIME type this connector has no basis for.
             return failure(
-                "unsupported_format", f"unsupported extension {path.suffix!r} (only .docx)"
+                "unsupported_format",
+                f"unsupported extension {path.suffix!r} (only .docx)",
+                content_type=None,
             )
 
         try:

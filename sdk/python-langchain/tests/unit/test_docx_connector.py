@@ -24,6 +24,7 @@ from .._docx import (  # noqa: E402
     para,
     table,
     table_with_nested_cell,
+    table_with_nested_cells,
     textbox_para,
 )
 
@@ -98,6 +99,26 @@ def test_nested_table_gets_its_own_paragraph_and_dotted_locator(tmp_path: Path) 
         (1, Locator(kind="table", value="1")),
         (2, Locator(kind="table", value="1.1")),
     ]
+
+
+def test_nested_tables_in_different_cells_of_the_same_parent_get_distinct_locators(
+    tmp_path: Path,
+) -> None:
+    """Regression for a numbering bug: a nested table's ordinal must count
+    across every cell of its parent table, not reset to 1 for each cell —
+    otherwise two distinct nested tables can end up sharing one locator
+    value, which would let a citation resolve to the wrong table."""
+    body = para("Intro") + table_with_nested_cells(
+        [["", "B1"], ["A2", ""]],
+        nested={(0, 0): [["NA1"]], (1, 1): [["NB1"]]},
+    )
+    path = _write(tmp_path, "doc.docx", docx_bytes(body))
+    document = DocxConnector().read(str(path))
+
+    assert document.diagnostics == ()
+    values = [entry.locator.value for entry in document.locators]
+    assert len(values) == len(set(values)), f"duplicate locator values: {values}"
+    assert values == ["1", "1.1", "1.2"]
 
 
 def test_multiple_top_level_tables_are_numbered_in_document_order(tmp_path: Path) -> None:
@@ -214,6 +235,11 @@ def test_unsupported_extension_is_reported_without_touching_the_filesystem(
 
     assert document.text == ""
     assert [d.code for d in document.diagnostics] == ["unsupported_format"]
+    # The extension mismatch is affirmative evidence the file isn't a DOCX
+    # — content_type stays unclaimed rather than asserting a MIME type this
+    # connector has no basis for (the same posture HtmlConnector's own
+    # `_failure` already takes).
+    assert document.metadata.content_type is None
 
 
 def test_docm_extension_is_also_unsupported(tmp_path: Path) -> None:
@@ -221,6 +247,20 @@ def test_docm_extension_is_also_unsupported(tmp_path: Path) -> None:
     document = DocxConnector().read(str(path))
 
     assert [d.code for d in document.diagnostics] == ["unsupported_format"]
+    assert document.metadata.content_type is None
+
+
+def test_other_failure_codes_still_claim_the_docx_mime_type(tmp_path: Path) -> None:
+    """Unlike `unsupported_format`, every other failure below happens AFTER
+    the `.docx` extension already matched, so claiming the DOCX MIME type
+    is a reasonable inference from a trusted extension, not asserted
+    fact — kept unchanged by the `unsupported_format` fix above."""
+    document = DocxConnector().read(str(tmp_path / "missing.docx"))
+
+    assert [d.code for d in document.diagnostics] == ["unreadable"]
+    assert document.metadata.content_type == (
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
 
 
 def test_oversized_file_is_reported_without_parsing(tmp_path: Path) -> None:
