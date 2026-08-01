@@ -358,6 +358,23 @@ class S3Connector:
         if fetched is None:
             fetched = self._store.get(meta.key, version_id=meta.version_id)
 
+        # The listing's own size is authoritative when it exists — but
+        # `read()` (the plain `Connector`-protocol entry point) synthesizes
+        # `size=-1` (no listing at all), which skips the pre-fetch check
+        # above entirely. Re-check the FETCHED bytes so the cap holds on
+        # every entry point, not only the listing-driven one
+        # `sync_object_storage` itself uses.
+        if len(fetched.body) > self._max_file_bytes:
+            return ReadResult(
+                document=_failure_document(
+                    source,
+                    display_name,
+                    "content_too_large",
+                    f"{len(fetched.body)} bytes exceeds the {self._max_file_bytes}-byte object cap",
+                    content_type=fetched.content_type,
+                )
+            )
+
         tags, tags_dropped = _mapped_tags(self._store, meta.key)
         document = self._delegate(source, display_name, connector, suffix, fetched, tags)
         return ReadResult(document=document, tags_dropped=tags_dropped)
@@ -548,6 +565,8 @@ def _handle_deletions(
     store: ObjectStore,
     prefix: str,
     checkpoints: CheckpointStore,
+    object_checkpoint: S3ObjectCheckpoint,
+    connector_checkpoint: ConnectorCheckpoint,
     ingester: TaguruIngester,
     seen_sources: frozenset[str],
     listing_completed: bool,
@@ -563,6 +582,16 @@ def _handle_deletions(
     prior = _load_inventory(checkpoints, store, prefix)
     deleted: frozenset[str] = (prior - seen_sources) if prior is not None else frozenset()
 
+    def retract(source: str) -> None:
+        context.retract_source(source)
+        # Without this, an object deleted then recreated elsewhere with
+        # the SAME (size, last_modified) — the fingerprint tier a
+        # non-versioned bucket falls back to — would read as "unchanged"
+        # on the very next pass (Layer 1) and never be re-ingested, even
+        # though the server no longer has its passage at all.
+        object_checkpoint.delete(source)
+        connector_checkpoint.delete(source)
+
     retracted = 0
     needs_context = deleted and deletion_policy in ("retract", "mirror")
     if needs_context or (deletion_policy == "mirror" and listing_completed):
@@ -574,7 +603,7 @@ def _handle_deletions(
             )
         context = ingester.client.context(ingester.context)
         for source in deleted:
-            context.retract_source(source)
+            retract(source)
             retracted += 1
         if deletion_policy == "mirror" and listing_completed:
             # Beyond the inventory diff (which only sees what THIS
@@ -586,7 +615,7 @@ def _handle_deletions(
             for source in context.iter_sources(prefix=mirror_prefix):
                 if source in seen_sources or source in deleted:
                     continue
-                context.retract_source(source)
+                retract(source)
                 retracted += 1
 
     if listing_completed:
@@ -622,11 +651,14 @@ def sync_object_storage(
     actual source list under this prefix, self-healing even without a
     prior inventory.
 
-    ``dry_run`` reports ``discovered``/would-be-``parsed``/``unchanged``
-    without any fetch, parse, ingest, or checkpoint/inventory write — S3's
-    own listing already carries ADR 0007 §9's fingerprint fields, so
-    ``unchanged`` is exactly as reliable here as on a real run (ADR 0007
-    §11).
+    ``dry_run`` tallies every listed object as would-be-``parsed`` or
+    ``unchanged`` — never ``discovered``, since :class:`S3SyncReport`'s
+    counts reflect each source's LAST phase only; the full ``discovered``
+    → ``parsed``/``unchanged`` transition is still visible in ``events``.
+    Nothing is fetched, parsed, ingested, or written to the checkpoint/
+    inventory store. S3's own listing already carries ADR 0007 §9's
+    fingerprint fields, so ``unchanged`` is exactly as reliable here as on
+    a real run (ADR 0007 §11).
     """
     if deletion_policy not in _DELETION_POLICIES:
         raise ValueError(f"deletion_policy must be one of {sorted(_DELETION_POLICIES)}")
@@ -780,6 +812,8 @@ def sync_object_storage(
         store=store,
         prefix=prefix,
         checkpoints=checkpoints,
+        object_checkpoint=object_checkpoint,
+        connector_checkpoint=connector_checkpoint,
         ingester=ingester,
         seen_sources=frozenset(seen_sources),
         listing_completed=listing_completed,

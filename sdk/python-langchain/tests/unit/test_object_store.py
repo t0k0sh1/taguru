@@ -283,6 +283,25 @@ def test_list_uses_list_object_versions_when_versioning_is_enabled() -> None:
     assert metas[0].version_id == "v2"
 
 
+def test_list_raises_permanent_not_not_found_for_a_missing_bucket() -> None:
+    """A missing bucket is a configuration error (a typo, a bucket never
+    created), not one object vanishing mid-pass — `NoSuchBucket` must
+    classify as `PermanentStoreError`, never `ObjectNotFoundError`, which
+    `ObjectStore.list`'s own contract promises it never raises."""
+    pytest.importorskip("boto3")
+    store, stubber = _stubbed_store()
+    # `_versioning_enabled()` degrades ANY `get_bucket_versioning` failure
+    # to "assume not versioned" (a narrower, unrelated permission) — the
+    # bucket-missing error a real deployment would hit surfaces from the
+    # actual listing call itself, `list_objects_v2`.
+    stubber.add_response("get_bucket_versioning", {}, {"Bucket": "test-bucket"})
+    stubber.add_client_error(
+        "list_objects_v2", service_error_code="NoSuchBucket", http_status_code=404
+    )
+    with stubber, pytest.raises(PermanentStoreError):
+        list(store.list(""))
+
+
 def test_get_bucket_versioning_failure_degrades_to_the_plain_listing() -> None:
     """ANY failure checking versioning status (a narrower permission than
     listing itself needs) must not fail the whole listing — it degrades to

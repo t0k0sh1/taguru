@@ -241,12 +241,13 @@ print(report.discovered, report.imported, report.failed, report.deleted_detected
 ```
 
 Re-running the same call is cheap twice over: an object whose bucket-listing
-metadata (version id / content hash / size+last-modified — never a bare
-`ETag`, which some S3-compatible stores compute in a way that isn't a
-reliable content hash) is unchanged from last time is never even fetched;
-one whose bytes are unchanged despite a metadata bump (a tag edit, a
-copy-in-place) is fetched but never re-ingested. Both checkpoints live in
-the same `checkpoints` store passed above — no second store to configure.
+metadata (version id / content hash / size+last-modified, with a bare
+`ETag` only as the last resort — some S3-compatible stores compute it in a
+way that isn't a reliable content hash) is unchanged from last time is
+never even fetched; one whose bytes are unchanged despite a metadata bump
+(a tag edit, a copy-in-place) is fetched but never re-ingested. Both
+checkpoints live in the same `checkpoints` store passed above — no second
+store to configure.
 
 Deleted objects are never retracted by default — `report.deleted_detected`
 names them, but nothing changes in `taguru` until you opt in explicitly:
@@ -268,9 +269,10 @@ end-to-end check outside CI:
 
 ```sh
 docker run -d -p 9000:9000 -e MINIO_ROOT_USER=test -e MINIO_ROOT_PASSWORD=testtest quay.io/minio/minio server /data
+export AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=testtest AWS_DEFAULT_REGION=us-east-1
 python -c "
 import boto3
-c = boto3.client('s3', endpoint_url='http://localhost:9000', aws_access_key_id='test', aws_secret_access_key='testtest')
+c = boto3.client('s3', endpoint_url='http://localhost:9000')
 c.create_bucket(Bucket='reports')
 c.put_object(Bucket='reports', Key='q1.pdf', Body=open('q1.pdf', 'rb').read())
 "

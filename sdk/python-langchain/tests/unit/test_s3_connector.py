@@ -10,6 +10,7 @@ from __future__ import annotations
 import dataclasses
 import io
 import json
+from datetime import datetime, timezone
 
 import pytest
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
@@ -211,6 +212,20 @@ def test_read_via_the_plain_connector_protocol_entry_point() -> None:
     assert document.source == "s3://reports/a.md"
 
 
+def test_read_enforces_max_file_bytes_even_without_a_listing() -> None:
+    """`read()` synthesizes `size=-1` (no `ObjectMeta` from a real listing),
+    which skips the pre-fetch size check entirely — the cap must still
+    hold via a post-fetch check, or `read()` could pull an object of any
+    size fully into memory."""
+    store = FakeObjectStore("reports")
+    store.put("big.txt", b"x" * 100)
+    connector = S3Connector(store, max_file_bytes=10)
+
+    document = connector.read("s3://reports/big.txt")
+
+    assert document.diagnostics[0].code == "content_too_large"
+
+
 def test_parse_options_digest_is_stable_and_reflects_config() -> None:
     store = FakeObjectStore()
     a = S3Connector(store, max_file_bytes=1024)
@@ -337,6 +352,37 @@ def test_deletion_retract_policy_withdraws_only_the_detected_deletion(
     assert report.deleted_detected == 1
     assert report.retracted == 1
     assert fake_server.retracted == ["s3://reports/b.md"]
+
+
+def test_retract_clears_both_checkpoints_so_a_recreated_object_is_reimported(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    """Without clearing `S3ObjectCheckpoint`/`ConnectorCheckpoint` on
+    retract, a non-versioned bucket's object deleted then recreated
+    elsewhere with the SAME (size, last_modified) — the fingerprint tier
+    that combination falls back to — would read as `unchanged` on the
+    very next pass and never be re-ingested, even though the server no
+    longer has its passage at all."""
+    store = FakeObjectStore("reports")
+    same_when = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store.put("a.md", b"alpha", last_modified=same_when)
+    checkpoints = RecordingCheckpointStore()
+    ingester = _ingester(sync_client, async_client)
+
+    sync_object_storage(store, "", ingester=ingester, checkpoints=checkpoints)
+    store.delete("a.md")
+    sync_object_storage(
+        store, "", ingester=ingester, checkpoints=checkpoints, deletion_policy="retract"
+    )
+    assert fake_server.retracted == ["s3://reports/a.md"]
+
+    # Recreated with the exact same size and last_modified a non-versioned
+    # bucket's fingerprint falls back to — the false-"unchanged" scenario.
+    store.put("a.md", b"alpha", last_modified=same_when)
+    report = sync_object_storage(store, "", ingester=ingester, checkpoints=checkpoints)
+
+    assert report.imported == 1
+    assert len(fake_server.imported) == 2
 
 
 def test_deletion_mirror_policy_self_heals_even_without_a_prior_inventory(

@@ -266,19 +266,31 @@ _PERMANENT_ERROR_CODES: Final = frozenset(
         "UnauthorizedAccess",
         "AccountProblem",
         "InvalidSecurity",
+        # A missing bucket is a configuration error (a typo, a bucket
+        # never created), not one object vanishing mid-pass — it must
+        # NOT be classified as `ObjectNotFoundError`, which `list()`'s own
+        # contract promises never to raise (below).
+        "NoSuchBucket",
     }
 )
 
-_NOT_FOUND_ERROR_CODES: Final = frozenset({"NoSuchKey", "NoSuchVersion", "NoSuchBucket", "404"})
+_NOT_FOUND_ERROR_CODES: Final = frozenset({"NoSuchKey", "NoSuchVersion", "404"})
 
 
 def _classify_client_error(error: ClientError) -> Exception:
     response = getattr(error, "response", {}) or {}
     code = response.get("Error", {}).get("Code", "")
     status = response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+    # Code-based permanent classification (`NoSuchBucket` included) wins
+    # over the blanket "status == 404" not-found check below — S3 answers
+    # a missing bucket with HTTP 404 too, and a bare status code alone
+    # cannot distinguish "this bucket doesn't exist" from "this object
+    # doesn't exist."
+    if code in _PERMANENT_ERROR_CODES:
+        return PermanentStoreError(str(error))
     if code in _NOT_FOUND_ERROR_CODES or status == 404:
         return ObjectNotFoundError(str(error))
-    if code in _PERMANENT_ERROR_CODES or status in (401, 403):
+    if status in (401, 403):
         return PermanentStoreError(str(error))
     return TransientStoreError(str(error))
 
@@ -447,8 +459,10 @@ def open_object_store(
 ) -> tuple[ObjectStore, str]:
     """Opens the store ``url`` names, mirroring `src/ship.rs:176`'s own
     ``open_store`` in shape: parse the URL, dispatch on scheme, return
-    ``(store, prefix)`` — the prefix is the URL's own path, so a caller
-    lists ``store.list(prefix)`` to enumerate exactly what the URL named.
+    ``(store, prefix)`` — a caller lists ``store.list(prefix)`` to
+    enumerate exactly what the URL named. For ``s3://`` the prefix is the
+    URL's own path (the bucket is the netloc); for ``file://`` the whole
+    path IS the bucket directory, so the prefix is always ``""``.
     ``endpoint_url``/``region_name``/``profile_name`` apply to ``s3://``
     only (an S3-compatible endpoint, or a non-default region/profile) and
     are rejected for ``file://``, which has no such concept."""

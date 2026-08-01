@@ -242,11 +242,21 @@ class FakeServer:
             limit_raw = params.get("limit")
             limit = int(limit_raw) if limit_raw is not None else None
             candidates = sorted(s for s in self.sources if prefix is None or s.startswith(prefix))
+            # `total` is the prefix-filtered count, BEFORE `after`/`limit`
+            # slice it down for this one page — matching the real server's
+            # own SourcePage contract (src/api/sources.rs).
+            total = len(candidates)
             if after is not None:
                 candidates = [s for s in candidates if s > after]
             if limit is not None:
                 candidates = candidates[:limit]
-            return ok({"total": len(self.sources), "sources": candidates, "entries": []})
+            return ok(
+                {
+                    "total": total,
+                    "sources": candidates,
+                    "entries": [{"name": source} for source in candidates],
+                }
+            )
         if path == "/import":
             if self.fail_import:
                 return httpx.Response(
