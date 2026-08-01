@@ -8,6 +8,36 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- HTML connector (#349, implementing ADR 0007 §7/§8): `HtmlConnector` in
+  `taguru_langchain.ingest_connectors.html`, reading both a local
+  `.html`/`.htm`/`.xhtml` file and an `http(s)://` URL fetch (via `httpx`,
+  now a direct dependency of `langchain-taguru` — already transitive
+  through `taguru`) — no new optional extra, parsing is stdlib
+  `html.parser` only. Boilerplate (script/style/nav/aside/hidden regions,
+  and a page's own header/footer when no `<main>`/`<article>` scopes the
+  content) is stripped before `text` is built; the heading hierarchy
+  survives as a breadcrumb `section` per paragraph (`"Guide >
+  Installation"`, since `sections` is flat); and each heading's own `id`
+  (or its nearest `id`-bearing ancestor's) becomes a `{"kind": "fragment",
+  "value": ...}` locator on every paragraph up to the next heading —
+  combined with `metadata.canonical_url`, a citation can point at a real
+  in-page deep link. A URL fetch's source id is the *final*,
+  fragment-stripped, canonicalized URL (ADR 0007 §6.1); a page's own
+  `<link rel="canonical">`, when present, only ever populates
+  `metadata.canonical_url`, never substituted for the source id itself,
+  since a page can claim any canonical and two distinct pages claiming the
+  same one would otherwise collide. A page left with no extractable text
+  after boilerplate removal (image-only, an unrendered JS-shell SPA) is
+  reported `ocr_required` with empty `text`; a non-2xx response, a
+  non-HTML `Content-Type`, a raw body over `max_file_bytes` (streamed,
+  refused mid-fetch), or a fetch timeout are each their own diagnostic
+  (`unreadable`/`unsupported_format`/
+  `content_too_large`) — never a raised exception. An `<iframe>`/`<frame>`
+  whose content was not fetched is named in a `partial_extraction`
+  diagnostic rather than silently dropped. Nested `<table>`s and a
+  `{"kind": "table"}` locator are out of scope for this connector (ADR
+  0007 §7.3's table locator is left to a future revision). No change to
+  `src/`, `http_contract`, or `mcp_contract`.
 - PDF connector (#348, implementing ADR 0007 §7/§8/§10): `PdfConnector`
   in `taguru_langchain.ingest_connectors.pdf`, the first standard format
   connector built on #347's protocol — `pip install
