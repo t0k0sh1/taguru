@@ -14,7 +14,6 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::extract::{MatchedPath, Request, State};
-use axum::http::Method;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
@@ -345,7 +344,14 @@ impl SearchOp {
         SearchOp::Explore,
     ];
 
-    fn as_str(self) -> &'static str {
+    /// `pub(crate)`: also `taguru.op`'s source of truth on the spans
+    /// this vocabulary lines up with (`taguru.passage_search` and its
+    /// server-composed siblings, ADR 0008 §6). `src/mcp/retrieve.rs`
+    /// cannot call this directly — it is dual-included into the stdio
+    /// bridge, which has no `metrics` module — so its own phase spans
+    /// copy the same string literals instead; this stays the one place
+    /// that would fail to compile if the two ever drifted apart.
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             SearchOp::Resolve => "resolve",
             SearchOp::ResolveLabel => "resolve_label",
@@ -432,7 +438,11 @@ impl SemanticCacheOutcome {
         SemanticCacheOutcome::Miss,
     ];
 
-    fn as_str(self) -> &'static str {
+    /// `pub(crate)`, not private: also the `taguru.cache.semantic` span
+    /// attribute's source of truth (ADR 0008 §6) — one vocabulary for
+    /// both the Prometheus label and the span, never a parallel
+    /// spelling.
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             SemanticCacheOutcome::Hit => "hit",
             SemanticCacheOutcome::Stale => "stale",
@@ -2054,7 +2064,7 @@ pub async fn track_http(
     request: Request,
     next: Next,
 ) -> Response {
-    let method = normalized_method(request.method());
+    let method = crate::trace::normalized_method(request.method());
     let route = matched
         .as_ref()
         .map(|matched| matched.as_str().to_string())
@@ -2086,7 +2096,7 @@ pub async fn track_http(
     let started = Instant::now();
 
     let (response, trace_id) = if crate::trace::enabled() {
-        traced_request(method, &route, request, next).await
+        crate::trace::traced_request(method, &route, request, next).await
     } else {
         (next.run(request).await, None)
     };
@@ -2137,75 +2147,6 @@ pub async fn track_http(
         ),
     }
     response
-}
-
-/// Runs the request inside an OTel server span. Span name and
-/// attributes follow HTTP semconv (`{method} {route}`, method only
-/// when unmatched); a 5xx marks the span as an error, a 4xx does not —
-/// for a server, a client's mistake is a normal outcome.
-/// Folds a request method to a fixed set of `&'static str` labels. RFC
-/// 9110 leaves the method an open token, so an unauthenticated client
-/// can send an unbounded stream of distinct extension methods; keyed
-/// straight into the metrics map (or a span name) each would mint a new
-/// series. Anything outside the standard set collapses to `<other>`,
-/// mirroring how the route collapses to `<unmatched>`.
-fn normalized_method(method: &Method) -> &'static str {
-    match *method {
-        Method::GET => "GET",
-        Method::POST => "POST",
-        Method::PUT => "PUT",
-        Method::DELETE => "DELETE",
-        Method::PATCH => "PATCH",
-        Method::HEAD => "HEAD",
-        Method::OPTIONS => "OPTIONS",
-        Method::TRACE => "TRACE",
-        Method::CONNECT => "CONNECT",
-        _ => "<other>",
-    }
-}
-
-async fn traced_request(
-    method: &str,
-    route: &str,
-    request: Request,
-    next: Next,
-) -> (Response, Option<String>) {
-    use tracing::Instrument as _;
-    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
-
-    let span = tracing::info_span!(
-        "request",
-        otel.name = %if route == "<unmatched>" {
-            method.to_string()
-        } else {
-            format!("{method} {route}")
-        },
-        otel.kind = "server",
-        http.request.method = %method,
-        http.route = %route,
-        url.path = %request.uri().path(),
-        http.response.status_code = tracing::field::Empty,
-        otel.status_code = tracing::field::Empty,
-    );
-    // Only fails without an export layer, and we only run when one is
-    // installed.
-    let _ = span.set_parent(crate::trace::extract_parent(request.headers()));
-    let trace_id = {
-        use opentelemetry::trace::TraceContextExt as _;
-        span.context().span().span_context().trace_id().to_string()
-    };
-
-    let response = next.run(request).instrument(span.clone()).await;
-
-    // i64 keeps the attribute an OTLP int — a bare u16 records as text.
-    span.record(
-        "http.response.status_code",
-        i64::from(response.status().as_u16()),
-    );
-    if response.status().is_server_error() {
-        span.record("otel.status_code", "ERROR");
-    }
-    (response, Some(trace_id))
 }
 
 /// GET /live: pure liveness — 200 for as long as the process answers
@@ -2715,19 +2656,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn nonstandard_methods_fold_to_a_single_label() {
-        // Standard methods keep their identity...
-        assert_eq!(normalized_method(&Method::GET), "GET");
-        assert_eq!(normalized_method(&Method::DELETE), "DELETE");
-        // ...but an extension-method token — which a client can mint
-        // without bound, ahead of auth — collapses to one series rather
-        // than growing the metrics map per distinct value.
-        let weird = Method::from_bytes(b"M0001").unwrap();
-        assert_eq!(normalized_method(&weird), "<other>");
-        let also = Method::from_bytes(b"FROBNICATE").unwrap();
-        assert_eq!(normalized_method(&also), "<other>");
-    }
+    // `normalized_method` itself now lives in `src/trace.rs` (moved
+    // alongside `traced_request`, ADR 0008 §5) — its own test moved
+    // with it.
 
     #[test]
     fn render_is_deterministic_with_sorted_dynamic_keys() {

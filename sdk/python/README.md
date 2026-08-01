@@ -36,6 +36,33 @@ durable write.
 contract is the server's own protocol document — read it from the deployment
 you target: `client.protocol()` (`GET /protocol`).
 
+## Tracing
+
+`retrieve()` composes a client-side loop the same way the server's own
+`retrieve` MCP tool does — resolve → describe → query → activate → citations
+→ passage fallback. Optionally trace it as one OpenTelemetry span tree,
+`taguru.retrieve` with a child span per phase, joined to the server's own
+request span through injected `traceparent`/`tracestate` headers:
+
+```sh
+pip install "taguru[otel]"  # pulls in opentelemetry-api; core install stays dependency-free otherwise
+```
+
+```python
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry import trace
+
+trace.set_tracer_provider(TracerProvider())  # wire up whichever exporter you use — the SDK just emits spans
+```
+
+With no `TracerProvider` configured (or `opentelemetry-api` not installed at
+all), every tracing call in the SDK is a silent no-op — nothing about
+`retrieve()`'s behavior or return value changes either way. See
+[Tracing](https://t0k0sh1.github.io/taguru/tracing.html) for the full span
+tree, the attribute/event vocabulary (shared with the TypeScript SDK via
+`sdk/spec/tracing.yaml`), and the privacy rules (spans carry counts, flags,
+and closed reason codes — never cue text, labels, or passage content).
+
 See the repository's `sdk/` directory for the full documentation, the
 LangChain integration (`langchain-taguru`), and the cross-language surface
 spec.

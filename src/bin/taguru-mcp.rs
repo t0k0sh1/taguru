@@ -22,6 +22,8 @@
 
 #[path = "../mcp.rs"]
 mod mcp;
+#[path = "../trace.rs"]
+mod trace;
 
 use std::collections::HashMap;
 use std::io::{BufRead, Read, Write};
@@ -45,7 +47,42 @@ const FALLBACK_INSTRUCTIONS: &str = include_str!("../llm-protocol.md");
 /// realistic `recall`/`retrieve`/`export` result should ever reach it.
 const BRIDGE_RESPONSE_CAP_BYTES: u64 = 1024 * 1024 * 1024;
 
+/// The bridge's own tracing subscriber (ADR 0008 §8). stdout is the
+/// MCP frame stream, so logs — like `eprintln!` throughout this file —
+/// go to stderr; `RUST_LOG` still overrides. Default level is `warn`,
+/// not `info`: this process' only current output is the `eprintln!`
+/// diagnostics scattered through this file, and flipping the default
+/// to `info` would put a line in the operator's MCP client log for
+/// every tool call. The OTLP layer keeps its own INFO floor (matching
+/// `taguru::main::init_telemetry`), so spans export regardless of
+/// what the stderr log level is set to. No tokio runtime is needed
+/// here: `opentelemetry-otlp` is built with `reqwest-blocking-client`,
+/// and `SdkTracerProvider`'s batch processor owns its own thread.
+fn init_telemetry() -> Option<opentelemetry_sdk::trace::SdkTracerProvider> {
+    use tracing_subscriber::Layer as _;
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+
+    let filter = tracing_subscriber::EnvFilter::try_from_env("RUST_LOG")
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
+    let (provider, exporter_error) = trace::provider();
+    let otel_layer = provider.as_ref().map(trace::otel_layer);
+    tracing_subscriber::registry()
+        .with(otel_layer)
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(std::io::stderr)
+                .with_filter(filter),
+        )
+        .init();
+    if let Some(error) = exporter_error {
+        eprintln!("taguru-mcp: span export disabled: the OTLP exporter failed to build: {error}");
+    }
+    provider
+}
+
 fn main() {
+    let tracer_provider = init_telemetry();
     let base = std::env::var("TAGURU_URL").unwrap_or_else(|_| "http://127.0.0.1:8248".to_string());
     let token = std::env::var("TAGURU_API_TOKEN").ok();
     if token.is_none() {
@@ -254,6 +291,10 @@ fn main() {
                 // this reuse can never erase a cancellation already
                 // recorded against it.
                 active_by_id.lock().insert(response_id.clone(), seq);
+                // Read while `message` is still in scope — classified
+                // above into `id`/`name`/`arguments`, which do not
+                // carry `_meta`.
+                let trace_headers = mcp::meta_trace_headers(&message);
                 // Non-blocking, not `send`: this loop is also the only
                 // reader of `notifications/cancelled` for every already-
                 // queued call, so blocking here for queue room would
@@ -268,6 +309,7 @@ fn main() {
                     seq,
                     name,
                     arguments,
+                    trace_headers,
                 }) {
                     Ok(()) => {}
                     Err(mpsc::TrySendError::Full(job) | mpsc::TrySendError::Disconnected(job)) => {
@@ -301,6 +343,14 @@ fn main() {
     for worker in workers {
         let _ = worker.join();
     }
+    // Without this, every span from the last batch window is lost at
+    // EOF — the provider's own batch processor has no other trigger to
+    // flush on for a process that just exits (ADR 0008 §8).
+    if let Some(provider) = tracer_provider
+        && let Err(error) = provider.shutdown()
+    {
+        eprintln!("taguru-mcp: trace export flush on shutdown failed: {error}");
+    }
 }
 
 /// One queued `tools/call` dispatch, handed from the stdio loop to
@@ -313,6 +363,13 @@ struct ToolJob {
     seq: u64,
     name: String,
     arguments: Value,
+    /// This call's inbound trace context, if the client attached one
+    /// via `params._meta` (ADR 0008 §10). Carried as the raw headers
+    /// rather than a resolved `opentelemetry::Context`: per-job data
+    /// cannot be confused between concurrent workers the way any
+    /// shared or thread-local state could, and parsing it is one
+    /// call's worth of work either way.
+    trace_headers: http::HeaderMap,
 }
 
 /// Runs on one of the pool's fixed worker threads: pulls jobs off the
@@ -328,11 +385,35 @@ fn run_tool_worker(
         let Ok(job) = job_rx.lock().recv() else {
             return;
         };
+
+        // One `taguru.tool_call` span per dispatch — the stdio side's
+        // twin of `POST /mcp`'s request span (ADR 0008 §5). The
+        // advertised tool set is closed (`mcp::tools_result`), so
+        // `taguru.tool` is bounded cardinality, unlike an HTTP method.
+        // Parented from `job.trace_headers` (`params._meta`, §10) when
+        // the client attached one; otherwise this starts a fresh
+        // trace, same as any other root span.
+        use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+        let span = trace::span!(
+            "taguru.tool_call",
+            otel.kind = "server",
+            otel.name = %format!("mcp.tools/call {}", job.name),
+            taguru.transport = "stdio_mcp",
+            taguru.tool = %job.name,
+            taguru.result.bytes = tracing::field::Empty,
+            taguru.error.kind = tracing::field::Empty,
+            otel.status_code = tracing::field::Empty,
+        );
+        let _ = span.set_parent(trace::extract_parent(&job.trace_headers));
+        let _guard = span.enter();
+
         // A cancel that landed while this call was still queued skips
         // it entirely: no request sent for a reply nothing is waiting
         // on.
         if take_cancelled(tracked_calls, job.seq) {
             clear_active(active_by_id, &job.response_id, job.seq);
+            span.record("otel.status_code", "ERROR");
+            span.record("taguru.error.kind", "cancelled");
             continue;
         }
         let outcome = dispatch_tool(bridge, &job.name, &job.arguments);
@@ -342,8 +423,19 @@ fn run_tool_worker(
         // client.
         if take_cancelled(tracked_calls, job.seq) {
             clear_active(active_by_id, &job.response_id, job.seq);
+            span.record("otel.status_code", "ERROR");
+            span.record("taguru.error.kind", "cancelled");
             continue;
         }
+        match &outcome {
+            Ok(text) => {
+                span.record("taguru.result.bytes", text.len());
+            }
+            Err(error) => {
+                span.record("otel.status_code", "ERROR");
+                span.record("taguru.error.kind", mcp::error_kind(&error.text));
+            }
+        };
         // Finished clean: drop the tracking entry so a LATER message
         // that reuses this id (ids are caller-chosen, not guaranteed
         // unique across a session) starts untracked instead of
@@ -627,6 +719,14 @@ impl Bridge {
         if let Some(token) = &self.token {
             request = request.header("Authorization", format!("Bearer {token}"));
         }
+        // The current span — the tool-call root, or, inside
+        // `retrieve`, whichever phase span issued this dispatch —
+        // is what makes the server's own request span land under
+        // the right phase across the stdio hop (ADR 0008 §10). A
+        // no-op with export off or a builder already in error.
+        if let Some(headers) = request.headers_mut() {
+            trace::inject_current(headers);
+        }
         // Both arms run to completion inside the match: a bodiless GET
         // and a JSON POST are differently typed requests in ureq 3.
         let response = match body {
@@ -658,6 +758,7 @@ impl Bridge {
                 // request URI) with no actionable meaning to an
                 // operator anyway.
                 eprintln!("taguru-mcp: request to the configured taguru server failed");
+                tracing::info!(taguru.reason = "bridge_unreachable", "taguru.degrade");
                 "failed to reach the taguru server".to_string()
             })
             .map_err(mcp::ToolError::from)?;
@@ -950,6 +1051,7 @@ mod tests {
                     seq,
                     name: "not-a-real-tool".to_string(),
                     arguments: serde_json::json!({}),
+                    trace_headers: http::HeaderMap::new(),
                 })
                 .unwrap();
         }

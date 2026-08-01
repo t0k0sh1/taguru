@@ -50,6 +50,7 @@
     <div class="side-group">
       <div class="side-group-label">How it works</div>
       <a href="architecture.html">Internal architecture</a>
+      <a href="tracing.html">Tracing</a>
       <a href="mcp-rag-walkthrough.html">MCP walkthrough</a>
       <a href="local-rag-walkthrough.html">Local RAG walkthrough</a>
     </div>
@@ -142,6 +143,8 @@ taguru version</code></pre>
       Observability (<code>RUST_LOG</code>, <code>TAGURU_LOG_FORMAT=json</code>, <code>OTEL_EXPORTER_OTLP_ENDPOINT</code>,
       search logging via <code>TAGURU_LOG_SEARCHES</code>) and the caps (<code>TAGURU_MAX_BODY_BYTES</code> and friends)
       are covered in <a href="architecture.html">Internal architecture</a>. The full list is <code>taguru --help</code>.
+      <code>OTEL_EXPORTER_OTLP_ENDPOINT</code> turns on the composed retrieval span tree specifically —
+      see <a href="tracing.html">Tracing</a>.
     </p>
   </section>
 

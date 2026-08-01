@@ -57,6 +57,7 @@ import type {
   VocabularyAudit,
 } from "./models.js";
 import { citationKey, crossMatchCursor, matchCursor } from "./models.js";
+import * as tracing from "./tracing.js";
 import {
   DEFAULT_RETRIES,
   type RetryClass,
@@ -274,6 +275,7 @@ export class Taguru {
       }
     }
     const headers: Record<string, string> = { ...this.headers };
+    await tracing.injectHeaders(headers);
     let body: string | Uint8Array | undefined = options.content;
     if (options.jsonBody !== undefined) {
       body = JSON.stringify(options.jsonBody);
@@ -1401,6 +1403,7 @@ export class Context {
     // too. `streamUrl` is synchronous, so it can't hide this itself.
     await this.client.ensureContract();
     const { url, headers, fetchImpl, timeoutSecs } = this.client.streamUrl(`${this.path}/export`);
+    await tracing.injectHeaders(headers);
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const arm = (): void => {
@@ -1568,99 +1571,150 @@ export class Context {
     const fetchCitations = options.fetch_citations ?? true;
     const onlyIfEmpty = options.text_fallback_only_if_empty ?? true;
 
-    const resolved: Record<string, TieredResolution[]> = {};
-    const anchors: string[] = [];
-    for (const cue of cues) {
-      const candidates = await this.resolve(cue, {
-        dice_floor: options.dice_floor,
-        semantic_floor: options.semantic_floor,
-        limit: options.resolve_limit,
+    return tracing.span(tracing.ROOT_SPAN, async (root) => {
+      root.count(tracing.ATTR_ORIGIN_COUNT, cues.length);
+      const resolved: Record<string, TieredResolution[]> = {};
+      const anchors: string[] = [];
+      await tracing.span(tracing.SPAN_RESOLVE, async () => {
+        for (const cue of cues) {
+          const candidates = await this.resolve(cue, {
+            dice_floor: options.dice_floor,
+            semantic_floor: options.semantic_floor,
+            limit: options.resolve_limit,
+          });
+          resolved[cue] = candidates;
+          const picked = autoPick ? candidates[0]?.name : cue;
+          if (picked !== undefined && !anchors.includes(picked)) {
+            anchors.push(picked);
+          }
+        }
       });
-      resolved[cue] = candidates;
-      const picked = autoPick ? candidates[0]?.name : cue;
-      if (picked !== undefined && !anchors.includes(picked)) {
-        anchors.push(picked);
-      }
-    }
+      root.count(tracing.ATTR_ANCHOR_COUNT, anchors.length);
 
-    const outline: Record<string, ConceptDescription | null> = {};
-    if (describeFirst) {
-      for (const anchor of anchors) {
-        outline[anchor] = await this.describe(anchor);
-      }
-    }
-
-    let activations: Activation[] = [];
-    const associations: Association[] = [];
-    const seenTriples = new Set<string>();
-    const tripleKey = (a: Association) => `${a.subject}\u0000${a.label}\u0000${a.object}`;
-    if (anchors.length > 0) {
-      if (options.labels !== undefined) {
-        const matched = await this.query({ subject: anchors, label: options.labels });
-        for (const match of matched.matches) {
-          const key = tripleKey(match);
-          if (!seenTriples.has(key)) {
-            seenTriples.add(key);
-            associations.push(match);
-          }
+      const outline: Record<string, ConceptDescription | null> = {};
+      let activations: Activation[] = [];
+      const associations: Association[] = [];
+      const seenTriples = new Set<string>();
+      const tripleKey = (a: Association) => `${a.subject} ${a.label} ${a.object}`;
+      if (anchors.length > 0) {
+        if (describeFirst) {
+          await tracing.span(tracing.SPAN_DESCRIBE, async () => {
+            for (const anchor of anchors) {
+              outline[anchor] = await this.describe(anchor);
+            }
+          });
+        } else {
+          root.skip("describe_disabled");
         }
-      }
-      const page = await this.activate(anchors, {
-        decay: options.activate_decay,
-        limit: options.activate_limit,
-      });
-      activations = page.matches;
-      for (const activation of activations) {
-        const key = tripleKey(activation.association);
-        if (!seenTriples.has(key)) {
-          seenTriples.add(key);
-          associations.push(activation.association);
-        }
-      }
-    }
 
-    const citations = new Map<string, Citation>();
-    if (fetchCitations) {
-      const wanted: Array<[string, number]> = [];
-      const wantedKeys = new Set<string>();
-      for (const association of associations) {
-        for (const attribution of association.attributions) {
-          if (attribution.paragraph === null) {
-            continue;
-          }
-          const key = citationKey(attribution.source, attribution.paragraph);
-          if (!wantedKeys.has(key)) {
-            wantedKeys.add(key);
-            wanted.push([attribution.source, attribution.paragraph]);
-          }
+        if (options.labels !== undefined) {
+          await tracing.span(tracing.SPAN_QUERY, async () => {
+            const matched = await this.query({ subject: anchors, label: options.labels });
+            for (const match of matched.matches) {
+              const key = tripleKey(match);
+              if (!seenTriples.has(key)) {
+                seenTriples.add(key);
+                associations.push(match);
+              }
+            }
+          });
+        } else {
+          root.skip("labels_absent");
         }
-      }
-      for (const [source, paragraph] of wanted) {
-        try {
-          citations.set(citationKey(source, paragraph), await this.citePassage(source, paragraph));
-        } catch (error) {
-          // The locator points at a passage that was never stored (or was
-          // retracted) — the graph fact itself still stands.
-          if (!(error instanceof NotFoundError)) {
-            throw error;
+
+        await tracing.span(tracing.SPAN_ACTIVATE, async () => {
+          const page = await this.activate(anchors, {
+            decay: options.activate_decay,
+            limit: options.activate_limit,
+          });
+          activations = page.matches;
+          for (const activation of activations) {
+            const key = tripleKey(activation.association);
+            if (!seenTriples.has(key)) {
+              seenTriples.add(key);
+              associations.push(activation.association);
+            }
           }
-        }
+        });
+      } else {
+        root.skip("no_anchors");
       }
-    }
+      root.count(tracing.ATTR_ASSOCIATION_COUNT, associations.length);
+      root.count(tracing.ATTR_ACTIVATION_COUNT, activations.length);
 
-    let passage_hits: PassageHit[] = [];
-    let search_plan: SearchPlan | undefined;
-    if (
-      options.text_fallback_query !== undefined &&
-      (!onlyIfEmpty || associations.length === 0)
-    ) {
-      const page = await this.searchPassages(options.text_fallback_query, {
-        limit: options.search_limit,
-      });
-      passage_hits = page.hits;
-      search_plan = page.plan;
-    }
+      const citations = new Map<string, Citation>();
+      if (fetchCitations) {
+        await tracing.span(tracing.SPAN_CITATIONS, async (citationsSpan) => {
+          const wanted: Array<[string, number]> = [];
+          const wantedKeys = new Set<string>();
+          for (const association of associations) {
+            for (const attribution of association.attributions) {
+              if (attribution.paragraph === null) {
+                continue;
+              }
+              const key = citationKey(attribution.source, attribution.paragraph);
+              if (!wantedKeys.has(key)) {
+                wantedKeys.add(key);
+                wanted.push([attribution.source, attribution.paragraph]);
+              }
+            }
+          }
+          let missing = 0;
+          for (const [source, paragraph] of wanted) {
+            try {
+              citations.set(
+                citationKey(source, paragraph),
+                await this.citePassage(source, paragraph),
+              );
+            } catch (error) {
+              // The locator points at a passage that was never stored (or
+              // was retracted) — the graph fact itself still stands.
+              if (!(error instanceof NotFoundError)) {
+                throw error;
+              }
+              missing += 1;
+            }
+          }
+          citationsSpan.citationMissing(missing);
+        });
+      } else {
+        root.skip("citations_disabled");
+      }
+      root.count(tracing.ATTR_CITATION_RETURNED, citations.size);
 
-    return { resolved, outline, associations, activations, citations, passage_hits, search_plan };
+      let passage_hits: PassageHit[] = [];
+      let search_plan: SearchPlan | undefined;
+      if (
+        options.text_fallback_query !== undefined &&
+        (!onlyIfEmpty || associations.length === 0)
+      ) {
+        root.flag(tracing.ATTR_FALLBACK_RAN, true);
+        await tracing.span(tracing.SPAN_PASSAGE_FALLBACK, async () => {
+          const page = await this.searchPassages(options.text_fallback_query as string, {
+            limit: options.search_limit,
+          });
+          passage_hits = page.hits;
+          search_plan = page.plan;
+        });
+      } else {
+        root.flag(tracing.ATTR_FALLBACK_RAN, false);
+        root.skip(
+          options.text_fallback_query === undefined
+            ? "fallback_not_requested"
+            : "fallback_suppressed",
+        );
+      }
+      root.count(tracing.ATTR_PASSAGE_HIT_COUNT, passage_hits.length);
+
+      return {
+        resolved,
+        outline,
+        associations,
+        activations,
+        citations,
+        passage_hits,
+        search_plan,
+      };
+    });
   }
 }

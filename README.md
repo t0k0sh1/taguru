@@ -397,7 +397,11 @@ and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
   Every request lands in the access log with its key, context, and
   latency; destructive operations additionally leave one
   self-contained `taguru::audit` line. Distributed tracing is opt-in
-  via `OTEL_EXPORTER_OTLP_ENDPOINT`.
+  via `OTEL_EXPORTER_OTLP_ENDPOINT`: the composed retrieval loop exports
+  as a full span tree (resolve/describe/query/activate/citations/passage
+  fallback, further nested into BM25/ANN/fuse lanes), not one flat
+  request span — see
+  [Tracing](https://t0k0sh1.github.io/taguru/tracing.html).
 - **Backups.** Set `TAGURU_REPLICATE_URL` and the server continuously
   ships every file family — both log lanes tailed record-by-record,
   published files whole — to object storage (S3/GCS/Azure, credentials

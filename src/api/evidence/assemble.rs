@@ -169,6 +169,24 @@ pub async fn assemble_evidence(
         return refusal;
     }
 
+    // The server-composed twin of `taguru.retrieve` (ADR 0008 §5, §6):
+    // same root shape, one child span per `EvidenceLanesPlan` field.
+    // Synchronous below (every lane's I/O is a `block_in_place`
+    // closure, never a real `.await`), so holding the guard across
+    // the whole handler is correct — matching `taguru.passage_search`
+    // in `src/api/sources.rs`.
+    let root = crate::trace::span!(
+        "taguru.assemble_evidence",
+        otel.kind = "internal",
+        taguru.operation = "assemble_evidence",
+        taguru.origin.count = origins.len(),
+        taguru.label.count = labels.len(),
+        taguru.anchor.count = tracing::field::Empty,
+        taguru.association.count = tracing::field::Empty,
+        taguru.citation.returned = tracing::field::Empty,
+    );
+    let _entered = root.enter();
+
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }
@@ -197,33 +215,52 @@ pub async fn assemble_evidence(
     // nothing below needs it again, `canonical_query` above already
     // read it.
     let origins_is_empty = origins.is_empty();
+    let resolve_span = crate::trace::span!(
+        "taguru.resolve",
+        otel.kind = "internal",
+        taguru.op = "resolve",
+        taguru.origin.count = origins.len(),
+        taguru.anchor.count = tracing::field::Empty,
+    );
     let mut anchors: Vec<String> = Vec::new();
-    for cue in origins {
-        if deadline.expired() {
-            return deadline_exceeded(started_at);
-        }
-        let resolve_request = ResolveRequest {
-            cue,
-            dice_floor: request.dice_floor,
-            semantic_floor: request.semantic_floor,
-            limit: request.resolve_limit,
-        };
-        let served =
-            match resolve_served(&state, &name, &resolve_request, false, deadline, started_at) {
+    {
+        let _guard = resolve_span.enter();
+        for cue in origins {
+            if deadline.expired() {
+                return deadline_exceeded(started_at);
+            }
+            let resolve_request = ResolveRequest {
+                cue,
+                dice_floor: request.dice_floor,
+                semantic_floor: request.semantic_floor,
+                limit: request.resolve_limit,
+            };
+            let served = match resolve_served(
+                &state,
+                &name,
+                &resolve_request,
+                false,
+                deadline,
+                started_at,
+            ) {
                 Ok(served) => served,
                 Err(response) => return response,
             };
-        if let Some(top) = served.first()
-            && !anchors.contains(&top.name)
-        {
-            anchors.push(top.name.clone());
+            if let Some(top) = served.first()
+                && !anchors.contains(&top.name)
+            {
+                anchors.push(top.name.clone());
+            }
         }
+        resolve_span.record("taguru.anchor.count", anchors.len());
     }
     let resolve_plan = if origins_is_empty {
+        tracing::info!(taguru.reason = "origins_empty", "taguru.skip");
         LanePlan::skipped("origins was empty")
     } else {
         LanePlan::ran()
     };
+    root.record("taguru.anchor.count", anchors.len());
     let anchor_refs: Vec<&str> = anchors.iter().map(String::as_str).collect();
     const NO_ANCHORS_REASON: &str = "no anchors resolved from 'origins'";
 
@@ -232,13 +269,23 @@ pub async fn assemble_evidence(
     // --- Step 2: query — only when `labels` pins the facets (retrieve's
     // own Step 3a, `src/mcp/retrieve.rs:178-207`).
     let query_plan = if anchors.is_empty() {
+        tracing::info!(taguru.reason = "no_anchors", "taguru.skip");
         LanePlan::skipped(NO_ANCHORS_REASON)
     } else if labels.is_empty() {
+        tracing::info!(taguru.reason = "labels_absent", "taguru.skip");
         LanePlan::skipped("no 'labels' given")
     } else {
         if deadline.expired() {
             return deadline_exceeded(started_at);
         }
+        let query_span = crate::trace::span!(
+            "taguru.query",
+            otel.kind = "internal",
+            taguru.op = "query",
+            taguru.anchor.count = anchors.len(),
+            taguru.association.count = tracing::field::Empty,
+        );
+        let _guard = query_span.enter();
         let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
         match state.read_context(&name, |context| {
             context.query_any(&anchor_refs, &label_refs, &[])
@@ -254,6 +301,7 @@ pub async fn assemble_evidence(
                         rank + 1,
                     ));
                 }
+                query_span.record("taguru.association.count", association_pool.len());
                 LanePlan::ran()
             }
             Err(failure) => return access_error(&state, failure, &name, started_at),
@@ -268,6 +316,14 @@ pub async fn assemble_evidence(
         if deadline.expired() {
             return deadline_exceeded(started_at);
         }
+        let activate_span = crate::trace::span!(
+            "taguru.activate",
+            otel.kind = "internal",
+            taguru.op = "activate",
+            taguru.anchor.count = anchors.len(),
+            taguru.activation.count = tracing::field::Empty,
+        );
+        let _guard = activate_span.enter();
         match state.read_context(&name, |context| {
             context.activate(
                 &anchor_refs,
@@ -278,6 +334,7 @@ pub async fn assemble_evidence(
             Ok((total, matches)) => {
                 state.note_search(SearchOp::Activate, &name, total == 0);
                 let matches = activations_out(&state, &name, matches);
+                activate_span.record("taguru.activation.count", matches.len());
                 for (rank, activation) in matches.into_iter().enumerate() {
                     association_pool.push(EvidenceCandidate::from_activation(
                         &name,
@@ -290,6 +347,7 @@ pub async fn assemble_evidence(
             Err(failure) => return access_error(&state, failure, &name, started_at),
         }
     };
+    root.record("taguru.association.count", association_pool.len());
 
     // --- Step 4: passages — always, over the canonical query. Unlike
     // `retrieve`'s own text-fallback lane (opt-in, and only when
@@ -300,46 +358,70 @@ pub async fn assemble_evidence(
     }
     let search_limit = clamp(request.search_limit, 5, MAX_EVIDENCE_SEARCH_LIMIT);
     let mut passage_candidates: Vec<EvidenceCandidate> = Vec::new();
-    // A residency's first search tokenizes the whole corpus into the
-    // index (`search_passages`'s own rule) — keep it off the async
-    // worker, like every other passage-search entry.
-    let passages_plan = match tokio::task::block_in_place(|| {
-        state.search_passages(
-            &name,
-            &canonical_query,
-            search_limit,
-            request.semantic_floor,
-            None,
-            deadline,
-        )
-    }) {
-        None => return not_found(&name, started_at),
-        Some(Err(_)) if deadline.expired() => return deadline_exceeded(started_at),
-        Some(Err(io_error)) => {
-            return crate::api::sources::passages_unreadable(&state, io_error, started_at);
-        }
-        Some(Ok(found)) => {
-            state.note_search(SearchOp::SearchPassages, &name, found.hits.is_empty());
-            for hit in &found.hits {
-                state
-                    .metrics()
-                    .record_passage_hit(hit.bm25.is_some(), hit.vector.is_some());
+    // Named `taguru.passages`, not `taguru.passage_search` — this lane
+    // is unconditional here (unlike `sources/search`'s handler, which
+    // owns that name), so a distinct name keeps "always ran" and "ran
+    // as a fallback" tellable apart in a trace (ADR 0008 §5).
+    let passages_span = crate::trace::span!(
+        "taguru.passages",
+        otel.kind = "internal",
+        taguru.op = "search_passages",
+        taguru.limit = search_limit,
+        taguru.passage.hit_count = tracing::field::Empty,
+    );
+    // Scoped tightly to Step 4 alone — Steps 5/6 below must not nest
+    // under this span.
+    let passages_plan;
+    {
+        let _guard = passages_span.enter();
+        // A residency's first search tokenizes the whole corpus into
+        // the index (`search_passages`'s own rule) — keep it off the
+        // async worker, like every other passage-search entry.
+        passages_plan = match tokio::task::block_in_place(|| {
+            state.search_passages(
+                &name,
+                &canonical_query,
+                search_limit,
+                request.semantic_floor,
+                None,
+                deadline,
+            )
+        }) {
+            None => return not_found(&name, started_at),
+            Some(Err(_)) if deadline.expired() => return deadline_exceeded(started_at),
+            Some(Err(io_error)) => {
+                return crate::api::sources::passages_unreadable(&state, io_error, started_at);
             }
-            let plan = match &found.lanes {
-                PassageSearchLanes::NoQueryTerms => LanePlan::skipped(NO_QUERY_TERMS_REASON),
-                PassageSearchLanes::ZeroLimit => LanePlan::skipped(ZERO_LIMIT_REASON),
-                PassageSearchLanes::Ran { .. } => LanePlan::ran(),
-            };
-            for (rank, hit) in found.hits.into_iter().enumerate() {
-                passage_candidates.push(EvidenceCandidate::from_passage(
-                    &name,
-                    PassageHit::from(hit),
-                    rank + 1,
-                ));
+            Some(Ok(found)) => {
+                state.note_search(SearchOp::SearchPassages, &name, found.hits.is_empty());
+                passages_span.record("taguru.passage.hit_count", found.hits.len());
+                for hit in &found.hits {
+                    state
+                        .metrics()
+                        .record_passage_hit(hit.bm25.is_some(), hit.vector.is_some());
+                }
+                let plan = match &found.lanes {
+                    PassageSearchLanes::NoQueryTerms => {
+                        tracing::info!(taguru.reason = "no_query_terms", "taguru.skip");
+                        LanePlan::skipped(NO_QUERY_TERMS_REASON)
+                    }
+                    PassageSearchLanes::ZeroLimit => {
+                        tracing::info!(taguru.reason = "zero_limit", "taguru.skip");
+                        LanePlan::skipped(ZERO_LIMIT_REASON)
+                    }
+                    PassageSearchLanes::Ran { .. } => LanePlan::ran(),
+                };
+                for (rank, hit) in found.hits.into_iter().enumerate() {
+                    passage_candidates.push(EvidenceCandidate::from_passage(
+                        &name,
+                        PassageHit::from(hit),
+                        rank + 1,
+                    ));
+                }
+                plan
             }
-            plan
-        }
-    };
+        };
+    }
 
     // --- Step 5: communities — opt-in, over the same canonical query
     // (ADR 0006 §6: `include_communities`, default false). A missing
@@ -349,6 +431,7 @@ pub async fn assemble_evidence(
     // of this call.
     let mut community_candidates: Vec<EvidenceCandidate> = Vec::new();
     let communities_plan = if !request.include_communities {
+        tracing::info!(taguru.reason = "communities_disabled", "taguru.skip");
         LanePlan::skipped("include_communities was false")
     } else {
         let derived = derived_context_name(&name);
@@ -358,6 +441,12 @@ pub async fn assemble_evidence(
         if deadline.expired() {
             return deadline_exceeded(started_at);
         }
+        let communities_span = crate::trace::span!(
+            "taguru.communities",
+            otel.kind = "internal",
+            taguru.limit = search_limit,
+        );
+        let _guard = communities_span.enter();
         match community_hits(
             &state,
             &name,
@@ -401,16 +490,30 @@ pub async fn assemble_evidence(
     for candidate in &association_pool {
         wanted.extend(candidate.origins.iter().cloned());
     }
-    // Same cold-load path as the direct `citation` endpoint; one
-    // block_in_place around every locator this call needs, not one
-    // per locator.
-    #[allow(clippy::result_large_err)] // the Err IS the response served next
-    let citation_lookup = match tokio::task::block_in_place(|| {
-        resolve_citations(&state, &name, wanted, started_at)
-    }) {
-        Ok(citation_lookup) => citation_lookup,
-        Err(response) => return response,
-    };
+    let citations_span = crate::trace::span!(
+        "taguru.citations",
+        otel.kind = "internal",
+        taguru.citation.requested = wanted.len(),
+        taguru.citation.returned = tracing::field::Empty,
+    );
+    let citation_lookup;
+    {
+        let _guard = citations_span.enter();
+        // Same cold-load path as the direct `citation` endpoint; one
+        // block_in_place around every locator this call needs, not one
+        // per locator.
+        #[allow(clippy::result_large_err)] // the Err IS the response served next
+        {
+            citation_lookup = match tokio::task::block_in_place(|| {
+                resolve_citations(&state, &name, wanted, started_at)
+            }) {
+                Ok(citation_lookup) => citation_lookup,
+                Err(response) => return response,
+            };
+        }
+        citations_span.record("taguru.citation.returned", citation_lookup.len());
+        root.record("taguru.citation.returned", citation_lookup.len());
+    }
     let citations_plan = LanePlan::ran();
 
     // --- Fuse and select (#303 §7, #304 §8-§9), with an optional

@@ -120,6 +120,15 @@ pub async fn serve(
             // the parked worker and the dispatched fan-out behind it,
             // not after.
             let outcome: Result<String, mcp::ToolError> = if deadline.expired() {
+                // Refused before `run_retrieve_bounded` is even
+                // reached — but it is still one logical retrieval, and
+                // a trace showing nothing at all for a budget-exhausted
+                // call is exactly the one a tail sampler most needs to
+                // keep (ADR 0008 §5).
+                let span = mcp::root_span(mcp::Transport::RemoteMcp);
+                span.record("otel.status_code", "ERROR");
+                span.record("taguru.error.kind", "deadline_exceeded");
+                let _span = span.entered();
                 Err(DEADLINE_EXCEEDED.to_string().into())
             } else {
                 tokio::task::block_in_place(|| {
@@ -127,18 +136,29 @@ pub async fn serve(
                     mcp::run_retrieve_bounded(
                         &arguments,
                         Some(max_result_bytes),
+                        mcp::Transport::RemoteMcp,
                         |method, path, body| {
+                            use tracing::Instrument as _;
                             handle
-                                .block_on(call_inner(
-                                    dispatch.clone(),
-                                    method,
-                                    &path,
-                                    body,
-                                    key.as_ref(),
-                                    scope.as_ref(),
-                                    max_result_bytes,
-                                    deadline,
-                                ))
+                                .block_on(
+                                    call_inner(
+                                        dispatch.clone(),
+                                        method,
+                                        &path,
+                                        body,
+                                        key.as_ref(),
+                                        scope.as_ref(),
+                                        max_result_bytes,
+                                        deadline,
+                                    )
+                                    // Captured at construction, not
+                                    // re-read at each poll: the phase
+                                    // span this dispatch belongs to
+                                    // stays unambiguous even if
+                                    // `call_inner` ever grows a
+                                    // `spawn` (ADR 0008 §10).
+                                    .instrument(tracing::Span::current()),
+                                )
                                 .map_err(|error| error.text)
                         },
                     )
@@ -162,6 +182,11 @@ pub async fn serve(
                         Ok(text)
                     }
                 })
+                // The transport-owned size the `taguru.retrieve` span
+                // itself never records (ADR 0008 §3): the composed
+                // JSON's true byte length is only known here, after
+                // `to_string()` and this transport's own cap.
+                .inspect(|text| tracing::info!(taguru.result.bytes = text.len(), "taguru.result"))
                 .map_err(mcp::ToolError::from)
             };
             mcp::response(id, mcp::tool_response(outcome))

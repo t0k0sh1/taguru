@@ -50,6 +50,7 @@
     <div class="side-group">
       <div class="side-group-label">How it works</div>
       <a href="architecture.html">Internal architecture</a>
+      <a href="tracing.html">Tracing</a>
       <a href="mcp-rag-walkthrough.html">MCP walkthrough</a>
       <a href="local-rag-walkthrough.html">Local RAG walkthrough</a>
     </div>
@@ -145,7 +146,7 @@ kubectl -n taguru apply -f kubernetes.yaml</code></pre>
           </table>
         </div>
       </li>
-      <li><b><code>fsGroup: 65532</code></b> makes the volume writable by the scratch image's uid, and <code>readOnlyRootFilesystem: true</code> holds because /data is the only write target. The image is the server binary alone on <code>scratch</code> — no shell to <code>kubectl exec</code> into; the observability surface is <code>/metrics</code>, the logs, and the probes.</li>
+      <li><b><code>fsGroup: 65532</code></b> makes the volume writable by the scratch image's uid, and <code>readOnlyRootFilesystem: true</code> holds because /data is the only write target. The image is the server binary alone on <code>scratch</code> — no shell to <code>kubectl exec</code> into; the observability surface is <code>/metrics</code>, the logs, and the probes — plus, with <code>OTEL_EXPORTER_OTLP_ENDPOINT</code> pointed at a collector Service, a full retrieval span tree (see <a href="tracing.html">Tracing</a>) that needs no shell access to read.</li>
       <li><b>Memory requests ≈ <code>TAGURU_CACHE_BYTES</code> (default 512 MiB) + pinned contexts + headroom</b> (the manifest ships 1Gi request / 2Gi limit). Don't guess at scale — <code>taguru estimate --associations N</code> builds a context of the target size and measures it.</li>
       <li><b>The Service stays inside the cluster.</b> Expose beyond it only behind TLS (Ingress/Gateway with a certificate) — a bearer token is the whole credential — and set <code>TAGURU_RATE_LIMIT_PER_MIN</code> when you do.</li>
       <li><b>The image version is pinned</b> (<code>latest</code> moves): with formats that migrate forward only, a surprise binary bump on a pod reschedule is a one-way door.</li>

@@ -52,6 +52,51 @@ Entries that change an on-disk format or a response shape say so.
   TypeScript SDKs gain the `Locator` type and `store_passages`/
   `storePassages`'s new `locators` option. `http_contract`/
   `mcp_contract` stay `1`.
+- OpenTelemetry tracing for the whole composed retrieval loop (#224,
+  implementing ADR 0008): where previously only three spans existed
+  server-wide (`request`/`embed`/`rerank`), `taguru.retrieve` and
+  `taguru.assemble_evidence` now each export a full span tree — a phase
+  span per step (resolve/describe/query/activate/citations/passage
+  fallback), and passage search nested further into
+  `taguru.search.bm25`/`.ann`/`.fuse` lane spans — so a slow or
+  degraded `POST /mcp` can be diagnosed from one trace instead of
+  guessed at from a flat request span. Skip/degrade/cache decisions are
+  recorded as `taguru.skip`/`taguru.degrade`/`taguru.cache` events
+  carrying a stable `taguru.reason` code, never a raw string; attribute
+  values are bound to existing `/metrics` enum spellings so no parallel
+  vocabulary can drift out of sync. Context propagation is now
+  bidirectional everywhere it previously only extracted: router →
+  shard fan-out (`taguru.shard_call`) and the stdio bridge
+  (`taguru-mcp`, via optional `params._meta.traceparent`) both inject
+  their own current span outbound rather than passing inbound headers
+  through bare, and `tracestate` now forwards through the router
+  (previously dropped). Two real defects this closed along the way:
+  an embedding-provider degrade no longer paints the whole request
+  span `ERROR` for what is actually a successful, merely-degraded
+  retrieval (`.with_error_events_to_status(false)`, plus no span-event
+  field is ever named `error` going forward); and
+  `TAGURU_LOG_SEARCHES=1` combined with OTLP export can no longer leak
+  a raw question into a span event (a target-level export firewall
+  forces `taguru::search` `OFF` on the OTel layer regardless of level,
+  verified by a sentinel integration test). Fully opt-in
+  (`OTEL_EXPORTER_OTLP_ENDPOINT`, as before); disabled, every new span
+  call short-circuits to `Span::none()` without opening the tracing
+  registry's storage. `http_contract`/`mcp_contract` are unaffected —
+  spans and events carry no wire-visible behavior change. See
+  [Tracing](https://t0k0sh1.github.io/taguru/tracing.html).
+- Python/TypeScript SDK tracing parity (#224): `retrieve()` composes
+  the identical client-side span tree the server's own
+  `taguru.mcp.retrieve` does, sharing one reason-code vocabulary
+  pinned in `sdk/spec/tracing.yaml` and asserted by both languages'
+  test suites. Both SDKs treat OpenTelemetry as strictly optional and
+  add no required dependency: Python via the new `taguru[otel]` extra
+  (soft `opentelemetry-api` import; `taguru._tracing` no-ops without
+  it), TypeScript via an optional peer dependency loaded through a
+  lazily cached dynamic `import()` and excluded from the bundle
+  (`tsup --external @opentelemetry/api`). Neither SDK opens a
+  client-side HTTP span for the request itself, and neither ever calls
+  `set_tracer_provider`/`setGlobalTracerProvider` — that stays the
+  host application's call.
 
 ## [0.6.0] - 2026-08-01
 

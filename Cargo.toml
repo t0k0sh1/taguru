@@ -42,6 +42,12 @@ tower = { version = "0.5.3", features = ["util"] }
 # which tells a capped MCP tool result apart from any other read
 # failure on the in-process dispatch response.
 http-body-util = "0.1.3"
+# Already in the tree through axum, reqwest, and ureq 3 alike; made
+# direct because it is the one HeaderMap type all three share, which
+# is what lets src/trace.rs's outbound trace-context injector serve
+# the router's fan-out and the stdio bridge's outbound calls with a
+# single impl.
+http = "1.4"
 # OAuth needs exactly two primitives: SHA-256 (PKCE, tokens hashed at
 # rest) and a CSPRNG (token material). Both crates are tiny, pure-Rust,
 # and already ubiquitous in the wider tree.

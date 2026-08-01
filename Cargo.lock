@@ -2414,6 +2414,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.4.3",
  "gungraun",
+ "http",
  "http-body-util",
  "jsonschema",
  "libc",

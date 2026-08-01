@@ -251,6 +251,18 @@ pub(crate) struct SemanticFill {
     pub embedding: Arc<Vec<f32>>,
 }
 
+/// The `taguru.cache` span event for one semantic-tier probe outcome
+/// (ADR 0008 §6, §7). Recorded beside — never instead of — the
+/// Prometheus counter above: this is the one place the real outcome
+/// is known, and `semantic_retrieval` always runs on the caller's own
+/// thread (never spawned), so the event lands under whatever span
+/// (`taguru.passage_search`, `taguru.assemble_evidence`'s `passages`
+/// phase) called it in.
+fn record_semantic_cache_span_event(outcome: SemanticCacheOutcome) {
+    let reason = format!("semantic_cache_{}", outcome.as_str());
+    tracing::info!(taguru.reason = %reason, "taguru.cache");
+}
+
 impl AppState {
     /// One semantic consultation, run only after the request's own
     /// exact key missed. `None` means the tier did not run at all (no
@@ -292,6 +304,7 @@ impl AppState {
             self.0
                 .metrics
                 .record_semantic_cache(SemanticCacheOutcome::Miss);
+            record_semantic_cache_span_event(SemanticCacheOutcome::Miss);
             return Some(SemanticProbe {
                 embedding,
                 served: None,
@@ -311,6 +324,7 @@ impl AppState {
                     self.0
                         .metrics
                         .record_semantic_cache(SemanticCacheOutcome::Hit);
+                    record_semantic_cache_span_event(SemanticCacheOutcome::Hit);
                     SemanticProbe {
                         embedding,
                         served: Some(SemanticServe {
@@ -324,6 +338,7 @@ impl AppState {
                     self.0
                         .metrics
                         .record_semantic_cache(SemanticCacheOutcome::Stale);
+                    record_semantic_cache_span_event(SemanticCacheOutcome::Stale);
                     SemanticProbe {
                         embedding,
                         served: None,
@@ -334,6 +349,7 @@ impl AppState {
         self.0
             .metrics
             .record_semantic_cache(SemanticCacheOutcome::Guarded);
+        record_semantic_cache_span_event(SemanticCacheOutcome::Guarded);
         Some(SemanticProbe {
             embedding,
             served: None,

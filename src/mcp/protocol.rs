@@ -108,6 +108,31 @@ pub fn cancelled_request_id(message: &Value) -> Option<Value> {
     message.get("params")?.get("requestId").cloned()
 }
 
+/// The W3C trace context an MCP client may attach as
+/// `params._meta.traceparent` / `params._meta.tracestate` — stdio has
+/// no HTTP headers of its own to carry it. Rendered as an
+/// [`http::HeaderMap`] on purpose: it feeds `trace::extract_parent`
+/// unchanged, so there is exactly one `traceparent` parser in the tree
+/// and the stdio transport cannot disagree with the HTTP one about a
+/// malformed header (ADR 0008 §10). Absent, wrong-typed, or malformed
+/// is "no parent" — an ordinary MCP client that sends no `_meta` at
+/// all is unaffected — never an error.
+#[allow(dead_code)] // consumed by the stdio bridge; the HTTP transport extracts from real headers instead
+pub fn meta_trace_headers(message: &Value) -> http::HeaderMap {
+    let mut headers = http::HeaderMap::new();
+    let Some(meta) = message.get("params").and_then(|params| params.get("_meta")) else {
+        return headers;
+    };
+    for name in ["traceparent", "tracestate"] {
+        if let Some(value) = meta.get(name).and_then(Value::as_str)
+            && let Ok(value) = http::HeaderValue::from_str(value)
+        {
+            headers.insert(http::HeaderName::from_static(name), value);
+        }
+    }
+    headers
+}
+
 /// The `initialize` result: capabilities plus the full protocol manual
 /// as `instructions`, so the agent learns the discipline the moment it
 /// connects.

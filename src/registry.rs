@@ -1263,6 +1263,17 @@ impl PassageSearchLanes {
             }
         )
     }
+
+    /// The `taguru.search.lanes` span attribute's source of truth (ADR
+    /// 0008 §6) — an exhaustive `match`, so a new variant here fails
+    /// the build instead of silently exporting nothing.
+    pub(crate) fn code(&self) -> &'static str {
+        match self {
+            PassageSearchLanes::NoQueryTerms => "no_query_terms",
+            PassageSearchLanes::ZeroLimit => "zero_limit",
+            PassageSearchLanes::Ran { .. } => "ran",
+        }
+    }
 }
 
 /// The semantic lane's response-level account: [`VectorLaneReport`]'s
@@ -1293,6 +1304,22 @@ pub(crate) enum VectorLaneStatus {
     /// value after the override → context setting → server default
     /// chain, the one threshold a caller cannot reconstruct alone.
     Ran { floor: f32 },
+}
+
+impl VectorLaneStatus {
+    /// The `taguru.search.vector.outcome` span attribute's source of
+    /// truth (ADR 0008 §6) — an exhaustive `match`, so a new variant
+    /// here fails the build instead of silently exporting nothing.
+    pub(crate) fn code(&self) -> &'static str {
+        match self {
+            VectorLaneStatus::Off { .. } => "off",
+            VectorLaneStatus::QueryEmbeddingFailed(_) => "query_embedding_failed",
+            VectorLaneStatus::NoVectors => "no_vectors",
+            VectorLaneStatus::ModelChanged { .. } => "model_changed",
+            VectorLaneStatus::WidthChanged { .. } => "width_changed",
+            VectorLaneStatus::Ran { .. } => "ran",
+        }
+    }
 }
 
 /// The outcome of resolving one `(source, paragraph index)` citation:
@@ -2168,6 +2195,12 @@ impl AppState {
         deadline: Deadline,
     ) -> Result<Arc<Vec<f32>>, String> {
         if let Some(vector) = self.0.cue_cache.lock().get(cue) {
+            // The one bit `taguru.embed` (the provider client span) has
+            // no way to show, since it never opens on a cache hit: this
+            // call resolved the query embedding without a round trip
+            // (ADR 0008 §5). No cue text on the event — counts and
+            // reasons only, per §8.
+            tracing::info!(taguru.reason = "cue_cache_hit", "taguru.cache");
             return Ok(vector);
         }
         match self.timed_embed(embedder, &[cue], EmbedPurpose::Query, deadline) {
@@ -2881,4 +2914,55 @@ pub(crate) fn name_from_stem(stem: &str) -> Option<String> {
         }
     }
     String::from_utf8(bytes).ok()
+}
+
+#[cfg(test)]
+mod tracing_code_tests {
+    use super::*;
+
+    #[test]
+    fn passage_search_lanes_code_is_exhaustive_and_matches_adr_0008() {
+        assert_eq!(PassageSearchLanes::NoQueryTerms.code(), "no_query_terms");
+        assert_eq!(PassageSearchLanes::ZeroLimit.code(), "zero_limit");
+        assert_eq!(
+            PassageSearchLanes::Ran {
+                vector: VectorLaneStatus::NoVectors
+            }
+            .code(),
+            "ran"
+        );
+    }
+
+    #[test]
+    fn vector_lane_status_code_is_exhaustive_and_matches_adr_0008() {
+        assert_eq!(
+            VectorLaneStatus::Off {
+                provider_configured: false
+            }
+            .code(),
+            "off"
+        );
+        assert_eq!(
+            VectorLaneStatus::QueryEmbeddingFailed("boom".to_string()).code(),
+            "query_embedding_failed"
+        );
+        assert_eq!(VectorLaneStatus::NoVectors.code(), "no_vectors");
+        assert_eq!(
+            VectorLaneStatus::ModelChanged {
+                stored: "a".to_string(),
+                current: "b".to_string()
+            }
+            .code(),
+            "model_changed"
+        );
+        assert_eq!(
+            VectorLaneStatus::WidthChanged {
+                stored: 384,
+                current: 768
+            }
+            .code(),
+            "width_changed"
+        );
+        assert_eq!(VectorLaneStatus::Ran { floor: 0.5 }.code(), "ran");
+    }
 }

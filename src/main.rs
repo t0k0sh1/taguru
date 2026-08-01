@@ -1276,14 +1276,7 @@ pub(crate) fn init_telemetry() -> Option<opentelemetry_sdk::trace::SdkTracerProv
     };
 
     let (provider, exporter_error) = trace::provider();
-    let otel_layer = provider.as_ref().map(|provider| {
-        use opentelemetry::trace::TracerProvider as _;
-        // INFO keeps the export layer from re-enabling debug/trace
-        // callsites the stderr filter would otherwise leave off.
-        tracing_opentelemetry::layer()
-            .with_tracer(provider.tracer("taguru"))
-            .with_filter(tracing::level_filters::LevelFilter::INFO)
-    });
+    let otel_layer = provider.as_ref().map(trace::otel_layer);
 
     let registry = tracing_subscriber::registry().with(otel_layer);
     let stderr_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);

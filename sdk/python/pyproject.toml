@@ -28,6 +28,10 @@ Homepage = "https://github.com/t0k0sh1/taguru"
 Repository = "https://github.com/t0k0sh1/taguru"
 
 [project.optional-dependencies]
+# Span creation only needs the API package (see `taguru._tracing`); the
+# SDK implementation (exporters, `TracerProvider`) is the application's
+# choice and stays out of this extra.
+otel = ["opentelemetry-api>=1.20,<2"]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
@@ -65,3 +69,14 @@ ignore = [
 [tool.mypy]
 strict = true
 files = ["src"]
+
+[[tool.mypy.overrides]]
+# `opentelemetry-api` is optional (the `otel` extra) — CI's mypy job
+# installs `dev` only, so the package is genuinely absent there. This
+# override, not a `# type: ignore[import-not-found]` comment, is what
+# makes `taguru._tracing` typecheck identically whether or not a
+# developer's own environment happens to have it installed too (a
+# comment-based ignore flips to "unused" the moment the package IS
+# present and ships its own `py.typed` types).
+module = ["opentelemetry", "opentelemetry.*"]
+ignore_missing_imports = true

@@ -62,6 +62,7 @@ impl AppState {
     ) -> Option<io::Result<PassageSearch>> {
         let entry = self.lookup(name)?;
         if limit == 0 {
+            tracing::info!(taguru.reason = "zero_limit", "taguru.skip");
             return entry.read_unless_deleted().map(|_| {
                 Ok(PassageSearch {
                     hits: Vec::new(),
@@ -72,6 +73,7 @@ impl AppState {
         }
         let query_grams = deduped_query_grams(query);
         if query_grams.is_empty() {
+            tracing::info!(taguru.reason = "no_query_terms", "taguru.skip");
             return entry.read_unless_deleted().map(|_| {
                 Ok(PassageSearch {
                     hits: Vec::new(),
@@ -88,9 +90,19 @@ impl AppState {
         if let Err(error) = &cue {
             // Degrade, loudly: the lexical lane still answers, and the
             // plan hands the caller the same account this line logs.
+            //
+            // The field is deliberately never named `error`:
+            // tracing-opentelemetry special-cases exactly that name
+            // into an exception event and (by default) an ERROR
+            // status, which would color the whole active span ERROR
+            // for a request that goes on to answer successfully from
+            // the lexical lane alone (ADR 0008 §9). `taguru.degrade`,
+            // the actual span event for this outcome, is recorded
+            // separately where `VectorLaneStatus::QueryEmbeddingFailed`
+            // is known (`semantic_work`, below).
             tracing::warn!(
                 context = %name,
-                error,
+                reason = %error,
                 "passage query embedding failed; serving the lexical lane alone"
             );
         }
@@ -136,6 +148,36 @@ impl AppState {
         // would spend a thread-spawn on that fixed lookup for nothing;
         // both lanes run inline on the calling thread instead.
 
+        // `tracing`'s current-span stack is thread-local, so a lane on
+        // its own scoped thread would otherwise export as the root of
+        // a fresh trace. Captured HERE, on the calling thread — inside
+        // `taguru.passage_search` — and re-entered inside each lane,
+        // whichever thread it ends up running on (ADR 0008 §10).
+        // `Span::none()` when export is off, and `in_scope` on that is
+        // a closure call the optimizer removes.
+        let parent = tracing::Span::current();
+
+        // Lexical lane: BM25 over the resident index. Hoisted into a
+        // closure (previously duplicated between the two branches
+        // below) so the span is written once.
+        let lexical_work = || {
+            parent.in_scope(|| {
+                let span = crate::trace::span!(
+                    "taguru.search.bm25",
+                    otel.kind = "internal",
+                    taguru.search.terms = query_grams.len(),
+                    taguru.search.pool = pool,
+                    taguru.search.hits = tracing::field::Empty,
+                );
+                let _guard = span.enter();
+                let guard = entry.bm25.read();
+                let index = guard.as_ref().expect("index was just built");
+                let hits = index.search(&query_grams, pool, eligible);
+                span.record("taguru.search.hits", hits.len());
+                hits
+            })
+        };
+
         // Semantic lane: sweep the paragraph vectors with the
         // pre-embedded query, then drop candidates below the same
         // floor semantic_resolve applies to its own cosine matches
@@ -143,69 +185,73 @@ impl AppState {
         // setting beats the server default (`fence` is already
         // this entry's read lock, taken above). Every arm also
         // names what it did: the status the handler serializes
-        // into the response's plan.
+        // into the response's plan, and — for every arm but `Ran` —
+        // a `taguru.degrade` span event names it too (ADR 0008 §6.2).
         let semantic_work = || -> (Vec<(String, u32, u64, f32)>, VectorLaneStatus) {
-            match &cue {
-                Err(error) => (
-                    Vec::new(),
-                    VectorLaneStatus::QueryEmbeddingFailed(error.clone()),
-                ),
-                Ok(None) => (
-                    Vec::new(),
-                    VectorLaneStatus::Off {
-                        provider_configured: self.0.embedder.is_some(),
-                    },
-                ),
-                Ok(Some(cue)) => match self.passage_vector_gate(&entry, &file_stem(name)) {
-                    // The gate checks the model NAME; the width can
-                    // still disagree (a dimensions setting changed
-                    // behind a stable name, #133). Swept anyway,
-                    // every row would be `similarity`'s silent 0.0 —
-                    // an empty lane the plan would then call "ran" —
-                    // so the mismatch is named instead, exactly like
-                    // a model change.
-                    PassageVectorGate::Ready(vectors) if cue.len() != vectors.dim() => (
+            parent.in_scope(|| {
+                let (hits, status) = match &cue {
+                    Err(error) => (
                         Vec::new(),
-                        VectorLaneStatus::WidthChanged {
-                            stored: vectors.dim(),
-                            current: cue.len(),
-                        },
+                        VectorLaneStatus::QueryEmbeddingFailed(error.clone()),
                     ),
-                    PassageVectorGate::Ready(vectors) => {
-                        let floor = self.effective_semantic_floor(floor_override, &fence.meta);
-                        (
-                            semantic_lane_hits(
-                                vectors.top_matches(cue, pool, deadline, eligible),
-                                floor,
-                            ),
-                            VectorLaneStatus::Ran { floor },
-                        )
-                    }
-                    // Unreachable in practice (a cue exists only
-                    // when the lane is on), kept for the same
-                    // defensiveness as explain's mapping.
-                    PassageVectorGate::Disabled => (
+                    Ok(None) => (
                         Vec::new(),
                         VectorLaneStatus::Off {
                             provider_configured: self.0.embedder.is_some(),
                         },
                     ),
-                    PassageVectorGate::Empty => (Vec::new(), VectorLaneStatus::NoVectors),
-                    PassageVectorGate::ModelChanged { stored, current } => (
-                        Vec::new(),
-                        VectorLaneStatus::ModelChanged { stored, current },
-                    ),
-                },
-            }
+                    Ok(Some(cue)) => match self.passage_vector_gate(&entry, &file_stem(name)) {
+                        // The gate checks the model NAME; the width can
+                        // still disagree (a dimensions setting changed
+                        // behind a stable name, #133). Swept anyway,
+                        // every row would be `similarity`'s silent 0.0 —
+                        // an empty lane the plan would then call "ran" —
+                        // so the mismatch is named instead, exactly like
+                        // a model change.
+                        PassageVectorGate::Ready(vectors) if cue.len() != vectors.dim() => (
+                            Vec::new(),
+                            VectorLaneStatus::WidthChanged {
+                                stored: vectors.dim(),
+                                current: cue.len(),
+                            },
+                        ),
+                        PassageVectorGate::Ready(vectors) => {
+                            let floor = self.effective_semantic_floor(floor_override, &fence.meta);
+                            (
+                                semantic_lane_hits(
+                                    vectors.top_matches(cue, pool, deadline, eligible),
+                                    floor,
+                                ),
+                                VectorLaneStatus::Ran { floor },
+                            )
+                        }
+                        // Unreachable in practice (a cue exists only
+                        // when the lane is on), kept for the same
+                        // defensiveness as explain's mapping.
+                        PassageVectorGate::Disabled => (
+                            Vec::new(),
+                            VectorLaneStatus::Off {
+                                provider_configured: self.0.embedder.is_some(),
+                            },
+                        ),
+                        PassageVectorGate::Empty => (Vec::new(), VectorLaneStatus::NoVectors),
+                        PassageVectorGate::ModelChanged { stored, current } => (
+                            Vec::new(),
+                            VectorLaneStatus::ModelChanged { stored, current },
+                        ),
+                    },
+                };
+                if !matches!(status, VectorLaneStatus::Ran { .. }) {
+                    let reason = format!("vector_{}", status.code());
+                    tracing::info!(taguru.reason = %reason, "taguru.degrade");
+                }
+                (hits, status)
+            })
         };
 
         let (lexical, (semantic, vector)) = if matches!(cue, Ok(Some(_))) {
             std::thread::scope(|scope| {
-                let lexical_lane = scope.spawn(|| {
-                    let guard = entry.bm25.read();
-                    let index = guard.as_ref().expect("index was just built");
-                    index.search(&query_grams, pool, eligible)
-                });
+                let lexical_lane = scope.spawn(lexical_work);
                 let semantic_lane = scope.spawn(semantic_work);
 
                 // A lane panic surfaces exactly like it would have before
@@ -218,16 +264,22 @@ impl AppState {
                 )
             })
         } else {
-            let lexical = {
-                let guard = entry.bm25.read();
-                let index = guard.as_ref().expect("index was just built");
-                index.search(&query_grams, pool, eligible)
-            };
-            (lexical, semantic_work())
+            (lexical_work(), semantic_work())
         };
 
+        let fuse_span = crate::trace::span!(
+            "taguru.search.fuse",
+            otel.kind = "internal",
+            taguru.search.lexical_pool = lexical.len(),
+            taguru.search.semantic_pool = semantic.len(),
+            taguru.passage.hit_count = tracing::field::Empty,
+        );
+        let _fuse_guard = fuse_span.enter();
+        let hits = fuse_passage_lanes(&store, lexical, semantic, limit);
+        fuse_span.record("taguru.passage.hit_count", hits.len());
+
         Some(Ok(PassageSearch {
-            hits: fuse_passage_lanes(&store, lexical, semantic, limit),
+            hits,
             lanes: PassageSearchLanes::Ran { vector },
             filter: filter_report,
         }))

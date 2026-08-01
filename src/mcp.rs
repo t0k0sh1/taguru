@@ -35,11 +35,11 @@ mod schema;
 #[allow(unused_imports)]
 pub use protocol::{
     Call, FALLBACK_PROTOCOL_VERSION, Message, SUPPORTED_PROTOCOL_VERSIONS, ToolError,
-    cancelled_request_id, classify, error_response, initialize_result, response, tool_response,
-    tools_result,
+    cancelled_request_id, classify, error_response, initialize_result, meta_trace_headers,
+    response, tool_response, tools_result,
 };
 #[allow(unused_imports)]
-pub use retrieve::{run_retrieve, run_retrieve_bounded};
+pub use retrieve::{Transport, error_kind, root_span, run_retrieve, run_retrieve_bounded};
 pub use route::route_tool;
 
 #[cfg(test)]
@@ -1117,18 +1117,23 @@ mod tests {
 
         let arguments = json!({ "context": "sake", "origins": ["tokyo"], "describe_first": false });
         let mut citation_calls = 0usize;
-        let result = run_retrieve_bounded(&arguments, Some(budget), |_method, path, _body| {
-            if path.ends_with("/resolve") {
-                Ok(resolve_body.clone())
-            } else if path.ends_with("/activate") {
-                Ok(activate_body.clone())
-            } else if path.ends_with("/citations") {
-                citation_calls += 1;
-                Ok(citation_body.clone())
-            } else {
-                panic!("unexpected call: {path}");
-            }
-        });
+        let result = run_retrieve_bounded(
+            &arguments,
+            Some(budget),
+            Transport::RemoteMcp,
+            |_method, path, _body| {
+                if path.ends_with("/resolve") {
+                    Ok(resolve_body.clone())
+                } else if path.ends_with("/activate") {
+                    Ok(activate_body.clone())
+                } else if path.ends_with("/citations") {
+                    citation_calls += 1;
+                    Ok(citation_body.clone())
+                } else {
+                    panic!("unexpected call: {path}");
+                }
+            },
+        );
 
         assert!(
             matches!(&result, Err(message) if message.contains(&format!("already exceeds {budget} bytes"))

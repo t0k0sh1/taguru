@@ -64,7 +64,13 @@ jobs:
       # release time: the langchain package then requires a core version
       # the tag has not published yet. --skip-editable exempts only the
       # two local packages themselves; their dependency trees are still
-      # audited.
+      # audited. Runs before the OpenTelemetry SDK is installed further
+      # down (see "Install OpenTelemetry SDK") — a deliberate gap, not an
+      # oversight: that tree goes unaudited on this job, accepted because
+      # it is a dev/test-only install (the `otel` extra itself pulls in
+      # only `opentelemetry-api`, and even that stays optional for real
+      # users) and the typescript job's `npm audit --workspaces` already
+      # covers the equivalent dependency there.
       - name: Audit dependencies
         run: pip-audit --skip-editable
       - name: Lint (core)
@@ -88,6 +94,20 @@ jobs:
       - name: Version lockstep (SDK packages carry the server's version)
         run: python sdk/spec/check_versions.py
       - name: Test (core)
+        run: python -m pytest sdk/python/tests -q
+        env:
+          TAGURU_TEST_BIN: ${{ github.workspace }}/bin/taguru
+      # `test_tracing.py` (ADR 0008, #224) `importorskip`s on
+      # `opentelemetry.sdk.trace`, so the run just above proves the no-op
+      # path really is a no-op in a genuinely OTel-less environment —
+      # not that pytest merely skipped the otherwise-untested code. Only
+      # after that does this job install the SDK package and run the
+      # whole suite again to exercise the tracing tests for real. Order
+      # matters: doing this before the plain run above would leave the
+      # no-op path unverified.
+      - name: Install OpenTelemetry SDK
+        run: pip install "opentelemetry-sdk>=1.20,<2"
+      - name: Test (core, with OpenTelemetry)
         run: python -m pytest sdk/python/tests -q
         env:
           TAGURU_TEST_BIN: ${{ github.workspace }}/bin/taguru
