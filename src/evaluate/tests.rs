@@ -1,6 +1,7 @@
 use axum::http::Method;
 
 use super::*;
+use crate::api::evidence::select::REASON_BUDGET_EXCEEDED;
 
 // ============================ Argument parsing ============================
 
@@ -557,20 +558,15 @@ fn hits_from_evidence_items_never_exceeds_the_case_limit() {
 
 // ========================= rerank.ran denominator =========================
 
-/// Regression: `RerankerPlan::not_requested` (`assemble.rs`) echoes the
-/// *server's* own configuration state (`state.reranker().is_some()`)
-/// into `configured`, even for a request whose body carried no
-/// `rerank` field at all — a run against a rerank-configured server
-/// that never itself passed `--rerank` still gets back
-/// `{configured: true, ran: false, reason: None}` for every case.
-/// `rerank.ran`'s denominator must gate on `rerank_requested_this_run`
-/// (this run's own `--rerank` flag), never on that echoed
-/// `reranker.configured`, or a `--rerank`-less run would wrongly count
-/// toward "empty when `--rerank` was not given" (`build_definitions`'
-/// own documented contract for this metric).
-#[test]
-fn rerank_ran_ignores_a_server_side_configured_reranker_when_this_run_never_asked_for_one() {
-    let case = CaseBlock {
+/// A one-case `CaseBlock` whose passage lane searched and found
+/// nothing — the twelve fields every metrics/summary test here shares,
+/// with only the three assembly-lane fields varying per test.
+fn searched_case(
+    evidence: Option<EvidenceOutcome>,
+    budget: Option<BudgetAccounting>,
+    diversity_sources: Option<usize>,
+) -> CaseBlock {
+    CaseBlock {
         case_id: "c1".to_string(),
         query: "q".to_string(),
         cues: Vec::new(),
@@ -587,7 +583,27 @@ fn rerank_ran_ignores_a_server_side_configured_reranker_when_this_run_never_aske
         citations: None,
         missed: Vec::new(),
         missed_truncated: 0,
-        evidence: Some(EvidenceOutcome::Assembled {
+        evidence,
+        budget,
+        diversity_sources,
+    }
+}
+
+/// Regression: `RerankerPlan::not_requested` (`assemble.rs`) echoes the
+/// *server's* own configuration state (`state.reranker().is_some()`)
+/// into `configured`, even for a request whose body carried no
+/// `rerank` field at all — a run against a rerank-configured server
+/// that never itself passed `--rerank` still gets back
+/// `{configured: true, ran: false, reason: None}` for every case.
+/// `rerank.ran`'s denominator must gate on `rerank_requested_this_run`
+/// (this run's own `--rerank` flag), never on that echoed
+/// `reranker.configured`, or a `--rerank`-less run would wrongly count
+/// toward "empty when `--rerank` was not given" (`build_definitions`'
+/// own documented contract for this metric).
+#[test]
+fn rerank_ran_ignores_a_server_side_configured_reranker_when_this_run_never_asked_for_one() {
+    let case = searched_case(
+        Some(EvidenceOutcome::Assembled {
             latency_ms: 1,
             items: Vec::new(),
             omitted_by_reason: BTreeMap::new(),
@@ -603,13 +619,107 @@ fn rerank_ran_ignores_a_server_side_configured_reranker_when_this_run_never_aske
                 reason: None,
             },
         }),
-        budget: None,
-        diversity_sources: None,
-    };
+        None,
+        None,
+    );
 
     let metrics = build_metrics(&[case], false);
     let rerank_ran = metrics.get("rerank.ran").expect("metric key exists");
     assert_eq!(rerank_ran.sample_size(), 0, "{rerank_ran:?}");
+}
+
+// ========================= assembly stdout summary =========================
+
+fn inputs_block(budget: Option<BudgetLimits>, rerank: Option<&str>) -> InputsBlock {
+    InputsBlock {
+        eval: EvalInputsBlock {
+            path: "eval.jsonl".to_string(),
+            name: None,
+            cases: 1,
+        },
+        context: "sake".to_string(),
+        url: "http://localhost:8080".to_string(),
+        out: "evaluation.json".to_string(),
+        default_limit: 10,
+        resolve_limit: 5,
+        mode: if budget.is_some() {
+            "assembly"
+        } else {
+            "baseline"
+        }
+        .to_string(),
+        budget,
+        rerank: rerank.map(str::to_string),
+    }
+}
+
+/// #308's data (budget usage, `diversity.sources`, `rerank.ran`) must
+/// reach stdout, not only `evaluation.json` — a CI operator reading
+/// the console alone should see the equal-budget and reranker outcome
+/// of an `--assembly` run.
+#[test]
+fn assembly_summary_prints_budget_diversity_and_rerank_lines() {
+    let limits = BudgetLimits {
+        max_items: 40,
+        max_bytes: 65536,
+        max_tokens: 4000,
+    };
+    let mut omitted_by_reason = BTreeMap::new();
+    omitted_by_reason.insert(REASON_BUDGET_EXCEEDED.to_string(), 1);
+    let case = searched_case(
+        Some(EvidenceOutcome::Assembled {
+            latency_ms: 1,
+            items: Vec::new(),
+            omitted_by_reason,
+            selection: SelectionPlan {
+                dedup_dropped: 0,
+                contradiction_groups: 0,
+                diversity_tier_width: 10,
+            },
+            reranker: RerankerPlan {
+                configured: true,
+                ran: true,
+                model: Some("model-x".to_string()),
+                reason: None,
+            },
+        }),
+        Some(BudgetAccounting {
+            usage: BudgetUsage {
+                items_used: 3,
+                bytes_used: 500,
+                tokens_used: 100,
+                limits,
+            },
+            omitted_total: 1,
+        }),
+        Some(2),
+    );
+
+    let metrics = build_metrics(&[case], true);
+    let lines = assembly_summary_lines(&inputs_block(Some(limits), Some("model-x")), &metrics);
+    assert_eq!(
+        lines,
+        vec![
+            "  budget over 1 case(s): mean 3.0 item(s) / 500.0 byte(s) / 100.0 token(s) used, \
+             budget-omitted rate 0.250"
+                .to_string(),
+            "  diversity over 1 case(s): mean 2.0 distinct source(s) in admitted evidence"
+                .to_string(),
+            "  rerank 'model-x' over 1 attempted case(s): 1 ran, 0 degraded".to_string(),
+        ]
+    );
+}
+
+/// A plain baseline run (no budget flag, no `--rerank`, no assembly
+/// lane) must add nothing to the summary — the pre-#308 stdout shape
+/// is unchanged.
+#[test]
+fn a_plain_baseline_run_adds_no_assembly_summary_lines() {
+    let case = searched_case(None, None, None);
+
+    let metrics = build_metrics(&[case], false);
+    let lines = assembly_summary_lines(&inputs_block(None, None), &metrics);
+    assert!(lines.is_empty(), "{lines:?}");
 }
 
 // ========================= metrics <-> definitions agreement =========================
