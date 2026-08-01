@@ -39,7 +39,7 @@
   ],
   "scripts": {
     "prepublishOnly": "npm run build",
-    "build": "tsup src/index.ts src/testing.ts --format esm,cjs --dts --sourcemap",
+    "build": "tsup src/index.ts src/testing.ts --format esm,cjs --dts --sourcemap --external @opentelemetry/api",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src tests",
     "test": "vitest run",
@@ -47,7 +47,19 @@
     "test:integration": "vitest run tests/integration",
     "check:surface": "tsx scripts/check-surface.ts"
   },
+  "peerDependencies": {
+    "@opentelemetry/api": "^1.9.0"
+  },
+  "peerDependenciesMeta": {
+    "@opentelemetry/api": {
+      "optional": true
+    }
+  },
   "devDependencies": {
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/context-async-hooks": "^2.10.0",
+    "@opentelemetry/core": "^2.10.0",
+    "@opentelemetry/sdk-trace-base": "^2.10.0",
     "@types/node": "^26.1.2",
     "eslint": "^10.8.0",
     "tsup": "^8.2.0",

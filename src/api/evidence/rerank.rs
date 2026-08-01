@@ -274,11 +274,14 @@ impl EvidenceReranker for HttpReranker {
         candidates: &[RerankCandidate],
         deadline: Deadline,
     ) -> Result<Vec<usize>, RerankFailure> {
-        let span = tracing::info_span!(
-            "rerank",
+        // `taguru.`-prefixed per ADR 0008 §5 (renamed from the bare
+        // `"rerank"`/`rerank.*` this predates — no wire or test
+        // depends on the old spelling).
+        let span = crate::trace::span!(
+            "taguru.rerank",
             otel.kind = "client",
-            rerank.model = %self.model,
-            rerank.candidates = candidates.len(),
+            taguru.rerank.model = %self.model,
+            taguru.rerank.candidates = candidates.len(),
         );
         let _guard = span.enter();
 

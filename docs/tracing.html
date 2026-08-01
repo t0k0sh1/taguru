@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tracing — Taguru</title>
+  <meta name="description" content="The composed retrieval span tree, the attribute and event vocabulary, error semantics, privacy rules, and how to point a local Jaeger at a running server.">
+  <link rel="icon" type="image/png" href="favicon.png">
+  <link rel="stylesheet" href="style.css">
+  <script src="site.js"></script>
+</head>
+<body>
+
+<div class="topbar">
+  <button class="nav-toggle" id="nav-toggle" type="button" aria-label="Toggle menu">☰</button>
+  <a class="brand" href="index.html"><img class="brand-mark" src="logo.png" alt="">Taguru</a>
+  <button class="theme-toggle" type="button" aria-label="Toggle theme">◐</button>
+</div>
+<div class="scrim" id="scrim"></div>
+
+<div class="layout">
+<aside class="sidebar">
+  <a class="brand" href="index.html"><img class="brand-mark" src="logo.png" alt="">Taguru</a>
+  <nav class="side-nav">
+    <div class="side-group">
+      <a href="index.html">Home</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Guide</div>
+      <a href="getting-started.html">Getting started</a>
+      <a href="concepts.html">Concepts</a>
+      <a href="modeling.html">Modeling</a>
+      <a href="troubleshooting.html">Troubleshooting</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Reference</div>
+      <a href="import.html">Batch import</a>
+      <a href="extract.html">Document extraction</a>
+      <a href="benchmark.html">Extraction benchmark</a>
+      <a href="evaluate.html">Retrieval quality gate</a>
+      <a href="evidence.html">Evidence assembly</a>
+      <a href="long-running.html">Long-running ingestion</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Deploy</div>
+      <a href="docker-compose.html">Docker Compose</a>
+      <a href="kubernetes.html">Kubernetes</a>
+      <a href="bedrock.html">Amazon Bedrock</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">How it works</div>
+      <a href="architecture.html">Internal architecture</a>
+      <a href="tracing.html" aria-current="page">Tracing</a>
+      <a href="mcp-rag-walkthrough.html">MCP walkthrough</a>
+      <a href="local-rag-walkthrough.html">Local RAG walkthrough</a>
+    </div>
+  </nav>
+  <div class="sidebar-footer">
+    <a href="https://github.com/t0k0sh1/taguru">GitHub ↗</a>
+    <button class="theme-toggle" type="button" aria-label="Toggle theme">◐</button>
+  </div>
+</aside>
+
+<main class="content">
+<div class="page">
+
+  <header class="hero">
+    <div class="eyebrow">how it works · observability</div>
+    <h1>Tracing — the composed retrieval loop, made legible</h1>
+    <p class="lede">
+      One HTTP request span was never the question. <code>retrieve</code> and
+      <code>assemble_evidence</code> each fan out into resolve → describe →
+      <code>query</code> (only when <code>labels</code> pins the facets) → activate → citations →
+      passage fallback, and passage search itself fans further
+      into BM25 / ANN / fuse lanes — all inside one round trip. <a href="#trees">The span tree</a>
+      below is what turns "<code>POST /mcp</code> is slow" into "the semantic lane degraded and
+      fell back to BM25 alone," from one trace.
+    </p>
+    <div class="hero-meta">
+      <span><b>Opt-in:</b> <code>OTEL_EXPORTER_OTLP_ENDPOINT</code></span>
+      <span><b>Modules:</b> <code>src/trace.rs</code> · <code>src/mcp/retrieve.rs</code> · ADR 0008</span>
+    </div>
+  </header>
+
+  <section id="trees">
+    <h2>The span tree</h2>
+    <p class="section-sub">
+      Every Taguru-owned span is named <code>taguru.*</code>. The HTTP server span is the one
+      exception, kept as semconv's <code>{method} {route}</code> — that's what already crosses
+      process boundaries via <code>traceparent</code>, and giving it a second name would only
+      make dashboards built on the semconv convention stop matching.
+    </p>
+    <pre><code>POST /mcp                                  <span class="c"># server span, otel.kind=server</span>
+└─ taguru.retrieve                         <span class="c"># root: one call composed the whole loop</span>
+   ├─ taguru.resolve
+   ├─ taguru.describe                      <span class="c"># absent if describe_first=false</span>
+   ├─ taguru.query                         <span class="c"># absent unless `labels` pins facets</span>
+   ├─ taguru.activate
+   ├─ taguru.citations                     <span class="c"># absent if fetch_citations=false</span>
+   │  └─ taguru.citation_missing (event)   <span class="c"># one aggregate event, not one per miss</span>
+   └─ taguru.passage_fallback              <span class="c"># absent unless the text lane actually ran</span>
+      └─ taguru.passage_search             <span class="c"># same span search_passages emits directly</span>
+         ├─ taguru.search.bm25
+         ├─ taguru.search.ann              <span class="c"># absent: cache hit, or vector lane didn't run</span>
+         │  └─ taguru.embed (client)       <span class="c"># query embedding — cue-cache hits skip this</span>
+         └─ taguru.search.fuse</code></pre>
+    <p>
+      <code>taguru.passage_search</code> is also the whole answer for a cache hit: one childless
+      span, <code>taguru.cache.result=hit</code>, no lanes underneath — the absence of children
+      <i>is</i> the signal, not a separate flag to check. <code>assemble_evidence</code> composes
+      the identical five phases (minus <code>query</code>'s special-casing) under its own root,
+      <code>taguru.assemble_evidence</code>.
+    </p>
+    <p>
+      Two more span kinds sit outside the retrieval tree proper:
+    </p>
+    <ul>
+      <li><code>taguru.shard_call</code> (client, <code>otel.name</code> overridden to
+        <code>"{method} -&gt; shard {n}"</code>) — the router's fan-out to each shard, parenting that
+        shard's own <code>{method} {route}</code> span. A router deployment gets end-to-end traces
+        across every shard, not just its own hop.</li>
+      <li><code>taguru.tool_call</code> (server) — the stdio bridge's (<code>taguru-mcp</code>)
+        per-job span, parented from the caller's <code>traceparent</code> when the MCP client sends
+        one in <code>params._meta</code> (optional; a client that sends nothing behaves
+        byte-identically).</li>
+    </ul>
+  </section>
+
+  <section id="vocabulary">
+    <h2>Attributes and events</h2>
+    <p class="section-sub">
+      Every attribute value is bound to an existing metrics enum's <code>as_str()</code> — no
+      parallel spelling grows out of sync with <code>/metrics</code>' own labels.
+    </p>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>attribute</th><th>values</th></tr></thead>
+        <tbody>
+          <tr><td><code>taguru.op</code></td><td><code>resolve</code> <code>query</code> <code>activate</code> <code>search_passages</code> …</td></tr>
+          <tr><td><code>taguru.cache.result</code></td><td><code>hit</code> <code>miss</code></td></tr>
+          <tr><td><code>taguru.cache.semantic</code></td><td><code>hit</code> <code>stale</code> <code>guarded</code> <code>miss</code></td></tr>
+          <tr><td><code>taguru.resolve.tier</code></td><td><code>lexical</code> <code>semantic</code> <code>weak_lexical</code> <code>miss</code></td></tr>
+          <tr><td><code>taguru.search.lanes</code></td><td><code>no_query_terms</code> <code>zero_limit</code> <code>ran</code></td></tr>
+          <tr><td><code>taguru.search.vector.outcome</code></td><td><code>off</code> <code>query_embedding_failed</code> <code>no_vectors</code> <code>model_changed</code> <code>width_changed</code> <code>ran</code></td></tr>
+          <tr><td><code>taguru.error.kind</code></td><td><code>deadline_exceeded</code> <code>result_too_large</code> <code>cancelled</code> <code>invalid_argument</code> <code>not_found</code> <code>unauthorized</code> <code>upstream_error</code> <code>transport</code> <code>provider_error</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      Three span-event names carry a <code>taguru.reason</code> field instead of a free-form
+      message — <code>tracing-opentelemetry</code> maps a log line's <code>message</code> field to
+      the OTel event name, so the stable code has to live in its own field to stay greppable
+      across a fleet:
+    </p>
+    <ul>
+      <li><code>taguru.skip</code> — a planned step didn't run. Reasons include
+        <code>describe_disabled</code>, <code>no_anchors</code>, <code>labels_absent</code>,
+        <code>citations_disabled</code>, <code>fallback_not_requested</code>,
+        <code>fallback_suppressed</code>, <code>zero_limit</code>, <code>no_query_terms</code>.</li>
+      <li><code>taguru.degrade</code> — a step ran, but in a reduced form. Reasons are the
+        <code>vector_*</code> outcomes above, prefixed the same way.</li>
+      <li><code>taguru.cache</code> — a cache tier decided the result. Reasons include
+        <code>retrieval_cache_hit</code>, <code>semantic_cache_hit</code> /
+        <code>_stale</code> / <code>_guarded</code> / <code>_miss</code>, <code>cue_cache_hit</code>.</li>
+    </ul>
+  </section>
+
+  <section id="errors">
+    <h2>Error semantics</h2>
+    <p class="section-sub">
+      A degraded-but-completed retrieval is not the same failure mode as one that returned
+      nothing, and the two must not collide into one red span.
+    </p>
+    <ul>
+      <li><code>otel.status_code=ERROR</code> is set only by the span whose own operation failed
+        to produce a result — it does <b>not</b> propagate to ancestors. A retrieval that degraded
+        (semantic lane down, BM25 still answered) leaves every span <code>UNSET</code>, the OTel
+        convention for success.</li>
+      <li><code>.with_error_events_to_status(false)</code> closes the one path that used to break
+        this: <code>tracing-opentelemetry</code> special-cases a log field literally named
+        <code>error</code> into an exception event <i>and</i> an automatic <code>ERROR</code>
+        status. A <code>tracing::warn!(error = …)</code> on a successful degrade used to paint the
+        whole request span red for no operational reason — fixed structurally by this one setting,
+        not by renaming every occurrence (span-event fields are never named <code>error</code>
+        going forward; see ADR 0008 §9).</li>
+      <li>The HTTP server span keeps its existing rule (5xx → <code>ERROR</code>, 4xx does not) —
+        a JSON-RPC tool error rides on a 200, so <code>POST /mcp</code> stays <code>UNSET</code>
+        while <code>taguru.retrieve</code> goes <code>ERROR</code>. That split <i>is</i> the
+        distinction #224 asked for.</li>
+    </ul>
+  </section>
+
+  <section id="privacy">
+    <h2>Privacy</h2>
+    <p class="section-sub">Enforced three ways, none of them a reviewer's judgment call at write time.</p>
+    <ul>
+      <li><b>No dynamic attribute keys, anywhere.</b> <code>tracing::info_span!</code> and
+        <code>tracing::info!</code> require field names at macro-expansion time — the full set of
+        exportable keys is enumerable with <code>grep</code>, and no call site can invent a new
+        one at runtime that carries a raw string.</li>
+      <li><b>A target-level firewall on the export path.</b> <code>init_telemetry</code>'s OTel
+        layer filters on <code>tracing_subscriber::filter::Targets</code>, with
+        <code>taguru::search</code> forced <code>OFF</code> regardless of level — the one target
+        <code>TAGURU_LOG_SEARCHES=1</code> turns on for raw-query debug logging. Turning that
+        env var on for local debugging can never leak a question into OTLP, even by accident.</li>
+      <li><b>A sentinel integration test.</b> A concept name, a source id, passage text, and a
+        query each get a unique nonce; a full retrieval runs with
+        <code>TAGURU_LOG_SEARCHES=1</code> <i>and</i> OTLP export both on, and the test asserts
+        none of the four nonces appear anywhere in the raw bytes the collector received.</li>
+    </ul>
+    <p>
+      Per-item data follows one rule: <b>default to aggregate, never one span or event per item</b>
+      — not one event per citation miss (<code>taguru.citation_missing</code> carries a count),
+      not one span per resolved cue, not a context <i>name</i> anywhere (only counts — consistent
+      with <code>taguru_searches_total</code> not carrying a context label either). The one
+      exception is a router's shard list: shard identifiers are operator-controlled configuration,
+      not caller-shaped data, so <code>taguru.shard_call</code> is one span per shard.
+    </p>
+  </section>
+
+  <section id="propagation">
+    <h2>Context propagation</h2>
+    <p class="section-sub">Every hop both extracts an inbound parent and injects its own current span outbound — this was previously extract-only.</p>
+    <ul>
+      <li><b>HTTP</b>: inbound W3C <code>traceparent</code> / <code>tracestate</code> (and AWS
+        <code>X-Amzn-Trace-Id</code> as a fallback) become the request span's parent, as before.
+        New: every outbound call this process makes — router → shard, SDK → server — injects its
+        <i>own</i> current span, not a bare pass-through of whatever header it received. A router
+        fanning out to N shards now produces N child spans under its own request span, not one
+        flat trace per shard.</li>
+      <li><b>stdio (<code>taguru-mcp</code>)</b>: MCP has no HTTP headers to carry a
+        <code>traceparent</code> on, so it rides in <code>params._meta.traceparent</code> /
+        <code>.tracestate</code> — optional, read-only, and a client that sends nothing behaves
+        exactly as before. The bridge injects its own span the same way on every outbound call to
+        the server it fronts.</li>
+      <li><b>SDKs (Python/TypeScript)</b>: inject on every outbound request, the same way — see
+        <a href="#sdks">below</a>.</li>
+    </ul>
+  </section>
+
+  <section id="sdks">
+    <h2>SDK tracing (opt-in, zero required dependencies)</h2>
+    <p class="section-sub">
+      <code>retrieve()</code> composes the identical client-side loop server-side
+      <code>taguru.mcp.retrieve</code> does — resolve → describe → query → activate → citations →
+      passage fallback — under its own <code>taguru.retrieve</code> root, with the same
+      <code>taguru.skip</code> reason vocabulary. <code>sdk/spec/tracing.yaml</code> pins the exact
+      span names, attribute keys, and reason codes both SDKs share; each language's own test suite
+      loads it and asserts against it directly.
+    </p>
+    <p>
+      Neither SDK's <b>required</b> dependency set grows. Both add OpenTelemetry as strictly
+      optional:
+    </p>
+    <ul>
+      <li><b>Python</b> — <code>pip install "taguru[otel]"</code> pulls in
+        <code>opentelemetry-api</code>; without it, every call in <code>taguru._tracing</code>
+        degrades to a silent no-op (a plain <code>pip install taguru</code> is unaffected either
+        way). Spans record only through three privacy-safe setters — a bounded int, a bool, or a
+        closed reason code — never a free-form string.</li>
+      <li><b>TypeScript</b> — <code>@opentelemetry/api</code> is an <i>optional peer dependency</i>
+        (<code>peerDependenciesMeta.optional: true</code>), loaded through a lazily cached dynamic
+        <code>import()</code> so a plain <code>npm install taguru</code> never attempts to resolve
+        it and the build (<code>tsup --external @opentelemetry/api</code>) never bundles it.</li>
+      <li>Neither SDK opens a client-side HTTP span for the request itself — the server's own
+        request span already covers that round trip as a child of whichever phase span made the
+        call, so a client span in between would duplicate it without adding information.</li>
+      <li>Tracing activates only once the <i>application</i> configures a <code>TracerProvider</code>
+        — neither SDK calls <code>set_tracer_provider</code> / <code>setGlobalTracerProvider</code>
+        itself. Wire up whatever OTel SDK you already use; these two just emit spans into it.</li>
+    </ul>
+  </section>
+
+  <section id="try-it">
+    <h2>Try it locally: Jaeger via Docker Compose</h2>
+    <p class="section-sub">No changes to your server config beyond one environment variable.</p>
+    <pre><code><span class="c"># one-off Jaeger all-in-one, OTLP/HTTP on 4318, UI on 16686</span>
+docker run -d --name jaeger \
+  -p 16686:16686 -p 4318:4318 \
+  jaegertracing/all-in-one:latest
+
+<span class="c"># point Taguru at it and start the server (see docker-compose.html for the</span>
+<span class="c"># full compose walkthrough — add this one variable to that file's `environment:`)</span>
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
+OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf \
+  taguru serve</code></pre>
+    <p>
+      Run a <code>retrieve</code> tool call through any MCP client (or
+      <code>curl -X POST localhost:8248/mcp</code>, see <code>GET /protocol</code>), then open
+      <a href="http://localhost:16686">localhost:16686</a> and search for the <code>taguru</code>
+      service. One trace should show <code>taguru.retrieve</code> with its phase spans nested
+      underneath, matching <a href="#trees">the tree above</a> — with any lane that degraded or
+      any step that was skipped visible as an event, reason code included.
+    </p>
+    <p>
+      <b>To correlate with logs</b>: <code>TAGURU_LOG_FORMAT=json</code> puts <code>trace_id</code>
+      on every access-log line for a traced request. Grep the log for the trace id you care about,
+      then paste it straight into Jaeger's trace-lookup search — no separate correlation system
+      needed.
+    </p>
+    <p class="note">
+      Sampled-out is not the same as disabled. With export configured but a sampler set to drop a
+      given trace, <code>tracing-opentelemetry</code> still builds the span (and the SDK still
+      runs the sampler) — the cost just never reaches the network. True zero cost only happens
+      with <code>OTEL_EXPORTER_OTLP_ENDPOINT</code> unset entirely: every <code>taguru::trace::span!</code>
+      call short-circuits to <code>Span::none()</code> without even opening the tracing registry's
+      storage.
+    </p>
+  </section>
+
+  <section id="next">
+    <div class="next-links">
+      <a class="nav-card" href="architecture.html#observability" style="flex:1 1 16rem">
+        <span class="nc-title">Internal architecture — observability</span>
+        <p>Metrics, per-context capacity gauges, and where tracing sits alongside them.</p>
+      </a>
+      <a class="nav-card" href="troubleshooting.html#observability" style="flex:1 1 16rem">
+        <span class="nc-title">Troubleshooting — seeing the split</span>
+        <p>Pairing Taguru's retrieval-side spans with your own generation-call instrumentation.</p>
+      </a>
+    </div>
+  </section>
+
+  <footer class="colophon">
+    <span>MIT License</span>
+    <a href="https://github.com/t0k0sh1/taguru">github.com/t0k0sh1/taguru</a>
+  </footer>
+
+</div>
+</main>
+</div>
+</body>
+</html>

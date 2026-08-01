@@ -180,12 +180,15 @@ impl EmbeddingProvider for HttpEmbeddings {
         // on the caller's thread (block_in_place), so a request span
         // in scope becomes its parent automatically. Retries stay
         // inside the one span: one logical embed, one client call.
-        let span = tracing::info_span!(
-            "embed",
+        // `taguru.`-prefixed per ADR 0008 §5 (renamed from the bare
+        // `"embed"`/`embed.*` this predates — no wire or test depends
+        // on the old spelling).
+        let span = crate::trace::span!(
+            "taguru.embed",
             otel.kind = "client",
-            embed.model = %self.model,
-            embed.inputs = texts.len(),
-            embed.purpose = purpose.as_str(),
+            taguru.embed.model = %self.model,
+            taguru.embed.inputs = texts.len(),
+            taguru.embed.purpose = purpose.as_str(),
         );
         let _guard = span.enter();
         let mut backoff = RETRY_INITIAL_BACKOFF;
@@ -218,10 +221,16 @@ impl EmbeddingProvider for HttpEmbeddings {
                         && !self.shutdown.active()
                     {
                         attempt += 1;
+                        // Not `error =`: this fires inside the active
+                        // `taguru.embed` span, and that field name is
+                        // what tracing-opentelemetry special-cases into
+                        // an exception event and an ERROR status (ADR
+                        // 0008 §9) — which a retry that goes on to
+                        // succeed must not leave behind.
                         tracing::warn!(
                             attempt,
                             of = RETRY_ATTEMPTS,
-                            error = %refusal.message,
+                            reason = %refusal.message,
                             "transient embedding failure; retrying"
                         );
                         std::thread::sleep(backoff.min(deadline.remaining()));
@@ -814,13 +823,31 @@ impl PassageVectorStore {
         if self.dim == 0 || query.len() != self.dim {
             return Vec::new();
         }
-        if limit < self.len()
+        // On the semantic lane's own scoped thread (`registry/search.rs`'s
+        // `thread::scope`), whose `taguru.search.bm25`-style parent is
+        // already re-entered by the caller — this only needs its own
+        // span, not the parent hand-off (ADR 0008 §6.2).
+        let span = crate::trace::span!(
+            "taguru.search.ann",
+            otel.kind = "internal",
+            taguru.search.pool = limit,
+            taguru.search.rows = self.len(),
+            taguru.search.exact = tracing::field::Empty,
+            taguru.search.hits = tracing::field::Empty,
+        );
+        let _guard = span.enter();
+        let hits = if limit < self.len()
             && self.len() >= PASSAGE_ANN_THRESHOLD
             && let Some(index) = self.ensure_ann_index(deadline)
         {
-            return index.search(self, query, limit, eligible);
-        }
-        self.exact_top_matches(query, limit, eligible)
+            span.record("taguru.search.exact", false);
+            index.search(self, query, limit, eligible)
+        } else {
+            span.record("taguru.search.exact", true);
+            self.exact_top_matches(query, limit, eligible)
+        };
+        span.record("taguru.search.hits", hits.len());
+        hits
     }
 
     /// The linear cosine sweep [`Self::top_matches`] takes below

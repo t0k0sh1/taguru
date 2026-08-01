@@ -21,6 +21,7 @@ from typing import Any
 
 import httpx
 
+from .. import _tracing
 from .._contract import VERSION_PATH, incompatibility, parse_version_body
 from .._decode import decode
 from .._errors import IncompatibleServerError, NotFoundError, TaguruError, TransportError
@@ -239,6 +240,7 @@ class AsyncTaguru:
     ) -> httpx.Response:
         url = self._base_url + path
         headers = dict(self._headers)
+        _tracing.inject_headers(headers)
         body: bytes | None = content
         if json_body is not None:
             body = dumps_compact(json_body)
@@ -1326,6 +1328,7 @@ class AsyncContext:
         await self._client._ensure_contract()
         url = self._client._base_url + self._path + "/export"
         headers = dict(self._client._headers)
+        _tracing.inject_headers(headers)
         async with self._client._http.stream("GET", url, headers=headers) as response:
             if response.status_code >= 400:
                 await response.aread()
@@ -1441,80 +1444,120 @@ class AsyncContext:
         never hidden.
         """
         cues = [origins] if isinstance(origins, str) else list(origins)
-        resolved: dict[str, list[TieredResolution]] = {}
-        anchors: list[str] = []
-        for cue in cues:
-            candidates = await self.resolve(
-                cue, dice_floor=dice_floor, semantic_floor=semantic_floor, limit=resolve_limit
+        with _tracing.span(_tracing.ROOT_SPAN) as root:
+            root.count(_tracing.ATTR_ORIGIN_COUNT, len(cues))
+            resolved: dict[str, list[TieredResolution]] = {}
+            anchors: list[str] = []
+            with _tracing.span(_tracing.SPAN_RESOLVE):
+                for cue in cues:
+                    candidates = await self.resolve(
+                        cue,
+                        dice_floor=dice_floor,
+                        semantic_floor=semantic_floor,
+                        limit=resolve_limit,
+                    )
+                    resolved[cue] = candidates
+                    picked = (
+                        candidates[0].name
+                        if (auto_pick and candidates)
+                        else (None if auto_pick else cue)
+                    )
+                    if picked is not None and picked not in anchors:
+                        anchors.append(picked)
+            root.count(_tracing.ATTR_ANCHOR_COUNT, len(anchors))
+
+            outline: dict[str, ConceptDescription | None] = {}
+            activations: list[Activation] = []
+            associations: list[Association] = []
+            seen_triples: set[tuple[str, str, str]] = set()
+            if anchors:
+                if describe_first:
+                    with _tracing.span(_tracing.SPAN_DESCRIBE):
+                        for anchor in anchors:
+                            outline[anchor] = await self.describe(anchor)
+                else:
+                    root.skip("describe_disabled")
+
+                if labels is not None:
+                    with _tracing.span(_tracing.SPAN_QUERY):
+                        matched = await self.query(subject=anchors, label=labels)
+                        for match in matched.matches:
+                            triple = (match.subject, match.label, match.object)
+                            if triple not in seen_triples:
+                                seen_triples.add(triple)
+                                associations.append(match)
+                else:
+                    root.skip("labels_absent")
+
+                with _tracing.span(_tracing.SPAN_ACTIVATE):
+                    page = await self.activate(anchors, decay=activate_decay, limit=activate_limit)
+                    activations = page.matches
+                    for activation in activations:
+                        triple = (
+                            activation.association.subject,
+                            activation.association.label,
+                            activation.association.object,
+                        )
+                        if triple not in seen_triples:
+                            seen_triples.add(triple)
+                            associations.append(activation.association)
+            else:
+                root.skip("no_anchors")
+            root.count(_tracing.ATTR_ASSOCIATION_COUNT, len(associations))
+            root.count(_tracing.ATTR_ACTIVATION_COUNT, len(activations))
+
+            citations: dict[tuple[str, int], Citation] = {}
+            if fetch_citations:
+                missing = 0
+                with _tracing.span(_tracing.SPAN_CITATIONS) as citations_span:
+                    wanted: list[tuple[str, int]] = []
+                    for association in associations:
+                        for attribution in association.attributions:
+                            if attribution.paragraph is None:
+                                continue
+                            key = (attribution.source, attribution.paragraph)
+                            if key not in citations and key not in wanted:
+                                wanted.append(key)
+                    for source, paragraph in wanted:
+                        try:
+                            citations[(source, paragraph)] = await self.cite_passage(
+                                source, paragraph
+                            )
+                        except NotFoundError:
+                            # The locator points at a passage that was never
+                            # stored (or was retracted) — the graph fact
+                            # itself still stands.
+                            missing += 1
+                            continue
+                    citations_span.citation_missing(missing)
+            else:
+                root.skip("citations_disabled")
+            root.count(_tracing.ATTR_CITATION_RETURNED, len(citations))
+
+            passage_hits: list[PassageHit] = []
+            search_plan: SearchPlan | None = None
+            if text_fallback_query is not None and (
+                not text_fallback_only_if_empty or not associations
+            ):
+                root.flag(_tracing.ATTR_FALLBACK_RAN, True)
+                with _tracing.span(_tracing.SPAN_PASSAGE_FALLBACK):
+                    fallback = await self.search_passages(text_fallback_query, limit=search_limit)
+                    passage_hits = fallback.hits
+                    search_plan = fallback.plan
+            else:
+                root.flag(_tracing.ATTR_FALLBACK_RAN, False)
+                if text_fallback_query is None:
+                    root.skip("fallback_not_requested")
+                else:
+                    root.skip("fallback_suppressed")
+            root.count(_tracing.ATTR_PASSAGE_HIT_COUNT, len(passage_hits))
+
+            return RetrievalResult(
+                resolved=resolved,
+                outline=outline,
+                associations=associations,
+                activations=activations,
+                citations=citations,
+                passage_hits=passage_hits,
+                search_plan=search_plan,
             )
-            resolved[cue] = candidates
-            picked = (
-                candidates[0].name if (auto_pick and candidates) else (None if auto_pick else cue)
-            )
-            if picked is not None and picked not in anchors:
-                anchors.append(picked)
-
-        outline: dict[str, ConceptDescription | None] = {}
-        if describe_first:
-            for anchor in anchors:
-                outline[anchor] = await self.describe(anchor)
-
-        activations: list[Activation] = []
-        associations: list[Association] = []
-        seen_triples: set[tuple[str, str, str]] = set()
-        if anchors:
-            if labels is not None:
-                matched = await self.query(subject=anchors, label=labels)
-                for match in matched.matches:
-                    triple = (match.subject, match.label, match.object)
-                    if triple not in seen_triples:
-                        seen_triples.add(triple)
-                        associations.append(match)
-            page = await self.activate(anchors, decay=activate_decay, limit=activate_limit)
-            activations = page.matches
-            for activation in activations:
-                triple = (
-                    activation.association.subject,
-                    activation.association.label,
-                    activation.association.object,
-                )
-                if triple not in seen_triples:
-                    seen_triples.add(triple)
-                    associations.append(activation.association)
-
-        citations: dict[tuple[str, int], Citation] = {}
-        if fetch_citations:
-            wanted: list[tuple[str, int]] = []
-            for association in associations:
-                for attribution in association.attributions:
-                    if attribution.paragraph is None:
-                        continue
-                    key = (attribution.source, attribution.paragraph)
-                    if key not in citations and key not in wanted:
-                        wanted.append(key)
-            for source, paragraph in wanted:
-                try:
-                    citations[(source, paragraph)] = await self.cite_passage(source, paragraph)
-                except NotFoundError:
-                    # The locator points at a passage that was never stored
-                    # (or was retracted) — the graph fact itself still stands.
-                    continue
-
-        passage_hits: list[PassageHit] = []
-        search_plan: SearchPlan | None = None
-        if text_fallback_query is not None and (
-            not text_fallback_only_if_empty or not associations
-        ):
-            fallback = await self.search_passages(text_fallback_query, limit=search_limit)
-            passage_hits = fallback.hits
-            search_plan = fallback.plan
-
-        return RetrievalResult(
-            resolved=resolved,
-            outline=outline,
-            associations=associations,
-            activations=activations,
-            citations=citations,
-            passage_hits=passage_hits,
-            search_plan=search_plan,
-        )

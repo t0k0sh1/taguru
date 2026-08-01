@@ -1,0 +1,95 @@
+# SDK-side (Python/TypeScript) retrieval tracing vocabulary — ADR 0008, #224.
+#
+# `Taguru.context(...).retrieve()` composes a client-side retrieval loop
+# (resolve -> describe -> query -> activate -> citations -> passage
+# fallback) the way `taguru.mcp.retrieve` does server-side. This spec
+# binds the span names, attribute keys, and reason codes both language
+# SDKs use to describe that composition, so the two implementations stay
+# one vocabulary rather than two that happen to look similar.
+#
+# Checked by each SDK's own test suite (`sdk/python/tests/unit/
+# test_tracing.py`, `sdk/typescript/tests/unit/tracing.test.ts`), which load
+# this file and assert their emitted spans/attributes/events are exactly
+# this set — no more, no fewer. There is no automated cross-check against
+# the Rust server's own vocabulary (ADR 0008 §6): the SDK sees a narrower
+# slice of the retrieval loop (no BM25/ANN/fuse lanes, no cache tiers —
+# those are server-internal), so span names below are a subset of, not
+# identical to, the server's.
+
+tracer_name: taguru
+
+root_span: taguru.retrieve
+
+# One phase span per step `retrieve()` composes, in call order. A step
+# that does not run for a given call (see `skip_reasons` below) produces
+# no span at all — never an empty or errored one.
+phase_spans:
+  - taguru.resolve
+  - taguru.describe
+  - taguru.query
+  - taguru.activate
+  - taguru.citations
+  - taguru.passage_fallback
+
+# Attributes the root span records. All are counts (non-negative int) or
+# flags (bool) — never free text. Recorded once, after the phase that
+# produces them has run (or been skipped, leaving the natural zero/false).
+root_attributes:
+  taguru.origin.count: count      # len(origins) passed in
+  taguru.anchor.count: count      # resolved cues that became anchors
+  taguru.association.count: count # deduplicated associations collected
+  taguru.activation.count: count  # activation matches returned
+  taguru.citation.returned: count # citations successfully fetched
+  taguru.passage.hit_count: count # passage fallback hits
+  taguru.fallback.ran: flag       # whether the passage fallback lane ran
+
+# A step that was planned but did not run records exactly one `taguru.skip`
+# event on the ROOT span (not on a phase span — a skipped step has no span
+# to attach it to), carrying one of these stable reason codes in the
+# `taguru.reason` field. This is the SDK's full vocabulary; server-side
+# ADR 0008 §7 has more (fallback_suppressed's near-cousin
+# `fallback_graph_empty`, lane-level `vector_*` codes, ...) that describe
+# server-internal mechanics the SDK cannot observe and therefore never
+# emits.
+skip_event: taguru.skip
+reason_field: taguru.reason
+skip_reasons:
+  - describe_disabled       # anchors resolved, but describe_first=False
+  - no_anchors              # no cue resolved to an anchor; describe/query/activate all skipped
+  - labels_absent           # anchors resolved, but labels=None; query skipped (activate still runs)
+  - citations_disabled      # fetch_citations=False
+  - fallback_not_requested  # text_fallback_query=None
+  - fallback_suppressed     # text_fallback_query set, but text_fallback_only_if_empty and associations were non-empty
+
+# Citation lookups that 404 (a locator pointing at a passage that was
+# never stored, or was retracted) fold into ONE aggregate event on the
+# `taguru.citations` phase span per call, never one event per miss — a
+# citation locator is caller-shaped, unbounded data, so per-item events
+# would defeat the same cardinality discipline ADR 0008 §5 applies
+# server-side.
+citation_missing_event: taguru.citation_missing
+citation_missing_field: taguru.citation.missing
+
+# Every outbound HTTP request the client issues carries the currently
+# active span's context via W3C Trace Context (`traceparent` /
+# `tracestate`), injected fresh on each call — never a bare pass-through
+# of some earlier response's headers. No client-side HTTP span is created
+# for the request itself: the server's own request span (ADR 0008 §1)
+# already covers that round trip as this span's child, and a client span
+# in between would duplicate it without adding information (ADR 0008
+# principle: no span whose sole content is "I called the network").
+propagation: w3c-tracecontext
+
+privacy:
+  # The only attribute-setting primitives the tracing helper exposes:
+  # a bounded int, a bool, or a value from a closed string-literal union
+  # (the reason codes above). There is deliberately no free-form string
+  # setter. Cue text, origins, labels, `text_fallback_query`, and any
+  # passage/citation content can never reach a span through this
+  # vocabulary — not as a reviewer's judgment call, but because the API
+  # surface has no method that accepts one.
+  allowed_value_kinds: [count, flag, reason]
+  # No per-item span or event exists anywhere in this vocabulary: not one
+  # span per resolved cue, not one event per citation miss, not one
+  # attribute per passage hit. Every number above is an aggregate.
+  no_per_item_signals: true

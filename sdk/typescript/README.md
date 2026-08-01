@@ -39,6 +39,33 @@ the deployment you target: `await client.protocol()` (`GET /protocol`).
 `taguru/testing` (Node-only) spawns a real server binary for integration
 tests — the twin of Python's `taguru.testing`.
 
+## Tracing
+
+`retrieve()` composes a client-side loop the same way the server's own
+`retrieve` MCP tool does — resolve → describe → query → activate → citations
+→ passage fallback. Optionally trace it as one OpenTelemetry span tree,
+`taguru.retrieve` with a child span per phase, joined to the server's own
+request span through injected `traceparent`/`tracestate` headers:
+
+```sh
+npm install @opentelemetry/api  # optional peer dependency — core install stays dependency-free otherwise
+```
+
+```typescript
+import { trace } from "@opentelemetry/api";
+// wire up whichever OpenTelemetry SDK/exporter you use — this package just emits spans into it
+```
+
+With no `TracerProvider` configured (or `@opentelemetry/api` not installed at
+all), every tracing call in the SDK is a silent no-op — nothing about
+`retrieve()`'s behavior or return value changes either way; the package is
+loaded through a lazily cached dynamic `import()`, never a static one, so a
+plain `npm install taguru` never even attempts to resolve it. See
+[Tracing](https://t0k0sh1.github.io/taguru/tracing.html) for the full span
+tree, the attribute/event vocabulary (shared with the Python SDK via
+`sdk/spec/tracing.yaml`), and the privacy rules (spans carry counts, flags,
+and closed reason codes — never cue text, labels, or passage content).
+
 See the repository's `sdk/` directory for the full documentation, the
 LangChain integration (`langchain-taguru`), and the cross-language surface
 spec.

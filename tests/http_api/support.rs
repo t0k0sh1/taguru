@@ -360,6 +360,255 @@ pub fn run_cli(args: &[&str], extra_env: &[(&str, &str)]) -> (i32, String, Strin
     )
 }
 
+/// Reads one HTTP/1.1 request off `stream`: header lines up to the blank
+/// line, then exactly `Content-Length` more body bytes (0 if absent).
+/// Header names come back lower-cased. `None` means the connection
+/// closed before a header terminator ever showed up — a probe or a
+/// half-open connection, not a real request. Shared by every hand-rolled
+/// fake server below (`FakeCollector`, `FakeShard`) so the same
+/// read-until-`\r\n\r\n`-then-drain-the-body loop exists once.
+fn read_http_request(
+    stream: &mut std::net::TcpStream,
+) -> Option<(std::collections::HashMap<String, String>, Vec<u8>)> {
+    use std::io::Read;
+    // `FakeCollector`/`FakeShard` serve one connection at a time on a
+    // single accept thread — a client that opens a connection and never
+    // finishes sending would otherwise block this call forever, stalling
+    // every later request to the same fake server.
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(30)));
+    let mut buffer = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let header_end = loop {
+        match stream.read(&mut chunk) {
+            Ok(0) | Err(_) => return None,
+            Ok(n) => buffer.extend_from_slice(&chunk[..n]),
+        }
+        if let Some(at) = buffer.windows(4).position(|w| w == b"\r\n\r\n") {
+            break at + 4;
+        }
+    };
+    let header_text = String::from_utf8_lossy(&buffer[..header_end]).to_string();
+    let mut headers = std::collections::HashMap::new();
+    for line in header_text.lines().skip(1) {
+        if let Some((name, value)) = line.split_once(':') {
+            headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+        }
+    }
+    let length: usize = headers
+        .get("content-length")
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    while buffer.len() < header_end + length {
+        match stream.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => buffer.extend_from_slice(&chunk[..n]),
+        }
+    }
+    let body = buffer[header_end..].to_vec();
+    Some((headers, body))
+}
+
+/// A single-purpose OTLP/HTTP sink: accepts POSTs, stores every body,
+/// answers 200. Runs until the test process exits. Shared by every
+/// tracing test that needs a real OTLP wire target — `FakeCollector`
+/// exposes the complete exported shape (parent ids, attributes,
+/// events, status, resource), which is why ADR 0008 §3 chose it over
+/// `opentelemetry_sdk`'s in-memory exporter (which cannot see spans
+/// from the spawned server process these tests drive anyway).
+pub struct FakeCollector {
+    pub endpoint: String,
+    bodies: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl FakeCollector {
+    pub fn start() -> Self {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("collector must bind");
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = bodies.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let Some((_headers, body)) = read_http_request(&mut stream) else {
+                    continue;
+                };
+                sink.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&body).to_string());
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                      Content-Length: 2\r\nConnection: close\r\n\r\n{}",
+                );
+            }
+        });
+        Self { endpoint, bodies }
+    }
+
+    /// Every span object exported so far, flattened across batches.
+    pub fn spans(&self) -> Vec<Value> {
+        let mut spans = Vec::new();
+        for body in self.bodies.lock().unwrap().iter() {
+            let Ok(parsed) = serde_json::from_str::<Value>(body) else {
+                continue;
+            };
+            for resource_spans in parsed["resourceSpans"].as_array().into_iter().flatten() {
+                for scope_spans in resource_spans["scopeSpans"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                {
+                    for span in scope_spans["spans"].as_array().into_iter().flatten() {
+                        let mut span = span.clone();
+                        span["resource"] = resource_spans["resource"].clone();
+                        spans.push(span);
+                    }
+                }
+            }
+        }
+        spans
+    }
+
+    /// Every raw request body received so far — for the sentinel test
+    /// that must prove a nonce appears NOWHERE in the wire payload,
+    /// not just outside the attributes/events [`spans`] already
+    /// parses out.
+    pub fn raw_bodies(&self) -> Vec<String> {
+        self.bodies.lock().unwrap().clone()
+    }
+}
+
+/// A span's OTLP status code — `tracing-opentelemetry` consumes the
+/// `otel.status_code` tracing field entirely into this real `status`
+/// object, so it never shows up via [`attribute`] the way an ordinary
+/// field does. `0` (UNSET, the default when a span never touched
+/// status) / `1` (OK) / `2` (ERROR) per the OTLP `trace.proto`
+/// `StatusCode` enum.
+pub fn status_code(span: &Value) -> i64 {
+    span["status"]["code"].as_i64().unwrap_or(0)
+}
+
+/// One attribute value out of the OTLP attribute list shape
+/// `[{"key": ..., "value": {"stringValue": ...}}]`.
+pub fn attribute<'a>(span: &'a Value, key: &str) -> Option<&'a Value> {
+    span["attributes"]
+        .as_array()?
+        .iter()
+        .find(|attribute| attribute["key"] == key)
+        .map(|attribute| &attribute["value"])
+}
+
+/// One event's `taguru.reason` attribute — `taguru.skip`/`.degrade`/
+/// `.cache` events all carry the reason this way (ADR 0008 §7).
+pub fn event_reason(event: &Value) -> Option<&str> {
+    event["attributes"]
+        .as_array()?
+        .iter()
+        .find(|attribute| attribute["key"] == "taguru.reason")
+        .and_then(|attribute| attribute["value"]["stringValue"].as_str())
+}
+
+/// Indexes a flat [`FakeCollector::spans`] list by id and by name, so a
+/// tracing test can walk parent/child relationships without
+/// re-implementing the same linear scan in every assertion.
+pub struct SpanTree {
+    by_id: std::collections::HashMap<String, Value>,
+}
+
+impl SpanTree {
+    pub fn new(spans: Vec<Value>) -> Self {
+        let by_id = spans
+            .into_iter()
+            .filter_map(|span| {
+                let id = span["spanId"].as_str()?.to_string();
+                Some((id, span))
+            })
+            .collect();
+        Self { by_id }
+    }
+
+    pub fn by_name<'a>(&'a self, name: &str) -> Vec<&'a Value> {
+        self.by_id
+            .values()
+            .filter(|span| span["name"] == name)
+            .collect()
+    }
+
+    /// The one span named `name` — panics with every span's name
+    /// listed when there isn't exactly one, so a failing assertion
+    /// names what WAS exported instead of just "not found".
+    pub fn one<'a>(&'a self, name: &str) -> &'a Value {
+        let matches = self.by_name(name);
+        match matches.as_slice() {
+            [span] => span,
+            _ => panic!(
+                "expected exactly one {name:?} span, found {}; exported names: {:?}",
+                matches.len(),
+                self.by_id.values().map(|s| &s["name"]).collect::<Vec<_>>()
+            ),
+        }
+    }
+
+    /// Every exported span whose `parentSpanId` is `parent`'s own id.
+    pub fn children<'a>(&'a self, parent: &Value) -> Vec<&'a Value> {
+        let parent_id = parent["spanId"].as_str().unwrap_or_default();
+        self.by_id
+            .values()
+            .filter(|span| span["parentSpanId"] == parent_id)
+            .collect()
+    }
+}
+
+/// A [`FakeCollector`] twin for the router-propagation tests: answers
+/// a canned JSON body and records every inbound request's headers, so
+/// a test can assert on what the router actually injected/forwarded
+/// rather than the collector's own OTLP shape.
+pub struct FakeShard {
+    pub endpoint: String,
+    requests: std::sync::Arc<std::sync::Mutex<Vec<std::collections::HashMap<String, String>>>>,
+}
+
+impl FakeShard {
+    pub fn start(body: Value) -> Self {
+        Self::start_with_status(200, body)
+    }
+
+    /// Same as [`Self::start`], but answering every request with
+    /// `status` instead of a hardcoded 200 — for tests exercising a
+    /// shard that answers with an HTTP error status (a router-side
+    /// `"http_error"` shard outcome, not a transport failure).
+    pub fn start_with_status(status: u16, body: Value) -> Self {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("shard must bind");
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = requests.clone();
+        let body_text = body.to_string();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let Some((headers, _body)) = read_http_request(&mut stream) else {
+                    continue;
+                };
+                sink.lock().unwrap().push(headers);
+                let response = format!(
+                    "HTTP/1.1 {status} Status\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body_text.len(),
+                    body_text
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        Self { endpoint, requests }
+    }
+
+    /// Every request's headers, in arrival order.
+    pub fn requests(&self) -> Vec<std::collections::HashMap<String, String>> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
 /// A scratch directory for batch files, separate from any data dir.
 pub fn batch_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("taguru-batches-{tag}-{}", std::process::id()));

@@ -35,11 +35,14 @@ mod schema;
 #[allow(unused_imports)]
 pub use protocol::{
     Call, FALLBACK_PROTOCOL_VERSION, Message, SUPPORTED_PROTOCOL_VERSIONS, ToolError,
-    cancelled_request_id, classify, error_response, initialize_result, response, tool_response,
-    tools_result,
+    cancelled_request_id, classify, error_response, initialize_result, meta_trace_headers,
+    response, tool_response, tools_result,
 };
 #[allow(unused_imports)]
-pub use retrieve::{run_retrieve, run_retrieve_bounded};
+pub use retrieve::{
+    REQUEST_BUILD_FAILED_PREFIX, Transport, error_kind, root_span, run_retrieve,
+    run_retrieve_bounded,
+};
 pub use route::route_tool;
 
 #[cfg(test)]
@@ -907,6 +910,60 @@ mod tests {
         );
     }
 
+    /// Absent, wrong-typed, or malformed `_meta` is "no parent", never
+    /// an error — an ordinary MCP client that sends no `_meta` at all
+    /// must see no difference from one whose header happens to be
+    /// garbage.
+    #[test]
+    fn meta_trace_headers_treats_every_malformed_shape_as_no_parent() {
+        // No params at all.
+        assert!(
+            meta_trace_headers(&json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call"}))
+                .is_empty()
+        );
+        // params present, but no _meta.
+        assert!(
+            meta_trace_headers(&json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "retrieve", "arguments": {}},
+            }))
+            .is_empty()
+        );
+        // traceparent present but not a string.
+        assert!(
+            meta_trace_headers(&json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"_meta": {"traceparent": 12345}},
+            }))
+            .is_empty()
+        );
+        // traceparent present but not a legal header value (control
+        // character) — dropped rather than passed through to panic
+        // deeper in `http::HeaderValue`.
+        assert!(
+            meta_trace_headers(&json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"_meta": {"traceparent": "00-\u{0}-01"}},
+            }))
+            .is_empty()
+        );
+        // tracestate alone, no traceparent: still not empty — each
+        // header is read independently, and a downstream consumer that
+        // only cares about tracestate must see it.
+        let tracestate_only = meta_trace_headers(&json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"_meta": {"tracestate": "vendor=abc"}},
+        }));
+        assert!(!tracestate_only.is_empty(), "{tracestate_only:?}");
+        assert_eq!(
+            tracestate_only
+                .get("tracestate")
+                .map(|v| v.to_str().unwrap()),
+            Some("vendor=abc")
+        );
+        assert!(tracestate_only.get("traceparent").is_none());
+    }
+
     #[test]
     fn initialize_result_echoes_the_client_version_or_falls_back() {
         let echoed = initialize_result(Some("2025-06-18"), "manual");
@@ -1117,18 +1174,23 @@ mod tests {
 
         let arguments = json!({ "context": "sake", "origins": ["tokyo"], "describe_first": false });
         let mut citation_calls = 0usize;
-        let result = run_retrieve_bounded(&arguments, Some(budget), |_method, path, _body| {
-            if path.ends_with("/resolve") {
-                Ok(resolve_body.clone())
-            } else if path.ends_with("/activate") {
-                Ok(activate_body.clone())
-            } else if path.ends_with("/citations") {
-                citation_calls += 1;
-                Ok(citation_body.clone())
-            } else {
-                panic!("unexpected call: {path}");
-            }
-        });
+        let result = run_retrieve_bounded(
+            &arguments,
+            Some(budget),
+            Transport::RemoteMcp,
+            |_method, path, _body| {
+                if path.ends_with("/resolve") {
+                    Ok(resolve_body.clone())
+                } else if path.ends_with("/activate") {
+                    Ok(activate_body.clone())
+                } else if path.ends_with("/citations") {
+                    citation_calls += 1;
+                    Ok(citation_body.clone())
+                } else {
+                    panic!("unexpected call: {path}");
+                }
+            },
+        );
 
         assert!(
             matches!(&result, Err(message) if message.contains(&format!("already exceeds {budget} bytes"))

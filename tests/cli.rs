@@ -2303,3 +2303,291 @@ fn top_level_help_documents_exit_code_3_for_threshold_violations() {
     assert!(stdout.contains("EXIT CODES"), "{stdout}");
     assert!(stdout.contains('3'), "{stdout}");
 }
+
+// ADR 0008 §10: the stdio bridge propagates trace context on its
+// outbound calls, in both directions — injecting from its own active
+// span, and adopting a parent an MCP client attached via `params._meta`.
+
+/// A raw HTTP listener that records every request it receives (request
+/// line plus headers, header names lower-cased) and answers each with
+/// a fixed 200 JSON body. Multiple connections on purpose: the bridge
+/// makes an unauthenticated `GET /protocol` probe before the stdio
+/// loop even starts (no active span at that point, so correctly
+/// carries no `traceparent`), and a test that only captured the first
+/// connection would silently assert on the probe instead of the tool
+/// call under test. The bridge does not parse or validate a tool's
+/// response shape beyond its status code, so any valid JSON body is a
+/// passing "server."
+type CapturedRequests =
+    std::sync::Arc<std::sync::Mutex<Vec<(String, std::collections::HashMap<String, String>)>>>;
+
+struct HeaderCapture {
+    addr: std::net::SocketAddr,
+    requests: CapturedRequests,
+}
+
+impl HeaderCapture {
+    fn start() -> Self {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("capture must bind");
+        let addr = listener.local_addr().unwrap();
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = requests.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut buffer = Vec::new();
+                let mut chunk = [0u8; 4096];
+                let header_end = loop {
+                    match stream.read(&mut chunk) {
+                        Ok(0) | Err(_) => break None,
+                        Ok(n) => buffer.extend_from_slice(&chunk[..n]),
+                    }
+                    if let Some(at) = buffer.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break Some(at + 4);
+                    }
+                };
+                if let Some(header_end) = header_end {
+                    let text = String::from_utf8_lossy(&buffer[..header_end]).to_string();
+                    let mut lines = text.lines();
+                    let request_line = lines.next().unwrap_or_default().to_string();
+                    let mut parsed = std::collections::HashMap::new();
+                    for line in lines {
+                        if let Some((name, value)) = line.split_once(':') {
+                            parsed
+                                .insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+                        }
+                    }
+                    sink.lock().unwrap().push((request_line, parsed));
+                }
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                      Content-Length: 2\r\nConnection: close\r\n\r\n{}",
+                );
+            }
+        });
+        Self { addr, requests }
+    }
+
+    /// Blocks (bounded) for a request whose request line contains
+    /// `path`, then returns its headers — skipping the startup probe
+    /// (`GET /protocol`) and any other unrelated connection.
+    fn wait_for(&self, path: &str) -> std::collections::HashMap<String, String> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Some((_, headers)) = self
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(line, _)| line.contains(path))
+            {
+                return headers.clone();
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no request matching {path:?} reached the capture listener within 10s"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+}
+
+/// One `tools/call` sent over the bridge's stdin, its first reply line
+/// read back with a bounded wait — the same pattern every other bridge
+/// test in this file uses.
+fn call_bridge_tool(bridge: &mut std::process::Child, request: serde_json::Value) -> String {
+    use std::io::Write;
+    let mut stdin = bridge.stdin.take().unwrap();
+    writeln!(stdin, "{request}").unwrap();
+    drop(stdin);
+    let stdout = bridge.stdout.take().unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut lines = BufReader::new(stdout).lines();
+        let _ = sender.send(lines.next().and_then(Result::ok));
+    });
+    receiver
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the bridge must answer the tool call")
+        .expect("one JSON-RPC response line")
+}
+
+#[test]
+fn the_stdio_bridge_injects_traceparent_into_its_outbound_calls() {
+    let capture = HeaderCapture::start();
+
+    let mut bridge = Command::new(env!("CARGO_BIN_EXE_taguru-mcp"))
+        .env("TAGURU_URL", format!("http://{}", capture.addr))
+        .env_remove("TAGURU_API_TOKEN")
+        // The endpoint need not be reachable — building the exporter
+        // (what makes `trace::enabled()` true) does not require
+        // connectivity, only actually delivering a batch would.
+        .env("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("bridge must spawn");
+
+    let reply = call_bridge_tool(
+        &mut bridge,
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "list_contexts", "arguments": {}}
+        }),
+    );
+    let headers = capture.wait_for("/contexts");
+
+    let _ = bridge.kill();
+    let _ = bridge.wait();
+
+    assert!(reply.contains(r#""id":1"#), "{reply}");
+    let traceparent = headers
+        .get("traceparent")
+        .unwrap_or_else(|| panic!("no traceparent header among {headers:?}"));
+    // `{version}-{trace-id:32}-{parent-id:16}-{flags:2}` — the bridge
+    // minted a fresh trace (no `_meta` was sent), so only the shape is
+    // checked, not a specific id.
+    let parts: Vec<&str> = traceparent.split('-').collect();
+    assert_eq!(parts.len(), 4, "{traceparent}");
+    assert_eq!(parts[0], "00", "{traceparent}");
+    assert_eq!(parts[1].len(), 32, "{traceparent}");
+    assert_eq!(parts[2].len(), 16, "{traceparent}");
+}
+
+#[test]
+fn the_stdio_bridge_adopts_a_parent_from_meta() {
+    let capture = HeaderCapture::start();
+
+    let mut bridge = Command::new(env!("CARGO_BIN_EXE_taguru-mcp"))
+        .env("TAGURU_URL", format!("http://{}", capture.addr))
+        .env_remove("TAGURU_API_TOKEN")
+        .env("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("bridge must spawn");
+
+    let inbound_trace_id = "4bf92f3577b34da6a3ce929d0e0e4736";
+    let reply = call_bridge_tool(
+        &mut bridge,
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {
+                "name": "list_contexts", "arguments": {},
+                "_meta": {
+                    "traceparent": format!("00-{inbound_trace_id}-00f067aa0ba902b7-01"),
+                }
+            }
+        }),
+    );
+    let headers = capture.wait_for("/contexts");
+
+    let _ = bridge.kill();
+    let _ = bridge.wait();
+
+    assert!(reply.contains(r#""id":1"#), "{reply}");
+    let traceparent = headers
+        .get("traceparent")
+        .unwrap_or_else(|| panic!("no traceparent header among {headers:?}"));
+    // Same trace as the client attached via `_meta` — proof the
+    // bridge adopted it as `taguru.tool_call`'s parent rather than
+    // starting a fresh trace.
+    assert!(
+        traceparent.starts_with(&format!("00-{inbound_trace_id}-")),
+        "expected trace id {inbound_trace_id} to propagate, got {traceparent}"
+    );
+    // The span id must NOT be the caller's own `00f067aa0ba902b7` —
+    // the outbound call is parented under the bridge's OWN
+    // `taguru.tool_call` span, not a bare copy of the inbound header.
+    assert!(
+        !traceparent.contains("00f067aa0ba902b7"),
+        "span id must be the bridge's own span, not the caller's: {traceparent}"
+    );
+}
+
+#[test]
+fn the_stdio_bridge_starts_a_fresh_trace_on_a_malformed_meta_traceparent() {
+    let capture = HeaderCapture::start();
+
+    let mut bridge = Command::new(env!("CARGO_BIN_EXE_taguru-mcp"))
+        .env("TAGURU_URL", format!("http://{}", capture.addr))
+        .env_remove("TAGURU_API_TOKEN")
+        .env("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("bridge must spawn");
+
+    let reply = call_bridge_tool(
+        &mut bridge,
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {
+                "name": "list_contexts", "arguments": {},
+                "_meta": {"traceparent": "not-a-traceparent"}
+            }
+        }),
+    );
+    let headers = capture.wait_for("/contexts");
+
+    let _ = bridge.kill();
+    let _ = bridge.wait();
+
+    assert!(reply.contains(r#""id":1"#), "{reply}");
+    // Garbage in `_meta` is "no parent", not an error — the bridge
+    // still answers and still injects a `traceparent` of its own, just
+    // rooted in a fresh trace rather than the malformed one.
+    let traceparent = headers
+        .get("traceparent")
+        .unwrap_or_else(|| panic!("no traceparent header among {headers:?}"));
+    let parts: Vec<&str> = traceparent.split('-').collect();
+    assert_eq!(parts.len(), 4, "{traceparent}");
+    assert_eq!(parts[0], "00", "{traceparent}");
+    assert_eq!(parts[1].len(), 32, "{traceparent}");
+    assert_eq!(parts[2].len(), 16, "{traceparent}");
+}
+
+#[test]
+fn the_stdio_bridge_forwards_tracestate_from_meta() {
+    let capture = HeaderCapture::start();
+
+    let mut bridge = Command::new(env!("CARGO_BIN_EXE_taguru-mcp"))
+        .env("TAGURU_URL", format!("http://{}", capture.addr))
+        .env_remove("TAGURU_API_TOKEN")
+        .env("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("bridge must spawn");
+
+    let inbound_trace_id = "4bf92f3577b34da6a3ce929d0e0e4736";
+    let reply = call_bridge_tool(
+        &mut bridge,
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {
+                "name": "list_contexts", "arguments": {},
+                "_meta": {
+                    "traceparent": format!("00-{inbound_trace_id}-00f067aa0ba902b7-01"),
+                    "tracestate": "vendor=abc123",
+                }
+            }
+        }),
+    );
+    let headers = capture.wait_for("/contexts");
+
+    let _ = bridge.kill();
+    let _ = bridge.wait();
+
+    assert!(reply.contains(r#""id":1"#), "{reply}");
+    assert_eq!(
+        headers.get("tracestate").map(String::as_str),
+        Some("vendor=abc123"),
+        "{headers:?}"
+    );
+}

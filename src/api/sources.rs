@@ -689,6 +689,28 @@ pub async fn search_passages(
     // The one filter value BOTH key tuples below serialize — see
     // `filter_key_params` for why sharing it is load-bearing.
     let filter_params = filter_key_params(&filter);
+    // One span for the whole handler — cache hits included, so a hit
+    // is a childless span of its own rather than invisible (ADR 0008
+    // §5, §6). Synchronous for the rest of this function (every I/O
+    // point below is a `block_in_place` closure, never a real
+    // `.await`), so holding the guard across it is correct.
+    let span = crate::trace::span!(
+        "taguru.passage_search",
+        otel.kind = "internal",
+        taguru.op = SearchOp::SearchPassages.as_str(),
+        taguru.limit = limit,
+        taguru.cache.result = tracing::field::Empty,
+        taguru.cache.semantic = tracing::field::Empty,
+        taguru.search.lanes = tracing::field::Empty,
+        taguru.search.vector.outcome = tracing::field::Empty,
+        taguru.passage.hit_count = tracing::field::Empty,
+        taguru.passage.bm25_only = tracing::field::Empty,
+        taguru.passage.both_lanes = tracing::field::Empty,
+        taguru.passage.vector_only = tracing::field::Empty,
+        taguru.filter.eligible = tracing::field::Empty,
+        taguru.filter.total = tracing::field::Empty,
+    );
+    let _entered = span.enter();
     // Minted before the search — see `retrieval_key`. The raw
     // `semantic_floor` goes in unclamped: two spellings of one
     // effective floor just occupy two entries, which is only a hit-rate
@@ -721,6 +743,11 @@ pub async fn search_passages(
                     "search",
                 );
             }
+            // A hit answers with THIS span and no lane children —
+            // that zero-duration childless span is the signal (ADR
+            // 0008 §6.1).
+            span.record("taguru.cache.result", "hit");
+            tracing::info!(taguru.reason = "retrieval_cache_hit", "taguru.cache");
             return ok(found.payload.as_ref(), started_at);
         }
         // The semantic tier (see `semantic_retrieval`): the bucket is
@@ -753,6 +780,16 @@ pub async fn search_passages(
                         "search",
                     );
                 }
+                // The exact tier missed (we are past that early
+                // return) but the semantic tier served — the two
+                // outcomes are independent attributes on purpose
+                // (ADR 0008 §6). `semantic_retrieval` already emitted
+                // its own `taguru.cache` event for the outcome.
+                span.record("taguru.cache.result", "miss");
+                span.record(
+                    "taguru.cache.semantic",
+                    crate::metrics::SemanticCacheOutcome::Hit.as_str(),
+                );
                 return ok(served.value.payload.as_ref(), started_at);
             }
             semantic_fill = Some(SemanticFill {
@@ -807,6 +844,21 @@ pub async fn search_passages(
                     top_score = found.hits.first().map_or(0.0, |hit| f64::from(hit.score)),
                     "search",
                 );
+            }
+            // Both tiers missed (an exact hit or a semantic hit would
+            // already have returned above) — this is a fresh compute.
+            span.record("taguru.cache.result", "miss");
+            span.record("taguru.search.lanes", found.lanes.code());
+            if let crate::registry::PassageSearchLanes::Ran { vector } = &found.lanes {
+                span.record("taguru.search.vector.outcome", vector.code());
+            }
+            span.record("taguru.passage.hit_count", found.hits.len());
+            span.record("taguru.passage.bm25_only", lane_hits[0]);
+            span.record("taguru.passage.both_lanes", lane_hits[1]);
+            span.record("taguru.passage.vector_only", lane_hits[2]);
+            if let Some(filter_report) = found.filter {
+                span.record("taguru.filter.eligible", filter_report.eligible);
+                span.record("taguru.filter.total", filter_report.total);
             }
             // A transiently degraded fill must not be pinned — see
             // `PassageSearchLanes::embedding_failed` (the semantic

@@ -104,7 +104,7 @@ use serde_json::{Value, json};
 use taguru::deadline::Deadline;
 use tokio::net::TcpListener;
 use tower_http::catch_panic::CatchPanicLayer;
-use tracing::{info, warn};
+use tracing::{Instrument as _, info, warn};
 
 use crate::api::{self, ErrorCode};
 use crate::env::{
@@ -616,28 +616,49 @@ fn router_panic_response(payload: Box<dyn std::any::Any + Send>, state: &RouterS
 
 /// The router's access log + RED counters — the thin twin of
 /// `metrics::track_http`, without the registry the full version needs.
+/// Shares `crate::trace::traced_request`/`normalized_method` with that
+/// function (ADR 0008 §5) — router mode calls `init_telemetry` at boot
+/// like `serve` does, but until now made no span of its own, so its
+/// access log carried no `trace_id` to correlate with a collector.
 async fn track_router_http(
     State(state): State<RouterState>,
     matched: Option<MatchedPath>,
     request: Request,
     next: Next,
 ) -> Response {
-    let method = request.method().clone();
+    let method = crate::trace::normalized_method(request.method());
     let route = matched
         .as_ref()
         .map(|matched| matched.as_str().to_string())
         .unwrap_or_else(|| "<unmatched>".to_string());
     let started = Instant::now();
-    let response = next.run(request).await;
+
+    let (response, trace_id) = if crate::trace::enabled() {
+        crate::trace::traced_request(method, &route, request, next).await
+    } else {
+        (next.run(request).await, None)
+    };
+
     let status = response.status().as_u16();
     state.inner.metrics.record_http(&route, status);
-    info!(
-        method = %method,
-        route = %route,
-        status,
-        latency_ms = started.elapsed().as_secs_f64() * 1000.0,
-        "http",
-    );
+    let latency_ms = started.elapsed().as_secs_f64() * 1000.0;
+    match trace_id {
+        Some(trace_id) => info!(
+            method = %method,
+            route = %route,
+            status,
+            latency_ms,
+            trace_id = %trace_id,
+            "http",
+        ),
+        None => info!(
+            method = %method,
+            route = %route,
+            status,
+            latency_ms,
+            "http",
+        ),
+    }
     response
 }
 
@@ -688,12 +709,32 @@ impl RouterState {
         body: Option<Bytes>,
         deadline: Deadline,
     ) -> Result<ShardAnswer, String> {
+        // A causal CHILD of one router request with a fully contained
+        // lifetime — not a span link, which would lose that
+        // containment (ADR 0008 §3, §7). Created before
+        // `forward_headers` so `inject_current` picks up this span,
+        // not whatever the router's own request span happens to be.
+        let span = crate::trace::span!(
+            "taguru.shard_call",
+            otel.kind = "client",
+            otel.name = %format!("{method} -> shard {shard}"),
+            taguru.shard.index = shard,
+            http.request.method = %method,
+            http.response.status_code = tracing::field::Empty,
+            taguru.shard.outcome = tracing::field::Empty,
+            otel.status_code = tracing::field::Empty,
+        );
         let url = format!("{}{}", self.map().url(shard), path_and_query);
-        let mut request = self
-            .inner
-            .client
-            .request(method, url)
-            .headers(forward_headers(headers));
+        // Header injection has to see `span`, and building the request
+        // is synchronous — so it happens inside `in_scope`, while the
+        // round trip below rides `.instrument` instead (a thread-local
+        // guard cannot survive `fan_out`'s `join_all` interleaving).
+        let mut request = span.in_scope(|| {
+            self.inner
+                .client
+                .request(method, url)
+                .headers(forward_headers(headers))
+        });
         if let Some(limit) = budget(deadline) {
             request = request.timeout(limit);
         }
@@ -708,21 +749,30 @@ impl RouterState {
             let body = response.bytes().await?;
             Ok::<ShardAnswer, reqwest::Error>(ShardAnswer { status, body })
         }
+        .instrument(span.clone())
         .await;
         match outcome {
             Ok(answer) => {
-                self.inner.metrics.record_shard(
-                    shard,
-                    if answer.status.is_success() {
-                        "ok"
-                    } else {
-                        "http_error"
-                    },
+                let shard_outcome = if answer.status.is_success() {
+                    "ok"
+                } else {
+                    "http_error"
+                };
+                self.inner.metrics.record_shard(shard, shard_outcome);
+                span.record(
+                    "http.response.status_code",
+                    i64::from(answer.status.as_u16()),
                 );
+                span.record("taguru.shard.outcome", shard_outcome);
+                // An HTTP error status from a shard is an answer, not
+                // a client-span failure — only the transport (`Err`)
+                // arm below marks this span ERROR.
                 Ok(answer)
             }
             Err(error) => {
                 self.inner.metrics.record_shard(shard, "unreached");
+                span.record("taguru.shard.outcome", "unreached");
+                span.record("otel.status_code", "ERROR");
                 Err(error.to_string())
             }
         }
@@ -795,11 +845,35 @@ fn forward_headers(headers: &HeaderMap) -> HeaderMap {
     for name in [
         header::AUTHORIZATION,
         header::HeaderName::from_static("traceparent"),
+        // Vendor sampling/routing state: a shard that gets
+        // `traceparent` without it loses whatever the upstream tracer
+        // decided about this trace (ADR 0008 §10).
+        header::HeaderName::from_static("tracestate"),
         header::HeaderName::from_static("x-amzn-trace-id"),
     ] {
         if let Some(value) = headers.get(&name) {
             forwarded.insert(name, value.clone());
         }
+    }
+    // The router's OWN current span — `taguru.shard_call`, entered by
+    // the caller before this runs — not the inbound header: a shard
+    // must parent under the span that dispatched it, or the fan-out
+    // collapses into one flat level and the router's own time vanishes
+    // from the trace. Overwrites the two W3C headers copied above; the
+    // AWS form is left as the caller sent it, since Taguru never mints
+    // that spelling. A no-op with export off, which is what keeps the
+    // copy above meaningful in that mode (ADR 0008 §10).
+    crate::trace::inject_current(&mut forwarded);
+    // `TraceContextPropagator::inject_context` always sets `tracestate`
+    // alongside `traceparent`, even when there is none to carry — an
+    // empty-but-present header rather than an absent one. Drop it in
+    // that case so a shard that got no inbound `tracestate` doesn't
+    // receive an empty one just because export happens to be on.
+    if forwarded
+        .get(header::HeaderName::from_static("tracestate"))
+        .is_some_and(|value| value.is_empty())
+    {
+        forwarded.remove(header::HeaderName::from_static("tracestate"));
     }
     forwarded
 }
