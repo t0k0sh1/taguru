@@ -31,6 +31,18 @@ class Connector(Protocol):
         ``fingerprint_inputs.parser_version``."""
         ...
 
+    @property
+    def parse_options_digest(self) -> str:
+        """The digest :meth:`read` would stamp into
+        ``fingerprint_inputs.parse_options_digest`` for this instance's
+        current effective config — computable without reading anything.
+        Added for issue #351's S3 connector: its own connector-level
+        checkpoint (ADR 0007 §6.3) must decide whether re-parsing a
+        just-fetched object can be skipped BEFORE calling :meth:`read`,
+        which needs this value as part of the candidate fingerprint it
+        checks the checkpoint against."""
+        ...
+
     def supports(self, reference: str) -> bool:
         """Whether this connector can read ``reference`` at all (extension,
         MIME, or content sniffing) — a caller dispatching across several

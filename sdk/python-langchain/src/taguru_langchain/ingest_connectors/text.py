@@ -72,6 +72,16 @@ class TextFileConnector:
     def parser_version(self) -> str:
         return PARSER_VERSION
 
+    @property
+    def parse_options_digest(self) -> str:
+        """The digest :meth:`read` would stamp into
+        ``fingerprint_inputs.parse_options_digest`` for THIS instance's
+        effective config, computable without reading anything (ADR 0007
+        §6.3, added for issue #351's connector-level checkpoint: it gates
+        skipping a re-parse before ever calling :meth:`read`, which needs
+        the full candidate fingerprint up front)."""
+        return self._options_digest()
+
     def supports(self, reference: str) -> bool:
         return Path(reference).suffix.lower() in _SUPPORTED_SUFFIXES
 

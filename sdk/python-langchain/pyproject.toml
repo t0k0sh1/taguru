@@ -51,6 +51,13 @@ pdf = [
 docx = [
     "python-docx>=1.2",
 ]
+# Same ADR 0007 §3/§4 decision, for S3Connector (issue #351): only a caller
+# who actually uses S3Connector needs boto3 — `FileObjectStore` (the
+# `file://` test/air-gapped backend) is stdlib-only and needs neither this
+# extra nor any of pdf/docx to exist on its own.
+s3 = [
+    "boto3>=1.35",
+]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
@@ -68,6 +75,14 @@ dev = [
     # DocxConnector's own tests (tests/unit/test_docx_connector.py) exercise
     # the real python-docx-backed path, not a mock.
     "python-docx>=1.2",
+    # S3Connector's own tests (tests/unit/test_object_store.py,
+    # tests/unit/test_s3_connector.py) exercise the real boto3-backed path
+    # (stubbed at the HTTP layer, never a live bucket) rather than a mock of
+    # our own making.
+    "boto3>=1.35",
+    # This package's own mypy is `strict`; boto3 ships no inline types, so
+    # its stub package is what lets `S3ObjectStore` type-check at all.
+    "boto3-stubs[s3]>=1.35",
 ]
 
 [tool.hatch.build.targets.wheel]

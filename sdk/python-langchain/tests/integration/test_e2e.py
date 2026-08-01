@@ -11,11 +11,13 @@ from langchain_core.documents import Document
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from taguru import Locator, Taguru
 
-from taguru_langchain import TaguruIngester, TaguruRetriever
+from taguru_langchain import FilesystemCheckpointStore, TaguruIngester, TaguruRetriever
 from taguru_langchain.ingest_connectors import (
     LocatorEntry,
     TextFileConnector,
     ingest_connector_document,
+    open_object_store,
+    sync_object_storage,
 )
 
 
@@ -356,3 +358,93 @@ def test_docx_connector_document_round_trips_table_locators_to_citations(
     finally:
         if client.contexts.exists("pottery-studio"):
             client.contexts.delete("pottery-studio")
+
+
+def test_s3_connector_syncs_a_file_bucket_of_pdf_html_docx_to_citations(
+    client: Taguru, tmp_path: Path
+) -> None:
+    """The S3 connector's own acceptance bar (issue #351), against the real
+    server, using a `file://` bucket in place of a real S3 endpoint — the
+    same substitution issue #351 itself specifies ("minio/localstack を使
+    わず file:// バケットでテスト"): PDF/HTML/DOCX objects are listed and
+    dispatched by extension, each one's own citation locator survives sync,
+    a second pass with nothing changed on disk re-fetches and re-ingests
+    NEITHER checkpoint layer's own work (ADR 0007 §6.3), and deleting an
+    object then syncing with `deletion_policy="retract"` withdraws exactly
+    that source — the default `report` policy never would have (#217's
+    explicit "default で破壊的同期を行わない")."""
+    pytest.importorskip("pypdf")
+    pytest.importorskip("docx")
+    from taguru_langchain.ingest_connectors import DocxConnector, HtmlConnector, PdfConnector
+
+    from .._docx import docx_bytes, heading, table
+    from .._pdfs import text_pdf
+
+    bucket = tmp_path / "bucket"
+    bucket.mkdir()
+    pdf_bytes = text_pdf(["Ceramics Workshop\n\nThe workshop preserves raku firing techniques."])
+    html_bytes = (
+        b"<html><head><title>Ceramics</title></head><body><main>"
+        b'<h1 id="top">Ceramics</h1><p>A page about ceramics.</p>'
+        b"</main></body></html>"
+    )
+    docx_bytes_ = docx_bytes(heading("Catalog", 1) + table([["Item", "Price"], ["Bowl", "3000"]]))
+    (bucket / "report.pdf").write_bytes(pdf_bytes)
+    (bucket / "page.html").write_bytes(html_bytes)
+    (bucket / "catalog.docx").write_bytes(docx_bytes_)
+
+    # Independently parsed from the SAME bytes, purely to learn the
+    # locators/paragraph indices this run's own citations must match — the
+    # actual documents synced below are produced inside S3Connector, not
+    # these.
+    pdf_document = PdfConnector().read(str(bucket / "report.pdf"))
+    html_document = HtmlConnector().read(str(bucket / "page.html"))
+    docx_document = DocxConnector().read(str(bucket / "catalog.docx"))
+
+    store, prefix = open_object_store(f"file://{bucket}")
+    checkpoints = FilesystemCheckpointStore(tmp_path / "checkpoints")
+    llm = FakeListChatModel(
+        responses=[json.dumps({"associations": [], "aliases": [], "questions": []})]
+    )
+    ingester = TaguruIngester(
+        context="ceramics-s3",
+        llm=llm,
+        client=client,
+        create_context=True,
+        context_description="S3 connector round trip (issue #351)",
+    )
+    try:
+        report = sync_object_storage(store, prefix, ingester=ingester, checkpoints=checkpoints)
+        assert report.imported == 3
+        assert report.failed == 0
+
+        ctx = client.context("ceramics-s3")
+        pdf_source = f"{store.base_uri}/report.pdf"
+        html_source = f"{store.base_uri}/page.html"
+        docx_source = f"{store.base_uri}/catalog.docx"
+
+        pdf_citation = ctx.cite_passage(pdf_source, pdf_document.locators[0].paragraph)
+        assert pdf_citation.locator == pdf_document.locators[0].locator
+
+        html_citation = ctx.cite_passage(html_source, html_document.locators[0].paragraph)
+        assert html_citation.locator == html_document.locators[0].locator
+
+        docx_citation = ctx.cite_passage(docx_source, docx_document.locators[0].paragraph)
+        assert docx_citation.locator == docx_document.locators[0].locator
+
+        # A second pass with nothing changed on disk: both checkpoint
+        # layers hit, so nothing is re-fetched or re-ingested.
+        second = sync_object_storage(store, prefix, ingester=ingester, checkpoints=checkpoints)
+        assert second.unchanged == 3
+        assert second.imported == 0
+
+        (bucket / "catalog.docx").unlink()
+        third = sync_object_storage(
+            store, prefix, ingester=ingester, checkpoints=checkpoints, deletion_policy="retract"
+        )
+        assert third.deleted_detected == 1
+        assert third.retracted == 1
+        assert docx_source in ctx.lookup_passages([docx_source]).missing
+    finally:
+        if client.contexts.exists("ceramics-s3"):
+            client.contexts.delete("ceramics-s3")

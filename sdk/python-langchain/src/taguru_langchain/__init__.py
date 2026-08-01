@@ -9,9 +9,9 @@ Three entry points:
   discipline, applied via ``POST /import`` (per-source replace, idempotent).
 - :mod:`taguru_langchain.ingest_connectors` (ADR 0007, issue #347) — the
   normalized document contract standard ingest connectors (``.md``/``.txt``/
-  ``.pdf``/``.html`` today; DOCX/S3 in follow-up issues) produce, and the
-  bridge that feeds a :class:`~taguru_langchain.ingest_connectors.document.
-  ConnectorDocument` into :class:`TaguruIngester` instead of a bare string.
+  ``.pdf``/``.html``/``.docx``/S3) produce, and the bridge that feeds a
+  :class:`~taguru_langchain.ingest_connectors.document.ConnectorDocument`
+  into :class:`TaguruIngester` instead of a bare string.
 
 Deliberately NOT provided: a VectorStore facade (Taguru's retrieval is
 structural-first; forcing it behind ``similarity_search`` would misrepresent
@@ -47,15 +47,31 @@ from .ingest_connectors import (
     ConnectorCheckpoint,
     ConnectorDocument,
     ConnectorMetadata,
+    DeletionPolicy,
     Diagnostic,
     DiagnosticCode,
+    DocxConnector,
+    FetchedObject,
+    FileObjectStore,
     FingerprintInputs,
+    FingerprintTier,
     HtmlConnector,
     LocatorEntry,
+    ObjectMeta,
+    ObjectNotFoundError,
+    ObjectStore,
     PdfConnector,
+    PermanentStoreError,
+    Phase,
+    S3Connector,
+    S3ObjectCheckpoint,
+    S3ObjectStore,
+    S3SyncReport,
     SectionEntry,
+    SourceEvent,
     SourceIdRegistry,
     TextFileConnector,
+    TransientStoreError,
     aingest_connector_document,
     aingest_connector_documents,
     canonicalize_url,
@@ -63,8 +79,11 @@ from .ingest_connectors import (
     file_source_id,
     ingest_connector_document,
     ingest_connector_documents,
+    object_fingerprint,
+    open_object_store,
     options_digest,
     sub_source_id,
+    sync_object_storage,
 )
 from .retrievers import TaguruRetriever
 
@@ -96,15 +115,31 @@ __all__ = [
     "ConnectorCheckpoint",
     "ConnectorDocument",
     "ConnectorMetadata",
+    "DeletionPolicy",
     "Diagnostic",
     "DiagnosticCode",
+    "DocxConnector",
+    "FetchedObject",
+    "FileObjectStore",
     "FingerprintInputs",
+    "FingerprintTier",
     "HtmlConnector",
     "LocatorEntry",
+    "ObjectMeta",
+    "ObjectNotFoundError",
+    "ObjectStore",
     "PdfConnector",
+    "PermanentStoreError",
+    "Phase",
+    "S3Connector",
+    "S3ObjectCheckpoint",
+    "S3ObjectStore",
+    "S3SyncReport",
     "SectionEntry",
+    "SourceEvent",
     "SourceIdRegistry",
     "TextFileConnector",
+    "TransientStoreError",
     "aingest_connector_document",
     "aingest_connector_documents",
     "canonicalize_url",
@@ -112,7 +147,10 @@ __all__ = [
     "file_source_id",
     "ingest_connector_document",
     "ingest_connector_documents",
+    "object_fingerprint",
+    "open_object_store",
     "options_digest",
     "sub_source_id",
+    "sync_object_storage",
     "__version__",
 ]

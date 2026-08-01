@@ -8,6 +8,41 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- S3 (object-storage) connector (#351, implementing ADR 0007 §9):
+  `S3Connector`/`sync_object_storage` in
+  `taguru_langchain.ingest_connectors.s3`, plus the
+  `taguru_langchain.ingest_connectors.objectstore` store boundary
+  (`S3ObjectStore`, optional `boto3` dependency via the new `s3` extra —
+  `pip install "langchain-taguru[s3]"`, the same packaging decision
+  `PdfConnector`/`DocxConnector` already follow — and `FileObjectStore`,
+  stdlib-only, the `file://` backend this package's own tests and an
+  air-gapped deployment both use in place of a live bucket). Each listed
+  object is dispatched by extension (falling back to content-type) to
+  whichever installed connector above handles it, then re-stamped onto the
+  S3 source id (`s3://bucket/key`) — the delegate's own
+  `fingerprint_inputs` (parser/version/raw content hash/options) is kept
+  untouched. A two-layer checkpoint composes with (never replaces)
+  `CheckpointStore`: a cheap listing-metadata check (`version id` >
+  `content hash` > `(size, last-modified)` > bare `ETag` as the last
+  resort — an `ETag` alone is never the first choice, since some
+  S3-compatible stores compute it in a way that isn't a reliable content
+  hash) skips the fetch entirely when nothing changed; a second check
+  skips the model call/import when the fetched-and-parsed content is
+  unchanged despite a metadata bump. Credentials always come from
+  `boto3`'s own standard chain — no parameter anywhere in this path
+  accepts an access key/secret directly, and none ever reaches a
+  checkpoint, batch file, log line, or Taguru source metadata. Object
+  tags map onto `metadata.tags`, capped and drop-counted like every other
+  per-source limit, never silently truncated. Deletion is `report`-only
+  by default (a vanished object is only counted, never retracted);
+  `deletion_policy="retract"`/`"mirror"` are both explicit opt-in, backed
+  by a persisted prefix inventory that degrades to "nothing to compare
+  against" — never a false deletion — on its own absence or corruption.
+  `dry_run=True` reports discovered/would-fetch/unchanged without any
+  network access, parse, ingest, or checkpoint/inventory write. No change
+  to `src/`, `http_contract`, or `mcp_contract` — this connector, like
+  #348-#350's, is entirely client-side per ADR 0007 §3/§4's packaging
+  decision.
 - DOCX connector (#350, implementing ADR 0007 §7/§8): `DocxConnector` in
   `taguru_langchain.ingest_connectors.docx`, reading `.docx` files — `pip
   install "langchain-taguru[docx]"` for its `python-docx` dependency, kept
