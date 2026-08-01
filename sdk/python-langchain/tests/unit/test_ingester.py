@@ -225,6 +225,74 @@ def test_ingest_text_builds_the_batch_and_imports(
     assert "[0] 青嶺酒造は1907年創業。" in llm.seen_prompts[0][1].content
 
 
+def test_ingest_text_sections_and_locators_render_into_the_batch(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    """ADR 0007 §7/issue #347: ``ingest_text(sections=..., locators=...)``
+    reaches the wire batch right after the question line."""
+    ingester, _llm = make_ingester(sync_client, async_client, [MODEL_ANSWER])
+    outcome = ingester.ingest_text(
+        DOC_TEXT,
+        source="docs/aomine.md",
+        sections=[{"paragraph": 0, "section": "沿革"}],
+        locators=[{"paragraph": 1, "locator": {"kind": "page", "value": "3"}}],
+    )
+    assert outcome.ok
+    lines = [json.loads(line) for line in fake_server.imported[0].strip().split("\n")]
+    assert {"paragraph": 0, "section": "沿革"} in lines
+    assert {"paragraph": 1, "locator": {"kind": "page", "value": "3"}} in lines
+
+
+def test_ingest_text_sections_and_locators_are_dropped_without_a_passage(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    """``include_passage=False`` strips the passage line, so sections/
+    locators (which attach to it) must be silently dropped too, not sent
+    dangling (src/ingest.rs:1518-1524)."""
+    ingester, _llm = make_ingester(sync_client, async_client, [MODEL_ANSWER], include_passage=False)
+    outcome = ingester.ingest_text(
+        DOC_TEXT,
+        source="docs/aomine.md",
+        sections=[{"paragraph": 0, "section": "沿革"}],
+        locators=[{"paragraph": 1, "locator": {"kind": "page", "value": "3"}}],
+    )
+    assert outcome.ok
+    ndjson = fake_server.imported[0]
+    assert "section" not in ndjson
+    assert "locator" not in ndjson
+
+
+def test_ingest_text_propagates_section_and_locator_counts_from_the_server(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    """``TaguruIngester._record`` copies the server's ``ImportOutcome.
+    sections_stored``/``sections_dropped``/``locators_stored``/
+    ``locators_dropped`` onto ``IngestOutcome`` (issue #347)."""
+    fake_server.import_result_override = {
+        "context": "sake",
+        "source": "docs/aomine.md",
+        "created": False,
+        "retracted": 0,
+        "associations": 2,
+        "aliases": 1,
+        "passage_stored": True,
+        "passage_dropped": False,
+        "questions_stored": 1,
+        "questions_dropped": 0,
+        "sections_stored": 1,
+        "sections_dropped": 2,
+        "locators_stored": 3,
+        "locators_dropped": 4,
+        "association_paragraphs_dropped": 0,
+    }
+    ingester, _llm = make_ingester(sync_client, async_client, [MODEL_ANSWER])
+    outcome = ingester.ingest_text(DOC_TEXT, source="docs/aomine.md")
+    assert outcome.sections_stored == 1
+    assert outcome.sections_dropped == 2
+    assert outcome.locators_stored == 3
+    assert outcome.locators_dropped == 4
+
+
 def test_structured_output_true_uses_with_structured_output(
     sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
 ) -> None:

@@ -68,6 +68,11 @@ class FakeServer:
         # When set, /import fails with a 500 — exercises the "checkpoints
         # survive an import failure" case (issue #211).
         self.fail_import = False
+        # Overrides the one canned ImportOutcome /import always answers
+        # with below — set per test to assert a specific server-reported
+        # field (e.g. sections_stored/locators_dropped, issue #347) copies
+        # through TaguruIngester._record into IngestOutcome correctly.
+        self.import_result_override: dict[str, Any] | None = None
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -229,29 +234,24 @@ class FakeServer:
                     },
                 )
             self.imported.append(body if isinstance(body, str) else "")
-            return ok(
-                {
-                    "batches": [
-                        {
-                            "context": "sake",
-                            "source": "docs/aomine.md",
-                            "created": False,
-                            "retracted": 0,
-                            "associations": 2,
-                            "aliases": 1,
-                            "passage_stored": True,
-                            "passage_dropped": False,
-                            "questions_stored": 1,
-                            "questions_dropped": 0,
-                            "sections_stored": 0,
-                            "sections_dropped": 0,
-                            "locators_stored": 0,
-                            "locators_dropped": 0,
-                            "association_paragraphs_dropped": 0,
-                        }
-                    ]
-                }
-            )
+            batch_result = self.import_result_override or {
+                "context": "sake",
+                "source": "docs/aomine.md",
+                "created": False,
+                "retracted": 0,
+                "associations": 2,
+                "aliases": 1,
+                "passage_stored": True,
+                "passage_dropped": False,
+                "questions_stored": 1,
+                "questions_dropped": 0,
+                "sections_stored": 0,
+                "sections_dropped": 0,
+                "locators_stored": 0,
+                "locators_dropped": 0,
+                "association_paragraphs_dropped": 0,
+            }
+            return ok({"batches": [batch_result]})
         if path.endswith("/embeddings/refresh"):
             if self.embeddings_refresh_status == 200:
                 return ok(self.embeddings_refresh_result)

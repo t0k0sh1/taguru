@@ -31,7 +31,9 @@ from taguru import (
     AsyncTaguru,
     EmbeddingUnavailableError,
     ImportOutcome,
+    LocatorSpec,
     NotFoundError,
+    SectionSpec,
     Taguru,
 )
 
@@ -115,6 +117,17 @@ class IngestOutcome:
     aliases: int = 0
     passage_stored: bool = False
     questions_stored: int = 0
+    sections_stored: int = 0
+    sections_dropped: int = 0
+    """Sections named in ``ingest_text(sections=...)`` whose paragraph index
+    fell outside the document's own paragraph range, or whose paragraph was
+    already claimed by an earlier section — dropped and counted rather than
+    failing the ingest (ADR 0007 §5, mirrors the server's ``ImportOutcome.
+    sections_dropped``)."""
+    locators_stored: int = 0
+    locators_dropped: int = 0
+    """Same accounting as ``sections_dropped``, for ``ingest_text(locators=
+    ...)`` (ADR 0007 §7)."""
     duplicates_dropped: int = 0
     invalid_dropped: int = 0
     """Under the strict default this counts only merge()'s policy trims
@@ -547,6 +560,8 @@ class TaguruIngester:
         text: str,
         outputs: list[ModelOutput],
         outcome: IngestOutcome,
+        sections: Sequence[SectionSpec],
+        locators: Sequence[LocatorSpec],
     ) -> str:
         paragraph_count = len(split_paragraphs(text))
         extraction = merge(outputs, self.questions, paragraph_count)
@@ -559,6 +574,8 @@ class TaguruIngester:
             description,
             extraction,
             text if self.include_passage else None,
+            sections,
+            locators,
         )
         reparse_batch(ndjson)
         return ndjson
@@ -570,6 +587,10 @@ class TaguruIngester:
         outcome.aliases = applied.aliases
         outcome.passage_stored = applied.passage_stored
         outcome.questions_stored = applied.questions_stored
+        outcome.sections_stored = applied.sections_stored
+        outcome.sections_dropped = applied.sections_dropped
+        outcome.locators_stored = applied.locators_stored
+        outcome.locators_dropped = applied.locators_dropped
 
     @staticmethod
     def _content_text(message: object) -> str:
@@ -745,11 +766,26 @@ class TaguruIngester:
         text: str,
         *,
         source: str,
+        sections: Sequence[SectionSpec] | None = None,
+        locators: Sequence[LocatorSpec] | None = None,
         dry_run: bool = False,
         should_stop: Callable[[], bool] | threading.Event | None = None,
     ) -> IngestOutcome:
         """Ingest one text under one source id. Raises on failure (unlike
         ``ingest_documents``, there is no "continue with the rest" here).
+
+        ``sections``/``locators`` (ADR 0007 §7, issue #347) are paragraph-
+        indexed positional metadata a connector derived from ``text`` —
+        typed citation locators (page/slide/sheet/table) and free-text
+        section headings, respectively. Both index into
+        ``taguru_langchain._extract.split_paragraphs(text)``, the exact
+        split the server itself uses; an entry naming a paragraph index
+        outside that range is dropped and counted
+        (``IngestOutcome.sections_dropped``/``locators_dropped``), never a
+        hard failure. Silently dropped (not an error) when
+        ``include_passage=False`` — a locator/section attaches to this
+        batch's own passage line, and import refuses the dangling
+        reference when there is none.
 
         ``should_stop`` (issue #211, a zero-argument callable or a
         ``threading.Event``) is checked between chunks; when it fires,
@@ -914,7 +950,14 @@ class TaguruIngester:
         if not self.lossy:
             self._correct_cross_chunk_issues(source, system, records, rules, len(chunks), outcome)
 
-        ndjson = self._build_batch(source, text, [record.output for record in records], outcome)
+        ndjson = self._build_batch(
+            source,
+            text,
+            [record.output for record in records],
+            outcome,
+            sections or (),
+            locators or (),
+        )
         outcome.ndjson = ndjson
         if dry_run:
             outcome.ok = True
@@ -1112,14 +1155,17 @@ class TaguruIngester:
         text: str,
         *,
         source: str,
+        sections: Sequence[SectionSpec] | None = None,
+        locators: Sequence[LocatorSpec] | None = None,
         dry_run: bool = False,
         should_stop: Callable[[], bool] | threading.Event | None = None,
     ) -> IngestOutcome:
-        """Async ``ingest_text``. Also safe under plain ``asyncio`` task
-        cancellation when ``checkpoint_store`` is configured: every
-        completed chunk is durably checkpointed before the loop reaches
-        its next ``await``, and ``asyncio.CancelledError`` (a
-        ``BaseException``, not caught by any ``except Exception`` here)
+        """Async ``ingest_text``. See the sync twin for ``sections``/
+        ``locators`` (ADR 0007 §7, issue #347). Also safe under plain
+        ``asyncio`` task cancellation when ``checkpoint_store`` is
+        configured: every completed chunk is durably checkpointed before
+        the loop reaches its next ``await``, and ``asyncio.CancelledError``
+        (a ``BaseException``, not caught by any ``except Exception`` here)
         propagates straight out without losing that work."""
         if self.async_client is None:
             raise ValueError("this ingester was built with only a sync client")
@@ -1277,7 +1323,14 @@ class TaguruIngester:
                 source, system, records, rules, len(chunks), outcome
             )
 
-        ndjson = self._build_batch(source, text, [record.output for record in records], outcome)
+        ndjson = self._build_batch(
+            source,
+            text,
+            [record.output for record in records],
+            outcome,
+            sections or (),
+            locators or (),
+        )
         outcome.ndjson = ndjson
         if dry_run:
             outcome.ok = True
