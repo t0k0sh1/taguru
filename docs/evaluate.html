@@ -97,10 +97,16 @@
                     forgot the flag does not pass silently.
 --assembly           swap the passage lane for POST /contexts/{name}/evidence
                     (see <a href="evidence.html">evidence assembly</a>) — the
-                    structural lane never changes, so a baseline/assembly run
-                    pair stays comparable on coverage and lane cross-tab.
-                    Without it, behavior is unchanged from before this flag
-                    existed.
+                    structural lane itself never changes, so a baseline/
+                    assembly run pair stays comparable on coverage and on
+                    lanes.structural_hit specifically. lanes.passage_hit is
+                    NOT identical across modes: assembly's hits[] mixes
+                    passage/community locators with graph associations'
+                    own citation_refs into one ranked pool, so a case that
+                    only structural evidence answers can read passage_hit:
+                    true under --assembly where baseline reads it false.
+                    Without --assembly, behavior is unchanged from before
+                    this flag existed.
 --max-items N
 --max-bytes N        equal-budget ceilings applied to BOTH modes — see
 --max-tokens N        <a href="evidence.html#equal-budget">proving assembly
@@ -439,7 +445,7 @@
       <table>
         <thead><tr><th>Metric key</th><th>Shape</th><th>What it measures</th></tr></thead>
         <tbody>
-          <tr><td><code>recall.recall_at_k</code></td><td>distribution (per case)</td><td>Fraction of a case's <code>relevance &gt;= 1</code> <code>expected_sources</code> found among the passage lane's hits, at that case's own <code>k = options.limit</code>.</td></tr>
+          <tr><td><code>recall.recall_at_k</code></td><td>distribution (per case)</td><td>Fraction of a case's <code>relevance &gt;= 1</code> <code>expected_sources</code> found among the passage lane's hits, at that case's own <code>k</code> — <code>options.limit</code>, or fewer when a budget flag (<code>--max-items</code>/<code>--max-bytes</code>/<code>--max-tokens</code>) truncates <code>hits[]</code> further.</td></tr>
           <tr><td><code>recall.mrr</code></td><td>distribution</td><td><code>1 / (rank + 1)</code> of the first hit satisfying any <code>expected_sources</code> entry; 0 if none does.</td></tr>
           <tr><td><code>recall.ndcg</code></td><td>distribution</td><td>Graded-relevance nDCG over <code>expected_sources</code> — one credit per entry at the rank of its first satisfying hit, <code>DCG/IDCG</code> clamped to 1 (two entries can share one hit).</td></tr>
           <tr><td><code>coverage.concepts</code>, <code>.labels</code></td><td>distribution</td><td>Fraction of <code>expected_concepts</code>/<code>expected_labels</code> present in the top-tier <code>resolved_names[]</code>, matched with normalized entry folding.</td></tr>
@@ -452,7 +458,8 @@
           <tr><td><code>latency.passage_ms</code>, <code>.resolve_ms</code>, <code>.query_ms</code>, <code>.citation_ms</code>, <code>.evidence_ms</code></td><td>distribution</td><td>Wall time per call, by lane — <code>.evidence_ms</code> only in <code>--assembly</code> mode.</td></tr>
           <tr><td><code>passage.failure_rate</code>, <code>structural.case_rate</code></td><td>ratio (run)</td><td>Share of passage-lane calls that failed; share of cases that ran the structural lane at all.</td></tr>
           <tr><td><code>diversity.sources</code></td><td>distribution (per case)</td><td>Distinct source locators among a case's admitted evidence — see <a href="evidence.html#equal-budget">evidence assembly</a>.</td></tr>
-          <tr><td><code>budget.items_used</code>, <code>.bytes_used</code>, <code>.tokens_used</code>, <code>.omitted_rate</code></td><td>distribution / ratio (run)</td><td>What a case's own budget spent and dropped. In <code>baseline</code> mode, empty unless <code>--max-items</code>/<code>--max-bytes</code>/<code>--max-tokens</code> was given. In <code>--assembly</code> mode, always populated — the endpoint has no unbudgeted mode, so an unflagged run is measured against the server's own defaults.</td></tr>
+          <tr><td><code>budget.items_used</code>, <code>.bytes_used</code>, <code>.tokens_used</code></td><td>distribution (case)</td><td>What a case's own budget spent. In <code>baseline</code> mode, empty unless <code>--max-items</code>/<code>--max-bytes</code>/<code>--max-tokens</code> was given. In <code>--assembly</code> mode, always populated — the endpoint has no unbudgeted mode, so an unflagged run is measured against the server's own defaults.</td></tr>
+          <tr><td><code>budget.omitted_rate</code></td><td>ratio (run)</td><td>Share of every candidate a budget-truncated case considered (admitted plus omitted) that a <b>budget ceiling</b> specifically dropped — excludes an assembly-mode candidate dropped earlier, by near-duplicate suppression, which would have been dropped at any budget.</td></tr>
           <tr><td><code>rerank.ran</code></td><td>ratio (run)</td><td>Share of <code>--rerank</code> cases whose configured reranker actually reordered the pool; the complement is the degrade rate — empty unless <code>--rerank</code> was given.</td></tr>
         </tbody>
       </table>
@@ -482,7 +489,10 @@
       "sources": "exact (source, paragraph) match — no normalization" },
   "inputs": { "eval": { "path": "eval.jsonl", "name": "sake retrieval cases", "cases": 12 },
       "context": "sake", "url": "http://localhost:8248", "out": "evaluation.json",
-      "default_limit": 10, "resolve_limit": 5 },
+      "default_limit": 10, "resolve_limit": 5,
+      "mode": "assembly",
+      "budget": {"max_items": 40, "max_bytes": 65536, "max_tokens": 4000},
+      "rerank": "bge-reranker-v2-m3" },
   "corpus": { "revision_before": { "...": "..." }, "revision_after": { "...": "..." },
       "stable": true, "last_write_epoch_before": 1234, "last_write_epoch_after": 1234,
       "embeddings": { "provider_model": null }, "sources_count": 5 },
@@ -500,10 +510,31 @@
         "checks": [ { "source": "corpus/brewery.md", "paragraph": 0, "served": true,
           "outcome": "resolved", "section": { "check": "matched", "expected": "沿革" },
           "quote": { "declared": "1897年に創業", "matched": true }, "latency_ms": 6 } ] },
-      "missed": [], "missed_truncated": 0 } ],
+      "missed": [], "missed_truncated": 0,
+      "evidence": { "latency_ms": 4, "items": [ { "candidate_id": "passage\u0000sake\u0000corpus/brewery.md\u00000",
+          "kind": "passage", "fused_rank": 1, "source": "corpus/brewery.md", "paragraph": 0,
+          "citation_refs": [] } ],
+        "omitted_by_reason": {},
+        "selection": { "dedup_dropped": 0, "contradiction_groups": 0, "diversity_tier_width": 10 },
+        "reranker": { "configured": true, "ran": true, "model": "bge-reranker-v2-m3" } },
+      "budget": { "items_used": 2, "bytes_used": 612, "tokens_used": 158,
+        "limits": {"max_items": 40, "max_bytes": 65536, "max_tokens": 4000}, "omitted_total": 0 },
+      "diversity_sources": 1 } ],
   "metrics": { "recall.recall_at_k": { "n": 12, "min": 0.5, "p50": 1.0, "p90": 1.0, "p99": 1.0,
       "max": 1.0, "mean": 0.93, "sum": 11.2 }, "...": "..." }
 }</code></pre>
+    <p class="note">
+      <code>inputs.mode</code>/<code>.budget</code>/<code>.rerank</code> and the per-case
+      <code>evidence</code>/<code>budget</code>/<code>diversity_sources</code> blocks (#308, ADR
+      0006 §14) are additive — <code>taguru_evaluation</code> stays <code>1</code>.
+      <code>inputs.budget</code> is absent in <code>baseline</code> mode unless a
+      <code>--max-*</code> flag was given; <code>inputs.rerank</code> is absent unless
+      <code>--rerank MODEL</code> was. A case's own <code>evidence</code> block is present only
+      in <code>--assembly</code> mode; <code>budget</code> is present in either mode once a
+      budget flag applies. See <a href="evidence.html">evidence assembly</a> for the full
+      <code>EvidencePackage</code> shape <code>evidence.items[]</code> mirrors (stripped of
+      corpus body text, ADR 0004 §11).
+    </p>
     <p>
       Stamp <code>taguru_evaluation: 1</code>, <b>range acceptance</b> — taguru writes this file
       and its own <code>compare</code> mode re-reads it, so within an accepted range a later
@@ -520,16 +551,25 @@
       one.
     </p>
     <p>
-      <code>hits[]</code> is <b>not</b> capped below a case's own <code>options.limit</code> —
-      the bound is exactly that case's configured limit, so an external offline scorer can build
-      a recall@<i>k</i> for any <i>k</i> up to it (a case wanting an offline
-      <code>recall@50</code> must set that case's own <code>options.limit</code> to 50 or
-      higher; the artifact never truncates below whatever limit was configured). No corpus body
-      text is ever written into this artifact; on a <code>quote</code> mismatch, only the user's own
-      declared quote and a boolean match result are recorded, never the served paragraph body.
-      <code>missed[]</code> is capped at 3 entries with a <code>missed_truncated</code> count of
-      what was dropped (not the total). The resolved server URL is recorded as scheme + host +
-      port only — never with userinfo, and never the bearer token in any form.
+      Without a budget flag, <code>hits[]</code> is <b>not</b> capped below a case's own
+      <code>options.limit</code> — the bound is exactly that case's configured limit, so an
+      external offline scorer can build a recall@<i>k</i> for any <i>k</i> up to it (a case
+      wanting an offline <code>recall@50</code> must set that case's own
+      <code>options.limit</code> to 50 or higher). Two things narrow this, both by design: a
+      <code>--max-items</code>/<code>--max-bytes</code>/<code>--max-tokens</code> flag can
+      truncate <code>hits[]</code> below <code>options.limit</code> in either mode (that is the
+      whole point of an equal-budget comparison — see
+      <a href="evidence.html#budget">evidence assembly's budget semantics</a>); and in
+      <code>--assembly</code> mode, <code>hits[]</code> is capped <b>at</b>
+      <code>options.limit</code> rather than left to the admitted package's own item count (up to
+      <code>budget.max_items</code>, default 40 — structurally unrelated to <code>options.limit</code>),
+      so a <code>baseline</code>/<code>assembly</code> run pair at the same <code>--limit</code>
+      scores over the same <i>k</i>. No corpus body text is ever written into this artifact; on a
+      <code>quote</code> mismatch, only the user's own declared quote and a boolean match result
+      are recorded, never the served paragraph body. <code>missed[]</code> is capped at 3 entries
+      with a <code>missed_truncated</code> count of what was dropped (not the total). The
+      resolved server URL is recorded as scheme + host + port only — never with userinfo, and
+      never the bearer token in any form.
     </p>
     <p class="section-sub">Corpus revision bracketing</p>
     <p>
@@ -661,9 +701,11 @@
       token. Server error messages truncated to 200 bytes on a UTF-8 character boundary.
       <code>missed[]</code> capped at 3 entries per case, with the dropped count recorded
       separately. <code>hits[]</code> is not capped below a case's own <code>options.limit</code>
-      — a <code>HitLocator</code> is roughly 40 bytes, so even a limit of 1000 is cheap, and
-      capping below the case's own configured limit would prevent an external scorer from ever
-      seeing the full window that case asked for.
+      when no budget flag applies — a <code>HitLocator</code> is roughly 40 bytes, so even a
+      limit of 1000 is cheap, and capping below the case's own configured limit would prevent an
+      external scorer from ever seeing the full window that case asked for. A
+      <code>--max-items</code>/<code>--max-bytes</code>/<code>--max-tokens</code> flag is the one
+      deliberate exception (see <a href="#evaluation-json">above</a>).
     </p>
   </section>
 

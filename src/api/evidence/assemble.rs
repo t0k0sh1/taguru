@@ -47,6 +47,23 @@ use super::rerank::{self, RerankRequest, RerankerPlan};
 use super::select::{self, EvidenceItem, OmittedCandidate, SelectionPlan, select_with_reorder};
 use super::{CitationEntry, EvidenceCandidate, FusedCandidate, fuse};
 
+/// `search_limit`'s own ceiling — deliberately lower than the house
+/// `MAX_MATCH_LIMIT` (1000) every other endpoint's list-limit reuses.
+/// `search_limit` bounds both the passage and (opt-in) community
+/// lanes, and every passage candidate it admits is later compared
+/// pairwise against every other kept passage by
+/// [`select::suppress_near_duplicate_passages`] — an O(n²) step by
+/// construction (ADR 0006 §9 fixes the near-duplicate detector's
+/// *rule*, not a request-tunable pool size to run it over). At the
+/// house ceiling, a caller could ask for up to 2000 combined passage/
+/// community candidates and drive on the order of two million pairwise
+/// comparisons on one request from an ordinary Read-scoped key. 200
+/// keeps the worst case two orders of magnitude smaller while staying
+/// well above the default (5) and any realistic caller's real need —
+/// nothing in ADR 0006 requires `search_limit` to share
+/// `MAX_MATCH_LIMIT`'s ceiling, only that it default to 5 (§5.1).
+const MAX_EVIDENCE_SEARCH_LIMIT: usize = 200;
+
 /// `origins`/`labels` accept `"..."` and `["...", ...]` interchangeably
 /// (the same contract `retrieve`'s own arguments use); flattened to an
 /// owned list once, up front, so every lane below works with a plain
@@ -281,7 +298,7 @@ pub async fn assemble_evidence(
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }
-    let search_limit = clamp(request.search_limit, 5, MAX_MATCH_LIMIT);
+    let search_limit = clamp(request.search_limit, 5, MAX_EVIDENCE_SEARCH_LIMIT);
     let mut passage_candidates: Vec<EvidenceCandidate> = Vec::new();
     // A residency's first search tokenizes the whole corpus into the
     // index (`search_passages`'s own rule) — keep it off the async

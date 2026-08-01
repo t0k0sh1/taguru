@@ -543,7 +543,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
                     "activate_decay": { "type": "number", "description": "activate's decay (default 0.5)" },
                     "activate_limit": { "type": "integer", "minimum": 0, "description": "activate's limit (default 20)" },
                     "text_fallback_query": { "type": "string", "description": "passage/community lanes' query text; omitted means 'origins' joined with '; '" },
-                    "search_limit": { "type": "integer", "minimum": 0, "description": "the passage/community search calls' limit (default 5)" },
+                    "search_limit": { "type": "integer", "minimum": 0, "description": "the passage/community search calls' limit (default 5, ceiling 200)" },
                     "include_communities": { "type": "boolean", "description": "also search the context's derived community-summary artifact (default false); no artifact is a degrade (plan.lanes.communities.ran = false), never a refusal" },
                     "budget": {
                         "type": "object",

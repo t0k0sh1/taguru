@@ -92,7 +92,12 @@ describe("assembleEvidence", () => {
 
     expect(calls).toHaveLength(1);
     expect(calls[0]!.path).toBe("/contexts/sake/evidence");
-    expect(JSON.parse(calls[0]!.body ?? "{}")).toEqual({ origins: "青嶺酒造" });
+    // A bare-string call normalizes to a one-element array on the wire —
+    // matching `explore`/`activate`/`unreachableFrom`'s own convention
+    // for a required cue argument, and matching the Python SDK's
+    // `assemble_evidence`, so the same logical call produces the
+    // identical JSON body from either official SDK.
+    expect(JSON.parse(calls[0]!.body ?? "{}")).toEqual({ origins: ["青嶺酒造"] });
     expect(pkg.items).toHaveLength(2);
     expect(pkg.items[0]!.kind).toBe("association");
     expect(pkg.items[0]!.corroboration?.sources).toEqual(["docs/kura.md"]);
@@ -112,6 +117,21 @@ describe("assembleEvidence", () => {
     await client.context("sake").assembleEvidence(["青嶺酒造", "高瀬"]);
 
     expect(JSON.parse(calls[0]!.body ?? "{}")).toEqual({ origins: ["青嶺酒造", "高瀬"] });
+  });
+
+  it("normalizes a bare-string labels option to a one-element array", async () => {
+    const calls: StubRequest[] = [];
+    const client = stubClient((req) => {
+      calls.push(req);
+      return okBody(MIXED_LANES_RESULT);
+    });
+
+    await client.context("sake").assembleEvidence("青嶺酒造", { labels: "杜氏" });
+
+    expect(JSON.parse(calls[0]!.body ?? "{}")).toEqual({
+      origins: ["青嶺酒造"],
+      labels: ["杜氏"],
+    });
   });
 
   it("passes budget and rerank through as nested objects", async () => {

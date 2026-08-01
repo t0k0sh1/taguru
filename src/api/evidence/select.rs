@@ -142,6 +142,28 @@ const REASON_DUPLICATE_PASSAGE: &str = "duplicate_passage";
 const REASON_BUDGET_EXCEEDED: &str = "budget_exceeded";
 const REASON_CONTRADICTION_GROUP_EXCEEDS_BUDGET: &str = "contradiction_group_exceeds_budget";
 
+/// How many of `omitted_by_reason`'s entries a budget ceiling
+/// specifically dropped — excludes [`REASON_DUPLICATE_PASSAGE`], which
+/// runs before budget admission ever does and would drop the same
+/// candidate at any budget. `pub(crate)` so `src/evaluate.rs`'s
+/// `budget.omitted_rate` metric (#308) can separate a budget-driven
+/// omission from a near-duplicate one when summing an assembly-mode
+/// case's `omitted_by_reason` — `omitted_total` alone conflates the
+/// two and would report a rate the metric's own documented definition
+/// ("share … a budget ceiling dropped") does not describe — without
+/// that caller needing to know this module's own reason-string
+/// vocabulary itself.
+pub(crate) fn budget_only_omitted(omitted_by_reason: &BTreeMap<String, usize>) -> usize {
+    omitted_by_reason
+        .get(REASON_BUDGET_EXCEEDED)
+        .copied()
+        .unwrap_or(0)
+        + omitted_by_reason
+            .get(REASON_CONTRADICTION_GROUP_EXCEEDS_BUDGET)
+            .copied()
+            .unwrap_or(0)
+}
+
 /// Character-bigram Dice-coefficient threshold a passage pair must
 /// meet or exceed to be treated as near-duplicate (ADR 0006 §9: "#304
 /// fixes and documents one deterministic similarity function … not
@@ -692,7 +714,22 @@ fn prepare_item(
         })
         .collect();
 
-    let corroboration = if kind == KIND_ASSOCIATION && !citation_refs.is_empty() {
+    // Gates on `corroborating_sources`, not `citation_refs`: the two
+    // differ exactly when an attribution names a source but no
+    // paragraph (so it never entered `origins`/`citation_refs`, ADR
+    // 0006 §6) or when a located locator's citation text failed to
+    // resolve (`citation_lookup` had no entry). `corroborating_sources`
+    // already reads every attribution directly for this reason
+    // (`EvidenceCandidate::corroborating_sources`'s own doc) — gating
+    // on `citation_refs` here silently dropped that guarantee and made
+    // a graph-only, paragraph-less fact (or one whose citation could
+    // not be located) report no corroboration at all, even with two or
+    // more independent sources, violating ADR 0006 §9 I4 ("corroboration
+    // is never silently collapsed"). `attributions` still only ever
+    // lists what actually resolved to citation text — a source with no
+    // resolvable locator is named in `sources` but contributes no
+    // `attributions` entry.
+    let corroboration = if kind == KIND_ASSOCIATION && !corroborating_sources.is_empty() {
         Some(Corroboration {
             sources: corroborating_sources.into_iter().collect(),
             attributions: citation_refs.clone(),
@@ -791,9 +828,7 @@ fn suppress_near_duplicate_passages(
 
         let duplicate_of = kept_passages
             .iter()
-            .find(|(_, kept_bigrams)| {
-                dice_coefficient(kept_bigrams, &bigrams) >= NEAR_DUPLICATE_DICE_THRESHOLD
-            })
+            .find(|(_, kept_bigrams)| could_be_near_duplicate(kept_bigrams, &bigrams))
             .map(|(id, _)| id.clone());
 
         match duplicate_of {
@@ -841,6 +876,24 @@ fn dice_coefficient(a: &HashSet<(char, char)>, b: &HashSet<(char, char)>) -> f64
     }
     let shared = a.intersection(b).count();
     2.0 * shared as f64 / (a.len() + b.len()) as f64
+}
+
+/// A sound, O(1) upper bound on [`dice_coefficient`] — `|A∩B| <=
+/// min(|A|,|B|)`, so `dice <= 2*min(|A|,|B|) / (|A|+|B|)` always — used
+/// to skip the O(min(|A|,|B|)) real intersection for a pair whose
+/// bound alone already falls under the threshold. Never a false
+/// negative: this can only over-estimate the real coefficient, so
+/// [`suppress_near_duplicate_passages`]'s O(n²) candidate-pair walk
+/// pays the real intersection only for pairs that could plausibly
+/// match, without changing which pairs it calls near-duplicate.
+fn could_be_near_duplicate(a: &HashSet<(char, char)>, b: &HashSet<(char, char)>) -> bool {
+    let denom = a.len() + b.len();
+    if denom == 0 {
+        return true; // two empty strings: dice_coefficient's own 1.0 case.
+    }
+    let upper_bound = 2.0 * a.len().min(b.len()) as f64 / denom as f64;
+    upper_bound >= NEAR_DUPLICATE_DICE_THRESHOLD
+        && dice_coefficient(a, b) >= NEAR_DUPLICATE_DICE_THRESHOLD
 }
 
 #[cfg(test)]
@@ -1015,6 +1068,68 @@ mod tests {
             + array_overhead(citations_len) as u64
             + citations_quarters;
         (bytes_used, tokens_from_quarters(total_quarters))
+    }
+
+    // --- `could_be_near_duplicate`'s O(1) bound never disagrees with
+    // the real `dice_coefficient` it stands in for ---
+
+    #[test]
+    fn could_be_near_duplicate_agrees_with_dice_coefficient_below_threshold() {
+        // Same size, zero overlap: the O(1) size bound alone (1.0)
+        // cannot prune this pair, so `could_be_near_duplicate` falls
+        // through to the real intersection — which correctly finds
+        // none — and must still agree with `dice_coefficient` on the
+        // verdict.
+        let a = char_bigrams("aa");
+        let b = char_bigrams("bb");
+        assert!(dice_coefficient(&a, &b) < NEAR_DUPLICATE_DICE_THRESHOLD);
+        assert!(!could_be_near_duplicate(&a, &b));
+    }
+
+    #[test]
+    fn could_be_near_duplicate_prunes_a_size_mismatched_pair_without_the_real_intersection() {
+        // |a| = 20 distinct bigrams, |b| = 1: upper bound =
+        // 2*1/21 ≈ 0.095, well under 0.9 — the O(1) bound alone must
+        // reject this pair, short-circuiting before `dice_coefficient`
+        // ever runs its O(min(|a|,|b|)) intersection.
+        let a: HashSet<(char, char)> = ('a'..='t').zip('b'..='u').collect();
+        assert_eq!(a.len(), 20);
+        let mut b = HashSet::new();
+        b.insert(('x', 'y'));
+        assert!(dice_coefficient(&a, &b) < NEAR_DUPLICATE_DICE_THRESHOLD);
+        assert!(!could_be_near_duplicate(&a, &b));
+    }
+
+    #[test]
+    fn could_be_near_duplicate_agrees_with_dice_coefficient_above_threshold() {
+        let a = char_bigrams(&taguru::context::normalize_entry("identical passage text"));
+        let b = char_bigrams(&taguru::context::normalize_entry("identical passage text"));
+        assert!(dice_coefficient(&a, &b) >= NEAR_DUPLICATE_DICE_THRESHOLD);
+        assert!(could_be_near_duplicate(&a, &b));
+    }
+
+    #[test]
+    fn could_be_near_duplicate_treats_two_empty_strings_as_a_match() {
+        let a = char_bigrams("");
+        let b = char_bigrams("");
+        assert_eq!(dice_coefficient(&a, &b), 1.0);
+        assert!(could_be_near_duplicate(&a, &b));
+    }
+
+    // --- `budget_only_omitted` isolates budget-driven reasons ---
+
+    #[test]
+    fn budget_only_omitted_excludes_duplicate_passage() {
+        let mut by_reason = BTreeMap::new();
+        by_reason.insert(REASON_DUPLICATE_PASSAGE.to_string(), 5);
+        by_reason.insert(REASON_BUDGET_EXCEEDED.to_string(), 2);
+        by_reason.insert(REASON_CONTRADICTION_GROUP_EXCEEDS_BUDGET.to_string(), 3);
+        assert_eq!(budget_only_omitted(&by_reason), 5);
+    }
+
+    #[test]
+    fn budget_only_omitted_of_an_empty_map_is_zero() {
+        assert_eq!(budget_only_omitted(&BTreeMap::new()), 0);
     }
 
     /// Regression case for the bug fixed alongside `budget::content_
@@ -1257,6 +1372,57 @@ mod tests {
             vec!["a.txt".to_string(), "b.txt".to_string()]
         );
         assert_eq!(corroboration.attributions.len(), 2);
+    }
+
+    #[test]
+    fn corroboration_survives_a_paragraph_less_attribution() {
+        // An attribution naming a source but no paragraph never enters
+        // `origins`/`citation_refs` (`origins_of`'s own filter, ADR
+        // 0006 §6) — but it still corroborates the fact and must still
+        // be named in `corroboration.sources`. Regression for gating
+        // `corroboration` on `citation_refs.is_empty()`, which dropped
+        // this source (and every sibling attribution's source) entirely
+        // whenever none of an association's attributions carried a
+        // paragraph.
+        let mut association = association_out("cats", "is_a", "mammals", 1.0);
+        association.attributions = vec![AttributionOut {
+            source: "a.txt".to_string(),
+            weight: 1.0,
+            count: 1,
+            paragraph: None,
+            section: None,
+        }];
+        let pool = vec![EvidenceCandidate::from_association("ctx", association, 1)];
+        let result = select_all(pool, &empty_lookup());
+
+        let corroboration = result.items[0]
+            .corroboration
+            .as_ref()
+            .expect("a paragraph-less attribution still corroborates");
+        assert_eq!(corroboration.sources, vec!["a.txt".to_string()]);
+        assert!(
+            corroboration.attributions.is_empty(),
+            "no paragraph locator to name — attributions stays empty, not the whole field"
+        );
+    }
+
+    #[test]
+    fn corroboration_survives_an_unresolvable_citation() {
+        // A real paragraph locator whose citation text never resolved
+        // (the passage was retracted, say) still corroborates the
+        // fact — the missing citation text is `citation_refs`'s
+        // problem, not `corroboration`'s.
+        let association = sourced_association("cats", "is_a", "mammals", 1.0, "a.txt", 1);
+        let pool = vec![EvidenceCandidate::from_association("ctx", association, 1)];
+        // Empty lookup: "a.txt" paragraph 1 has no citation text.
+        let result = select_all(pool, &empty_lookup());
+
+        let corroboration = result.items[0]
+            .corroboration
+            .as_ref()
+            .expect("an unresolvable citation still corroborates");
+        assert_eq!(corroboration.sources, vec!["a.txt".to_string()]);
+        assert!(corroboration.attributions.is_empty());
     }
 
     #[test]

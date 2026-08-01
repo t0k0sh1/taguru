@@ -1503,8 +1503,13 @@ export class Context {
     const result = await this.post(
       "/evidence",
       dropUndefined({
-        origins,
-        labels: options.labels,
+        origins: typeof origins === "string" ? [origins] : origins,
+        labels:
+          options.labels === undefined
+            ? undefined
+            : typeof options.labels === "string"
+              ? [options.labels]
+              : options.labels,
         dice_floor: options.dice_floor,
         semantic_floor: options.semantic_floor,
         resolve_limit: options.resolve_limit,
