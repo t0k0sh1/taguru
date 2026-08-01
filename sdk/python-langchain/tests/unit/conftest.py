@@ -245,6 +245,8 @@ class FakeServer:
                             "questions_dropped": 0,
                             "sections_stored": 0,
                             "sections_dropped": 0,
+                            "locators_stored": 0,
+                            "locators_dropped": 0,
                             "association_paragraphs_dropped": 0,
                         }
                     ]
