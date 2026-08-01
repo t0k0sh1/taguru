@@ -217,8 +217,71 @@ if document.diagnostics:
 outcome = ingest_connector_document(ingester, document)
 ```
 
-An S3 connector implementing the same `Connector` protocol is tracked as a
-follow-up issue (#351); the contract itself (ADR 0007 §5) is stable now.
+`S3Connector`/`sync_object_storage` (issue #351) list an S3 bucket/prefix
+and dispatch each object to whichever installed connector above its
+extension (or, failing that, its content-type) names — `pip install
+"langchain-taguru[s3]"` for its `boto3` dependency, the same opt-in extra
+`PdfConnector`/`DocxConnector` already use. Credentials always come from
+`boto3`'s own standard chain (environment, shared config/credentials file,
+an EC2/ECS/Lambda role, ...); there is no parameter anywhere in this path
+that accepts an access key or secret directly:
+
+```python
+from taguru_langchain import FilesystemCheckpointStore
+from taguru_langchain.ingest_connectors import open_object_store, sync_object_storage
+
+store, prefix = open_object_store("s3://my-bucket/reports/")
+report = sync_object_storage(
+    store,
+    prefix,
+    ingester=ingester,
+    checkpoints=FilesystemCheckpointStore(".taguru-checkpoints"),
+)
+print(report.discovered, report.imported, report.failed, report.deleted_detected)
+```
+
+Re-running the same call is cheap twice over: an object whose bucket-listing
+metadata (version id / content hash / size+last-modified, with a bare
+`ETag` only as the last resort — some S3-compatible stores compute it in a
+way that isn't a reliable content hash) is unchanged from last time is
+never even fetched; one whose bytes are unchanged despite a metadata bump
+(a tag edit, a copy-in-place) is fetched but never re-ingested. Both
+checkpoints live in the same `checkpoints` store passed above — no second
+store to configure.
+
+Deleted objects are never retracted by default — `report.deleted_detected`
+names them, but nothing changes in `taguru` until you opt in explicitly:
+`sync_object_storage(..., deletion_policy="retract")` withdraws exactly the
+objects this connector's own prior listing no longer sees; `"mirror"` goes
+further and reconciles against the context's actual source list too, so it
+self-heals even the first time it runs, with no prior listing to diff
+against. `dry_run=True` reports what a real pass would discover/fetch/skip
+— including an honest `unchanged` verdict, since S3's own listing already
+carries every fingerprint field needed — without ever touching the network,
+`taguru`, or the checkpoint/inventory store.
+
+An S3-compatible endpoint (MinIO, Cloudflare R2, ...) works the same way —
+pass `endpoint_url`/`region_name`/`profile_name` to `open_object_store`, or
+build `S3ObjectStore` directly. This package's own tests use a `file://`
+bucket (`FileObjectStore`, stdlib-only — no `boto3` needed at all) in place
+of a live bucket; point at a real MinIO container the same way for an
+end-to-end check outside CI:
+
+```sh
+docker run -d -p 9000:9000 -e MINIO_ROOT_USER=test -e MINIO_ROOT_PASSWORD=testtest quay.io/minio/minio server /data
+export AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=testtest AWS_DEFAULT_REGION=us-east-1
+python -c "
+import boto3
+c = boto3.client('s3', endpoint_url='http://localhost:9000')
+c.create_bucket(Bucket='reports')
+c.put_object(Bucket='reports', Key='q1.pdf', Body=open('q1.pdf', 'rb').read())
+"
+python -c "
+from taguru_langchain.ingest_connectors import open_object_store, sync_object_storage
+store, prefix = open_object_store('s3://reports/', endpoint_url='http://localhost:9000')
+# ... sync_object_storage(store, prefix, ingester=..., checkpoints=...)
+"
+```
 
 Three more constructor arguments bound how a chunk's structured-output
 retry behaves, all optional and all unchanged by default: `fact_budget`

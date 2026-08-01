@@ -73,6 +73,13 @@ class FakeServer:
         # field (e.g. sections_stored/locators_dropped, issue #347) copies
         # through TaguruIngester._record into IngestOutcome correctly.
         self.import_result_override: dict[str, Any] | None = None
+        # The context's current source list, and every source
+        # `Context.retract_source` has been asked to withdraw (in call
+        # order) — backs `sync_object_storage`'s own `retract`/`mirror`
+        # deletion-policy tests (issue #351): seed `sources` to simulate
+        # what the server already holds, then assert `retracted`.
+        self.sources: list[str] = []
+        self.retracted: list[str] = []
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -222,6 +229,34 @@ class FakeServer:
             )
         if path.endswith("/labels"):
             return ok({"total": 2, "labels": ["代表銘柄", "杜氏"]})
+        if path.endswith("/sources/retract"):
+            source = body["source"]
+            if source in self.sources:
+                self.sources.remove(source)
+            self.retracted.append(source)
+            return ok({"associations_touched": 0, "passage_removed": True})
+        if path.endswith("/sources") and request.method == "GET":
+            params = request.url.params
+            prefix = params.get("prefix")
+            after = params.get("after")
+            limit_raw = params.get("limit")
+            limit = int(limit_raw) if limit_raw is not None else None
+            candidates = sorted(s for s in self.sources if prefix is None or s.startswith(prefix))
+            # `total` is the prefix-filtered count, BEFORE `after`/`limit`
+            # slice it down for this one page — matching the real server's
+            # own SourcePage contract (src/api/sources.rs).
+            total = len(candidates)
+            if after is not None:
+                candidates = [s for s in candidates if s > after]
+            if limit is not None:
+                candidates = candidates[:limit]
+            return ok(
+                {
+                    "total": total,
+                    "sources": candidates,
+                    "entries": [{"name": source} for source in candidates],
+                }
+            )
         if path == "/import":
             if self.fail_import:
                 return httpx.Response(

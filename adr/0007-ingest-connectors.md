@@ -226,6 +226,40 @@ protocol was never Python-specific to begin with.
 9. Nothing in this ADR changes `taguru extract`'s or `POST /import`'s
    behavior for an existing caller who sends no new field (§12).
 
+### 4.6 Implementation note (#351): object storage stays entirely in Python
+
+Item 6 above named a thin CLI/subprocess or FFI boundary as #351's way to
+reuse `src/ship.rs`'s `open_store`/listing/retry pattern "from the
+*connector* side." Implementing #351 surfaced a conflict this ADR did not
+resolve: any such boundary needs a new subcommand (or a new binary) in
+`src/`, which contradicts §3/§4's own Option C decision and this ADR's own
+requirement traceability table (§Appendix), which states "#347–#352 は
+`src/` に触れない." Issue #351's own acceptance criterion — an integration
+test using a `file://` bucket, no minio/localstack — also needs a `file://`
+implementation that lives wherever the rest of the connector does, i.e. in
+Python, not behind a Rust-only boundary.
+
+#351 resolves this in favor of §3/§4: object storage access is a thin
+Python-side `ObjectStore` protocol (`taguru_langchain.ingest_connectors.
+objectstore`) with two implementations — `S3ObjectStore` (an optional
+`boto3` dependency via a new `s3` extra, the same packaging posture
+`PdfConnector`/`DocxConnector` already take for their own optional parser
+dependencies) and `FileObjectStore` (stdlib-only). Nothing here calls
+`object_store` (the Rust crate) or any code in `src/`; what carries over
+from `src/ship.rs` is the *shape* only — parse a URL, dispatch on scheme,
+return a store scoped to one bucket/directory plus the prefix the URL
+itself named, and the same refusal posture (a missing `file://` directory
+is an error, never a silent `mkdir`; an unsupported scheme names the ones
+that are supported). Credentials still come only from `boto3`'s own
+standard chain (mirroring `AmazonS3Builder::from_env()`, never a bespoke
+path), and §9's checkpoint-fingerprint priority, deletion policy, and
+transient/permanent failure split are all implemented exactly as designed
+below — only the "calls the same crate" clause of item 6 does not hold.
+This is an implementation-time amendment, not a re-opening of §3/§4's own
+packaging decision: the packaging boundary (no new Rust dependency, no new
+binary, `src/` untouched) is upheld *more* strictly than item 6 originally
+described, not less.
+
 ## 5. Normalized document contract (for #347)
 
 The one shape every connector — present or future — produces, and the one

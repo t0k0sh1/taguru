@@ -51,16 +51,17 @@ jobs:
         # setuptools rides along: the runner's tool-cache copy lags
         # behind known advisories, and the environment audit below
         # rightly refuses to look away. sdk/python-langchain's own [dev]
-        # extra now carries pypdf (PdfConnector's tests, issue #348) and
-        # python-docx (DocxConnector's tests, issue #350); pypdf doubles as
-        # the local_rag example's dependency (PDF text extraction) — no
+        # extra now carries pypdf (PdfConnector's tests, issue #348),
+        # python-docx (DocxConnector's tests, issue #350), and boto3 plus
+        # its type stubs (S3Connector's tests, issue #351); pypdf doubles
+        # as the local_rag example's dependency (PDF text extraction) — no
         # separate `pip install pypdf` needed. The example isn't installed
         # from examples/langchain/requirements.txt because that file's
         # editable SDK paths are relative to being run from
         # examples/langchain, not the repo root this job runs from.
         run: |
           python -m pip install --upgrade pip setuptools
-          pip install -e "sdk/python[dev]" -e "sdk/python-langchain[dev,pdf,docx]"
+          pip install -e "sdk/python[dev]" -e "sdk/python-langchain[dev,pdf,docx,s3]"
       # Audit the environment the install step just resolved, the way the
       # typescript job audits its installed workspace. Handing pip-audit a
       # project directory re-resolves it from PyPI instead, which fails at
