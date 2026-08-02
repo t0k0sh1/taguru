@@ -111,6 +111,17 @@ taguru import --json batch/           <span class="c"># {dry_run, batches: [...]
       <code>?dry_run=true</code> omits it: restoring a group has no read-only twin to preview
       through.
     </p>
+    <p>
+      Every <code>--json</code> exit path prints exactly one JSON document, failures included —
+      never silent stdout on a non-zero exit. Validation refusing every file, the registry
+      refusing to boot, and a remote transport error or a server-refused chunk each add a
+      top-level <code>error</code> string alongside whatever <code>batches</code>/<code>groups</code>
+      already landed before the failure (empty arrays if nothing did). A local batch refused
+      mid-run (offline only — a remote refusal fails its whole chunk, never one batch within it)
+      is named under a <code>failed_batches</code> array instead of appearing in
+      <code>batches</code>, since there is no <code>ImportOutcome</code> to build for a batch that
+      was never applied; the human-readable stderr line for the same failure is unchanged.
+    </p>
   </section>
 
   <section id="one-file-one-source">

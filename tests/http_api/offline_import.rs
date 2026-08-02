@@ -92,6 +92,58 @@ fn an_offline_import_json_matches_the_http_endpoints_own_shape() {
     let _ = std::fs::remove_dir_all(&data_dir);
 }
 
+/// A batch refused mid-run must still leave `--json`'s stdout as one
+/// parseable document: the succeeded batch stays under `batches`, the
+/// refused one moves to `failed_batches` instead (there is no
+/// `ImportOutcome` to build for it), and the run continues past it —
+/// the same "keep going" contract the human-readable path has, now
+/// visible to a machine reader instead of only stderr.
+#[test]
+fn an_offline_import_json_represents_a_refused_batch_in_failed_batches() {
+    let batches = batch_dir("import-json-failed-batch");
+    let file = batches.join("seed.jsonl");
+    std::fs::write(
+        &file,
+        "{\"taguru_batch\": 1, \"context\": \"a\", \"source\": \"a.md\", \
+         \"create\": {\"description\": \"d\"}}\n\
+         {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o\", \"weight\": 1.0}\n\
+         {\"taguru_batch\": 1, \"context\": \"missing\", \"source\": \"bad.md\"}\n\
+         {\"subject\": \"s2\", \"label\": \"l2\", \"object\": \"o2\", \"weight\": 1.0}\n",
+    )
+    .unwrap();
+
+    let data_dir = std::env::temp_dir().join(format!(
+        "taguru-http-import-json-failed-batch-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&data_dir);
+    let (code, stdout, stderr) = run_import(&data_dir, &["--json", file.to_str().unwrap()]);
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    let report: Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|error| panic!("--json must be one JSON document: {error}\n{stdout}"));
+
+    let landed = report["batches"].as_array().unwrap();
+    assert_eq!(landed.len(), 1, "{report}");
+    assert_eq!(landed[0]["context"], "a");
+
+    let failed = &report["failed_batches"][0];
+    assert_eq!(failed["context"], "missing");
+    assert_eq!(failed["source"], "bad.md");
+    assert!(
+        failed["error"]
+            .as_str()
+            .unwrap()
+            .contains("does not exist and the batch brought no create block"),
+        "{report}"
+    );
+
+    let server = Server::start_on("import-json-failed-batch", data_dir);
+    let (status, _) = server.call("GET", "/contexts/a", None);
+    assert_eq!(status, 200, "the batch before the refusal must have landed");
+
+    let _ = std::fs::remove_dir_all(&batches);
+}
+
 /// `import --dry-run --json` offline never boots the registry, so it
 /// cannot know `created`/`retracted` the way a real apply (or the
 /// server's own `?dry_run=true`, which does boot) can — those report

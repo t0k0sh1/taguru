@@ -245,7 +245,7 @@ taguru compact --dry-run
 taguru compact --dry-run --url http://127.0.0.1:8248
 
 <span class="c"># machine-readable, e.g. to gate a maintenance job on dead_ratio</span>
-taguru compact --dry-run --json | jq '.[] | select(.dead_ratio > 0.2)'</code></pre>
+taguru compact --dry-run --json | jq '.[] | select(.dead_ratio &gt; 0.2)'</code></pre>
     <p>
       Each row reports <code>dead_edges</code>, <code>dead_ratio</code>, <code>dead_attributions</code>,
       and <code>arena_slack</code> — the exact numbers a real compaction would shed, since they're

@@ -413,6 +413,67 @@ fn a_mid_stream_refusal_reports_the_prefix_and_what_was_never_sent() {
     let _ = std::fs::remove_dir_all(&batches);
 }
 
+/// The same mid-stream refusal as the test above, but with `--json`:
+/// a refused chunk must still print exactly one JSON document — an
+/// `error` string naming the refusal, and `batches` holding what
+/// already landed before it (the `a` context), never the batch after
+/// (`c`, never sent) and never silent stdout on the exit-1 failure.
+#[test]
+fn a_mid_stream_refusal_with_json_still_emits_one_document_with_an_error_field() {
+    let batches = batch_dir("remote-import-midrefusal-json");
+    let file = batches.join("seed.jsonl");
+    std::fs::write(
+        &file,
+        "{\"taguru_batch\": 1, \"context\": \"a\", \"source\": \"a.md\", \
+         \"create\": {\"description\": \"d\"}}\n\
+         {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o\", \"weight\": 1.0}\n\
+         {\"taguru_batch\": 1, \"context\": \"missing\", \"source\": \"bad.md\"}\n\
+         {\"subject\": \"s2\", \"label\": \"l2\", \"object\": \"o2\", \"weight\": 1.0}\n\
+         {\"taguru_batch\": 1, \"context\": \"c\", \"source\": \"c.md\", \
+         \"create\": {\"description\": \"d\"}}\n\
+         {\"subject\": \"s3\", \"label\": \"l3\", \"object\": \"o3\", \"weight\": 1.0}\n",
+    )
+    .expect("fixture must be writable");
+
+    let server = Server::start_with_env(
+        "remote-import-midrefusal-json",
+        &[("TAGURU_MAX_BODY_BYTES", "220")],
+    );
+    let (code, stdout, stderr) = run_cli(
+        &[
+            "import",
+            "--url",
+            &server.base,
+            "--json",
+            file.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|error| {
+        panic!(
+            "--json must be one JSON document even on failure: \
+             {error}\nstdout: {stdout}\nstderr: {stderr}"
+        )
+    });
+    assert!(
+        report["error"]
+            .as_str()
+            .unwrap()
+            .contains("context 'missing' does not exist"),
+        "{report}"
+    );
+    let landed: Vec<&str> = report["batches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|outcome| outcome["context"].as_str().unwrap())
+        .collect();
+    assert_eq!(landed, vec!["a"], "{report}");
+
+    let _ = std::fs::remove_dir_all(&batches);
+}
+
 /// ADR 0002 §5/§7: a bare `--url` with no value, and a URL carrying
 /// userinfo, are both usage errors caught before any request leaves
 /// the process — no server needs to be running for either check.

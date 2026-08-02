@@ -844,12 +844,17 @@ fn inspect_directory(dir: &Path, as_json: bool) -> i32 {
 
     if stems.is_empty() && group_count == 0 && group_failures == 0 {
         if as_json {
+            // `notices` (import-marker warnings/notes especially) can
+            // be non-empty even with zero .ctx images and zero groups
+            // — an orphaned `.importing` marker needs neither — so
+            // this must carry the already-collected notices, not a
+            // fresh empty Vec that would silently drop them.
             print_json(&InspectReport {
                 target: dir.display().to_string(),
                 kind: "directory",
                 contexts: Vec::new(),
                 groups: Vec::new(),
-                notices: Vec::new(),
+                notices,
                 total: None,
                 corrupt: 0,
             });
@@ -916,6 +921,15 @@ fn inspect_groups(
     let mut records: BTreeMap<String, GroupRecord> = BTreeMap::new();
     let mut group_rows: Vec<GroupRow> = Vec::new();
     let mut notices: Vec<Notice> = Vec::new();
+    // Names already reported as CORRUPT above — inserted into `records`
+    // as an empty placeholder so a sibling's dangling-reference check
+    // sees the same shape boot will (comment below), but the JSON
+    // preview loop must not ALSO emit an "ok" row for a name that's
+    // already a `GroupRow::trouble` row; the human line below still
+    // prints one, since a person reads the CORRUPT line right above it
+    // and the empty "ok" line's own zero counts as a caveat, not new
+    // information a JSON reader could act on.
+    let mut reported_corrupt: BTreeSet<String> = BTreeSet::new();
     for path in entries {
         let file = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
         if file.ends_with(".group.corrupt") {
@@ -990,6 +1004,7 @@ fn inspect_groups(
                 // name is genuinely absent), and the shape preview below
                 // would prune the edge before repair_nesting ever runs,
                 // skewing the cycle/depth check for unrelated edges too.
+                reported_corrupt.insert(name.clone());
                 records.insert(name, GroupRecord::default());
             }
         }
@@ -1052,9 +1067,11 @@ fn inspect_groups(
             }
         }
         if as_json {
-            let mut row = GroupRow::ok(name.clone(), record);
-            row.notes = group_notes;
-            group_rows.push(row);
+            if !reported_corrupt.contains(name) {
+                let mut row = GroupRow::ok(name.clone(), record);
+                row.notes = group_notes;
+                group_rows.push(row);
+            }
         } else {
             println!(
                 "{name}: ok  {} member context(s) · {} child group(s){}",

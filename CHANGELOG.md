@@ -19,20 +19,27 @@ Entries that change an on-disk format or a response shape say so.
   change, since `GET /contexts` already carries these per-context stats
   (`ContextStats`); a cold/remote row is marked `stats_are_snapshot` since
   its numbers are the last-saved snapshot, not a live recomputation.
-  `compact --json` (with or without `--dry-run`) and `import --json`
-  reuse existing HTTP response types — `MaintenanceCompactionEntry` and
-  `ImportOutcome`/`ImportStreamOutcome`/`GroupImportOutcome` — rather than
-  inventing new schemas, so the CLI's structured output and `POST
-  /contexts/{name}/compact`/`POST /import`'s own bodies can't drift
-  apart. `import --dry-run --json` offline is the one exception: it never
-  boots the registry (the read-only-without-a-lock property `--dry-run`
-  already had), so it can't know `created`/`retracted` the way the
-  server's own `?dry_run=true` (which does boot, via `preview_batch`)
-  can — those fields report 0/false rather than a guess, and `groups` is
-  always absent, documented in `--help`. `inspect --json` is the one
-  genuinely new schema (`InspectReport`/`ContextRow`/`GroupRow`/
-  `Notice`/`Totals`) — inspect has no HTTP counterpart to reuse (ADR 0002
-  §6 rules out a remote `inspect`) — built alongside the existing
+  `compact --json` without `--dry-run` and `import --json`'s successful
+  batches reuse existing HTTP response types — `MaintenanceCompactionEntry`
+  and `ImportOutcome`/`ImportStreamOutcome`/`GroupImportOutcome` — rather
+  than inventing new schemas, so the CLI's structured output and `POST
+  /contexts/{name}/compact`/`POST /import`'s own bodies can't drift apart.
+  `compact --dry-run --json` answers with a new `DeadWeight` shape instead
+  (there is no HTTP endpoint that previews dead weight to reuse), and
+  `import --json` adds a small CLI-only `error`/`failed_batches` envelope
+  around the reused batch/group arrays so every `--json` exit path —
+  including a refused batch, a validation failure, a registry that
+  wouldn't boot, or a remote transport/refusal error — prints exactly one
+  parseable JSON document, never silent stdout. `import --dry-run --json`
+  offline is the one exception among successful runs: it never boots the
+  registry (the read-only-without-a-lock property `--dry-run` already
+  had), so it can't know `created`/`retracted` the way the server's own
+  `?dry_run=true` (which does boot, via `preview_batch`) can — those
+  fields report 0/false rather than a guess, and `groups` is always
+  absent, documented in `--help`. `inspect --json` (`InspectReport`/
+  `ContextRow`/`GroupRow`/`Notice`/`Totals`) is the only new schema built
+  for a command with no HTTP counterpart to reuse at all (ADR 0002 §6
+  rules out a remote `inspect`) — built alongside the existing
   human-readable report from the same computed values in the same scope,
   never a second pass over the data, so the two renderings cannot
   disagree about what was found.

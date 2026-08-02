@@ -242,8 +242,9 @@ fn run_local(names: Vec<String>, parallel: usize, as_json: bool) -> i32 {
             }
         }
     }
+    let mut ok = true;
     if as_json {
-        print_json(&reports);
+        ok = print_json(&reports);
     } else {
         println!(
             "compact: {} of {} context(s) rewritten",
@@ -251,7 +252,7 @@ fn run_local(names: Vec<String>, parallel: usize, as_json: bool) -> i32 {
             names.len()
         );
     }
-    if failures > 0 { 1 } else { 0 }
+    if failures > 0 || !ok { 1 } else { 0 }
 }
 
 /// `compact --dry-run` (offline): each context's standing dead weight,

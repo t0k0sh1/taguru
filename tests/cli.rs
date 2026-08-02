@@ -635,6 +635,9 @@ fn inspect_json_reports_torn_tail_and_import_marker_notices() {
         br#"{"context":"ghost","source":"doc-9"}"#,
     )
     .unwrap();
+    // A marker whose bytes don't even parse as JSON — the third
+    // branch (`unreadable_import_marker`), previously untested here.
+    std::fs::write(dir.join("torn.00000000deadbeef.importing"), b"{not json").unwrap();
 
     let output = run(&["inspect", "--json", &dir.display().to_string()]);
     let stdout_text = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -663,6 +666,13 @@ fn inspect_json_reports_torn_tail_and_import_marker_notices() {
         notices
             .iter()
             .any(|notice| notice["kind"] == "orphan_import_marker" && notice["level"] == "note"),
+        "{report}"
+    );
+    assert!(
+        notices
+            .iter()
+            .any(|notice| notice["kind"] == "unreadable_import_marker"
+                && notice["level"] == "warning"),
         "{report}"
     );
 
@@ -2049,6 +2059,33 @@ fn inspect_json_reports_group_notes_and_nesting_drops() {
     );
     std::fs::remove_file(dir.join("cyc-a.group")).unwrap();
     std::fs::remove_file(dir.join("cyc-b.group")).unwrap();
+
+    // Directory-scan path: a corrupt .group is registered under an
+    // empty placeholder record for reference checks (inspect_groups'
+    // own comment explains why), but the JSON preview loop must not
+    // ALSO emit an "ok" row for that same name — exactly one row,
+    // status "corrupt". `find` alone would pass even with a stray
+    // duplicate "ok" row present, so this counts rows by name instead.
+    std::fs::write(dir.join("bad.group"), b"{not json").unwrap();
+    let output = run(&["inspect", "--json", &dir.display().to_string()]);
+    let stdout_text = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert_eq!(output.status.code(), Some(1), "{stdout_text}");
+    let report: serde_json::Value = serde_json::from_str(&stdout_text)
+        .unwrap_or_else(|error| panic!("--json must be one JSON document: {error}"));
+    let bad_rows: Vec<&serde_json::Value> = report["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["name"] == "bad")
+        .collect();
+    assert_eq!(
+        bad_rows.len(),
+        1,
+        "a corrupt group must report exactly one row, not a duplicate 'ok' row too: {report}"
+    );
+    assert_eq!(bad_rows[0]["status"], "corrupt");
+    assert!(report["corrupt"].as_u64().unwrap() >= 1, "{report}");
+    std::fs::remove_file(dir.join("bad.group")).unwrap();
 
     // Single-file `.group` inspect answers the same GroupRow shape.
     let output = run(&[
