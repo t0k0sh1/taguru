@@ -139,8 +139,9 @@ document `title`. No OCR engine ships here: a page whose extracted text
 has fewer than `min_chars_per_page` (default 16) non-whitespace characters
 is named in an `ocr_required` diagnostic instead of silently passed
 through as low-quality text — raise the threshold for a corpus of
-mostly-image PDFs, or route pages it names to an external OCR step.
-Encrypted and corrupt PDFs are reported the same structured way
+mostly-image PDFs, or configure `ocr_adapter=` (issue #352, see below) to
+recover exactly the pages it names. Encrypted and corrupt PDFs are
+reported the same structured way
 (`encrypted`/`corrupt`), never a raised exception:
 
 ```python
@@ -215,6 +216,66 @@ document = DocxConnector().read("docs/manual.docx")
 if document.diagnostics:
     ...  # encrypted, corrupt, ocr_required, partial_extraction, ... — never a silently empty passage
 outcome = ingest_connector_document(ingester, document)
+```
+
+`PptxConnector` (issue #352) reads `.pptx` files — `pip install
+"langchain-taguru[pptx]"` for its `python-pptx` dependency, kept out of the
+default install per ADR 0007 §3/§4 for the same reason `DocxConnector`'s
+`python-docx` is. A slide's shapes are walked in document order, recursing
+into a group shape's own nested shapes; every non-empty text-frame
+paragraph and every table (rows joined with `\n`, cells with `" | "`, one
+paragraph per table) carries a `{"kind": "slide", "value": ...}` locator —
+unlike `DocxConnector` (whose one-locator-per-paragraph budget goes to
+tables, since a DOCX has no page-like structure of its own to spend it on
+instead), a slide already has a number to spend that budget naming, so
+here it goes to distinguishing a slide's body from its speaker notes
+instead: a slide's notes are read as their own paragraph(s), each carrying
+`{"kind": "speaker_notes", "value": ...}`. A slide's title is read like any
+other paragraph (same `slide` locator as its neighbors) and additionally
+becomes the paragraph-anchored `section`. No OCR engine, no rasterizer: a
+presentation left with no extractable text (an image-only deck) is
+`ocr_required` with empty `text`. A chart, a SmartArt diagram, and an
+embedded/linked OLE object are each unreachable through this connector's
+own shape walk — named in a single `partial_extraction` diagnostic rather
+than silently short-changed. Only `.pptx` is read; `.ppt` (legacy binary)
+and `.pptm` (macro-enabled) are both `unsupported_format`:
+
+```python
+from taguru_langchain.ingest_connectors import PptxConnector
+
+document = PptxConnector().read("docs/deck.pptx")
+if document.diagnostics:
+    ...  # encrypted, corrupt, ocr_required, partial_extraction, ... — never a silently empty passage
+outcome = ingest_connector_document(ingester, document)
+```
+
+No OCR engine ships in this package, or in any connector (ADR 0007 §10).
+`OcrAdapter` (issue #352) is the external boundary a connector calls out to
+when one is configured — given the raw document bytes and the locators
+naming which pages/units are unusable, an adapter returns whatever text it
+could recover for them, each still tagged with the same locator it was
+asked about; `PdfConnector` is the one connector wired to call one today
+(`ocr_adapter=`), offering it exactly the pages its own
+`min_chars_per_page` threshold found unusable, never the whole document.
+An adapter's own failure — an exception, or simply recovering nothing for
+a page — leaves that page exactly `ocr_required`, as if no adapter had
+been configured at all:
+
+```python
+from taguru_langchain.ingest_connectors import OcrAdapter, OcrRecoveredUnit, OcrRequest, OcrResult
+
+class MyOcrAdapter:
+    name = "my-ocr-engine"
+    version = "1.0"
+
+    def recognize(self, request: OcrRequest) -> OcrResult:
+        units = [
+            OcrRecoveredUnit(locator=locator, text=my_engine.recognize(request.content, locator))
+            for locator in request.locators
+        ]
+        return OcrResult(units=units)
+
+document = PdfConnector(ocr_adapter=MyOcrAdapter()).read("docs/scanned.pdf")
 ```
 
 `S3Connector`/`sync_object_storage` (issue #351) list an S3 bucket/prefix

@@ -51,6 +51,12 @@ pdf = [
 docx = [
     "python-docx>=1.2",
 ]
+# Same ADR 0007 §3/§4 decision, for PptxConnector (issue #352): only a
+# caller who actually uses PptxConnector needs python-pptx. >=1.0 for its
+# bundled `py.typed` marker (this package's own mypy is `strict`).
+pptx = [
+    "python-pptx>=1.0",
+]
 # Same ADR 0007 §3/§4 decision, for S3Connector (issue #351): only a caller
 # who actually uses S3Connector needs boto3 — `FileObjectStore` (the
 # `file://` test/air-gapped backend) is stdlib-only and needs neither this
@@ -75,6 +81,9 @@ dev = [
     # DocxConnector's own tests (tests/unit/test_docx_connector.py) exercise
     # the real python-docx-backed path, not a mock.
     "python-docx>=1.2",
+    # PptxConnector's own tests (tests/unit/test_pptx_connector.py) exercise
+    # the real python-pptx-backed path, not a mock.
+    "python-pptx>=1.0",
     # S3Connector's own tests (tests/unit/test_object_store.py,
     # tests/unit/test_s3_connector.py) exercise the real boto3-backed path
     # (stubbed at the HTTP layer, never a live bucket) rather than a mock of

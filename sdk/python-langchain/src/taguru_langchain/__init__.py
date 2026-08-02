@@ -9,7 +9,8 @@ Three entry points:
   discipline, applied via ``POST /import`` (per-source replace, idempotent).
 - :mod:`taguru_langchain.ingest_connectors` (ADR 0007, issue #347) — the
   normalized document contract standard ingest connectors (``.md``/``.txt``/
-  ``.pdf``/``.html``/``.docx``/S3) produce, and the bridge that feeds a
+  ``.pdf``/``.html``/``.docx``/``.pptx``/S3) produce, and the bridge that
+  feeds a
   :class:`~taguru_langchain.ingest_connectors.document.ConnectorDocument`
   into :class:`TaguruIngester` instead of a bare string.
 
@@ -60,9 +61,14 @@ from .ingest_connectors import (
     ObjectMeta,
     ObjectNotFoundError,
     ObjectStore,
+    OcrAdapter,
+    OcrRecoveredUnit,
+    OcrRequest,
+    OcrResult,
     PdfConnector,
     PermanentStoreError,
     Phase,
+    PptxConnector,
     S3Connector,
     S3ObjectCheckpoint,
     S3ObjectStore,
@@ -128,9 +134,14 @@ __all__ = [
     "ObjectMeta",
     "ObjectNotFoundError",
     "ObjectStore",
+    "OcrAdapter",
+    "OcrRecoveredUnit",
+    "OcrRequest",
+    "OcrResult",
     "PdfConnector",
     "PermanentStoreError",
     "Phase",
+    "PptxConnector",
     "S3Connector",
     "S3ObjectCheckpoint",
     "S3ObjectStore",

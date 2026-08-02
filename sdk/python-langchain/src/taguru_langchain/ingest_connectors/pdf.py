@@ -12,8 +12,21 @@ No OCR engine ships in this connector (ADR 0007 §10): a page whose
 extracted text has fewer than ``min_chars_per_page`` non-whitespace
 characters is treated as having no usable text layer and is named in an
 ``ocr_required`` diagnostic — never silently passed through as low-quality
-text. Absent an external OCR adapter (#352), that diagnostic is terminal
-for the pages it names.
+text. Absent an ``ocr_adapter`` (issue #352,
+:class:`~.ocr.OcrAdapter`), that diagnostic is terminal for the pages it
+names, exactly as before this connector could accept one at all. When one
+IS configured, it is asked to recover exactly the pages this connector
+itself found unusable — never the whole document, and never a page this
+connector already extracted usable text from — and each recovered page
+that clears the same ``min_chars_per_page`` bar every other page's text
+must clear is spliced back in as if this connector had extracted it
+itself: its own ``{"kind": "page", ...}`` locator, its own place in the
+outline fall-forward, its own contribution to ``sections``. An adapter's
+own failure (an exception, or simply recovering nothing) leaves the pages
+it was asked about exactly as ``ocr_required`` as if no adapter had been
+configured — the adapter's exception is itself never surfaced to a caller,
+since it is arbitrary external code, no more trusted than the parser
+itself.
 """
 
 from __future__ import annotations
@@ -48,6 +61,7 @@ from .document import (
     SectionEntry,
     options_digest,
 )
+from .ocr import OcrAdapter, OcrRequest
 from .sources import check_source_id, file_source_id
 
 PARSER_NAME: Final = "taguru-pdf-connector"
@@ -98,6 +112,73 @@ def _list_pages(pages: list[int]) -> str:
     return shown
 
 
+def _ocr_required_message(pages: list[int], adapter_error: str | None) -> str:
+    message = f"no extractable text layer on page(s) {_list_pages(pages)}"
+    if adapter_error is not None:
+        message += f" (OCR adapter failed: {adapter_error})"
+    return message
+
+
+def _recover_with_ocr(
+    adapter: OcrAdapter,
+    *,
+    source: str,
+    raw: bytes,
+    page_texts: list[str],
+    empty_pages: list[int],
+    min_chars_per_page: int,
+) -> tuple[list[str], list[int], list[Diagnostic], str | None]:
+    """Offers every page in ``empty_pages`` to ``adapter`` for recovery
+    (ADR 0007 §10), splicing back in whatever it recovers that clears the
+    same ``min_chars_per_page`` bar every other page's text must clear —
+    never a page this connector did not ask about, never text too thin to
+    count as recovered. Returns the (possibly updated) ``page_texts``, the
+    pages STILL unusable after the attempt, any diagnostics the adapter
+    itself reported, and — only if the adapter raised — a message naming
+    its own failure. An adapter's exception is never re-raised: the pages
+    it was asked about are left exactly as unusable as if no adapter had
+    been configured at all, matching §10's "absent a configured adapter,
+    the `ocr_required` diagnostic is terminal for that document" for a
+    misbehaving one too."""
+    request = OcrRequest(
+        source=source,
+        content=raw,
+        content_type="application/pdf",
+        locators=tuple(Locator(kind="page", value=str(page)) for page in empty_pages),
+    )
+    try:
+        result = adapter.recognize(request)
+    except Exception as error:  # noqa: BLE001 - an adapter is arbitrary
+        # external code this connector does not control; its own failure
+        # must not fail the whole document, only leave the pages it was
+        # asked about unrecovered.
+        return page_texts, empty_pages, [], str(error)
+
+    requested = set(empty_pages)
+    recovered: dict[int, str] = {}
+    for unit in result.units:
+        if unit.locator.kind != "page":
+            continue
+        try:
+            page_number = int(unit.locator.value)
+        except ValueError:
+            continue
+        if page_number not in requested or page_number in recovered:
+            continue
+        if _page_char_count(unit.text) < min_chars_per_page:
+            continue
+        recovered[page_number] = unit.text
+
+    if not recovered:
+        return page_texts, empty_pages, list(result.diagnostics), None
+
+    updated_texts = list(page_texts)
+    for page_number, text in recovered.items():
+        updated_texts[page_number - 1] = text
+    remaining_empty = [page for page in empty_pages if page not in recovered]
+    return updated_texts, remaining_empty, list(result.diagnostics), None
+
+
 class PdfConnector:
     """Reference connector for ``.pdf`` files (issue #348).
 
@@ -107,6 +188,11 @@ class PdfConnector:
     ``min_chars_per_page`` (default 16) is the ADR 0007 §10-required,
     connector-documented per-page text-layer threshold. ``max_file_bytes``
     (default 64 MiB) caps the raw file size checked before any parsing.
+    ``ocr_adapter`` (default ``None``, :class:`~.ocr.OcrAdapter`) is the
+    external OCR engine boundary §10 defines: when configured, every page
+    this connector itself finds unusable is offered to it for recovery
+    before ``ocr_required`` is decided; when absent, behavior is unchanged
+    from before this connector could accept one at all.
     """
 
     def __init__(
@@ -115,6 +201,7 @@ class PdfConnector:
         extract_outline: bool = True,
         min_chars_per_page: int = _DEFAULT_MIN_CHARS_PER_PAGE,
         max_file_bytes: int = _DEFAULT_MAX_FILE_BYTES,
+        ocr_adapter: OcrAdapter | None = None,
     ) -> None:
         if PdfReader is None:
             raise ImportError(
@@ -123,6 +210,7 @@ class PdfConnector:
         self._extract_outline = extract_outline
         self._min_chars_per_page = min_chars_per_page
         self._max_file_bytes = max_file_bytes
+        self._ocr_adapter = ocr_adapter
 
     @property
     def parser(self) -> str:
@@ -151,6 +239,17 @@ class PdfConnector:
                 "extract_outline": self._extract_outline,
                 "min_chars_per_page": self._min_chars_per_page,
                 "max_file_bytes": self._max_file_bytes,
+                # Not the adapter object itself (not JSON-digestible, and
+                # not something two adapter instances should ever need to
+                # be identical BY VALUE to compare equal) — its declared
+                # identity, so configuring, swapping, or removing an
+                # adapter changes this connector's effective fingerprint
+                # and §6.3's checkpoint knows to re-parse rather than skip.
+                "ocr_adapter": (
+                    None
+                    if self._ocr_adapter is None
+                    else f"{self._ocr_adapter.name}@{self._ocr_adapter.version}"
+                ),
             }
         )
 
@@ -265,6 +364,18 @@ class PdfConnector:
             if index + 1 not in failed_pages and _page_char_count(text) < self._min_chars_per_page
         ]
 
+        ocr_diagnostics: list[Diagnostic] = []
+        ocr_adapter_error: str | None = None
+        if self._ocr_adapter is not None and empty_pages:
+            page_texts, empty_pages, ocr_diagnostics, ocr_adapter_error = _recover_with_ocr(
+                self._ocr_adapter,
+                source=source,
+                raw=raw,
+                page_texts=page_texts,
+                empty_pages=empty_pages,
+                min_chars_per_page=self._min_chars_per_page,
+            )
+
         paragraphs: list[str] = []
         locators: list[LocatorEntry] = []
         page_paragraph_starts: list[int | None] = [None] * page_count
@@ -290,7 +401,7 @@ class PdfConnector:
                 unusable = sorted({*empty_pages, *failed_pages})
                 return failure(
                     "ocr_required",
-                    f"no extractable text layer on page(s) {_list_pages(unusable)}",
+                    _ocr_required_message(unusable, ocr_adapter_error),
                     raw_content_sha256,
                 )
             return failure(
@@ -318,10 +429,11 @@ class PdfConnector:
             diagnostics.append(
                 Diagnostic(
                     code="ocr_required",
-                    message=f"no extractable text layer on page(s) {_list_pages(empty_pages)}",
+                    message=_ocr_required_message(empty_pages, ocr_adapter_error),
                     source=source,
                 )
             )
+        diagnostics.extend(ocr_diagnostics)
         if failed_pages:
             diagnostics.append(
                 Diagnostic(

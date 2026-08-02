@@ -360,13 +360,15 @@ def test_docx_connector_document_round_trips_table_locators_to_citations(
             client.contexts.delete("pottery-studio")
 
 
-def test_s3_connector_syncs_a_file_bucket_of_pdf_html_docx_to_citations(
+def test_s3_connector_syncs_a_file_bucket_of_pdf_html_docx_pptx_to_citations(
     client: Taguru, tmp_path: Path
 ) -> None:
     """The S3 connector's own acceptance bar (issue #351), against the real
     server, using a `file://` bucket in place of a real S3 endpoint — the
     same substitution issue #351 itself specifies ("minio/localstack を使
-    わず file:// バケットでテスト"): PDF/HTML/DOCX objects are listed and
+    わず file:// バケットでテスト"): PDF/HTML/DOCX/PPTX objects (the latter
+    added for #352, dispatched by the PPTX MIME-type fallback entry
+    `_CONTENT_TYPE_SUFFIXES` gained alongside its extension) are listed and
     dispatched by extension, each one's own citation locator survives sync,
     a second pass with nothing changed on disk re-fetches and re-ingests
     NEITHER checkpoint layer's own work (ADR 0007 §6.3), and deleting an
@@ -375,10 +377,17 @@ def test_s3_connector_syncs_a_file_bucket_of_pdf_html_docx_to_citations(
     explicit "default で破壊的同期を行わない")."""
     pytest.importorskip("pypdf")
     pytest.importorskip("docx")
-    from taguru_langchain.ingest_connectors import DocxConnector, HtmlConnector, PdfConnector
+    pytest.importorskip("pptx")
+    from taguru_langchain.ingest_connectors import (
+        DocxConnector,
+        HtmlConnector,
+        PdfConnector,
+        PptxConnector,
+    )
 
     from .._docx import docx_bytes, heading, table
     from .._pdfs import text_pdf
+    from .._pptx import add_body, add_title_slide, blank_presentation, save_bytes
 
     bucket = tmp_path / "bucket"
     bucket.mkdir()
@@ -389,9 +398,13 @@ def test_s3_connector_syncs_a_file_bucket_of_pdf_html_docx_to_citations(
         b"</main></body></html>"
     )
     docx_bytes_ = docx_bytes(heading("Catalog", 1) + table([["Item", "Price"], ["Bowl", "3000"]]))
+    pptx_presentation = blank_presentation()
+    pptx_slide = add_title_slide(pptx_presentation, "Kiln Schedule")
+    add_body(pptx_slide, ["Fire the raku kiln at 1000C."])
     (bucket / "report.pdf").write_bytes(pdf_bytes)
     (bucket / "page.html").write_bytes(html_bytes)
     (bucket / "catalog.docx").write_bytes(docx_bytes_)
+    (bucket / "schedule.pptx").write_bytes(save_bytes(pptx_presentation))
 
     # Independently parsed from the SAME bytes, purely to learn the
     # locators/paragraph indices this run's own citations must match — the
@@ -400,6 +413,7 @@ def test_s3_connector_syncs_a_file_bucket_of_pdf_html_docx_to_citations(
     pdf_document = PdfConnector().read(str(bucket / "report.pdf"))
     html_document = HtmlConnector().read(str(bucket / "page.html"))
     docx_document = DocxConnector().read(str(bucket / "catalog.docx"))
+    pptx_document = PptxConnector().read(str(bucket / "schedule.pptx"))
 
     store, prefix = open_object_store(f"file://{bucket}")
     checkpoints = FilesystemCheckpointStore(tmp_path / "checkpoints")
@@ -415,13 +429,14 @@ def test_s3_connector_syncs_a_file_bucket_of_pdf_html_docx_to_citations(
     )
     try:
         report = sync_object_storage(store, prefix, ingester=ingester, checkpoints=checkpoints)
-        assert report.imported == 3
+        assert report.imported == 4
         assert report.failed == 0
 
         ctx = client.context("ceramics-s3")
         pdf_source = f"{store.base_uri}/report.pdf"
         html_source = f"{store.base_uri}/page.html"
         docx_source = f"{store.base_uri}/catalog.docx"
+        pptx_source = f"{store.base_uri}/schedule.pptx"
 
         pdf_citation = ctx.cite_passage(pdf_source, pdf_document.locators[0].paragraph)
         assert pdf_citation.locator == pdf_document.locators[0].locator
@@ -432,10 +447,13 @@ def test_s3_connector_syncs_a_file_bucket_of_pdf_html_docx_to_citations(
         docx_citation = ctx.cite_passage(docx_source, docx_document.locators[0].paragraph)
         assert docx_citation.locator == docx_document.locators[0].locator
 
+        pptx_citation = ctx.cite_passage(pptx_source, pptx_document.locators[0].paragraph)
+        assert pptx_citation.locator == pptx_document.locators[0].locator
+
         # A second pass with nothing changed on disk: both checkpoint
         # layers hit, so nothing is re-fetched or re-ingested.
         second = sync_object_storage(store, prefix, ingester=ingester, checkpoints=checkpoints)
-        assert second.unchanged == 3
+        assert second.unchanged == 4
         assert second.imported == 0
 
         (bucket / "catalog.docx").unlink()
@@ -448,3 +466,63 @@ def test_s3_connector_syncs_a_file_bucket_of_pdf_html_docx_to_citations(
     finally:
         if client.contexts.exists("ceramics-s3"):
             client.contexts.delete("ceramics-s3")
+
+
+def test_pptx_connector_document_round_trips_slide_and_notes_locators_to_citations(
+    client: Taguru, tmp_path: Path
+) -> None:
+    """The PPTX connector's own acceptance bar (issue #352), against the
+    real server: a slide's own body paragraphs (including a table) carry a
+    `slide` locator, its speaker notes carry a distinct `speaker_notes`
+    locator (ADR 0007 §7.3 — never the same locator a body paragraph on
+    that slide gets), and its title becomes the section breadcrumb — all
+    three surviving storage and the `/citations` response round trip
+    unchanged, the same bar #348's PDF-page-locator test and #350's
+    DOCX-table-locator test above clear for their own formats."""
+    pytest.importorskip("pptx")
+    from taguru_langchain.ingest_connectors import PptxConnector
+
+    from .._pptx import add_body, add_notes, add_title_slide, blank_presentation, save_bytes
+
+    presentation = blank_presentation()
+    slide = add_title_slide(presentation, "Glassblowing Studio")
+    add_body(slide, ["The studio preserves traditional glassblowing."])
+    add_notes(slide, ["Mention the kiln temperature on stage."])
+    path = tmp_path / "glassblowing.pptx"
+    path.write_bytes(save_bytes(presentation))
+
+    document = PptxConnector().read(str(path))
+    assert document.diagnostics == ()
+    assert [(s.paragraph, s.section) for s in document.sections] == [(0, "Glassblowing Studio")]
+    assert [(entry.paragraph, entry.locator) for entry in document.locators] == [
+        (0, Locator(kind="slide", value="1")),
+        (1, Locator(kind="slide", value="1")),
+        (2, Locator(kind="speaker_notes", value="1")),
+    ]
+
+    llm = FakeListChatModel(
+        responses=[json.dumps({"associations": [], "aliases": [], "questions": []})]
+    )
+    ingester = TaguruIngester(
+        context="glassblowing-studio",
+        llm=llm,
+        client=client,
+        create_context=True,
+        context_description="PPTX connector round trip (issue #352)",
+    )
+    try:
+        outcome = ingest_connector_document(ingester, document)
+        assert outcome.ok
+        assert outcome.sections_stored == len(document.sections)
+        assert outcome.locators_stored == len(document.locators)
+
+        ctx = client.context("glassblowing-studio")
+        body_citation = ctx.cite_passage(document.source, 1)
+        assert body_citation.section == "Glassblowing Studio"
+        assert body_citation.locator == Locator(kind="slide", value="1")
+
+        notes_citation = ctx.cite_passage(document.source, 2)
+        assert notes_citation.locator == Locator(kind="speaker_notes", value="1")
+    finally:
+        if client.contexts.exists("glassblowing-studio"):
+            client.contexts.delete("glassblowing-studio")

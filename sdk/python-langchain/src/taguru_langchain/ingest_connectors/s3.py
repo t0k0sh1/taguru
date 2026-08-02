@@ -1,7 +1,7 @@
 """The S3 (object-storage) connector (ADR 0007 §9, issue #351): lists a
 bucket/prefix, dispatches each object to whichever installed format
-connector (#347-#350) its extension or content-type names, and syncs the
-result into a :class:`~taguru_langchain.ingest.TaguruIngester` — with a
+connector (#347-#350, #352) its extension or content-type names, and syncs
+the result into a :class:`~taguru_langchain.ingest.TaguruIngester` — with a
 two-layer checkpoint (skip the fetch when listing metadata is unchanged;
 skip the model call/import when the fetched-and-parsed content is
 unchanged), a deletion policy that never retracts by default, and a
@@ -72,6 +72,7 @@ from .objectstore import (
     object_fingerprint,
 )
 from .pdf import PdfConnector
+from .pptx import PptxConnector
 from .protocol import Connector
 from .sources import SourceIdRegistry, check_source_id
 from .text import TextFileConnector
@@ -90,6 +91,7 @@ _CONTENT_TYPE_SUFFIXES: Final[dict[str, str]] = {
     "text/html": ".html",
     "application/xhtml+xml": ".xhtml",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
     "text/markdown": ".md",
     "text/plain": ".txt",
 }
@@ -124,11 +126,12 @@ def _connector_for_suffix(connectors: Sequence[Connector], suffix: str) -> Conne
 
 
 def _default_connectors() -> tuple[Connector, ...]:
-    """The installed reference connectors, in ADR 0007's own PDF/HTML/DOCX
-    order plus the original ``.md``/``.txt`` reference — an optional
-    dependency's connector (``pdf``, ``docx``) is simply absent when its
-    extra was never installed, so a bucket holding that format legitimately
-    reports ``unsupported_format`` rather than raising at construction."""
+    """The installed reference connectors, in ADR 0007's own PDF/HTML/DOCX/
+    PPTX order plus the original ``.md``/``.txt`` reference — an optional
+    dependency's connector (``pdf``, ``docx``, ``pptx``) is simply absent
+    when its extra was never installed, so a bucket holding that format
+    legitimately reports ``unsupported_format`` rather than raising at
+    construction."""
     connectors: list[Connector] = [TextFileConnector(), HtmlConnector()]
     try:
         connectors.append(PdfConnector())
@@ -136,6 +139,10 @@ def _default_connectors() -> tuple[Connector, ...]:
         pass
     try:
         connectors.append(DocxConnector())
+    except ImportError:
+        pass
+    try:
+        connectors.append(PptxConnector())
     except ImportError:
         pass
     return tuple(connectors)
