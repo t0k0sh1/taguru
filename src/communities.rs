@@ -40,8 +40,10 @@ use crate::config::{load_config, subcommand_usage_error};
 use crate::registry::ContextRevision;
 use crate::remote::{Api, ApiFailure};
 
-const COMMUNITIES_USAGE: &str = "usage: taguru communities --context NAME [--into NAME] [--dry-run] [--json] [--config FILE] [URL]
-       taguru communities --group NAME [--dry-run] [--json] [--config FILE] [URL]
+const COMMUNITIES_USAGE: &str = "usage: taguru communities --context NAME [--into NAME] [--dry-run]
+                           [--json] [--config FILE] [--url URL] [URL]
+       taguru communities --group NAME [--dry-run] [--json] [--config FILE]
+                           [--url URL] [URL]
 
 Derives (or refreshes) a community-summaries artifact from a RUNNING
 server's context: the server detects communities on the association
@@ -64,8 +66,9 @@ Summaries use the extract provider: TAGURU_EXTRACT_URL,
 TAGURU_EXTRACT_MODEL, TAGURU_EXTRACT_API_KEY (docs/extract.html) —
 required only when something actually needs summarizing. Auth rides
 the same variables the server reads: TAGURU_API_TOKEN, or the first
-key of TAGURU_API_TOKENS. URL defaults to TAGURU_ADDR after --config
-applies, exactly like `taguru health`.
+key of TAGURU_API_TOKENS. --url and the positional URL are aliases —
+name the target either way, never both; unnamed, it defaults to
+TAGURU_ADDR after --config applies, exactly like `taguru health`.
 
 exit codes: 0 artifact up to date (or dry-run report produced) ·
 1 derivation failed · 2 usage error
@@ -123,6 +126,18 @@ pub fn run(args: &[String]) -> i32 {
                 Some(_) => return usage("--config given twice"),
                 None => return usage("--config needs a file path"),
             },
+            "--url" => match rest.next() {
+                Some(url) if explicit_url.is_none() && !url.starts_with('-') => {
+                    explicit_url = Some(url.trim_end_matches('/').to_string());
+                }
+                Some(_) if explicit_url.is_none() => {
+                    return usage("--url needs a server URL");
+                }
+                Some(_) => {
+                    return usage("either --url or a positional URL, not both");
+                }
+                None => return usage("--url needs a server URL"),
+            },
             "--dry-run" => dry_run = true,
             "--json" => as_json = true,
             flag if flag.starts_with('-') => {
@@ -133,7 +148,7 @@ pub fn run(args: &[String]) -> i32 {
                     .replace(url.trim_end_matches('/').to_string())
                     .is_some()
                 {
-                    return usage(&format!("one optional URL only, got '{url}'"));
+                    return usage("either --url or a positional URL, not both");
                 }
             }
         }

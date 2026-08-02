@@ -631,6 +631,11 @@ pub(crate) fn run(args: &[String]) -> i32 {
             "--out DIR is required (where the streams land)",
         );
     };
+    // TAGURU_CONFIG fallback (issue #248 item 2): --config wins, but a
+    // deployment file baked in via the environment still applies when
+    // it's absent — the same priority serve/health/calibrate/
+    // communities/evaluate/restore already give it.
+    let config = config.or_else(|| std::env::var("TAGURU_CONFIG").ok().map(PathBuf::from));
     // SAFETY (same contract as serve/import): applied while the
     // process is still single-threaded — export never starts a
     // runtime. Loaded before the --url dispatch below, too: a config

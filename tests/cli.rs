@@ -18,6 +18,17 @@ fn run(args: &[&str]) -> Output {
         .expect("binary must run")
 }
 
+/// Like [`run`], but setting (rather than removing) environment
+/// variables — for exercising `TAGURU_CONFIG` itself.
+fn run_with_env(args: &[&str], env: &[(&str, &str)]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_taguru"));
+    command.args(args);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    command.output().expect("binary must run")
+}
+
 /// A scratch directory holding a config file (and doubling as the data
 /// directory the file points at). Removed by the caller.
 fn write_config(tag: &str, lines: &str) -> (PathBuf, PathBuf) {
@@ -285,6 +296,182 @@ fn health_exits_nonzero_when_nothing_listens() {
 fn health_refuses_trailing_arguments() {
     let output = run(&["health", "http://127.0.0.1:1", "extra"]);
     assert_eq!(output.status.code(), Some(2));
+}
+
+// Issue #248 item 1: `--url` is an alias for the positional URL on
+// `health`/`calibrate`/`communities` — either names the target, never
+// both.
+
+#[test]
+fn health_url_flag_works_the_same_as_the_positional_form() {
+    let (mut child, addr, dir) = spawn_server("health-url-flag");
+    let output = run(&["health", "--url", &format!("http://{addr}")]);
+    let _ = child.kill();
+    let _ = child.wait();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn health_refuses_both_url_flag_and_positional() {
+    let output = run(&[
+        "health",
+        "--url",
+        "http://127.0.0.1:1",
+        "http://127.0.0.1:2",
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("not both"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn health_url_flag_does_not_swallow_a_following_flag() {
+    // --url --help must not treat "--help" as the URL value (a
+    // confusing "invalid URL" failure instead of the usage error an
+    // operator reaching for the manual actually wants).
+    let output = run(&["health", "--url", "--help"]);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("--url needs a server URL"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn calibrate_url_flag_does_not_swallow_a_following_flag() {
+    let dir = std::env::temp_dir().join(format!(
+        "taguru-cli-calibrate-urlflag-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
+    let probes = dir.join("probes.tsv");
+    std::fs::write(&probes, "a paraphrase\texpected\n").expect("probes file must be writable");
+
+    let output = run(&[
+        "calibrate",
+        "--context",
+        "sake",
+        "--probes",
+        &probes.display().to_string(),
+        "--url",
+        "--json",
+    ]);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("--url needs a server URL"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn communities_url_flag_does_not_swallow_a_following_flag() {
+    let output = run(&["communities", "--context", "sake", "--url", "--json"]);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("--url needs a server URL"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn calibrate_refuses_both_url_flag_and_positional() {
+    let dir =
+        std::env::temp_dir().join(format!("taguru-cli-calibrate-both-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
+    let probes = dir.join("probes.tsv");
+    std::fs::write(&probes, "a paraphrase\texpected\n").expect("probes file must be writable");
+
+    let output = run(&[
+        "calibrate",
+        "--context",
+        "sake",
+        "--probes",
+        &probes.display().to_string(),
+        "--url",
+        "http://127.0.0.1:1",
+        "http://127.0.0.1:2",
+    ]);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("not both"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn communities_refuses_both_url_flag_and_positional() {
+    let output = run(&[
+        "communities",
+        "--context",
+        "sake",
+        "--url",
+        "http://127.0.0.1:1",
+        "http://127.0.0.1:2",
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("not both"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn communities_url_flag_reaches_the_named_server() {
+    // Not a full round trip (no context populated) — just proof --url
+    // actually routed the request there: a live server answers with a
+    // business error (context missing), not a connection failure.
+    let (mut child, addr, dir) = spawn_server("communities-url-flag");
+    let output = run(&[
+        "communities",
+        "--context",
+        "sake",
+        "--url",
+        &format!("http://{addr}"),
+    ]);
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_ne!(
+        output.status.code(),
+        Some(2),
+        "a reachable server must not be treated as a usage error: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -2686,6 +2873,81 @@ fn route_still_works_as_a_deprecated_alias_for_router() {
     let stderr = String::from_utf8_lossy(&route_output.stderr);
     assert!(
         stderr.contains("'route' is a deprecated alias for 'router'"),
+        "{stderr}"
+    );
+}
+
+// Issue #248 item 2: `import`/`export`/`compact`/`extract` now fall
+// back to TAGURU_CONFIG when --config is absent, like every other
+// subcommand already does — previously these four silently ignored
+// it. A config file with a misspelled TAGURU_* key still earns the
+// typo warning, which only fires if the file was actually loaded.
+
+#[test]
+fn import_honors_taguru_config_when_the_flag_is_absent() {
+    let (dir, config) = write_config("import-envcfg", "TAGURU_CAHCE_BYTES=1\n");
+    let output = run_with_env(
+        &["import", "/nonexistent-item"],
+        &[("TAGURU_CONFIG", &config.display().to_string())],
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("TAGURU_CAHCE_BYTES is not a variable taguru reads"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn export_honors_taguru_config_when_the_flag_is_absent() {
+    let (dir, config) = write_config("export-envcfg", "TAGURU_CAHCE_BYTES=1\n");
+    let out_dir = dir.join("out");
+    let output = run_with_env(
+        &["export", "--out", &out_dir.display().to_string()],
+        &[("TAGURU_CONFIG", &config.display().to_string())],
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("TAGURU_CAHCE_BYTES is not a variable taguru reads"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn compact_honors_taguru_config_when_the_flag_is_absent() {
+    let (dir, config) = write_config("compact-envcfg", "TAGURU_CAHCE_BYTES=1\n");
+    let output = run_with_env(
+        &["compact"],
+        &[("TAGURU_CONFIG", &config.display().to_string())],
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("TAGURU_CAHCE_BYTES is not a variable taguru reads"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn extract_honors_taguru_config_when_the_flag_is_absent() {
+    let (dir, config) = write_config("extract-envcfg", "TAGURU_CAHCE_BYTES=1\n");
+    let out_dir = dir.join("out");
+    let output = run_with_env(
+        &[
+            "extract",
+            "--context",
+            "sake",
+            "--out",
+            &out_dir.display().to_string(),
+            "/nonexistent-item",
+        ],
+        &[("TAGURU_CONFIG", &config.display().to_string())],
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("TAGURU_CAHCE_BYTES is not a variable taguru reads"),
         "{stderr}"
     );
 }
