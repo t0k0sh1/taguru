@@ -385,6 +385,44 @@ under this order, always safe to retry — the schema document is replaced
 wholesale, not by delta, so retrying is idempotent regardless of which
 side of the crash window the previous attempt reached.
 
+**The write order alone still leaves one window open, and this closes
+it: what a crash-then-clean-restart boots into.** The write order above
+guarantees a crash mid-`PUT` never advances the revision past
+unpublished content *while the process keeps running* — a live reader
+never observes the mismatch. But a genuine process crash followed by a
+restart is a different case: the restarted process does not "notice"
+anything is stale, it simply loads whatever bytes are durably on disk.
+If the crash landed between `write_meta` and `write_atomic`,
+`{stem}.schema.json` is still perfectly *valid* JSON — just the
+**previous** `PUT`'s content, not the one the operator's request
+intended — so §5.1's "refuses the boot" only fires for unreadable or
+malformed bytes, and this file is neither. Left unaddressed, the context
+would come back up enforcing `strict` under the *old* constraints while
+`MetaFile.config_revision` already claims the *new* one — content and
+revision durably disagree, and nothing before this paragraph would
+detect it.
+
+**Fix: `MetaFile` carries a schema content digest, written atomically
+with the revision it describes — never separately.** `ContextMeta`
+gains `schema_digest: Option<String>` (`sha256_hex` of
+`{stem}.schema.json`'s bytes, `None` for a schema-free context), set in
+the *same* `write_meta` call that bumps `config_revision` (§5.1's
+revision-then-content order: the digest recorded is the *target*
+content's digest, computed before `write_atomic` runs, exactly as the
+revision itself is bumped before that same write). At every point this
+ADR already reads the schema file — boot, and the read path
+`schema_issues`/`predicted_schema_rejection` share (§7.2) — the file's
+actual digest is checked against `MetaFile.schema_digest`. **A mismatch,
+in either direction (stale content under a newer digest, or a recorded
+digest with no corresponding file), fails exactly like §5.1's unreadable
+or malformed case: refuses the boot**, rather than serving a `strict`
+context whose enforced rules do not match what its own revision claims
+to be enforcing. This is the "fail-closed on undetectable interrupted
+update" contract directly: the digest is the one artifact §5.1's write
+order does not otherwise provide a way to cross-check, and it costs one
+extra field in a file already rewritten on every config bump, not a new
+persistence mechanism (no WAL record, no manifest entry).
+
 **Cost accepted**: re-minting invalidates every cached retrieval for the
 context, not only graph-lane ones, and is process-local — but a schema
 `PUT` is a rare operator action, not a per-write hot path, so coarse
@@ -496,6 +534,29 @@ must stay fast. **Rejected: no hierarchy.** Every `domain` would have to
 enumerate every subtype by hand, which the issue's own example already
 rules out.
 
+**A `schema:type` object naming a type that is not a key in `types` is
+always accepted, never a violation, in every mode.** This extends the
+same philosophy §6.1 already states for untyped concepts — a schema is
+meant to be adoptable incrementally on a live corpus, and an
+undeclared-but-asserted type name is exactly that kind of incremental
+fact: a source calling something `"Distillery"` before the schema
+document formally lists `Distillery` should not be refused for saying so.
+Concretely, for an undeclared type name: `is_a` closure lookup treats it
+as its own singleton ancestor set (absent from the precomputed map,
+§7.2 step 5's set union simply has nothing to add); `Issue.kind`
+(§8.1) never fires for it, in any mode, `closed_labels` or not —
+`closed_labels` (§6.4) governs *relation* label vocabulary only and does
+not extend to type names, on purpose, to avoid overloading one boolean
+with two different closed-world questions. What `strict` still enforces
+is the `domain`/`range` disjointness test (§7.2 step 6) against whatever
+type set the concept in fact carries, declared or not — an undeclared
+type behaves exactly like a declared one there, just without a hierarchy
+above it. §10's audit gains one more, always-on informational line
+(not gated by `closed_labels`, since this is not an enforcement question):
+type names asserted but absent from `types` — a signal for a schema
+author who wants to know what vocabulary is actually in use, reported
+the same "candidate for review" way as every other audit finding.
+
 ### 6.3 The reserved label, and the three exclusions its cost requires
 
 **Type assertions are ordinary associations under the reserved label
@@ -518,10 +579,29 @@ three guards, fixed as part of this Decision:
    more — no special meaning imposed on a context that never opted in.
    This is Decision #12's byte-identical guarantee applied to the one
    label an operator could otherwise coincidentally already be using.
-2. `add_label_alias` refuses an alias resolving to `schema:type` **once a
-   schema exists** — a second spelling would let a producer assert types
-   without knowing it; in a schema-free context this guard, like the
-   label itself, is inert.
+2. **No path may resolve any label to `schema:type` once a schema
+   exists** — this is one guard applied at every place §7.2 step 3
+   already says a label gets resolved, not `add_label_alias` alone:
+   - `add_label_alias` refuses to *create* a persisted alias whose
+     canonical target is `schema:type`.
+   - A batch's own inline `batch.labels` declaration (§7.2 step 3's
+     other half of the union) is checked by the same
+     `schema_issues`/`predicted_schema_rejection` pass that checks
+     everything else in that step — a batch-local alias mapping some
+     spelling to `schema:type` is refused the same way a persisted one
+     is, not silently accepted because it never touched
+     `add_label_alias`'s API.
+   - **`PUT /contexts/{name}/schema`, on the transition from no schema
+     (or `off`) to an installed one, refuses if any *already-persisted*
+     `label_alias` resolves to `schema:type`.** An alias created before
+     any schema existed cannot have been refused by the first two
+     bullets — there was nothing to refuse against — so the install
+     itself is where a coincidental pre-existing alias meeting the
+     reserved label is caught, symmetric with guard 3's own refusal of
+     a `relations` entry named `schema:type` at the same `PUT`.
+   Whichever path a violation is caught on, the message names the
+   conflicting alias and instructs a rename, mirroring
+   `EMPTY_SOURCE`'s own collision wording (`src/export.rs:315`, `:353`).
 3. `PUT /schema` refuses a relation definition named `schema:type`.
 
 **One gate for guard 1 and the three exclusions below, stated once so
@@ -850,16 +930,18 @@ canonical, and the fix is an ordinary alias.
 
 **`POST /contexts/{name}/schema/audit`** reports, over the live graph:
 untyped concepts, unknown relation labels (only meaningful with
-`closed_labels`, and never `schema:type` itself, per §6.4), and
-domain/range violations — several independent checks in one response, in
-`DriftAudit`'s shape (`src/api/vocabulary.rs:187`): one paged section
-(mirroring `page_by`, `:237`), and framed, like `audit_vocabulary` itself
-(`:37-40`), as "candidates for review, not verdicts" — this audit never
-auto-applies a fix. Deprecated-relation usage is **not** in this list —
-§9.2 defers it because the document has no field to mark a relation
-deprecated yet; a follow-up ADR adds both the field and this audit's
-check for it together, rather than the audit inventing a convention the
-schema shape does not yet define.
+`closed_labels`, and never `schema:type` itself, per §6.4), type names
+asserted but absent from `types` (§6.2 — always reported, unconditional
+on `closed_labels`, since an undeclared type is never a violation, only
+a signal), and domain/range violations — several independent checks in
+one response, in `DriftAudit`'s shape (`src/api/vocabulary.rs:187`): one
+paged section (mirroring `page_by`, `:237`), and framed, like
+`audit_vocabulary` itself (`:37-40`), as "candidates for review, not
+verdicts" — this audit never auto-applies a fix. Deprecated-relation
+usage is **not** in this list — §9.2 defers it because the document has
+no field to mark a relation deprecated yet; a follow-up ADR adds both
+the field and this audit's check for it together, rather than the audit
+inventing a convention the schema shape does not yet define.
 
 **`POST /contexts/{name}/schema/validate`** takes a *proposed* document and
 evaluates it against the live graph without persisting it — the pre-flight
