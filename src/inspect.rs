@@ -8,10 +8,18 @@
 //! group file that would not parse included, because boot answers
 //! that by resetting the record (the membership is acknowledged data,
 //! and this is the tool that must say so BEFORE a restore spends it).
+//!
+//! `--json` (issue #371) is a second rendering of the exact same
+//! facts the text report prints, never a second computation of them:
+//! every count that reaches the human line also reaches
+//! [`InspectReport`], built alongside it in the same scope from the
+//! same local variables, so the two can never disagree about what
+//! inspect actually found.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+use serde::Serialize;
 use taguru::context::Context;
 
 use crate::config::fmt_bytes;
@@ -24,31 +32,51 @@ use crate::registry::{
 };
 use crate::wal;
 
-const USAGE: &str =
-    "usage: taguru inspect PATH   (a data directory, one .ctx image, or one .group record)\n";
+const USAGE: &str = "\
+usage: taguru inspect PATH [--json]   (a data directory, one .ctx image, or one .group record)
+
+  --json   one JSON document instead of per-context/group text lines:
+           {target, kind, contexts, groups, notices, total, corrupt}.
+           The exit code and what counts as CORRUPT are unchanged —
+           only how the result is rendered.
+";
 
 pub fn run(args: &[String]) -> i32 {
-    // Anywhere in the argument list, like every other subcommand: an
-    // operator halfway through composing flags asks for the manual
-    // without first deleting what they typed.
-    if args.iter().any(|a| a == "--help" || a == "-h") {
-        print!("{USAGE}");
-        return 0;
+    // --help/-h anywhere in the argument list, like every other
+    // subcommand: an operator halfway through composing flags asks
+    // for the manual without first deleting what they typed. Folded
+    // into the same loop as --json's own parsing, rather than a
+    // separate up-front scan, since both need one pass over `args`.
+    let mut as_json = false;
+    let mut positionals: Vec<&str> = Vec::new();
+    for arg in args {
+        match arg.as_str() {
+            "--help" | "-h" => {
+                print!("{USAGE}");
+                return 0;
+            }
+            "--json" => as_json = true,
+            other if other.starts_with('-') => {
+                eprint!("{USAGE}");
+                return 2;
+            }
+            value => positionals.push(value),
+        }
     }
-    let path = match args {
-        [path] => Path::new(path.as_str()),
+    let path = match positionals.as_slice() {
+        [path] => Path::new(*path),
         _ => {
             eprint!("{USAGE}");
             return 2;
         }
     };
     if path.is_dir() {
-        inspect_directory(path)
+        inspect_directory(path, as_json)
     } else if path.is_file() {
         if path.extension().and_then(|e| e.to_str()) == Some("group") {
-            inspect_group_file(path)
+            inspect_group_file(path, as_json)
         } else {
-            inspect_file(path)
+            inspect_file(path, as_json)
         }
     } else {
         eprintln!(
@@ -56,6 +84,266 @@ pub fn run(args: &[String]) -> i32 {
             path.display()
         );
         2
+    }
+}
+
+/// One `level`/`kind`/`subject`/`message` finding — a warning names an
+/// alteration boot would make when it next loads the data (a dropped
+/// reference, a reset record); a note names something already healed
+/// or otherwise informational. `kind` is a stable machine key; `message`
+/// is the same prose the human report prints (verbatim in every case
+/// where a single note maps to one printed line — see call sites for
+/// the few that combine several notes' messages into one suffix).
+#[derive(Serialize)]
+struct Notice {
+    level: &'static str,
+    kind: &'static str,
+    subject: String,
+    message: String,
+}
+
+impl Notice {
+    fn warning(kind: &'static str, subject: impl Into<String>, message: impl Into<String>) -> Self {
+        Notice {
+            level: "warning",
+            kind,
+            subject: subject.into(),
+            message: message.into(),
+        }
+    }
+
+    fn note(kind: &'static str, subject: impl Into<String>, message: impl Into<String>) -> Self {
+        Notice {
+            level: "note",
+            kind,
+            subject: subject.into(),
+            message: message.into(),
+        }
+    }
+}
+
+/// One `.ctx` image's report — the same fields [`stats_line`] prints,
+/// plus (directory scans only) the sidecar sizes the text report's
+/// per-context line appends. `status` other than `"ok"` means every
+/// field below `error` is absent: a corrupt image, WAL, or passage
+/// store cannot report counts it never finished loading.
+#[derive(Serialize)]
+struct ContextRow {
+    name: String,
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    image_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    generation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    associations: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    concepts: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    labels: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sources: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    footprint_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    applied_seq: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dead_edges: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dead_ratio: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dead_attributions: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    arena_slack: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unsourced_edges: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unsourced_weight: Option<f64>,
+    /// Sidecar fields: present for a directory scan (which reads WAL,
+    /// vectors, index, and passages alongside the image), absent for a
+    /// bare single-file `inspect PATH.ctx` (which reads only the image).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    wal_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    wal_pending: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vector_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    index_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    passage_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    passage_count: Option<usize>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    notes: Vec<Notice>,
+}
+
+/// The per-context sidecar sizes a directory scan (not a bare
+/// single-file inspect) reads alongside the image.
+struct Sidecars {
+    wal_bytes: u64,
+    wal_pending: usize,
+    vector_bytes: u64,
+    index_bytes: u64,
+    passage_bytes: u64,
+    passage_count: usize,
+}
+
+impl ContextRow {
+    fn ok(
+        name: String,
+        context: &Context,
+        image_bytes: u64,
+        generation: &str,
+        sidecars: Option<Sidecars>,
+    ) -> Self {
+        let (unsourced_edges, unsourced_weight) = context.unsourced_summary();
+        let (wal_bytes, wal_pending, vector_bytes, index_bytes, passage_bytes, passage_count) =
+            match sidecars {
+                Some(s) => (
+                    Some(s.wal_bytes),
+                    Some(s.wal_pending),
+                    Some(s.vector_bytes),
+                    Some(s.index_bytes),
+                    Some(s.passage_bytes),
+                    Some(s.passage_count),
+                ),
+                None => (None, None, None, None, None, None),
+            };
+        ContextRow {
+            name,
+            status: "ok",
+            error: None,
+            image_bytes: Some(image_bytes),
+            generation: Some(generation.to_string()),
+            associations: Some(context.association_count()),
+            concepts: Some(context.concept_count()),
+            labels: Some(context.label_count()),
+            sources: Some(context.source_count()),
+            footprint_bytes: Some(context.footprint() as u64),
+            applied_seq: Some(context.applied_seq()),
+            dead_edges: Some(context.dead_edges()),
+            dead_ratio: Some(context.dead_ratio()),
+            dead_attributions: Some(context.dead_attributions()),
+            arena_slack: Some(context.arena_slack() as u64),
+            unsourced_edges: Some(unsourced_edges),
+            unsourced_weight: Some(unsourced_weight),
+            wal_bytes,
+            wal_pending,
+            vector_bytes,
+            index_bytes,
+            passage_bytes,
+            passage_count,
+            notes: Vec::new(),
+        }
+    }
+
+    fn corrupt(name: String, status: &'static str, error: String) -> Self {
+        ContextRow {
+            name,
+            status,
+            error: Some(error),
+            image_bytes: None,
+            generation: None,
+            associations: None,
+            concepts: None,
+            labels: None,
+            sources: None,
+            footprint_bytes: None,
+            applied_seq: None,
+            dead_edges: None,
+            dead_ratio: None,
+            dead_attributions: None,
+            arena_slack: None,
+            unsourced_edges: None,
+            unsourced_weight: None,
+            wal_bytes: None,
+            wal_pending: None,
+            vector_bytes: None,
+            index_bytes: None,
+            passage_bytes: None,
+            passage_count: None,
+            notes: Vec::new(),
+        }
+    }
+}
+
+/// One `.group` record's report. `status` other than `"ok"` means the
+/// record never parsed, so `contexts`/`groups` read 0 rather than a
+/// guess.
+#[derive(Serialize)]
+struct GroupRow {
+    name: String,
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    contexts: usize,
+    groups: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    notes: Vec<Notice>,
+}
+
+impl GroupRow {
+    fn ok(name: String, record: &GroupRecord) -> Self {
+        GroupRow {
+            name,
+            status: "ok",
+            error: None,
+            contexts: record.contexts.len(),
+            groups: record.groups.len(),
+            notes: Vec::new(),
+        }
+    }
+
+    fn trouble(name: String, status: &'static str, error: String) -> Self {
+        GroupRow {
+            name,
+            status,
+            error: Some(error),
+            contexts: 0,
+            groups: 0,
+            notes: Vec::new(),
+        }
+    }
+}
+
+/// The directory scan's footer line, structured — same six sums the
+/// text report's `total:` line prints.
+#[derive(Serialize)]
+struct Totals {
+    contexts: usize,
+    groups: usize,
+    image_bytes: u64,
+    wal_bytes: u64,
+    vector_bytes: u64,
+    index_bytes: u64,
+    passage_bytes: u64,
+    footprint_bytes: u64,
+}
+
+/// `--json`'s whole answer, one document regardless of which of the
+/// three targets (directory / image / group) `PATH` named.
+#[derive(Serialize)]
+struct InspectReport {
+    target: String,
+    kind: &'static str,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    contexts: Vec<ContextRow>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    groups: Vec<GroupRow>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    notices: Vec<Notice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total: Option<Totals>,
+    corrupt: usize,
+}
+
+fn print_json(report: &InspectReport) {
+    match serde_json::to_string_pretty(report) {
+        Ok(text) => println!("{text}"),
+        Err(error) => eprintln!("taguru: inspect: report did not serialize: {error}"),
     }
 }
 
@@ -78,23 +366,68 @@ enum GroupFileTrouble {
 /// intact" question, [`inspect_file`]'s twin one storey up. Reference
 /// checks need the directory around it, so a single file answers for
 /// its own parse alone.
-fn inspect_group_file(path: &Path) -> i32 {
+fn inspect_group_file(path: &Path, as_json: bool) -> i32 {
+    let target = path.display().to_string();
     match load_group(path) {
         Ok(record) => {
-            println!(
-                "{}: ok  {} member context(s) · {} child group(s)",
-                path.display(),
-                record.contexts.len(),
-                record.groups.len()
-            );
+            if as_json {
+                print_json(&InspectReport {
+                    target,
+                    kind: "group",
+                    contexts: Vec::new(),
+                    groups: vec![GroupRow::ok(path.display().to_string(), &record)],
+                    notices: Vec::new(),
+                    total: None,
+                    corrupt: 0,
+                });
+            } else {
+                println!(
+                    "{}: ok  {} member context(s) · {} child group(s)",
+                    path.display(),
+                    record.contexts.len(),
+                    record.groups.len()
+                );
+            }
             0
         }
         Err(GroupFileTrouble::Unreadable(error)) => {
-            eprintln!("{}: UNREADABLE — {error}", path.display());
+            if as_json {
+                print_json(&InspectReport {
+                    target,
+                    kind: "group",
+                    contexts: Vec::new(),
+                    groups: vec![GroupRow::trouble(
+                        path.display().to_string(),
+                        "unreadable",
+                        error.to_string(),
+                    )],
+                    notices: Vec::new(),
+                    total: None,
+                    corrupt: 1,
+                });
+            } else {
+                eprintln!("{}: UNREADABLE — {error}", path.display());
+            }
             1
         }
         Err(GroupFileTrouble::Corrupt(error)) => {
-            eprintln!("{}: CORRUPT — {error}", path.display());
+            if as_json {
+                print_json(&InspectReport {
+                    target,
+                    kind: "group",
+                    contexts: Vec::new(),
+                    groups: vec![GroupRow::trouble(
+                        path.display().to_string(),
+                        "corrupt",
+                        error.to_string(),
+                    )],
+                    notices: Vec::new(),
+                    total: None,
+                    corrupt: 1,
+                });
+            } else {
+                eprintln!("{}: CORRUPT — {error}", path.display());
+            }
             1
         }
     }
@@ -102,24 +435,60 @@ fn inspect_group_file(path: &Path) -> i32 {
 
 /// One bare image, no sidecars: the "is this .ctx I restored intact"
 /// question.
-fn inspect_file(path: &Path) -> i32 {
+fn inspect_file(path: &Path, as_json: bool) -> i32 {
+    let target = path.display().to_string();
     match load_image(path) {
         Ok((context, image_bytes, generation)) => {
-            println!(
-                "{}: ok  {}",
-                path.display(),
-                stats_line(&context, image_bytes, &generation)
-            );
+            if as_json {
+                let row = ContextRow::ok(
+                    path.display().to_string(),
+                    &context,
+                    image_bytes,
+                    &generation,
+                    None,
+                );
+                print_json(&InspectReport {
+                    target,
+                    kind: "image",
+                    contexts: vec![row],
+                    groups: Vec::new(),
+                    notices: Vec::new(),
+                    total: None,
+                    corrupt: 0,
+                });
+            } else {
+                println!(
+                    "{}: ok  {}",
+                    path.display(),
+                    stats_line(&context, image_bytes, &generation)
+                );
+            }
             0
         }
         Err(error) => {
-            eprintln!("{}: CORRUPT — {error}", path.display());
+            if as_json {
+                print_json(&InspectReport {
+                    target,
+                    kind: "image",
+                    contexts: vec![ContextRow::corrupt(
+                        path.display().to_string(),
+                        "corrupt_image",
+                        error.clone(),
+                    )],
+                    groups: Vec::new(),
+                    notices: Vec::new(),
+                    total: None,
+                    corrupt: 1,
+                });
+            } else {
+                eprintln!("{}: CORRUPT — {error}", path.display());
+            }
             1
         }
     }
 }
 
-fn inspect_directory(dir: &Path) -> i32 {
+fn inspect_directory(dir: &Path, as_json: bool) -> i32 {
     // One listing serves both halves: the .ctx stems here, the .group
     // files handed to `inspect_groups` below.
     let mut entries: Vec<std::path::PathBuf> = match std::fs::read_dir(dir) {
@@ -154,6 +523,8 @@ fn inspect_directory(dir: &Path) -> i32 {
     let mut vectors_total = 0u64;
     let mut index_total = 0u64;
     let mut passages_total = 0u64;
+    let mut context_rows: Vec<ContextRow> = Vec::new();
+    let mut notices: Vec<Notice> = Vec::new();
 
     for stem in &stems {
         let name = match name_from_stem(stem) {
@@ -161,7 +532,15 @@ fn inspect_directory(dir: &Path) -> i32 {
             None => {
                 // Not a failure: the server skips it too — but a backup
                 // holding files the server will never serve is worth a line.
-                println!("{stem}.ctx: WARNING — stem does not decode; the server will skip it");
+                if as_json {
+                    notices.push(Notice::warning(
+                        "undecodable_stem",
+                        format!("{stem}.ctx"),
+                        "stem does not decode; the server will skip it",
+                    ));
+                } else {
+                    println!("{stem}.ctx: WARNING — stem does not decode; the server will skip it");
+                }
                 continue;
             }
         };
@@ -169,7 +548,11 @@ fn inspect_directory(dir: &Path) -> i32 {
         let (context, image_bytes, generation) = match load_image(&image) {
             Ok(loaded) => loaded,
             Err(error) => {
-                println!("{name}: CORRUPT image — {error}");
+                if as_json {
+                    context_rows.push(ContextRow::corrupt(name.clone(), "corrupt_image", error));
+                } else {
+                    println!("{name}: CORRUPT image — {error}");
+                }
                 failures += 1;
                 continue;
             }
@@ -186,7 +569,15 @@ fn inspect_directory(dir: &Path) -> i32 {
             match wal::replay_readonly::<wal::WalOp>(&wal_path(dir, stem), context.applied_seq()) {
                 Ok((ops, _, torn, unchecked)) => (ops.len(), torn, unchecked),
                 Err(error) => {
-                    println!("{name}: CORRUPT WAL — {error}");
+                    if as_json {
+                        context_rows.push(ContextRow::corrupt(
+                            name.clone(),
+                            "corrupt_wal",
+                            error.to_string(),
+                        ));
+                    } else {
+                        println!("{name}: CORRUPT WAL — {error}");
+                    }
                     failures += 1;
                     continue;
                 }
@@ -207,7 +598,15 @@ fn inspect_directory(dir: &Path) -> i32 {
             ) {
                 Ok((store, torn, unchecked)) => (store.source_ids().len(), torn, unchecked),
                 Err(error) => {
-                    println!("{name}: CORRUPT passages — {error}");
+                    if as_json {
+                        context_rows.push(ContextRow::corrupt(
+                            name.clone(),
+                            "corrupt_passages",
+                            error.to_string(),
+                        ));
+                    } else {
+                        println!("{name}: CORRUPT passages — {error}");
+                    }
                     failures += 1;
                     continue;
                 }
@@ -215,11 +614,14 @@ fn inspect_directory(dir: &Path) -> i32 {
 
         // Meta is self-healing on the server side (defaults + warning),
         // so a broken one is reported without failing the inspection.
-        let meta_note = match std::fs::read(meta_path(dir, stem)) {
-            Ok(bytes) if serde_json::from_slice::<serde_json::Value>(&bytes).is_err() => {
-                " · WARNING: meta.json unparseable (description/usage will reset)"
-            }
-            _ => "",
+        let meta_unparseable = matches!(
+            std::fs::read(meta_path(dir, stem)),
+            Ok(bytes) if serde_json::from_slice::<serde_json::Value>(&bytes).is_err()
+        );
+        let meta_note = if meta_unparseable {
+            " · WARNING: meta.json unparseable (description/usage will reset)"
+        } else {
+            ""
         };
 
         // A non-empty tail is a crash mid-append, not corruption, but the
@@ -244,12 +646,17 @@ fn inspect_directory(dir: &Path) -> i32 {
                 ),
             }
         }
+        // Computed once, read by both the human suffix below and the
+        // JSON notes further down — one string, not two that could say
+        // different things about the same torn tail.
+        let wal_torn_note = wal_torn.map(|torn| torn_tail_note("WAL", torn));
+        let passages_torn_note = passages_torn.map(|torn| torn_tail_note("passages WAL", torn));
         let mut torn_parts = Vec::new();
-        if let Some(torn) = wal_torn {
-            torn_parts.push(torn_tail_note("WAL", torn));
+        if let Some(note) = &wal_torn_note {
+            torn_parts.push(note.clone());
         }
-        if let Some(torn) = passages_torn {
-            torn_parts.push(torn_tail_note("passages WAL", torn));
+        if let Some(note) = &passages_torn_note {
+            torn_parts.push(note.clone());
         }
         let torn_note = if torn_parts.is_empty() {
             String::new()
@@ -289,15 +696,69 @@ fn inspect_directory(dir: &Path) -> i32 {
         let passage_bytes = file_size(&passages_path(dir, stem))
             + file_size(&passages_wal_path(dir, stem))
             + file_size(&sources_path(dir, stem));
-        println!(
-            "{name}: ok  {} · WAL {} ({pending} pending) · vectors {} · index {} · passages {} \
-             ({passage_count} sources){meta_note}{torn_note}{unverified_note}",
-            stats_line(&context, image_bytes, &generation),
-            fmt_bytes(wal_bytes),
-            fmt_bytes(vector_bytes),
-            fmt_bytes(index_bytes),
-            fmt_bytes(passage_bytes),
-        );
+
+        if as_json {
+            let mut row = ContextRow::ok(
+                name.clone(),
+                &context,
+                image_bytes,
+                &generation,
+                Some(Sidecars {
+                    wal_bytes,
+                    wal_pending: pending,
+                    vector_bytes,
+                    index_bytes,
+                    passage_bytes,
+                    passage_count,
+                }),
+            );
+            if meta_unparseable {
+                row.notes.push(Notice::warning(
+                    "meta_unparseable",
+                    name.clone(),
+                    "meta.json unparseable (description/usage will reset)",
+                ));
+            }
+            if let Some(note) = wal_torn_note {
+                row.notes
+                    .push(Notice::note("wal_torn_tail", name.clone(), note));
+            }
+            if let Some(note) = passages_torn_note {
+                row.notes
+                    .push(Notice::note("passages_wal_torn_tail", name.clone(), note));
+            }
+            if wal_unchecked > 0 {
+                row.notes.push(Notice::note(
+                    "unverified_pre_checksum_wal",
+                    name.clone(),
+                    format!(
+                        "{wal_unchecked} WAL record(s) predate checksums — parsed, but not \
+                         verifiable bit-for-bit"
+                    ),
+                ));
+            }
+            if passages_unchecked > 0 {
+                row.notes.push(Notice::note(
+                    "unverified_pre_checksum_passages_wal",
+                    name.clone(),
+                    format!(
+                        "{passages_unchecked} passages WAL record(s) predate checksums — \
+                         parsed, but not verifiable bit-for-bit"
+                    ),
+                ));
+            }
+            context_rows.push(row);
+        } else {
+            println!(
+                "{name}: ok  {} · WAL {} ({pending} pending) · vectors {} · index {} · passages {} \
+                 ({passage_count} sources){meta_note}{torn_note}{unverified_note}",
+                stats_line(&context, image_bytes, &generation),
+                fmt_bytes(wal_bytes),
+                fmt_bytes(vector_bytes),
+                fmt_bytes(index_bytes),
+                fmt_bytes(passage_bytes),
+            );
+        }
 
         contexts += 1;
         image_total += image_bytes;
@@ -326,46 +787,119 @@ fn inspect_directory(dir: &Path) -> i32 {
             .and_then(|bytes| serde_json::from_slice::<ImportMarker>(&bytes).ok());
         match parsed {
             Some(marker) if context_names.contains(&marker.context) => {
-                println!(
-                    "{}: WARNING — the import of source '{}' never completed; its truth \
-                     may be half-applied — re-import its batch file or retract the source",
-                    marker.context, marker.source
-                );
+                if as_json {
+                    notices.push(Notice::warning(
+                        "incomplete_import",
+                        marker.context.clone(),
+                        format!(
+                            "the import of source '{}' never completed; its truth may be \
+                             half-applied — re-import its batch file or retract the source",
+                            marker.source
+                        ),
+                    ));
+                } else {
+                    println!(
+                        "{}: WARNING — the import of source '{}' never completed; its truth \
+                         may be half-applied — re-import its batch file or retract the source",
+                        marker.context, marker.source
+                    );
+                }
             }
             Some(marker) => {
-                println!(
-                    "{file}: NOTE — import marker for context '{}', which no longer \
-                     exists here (the server's next boot removes it)",
-                    marker.context
-                );
+                if as_json {
+                    notices.push(Notice::note(
+                        "orphan_import_marker",
+                        file.to_string(),
+                        format!(
+                            "import marker for context '{}', which no longer exists here (the \
+                             server's next boot removes it)",
+                            marker.context
+                        ),
+                    ));
+                } else {
+                    println!(
+                        "{file}: NOTE — import marker for context '{}', which no longer \
+                         exists here (the server's next boot removes it)",
+                        marker.context
+                    );
+                }
             }
             None => {
-                println!(
-                    "{file}: WARNING — unreadable import marker; an import batch may be \
-                     half-applied, but which source is unrecoverable"
-                );
+                if as_json {
+                    notices.push(Notice::warning(
+                        "unreadable_import_marker",
+                        file.to_string(),
+                        "unreadable import marker; an import batch may be half-applied, but \
+                         which source is unrecoverable",
+                    ));
+                } else {
+                    println!(
+                        "{file}: WARNING — unreadable import marker; an import batch may be \
+                         half-applied, but which source is unrecoverable"
+                    );
+                }
             }
         }
     }
 
-    let (group_count, group_failures) = inspect_groups(&entries, &context_names);
+    let (group_count, group_failures, group_rows, group_notices) =
+        inspect_groups(&entries, &context_names, as_json);
     failures += group_failures;
+    notices.extend(group_notices);
 
     if stems.is_empty() && group_count == 0 && group_failures == 0 {
-        println!("no .ctx images under {}", dir.display());
+        if as_json {
+            // `notices` (import-marker warnings/notes especially) can
+            // be non-empty even with zero .ctx images and zero groups
+            // — an orphaned `.importing` marker needs neither — so
+            // this must carry the already-collected notices, not a
+            // fresh empty Vec that would silently drop them.
+            print_json(&InspectReport {
+                target: dir.display().to_string(),
+                kind: "directory",
+                contexts: Vec::new(),
+                groups: Vec::new(),
+                notices,
+                total: None,
+                corrupt: 0,
+            });
+        } else {
+            println!("no .ctx images under {}", dir.display());
+        }
         return 0;
     }
 
-    println!(
-        "total: {contexts} contexts · {group_count} groups · images {} · WAL {} · vectors {} · \
-         index {} · passages {} · footprint if all resident {}",
-        fmt_bytes(image_total),
-        fmt_bytes(wal_total),
-        fmt_bytes(vectors_total),
-        fmt_bytes(index_total),
-        fmt_bytes(passages_total),
-        fmt_bytes(footprint_total),
-    );
+    if as_json {
+        print_json(&InspectReport {
+            target: dir.display().to_string(),
+            kind: "directory",
+            contexts: context_rows,
+            groups: group_rows,
+            notices,
+            total: Some(Totals {
+                contexts,
+                groups: group_count,
+                image_bytes: image_total,
+                wal_bytes: wal_total,
+                vector_bytes: vectors_total,
+                index_bytes: index_total,
+                passage_bytes: passages_total,
+                footprint_bytes: footprint_total,
+            }),
+            corrupt: failures,
+        });
+    } else {
+        println!(
+            "total: {contexts} contexts · {group_count} groups · images {} · WAL {} · vectors {} · \
+             index {} · passages {} · footprint if all resident {}",
+            fmt_bytes(image_total),
+            fmt_bytes(wal_total),
+            fmt_bytes(vectors_total),
+            fmt_bytes(index_total),
+            fmt_bytes(passages_total),
+            fmt_bytes(footprint_total),
+        );
+    }
     if failures > 0 {
         eprintln!("taguru: inspect: {failures} corrupt");
         return 1;
@@ -380,27 +914,58 @@ fn inspect_directory(dir: &Path) -> i32 {
 /// acknowledged data (bytes that do not parse reset the record; an
 /// unreadable file refuses the boot itself), as a warning where it
 /// drops what is already stale (dangling references, over-cap sets,
-/// an ill-shaped nesting). Returns (groups parsed, failures).
+/// an ill-shaped nesting). Returns (groups parsed, failures, the
+/// per-group JSON rows, and the standalone notices that don't belong
+/// to any one group).
 fn inspect_groups(
     entries: &[std::path::PathBuf],
     context_names: &BTreeSet<String>,
-) -> (usize, usize) {
+    as_json: bool,
+) -> (usize, usize, Vec<GroupRow>, Vec<Notice>) {
     let mut failures = 0usize;
     let mut records: BTreeMap<String, GroupRecord> = BTreeMap::new();
+    let mut group_rows: Vec<GroupRow> = Vec::new();
+    let mut notices: Vec<Notice> = Vec::new();
+    // Names already reported as CORRUPT above — inserted into `records`
+    // as an empty placeholder so a sibling's dangling-reference check
+    // sees the same shape boot will (comment below), but the JSON
+    // preview loop must not ALSO emit an "ok" row for a name that's
+    // already a `GroupRow::trouble` row; the human line below still
+    // prints one, since a person reads the CORRUPT line right above it
+    // and the empty "ok" line's own zero counts as a caveat, not new
+    // information a JSON reader could act on.
+    let mut reported_corrupt: BTreeSet<String> = BTreeSet::new();
     for path in entries {
         let file = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
         if file.ends_with(".group.corrupt") {
-            println!(
-                "{file}: NOTE — bytes an earlier boot set aside from a group that did not \
-                 parse (evidence for hand recovery; every scan ignores it)"
-            );
+            if as_json {
+                notices.push(Notice::note(
+                    "set_aside_group_bytes",
+                    file.to_string(),
+                    "bytes an earlier boot set aside from a group that did not parse (evidence \
+                     for hand recovery; every scan ignores it)",
+                ));
+            } else {
+                println!(
+                    "{file}: NOTE — bytes an earlier boot set aside from a group that did not \
+                     parse (evidence for hand recovery; every scan ignores it)"
+                );
+            }
             continue;
         }
         if path.extension().and_then(|e| e.to_str()) != Some("group") {
             continue;
         }
         let Some((stem, name)) = scanned_stem_and_name(path) else {
-            println!("{file}: WARNING — stem does not decode; the server will skip it");
+            if as_json {
+                notices.push(Notice::warning(
+                    "undecodable_stem",
+                    file.to_string(),
+                    "stem does not decode; the server will skip it",
+                ));
+            } else {
+                println!("{file}: WARNING — stem does not decode; the server will skip it");
+            }
             continue;
         };
         match load_group(path) {
@@ -408,17 +973,33 @@ fn inspect_groups(
                 records.insert(name, record);
             }
             Err(GroupFileTrouble::Unreadable(error)) => {
-                println!(
-                    "{name}: UNREADABLE group — {error} (a boot refuses to start while \
-                     this file cannot be read)"
-                );
+                if as_json {
+                    group_rows.push(GroupRow::trouble(
+                        name.clone(),
+                        "unreadable",
+                        error.to_string(),
+                    ));
+                } else {
+                    println!(
+                        "{name}: UNREADABLE group — {error} (a boot refuses to start while \
+                         this file cannot be read)"
+                    );
+                }
                 failures += 1;
             }
             Err(GroupFileTrouble::Corrupt(error)) => {
-                println!(
-                    "{name}: CORRUPT group — {error} (a boot keeps the name, sets these \
-                     bytes aside as {stem}.group.corrupt, and resets the record to empty)"
-                );
+                if as_json {
+                    group_rows.push(GroupRow::trouble(
+                        name.clone(),
+                        "corrupt",
+                        error.to_string(),
+                    ));
+                } else {
+                    println!(
+                        "{name}: CORRUPT group — {error} (a boot keeps the name, sets these \
+                         bytes aside as {stem}.group.corrupt, and resets the record to empty)"
+                    );
+                }
                 failures += 1;
                 // scan_groups registers the name with an empty record
                 // rather than dropping it — the reference checks below
@@ -428,6 +1009,7 @@ fn inspect_groups(
                 // name is genuinely absent), and the shape preview below
                 // would prune the edge before repair_nesting ever runs,
                 // skewing the cycle/depth check for unrelated edges too.
+                reported_corrupt.insert(name.clone());
                 records.insert(name, GroupRecord::default());
             }
         }
@@ -435,27 +1017,38 @@ fn inspect_groups(
 
     // The healing preview: what boot's reconciliation would drop.
     for (name, record) in &records {
-        let mut warnings: Vec<String> = Vec::new();
         let dangling_contexts = record
             .contexts
             .iter()
             .filter(|context| !context_names.contains(*context))
             .count();
-        if dangling_contexts > 0 {
-            warnings.push(format!(
-                "{dangling_contexts} member context(s) have no context here (boot drops \
-                 the references)"
-            ));
-        }
         let dangling_children = record
             .groups
             .iter()
             .filter(|child| !records.contains_key(*child))
             .count();
+        // Built once regardless of --json: the human suffix below reads
+        // the same `Notice::message`s this feeds into the JSON row, so
+        // the two renderings cannot disagree about what was found.
+        let mut group_notes: Vec<Notice> = Vec::new();
+        if dangling_contexts > 0 {
+            group_notes.push(Notice::warning(
+                "dangling_context_reference",
+                name.clone(),
+                format!(
+                    "{dangling_contexts} member context(s) have no context here (boot drops \
+                     the references)"
+                ),
+            ));
+        }
         if dangling_children > 0 {
-            warnings.push(format!(
-                "{dangling_children} child group(s) have no group here (boot drops the \
-                 references)"
+            group_notes.push(Notice::warning(
+                "dangling_child_group_reference",
+                name.clone(),
+                format!(
+                    "{dangling_children} child group(s) have no group here (boot drops the \
+                     references)"
+                ),
             ));
         }
         for (field, len) in [
@@ -463,22 +1056,46 @@ fn inspect_groups(
             ("child groups", record.groups.len()),
         ] {
             if len > MAX_GROUP_MEMBERS {
-                warnings.push(format!(
-                    "{len} {field} where a group holds at most {MAX_GROUP_MEMBERS} (boot \
-                     keeps the first {MAX_GROUP_MEMBERS})"
+                let kind = if field == "member contexts" {
+                    "over_cap_members"
+                } else {
+                    "over_cap_children"
+                };
+                group_notes.push(Notice::warning(
+                    kind,
+                    name.clone(),
+                    format!(
+                        "{len} {field} where a group holds at most {MAX_GROUP_MEMBERS} (boot \
+                         keeps the first {MAX_GROUP_MEMBERS})"
+                    ),
                 ));
             }
         }
-        println!(
-            "{name}: ok  {} member context(s) · {} child group(s){}",
-            record.contexts.len(),
-            record.groups.len(),
-            if warnings.is_empty() {
-                String::new()
-            } else {
-                format!(" · WARNING: {}", warnings.join("; "))
+        if as_json {
+            if !reported_corrupt.contains(name) {
+                let mut row = GroupRow::ok(name.clone(), record);
+                row.notes = group_notes;
+                group_rows.push(row);
             }
-        );
+        } else {
+            println!(
+                "{name}: ok  {} member context(s) · {} child group(s){}",
+                record.contexts.len(),
+                record.groups.len(),
+                if group_notes.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " · WARNING: {}",
+                        group_notes
+                            .iter()
+                            .map(|note| note.message.as_str())
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    )
+                }
+            );
+        }
     }
 
     // The shape preview runs the REAL repair on a scratch copy — dangling
@@ -497,13 +1114,24 @@ fn inspect_groups(
     repair_nesting(&mut repaired);
     for (name, record) in &swept {
         for child in record.groups.difference(&repaired[name].groups) {
-            println!(
-                "groups: WARNING — boot drops the nesting edge '{name}' → '{child}' \
-                 (it would close a cycle or stack more than {MAX_GROUP_DEPTH} groups)"
-            );
+            if as_json {
+                notices.push(Notice::warning(
+                    "dropped_nesting_edge",
+                    "groups",
+                    format!(
+                        "boot drops the nesting edge '{name}' → '{child}' (it would close a \
+                         cycle or stack more than {MAX_GROUP_DEPTH} groups)"
+                    ),
+                ));
+            } else {
+                println!(
+                    "groups: WARNING — boot drops the nesting edge '{name}' → '{child}' \
+                     (it would close a cycle or stack more than {MAX_GROUP_DEPTH} groups)"
+                );
+            }
         }
     }
-    (records.len(), failures)
+    (records.len(), failures, group_rows, notices)
 }
 
 fn load_image(path: &Path) -> Result<(Context, u64, String), String> {

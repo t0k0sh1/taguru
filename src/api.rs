@@ -58,7 +58,14 @@ pub use coverage::{embeddings_status, labels, refresh_embeddings, unreachable_fr
 pub use evidence::assemble::assemble_evidence;
 pub use explore::{activate, describe, explore};
 pub use groups::{create_group, delete_group, get_group, list_groups, rename_group, update_group};
-pub use import::{compact_context, export_context, export_group, import_batch};
+pub use import::{
+    GroupImportOutcome, ImportOutcome, ImportStreamOutcome, compact_context, export_context,
+    export_group, import_batch,
+};
+// `import_outcome` itself is `pub(crate)` (import --json, issue #371,
+// is the only crate-internal reuse of a handler's helper — everything
+// else in this module is `pub` for the handler wiring above).
+pub(crate) use import::import_outcome;
 pub use recall::{cross_query, cross_recall, query, recall};
 pub use resolve::{explain_resolve, explain_resolve_label, resolve, resolve_label};
 pub use sources::{

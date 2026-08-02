@@ -136,6 +136,106 @@ fn a_remote_dry_run_previews_every_chunk_and_writes_nothing() {
     let _ = std::fs::remove_dir_all(&batches);
 }
 
+/// `import --json --url` (issue #371) accumulates every chunk's
+/// server-answered outcome into one JSON document — proven identical
+/// to the local path's own `--json` output for the same stream against
+/// an equally empty starting state (the same parity property
+/// `a_full_remote_import_matches_the_local_import_of_the_same_stream`
+/// pins for the human-readable path).
+#[test]
+fn remote_json_matches_the_local_jsons_own_shape() {
+    let batches = batch_dir("remote-import-json");
+    let file = batches.join("seed.jsonl");
+    std::fs::write(
+        &file,
+        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \
+         \"create\": {\"description\": \"d\"}}\n\
+         {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o\", \"weight\": 1.0}\n",
+    )
+    .expect("fixture must be writable");
+
+    let server = Server::start("remote-import-json");
+    let (code, stdout, stderr) = run_cli(
+        &[
+            "import",
+            "--url",
+            &server.base,
+            "--json",
+            file.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let remote: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|error| panic!("--json must be one JSON document: {error}\n{stdout}"));
+    assert_eq!(remote["dry_run"], serde_json::json!(false));
+    let remote_outcome = &remote["batches"][0];
+    assert_eq!(remote_outcome["context"], serde_json::json!("sake"));
+    assert_eq!(remote_outcome["created"], serde_json::json!(true));
+    assert_eq!(remote_outcome["associations"], serde_json::json!(1));
+    assert!(remote.get("groups").is_none(), "{remote}");
+
+    let local_data = batches.join("local-data");
+    let (code, local_stdout, stderr) = run_import(&local_data, &["--json", file.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    let local: serde_json::Value = serde_json::from_str(&local_stdout).unwrap_or_else(|error| {
+        panic!("--json must be one JSON document: {error}\n{local_stdout}")
+    });
+    assert_eq!(
+        local["batches"][0], remote["batches"][0],
+        "local and remote --json must report the same outcome for the same stream"
+    );
+
+    let _ = std::fs::remove_dir_all(&batches);
+}
+
+/// `--dry-run --json --url` decodes every chunk's server-side preview
+/// (`preview_batch`, the exact code path a real apply runs) — exact,
+/// unlike the offline `--dry-run --json` path, which never boots and
+/// so cannot know `created`/`retracted`.
+#[test]
+fn remote_dry_run_json_is_exact_because_the_server_previews_it() {
+    let batches = batch_dir("remote-import-json-dryrun");
+    let file = batches.join("seed.jsonl");
+    std::fs::write(
+        &file,
+        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \
+         \"create\": {\"description\": \"d\"}}\n\
+         {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o\", \"weight\": 1.0}\n",
+    )
+    .expect("fixture must be writable");
+
+    let server = Server::start("remote-import-json-dryrun");
+    let (code, stdout, stderr) = run_cli(
+        &[
+            "import",
+            "--url",
+            &server.base,
+            "--dry-run",
+            "--json",
+            file.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let report: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|error| panic!("--json must be one JSON document: {error}\n{stdout}"));
+    assert_eq!(report["dry_run"], serde_json::json!(true));
+    let outcome = &report["batches"][0];
+    assert_eq!(outcome["context"], serde_json::json!("sake"));
+    assert_eq!(
+        outcome["created"],
+        serde_json::json!(true),
+        "the server's preview_batch knows this even though the offline path cannot: {outcome}"
+    );
+    assert_eq!(outcome["associations"], serde_json::json!(1));
+
+    let (status, _) = server.call("GET", "/contexts/sake", None);
+    assert_eq!(status, 404, "a dry run must write nothing");
+
+    let _ = std::fs::remove_dir_all(&batches);
+}
+
 /// A server whose body cap is far smaller than the client's starting
 /// 4 MiB budget forces the 413-halving path repeatedly until every
 /// chunk fits — and the import still lands every source, across
@@ -309,6 +409,67 @@ fn a_mid_stream_refusal_reports_the_prefix_and_what_was_never_sent() {
         status, 404,
         "the batch after the refusal must never have been sent"
     );
+
+    let _ = std::fs::remove_dir_all(&batches);
+}
+
+/// The same mid-stream refusal as the test above, but with `--json`:
+/// a refused chunk must still print exactly one JSON document — an
+/// `error` string naming the refusal, and `batches` holding what
+/// already landed before it (the `a` context), never the batch after
+/// (`c`, never sent) and never silent stdout on the exit-1 failure.
+#[test]
+fn a_mid_stream_refusal_with_json_still_emits_one_document_with_an_error_field() {
+    let batches = batch_dir("remote-import-midrefusal-json");
+    let file = batches.join("seed.jsonl");
+    std::fs::write(
+        &file,
+        "{\"taguru_batch\": 1, \"context\": \"a\", \"source\": \"a.md\", \
+         \"create\": {\"description\": \"d\"}}\n\
+         {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o\", \"weight\": 1.0}\n\
+         {\"taguru_batch\": 1, \"context\": \"missing\", \"source\": \"bad.md\"}\n\
+         {\"subject\": \"s2\", \"label\": \"l2\", \"object\": \"o2\", \"weight\": 1.0}\n\
+         {\"taguru_batch\": 1, \"context\": \"c\", \"source\": \"c.md\", \
+         \"create\": {\"description\": \"d\"}}\n\
+         {\"subject\": \"s3\", \"label\": \"l3\", \"object\": \"o3\", \"weight\": 1.0}\n",
+    )
+    .expect("fixture must be writable");
+
+    let server = Server::start_with_env(
+        "remote-import-midrefusal-json",
+        &[("TAGURU_MAX_BODY_BYTES", "220")],
+    );
+    let (code, stdout, stderr) = run_cli(
+        &[
+            "import",
+            "--url",
+            &server.base,
+            "--json",
+            file.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|error| {
+        panic!(
+            "--json must be one JSON document even on failure: \
+             {error}\nstdout: {stdout}\nstderr: {stderr}"
+        )
+    });
+    assert!(
+        report["error"]
+            .as_str()
+            .unwrap()
+            .contains("context 'missing' does not exist"),
+        "{report}"
+    );
+    let landed: Vec<&str> = report["batches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|outcome| outcome["context"].as_str().unwrap())
+        .collect();
+    assert_eq!(landed, vec!["a"], "{report}");
 
     let _ = std::fs::remove_dir_all(&batches);
 }

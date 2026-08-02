@@ -66,7 +66,8 @@ use crate::registry::{AccessError, AppState, AssocOp, ContextMeta, CreateError};
 use crate::remote::{Api, ImportFailure};
 
 const USAGE: &str = "\
-usage: taguru import [--dry-run] [--no-embed] [--config FILE] [--url URL] FILE|DIR...
+usage: taguru import [--dry-run] [--no-embed] [--json] [--config FILE]
+                      [--url URL] FILE|DIR...
 
 Applies JSONL batch files to TAGURU_DATA_DIR offline (the server must
 not be running — the directory lock enforces it), or to a RUNNING
@@ -106,6 +107,25 @@ Format: docs/import.html.
                entry of TAGURU_API_TOKENS), the admin role the server
                requires. In CI, name the target per invocation:
                  taguru import --url \"$TAGURU_URL\" backups/
+  --json       one JSON document instead of per-file lines: {dry_run,
+               batches: [...], groups: [...]} — the same shape POST
+               /import answers with (groups omitted when empty).
+               With --url, every field is exact (the server previews
+               with the same code path a real apply runs). Offline,
+               a real (non-dry-run) run is exact the same way; offline
+               --dry-run cannot open the data directory without the
+               lock a running import would need, so its batch counts
+               are read straight from each file (created/retracted and
+               the *_dropped fields all report 0/false) and its groups
+               array is always empty — a preview, not the server's
+               exact one. Every exit path prints exactly one document,
+               failures included: validation refusing every file, the
+               registry refusing to boot, and a remote transport error
+               or a server-refused chunk each add a top-level 'error'
+               string beside whatever batches/groups already landed; a
+               batch refused mid-run (offline only) is named under a
+               failed_batches array instead of batches, since there is
+               no successful outcome to report for it.
 ";
 
 /// The one format version this build reads and docs/import.html
@@ -144,6 +164,7 @@ const REMOTE_IMPORT_BUDGET_BYTES: usize = DEFAULT_MAX_BODY_BYTES / 2;
 pub fn run(args: &[String]) -> i32 {
     let mut dry_run = false;
     let mut no_embed = false;
+    let mut as_json = false;
     let mut config: Option<PathBuf> = None;
     let mut url: Option<String> = None;
     let mut paths: Vec<String> = Vec::new();
@@ -156,6 +177,7 @@ pub fn run(args: &[String]) -> i32 {
             }
             "--dry-run" => dry_run = true,
             "--no-embed" => no_embed = true,
+            "--json" => as_json = true,
             "--config" => match rest.next() {
                 Some(path) => config = Some(PathBuf::from(path)),
                 None => {
@@ -226,12 +248,12 @@ pub fn run(args: &[String]) -> i32 {
         // default_base_url() fallback the way `health`/`calibrate`/
         // `communities` have one. Absent, this is exactly the local
         // path that ran before this flag existed.
-        Some(base) => run_remote(&base, &files, dry_run),
-        None => run_local(&files, dry_run, no_embed),
+        Some(base) => run_remote(&base, &files, dry_run, as_json),
+        None => run_local(&files, dry_run, no_embed, as_json),
     }
 }
 
-fn run_local(files: &[PathBuf], dry_run: bool, no_embed: bool) -> i32 {
+fn run_local(files: &[PathBuf], dry_run: bool, no_embed: bool, as_json: bool) -> i32 {
     // Pass 1 — every file parses, or nothing applies. Apply-stage
     // refusals can strand a half-written source; a malformed line is
     // knowable up front, so it must never cost a write. A file may
@@ -287,15 +309,35 @@ fn run_local(files: &[PathBuf], dry_run: bool, no_embed: bool) -> i32 {
         }
     }
     if broken > 0 {
-        eprintln!(
-            "taguru: import: {broken} of {} file(s) refused during validation; \
-             nothing was applied",
+        let message = format!(
+            "{broken} of {} file(s) refused during validation; nothing was applied",
             files.len()
         );
+        eprintln!("taguru: import: {message}");
+        if as_json {
+            print_import_json(dry_run, Vec::new(), Vec::new(), Vec::new(), Some(message));
+        }
         return 1;
     }
 
     if dry_run {
+        if as_json {
+            // Offline never boots the registry for a dry run (that's
+            // the whole point — a validate-only pass needs no
+            // directory lock), so nothing here can know created/
+            // retracted or any of the *_dropped counts the way
+            // preview_batch (the server's own dry-run path) can.
+            // Reported as 0/false rather than guessed — see the
+            // --help text. Groups are always empty here for the same
+            // reason POST /import's own dry run omits them: restoring
+            // a group has no read-only twin to preview through.
+            let batches: Vec<crate::api::ImportOutcome> = batches
+                .iter()
+                .map(|(_, batch)| dry_run_outcome_of(batch))
+                .collect();
+            print_import_json(true, batches, Vec::new(), Vec::new(), None);
+            return 0;
+        }
         for (path, batch) in &batches {
             println!("{}: {}", path.display(), batch.describe());
         }
@@ -342,6 +384,15 @@ fn run_local(files: &[PathBuf], dry_run: bool, no_embed: bool) -> i32 {
                      racing the first"
                 );
             }
+            if as_json {
+                print_import_json(
+                    dry_run,
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    Some(error.to_string()),
+                );
+            }
             return 1;
         }
     };
@@ -350,10 +401,16 @@ fn run_local(files: &[PathBuf], dry_run: bool, no_embed: bool) -> i32 {
     let mut failures = 0;
     let mut touched: BTreeSet<String> = BTreeSet::new();
     let mut ops_since_flush = 0usize;
+    let mut json_batches: Vec<crate::api::ImportOutcome> = Vec::new();
+    let mut failed_batches: Vec<FailedBatch> = Vec::new();
     for (path, batch) in &batches {
         match apply_batch(&state, batch) {
             Ok(applied) => {
-                println!("{}: {}", path.display(), report(batch, &applied));
+                if as_json {
+                    json_batches.push(crate::api::import_outcome(batch, &applied));
+                } else {
+                    println!("{}: {}", path.display(), report(batch, &applied));
+                }
                 touched.insert(batch.context.clone());
                 ops_since_flush += batch.op_count();
             }
@@ -370,6 +427,17 @@ fn run_local(files: &[PathBuf], dry_run: bool, no_embed: bool) -> i32 {
                 }
                 ops_since_flush += refusal.ops_written();
                 failures += 1;
+                if as_json {
+                    failed_batches.push(FailedBatch {
+                        context: batch.context.clone(),
+                        source: batch.source.clone(),
+                        error: refusal.text(),
+                    });
+                }
+                // Represented in `failed_batches`, not `json_batches`:
+                // there is no `Applied` to build an `ImportOutcome`
+                // from. The failure still reaches stderr above and counts
+                // against the exit code the same as the human path.
             }
         }
         if ops_since_flush >= FLUSH_EVERY_OPS {
@@ -385,6 +453,13 @@ fn run_local(files: &[PathBuf], dry_run: bool, no_embed: bool) -> i32 {
     // untouched (they landed above; re-importing is idempotent).
     let mut restored = 0usize;
     let mut group_failures = 0usize;
+    let mut json_groups: Vec<crate::api::GroupImportOutcome> = Vec::new();
+    // Set on a group-restore refusal, carried into the final --json
+    // document's `error` field — the whole group set was judged and
+    // refused as one (restore_groups's own contract), so this is a
+    // whole-run-level error the same way a validation or boot failure
+    // is, not a per-batch one `FailedBatch` would fit.
+    let mut group_restore_error: Option<String> = None;
     if !groups.is_empty() {
         let records: Vec<(String, GroupRecord)> = groups
             .iter()
@@ -394,18 +469,30 @@ fn run_local(files: &[PathBuf], dry_run: bool, no_embed: bool) -> i32 {
             Ok(outcomes) => {
                 restored = outcomes.len();
                 for ((path, name, record), (_, outcome)) in groups.iter().zip(&outcomes) {
-                    println!(
-                        "{}: {} — {}",
-                        path.display(),
-                        describe_group(name, record),
-                        outcome.as_str()
-                    );
+                    if as_json {
+                        json_groups.push(crate::api::GroupImportOutcome {
+                            name: name.clone(),
+                            outcome: outcome.as_str(),
+                            contexts: record.contexts.len(),
+                            groups: record.groups.len(),
+                        });
+                    } else {
+                        println!(
+                            "{}: {} — {}",
+                            path.display(),
+                            describe_group(name, record),
+                            outcome.as_str()
+                        );
+                    }
                 }
             }
             Err(refusal) => {
                 restored = refusal.applied();
                 eprintln!("taguru: import: {}", refusal.text());
                 group_failures = groups.len() - restored;
+                if as_json {
+                    group_restore_error = Some(refusal.text());
+                }
             }
         }
     }
@@ -418,7 +505,11 @@ fn run_local(files: &[PathBuf], dry_run: bool, no_embed: bool) -> i32 {
         for name in &touched {
             match state.refresh_embeddings(name, Deadline::unbounded()) {
                 None | Some(Ok((0, _))) => {}
-                Some(Ok((embedded, _))) => println!("{name}: embedded {embedded} glosses"),
+                Some(Ok((embedded, _))) => {
+                    if !as_json {
+                        println!("{name}: embedded {embedded} glosses");
+                    }
+                }
                 Some(Err(error)) => {
                     eprintln!(
                         "taguru: import: {name}: embedding refresh failed ({error}) — the \
@@ -431,22 +522,109 @@ fn run_local(files: &[PathBuf], dry_run: bool, no_embed: bool) -> i32 {
         }
     }
 
-    println!(
-        "import: {} of {} batch(es) applied across {} context(s)",
-        batches.len() - failures,
-        batches.len(),
-        touched.len()
-    );
-    if !groups.is_empty() {
-        println!(
-            "import: {restored} of {} group record(s) restored",
-            groups.len()
+    if as_json {
+        print_import_json(
+            false,
+            json_batches,
+            json_groups,
+            failed_batches,
+            group_restore_error,
         );
+    } else {
+        println!(
+            "import: {} of {} batch(es) applied across {} context(s)",
+            batches.len() - failures,
+            batches.len(),
+            touched.len()
+        );
+        if !groups.is_empty() {
+            println!(
+                "import: {restored} of {} group record(s) restored",
+                groups.len()
+            );
+        }
     }
     if failures > 0 || embed_failures > 0 || group_failures > 0 {
         1
     } else {
         0
+    }
+}
+
+/// The pre-application counts `--dry-run --json` reports offline: read
+/// straight off the parsed [`Batch`] (the same numbers `Batch::describe`
+/// already prints as text), never touching state. `created`/
+/// `retracted` and every `*_dropped` field need a real apply (or the
+/// server's `preview_batch`, which needs a boot this path deliberately
+/// avoids) to know — reported as 0/false rather than guessed.
+fn dry_run_outcome_of(batch: &Batch) -> crate::api::ImportOutcome {
+    crate::api::ImportOutcome {
+        context: batch.context.clone(),
+        source: batch.source.clone(),
+        created: false,
+        retracted: 0,
+        associations: batch.associations.len(),
+        aliases: batch.concepts.len() + batch.labels.len(),
+        passage_stored: batch.passage.is_some(),
+        passage_dropped: false,
+        questions_stored: batch.questions.len(),
+        questions_dropped: 0,
+        sections_stored: batch.sections.len(),
+        sections_dropped: 0,
+        locators_stored: batch.locators.len(),
+        locators_dropped: 0,
+        association_paragraphs_dropped: 0,
+    }
+}
+
+/// One local batch [`apply_batch`] refused — `--json`'s only view of a
+/// per-batch failure, since there is no `Applied` to build an
+/// [`crate::api::ImportOutcome`] from. Local-only: a remote refusal
+/// fails its whole chunk (the server's own contract, `src/api/
+/// import.rs`), not one batch at a time, so `run_remote` has no
+/// per-batch failure to name this way — only the whole-chunk `error`
+/// text `print_import_json_values` carries.
+#[derive(serde::Serialize)]
+struct FailedBatch {
+    context: String,
+    source: String,
+    error: String,
+}
+
+/// `import --json`'s single shared print path for the local, typed
+/// entrance: `{dry_run, error, failed_batches, batches, groups}` — the
+/// last two the same shape [`crate::api::ImportStreamOutcome`]
+/// answers with. `error` is a whole-run failure (validation refused
+/// every file, the registry wouldn't boot, group restoration refused);
+/// `failed_batches` is the per-batch failures the run continued past.
+/// Every `--json` exit path calls this — including failure ones — so
+/// stdout is always exactly one parseable document, never silence.
+fn print_import_json(
+    dry_run: bool,
+    batches: Vec<crate::api::ImportOutcome>,
+    groups: Vec<crate::api::GroupImportOutcome>,
+    failed_batches: Vec<FailedBatch>,
+    error: Option<String>,
+) {
+    #[derive(serde::Serialize)]
+    struct Report {
+        dry_run: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        failed_batches: Vec<FailedBatch>,
+        #[serde(flatten)]
+        stream: crate::api::ImportStreamOutcome,
+    }
+    let report = Report {
+        dry_run,
+        error,
+        failed_batches,
+        stream: crate::api::ImportStreamOutcome { batches, groups },
+    };
+    match serde_json::to_string_pretty(&report) {
+        Ok(text) => println!("{text}"),
+        Err(error) => eprintln!("taguru: import: report did not serialize: {error}"),
     }
 }
 
@@ -650,7 +828,7 @@ fn summarize_chunk_outcomes(outcomes: &[Value]) -> String {
 /// and resending — never splitting a batch's own record set, never
 /// crossing into the next batch (ADR 0002 §9). `--dry-run` sends every
 /// chunk as `?dry_run=true` instead of touching anything.
-fn run_remote(base: &str, files: &[PathBuf], dry_run: bool) -> i32 {
+fn run_remote(base: &str, files: &[PathBuf], dry_run: bool, as_json: bool) -> i32 {
     // ADR 0002 §7: caught before any request leaves the process.
     if let Err(message) = crate::remote::reject_userinfo(base) {
         return crate::config::subcommand_usage_error("import", &message);
@@ -801,11 +979,14 @@ fn run_remote(base: &str, files: &[PathBuf], dry_run: bool) -> i32 {
         }
     }
     if broken > 0 {
-        eprintln!(
-            "taguru: import: {broken} of {} file(s) refused during validation; \
-             nothing was applied",
+        let message = format!(
+            "{broken} of {} file(s) refused during validation; nothing was applied",
             files.len()
         );
+        eprintln!("taguru: import: {message}");
+        if as_json {
+            print_import_json_values(dry_run, Vec::new(), Vec::new(), Some(message));
+        }
         return 1;
     }
 
@@ -849,6 +1030,8 @@ fn run_remote(base: &str, files: &[PathBuf], dry_run: bool) -> i32 {
     let mut batches_landed = 0usize;
     let mut group_records_landed = 0usize;
     let mut contexts: BTreeSet<String> = BTreeSet::new();
+    let mut json_batches: Vec<Value> = Vec::new();
+    let mut json_groups: Vec<Value> = Vec::new();
 
     while let Some(chunk) = queue.pop_front() {
         if chunk.size() > budget && chunk.units.len() > 1 {
@@ -872,24 +1055,38 @@ fn run_remote(base: &str, files: &[PathBuf], dry_run: bool) -> i32 {
                     }
                 }
                 batches_landed += outcomes.len();
-                // One line per LANDED chunk, always — every group unit
-                // rides after every batch unit (the append above), so
-                // the tail chunk(s) of a run can carry only group
-                // records and `outcomes` is empty for those. Skipping
-                // the line there (as this used to do) made `chunk N/M`
-                // visibly jump a number, and an operator watching the
-                // log cannot tell that apart from a crash between
-                // prints.
-                println!(
-                    "chunk {landed_chunks}/{total}: {}",
-                    if outcomes.is_empty() {
-                        "group record(s) only".to_string()
-                    } else {
-                        summarize_chunk_outcomes(&outcomes)
-                    }
-                );
-                if let Some(groups) = result.get("groups").and_then(Value::as_array) {
-                    for group in groups {
+                let groups = result
+                    .get("groups")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                group_records_landed += groups.len();
+                if as_json {
+                    // The server already answers each chunk in exactly
+                    // the shape `--json` reports — accumulated across
+                    // chunks and printed once at the end, never
+                    // reparsed into a different type that could drift
+                    // from what the server actually said.
+                    json_batches.extend(outcomes);
+                    json_groups.extend(groups);
+                } else {
+                    // One line per LANDED chunk, always — every group unit
+                    // rides after every batch unit (the append above), so
+                    // the tail chunk(s) of a run can carry only group
+                    // records and `outcomes` is empty for those. Skipping
+                    // the line there (as this used to do) made `chunk N/M`
+                    // visibly jump a number, and an operator watching the
+                    // log cannot tell that apart from a crash between
+                    // prints.
+                    println!(
+                        "chunk {landed_chunks}/{total}: {}",
+                        if outcomes.is_empty() {
+                            "group record(s) only".to_string()
+                        } else {
+                            summarize_chunk_outcomes(&outcomes)
+                        }
+                    );
+                    for group in &groups {
                         let name = group.get("name").and_then(Value::as_str).unwrap_or("?");
                         let outcome = group.get("outcome").and_then(Value::as_str).unwrap_or("?");
                         let member_contexts =
@@ -899,13 +1096,15 @@ fn run_remote(base: &str, files: &[PathBuf], dry_run: bool) -> i32 {
                             "group '{name}': {member_contexts} member context(s), \
                              {child_groups} child group(s) — {outcome}"
                         );
-                        group_records_landed += 1;
                     }
                 }
             }
             Err(ImportFailure::TooLarge(message)) => {
                 if chunk.units.len() == 1 {
                     eprintln!("taguru: import: {message}");
+                    if as_json {
+                        print_import_json_values(dry_run, json_batches, json_groups, Some(message));
+                    }
                     return server_refused_single_unit_error(
                         &chunk.units[0].label,
                         chunk.units[0].len(),
@@ -944,6 +1143,9 @@ fn run_remote(base: &str, files: &[PathBuf], dry_run: bool) -> i32 {
                         "taguru: import: connection lost after chunk {landed_chunks}/{total} \
                          — re-run `--dry-run` to confirm what would change, then resume"
                     );
+                }
+                if as_json {
+                    print_import_json_values(dry_run, json_batches, json_groups, Some(message));
                 }
                 return 1;
             }
@@ -988,12 +1190,17 @@ fn run_remote(base: &str, files: &[PathBuf], dry_run: bool) -> i32 {
                          own source)"
                     );
                 }
+                if as_json {
+                    print_import_json_values(dry_run, json_batches, json_groups, Some(message));
+                }
                 return 1;
             }
         }
     }
 
-    if dry_run {
+    if as_json {
+        print_import_json_values(dry_run, json_batches, json_groups, None);
+    } else if dry_run {
         println!(
             "dry run: {batch_count} batch(es){} valid, nothing applied",
             match group_count {
@@ -1012,6 +1219,44 @@ fn run_remote(base: &str, files: &[PathBuf], dry_run: bool) -> i32 {
         }
     }
     0
+}
+
+/// [`print_import_json`]'s remote twin: the server already answers
+/// each chunk in exactly the shape `ImportStreamOutcome` describes, so
+/// this builds the same `{dry_run, batches, groups}` envelope directly
+/// from the accumulated `Value`s instead of round-tripping them
+/// through the typed structs (which would risk silently dropping a
+/// field the server sent that this build's types don't know about).
+/// [`print_import_json`]'s remote twin — same `{dry_run, error,
+/// batches, groups}` envelope (no `failed_batches`: a remote refusal
+/// fails its whole chunk, never one batch within it, so there is
+/// nothing per-batch to name — the chunk's `error` text already says
+/// what happened). Called on every remote `--json` exit path,
+/// including failures, with whatever `batches`/`groups` landed before
+/// the failure — never silence.
+fn print_import_json_values(
+    dry_run: bool,
+    batches: Vec<Value>,
+    groups: Vec<Value>,
+    error: Option<String>,
+) {
+    let mut report = serde_json::Map::new();
+    report.insert("dry_run".to_string(), Value::Bool(dry_run));
+    if let Some(message) = error {
+        report.insert("error".to_string(), Value::String(message));
+    }
+    report.insert("batches".to_string(), Value::Array(batches));
+    // Matches ImportStreamOutcome's own `skip_serializing_if` on
+    // `groups` — omitted entirely when empty, not printed as `[]`, so
+    // local and remote --json agree byte for byte on a groupless run.
+    if !groups.is_empty() {
+        report.insert("groups".to_string(), Value::Array(groups));
+    }
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&Value::Object(report))
+            .expect("a Map of already-valid JSON values always serializes")
+    );
 }
 
 /// Explicit files are taken as given; a directory contributes its

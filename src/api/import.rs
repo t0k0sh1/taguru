@@ -84,7 +84,14 @@ pub struct GroupImportOutcome {
     pub groups: usize,
 }
 
-fn import_outcome(batch: &crate::ingest::Batch, applied: &crate::ingest::Applied) -> ImportOutcome {
+/// `pub(crate)`: `import --json` (issue #371) reuses this to build the
+/// exact same shape `POST /import`'s response carries, from the same
+/// `Batch`/`Applied` inputs `report()`'s human line already reads —
+/// one computation, not two that could drift.
+pub(crate) fn import_outcome(
+    batch: &crate::ingest::Batch,
+    applied: &crate::ingest::Applied,
+) -> ImportOutcome {
     ImportOutcome {
         context: batch.context.clone(),
         source: batch.source.clone(),

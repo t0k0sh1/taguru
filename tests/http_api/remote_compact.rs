@@ -126,6 +126,169 @@ fn a_full_remote_sweep_hits_maintenance_compact_and_never_enumerates() {
     let _ = std::fs::remove_dir_all(&scratch);
 }
 
+/// `compact --dry-run --url` with no CONTEXT arguments (issue #371)
+/// must enumerate `GET /contexts` — never the sweep, and never `POST
+/// .../compact` — and must leave every context exactly as compacting
+/// it for real afterward still finds the same weight to shed.
+#[test]
+fn dry_run_url_enumerates_get_contexts_and_never_compacts() {
+    let data = seed_dead_edge("dry-run-noenum");
+    let scratch = data.parent().unwrap().to_path_buf();
+    let server = Server::start_on("remote-compact-dry-run", data);
+
+    let (code, stdout, stderr) = run_cli(&["compact", "--dry-run", "--url", &server.base], &[]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("context 'sake':"), "{stdout}");
+    assert!(stdout.contains("dead edge(s)"), "{stdout}");
+    assert!(
+        !stdout.contains("dead edge(s) shed"),
+        "a dry run must not claim anything was shed: {stdout}"
+    );
+    assert!(stdout.contains("dry run: 1 of 1"), "{stdout}");
+
+    let (_, metrics_body) = server.call("GET", "/metrics", None);
+    let metrics_text = metrics_body
+        .as_str()
+        .expect("metrics body is text, not JSON");
+    assert!(
+        metrics_text.contains("route=\"/contexts\""),
+        "a dry run with no CONTEXT arguments must enumerate GET /contexts: {metrics_text}"
+    );
+    assert!(
+        !metrics_text.contains("route=\"/maintenance/compact\""),
+        "a dry run must never call the sweep: {metrics_text}"
+    );
+    assert!(
+        !metrics_text.contains("route=\"/contexts/{name}/compact\""),
+        "a dry run must never call POST .../compact: {metrics_text}"
+    );
+
+    // Compacting for real afterward sheds exactly what a first-ever
+    // run would — proof the dry run above did not already reclaim it.
+    let (code, real_stdout, real_stderr) = run_cli(&["compact", "--url", &server.base], &[]);
+    assert_eq!(code, 0, "stdout: {real_stdout}\nstderr: {real_stderr}");
+    assert!(real_stdout.contains("dead edge(s) shed"), "{real_stdout}");
+
+    drop(server);
+    let _ = std::fs::remove_dir_all(&scratch);
+}
+
+/// `compact --dry-run --json --url` decodes as one JSON array of the
+/// dead-weight rows, same shape the offline path's own JSON test pins
+/// in `tests/cli.rs`.
+#[test]
+fn dry_run_json_url_emits_a_single_parseable_document() {
+    let data = seed_dead_edge("dry-run-json");
+    let scratch = data.parent().unwrap().to_path_buf();
+    let server = Server::start_on("remote-compact-dry-run-json", data);
+
+    let (code, stdout, stderr) = run_cli(
+        &["compact", "--dry-run", "--json", "--url", &server.base],
+        &[],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let value: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|error| panic!("--dry-run --json must be one JSON document: {error}"));
+    let rows = value.as_array().expect("--dry-run --json is an array");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["context"], "sake");
+    assert!(rows[0]["dead_edges"].as_u64().unwrap() > 0);
+
+    drop(server);
+    let _ = std::fs::remove_dir_all(&scratch);
+}
+
+/// `compact --dry-run --json --url NAME` takes the single-context path
+/// (`GET /contexts/{name}`) rather than the enumeration one the two
+/// tests above cover — a distinct branch in `run_remote_dry_run` with
+/// its own request shape, so it needs its own pin.
+#[test]
+fn dry_run_json_url_with_a_named_context_uses_the_single_context_path() {
+    let data = seed_dead_edge("dry-run-json-named");
+    let scratch = data.parent().unwrap().to_path_buf();
+    let server = Server::start_on("remote-compact-dry-run-json-named", data);
+
+    let (code, stdout, stderr) = run_cli(
+        &[
+            "compact",
+            "--dry-run",
+            "--json",
+            "--url",
+            &server.base,
+            "sake",
+        ],
+        &[],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let value: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|error| panic!("--dry-run --json must be one JSON document: {error}"));
+    let rows = value.as_array().expect("--dry-run --json is an array");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["context"], "sake");
+    assert!(rows[0]["dead_edges"].as_u64().unwrap() > 0);
+
+    let (_, metrics_body) = server.call("GET", "/metrics", None);
+    let metrics_text = metrics_body
+        .as_str()
+        .expect("metrics body is text, not JSON");
+    assert!(
+        metrics_text.contains("route=\"/contexts/{name}\""),
+        "a named CONTEXT argument must call GET /contexts/{{name}}, not enumerate: {metrics_text}"
+    );
+    assert!(
+        !metrics_text.contains("route=\"/contexts\""),
+        "a named CONTEXT argument must not enumerate contexts: {metrics_text}"
+    );
+    assert!(
+        !metrics_text.contains("route=\"/contexts/{name}/compact\""),
+        "--dry-run must not compact the named context: {metrics_text}"
+    );
+
+    drop(server);
+    let _ = std::fs::remove_dir_all(&scratch);
+}
+
+/// An unknown context name must count as a per-item failure — a
+/// nonzero exit code and a stderr message naming it — while `--dry-run
+/// --json` itself is unaffected by the caller naming a name the
+/// server doesn't carry; the same "rest of the run still lands"
+/// contract the non-dry-run per-context path already has (see
+/// `an_unknown_context_counts_as_a_failure_and_the_rest_still_lands`
+/// below).
+#[test]
+fn dry_run_json_url_reports_an_unknown_context_as_a_failure() {
+    let data = seed_dead_edge("dry-run-json-unknown");
+    let scratch = data.parent().unwrap().to_path_buf();
+    let server = Server::start_on("remote-compact-dry-run-json-unknown", data);
+
+    let (code, stdout, stderr) = run_cli(
+        &[
+            "compact",
+            "--dry-run",
+            "--json",
+            "--url",
+            &server.base,
+            "sake",
+            "nope",
+        ],
+        &[],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stderr.contains("context 'nope'"), "{stderr}");
+    let value: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|error| panic!("--dry-run --json must be one JSON document: {error}"));
+    let rows = value.as_array().expect("--dry-run --json is an array");
+    assert_eq!(
+        rows.len(),
+        1,
+        "the failed name must not appear in the array, but 'sake' still must: {value}"
+    );
+    assert_eq!(rows[0]["context"], "sake");
+
+    drop(server);
+    let _ = std::fs::remove_dir_all(&scratch);
+}
+
 /// Enumeration is not in play here (per-context mode never enumerates
 /// either), but a name the server does not carry must still surface as
 /// a per-item failure — the rest of the run lands regardless, exactly
