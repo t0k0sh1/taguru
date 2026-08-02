@@ -224,7 +224,27 @@ pub(crate) fn install(document: SchemaDocument) -> Result<InstalledSchema, Schem
     if document.relations.len() > MAX_SCHEMA_RELATIONS {
         return Err(SchemaViolation::TooManyRelations(document.relations.len()));
     }
-    for name in document.types.keys().chain(document.relations.keys()) {
+    // Every name the document mentions, not just the declared keys:
+    // an `is_a` parent or a `domain`/`range` entry may legitimately
+    // name a type or relation this document never declares (§6.2's
+    // "always accepted, never a violation" undeclared-name posture),
+    // and an undeclared name is exactly as unbounded as a declared one
+    // unless checked here too — otherwise `MAX_RELATION_TYPES`'s own
+    // doc ("load-bearing for §8's bounded `expected` string") would not
+    // hold: bounding the COUNT of a domain/range list says nothing
+    // about each entry's length.
+    for name in document
+        .types
+        .keys()
+        .chain(document.relations.keys())
+        .chain(document.types.values().flat_map(|def| &def.is_a))
+        .chain(
+            document
+                .relations
+                .values()
+                .flat_map(|def| def.domain.iter().chain(&def.range)),
+        )
+    {
         if name.len() > MAX_NAME_BYTES {
             return Err(SchemaViolation::NameTooLong(name.clone()));
         }
@@ -349,15 +369,27 @@ pub(crate) fn write_schema(dir: &Path, stem: &str, document: &SchemaDocument) ->
 ///   with the recorded one (in EITHER direction) → refuse: the digest
 ///   is the one artifact that can catch an interrupted `PUT` a valid-
 ///   looking file would otherwise hide
-/// - bytes that read but do not parse → the mangled bytes are set
-///   aside as `{stem}.schema.corrupt` for hand recovery (evidence, like
-///   `scan_groups`' own quarantine) and refuse — UNLIKE `scan_groups`,
-///   there is no fresh-empty-record fallback here (see the module doc)
+/// - bytes that read but do not parse → the mangled bytes are set aside
+///   as `{stem}.schema.corrupt` for hand recovery (evidence, like
+///   `scan_groups`' own quarantine) when `set_aside_corrupt` is `true`,
+///   and refuse either way — UNLIKE `scan_groups`, there is no
+///   fresh-empty-record fallback here (see the module doc)
 /// - a document [`install`] refuses → refuse (a hand-edited file only)
+///
+/// `set_aside_corrupt` gates the ONE side effect this otherwise
+/// read-only function has: `taguru inspect` audits directories —
+/// often backups, sometimes on read-only media — and must never write
+/// to what it is auditing, so it passes `false`. Every other caller
+/// (boot, a cold load) passes `true`. Even then, a failed quarantine
+/// write is only logged, never returned as this call's error: the
+/// caller asked "does this schema load," and a hand-recovery copy
+/// failing to land must not overwrite that diagnosis with an
+/// unrelated write failure.
 pub(crate) fn load_schema(
     dir: &Path,
     stem: &str,
     recorded_digest: Option<&str>,
+    set_aside_corrupt: bool,
 ) -> io::Result<Option<InstalledSchema>> {
     let path = schema_path(dir, stem);
     let bytes = match fs::read(&path) {
@@ -398,20 +430,38 @@ pub(crate) fn load_schema(
         Ok(document) => document,
         Err(error) => {
             let set_aside = schema_corrupt_path(dir, stem);
-            tracing::warn!(
-                schema = %path.display(),
-                bytes_at = %set_aside.display(),
-                %error,
-                "schema file does not parse; refusing the boot and setting the bytes aside"
-            );
-            fs::write(&set_aside, &bytes)?;
+            if set_aside_corrupt {
+                tracing::warn!(
+                    schema = %path.display(),
+                    bytes_at = %set_aside.display(),
+                    %error,
+                    "schema file does not parse; refusing the boot and setting the bytes aside"
+                );
+                // Evidence, not the diagnosis: a failed quarantine write
+                // must not replace "does not parse" with an unrelated
+                // io error below (see this function's own doc).
+                if let Err(set_aside_error) = fs::write(&set_aside, &bytes) {
+                    tracing::warn!(
+                        schema = %path.display(),
+                        bytes_at = %set_aside.display(),
+                        error = %set_aside_error,
+                        "schema bytes not set aside"
+                    );
+                }
+            }
             return Err(io::Error::other(format!(
-                "schema '{}' does not parse: {error} — the bytes were set aside as {} for \
-                 hand recovery; a schema never falls back to an empty (i.e. mode: off) \
-                 record on parse failure, since that would silently disable strict \
-                 enforcement",
+                "schema '{}' does not parse: {error} — a schema never falls back to an \
+                 empty (i.e. mode: off) record on parse failure, since that would silently \
+                 disable strict enforcement{}",
                 path.display(),
-                set_aside.display(),
+                if set_aside_corrupt {
+                    format!(
+                        " (the bytes were set aside as {} for hand recovery)",
+                        set_aside.display()
+                    )
+                } else {
+                    String::new()
+                },
             )));
         }
     };
@@ -681,7 +731,9 @@ mod tests {
         let bytes = fs::read(schema_path(&dir, "sake")).unwrap();
         let digest = sha256_hex(&bytes);
 
-        let loaded = load_schema(&dir, "sake", Some(&digest)).unwrap().unwrap();
+        let loaded = load_schema(&dir, "sake", Some(&digest), true)
+            .unwrap()
+            .unwrap();
         assert_eq!(loaded.document(), &document);
 
         let _ = fs::remove_dir_all(&dir);
@@ -691,7 +743,7 @@ mod tests {
     fn no_file_and_no_recorded_digest_is_off() {
         let dir = scratch_dir("schema-off");
         fs::create_dir_all(&dir).unwrap();
-        assert!(load_schema(&dir, "sake", None).unwrap().is_none());
+        assert!(load_schema(&dir, "sake", None, true).unwrap().is_none());
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -699,7 +751,7 @@ mod tests {
     fn a_recorded_digest_with_no_file_refuses() {
         let dir = scratch_dir("schema-missing");
         fs::create_dir_all(&dir).unwrap();
-        let error = load_schema(&dir, "sake", Some("deadbeef")).unwrap_err();
+        let error = load_schema(&dir, "sake", Some("deadbeef"), true).unwrap_err();
         assert!(error.to_string().contains("is missing"), "{error}");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -711,11 +763,11 @@ mod tests {
         write_schema(&dir, "sake", &valid()).unwrap();
 
         // Stale recorded digest under fresh content.
-        let error = load_schema(&dir, "sake", Some("deadbeef")).unwrap_err();
+        let error = load_schema(&dir, "sake", Some("deadbeef"), true).unwrap_err();
         assert!(error.to_string().contains("does not match"), "{error}");
 
         // A stray file with nothing recorded for it at all.
-        let error = load_schema(&dir, "sake", None).unwrap_err();
+        let error = load_schema(&dir, "sake", None, true).unwrap_err();
         assert!(error.to_string().contains("does not match"), "{error}");
 
         let _ = fs::remove_dir_all(&dir);
@@ -729,7 +781,7 @@ mod tests {
         fs::write(&path, b"not json").unwrap();
         let digest = sha256_hex(b"not json");
 
-        let error = load_schema(&dir, "sake", Some(&digest)).unwrap_err();
+        let error = load_schema(&dir, "sake", Some(&digest), true).unwrap_err();
         assert!(error.to_string().contains("does not parse"), "{error}");
         assert_eq!(
             fs::read(schema_corrupt_path(&dir, "sake")).unwrap(),
@@ -737,6 +789,50 @@ mod tests {
         );
         // The original path is untouched — no empty-record fallback.
         assert_eq!(fs::read(&path).unwrap(), b"not json");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `set_aside_corrupt: false` is `taguru inspect`'s contract: it
+    /// audits directories (often backups, sometimes read-only media)
+    /// and must never write to them, even to quarantine evidence.
+    #[test]
+    fn set_aside_corrupt_false_never_writes_the_quarantine_file() {
+        let dir = scratch_dir("schema-corrupt-readonly");
+        fs::create_dir_all(&dir).unwrap();
+        let path = schema_path(&dir, "sake");
+        fs::write(&path, b"not json").unwrap();
+        let digest = sha256_hex(b"not json");
+
+        let error = load_schema(&dir, "sake", Some(&digest), false).unwrap_err();
+        assert!(error.to_string().contains("does not parse"), "{error}");
+        assert!(
+            !schema_corrupt_path(&dir, "sake").exists(),
+            "inspect must never write, not even a quarantine copy"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `load_schema`'s last failure path: the file reads, its digest
+    /// matches, and it parses — but `install` refuses it (a hand-edited
+    /// file naming an unread `schema` version, here). No quarantine:
+    /// the bytes are not mangled, so there is nothing to set aside.
+    #[test]
+    fn a_parseable_but_invalid_document_refuses_without_quarantine() {
+        let dir = scratch_dir("schema-invalid");
+        fs::create_dir_all(&dir).unwrap();
+        let bytes =
+            br#"{"schema":99,"mode":"off","closed_labels":false,"types":{},"relations":{}}"#;
+        fs::write(schema_path(&dir, "sake"), bytes).unwrap();
+        let digest = sha256_hex(bytes);
+
+        let error = load_schema(&dir, "sake", Some(&digest), true).unwrap_err();
+        assert!(error.to_string().contains("does not validate"), "{error}");
+        assert!(
+            !schema_corrupt_path(&dir, "sake").exists(),
+            "a parseable file is not corrupt bytes; nothing is set aside"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

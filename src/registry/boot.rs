@@ -333,13 +333,24 @@ fn scan_data_dir(data_dir: &Path) -> io::Result<(BTreeMap<String, Arc<Entry>>, R
     // The expensive part of a boot scan is the disk I/O per candidate
     // (sidecar read plus two `fs::metadata` calls), and each candidate
     // is independent — `parallel_map` pays for it in parallel the same
-    // way `preload_pinned` does; arrival order cannot affect the result
-    // since it only feeds a `BTreeMap`.
+    // way `preload_pinned` does. Arrival order cannot affect a
+    // SUCCESSFUL result (it only feeds a `BTreeMap`), but it can affect
+    // a FAILURE: `parallel_map`'s own doc says results "come back in
+    // arrival order, not input order," and the schema check below can
+    // fail more than one candidate — the sort by `index` right after
+    // (its own documented remedy: "callers that need input order carry
+    // an index through T/R and sort afterward") is what makes the
+    // FIRST reported error deterministic across repeated boots of the
+    // same directory, rather than a coin flip decided by which
+    // worker's thread happened to finish first.
     let workers = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
-    let registry: BTreeMap<String, Arc<Entry>> =
-        parallel_map(candidates, workers, |(stem, name)| {
+    type IndexedCandidate = (usize, io::Result<(String, Arc<Entry>)>);
+    let mut indexed: Vec<IndexedCandidate> = parallel_map(
+        candidates.into_iter().enumerate().collect(),
+        workers,
+        |(index, (stem, name))| {
             let stem = stem.as_str();
             let MetaFile {
                 meta,
@@ -359,11 +370,15 @@ fn scan_data_dir(data_dir: &Path) -> io::Result<(BTreeMap<String, Arc<Entry>>, R
             // through; every other case is folded into the `?` below
             // and stops the boot for the whole directory, exactly as
             // an unreadable `.ctx` already does one candidate over.
-            if let Err(error) = schema::load_schema(data_dir, stem, schema_digest.as_deref()) {
-                return Err(io::Error::new(
-                    error.kind(),
-                    format!("context '{name}': {error}"),
-                ));
+            if let Err(error) = schema::load_schema(data_dir, stem, schema_digest.as_deref(), true)
+            {
+                return (
+                    index,
+                    Err(io::Error::new(
+                        error.kind(),
+                        format!("context '{name}': {error}"),
+                    )),
+                );
             }
             // The gauge must see leftover logs from the first scrape,
             // not only after each context's first touch.
@@ -373,22 +388,30 @@ fn scan_data_dir(data_dir: &Path) -> io::Result<(BTreeMap<String, Arc<Entry>>, R
             let passages_wal_bytes = fs::metadata(passages_wal_path(data_dir, stem))
                 .map(|meta| meta.len())
                 .unwrap_or(0);
-            Ok((
-                name,
-                Arc::new(Entry::new(
-                    meta,
-                    stats,
-                    Slot::Cold,
-                    wal_bytes,
-                    passages_wal_bytes,
-                    usage,
-                    revision,
-                    schema_digest,
+            (
+                index,
+                Ok((
+                    name,
+                    Arc::new(Entry::new(
+                        meta,
+                        stats,
+                        Slot::Cold,
+                        wal_bytes,
+                        passages_wal_bytes,
+                        usage,
+                        revision,
+                        schema_digest,
+                    )),
                 )),
-            ))
-        })
+            )
+        },
+    );
+    indexed.sort_by_key(|(index, _)| *index);
+    let registry: BTreeMap<String, Arc<Entry>> = indexed
         .into_iter()
-        .collect::<io::Result<BTreeMap<String, Arc<Entry>>>>()?;
+        .map(|(_, result)| result)
+        .collect::<io::Result<BTreeMap<String, Arc<Entry>>>>(
+    )?;
 
     // Surviving import markers: each says a multi-store batch opened
     // and never finished — a crash (or an unretried refusal) between

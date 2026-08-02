@@ -2611,7 +2611,7 @@ fn ensure_hot(
     // one already passed the same check to get this far) but the only
     // check the replica path gets, so it always runs rather than only
     // when a hydrator is present.
-    if let Err(error) = schema::load_schema(data_dir, &stem, inner.schema_digest.as_deref()) {
+    if let Err(error) = schema::load_schema(data_dir, &stem, inner.schema_digest.as_deref(), true) {
         let error = format!("context '{name}': {error}");
         metrics.record_cache_load(false);
         inner.load_failure = Some((std::time::Instant::now(), error.clone()));

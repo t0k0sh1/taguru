@@ -567,8 +567,14 @@ fn inspect_directory(dir: &Path, as_json: bool) -> i32 {
         // absent," since that is indistinguishable from `mode: off` and
         // would silently disable `strict`. Reported the same severity
         // as a corrupt image, for the same reason — the server will not
-        // start on this directory.
-        if let Err(error) = schema::load_schema(dir, stem, schema_digest_of(dir, stem).as_deref()) {
+        // start on this directory. `set_aside_corrupt: false` — inspect
+        // audits a directory (often a backup, sometimes read-only media)
+        // and must never write to it, unlike the boot/cold-load callers
+        // this same check backs; the module doc on `load_schema` names
+        // this as its one caller-visible side effect.
+        if let Err(error) =
+            schema::load_schema(dir, stem, schema_digest_of(dir, stem).as_deref(), false)
+        {
             if as_json {
                 context_rows.push(ContextRow::corrupt(
                     name.clone(),

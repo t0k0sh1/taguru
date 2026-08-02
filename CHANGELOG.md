@@ -16,12 +16,13 @@ Entries that change an on-disk format or a response shape say so.
   8` ancestor-closure precompute) follows `GroupRecord`'s
   write-then-rename pattern, with one deliberate divergence: a schema
   file that is unreadable, does not parse, does not validate, or whose
-  digest disagrees with what `ContextMeta.schema_digest` recorded
-  refuses the boot outright — never a fresh-empty-record fallback,
-  since an empty schema is indistinguishable from `mode: off` and would
-  silently disable `strict` for a context whose operator explicitly
-  turned it on. A schema-free context (no file, no recorded digest)
-  boots byte-identical to every context before this change. Widens
+  digest disagrees with what `ContextMeta.schema_digest` recorded — in
+  either direction, including a digest recorded with the file itself
+  missing — refuses the boot outright, never a fresh-empty-record
+  fallback, since an empty schema is indistinguishable from `mode: off`
+  and would silently disable `strict` for a context whose operator
+  explicitly turned it on. A schema-free context (no file, no recorded
+  digest) boots byte-identical to every context before this change. Widens
   `context_files` from nine entries to ten (schema last, so a missing
   or lagging schema file never blocks a context rename) and adds
   `schema_formats: [1]` to `GET /version`/`version_facts()` beside
