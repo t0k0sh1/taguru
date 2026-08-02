@@ -237,9 +237,10 @@ the offline producer's environment only, and local or bridged models
 `taguru extract` reads `.md`/`.txt` only. For PDF, HTML, DOCX, PPTX, or
 objects in S3-compatible storage, the Python SDK's
 `taguru_langchain.ingest_connectors` module is the producer instead —
-same normalized document shape, same batch contract, same manifest/
-checkpoint discipline, plus its own observability (run report, event
-log):
+same normalized document shape, same batch contract, and its own
+checkpoint discipline (no separate manifest file — see
+[ingest connectors](https://t0k0sh1.github.io/taguru/connectors.html#checkpoints)),
+plus its own observability (run report, event log):
 
 ```python
 from taguru_langchain.ingest_connectors import sync_references
