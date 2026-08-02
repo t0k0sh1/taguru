@@ -338,6 +338,72 @@ impl Api {
         Ok(names)
     }
 
+    /// Every row of `GET /contexts`, keyset-walked the same way
+    /// [`Api::list_names`] walks `"contexts"`/`"groups"` but decoded
+    /// whole — `compact --dry-run --url` (issue #371) needs each row's
+    /// `stats` (`dead_edges`, `associations`, `arena_slack`, …), which
+    /// a bare name throws away. `GET /contexts` already carries them
+    /// per row, so no new server surface is required.
+    ///
+    /// Contexts-only: `GET /groups` rows don't decode as
+    /// [`crate::registry::DirectoryEntry`] (no `stats`/`usage`), so
+    /// this has no `collection` parameter the way `list_names` does —
+    /// a caller enumerating groups keeps using `list_names("groups")`.
+    pub(crate) fn list_context_entries(
+        &self,
+    ) -> Result<Vec<crate::registry::DirectoryEntry>, String> {
+        self.list_context_entries_paged(LIST_PAGE_LIMIT)
+    }
+
+    /// [`Api::list_context_entries`] with an explicit page size — same
+    /// split-out-for-testing reason as [`Api::list_names_paged`].
+    fn list_context_entries_paged(
+        &self,
+        page: usize,
+    ) -> Result<Vec<crate::registry::DirectoryEntry>, String> {
+        let mut rows = Vec::new();
+        let mut after: Option<String> = None;
+        loop {
+            let limit = page.to_string();
+            let mut query: Vec<(&str, &str)> = vec![("limit", limit.as_str())];
+            if let Some(cursor) = after.as_deref() {
+                query.push(("after", cursor));
+            }
+            let body = self.get_with_query(&["contexts"], &query)?;
+            let items = body["contexts"]
+                .as_array()
+                .ok_or_else(|| format!("{}: not a taguru contexts page", self.base))?;
+            let mut page_rows = Vec::with_capacity(items.len());
+            for item in items {
+                let entry: crate::registry::DirectoryEntry = serde_json::from_value(item.clone())
+                    .map_err(|error| {
+                    format!("{}: a contexts entry did not decode: {error}", self.base)
+                })?;
+                page_rows.push(entry);
+            }
+            let page_len = page_rows.len();
+            // Same first-name-vs-cursor advancement check
+            // `list_names_paged` runs — see its comment for why the
+            // first name, not the last, is the one compared.
+            if let (Some(cursor), Some(first)) = (after.as_deref(), page_rows.first())
+                && first.name.as_str() <= cursor
+            {
+                return Err(format!(
+                    "the server's contexts page did not advance past '{cursor}'"
+                ));
+            }
+            after = page_rows.last().map(|entry| entry.name.clone());
+            rows.extend(page_rows);
+            // Only an EMPTY page marks the end — see
+            // `list_names_paged`'s comment for why a short-but-nonempty
+            // page must not stop the walk.
+            if page_len == 0 {
+                break;
+            }
+        }
+        Ok(rows)
+    }
+
     /// One `POST /import` request carrying a pack of whole batches —
     /// the coarse view for callers that don't need to tell a 413 apart
     /// from any other refusal. `import --url` (#247) uses

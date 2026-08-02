@@ -328,6 +328,62 @@ fn inspect_verifies_a_directory_and_a_single_image() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `inspect --json` (issue #371) on the same directory and single
+/// image as the human-readable test above — one JSON document, the
+/// same facts (context stats, dead-weight numbers, the total footer),
+/// nothing printed alongside it.
+#[test]
+fn inspect_json_reports_directory_and_image_stats_as_one_document() {
+    let dir = std::env::temp_dir().join(format!("taguru-cli-inspect-json-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut context = taguru::context::Context::default();
+    context
+        .associate("青嶺酒造", "代表銘柄", "青嶺", 1.0)
+        .unwrap();
+    let image = dir.join("sake.ctx");
+    std::fs::write(&image, context.to_bytes()).unwrap();
+
+    let output = run(&["inspect", "--json", &dir.display().to_string()]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|error| panic!("--json must be one JSON document: {error}"));
+    assert_eq!(report["kind"], "directory");
+    assert_eq!(report["corrupt"], 0);
+    let row = &report["contexts"][0];
+    assert_eq!(row["name"], "sake");
+    assert_eq!(row["status"], "ok");
+    assert_eq!(row["associations"], 1);
+    assert_eq!(row["concepts"], 2);
+    assert_eq!(row["dead_edges"], 0);
+    assert_eq!(row["dead_ratio"], 0.0);
+    assert_eq!(row["arena_slack"], 0);
+    assert_eq!(row["unsourced_edges"], 1);
+    assert!(
+        row["generation"]
+            .as_str()
+            .unwrap()
+            .contains("checksum verified")
+    );
+    // Directory scan sidecars: absent for a bare single-file inspect,
+    // present here.
+    assert!(row["wal_bytes"].is_u64());
+    assert_eq!(report["total"]["contexts"], 1);
+
+    let output = run(&["inspect", "--json", &image.display().to_string()]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|error| panic!("--json must be one JSON document: {error}"));
+    assert_eq!(report["kind"], "image");
+    let row = &report["contexts"][0];
+    assert_eq!(row["status"], "ok");
+    assert_eq!(row["associations"], 1);
+    // A bare image inspect never touches the WAL/passages sidecars.
+    assert!(row.get("wal_bytes").is_none(), "{row}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn inspect_fails_an_image_whose_bytes_rotted_in_place() {
     // The backup-verification case the checksum footer exists for: one
@@ -395,6 +451,48 @@ fn inspect_flags_a_corrupt_image_and_a_corrupt_wal() {
         "{}",
         String::from_utf8_lossy(&output.stdout)
     );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The three corrupt statuses `--json` can report for a context row —
+/// `corrupt_image`/`corrupt_wal`/`corrupt_passages` — each with the
+/// error text and the overall `corrupt` count, over the same fixture
+/// sequence `inspect_flags_a_corrupt_image_and_a_corrupt_wal` pins for
+/// the human-readable path.
+#[test]
+fn inspect_json_reports_the_three_corrupt_statuses() {
+    let dir = std::env::temp_dir().join(format!("taguru-cli-corrupt-json-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    std::fs::write(dir.join("bad.ctx"), b"not an image").unwrap();
+    let output = run(&["inspect", "--json", &dir.display().to_string()]);
+    assert_eq!(output.status.code(), Some(1));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|error| panic!("--json must be one JSON document: {error}"));
+    assert_eq!(report["contexts"][0]["status"], "corrupt_image");
+    assert!(report["contexts"][0]["error"].as_str().is_some());
+    assert_eq!(report["corrupt"], 1);
+    assert!(report["contexts"][0].get("associations").is_none());
+
+    let context = taguru::context::Context::default();
+    std::fs::write(dir.join("sake.ctx"), context.to_bytes()).unwrap();
+    std::fs::write(dir.join("sake.wal.jsonl"), b"not json\n").unwrap();
+    std::fs::remove_file(dir.join("bad.ctx")).unwrap();
+    let output = run(&["inspect", "--json", &dir.display().to_string()]);
+    assert_eq!(output.status.code(), Some(1));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|error| panic!("--json must be one JSON document: {error}"));
+    assert_eq!(report["contexts"][0]["status"], "corrupt_wal");
+
+    std::fs::remove_file(dir.join("sake.wal.jsonl")).unwrap();
+    std::fs::write(dir.join("sake.passages.bin"), b"not a snapshot").unwrap();
+    let output = run(&["inspect", "--json", &dir.display().to_string()]);
+    assert_eq!(output.status.code(), Some(1));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|error| panic!("--json must be one JSON document: {error}"));
+    assert_eq!(report["contexts"][0]["status"], "corrupt_passages");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -501,6 +599,76 @@ fn inspect_reports_a_torn_import_marker_without_failing() {
         stdout.contains("no longer exists here"),
         "the moot marker gets its NOTE: {stdout}"
     );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A torn WAL tail and a surviving import marker (both `inspect_reports_
+/// a_torn_wal_tail_without_healing_it` and `inspect_reports_a_torn_
+/// import_marker_without_failing`'s own fixtures) surface as structured
+/// notices — a per-context `note`/`wal_torn_tail` on the context row,
+/// and top-level `warning`/`incomplete_import` and `note`/
+/// `orphan_import_marker` entries — all while `--json` still exits 0.
+#[test]
+fn inspect_json_reports_torn_tail_and_import_marker_notices() {
+    let dir = std::env::temp_dir().join(format!(
+        "taguru-cli-inspect-json-notices-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let context = taguru::context::Context::default();
+    std::fs::write(dir.join("sake.ctx"), context.to_bytes()).unwrap();
+    let mut bytes = br#"{"seq":1,"op":"associate","subject":"a","label":"likes","object":"apple","weight":1.0}"#
+        .to_vec();
+    bytes.push(b'\n');
+    bytes.extend_from_slice(br#"{"seq":2,"op":"associate","subject":"b"#);
+    std::fs::write(dir.join("sake.wal.jsonl"), &bytes).unwrap();
+    std::fs::write(
+        dir.join("sake.00000000deadbeef.importing"),
+        br#"{"context":"sake","source":"doc-1"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("ghost.00000000deadbeef.importing"),
+        br#"{"context":"ghost","source":"doc-9"}"#,
+    )
+    .unwrap();
+
+    let output = run(&["inspect", "--json", &dir.display().to_string()]);
+    let stdout_text = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert_eq!(output.status.code(), Some(0), "{stdout_text}");
+    let report: serde_json::Value = serde_json::from_str(&stdout_text)
+        .unwrap_or_else(|error| panic!("--json must be one JSON document: {error}"));
+
+    let notes = report["contexts"][0]["notes"].as_array().unwrap();
+    assert!(
+        notes
+            .iter()
+            .any(|note| note["kind"] == "wal_torn_tail" && note["level"] == "note"),
+        "{report}"
+    );
+
+    let notices = report["notices"].as_array().unwrap();
+    assert!(
+        notices
+            .iter()
+            .any(|notice| notice["kind"] == "incomplete_import"
+                && notice["level"] == "warning"
+                && notice["subject"] == "sake"),
+        "{report}"
+    );
+    assert!(
+        notices
+            .iter()
+            .any(|notice| notice["kind"] == "orphan_import_marker" && notice["level"] == "note"),
+        "{report}"
+    );
+
+    // The WAL is left byte-for-byte untouched by --json too — the
+    // read-only guarantee does not bend for the JSON rendering.
+    assert_eq!(std::fs::read(dir.join("sake.wal.jsonl")).unwrap(), bytes);
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1815,6 +1983,103 @@ fn inspect_flags_group_trouble_and_previews_boot_repairs() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `--json`'s group-side reporting: a dangling member-context reference
+/// as a `GroupRow` note, a dropped nesting edge as a top-level notice,
+/// and single-file `.group` inspect answering the same `GroupRow` shape
+/// — over the same fixtures
+/// `inspect_flags_group_trouble_and_previews_boot_repairs` pins for the
+/// human-readable path.
+#[test]
+fn inspect_json_reports_group_notes_and_nesting_drops() {
+    let dir = std::env::temp_dir().join(format!(
+        "taguru-cli-inspect-groups-json-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let context = taguru::context::Context::default();
+    std::fs::write(dir.join("sake.ctx"), context.to_bytes()).unwrap();
+    std::fs::write(
+        dir.join("kura.group"),
+        "{\"description\": \"\", \"contexts\": [\"sake\", \"ghost\"], \"groups\": []}",
+    )
+    .unwrap();
+
+    let output = run(&["inspect", "--json", &dir.display().to_string()]);
+    let stdout_text = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert_eq!(output.status.code(), Some(0), "{stdout_text}");
+    let report: serde_json::Value = serde_json::from_str(&stdout_text)
+        .unwrap_or_else(|error| panic!("--json must be one JSON document: {error}"));
+    let kura = report["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["name"] == "kura")
+        .expect("kura must be reported");
+    assert_eq!(kura["status"], "ok");
+    assert_eq!(kura["contexts"], 2);
+    assert!(
+        kura["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|note| note["kind"] == "dangling_context_reference" && note["level"] == "warning"),
+        "{report}"
+    );
+
+    // A cycle: boot's repair drops one edge, reported as a top-level
+    // notice (it names an edge between two groups, not one group's own
+    // fact).
+    std::fs::write(dir.join("cyc-a.group"), "{\"groups\": [\"cyc-b\"]}").unwrap();
+    std::fs::write(dir.join("cyc-b.group"), "{\"groups\": [\"cyc-a\"]}").unwrap();
+    let output = run(&["inspect", "--json", &dir.display().to_string()]);
+    let stdout_text = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert_eq!(output.status.code(), Some(0), "{stdout_text}");
+    let report: serde_json::Value = serde_json::from_str(&stdout_text)
+        .unwrap_or_else(|error| panic!("--json must be one JSON document: {error}"));
+    assert!(
+        report["notices"].as_array().unwrap().iter().any(|notice| {
+            notice["kind"] == "dropped_nesting_edge"
+                && notice["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("'cyc-b' → 'cyc-a'")
+        }),
+        "{report}"
+    );
+    std::fs::remove_file(dir.join("cyc-a.group")).unwrap();
+    std::fs::remove_file(dir.join("cyc-b.group")).unwrap();
+
+    // Single-file `.group` inspect answers the same GroupRow shape.
+    let output = run(&[
+        "inspect",
+        "--json",
+        &dir.join("kura.group").display().to_string(),
+    ]);
+    assert_eq!(output.status.code(), Some(0));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|error| panic!("--json must be one JSON document: {error}"));
+    assert_eq!(report["kind"], "group");
+    assert_eq!(
+        report["groups"][0]["name"],
+        dir.join("kura.group").display().to_string()
+    );
+    assert_eq!(report["groups"][0]["contexts"], 2);
+
+    std::fs::write(dir.join("kura.group"), b"{not json").unwrap();
+    let output = run(&[
+        "inspect",
+        "--json",
+        &dir.join("kura.group").display().to_string(),
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|error| panic!("--json must be one JSON document: {error}"));
+    assert_eq!(report["groups"][0]["status"], "corrupt");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A corrupt `.group` file is still a group at boot — `scan_groups`
 /// registers its name with an empty record rather than dropping it, so
 /// a sibling naming it as a child must not get a false "boot drops this
@@ -1904,6 +2169,142 @@ fn compact_rewrites_a_data_directory_offline() {
 
     let inspected = run_in(&["inspect", &data.display().to_string()]);
     assert_eq!(inspected.status.code(), Some(0), "{inspected:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `compact --dry-run` (issue #371) reports the standing dead weight
+/// and touches nothing — proven by compacting for real afterward and
+/// seeing the exact same shed counts a fresh (never-previewed) run
+/// would report.
+#[test]
+fn compact_dry_run_reports_dead_weight_without_rewriting() {
+    let dir = std::env::temp_dir().join(format!("taguru-cli-compact-dry-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
+    std::fs::write(
+        dir.join("a.jsonl"),
+        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \
+         \"create\": {\"description\": \"d\"}}\n\
+         {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n",
+    )
+    .expect("fixture must be writable");
+    std::fs::write(
+        dir.join("b.jsonl"),
+        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\"}\n\
+         {\"subject\": \"蔵\", \"label\": \"銘柄\", \"object\": \"青嶺\", \"weight\": 1.0}\n",
+    )
+    .expect("fixture must be writable");
+
+    let data = dir.join("data");
+    let run_in = |args: &[&str]| -> Output {
+        Command::new(env!("CARGO_BIN_EXE_taguru"))
+            .args(args)
+            .env("TAGURU_DATA_DIR", &data)
+            .env_remove("TAGURU_CONFIG")
+            .env_remove("TAGURU_EMBED_URL")
+            .output()
+            .expect("binary must run")
+    };
+    let first = run_in(&["import", &dir.join("a.jsonl").display().to_string()]);
+    assert_eq!(first.status.code(), Some(0), "{first:?}");
+    let second = run_in(&["import", &dir.join("b.jsonl").display().to_string()]);
+    assert_eq!(second.status.code(), Some(0), "{second:?}");
+
+    // Snapshot the image bytes before the dry run so a mutation, if
+    // one somehow happened, would be caught even if the report text
+    // itself looked plausible.
+    let image = data.join("sake.ctx");
+    let before = std::fs::read(&image).expect("image must exist after import");
+
+    let dry = run_in(&["compact", "--dry-run"]);
+    assert_eq!(dry.status.code(), Some(0), "{dry:?}");
+    let dry_stdout = String::from_utf8_lossy(&dry.stdout);
+    assert!(dry_stdout.contains("dead edge(s)"), "{dry_stdout}");
+    assert!(dry_stdout.contains("dry run: 1 of 1"), "{dry_stdout}");
+    assert!(
+        !dry_stdout.contains("dead edge(s) shed"),
+        "a dry run must not claim anything was shed: {dry_stdout}"
+    );
+
+    let after = std::fs::read(&image).expect("image must still exist");
+    assert_eq!(before, after, "--dry-run must not rewrite the image");
+
+    // A real compact afterward sheds exactly what a first-ever run
+    // would — proof the dry run above did not already reclaim it.
+    let real = run_in(&["compact"]);
+    assert_eq!(real.status.code(), Some(0), "{real:?}");
+    let real_stdout = String::from_utf8_lossy(&real.stdout);
+    assert!(real_stdout.contains("dead edge(s) shed"), "{real_stdout}");
+    assert!(
+        real_stdout.contains("1 of 1 context(s) rewritten"),
+        "{real_stdout}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `compact --dry-run --json` and `compact --json` each emit exactly
+/// one parseable JSON document on stdout — no human-readable line
+/// mixed in — with the fields the plan promises.
+#[test]
+fn compact_json_emits_a_single_parseable_document_dry_run_and_real() {
+    let dir = std::env::temp_dir().join(format!("taguru-cli-compact-json-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
+    std::fs::write(
+        dir.join("a.jsonl"),
+        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \
+         \"create\": {\"description\": \"d\"}}\n\
+         {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n",
+    )
+    .expect("fixture must be writable");
+    std::fs::write(
+        dir.join("b.jsonl"),
+        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\"}\n\
+         {\"subject\": \"蔵\", \"label\": \"銘柄\", \"object\": \"青嶺\", \"weight\": 1.0}\n",
+    )
+    .expect("fixture must be writable");
+
+    let data = dir.join("data");
+    let run_in = |args: &[&str]| -> Output {
+        Command::new(env!("CARGO_BIN_EXE_taguru"))
+            .args(args)
+            .env("TAGURU_DATA_DIR", &data)
+            .env_remove("TAGURU_CONFIG")
+            .env_remove("TAGURU_EMBED_URL")
+            .output()
+            .expect("binary must run")
+    };
+    let first = run_in(&["import", &dir.join("a.jsonl").display().to_string()]);
+    assert_eq!(first.status.code(), Some(0), "{first:?}");
+    let second = run_in(&["import", &dir.join("b.jsonl").display().to_string()]);
+    assert_eq!(second.status.code(), Some(0), "{second:?}");
+
+    let dry = run_in(&["compact", "--dry-run", "--json"]);
+    assert_eq!(dry.status.code(), Some(0), "{dry:?}");
+    let dry_value: serde_json::Value = serde_json::from_slice(&dry.stdout)
+        .unwrap_or_else(|error| panic!("--dry-run --json must be one JSON document: {error}"));
+    let dry_rows = dry_value.as_array().expect("--dry-run --json is an array");
+    assert_eq!(dry_rows.len(), 1);
+    assert_eq!(dry_rows[0]["context"], "sake");
+    assert!(dry_rows[0]["dead_edges"].as_u64().unwrap() > 0);
+    assert!(dry_rows[0]["dead_ratio"].as_f64().unwrap() > 0.0);
+    // A freshly booted CLI process hasn't loaded the context into
+    // memory yet (nothing in this run has read or written it before
+    // the dry run), so its stats are the last-saved snapshot, not a
+    // live recomputation — correctly flagged as such.
+    assert_eq!(dry_rows[0]["stats_are_snapshot"], true);
+
+    let real = run_in(&["compact", "--json"]);
+    assert_eq!(real.status.code(), Some(0), "{real:?}");
+    let real_value: serde_json::Value = serde_json::from_slice(&real.stdout)
+        .unwrap_or_else(|error| panic!("--json must be one JSON document: {error}"));
+    let real_rows = real_value.as_array().expect("--json is an array");
+    assert_eq!(real_rows.len(), 1);
+    assert_eq!(real_rows[0]["name"], "sake");
+    assert!(real_rows[0]["dead_edges"].as_u64().unwrap() > 0);
+    assert!(real_rows[0]["bytes_before"].as_u64().unwrap() > 0);
+
     let _ = std::fs::remove_dir_all(&dir);
 }
 

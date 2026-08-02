@@ -50,6 +50,103 @@ fn an_offline_import_lands_facts_passage_and_aliases_the_server_serves() {
     let _ = std::fs::remove_dir_all(&batches);
 }
 
+/// `import --json` (issue #371) must answer the same shape `POST
+/// /import` does for the identical batch against an equally-empty
+/// starting state — one schema, not two that could drift.
+#[test]
+fn an_offline_import_json_matches_the_http_endpoints_own_shape() {
+    let batches = batch_dir("import-json-parity");
+    let file = batches.join("guide.jsonl");
+    let body = "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-guide\", \
+                \"create\": {\"description\": \"d\"}}\n\
+                {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 2.0}\n\
+                {\"passage\": \"蔵の杜氏は高瀬。\"}\n";
+    std::fs::write(&file, body).unwrap();
+
+    let data_dir =
+        std::env::temp_dir().join(format!("taguru-http-import-json-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data_dir);
+    let (code, stdout, stderr) = run_import(&data_dir, &["--json", file.to_str().unwrap()]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let local: Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|error| panic!("--json must be one JSON document: {error}\n{stdout}"));
+    assert_eq!(local["dry_run"], json!(false));
+    let local_outcome = &local["batches"][0];
+    assert_eq!(local_outcome["context"], json!("sake"));
+    assert_eq!(local_outcome["source"], json!("doc-guide"));
+    assert_eq!(local_outcome["created"], json!(true));
+    assert_eq!(local_outcome["associations"], json!(1));
+    assert_eq!(local_outcome["passage_stored"], json!(true));
+    assert!(local.get("groups").is_none(), "{local}");
+
+    // The same batch, POSTed to a freshly booted server (same
+    // empty-context starting state) — the per-batch outcome must
+    // match field for field.
+    let server = Server::start("http-import-json-parity");
+    let (status, remote) = post_import(&server, body, None);
+    assert_eq!(status, 200, "{remote}");
+    let remote_outcome = &remote["result"]["batches"][0];
+    assert_eq!(local_outcome, remote_outcome, "local vs remote outcome");
+
+    let _ = std::fs::remove_dir_all(&batches);
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+/// `import --dry-run --json` offline never boots the registry, so it
+/// cannot know `created`/`retracted` the way a real apply (or the
+/// server's own `?dry_run=true`, which does boot) can — those report
+/// as 0/false rather than a guess, and `groups` stays absent even when
+/// the stream carries one, per the `--help` text's own honesty
+/// commitment.
+#[test]
+fn an_offline_dry_run_json_reports_pre_apply_counts_only() {
+    let batches = batch_dir("import-json-dry-run");
+    let file = batches.join("guide.jsonl");
+    std::fs::write(
+        &file,
+        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-guide\", \
+         \"create\": {\"description\": \"d\"}}\n\
+         {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 2.0}\n\
+         {\"alias\": \"Aomine\", \"canonical\": \"蔵\", \"kind\": \"concept\"}\n\
+         {\"taguru_group\": 1, \"name\": \"brewers\", \"contexts\": [\"sake\"]}\n",
+    )
+    .unwrap();
+
+    let data_dir = std::env::temp_dir().join(format!(
+        "taguru-http-import-json-dry-run-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&data_dir);
+    let (code, stdout, stderr) =
+        run_import(&data_dir, &["--dry-run", "--json", file.to_str().unwrap()]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let report: Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|error| panic!("--json must be one JSON document: {error}\n{stdout}"));
+    assert_eq!(report["dry_run"], json!(true));
+    let outcome = &report["batches"][0];
+    assert_eq!(outcome["context"], json!("sake"));
+    assert_eq!(outcome["associations"], json!(1));
+    assert_eq!(outcome["aliases"], json!(1));
+    assert_eq!(
+        outcome["created"],
+        json!(false),
+        "unknowable without a boot — must not guess: {outcome}"
+    );
+    assert_eq!(outcome["retracted"], json!(0), "{outcome}");
+    assert!(
+        report.get("groups").is_none(),
+        "a dry run never previews group restoration: {report}"
+    );
+
+    // Nothing was touched: no data directory was even created.
+    assert!(
+        !data_dir.exists(),
+        "a dry run must not create TAGURU_DATA_DIR"
+    );
+
+    let _ = std::fs::remove_dir_all(&batches);
+}
+
 /// `apply_batch`'s question bookkeeping (src/ingest.rs) had no coverage
 /// of its own — only the direct `POST .../sources` path (see
 /// `store_passages_accepts_questions_and_reports_the_bookkeeping`) was

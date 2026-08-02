@@ -87,12 +87,29 @@
     <pre><code>taguru import batch/                  <span class="c"># every *.jsonl under batch/, in name order</span>
 taguru import --dry-run batch/        <span class="c"># validate and report; touches nothing</span>
 taguru import --config prod.env a.jsonl b.jsonl
-taguru import --url http://127.0.0.1:8248 batch/   <span class="c"># send to a running server instead</span></code></pre>
+taguru import --url http://127.0.0.1:8248 batch/   <span class="c"># send to a running server instead</span>
+taguru import --json batch/           <span class="c"># {dry_run, batches: [...], groups: [...]} instead of text</span></code></pre>
     <p>Exit codes: <code>0</code> everything applied · <code>1</code> something was refused or failed (details on stderr) · <code>2</code> usage error.</p>
     <p>
       <code>--no-embed</code> is offline-only — combined with <code>--url</code> it is a usage
       error, since the server's own <code>TAGURU_EMBED_URL</code> configuration decides once the
       request lands there.
+    </p>
+    <p>
+      <code>--json</code> answers the same shape <code>POST /import</code>'s own response body
+      does — one <code>ImportOutcome</code> per batch under <code>batches</code>, one
+      <code>GroupImportOutcome</code> per <code>taguru_group</code> record under
+      <code>groups</code> (omitted entirely when the stream carried none) — so a script parses
+      one schema whether it called the CLI or the HTTP endpoint directly. With <code>--url</code>,
+      every field is exact: the server always answers from the same code path a real apply runs
+      (<code>preview_batch</code> under <code>--dry-run</code>). Offline, a real (non-dry-run) run
+      is exact the same way; offline <code>--dry-run</code> is the one exception — it never boots
+      the registry (so it needs no directory lock to validate files), and without a boot it cannot
+      know <code>created</code>/<code>retracted</code> or any <code>*_dropped</code> count the
+      way a real apply can. Those fields read <code>0</code>/<code>false</code> rather than a
+      guess, and <code>groups</code> is always absent for the same reason the HTTP endpoint's own
+      <code>?dry_run=true</code> omits it: restoring a group has no read-only twin to preview
+      through.
     </p>
   </section>
 

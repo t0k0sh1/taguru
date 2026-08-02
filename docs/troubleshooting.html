@@ -92,6 +92,7 @@
           <tr><td>a client chokes on an unexpected <code>{plan, hits}</code> object, or can't find <code>plan</code></td><td>version skew — a 0.3.x client against a 0.4.x server</td><td>same as above</td><td><a href="#compatibility">Compatibility</a></td></tr>
           <tr><td><code>IncompatibleServerError</code> raised before the SDK's first real request</td><td>the SDK and server share no <code>http_contract</code> version — a real, confirmed incompatibility, not a false alarm</td><td>read the error's own message — it names which side to upgrade and the exact command</td><td><a href="#compatibility">Compatibility</a></td></tr>
           <tr><td>behavior doesn't match the docs; a documented field is just missing</td><td>a stale Docker image — <code>latest</code> was never re-pulled</td><td><code>/metrics</code> → <code>taguru_build_info{version="…"}</code></td><td><a href="#stale-image">The image you think you're running</a></td></tr>
+          <tr><td>a long-lived context keeps growing and you're not sure a rebuild would help</td><td>append-only dead weight (retracted edges, unlinked attributions, arena slack) that hasn't been reclaimed yet</td><td><code>taguru compact --dry-run</code> (or <code>--dry-run --json</code>)</td><td><a href="#is-compaction-worth-it">Is compact worth running?</a></td></tr>
           <tr><td>an answer takes minutes, but Taguru's own request logs show milliseconds</td><td>LLM generation, not Taguru</td><td>compare end-to-end time against the <code>latency_ms</code> log field</td><td><a href="#latency">Whose seconds are they?</a>, <a href="#local-llm">The serving layer</a></td></tr>
           <tr><td>everything is slow, including a bare <code>curl</code> search with no LLM involved</td><td>Taguru itself, or its embedding provider</td><td><code>"http"</code> log lines; <code>TAGURU_LOG_SEARCHES=1</code> if needed (logs raw cue text — see caveat)</td><td><a href="#latency">Whose seconds are they?</a>, <a href="#embedding">The semantic lane</a></td></tr>
           <tr><td>search still returns results, but paraphrased queries stopped matching</td><td>the semantic lane silently degraded to lexical-only</td><td><code>plan.contexts[].lanes.vector.ran</code> on the search response</td><td><a href="#embedding">The semantic lane</a></td></tr>
@@ -225,6 +226,47 @@ docker compose up -d</code></pre>
       <a href="docker-compose.html#backup">Docker Compose — backups</a> for <code>POST
       /flush</code> + snapshot, <code>taguru export</code>/<code>import</code>, and
       <code>TAGURU_REPLICATE_URL</code> + <code>taguru restore</code>.
+    </p>
+  </section>
+
+  <section id="is-compaction-worth-it">
+    <h2>Is <code>compact</code> worth running on this context?</h2>
+    <p class="section-sub">
+      The append-only image format never reclaims space on its own between compactions:
+      retraction unlinks attribution records but doesn't erase them, and alias removal leaves
+      arena bytes behind. <code>compact --dry-run</code> (issue #371) answers "how much dead
+      weight is standing right now" without rebuilding anything, so you can decide whether a
+      rebuild is worth it before paying for one.
+    </p>
+    <pre><code><span class="c"># offline — reads state.directory(), opens nothing</span>
+taguru compact --dry-run
+
+<span class="c"># a running server — GET /contexts, never POST .../compact</span>
+taguru compact --dry-run --url http://127.0.0.1:8248
+
+<span class="c"># machine-readable, e.g. to gate a maintenance job on dead_ratio</span>
+taguru compact --dry-run --json | jq '.[] | select(.dead_ratio > 0.2)'</code></pre>
+    <p>
+      Each row reports <code>dead_edges</code>, <code>dead_ratio</code>, <code>dead_attributions</code>,
+      and <code>arena_slack</code> — the exact numbers a real compaction would shed, since they're
+      read from the same live-for-hot/snapshot-for-cold <code>ContextStats</code> <code>GET
+      /contexts</code> already serves (no server-side change was needed to add this: the stats
+      were already on the wire, just not surfaced by the CLI). One thing it deliberately does
+      <b>not</b> predict: the rebuilt image's byte size (<code>bytes_after</code>) — that depends
+      on exactly how the rewrite lays out the surviving content, which only running the rewrite
+      produces. A row with <code>"stats_are_snapshot": true</code> means the context is cold (not
+      currently loaded) or came from a remote listing, so its numbers are the last-saved snapshot
+      rather than a live recomputation — still accurate as of the last flush, just not
+      up-to-the-millisecond.
+    </p>
+    <p>
+      There's no fixed threshold that's right for every deployment — a context with heavy
+      revision traffic and light footprint may not be worth compacting even at a high
+      <code>dead_ratio</code>, and <code>TAGURU_AUTO_COMPACT</code> already handles the common
+      case (ratio-triggered, from the flusher tick) without any CLI involvement at all. This
+      command is for the cases automatic compaction doesn't cover: an opted-out deployment, or
+      deciding by hand whether a specific context is worth the maintenance window before running
+      <code>taguru compact</code> for real.
     </p>
   </section>
 
