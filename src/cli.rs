@@ -57,7 +57,8 @@ USAGE:
   taguru version                        print this binary's version; a running
                                         server reports its own version in its
                                         GET /health response body
-  taguru health [--config FILE] [URL]   exit 0 iff a running server's /health
+  taguru health [--config FILE] [--url URL] [URL]
+                                        exit 0 iff a running server's /health
                                         answers 200 — the container
                                         HEALTHCHECK; URL defaults to TAGURU_ADDR
                                         (the config file is applied first, so a
@@ -141,16 +142,20 @@ USAGE:
                                         regressed/added/removed cases (ADR
                                         0004 §9.2; see: taguru evaluate
                                         compare --help)
-  taguru calibrate --context NAME --probes FILE [--json] [URL]
+  taguru calibrate --context NAME --probes FILE [--json] [--url URL] [URL]
                                         measure the semantic-floor bands of a
                                         running server's embedding model with
                                         (cue, expected) probe pairs and print
                                         the floor between them — the floor is
                                         a property of the model, remeasured
                                         per switch (see: taguru calibrate
-                                        --help); URL defaults to TAGURU_ADDR
-  taguru communities --context NAME [--into NAME] [--dry-run] [--json] [URL]
-  taguru communities --group NAME [--dry-run] [--json] [URL]
+                                        --help); --url and the positional URL
+                                        are aliases, name the target either
+                                        way; unnamed, it defaults to
+                                        TAGURU_ADDR
+  taguru communities --context NAME [--into NAME] [--dry-run] [--json]
+                     [--url URL] [URL]
+  taguru communities --group NAME [--dry-run] [--json] [--url URL] [URL]
                                         derive (or refresh) a community-
                                         summaries artifact from a running
                                         server's context: server-side
@@ -164,7 +169,9 @@ USAGE:
                                         --group derives one artifact per
                                         member context instead, transitively,
                                         with no cross-context merge (see:
-                                        taguru communities --help); URL
+                                        taguru communities --help); --url and
+                                        the positional URL are aliases, name
+                                        the target either way; unnamed, it
                                         defaults to TAGURU_ADDR
   taguru --help                         this text
 
@@ -482,18 +489,19 @@ fn parse_serve(args: &[String]) -> ServeArgs {
     }
 }
 
-/// `taguru health [--config FILE] [URL]`: one GET against a running
-/// server's /health, exit 0 iff it answers 200. This exists for
-/// container HEALTHCHECKs — a scratch image has no curl, but it always
-/// has taguru itself. /health is exempt from bearer auth, so no token
-/// is needed here.
+/// `taguru health [--config FILE] [--url URL] [URL]`: one GET against
+/// a running server's /health, exit 0 iff it answers 200. This exists
+/// for container HEALTHCHECKs — a scratch image has no curl, but it
+/// always has taguru itself. /health is exempt from bearer auth, so no
+/// token is needed here.
 ///
-/// The config file (`--config`, or `TAGURU_CONFIG` like serve) is
-/// applied before the default URL is resolved: in a deployment whose
-/// TAGURU_ADDR lives in that file, the probe must aim at the port the
-/// server actually bound, not at the built-in default — a health
-/// check that asks the wrong door reports a healthy server unhealthy
-/// forever.
+/// `--url` is an alias for the positional form (issue #248 item 1) —
+/// either names the target, never both. The config file (`--config`,
+/// or `TAGURU_CONFIG` like serve) is applied before the default URL is
+/// resolved: in a deployment whose TAGURU_ADDR lives in that file, the
+/// probe must aim at the port the server actually bound, not at the
+/// built-in default — a health check that asks the wrong door reports
+/// a healthy server unhealthy forever.
 fn health(args: &[String]) -> i32 {
     let mut config: Option<PathBuf> = None;
     let mut explicit_url: Option<String> = None;
@@ -502,8 +510,9 @@ fn health(args: &[String]) -> i32 {
         match arg.as_str() {
             "--help" | "-h" => {
                 println!(
-                    "usage: taguru health [--config FILE] [URL]   \
-                     exit 0 iff GET URL/health answers 200"
+                    "usage: taguru health [--config FILE] [--url URL] [URL]   \
+                     exit 0 iff GET URL/health answers 200 — --url and the \
+                     positional form are aliases, name the target either way"
                 );
                 return 0;
             }
@@ -511,6 +520,13 @@ fn health(args: &[String]) -> i32 {
                 Some(path) if config.is_none() => config = Some(PathBuf::from(path)),
                 Some(_) => usage_error("--config given twice"),
                 None => usage_error("--config needs a file path"),
+            },
+            "--url" => match rest.next() {
+                Some(url) if explicit_url.is_none() => {
+                    explicit_url = Some(url.trim_end_matches('/').to_string());
+                }
+                Some(_) => usage_error("'health' takes either --url or a positional URL, not both"),
+                None => usage_error("--url needs a server URL"),
             },
             flag if flag.starts_with('-') => {
                 usage_error(&format!("'health' does not take '{flag}'"))
@@ -520,7 +536,7 @@ fn health(args: &[String]) -> i32 {
                     .replace(url.trim_end_matches('/').to_string())
                     .is_some()
                 {
-                    usage_error(&format!("'health' takes one optional URL, got '{url}'"));
+                    usage_error("'health' takes either --url or a positional URL, not both");
                 }
             }
         }

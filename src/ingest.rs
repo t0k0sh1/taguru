@@ -201,6 +201,11 @@ pub fn run(args: &[String]) -> i32 {
              configuration decides",
         );
     }
+    // TAGURU_CONFIG fallback (issue #248 item 2): --config wins, but a
+    // deployment file baked in via the environment still applies when
+    // it's absent — the same priority serve/health/calibrate/
+    // communities/evaluate/restore already give it.
+    let config = config.or_else(|| std::env::var("TAGURU_CONFIG").ok().map(PathBuf::from));
     // SAFETY (same contract as serve): applied while the process is
     // still single-threaded — import never starts a runtime at all.
     // Loaded before the --url dispatch below, too: a config file is

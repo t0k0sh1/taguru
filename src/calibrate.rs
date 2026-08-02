@@ -39,7 +39,8 @@ use crate::config::{load_config, subcommand_usage_error};
 use crate::remote::Api;
 
 const CALIBRATE_USAGE: &str =
-    "usage: taguru calibrate --context NAME --probes FILE [--json] [--config FILE] [URL]
+    "usage: taguru calibrate --context NAME --probes FILE [--json] [--config FILE]
+                         [--url URL] [URL]
 
 Measures the semantic-floor bands of a RUNNING server's embedding
 model and prints a suggested TAGURU_SEMANTIC_FLOOR — the floor is a
@@ -64,8 +65,9 @@ dimension — never papered over with a number.
 
 The server is asked read-only (works against a replica). Auth rides
 the same variables the server reads: TAGURU_API_TOKEN, or the first
-key of TAGURU_API_TOKENS. URL defaults to TAGURU_ADDR after --config
-applies, exactly like `taguru health`.
+key of TAGURU_API_TOKENS. --url and the positional URL are aliases —
+name the target either way, never both; unnamed, it defaults to
+TAGURU_ADDR after --config applies, exactly like `taguru health`.
 
 exit codes: 0 report produced (an overlap verdict included) ·
 1 calibration impossible · 2 usage error
@@ -217,6 +219,15 @@ pub fn run(args: &[String]) -> i32 {
                 Some(_) => return usage("--config given twice"),
                 None => return usage("--config needs a file path"),
             },
+            "--url" => match rest.next() {
+                Some(url) if explicit_url.is_none() => {
+                    explicit_url = Some(url.trim_end_matches('/').to_string());
+                }
+                Some(_) => {
+                    return usage("either --url or a positional URL, not both");
+                }
+                None => return usage("--url needs a server URL"),
+            },
             "--json" => as_json = true,
             flag if flag.starts_with('-') => {
                 return usage(&format!("unknown argument '{flag}'"));
@@ -226,7 +237,7 @@ pub fn run(args: &[String]) -> i32 {
                     .replace(url.trim_end_matches('/').to_string())
                     .is_some()
                 {
-                    return usage(&format!("one optional URL only, got '{url}'"));
+                    return usage("either --url or a positional URL, not both");
                 }
             }
         }
