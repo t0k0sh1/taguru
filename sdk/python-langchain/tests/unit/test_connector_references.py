@@ -493,6 +493,54 @@ def test_redirected_url_retargets_without_double_counting(
     assert by_phase["imported"] == f"{server.base_url}/new.html"
 
 
+def test_two_urls_redirecting_to_the_same_final_url_do_not_corrupt_the_tally(
+    sync_client: Taguru, async_client: AsyncTaguru
+) -> None:
+    """The post-fetch twin of `test_duplicate_reference_is_read_exactly_once`
+    — two DIFFERENT pre-fetch references (so `plan_references`'s own
+    pre-fetch dedup cannot catch this) both redirect to the SAME final
+    URL. Naively overwriting the winning source's state when the second
+    one's `retarget` runs would silently turn its real `imported` outcome
+    back into `unchanged`/`discovered` in the final tally."""
+    with serve(
+        {
+            "/old-a.html": Route(location="/new.html"),
+            "/old-b.html": Route(location="/new.html"),
+            "/new.html": Route(body=b"<html><body><p>paragraph one.</p></body></html>"),
+        }
+    ) as server:
+        report = sync_references(
+            [f"{server.base_url}/old-a.html", f"{server.base_url}/old-b.html"],
+            ingester=_ingester(sync_client, async_client),
+            checkpoints=RecordingCheckpointStore(),
+            connectors=(TextFileConnector(), HtmlConnector(allow_private_networks=True)),
+        )
+        new_url = f"{server.base_url}/new.html"
+
+    # The real outcome survives: exactly one import, under the shared
+    # final URL — never silently downgraded to unchanged/discovered by
+    # the second reference's own retarget.
+    assert report.imported == 1
+    assert report.discovered == 0
+    assert report.unchanged == 0
+    assert report.failed == 0
+
+    events_by_source: dict[str, list[str]] = {}
+    for event in report.events:
+        events_by_source.setdefault(event.source, []).append(event.phase)
+    assert events_by_source[new_url][-1] == "imported"
+    # The second (losing) reference is visible as a duplicate of the
+    # winning final URL, not as a second competing history under it.
+    duplicate_events = [
+        e
+        for e in report.events
+        if e.diagnostic is not None and e.diagnostic.code == "duplicate_source"
+    ]
+    assert len(duplicate_events) == 1
+    assert duplicate_events[0].diagnostic is not None
+    assert new_url in duplicate_events[0].diagnostic.message
+
+
 # ---------------------------------------------------------------------------
 # should_stop, ingest failure, connector-raised exceptions
 # ---------------------------------------------------------------------------

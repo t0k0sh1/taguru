@@ -317,7 +317,11 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Changed
 - `sync_object_storage` (#351) is rewritten onto the shared `RunRecorder`
-  (#353) and gains an `events_out=` parameter. Three observable behavior
+  (#353) and gains an `events_out=` parameter: a path (truncated on open,
+  like `taguru extract`'s own `--diagnostics-out`) or an already-open text
+  stream to also stream the per-source phase trail as JSONL — one UTF-8
+  JSON object per line, written the moment each phase transition happens,
+  never appended to across separate runs. Three observable behavior
   changes: (1) a `SourceEvent`'s `bytes` on the `parsed` phase is now the
   object's own raw byte size (matching every other connector driver's
   convention — `SourceEvent.bytes` is never the parsed text's byte count,

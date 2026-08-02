@@ -378,7 +378,7 @@ class RunRecorder:
             diagnostic=diagnostic,
         )
 
-    def retarget(self, old: str, new: str) -> None:
+    def retarget(self, old: str, new: str) -> bool:
         """Renames ``old`` to ``new`` in this run's tally and timing state
         without emitting a new event — for a source whose final identity
         is only known after a fetch (ADR 0007 §11.1, e.g. an HTTP redirect:
@@ -389,27 +389,45 @@ class RunRecorder:
 
         ``old``'s phase history stops counting under ``old`` — the next
         :meth:`record` for either name only ever tallies once, as one
-        reference. A no-op when ``old`` was never discovered under this
-        run (nothing to rename) or ``old == new`` (nothing changed).
+        reference. Returns ``True`` when the rename applied normally
+        (including the no-op cases: ``old == new``, or ``old`` was never
+        discovered under this run).
 
-        Not safe when ``new`` is already a DIFFERENT source this run
-        already has its own history for (two distinct inputs colliding
-        onto the same post-fetch identity, e.g. two different URLs that
-        both redirect to the same final URL) — that case silently
-        clobbers ``new``'s prior state. Genuinely rare (it requires a
-        post-fetch collision neither :func:`~taguru_langchain.
-        ingest_connectors.references.plan_references`'s pre-fetch
-        dedup nor :meth:`duplicate` can see coming) and out of scope for
-        issue #353; flagged here rather than silently mishandled."""
+        Returns ``False`` — a POST-fetch collision — when ``new`` is
+        already a DIFFERENT source this run has its own, independent
+        history for (two distinct inputs redirecting to the same final
+        URL, e.g.). Silently overwriting ``new``'s prior state in that
+        case is exactly :meth:`duplicate`'s own problem one layer later:
+        if the first input already reached ``imported``, blindly moving
+        the second input's still-``discovered`` state onto ``new`` would
+        reset ``new``'s last phase back to ``discovered``, then the
+        caller's own subsequent :meth:`record` calls for the second
+        input — which necessarily continue under ``new`` too, since that
+        is now the fetched document's identity — would drive it through
+        `parsed`/`unchanged` again, silently erasing the real `imported`
+        outcome from the tally. Instead: ``old`` is recorded as a
+        duplicate of ``new`` (:meth:`duplicate`, so the tally is
+        untouched), and the caller MUST treat ``False`` as "this
+        reference is already fully handled" — skip any further
+        recording, checkpoint write, or import attempt for it, the same
+        way a pre-fetch duplicate (:func:`~taguru_langchain.
+        ingest_connectors.references.plan_references`) is never read at
+        all."""
         if old == new:
-            return
+            return True
+        if new in self._sources:
+            self._sources.pop(old, None)
+            self._last_phase.pop(old, None)
+            self.duplicate(old, of=new)
+            return False
         state = self._sources.pop(old, None)
         if state is None:
-            return
+            return True
         self._sources[new] = state
         phase = self._last_phase.pop(old, None)
         if phase is not None:
             self._last_phase[new] = phase
+        return True
 
     def duplicate(self, reference: str, *, of: str) -> None:
         """Records ``reference`` as a rejected duplicate of the

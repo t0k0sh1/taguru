@@ -214,6 +214,37 @@ def test_retarget_is_a_noop_when_old_equals_new() -> None:
     assert report.imported == 1
 
 
+def test_retarget_returns_true_on_a_normal_rename() -> None:
+    recorder = RunRecorder(connector="test")
+    recorder.discovered("old")
+    assert recorder.retarget("old", "new") is True
+
+
+def test_retarget_onto_an_existing_different_source_does_not_clobber_it() -> None:
+    """The bug this return-value contract exists to prevent: two distinct
+    references (`a` and `b`) both retargeting onto the same already-
+    imported `new` must never let the second one reset `new`'s tally."""
+    recorder = RunRecorder(connector="test")
+    recorder.discovered("a")
+    assert recorder.retarget("a", "new") is True
+    recorder.record("new", "imported")
+
+    recorder.discovered("b")
+    assert recorder.retarget("b", "new") is False
+
+    report = recorder.finish()
+    assert report.imported == 1
+    assert report.discovered == 0
+    assert report.unchanged == 0
+    duplicate_events = [
+        e
+        for e in report.events
+        if e.diagnostic is not None and e.diagnostic.code == "duplicate_source"
+    ]
+    assert len(duplicate_events) == 1
+    assert duplicate_events[0].source == "b"
+
+
 def test_duplicate_does_not_disturb_the_claimed_sources_tally() -> None:
     """The bug this method exists to prevent: a duplicate input sharing an
     already-imported source's id must never turn that source's tally back

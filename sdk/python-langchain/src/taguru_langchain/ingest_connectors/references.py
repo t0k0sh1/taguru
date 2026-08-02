@@ -509,7 +509,13 @@ def sync_references(
                 continue
 
             if document.source != plan.source:
-                recorder.retarget(plan.source, document.source)
+                if not recorder.retarget(plan.source, document.source):
+                    # A post-fetch collision (e.g. two different URLs
+                    # redirecting to the same final URL) — already
+                    # recorded as a duplicate of the winning source with
+                    # no effect on its tally; this reference is fully
+                    # handled, never imported under a competing identity.
+                    continue
             source = document.source
 
             if not document.text:
