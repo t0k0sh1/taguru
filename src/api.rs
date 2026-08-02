@@ -146,6 +146,11 @@ pub(crate) fn version_facts() -> &'static serde_json::Value {
             "mcp_contract": {"current": MCP_CONTRACT, "supported": [MCP_CONTRACT]},
             "mcp_protocol": {"supported": crate::mcp::SUPPORTED_PROTOCOL_VERSIONS},
             "batch_formats": [crate::ingest::BATCH_VERSION],
+            // Equality-checked like `batch_formats`, not range-accepted
+            // like `image_formats` below — ADR 0009 §5.3 bumps
+            // `SCHEMA_VERSION` on every shape change, additive or
+            // breaking, so there is never a range of readable values.
+            "schema_formats": [crate::schema::SCHEMA_VERSION],
             // Every version from 1 through the current one still loads
             // (`src/context/image.rs`'s range-acceptance check), unlike
             // batch/communities formats below, which are checked for

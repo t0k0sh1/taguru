@@ -43,6 +43,13 @@ impl AppState {
         // whole directory from the first request. The `.ctx` scan
         // above naturally found any family whose image IS local
         // (cache-mode reuse); `or_insert`-style entry keeps those.
+        // Not schema-verified here: a lazy bucket boot registers these
+        // stems from the sidecar meta ALONE — their families (schema
+        // file included) are not local yet, so there is nothing on disk
+        // to check a digest against. `ensure_hot`'s own copy of ADR
+        // 0009 §5.2's check runs once hydration actually lands the
+        // family, which is the earliest point verification is possible
+        // for this path.
         if let Some(hydrator) = &options.hydrator {
             for stem in hydrator.context_stems() {
                 let Some(name) = name_from_stem(&stem) else {
@@ -54,8 +61,18 @@ impl AppState {
                         stats,
                         usage,
                         revision,
+                        schema_digest,
                     } = read_meta_file(&data_dir, &stem);
-                    Arc::new(Entry::new(meta, stats, Slot::Cold, 0, 0, usage, revision))
+                    Arc::new(Entry::new(
+                        meta,
+                        stats,
+                        Slot::Cold,
+                        0,
+                        0,
+                        usage,
+                        revision,
+                        schema_digest,
+                    ))
                 });
             }
         }
@@ -329,7 +346,25 @@ fn scan_data_dir(data_dir: &Path) -> io::Result<(BTreeMap<String, Arc<Entry>>, R
                 stats,
                 usage,
                 revision,
+                schema_digest,
             } = read_meta_file(data_dir, stem);
+            // ADR 0009 §5.1/§5.2: an unreadable, malformed, invalid, or
+            // digest-mismatched schema file refuses the WHOLE boot — a
+            // schema is never allowed to fall back to "as if absent"
+            // the way a corrupt `.meta.json` sidecar does just above,
+            // since that fallback is indistinguishable from `mode:
+            // off` and would silently disable `strict`. `Ok(None)`
+            // (nothing recorded, nothing on disk — a schema-free
+            // context) is the only outcome that lets this candidate
+            // through; every other case is folded into the `?` below
+            // and stops the boot for the whole directory, exactly as
+            // an unreadable `.ctx` already does one candidate over.
+            if let Err(error) = schema::load_schema(data_dir, stem, schema_digest.as_deref()) {
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!("context '{name}': {error}"),
+                ));
+            }
             // The gauge must see leftover logs from the first scrape,
             // not only after each context's first touch.
             let wal_bytes = fs::metadata(wal_path(data_dir, stem))
@@ -338,7 +373,7 @@ fn scan_data_dir(data_dir: &Path) -> io::Result<(BTreeMap<String, Arc<Entry>>, R
             let passages_wal_bytes = fs::metadata(passages_wal_path(data_dir, stem))
                 .map(|meta| meta.len())
                 .unwrap_or(0);
-            (
+            Ok((
                 name,
                 Arc::new(Entry::new(
                     meta,
@@ -348,11 +383,12 @@ fn scan_data_dir(data_dir: &Path) -> io::Result<(BTreeMap<String, Arc<Entry>>, R
                     passages_wal_bytes,
                     usage,
                     revision,
+                    schema_digest,
                 )),
-            )
+            ))
         })
         .into_iter()
-        .collect();
+        .collect::<io::Result<BTreeMap<String, Arc<Entry>>>>()?;
 
     // Surviving import markers: each says a multi-store batch opened
     // and never finished — a crash (or an unretried refusal) between
@@ -615,5 +651,164 @@ mod tests {
         assert_eq!(found, expected);
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A context with no `{stem}.schema.json` and no recorded digest
+    /// boots exactly as it did before #379 — the acceptance criterion
+    /// ADR 0009 §7.1 states by construction.
+    #[test]
+    fn a_context_with_no_schema_boots_unchanged() {
+        let dir = scratch_dir("schema-off-boots");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state.flush_dirty();
+        }
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        assert!(state.directory_entry("sake").is_some());
+        drop(state);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Hand-edits the meta sidecar's `schema_digest` directly — S1 ships
+    /// no writer for it (`PUT /contexts/{name}/schema` is #380), so
+    /// this is the only way a test can put one there; the boot refusal
+    /// under test does not care how it arrived.
+    fn record_schema_digest(dir: &Path, stem: &str, digest: &str) {
+        let path = meta_path(dir, stem);
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        value["schema_digest"] = serde_json::json!(digest);
+        fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    }
+
+    /// ADR 0009 §5.1: a schema file that reads but does not parse
+    /// refuses the WHOLE boot (not just this one context) and sets the
+    /// mangled bytes aside — never a fresh-empty-record fallback, since
+    /// that is indistinguishable from `mode: off` and would silently
+    /// disable `strict`.
+    #[test]
+    fn a_corrupt_schema_file_refuses_the_boot_and_quarantines_the_bytes() {
+        let dir = scratch_dir("schema-corrupt-boots");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state.flush_dirty();
+        }
+        let bytes = b"not json";
+        fs::write(schema_path(&dir, "sake"), bytes).unwrap();
+        record_schema_digest(&dir, "sake", &crate::sha256::sha256_hex(bytes));
+
+        let error = AppState::boot(dir.clone(), usize::MAX, None)
+            .map(|_| ())
+            .unwrap_err();
+        assert!(error.to_string().contains("does not parse"), "{error}");
+        assert_eq!(fs::read(schema_corrupt_path(&dir, "sake")).unwrap(), bytes);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// ADR 0009 §5.2: the whole point of the recorded digest is to
+    /// catch a crash between `write_meta`'s revision bump and the
+    /// schema file's own separate `write_atomic` — simulated here by
+    /// simply recording a digest that does not match the file's actual
+    /// bytes. Refuses the boot rather than serving `strict` (or any
+    /// mode) under content that does not match what the revision claims.
+    #[test]
+    fn a_schema_digest_mismatch_refuses_the_boot() {
+        let dir = scratch_dir("schema-mismatch-boots");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state.flush_dirty();
+        }
+        let document =
+            br#"{"schema":1,"mode":"off","closed_labels":false,"types":{},"relations":{}}"#;
+        fs::write(schema_path(&dir, "sake"), document).unwrap();
+        record_schema_digest(
+            &dir,
+            "sake",
+            &crate::sha256::sha256_hex(b"a different document"),
+        );
+
+        let error = AppState::boot(dir.clone(), usize::MAX, None)
+            .map(|_| ())
+            .unwrap_err();
+        assert!(error.to_string().contains("does not match"), "{error}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The other direction of §5.2's mismatch: a digest recorded with
+    /// no corresponding file (the schema was deleted, or the write that
+    /// should have landed it never reached disk).
+    #[test]
+    fn a_recorded_digest_with_no_schema_file_refuses_the_boot() {
+        let dir = scratch_dir("schema-missing-boots");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state.flush_dirty();
+        }
+        record_schema_digest(&dir, "sake", "deadbeef");
+
+        let error = AppState::boot(dir.clone(), usize::MAX, None)
+            .map(|_| ())
+            .unwrap_err();
+        assert!(error.to_string().contains("is missing"), "{error}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `EntryInner::schema_digest` must survive every `write_meta`
+    /// call, not just the one at boot — otherwise the very next flush
+    /// after a successful boot would silently drop it back to `None`,
+    /// and the NEXT boot would then see a stray schema file with
+    /// nothing recorded for it (a digest mismatch, per the module's own
+    /// fail-closed contract). `update_meta` is a convenient write_meta
+    /// trigger that does not require going through flush timing.
+    #[test]
+    fn schema_digest_survives_a_meta_update_write() {
+        let dir = scratch_dir("schema-digest-survives");
+        let document =
+            br#"{"schema":1,"mode":"off","closed_labels":false,"types":{},"relations":{}}"#;
+        let digest = crate::sha256::sha256_hex(document);
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state.flush_dirty();
+        }
+        fs::write(schema_path(&dir, "sake"), document).unwrap();
+        record_schema_digest(&dir, "sake", &digest);
+
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .update_meta("sake", Some("updated".to_string()), None, None, None)
+            .unwrap()
+            .unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&fs::read(meta_path(&dir, "sake")).unwrap()).unwrap();
+        assert_eq!(
+            value["schema_digest"],
+            serde_json::json!(digest),
+            "a write must not silently drop the recorded schema digest"
+        );
+        drop(state);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

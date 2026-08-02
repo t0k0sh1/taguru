@@ -56,6 +56,7 @@ use crate::api::evidence::rerank::{EvidenceReranker, RerankOutcome};
 use crate::embedding::{EmbedPurpose, EmbeddingProvider, PassageVectorStore, VectorStore};
 use crate::groups::{self, GroupRecord};
 use crate::metrics::{ContextGaugeRow, GaugeSnapshot, Metrics, PerContextMetrics};
+use crate::schema;
 #[cfg(test)]
 use crate::storage::{clear_persistence_fault, fail_persistence_ops_after, write_atomic_private};
 use crate::storage::{
@@ -91,8 +92,8 @@ pub(crate) use concurrency::{Semaphore, dispatch_chunks_concurrently, parallel_m
 pub(crate) use paths::{
     IMPORT_MARKER_EXTENSION, ImportMarker, ResumedRenames, bm25_path, deleted_marker_path,
     image_path, import_marker_path, import_marker_paths, meta_path, passages_path,
-    passages_wal_path, pvectors_path, renaming_marker_path, resume_rename_markers, sources_path,
-    vectors_path, wal_path,
+    passages_wal_path, pvectors_path, renaming_marker_path, resume_rename_markers,
+    schema_corrupt_path, schema_path, sources_path, vectors_path, wal_path,
 };
 use paths::{rename_markers_targeting, write_rename_marker};
 pub(crate) use retrieval_cache::{CachedRetrieval, RetrievalKey};
@@ -347,6 +348,19 @@ struct MetaFile {
     /// from before the field existed: those report zeros until their
     /// first load or flush catches them up.
     revision: ContextRevision,
+    /// `sha256_hex` of `{stem}.schema.json`'s bytes as of this save,
+    /// `None` for a schema-free context — ADR 0009 §5.2's boot-time
+    /// consistency check. Written in the SAME `write_meta` call that
+    /// bumps `config_revision` (never separately), so a crash between
+    /// this field landing and the schema file's own `write_atomic`
+    /// leaves a detectable disagreement rather than a silently stale
+    /// enforcement: [`crate::schema::load_schema`] refuses to load
+    /// whenever the file on disk and this recorded value disagree, in
+    /// either direction. Defaulted for sidecars from before the field
+    /// existed, exactly like `revision` above — a pre-#379 context has
+    /// no schema file either, so `None` is also the correct fact, not
+    /// just a safe default.
+    schema_digest: Option<String>,
 }
 
 /// One row of `GET /contexts` — the routing directory an LLM client
@@ -524,6 +538,7 @@ struct ContextDiskUsage {
 }
 
 impl Entry {
+    #[allow(clippy::too_many_arguments)] // every cold-load/register call site, not an API
     fn new(
         meta: ContextMeta,
         stats: ContextStats,
@@ -532,6 +547,7 @@ impl Entry {
         passages_wal_bytes: u64,
         usage: ContextUsage,
         revision: ContextRevision,
+        schema_digest: Option<String>,
     ) -> Self {
         Self {
             inner: RwLock::new(EntryInner {
@@ -547,6 +563,7 @@ impl Entry {
                 counted_bytes: 0,
                 load_failure: None,
                 image_generation: 0,
+                schema_digest,
             }),
             dirty: AtomicBool::new(false),
             flushing: AtomicBool::new(false),
@@ -725,6 +742,16 @@ struct EntryInner {
     /// compaction while I staged" — this generation is what makes the
     /// two distinguishable.
     image_generation: u64,
+    /// [`MetaFile::schema_digest`]'s live value — seeded from the
+    /// sidecar at scan/register, like `graph_revision`/`config_revision`
+    /// above, and re-persisted by every `write_meta` call this entry
+    /// makes so a flush can never let it quietly revert to `None`.
+    /// Nothing in this issue writes a NEW value here (that is `PUT
+    /// /contexts/{name}/schema`'s job); this field exists so a value a
+    /// hand-edited sidecar or a future `PUT` recorded survives every
+    /// flush cycle intact, the same durability story `config_revision`
+    /// already has.
+    schema_digest: Option<String>,
 }
 
 impl EntryInner {
@@ -2289,6 +2316,7 @@ impl AppState {
             &inner.stats,
             &entry.usage.snapshot(),
             entry.revision_snapshot(inner),
+            inner.schema_digest.as_deref(),
         ) {
             tracing::warn!(
                 "config revision for '{name}' not persisted (lags until the next flush): {error}"
@@ -2573,6 +2601,22 @@ fn ensure_hot(
         inner.load_failure = Some((std::time::Instant::now(), error.clone()));
         return Err(error);
     }
+    // ADR 0009 §5.2's boot-time consistency check, run here rather than
+    // only at `scan_data_dir`: a hydrated (replica) family has no local
+    // schema file until the line above lands it, so `scan_data_dir`'s
+    // own pass (which runs before any hydration) cannot see it — this
+    // is the one place both the plain-boot and the lazy-bucket path
+    // are guaranteed to have the bytes locally before anything is
+    // decided from them. Cheap and redundant on the plain path (that
+    // one already passed the same check to get this far) but the only
+    // check the replica path gets, so it always runs rather than only
+    // when a hydrator is present.
+    if let Err(error) = schema::load_schema(data_dir, &stem, inner.schema_digest.as_deref()) {
+        let error = format!("context '{name}': {error}");
+        metrics.record_cache_load(false);
+        inner.load_failure = Some((std::time::Instant::now(), error.clone()));
+        return Err(error);
+    }
     let loaded = fs::read(image_path(data_dir, &stem))
         .map_err(|e| format!("context '{name}' image unreadable: {e}"))
         .and_then(|bytes| {
@@ -2769,6 +2813,7 @@ fn fnv64(bytes: &[u8]) -> u64 {
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x1_0000_01b3;
 
+#[allow(clippy::too_many_arguments)] // every whole-family save call site, not an API
 fn save_files(
     dir: &Path,
     name: &str,
@@ -2776,6 +2821,7 @@ fn save_files(
     stats: &ContextStats,
     usage: &ContextUsage,
     revision: ContextRevision,
+    schema_digest: Option<&str>,
     context: &Context,
 ) -> io::Result<()> {
     let stem = file_stem(name);
@@ -2788,7 +2834,7 @@ fn save_files(
     // same-name create — never a durable image with a defaulted sidecar,
     // which would resurrect a context `create` told the client had failed.
     // (Image-then-meta would do exactly that; see `create`'s doc.)
-    write_meta(dir, &stem, meta, stats, usage, revision)?;
+    write_meta(dir, &stem, meta, stats, usage, revision, schema_digest)?;
     write_atomic(&image_path(dir, &stem), &context.to_bytes())
 }
 
@@ -2799,12 +2845,14 @@ fn write_meta(
     stats: &ContextStats,
     usage: &ContextUsage,
     revision: ContextRevision,
+    schema_digest: Option<&str>,
 ) -> io::Result<()> {
     let file = MetaFile {
         meta: meta.clone(),
         stats: stats.clone(),
         usage: usage.clone(),
         revision,
+        schema_digest: schema_digest.map(str::to_string),
     };
     write_atomic(&meta_path(dir, stem), &serde_json::to_vec_pretty(&file)?)
 }
@@ -2821,12 +2869,23 @@ fn read_meta_file(dir: &Path, stem: &str) -> MetaFile {
     }
 }
 
+/// The recorded schema digest alone, for a caller (`taguru inspect`)
+/// that has no use for the rest of the sidecar and must not import
+/// `MetaFile` (private to this module). Same lenient fallback as
+/// [`read_meta_file`]: an unreadable or corrupt sidecar reports `None`
+/// here exactly as it would seed a fresh [`MetaFile::default`] at boot,
+/// so inspect's schema check judges a context by the same recorded
+/// value boot itself would.
+pub(crate) fn schema_digest_of(dir: &Path, stem: &str) -> Option<String> {
+    read_meta_file(dir, stem).schema_digest
+}
+
 /// One context's whole file family, by stem — the delete loop and the
 /// boot-time deletion sweep must never disagree about what "the whole
-/// family" means, so both read this one list. Built from the same nine
+/// family" means, so both read this one list. Built from the same ten
 /// path builders every other caller uses, so a file kind added there
 /// cannot silently miss this list.
-pub(crate) fn context_files(stem: &str) -> [String; 9] {
+pub(crate) fn context_files(stem: &str) -> [String; 10] {
     let unrooted = Path::new("");
     [
         image_path(unrooted, stem),
@@ -2838,6 +2897,10 @@ pub(crate) fn context_files(stem: &str) -> [String; 9] {
         bm25_path(unrooted, stem),
         vectors_path(unrooted, stem),
         wal_path(unrooted, stem),
+        // Last on purpose: a missing or lagging schema file must never
+        // block the pivot rename below, so it sits where a straggler is
+        // already tolerated as best-effort (ADR 0009 §5.1).
+        schema_path(unrooted, stem),
     ]
     .map(|path| path.to_string_lossy().into_owned())
 }
@@ -2853,9 +2916,9 @@ pub(crate) fn context_files(stem: &str) -> [String; 9] {
 /// sidecar that still sticks is best-effort — the rest are moved anyway
 /// so the retry has fewer orphans to chase — but the first such error
 /// is returned so the caller knows the move is incomplete and keeps the
-/// rename marker. All nine share `data_dir` as their parent, so one
+/// rename marker. All ten share `data_dir` as their parent, so one
 /// fsync after every rename covers the whole family durably instead of
-/// paying for it (via `commit_staged`) up to nine times.
+/// paying for it (via `commit_staged`) up to ten times.
 fn move_context_files(data_dir: &Path, from_stem: &str, to_stem: &str) -> io::Result<()> {
     let mut moved_any = false;
     let mut first_error: Option<io::Error> = None;

@@ -33,7 +33,7 @@ impl AppState {
     /// existence (and description) survives a crash from the moment the
     /// create call returns. A persistence failure fails the create.
     ///
-    /// The registry lock is NOT held across the disk work (up to seven
+    /// The registry lock is NOT held across the disk work (up to eight
     /// unlinks plus save_files' fsyncs — seconds on slow storage,
     /// behind which every operation on every context would otherwise
     /// stall). The name is reserved in `pending.creates` under the
@@ -92,6 +92,10 @@ impl AppState {
                     0,
                     usage,
                     ContextRevision::default(),
+                    // A brand-new generation never has a schema: the
+                    // sweep above just removed any stray file an
+                    // earlier generation of this name left behind.
+                    None,
                 )),
             );
         });
@@ -141,6 +145,7 @@ impl AppState {
             &stats,
             &usage,
             ContextRevision::default(),
+            None,
             &context,
         )
         .map_err(CreateError::Io)?;
@@ -173,6 +178,16 @@ impl AppState {
             pvectors_path(&self.0.data_dir, stem),
             bm25_path(&self.0.data_dir, stem),
             vectors_path(&self.0.data_dir, stem),
+            // Neither `create_files` nor (on its own) a rename ever
+            // WRITES this file — only `PUT /contexts/{name}/schema`
+            // will (#380) — so unlike `meta_path` (always freshly
+            // overwritten by `save_files`/the moved family) a stray one
+            // left by an earlier generation at this stem would
+            // otherwise silently attach to the fresh context. Swept
+            // here so a reused name never inherits schema litter that
+            // would fail `ensure_hot`'s digest check on the very first
+            // cold load (the fresh sidecar records no digest for it).
+            schema_path(&self.0.data_dir, stem),
             // A leftover marker from an earlier delete that could not
             // finish MUST go before this new generation of files
             // lands — otherwise the next boot's resume-sweep sees the
@@ -506,6 +521,7 @@ impl AppState {
             stats,
             usage,
             revision,
+            schema_digest,
         } = read_meta_file(&self.0.data_dir, &to_stem);
         let usage = ContextUsage {
             reads: usage.reads.max(final_usage.reads),
@@ -533,6 +549,7 @@ impl AppState {
             passages_wal_bytes,
             usage,
             revision,
+            schema_digest,
         ));
         self.0
             .registry
@@ -589,6 +606,7 @@ impl AppState {
         let meta = inner.meta.clone();
         let usage = entry.usage.snapshot();
         let revision = entry.revision_snapshot(&inner);
+        let schema_digest = inner.schema_digest.clone();
         if let Slot::Hot(context) = &mut inner.slot {
             // `ensure_hot`'s replay only applies WAL entries past
             // `applied_seq`, so baking in this watermark before saving
@@ -604,6 +622,7 @@ impl AppState {
                 &stats,
                 &usage,
                 revision,
+                schema_digest.as_deref(),
                 context,
             )?;
             inner.stats = stats;
@@ -689,6 +708,7 @@ impl AppState {
                 &inner.stats,
                 &entry.usage.snapshot(),
                 entry.revision_snapshot(inner),
+                inner.schema_digest.as_deref(),
             )
             .map(|()| inner.meta.clone());
             if result.is_err() {
@@ -1230,6 +1250,70 @@ mod tests {
             BTreeSet::from(["shochu".to_string()])
         );
 
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The schema file family regression: #379 added `{stem}.schema.json`
+    /// as `context_files`' tenth (last, best-effort) entry — this
+    /// confirms `move_context_files` actually carries it, the same as
+    /// every other sidecar, and that the moved sidecar's recorded digest
+    /// still matches the moved content so a later boot does not refuse.
+    #[test]
+    fn rename_context_moves_the_schema_file_and_its_recorded_digest_too() {
+        let dir = scratch_dir("rename-context-schema");
+        let document =
+            br#"{"schema":1,"mode":"off","closed_labels":false,"types":{},"relations":{}}"#;
+        let digest = crate::sha256::sha256_hex(document);
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state.create("sake", ContextMeta::default()).unwrap();
+            state.flush_dirty();
+        }
+        fs::write(schema_path(&dir, "sake"), document).unwrap();
+        let meta_file = meta_path(&dir, "sake");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&meta_file).unwrap()).unwrap();
+        value["schema_digest"] = serde_json::json!(digest);
+        fs::write(&meta_file, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+        // A fresh boot picks up the hand-planted schema (matching the
+        // digest above) before renaming it — `Entry::new`'s
+        // `schema_digest` parameter is what this test is really after.
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state.rename_context("sake", "shochu").unwrap();
+
+        assert!(
+            !schema_path(&dir, "sake").exists(),
+            "the old stem's schema file must move, not stay behind"
+        );
+        assert_eq!(fs::read(schema_path(&dir, "shochu")).unwrap(), document);
+        drop(state);
+
+        // If the recorded digest had not moved with the content (or had
+        // been dropped to `None` along the way), this boot would refuse.
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        assert!(state.directory_entry("shochu").is_some());
+        drop(state);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// `delete`'s unlink loop walks `context_files`, so the schema file
+    /// — its tenth entry since #379 — must go with the rest of the
+    /// family, never left as litter a reused name could later collide
+    /// with (see `sweep_stale_stem_files`'s own schema-litter guard).
+    #[test]
+    fn delete_removes_the_schema_file_with_the_rest_of_the_family() {
+        let dir = scratch_dir("delete-context-schema");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state.create("sake", ContextMeta::default()).unwrap();
+        state.flush_dirty();
+        fs::write(schema_path(&dir, "sake"), b"irrelevant to this test").unwrap();
+
+        state.delete("sake").unwrap().unwrap();
+
+        assert!(!schema_path(&dir, "sake").exists());
+        drop(state);
         let _ = fs::remove_dir_all(dir);
     }
 

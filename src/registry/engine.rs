@@ -203,6 +203,7 @@ impl AppState {
             // staging block's comment for why publishing a live value
             // instead would overstate content the WAL cannot cover.
             entry.revision_snapshot_with_graph(inner, staged_graph_revision),
+            inner.schema_digest.as_deref(),
         )
         .and_then(|()| commit_staged(&staged, &image));
         let published = match outcome {
@@ -728,6 +729,7 @@ impl AppState {
                         passages: entry.passage_revision.load(Ordering::Relaxed),
                         config: inner.config_revision,
                     },
+                    inner.schema_digest.as_deref(),
                     context,
                 ) {
                     tracing::warn!(

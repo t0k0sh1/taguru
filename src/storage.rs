@@ -261,7 +261,7 @@ pub(crate) fn stage_bytes(path: &Path, bytes: &[u8], private: bool) -> io::Resul
 /// the whole of a same-directory file move (`staged` need not be a
 /// `.tmp*` name): `rename_group` and `groups::scan_groups`'s
 /// rename-marker resume both use it that way. [`move_context_files`]
-/// moves nine files under one parent and fsyncs once itself instead of
+/// moves ten files under one parent and fsyncs once itself instead of
 /// calling this per file — see there.
 pub(crate) fn commit_staged(staged: &Path, path: &Path) -> io::Result<()> {
     rename_persisted_file(staged, path)?;

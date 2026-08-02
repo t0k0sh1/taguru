@@ -26,8 +26,23 @@ impl AppState {
                 stats,
                 usage,
                 revision,
+                schema_digest,
             } = read_meta_file(&self.0.data_dir, stem);
-            Arc::new(Entry::new(meta, stats, Slot::Cold, 0, 0, usage, revision))
+            // Not schema-verified here, same asymmetry as boot's
+            // hydrator registration (`boot_with`): the family this
+            // digest describes is not necessarily local yet, only the
+            // meta is. `ensure_hot`'s own copy of ADR 0009 §5.2's check
+            // runs once a load actually needs the bytes.
+            Arc::new(Entry::new(
+                meta,
+                stats,
+                Slot::Cold,
+                0,
+                0,
+                usage,
+                revision,
+                schema_digest,
+            ))
         });
     }
 
@@ -52,9 +67,18 @@ impl AppState {
             stats,
             usage: _,
             revision,
+            schema_digest,
         } = read_meta_file(&self.0.data_dir, &stem);
         inner.meta = meta;
         inner.stats = stats;
+        // Not `max`-merged like the revision counters below: a digest
+        // is a content fingerprint, not a monotonic counter, so the
+        // freshly re-read sidecar's value is simply the current truth
+        // — same posture as `meta`/`stats` just above. `load_failure`
+        // is cleared a few lines down regardless, so a stale digest
+        // left over from a load that quarantined on the OLD value
+        // cannot linger past this refresh either way.
+        inner.schema_digest = schema_digest;
         // Monotonic re-seed: the writer's sidecar lags its shipped WAL
         // by a flush interval, and this replica's own last load may
         // already have replayed past it — a tailed refresh must move

@@ -37,6 +37,9 @@
         "2025-06-18"
       ]
     },
+    "schema_formats": [
+      1
+    ],
     "server": "0.0.0"
   },
   "route": "/version",
