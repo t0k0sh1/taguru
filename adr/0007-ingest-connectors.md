@@ -754,6 +754,88 @@ that slide, not a distinct `table` kind.
   the first fetch — the same two properties that make extract/import's own
   long-running story converge.
 
+### 11.1 Implementation note (#353): one shared shape, a generic local-file/URL driver, and four seams §11 left open
+
+`taguru_langchain.ingest_connectors.observability` is this section
+implemented once: `RunReport`, `SourceEvent`, `RunRecorder` (the shared
+bookkeeping — last-phase-only tally, `to_dict()`/`events_jsonl()`
+serialization), and `SourceEventSink` (the append-only JSONL sidecar,
+`DiagnosticsSink`'s truncate-on-open/one-warning-then-drop posture ported
+field for field). `sync_object_storage` (#351) is rewritten onto it;
+`taguru_langchain.ingest_connectors.references.sync_references` is its new
+local-file/`http(s)://` twin, covering every non-S3 connector
+(`.md`/`.txt`/PDF/HTML/DOCX/PPTX) `sync_object_storage`'s own listing
+model does not fit. `S3SyncReport` becomes an alias of `RunReport`, not a
+subclass — a slotted, frozen dataclass subclass re-declares its base's
+`__slots__` on this SDK's Python 3.10 floor (`inherited_slots` lands in
+3.11) — folding `tags_dropped`/`deleted_detected`/`retracted` into the one
+shared shape (structurally zero on a driver that has no use for them)
+rather than branching a consumer on which connector produced a summary.
+
+Four seams this section states as requirements but leaves the exact
+mechanism to the implementation:
+
+- **The driver-level `dry_run` is not `TaguruIngester.ingest_text`'s
+  `dry_run`.** The latter still calls the model and only skips
+  `import_batches`; §11's "touches nothing" is the stricter contract, so
+  neither driver ever forwards its own `dry_run` into
+  `ingest_connector_document` — a real (non-dry) bridge call always runs
+  with `dry_run=False`.
+- **`extracted` has no honest moment inside a single bridge call.** One
+  `ingest_connector_document` call covers extraction and import
+  opaquely; synthesizing `extracted` at the same instant as `imported`
+  would be exactly the "quietly degraded output" #217 forbids. Both
+  drivers instead scope-attach `RunRecorder.attached(ingester)` around
+  the bridge call — a context manager that chains onto whatever
+  `ingester.on_event` already held (never replacing it) and restores it
+  in `finally` — and translate the ingester's own `ImportStarted` event
+  (fired once per document, immediately before `import_batches`, after
+  every chunk is extracted) into the `extracted` phase.
+- **A reference/key that collides with an already-claimed source id must
+  never corrupt that source's tally.** Recording the collision under the
+  SAME source key is the obvious approach and the wrong one: because a
+  duplicate is always resolved after its claiming original (input order
+  for `sync_references`'s pre-fetch dedup; listing order for
+  `sync_object_storage`'s duplicate-key case), the original may have
+  already reached `imported` by the time the duplicate is processed, and
+  a naive `record(source, "skipped", ...)` would silently turn that
+  `imported` back into `skipped` in the final summary.
+  `RunRecorder.duplicate(reference, of=source)` exists specifically to
+  make this impossible: it appends a `skipped`/`duplicate_source` event
+  keyed by the REJECTED reference, never touching the claimed source's
+  own phase history. `duplicate_source` is a new, additive
+  (ADR 0005 §4-compatible) §8 diagnostic code.
+- **A URL's post-redirect identity does not match the id it was
+  `discovered` under.** §6.1 stamps a fetched document's `source` with the
+  final, post-redirect URL; a driver plans and reports `discovered` before
+  any fetch, necessarily under the PRE-redirect id. `RunRecorder.retarget
+  (old, new)` renames the bookkeeping (never emitting a new event): `old`'s
+  phase history stops counting, and every later phase for this reference
+  tallies under `new`. The JSONL trail stays honest either way —
+  `discovered` shows the id that was actually requested, later phases show
+  where it ended up — and the reference counts exactly once.
+
+`sync_references`'s dispatch has one more bug this ADR's §5 example did
+not anticipate: every non-HTML connector's `supports()` inspects only a
+reference's extension, so `TextFileConnector.supports("https://
+example.com/a.md")` is `True` — a naive "ask each connector" dispatch
+would hand a URL to `open()` as a local path. `plan_references`
+classifies a reference's kind (path vs. URL) FIRST, mirroring
+`HtmlConnector.read`'s own `_is_windows_drive_path`-then-scheme check
+exactly, and only offers a URL-kind reference to connectors a scheme-only
+probe (`f"{scheme}://taguru.invalid/probe"`) confirms are scheme-aware —
+today, only `HtmlConnector`.
+
+The local-file half of §11's dry-run table needed its own cheap
+metadata gate, mirroring §9's `S3ObjectCheckpoint` exactly: new
+`FileProbeCheckpoint`/`FileProbe` (`checkpoint.py`) store `size`,
+`mtime_ns`, and the connector's own `parser`/`parser_version`/
+`parse_options_digest` — all five must match for `unchanged`; any
+mismatch, including a metadata match under changed connector options,
+degrades to `parsed`, never a false `unchanged`. Written only on a REAL
+run's successful parse; read only under `dry_run` (§6.3's "a real run
+always hashes" applies here too).
+
 ## 12. Backward compatibility, scope boundary, and privacy
 
 - `taguru extract` and `POST /import`'s behavior for a caller sending no new

@@ -1,0 +1,9 @@
+{"bytes": 14, "diagnostic": null, "elapsed_ms": 0.0, "kind": "source_event", "parser": null, "phase": "discovered", "source": "<tmp>/manual.md"}
+{"bytes": 0, "diagnostic": {"code": "duplicate_source", "message": "already claimed as '<tmp>/manual.md' earlier in this run", "source": "<tmp>/manual.md"}, "elapsed_ms": 0.0, "kind": "source_event", "parser": null, "phase": "skipped", "source": "<tmp>/manual.md"}
+{"bytes": 0, "diagnostic": null, "elapsed_ms": 0.0, "kind": "source_event", "parser": null, "phase": "discovered", "source": "http://<server>/old.html"}
+{"bytes": 14, "diagnostic": null, "elapsed_ms": 0.0, "kind": "source_event", "parser": "taguru-text-connector", "phase": "parsed", "source": "<tmp>/manual.md"}
+{"bytes": 14, "diagnostic": null, "elapsed_ms": 0.0, "kind": "source_event", "parser": null, "phase": "extracted", "source": "<tmp>/manual.md"}
+{"bytes": 14, "diagnostic": null, "elapsed_ms": 0.0, "kind": "source_event", "parser": "taguru-text-connector", "phase": "imported", "source": "<tmp>/manual.md"}
+{"bytes": 0, "diagnostic": null, "elapsed_ms": 0.0, "kind": "source_event", "parser": "taguru-html-connector", "phase": "parsed", "source": "http://<server>/new.html"}
+{"bytes": 0, "diagnostic": null, "elapsed_ms": 0.0, "kind": "source_event", "parser": null, "phase": "extracted", "source": "http://<server>/new.html"}
+{"bytes": 0, "diagnostic": null, "elapsed_ms": 0.0, "kind": "source_event", "parser": "taguru-html-connector", "phase": "imported", "source": "http://<server>/new.html"}

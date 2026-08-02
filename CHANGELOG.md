@@ -8,6 +8,50 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- Cross-connector observability (#353, implementing ADR 0007 §11 and
+  completing #217's observability requirement): every connector driver now
+  shares one event/summary shape instead of `sync_object_storage` (#351)
+  being the only one with any. New
+  `taguru_langchain.ingest_connectors.observability`: `RunReport` (the
+  seven-state `discovered`/`unchanged`/`parsed`/`extracted`/`imported`/
+  `skipped`/`failed` tally — each source counted once, under its LAST
+  phase only — plus `duration_ms`/`interrupted`, and
+  `tags_dropped`/`deleted_detected`/`retracted` for connectors that use
+  them), `SourceEvent` (one phase transition; `to_dict()`/
+  `RunReport.events_jsonl()` render the same JSONL shape
+  `taguru extract`'s own diagnostics sidecar uses), `RunRecorder` (the
+  shared bookkeeping, including `attached()` — a scoped, chaining
+  `TaguruIngester.on_event` hook that reports the `extracted` phase from
+  `ImportStarted` without ever losing a caller's own already-installed
+  callback), and `SourceEventSink` (an append-only per-source JSONL
+  sidecar, `events_out=` on both drivers below, truncate-on-open like
+  `DiagnosticsSink`, written even under `dry_run=True` since it is a dry
+  run's entire product). New `taguru_langchain.ingest_connectors.
+  references`: `sync_references`/`plan_references`/`default_connectors` —
+  the local-file/`http(s)://` counterpart to `sync_object_storage`, for
+  every non-S3 connector (`.md`/`.txt`/PDF/HTML/DOCX/PPTX). Classifies a
+  reference's kind (path vs. URL) before ever asking a connector whether
+  it "supports" the reference — every non-HTML connector's own
+  `supports()` checks only the extension, so a naive dispatch would hand
+  `https://example.com/a.md` to `open()` as a local path. Implements ADR
+  0007 §11's per-kind `--dry-run` table: a local file is `unchanged` only
+  when a new `FileProbeCheckpoint` (cheap `stat`-only metadata, mirroring
+  `S3ObjectCheckpoint`) matches, `parsed` on any mismatch (never a false
+  `unchanged`); a URL is always `parsed` — no `HEAD`, no network access at
+  all under `dry_run`. A reference resolving to a source id already
+  claimed earlier in the same run gets the new `duplicate_source`
+  diagnostic and is never fetched — `RunRecorder.duplicate()` records it
+  without disturbing the winning occurrence's own tally. An HTTP redirect
+  is handled by `RunRecorder.retarget()`: `discovered` keeps the
+  pre-redirect URL (the honest history), every later phase and the tally
+  itself move to the post-redirect one, and the reference counts exactly
+  once either way. `S3SyncReport` (`sync_object_storage`'s own report
+  type, published by #351/#352) is now a deprecated alias of `RunReport`
+  rather than its own dataclass — a slotted, frozen dataclass subclass
+  re-declares its base's `__slots__` on this SDK's Python 3.10 floor (the
+  `inherited_slots` fix landed in 3.11), so an alias is the only option
+  correct on the whole supported range. New `FileProbeCheckpoint`/
+  `FileProbe` in `taguru_langchain.ingest_connectors.checkpoint`.
 - PPTX connector and an external OCR adapter boundary (#352, implementing
   ADR 0007 §10 and completing #217's Office/OCR requirements): `PptxConnector`
   in `taguru_langchain.ingest_connectors.pptx`, reading `.pptx` files — `pip
@@ -275,6 +319,26 @@ Entries that change an on-disk format or a response shape say so.
   client-side HTTP span for the request itself, and neither ever calls
   `set_tracer_provider`/`setGlobalTracerProvider` — that stays the
   host application's call.
+
+### Changed
+- `sync_object_storage` (#351) is rewritten onto the shared `RunRecorder`
+  (#353) and gains an `events_out=` parameter. Three observable behavior
+  changes: (1) a `SourceEvent`'s `bytes` on the `parsed` phase is now the
+  object's own raw byte size (matching every other connector driver's
+  convention — `SourceEvent.bytes` is never the parsed text's byte count,
+  which would make a sum over that column meaningless for phases that
+  carry no text at all), previously `len(document.text.encode())`; (2) a
+  duplicate key in one `store.list()` listing (a store bug/quirk — the
+  same key appearing twice in one pass) is now recorded with the
+  `duplicate_source` diagnostic instead of a silent, uncounted `continue`;
+  (3) the full listing is now always drained and every object reported
+  `discovered` before any object is fetched (ADR 0007 §11's "enumerate all
+  discovered work before the first fetch"), rather than interleaving
+  listing and fetch one object at a time — a `should_stop` interruption
+  therefore no longer leaves the listing itself incomplete, and (a useful
+  side effect) the run's own prefix inventory stays trustworthy and gets
+  saved even after an interrupted pass, since `seen_sources` is always a
+  complete snapshot regardless of where fetch/import got interrupted.
 
 ## [0.6.0] - 2026-08-01
 

@@ -57,11 +57,20 @@ DiagnosticCode = Literal[
     "source_id_too_long",
     "content_too_large",
     "partial_extraction",
+    "duplicate_source",
 ]
 """ADR 0007 §8's closed, versioned diagnostic vocabulary. Adding a new code
 is additive (compatible, ADR 0005 §4); renaming or repurposing an existing
 one is breaking — the same posture src/api.rs's ``ErrorCode`` documents for
-itself."""
+itself.
+
+``duplicate_source`` (added by issue #353's observability driver,
+``ingest_connectors.references.sync_references``): a reference resolves to
+a source id already claimed earlier in the same run (an exact duplicate
+input, or two inputs that normalize to the same id — e.g. two URLs
+differing only by a tracking query parameter ``canonicalize_url`` strips).
+The second and later occurrences are reported ``skipped`` with this code;
+only the first is ever fetched/parsed/imported."""
 
 DIAGNOSTIC_CODES: Final[frozenset[str]] = frozenset(get_args(DiagnosticCode))
 
