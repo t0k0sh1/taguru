@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Deploy on AWS — Taguru</title>
+  <meta name="description" content="Deploying Taguru on AWS: EC2 or EKS compute, EBS-only storage (never EFS), ALB + ACM in front, ECR pull-through cache, Secrets Manager/SSM, DLM snapshot backups, CloudWatch/X-Ray observability.">
+  <link rel="icon" type="image/png" href="favicon.png">
+  <link rel="stylesheet" href="style.css">
+  <script src="site.js"></script>
+</head>
+<body>
+
+<div class="topbar">
+  <button class="nav-toggle" id="nav-toggle" type="button" aria-label="Toggle menu">☰</button>
+  <a class="brand" href="index.html"><img class="brand-mark" src="logo.png" alt="">Taguru</a>
+  <button class="theme-toggle" type="button" aria-label="Toggle theme">◐</button>
+</div>
+<div class="scrim" id="scrim"></div>
+
+<div class="layout">
+<aside class="sidebar">
+  <a class="brand" href="index.html"><img class="brand-mark" src="logo.png" alt="">Taguru</a>
+  <nav class="side-nav">
+    <div class="side-group">
+      <a href="index.html">Home</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Guide</div>
+      <a href="getting-started.html">Getting started</a>
+      <a href="concepts.html">Concepts</a>
+      <a href="modeling.html">Modeling</a>
+      <a href="troubleshooting.html">Troubleshooting</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Reference</div>
+      <a href="import.html">Batch import</a>
+      <a href="extract.html">Document extraction</a>
+      <a href="connectors.html">Ingest connectors</a>
+      <a href="benchmark.html">Extraction benchmark</a>
+      <a href="evaluate.html">Retrieval quality gate</a>
+      <a href="evidence.html">Evidence assembly</a>
+      <a href="long-running.html">Long-running ingestion</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Deploy</div>
+      <a href="docker-compose.html">Docker Compose</a>
+      <a href="kubernetes.html">Kubernetes</a>
+      <a href="aws.html" aria-current="page">AWS</a>
+      <a href="bedrock.html">Amazon Bedrock</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">How it works</div>
+      <a href="architecture.html">Internal architecture</a>
+      <a href="tracing.html">Tracing</a>
+      <a href="mcp-rag-walkthrough.html">MCP walkthrough</a>
+      <a href="local-rag-walkthrough.html">Local RAG walkthrough</a>
+    </div>
+  </nav>
+  <div class="sidebar-footer">
+    <a href="https://github.com/t0k0sh1/taguru">GitHub ↗</a>
+    <button class="theme-toggle" type="button" aria-label="Toggle theme">◐</button>
+  </div>
+</aside>
+
+<main class="content">
+<div class="page">
+
+  <header class="hero">
+    <div class="eyebrow">deploy · aws</div>
+    <h1>Deploy on AWS</h1>
+    <p class="lede">
+      Taguru's single-writer, single-data-directory design makes the AWS service choices
+      mechanical: some services can host the model honestly, and some cannot, and the line
+      between them is not a matter of taste. This page records the mapping — compute, storage,
+      the load balancer, the image path, secrets, backups, observability — and why each
+      alternative that looks tempting is off the table.
+    </p>
+    <div class="hero-meta">
+      <span><b>Compute:</b> EC2 (Docker/systemd) or EKS</span>
+      <span><b>Storage:</b> EBS gp3 — never EFS</span>
+      <span><b>TLS:</b> ALB + ACM in front, plain HTTP behind</span>
+    </div>
+  </header>
+
+  <section id="constraints">
+    <h2>The three constraints that decide everything</h2>
+    <p class="section-sub">
+      The general model is on the <a href="docker-compose.html#model">Docker Compose</a> and
+      <a href="kubernetes.html#model">Kubernetes</a> pages; this page is only the AWS
+      projection of it.
+    </p>
+    <ul>
+      <li><b>One data directory, one writer — and the advisory lock cannot be trusted on
+        network filesystems.</b> On EFS (NFSv4.1) the lock does hold in the happy path — a
+        second server against the same directory is refused — but the guarantee rides on an
+        NFS lease. A client partitioned for longer than the lease loses the lock <i>silently</i>:
+        a second writer acquires it and starts serving while the first is still alive and
+        writing. That failure class does not exist on a single-attached EBS volume, which is
+        why the storage answer is <b>EBS only</b>.</li>
+      <li><b>Availability is restore time.</b> Deploys are stop-then-start, there is no
+        failover, and the availability story is snapshots plus (optionally) a replica to
+        promote by hand — see <a href="architecture.html#replicas">the promotion runbook</a>.
+        No multi-AZ active-active exists to configure.</li>
+      <li><b>TLS belongs to the layer in front.</b> A bearer token is the whole credential, so
+        the server must never be reachable over plain HTTP from outside. On AWS that layer is
+        an ALB with an ACM certificate; the server behind it speaks HTTP on 8248 to the ALB
+        alone.</li>
+    </ul>
+  </section>
+
+  <section id="compute">
+    <h2>Compute: EC2 or EKS, and why not the rest</h2>
+    <p class="section-sub">Anything that cannot keep one EBS volume attached to one long-lived process is out.</p>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Service</th><th>Fit</th><th>Why</th></tr></thead>
+        <tbody>
+          <tr><td>EC2 + Docker (or the bare binary under systemd)</td><td>✓ the simplest honest fit</td><td>One instance, one gp3 data volume, one container. The <a href="docker-compose.html">Docker Compose page</a> applies nearly verbatim.</td></tr>
+          <tr><td>EKS</td><td>✓ with <code>deploy/kubernetes.yaml</code> as-is</td><td>EBS CSI driver + a gp3 StorageClass are the only prerequisites; the manifest's <code>replicas: 1</code> + <code>Recreate</code> + RWO PVC land unchanged.</td></tr>
+          <tr><td>ECS / Fargate</td><td>✗</td><td>Its practical persistence is EFS (the silent-lock-loss risk above). The EBS integration provisions a <b>fresh volume per task and deletes the old one</b> — a redeploy destroys the data directory; there is no way to hand an existing volume to the next task. And there is no <code>fsGroup</code> equivalent, so the scratch image's uid 65532 cannot write a freshly formatted task volume without running the container as root.</td></tr>
+          <tr><td>Lambda / App Runner</td><td>✗</td><td>No persistent local disk at all — incompatible with a design where one process owns a directory.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <h3>EC2</h3>
+    <ul>
+      <li><b>Keep the data directory on its own gp3 volume</b>, separate from the root volume:
+        snapshots, restores, and instance replacement then never touch the OS disk. Format it
+        (XFS works well), mount it, and create the data directory <b>owned by uid 65532</b>
+        before the first start — the image is the binary alone on <code>scratch</code>, with no
+        shell and no <code>mkdir</code>, so the host does this once:
+        <pre><code>mkfs -t xfs /dev/nvme1n1 &amp;&amp; mount /dev/nvme1n1 /mnt/taguru
+mkdir -p /mnt/taguru/data &amp;&amp; chown 65532:65532 /mnt/taguru/data</code></pre></li>
+      <li><b>No SSH required.</b> An instance profile with <code>AmazonSSMManagedInstanceCore</code>
+        gives Session Manager access and — the same policy — lets the boot script read the API
+        token from SSM Parameter Store (below).</li>
+      <li><code>docker run --restart unless-stopped</code> (or a systemd unit with
+        <code>Restart=on-failure</code>) is the restart policy — restarts are the host's job,
+        not the load balancer's (see <a href="#network">the probe split</a>).</li>
+      <li><b>Instance size:</b> memory ≈ <code>TAGURU_CACHE_BYTES</code> (default 512 MiB) +
+        pinned contexts + headroom — a t3.small runs the default profile; measure with
+        <code>taguru estimate</code> before scaling up.</li>
+      <li><b>EBS is AZ-bound.</b> Replacing a dead instance means recreating in the same AZ and
+        reattaching the volume — or restoring a snapshot into another AZ (snapshots are
+        regional). Script whichever walk you choose, and rehearse it.</li>
+    </ul>
+    <h3>EKS</h3>
+    <ul>
+      <li><b><code>deploy/kubernetes.yaml</code> applies unchanged.</b> Everything the
+        <a href="kubernetes.html">Kubernetes page</a> says — the probe wiring,
+        <code>fsGroup: 65532</code> (which makes the volume-ownership step automatic, unlike raw
+        EC2), the grace period — holds on EKS. The AWS-specific work is only the storage and
+        credential plumbing:
+        <pre><code>aws eks create-addon --cluster-name CLUSTER --addon-name aws-ebs-csi-driver</code></pre>
+        plus a <code>gp3</code> StorageClass marked default (the CSI driver provisions
+        topology-aware, so <code>WaitForFirstConsumer</code> places the volume in the pod's AZ):
+        <pre><code>apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp3
+  annotations: { storageclass.kubernetes.io/is-default-class: "true" }
+provisioner: ebs.csi.aws.com
+volumeBindingMode: WaitForFirstConsumer
+parameters: { type: gp3 }</code></pre></li>
+      <li><b>The CSI controller needs its own AWS identity — attaching a policy to the node
+        role is not enough.</b> Managed node groups default to an IMDS hop limit of 1, which
+        pods cannot reach, so the controller crash-loops with "no EC2 IMDS role found". Give it
+        <a href="https://docs.aws.amazon.com/eks/latest/userguide/pod-identities.html">EKS Pod
+        Identity</a> (the <code>eks-pod-identity-agent</code> add-on plus an association handing
+        a role with <code>AmazonEBSCSIDriverPolicy</code> to
+        <code>kube-system/ebs-csi-controller-sa</code>) or IRSA.</li>
+      <li><b>A <code>Recreate</code> rollout on the same node costs seconds</b> — the EBS volume
+        detaches and reattaches without leaving the instance. A reschedule to another node in
+        the same AZ adds the detach/attach round trip; another AZ needs the snapshot walk
+        (RWO EBS cannot follow the pod across AZs).</li>
+      <li><b>Fronting with an ALB:</b> the standard route is the
+        <a href="https://kubernetes-sigs.github.io/aws-load-balancer-controller/">AWS Load
+        Balancer Controller</a> (Ingress → ALB, <code>target-type: ip</code>, certificate from
+        ACM), with the same health-check and timeout rules as <a href="#network">below</a>. It
+        needs its own Pod Identity/IRSA role — the same pattern as the CSI controller.</li>
+      <li><b>Grace vs. drain:</b> <code>terminationGracePeriodSeconds: 60</code> in the manifest
+        covers the drain plus the final flush. Keep the ALB target group's deregistration delay
+        at or below it — a drain window longer than the pod's remaining lifetime just resets
+        whatever is still in flight when the pod dies.</li>
+    </ul>
+    <p class="note">
+      The stateless and read-pool variants (<code>kubernetes-stateless.yaml</code>,
+      <code>kubernetes-replicas.yaml</code>) work on EKS the same way, with
+      <code>TAGURU_REPLICATE_URL</code> pointed at S3 and the pod's bucket credentials granted
+      via Pod Identity/IRSA — see <a href="kubernetes.html#stateless">the Kubernetes page</a>.
+    </p>
+  </section>
+
+  <section id="image">
+    <h2>The image: mirror ghcr.io through ECR</h2>
+    <p class="section-sub">Keep pulls inside AWS and survive a ghcr.io outage without changing what you run.</p>
+    <ul>
+      <li>ECR's <b>pull-through cache</b> mirrors <code>ghcr.io</code> on first pull. ghcr
+        requires upstream credentials even for public images: store a GitHub token
+        (<code>read:packages</code> only) in Secrets Manager under the required
+        <code>ecr-pullthroughcache/</code> prefix, then
+        <pre><code>aws ecr create-pull-through-cache-rule \
+  --ecr-repository-prefix ghcr \
+  --upstream-registry-url ghcr.io \
+  --credential-arn arn:aws:secretsmanager:…:secret:ecr-pullthroughcache/ghcr-…</code></pre></li>
+      <li>The image reference becomes
+        <code>ACCOUNT.dkr.ecr.REGION.amazonaws.com/ghcr/t0k0sh1/taguru:VERSION</code>. The cache
+        stores the same manifest, so <b>a digest pin carries over unchanged</b> — pin exactly as
+        <a href="docker-compose.html#image">the image guidance</a> says, digest and all.</li>
+      <li>Pullers need only <code>AmazonEC2ContainerRegistryReadOnly</code> once the cache is
+        populated; the <i>first</i> pull of a new tag additionally needs
+        <code>ecr:BatchImportUpstreamImage</code> — grant that to whatever refreshes versions
+        (CI, an operator role), not to every node.</li>
+    </ul>
+  </section>
+
+  <section id="secrets">
+    <h2>Secrets: the token never touches a manifest</h2>
+    <p class="section-sub"><code>TAGURU_API_TOKENS</code> (and <code>TAGURU_KEY_SCOPES</code>, provider keys, …) come from a secret store at boot.</p>
+    <ul>
+      <li><b>EC2:</b> put the token in SSM Parameter Store as a <code>SecureString</code> (or in
+        Secrets Manager) and read it in the boot script with the instance role —
+        <code>AmazonSSMManagedInstanceCore</code> already includes <code>ssm:GetParameter</code>:
+        <pre><code>TOKENS=$(aws ssm get-parameter --name /taguru/api-tokens \
+  --with-decryption --query Parameter.Value --output text)
+docker run -d --restart unless-stopped -p 8248:8248 \
+  -e TAGURU_API_TOKENS="$TOKENS" -e TAGURU_LOG_FORMAT=json \
+  -v /mnt/taguru/data:/data ACCOUNT.dkr.ecr.REGION.amazonaws.com/ghcr/t0k0sh1/taguru:VERSION</code></pre></li>
+      <li><b>EKS:</b> External Secrets Operator or the Secrets Store CSI driver materializes the
+        Secrets Manager entry as the <code>taguru-keys</code> Secret the manifest already
+        consumes. For live key rotation, mount it as a file and pass <code>--config</code> —
+        the manifest's comments carry the exact steps.</li>
+      <li><code>TAGURU_PUBLIC_URL</code> (for claude.ai-connector OAuth on <code>/mcp</code>) is
+        plain configuration, not a secret — set it beside the rest of the environment.</li>
+    </ul>
+  </section>
+
+  <section id="network">
+    <h2>Network: ALB in front, one port behind</h2>
+    <p class="section-sub">Two security groups and a strict division of labor between the two health endpoints.</p>
+    <ul>
+      <li><b>Security groups:</b> the ALB's accepts 443 from clients; the instance's (or the
+        cluster's, for a NodePort/IP target) accepts 8248 <b>from the ALB's security group
+        only</b>. Nothing else reaches the server — a bearer token is the whole credential, and
+        the token never travels unencrypted because TLS terminates at the ALB (ACM issues and
+        renews the certificate).</li>
+      <li><b>Target group health check: <code>GET /health</code></b> — and understand what the
+        ALB can and cannot do about a failure:
+        <div class="tbl" style="margin-top:0.6rem">
+          <table>
+            <thead><tr><th>Signal</th><th>Endpoint</th><th>Who acts</th></tr></thead>
+            <tbody>
+              <tr><td>Routing: is this target serving?</td><td><code>/health</code> (503 while the write path is degraded)</td><td>The ALB routes away and back — it never restarts anything.</td></tr>
+              <tr><td>Restart: is the process wedged?</td><td><code>/live</code></td><td>Docker's restart policy, systemd, or the kubelet's liveness probe. The ALB has no restart lever, so pointing its check at <code>/live</code> would just mask write-path failures.</td></tr>
+            </tbody>
+          </table>
+        </div></li>
+      <li><b>Idle timeout is a real ceiling.</b> The server always answers within
+        <code>TAGURU_REQUEST_TIMEOUT_SECS</code> (30s default) — embedding-provider attempts are
+        cut at the request's remaining budget, and after repeated provider failures a circuit
+        breaker fails fast instead of hanging at all. With the defaults (30s budget, 60s ALB
+        idle timeout) nothing ever hits the ALB limit. But the budgets are coupled: if you raise
+        <code>TAGURU_REQUEST_TIMEOUT_SECS</code> past 60 — say, to give a slow embedding
+        provider its full <code>TAGURU_EMBED_TIMEOUT_SECS</code> ceiling — <b>the ALB idle
+        timeout is the knob that must move with it</b>, or the ALB returns 504 at the idle
+        timeout while the server is still mid-request.</li>
+      <li><b>Deregistration delay ≈ the request budget.</b> In-flight requests get at most the
+        deregistration delay to finish once a target starts draining; connections that outlive
+        it are reset. The 300s default is safe but slows every deploy — with a 30s request
+        budget, a 30–60s delay drains everything a target could still be serving.</li>
+      <li>Once the server is reachable beyond the VPC, set
+        <code>TAGURU_RATE_LIMIT_PER_MIN</code>; WAF on the ALB is optional on top.</li>
+    </ul>
+    <p class="note">
+      Hosting the <i>model</i> side on AWS too — Bedrock driving the agent through
+      <code>taguru-mcp</code> or the Converse API, Titan/Cohere behind the embedding bridge —
+      is the <a href="bedrock.html">Amazon Bedrock page</a>; managed agent runtimes register
+      <code>https://your-host/mcp</code> through this same ALB.
+    </p>
+  </section>
+
+  <section id="backup">
+    <h2>Backups and DR: DLM snapshots + an export lane</h2>
+    <p class="section-sub">Every writer is fsync+rename, so an EBS snapshot is safe at any instant — even mid-write, with the server running.</p>
+    <ol>
+      <li><b>Automate snapshots with DLM</b> (or AWS Backup): a lifecycle policy targeting the
+        data volume's tag, on whatever cadence bounds your RPO. <code>POST /flush</code> first
+        when you want a snapshot to contain this second's writes rather than the last flush
+        interval's.</li>
+      <li><b>Rehearse the restore</b>: create a volume from the snapshot, attach it, and run the
+        image against it — XFS twins need <code>-o nouuid</code> to mount beside their
+        original:
+        <pre><code>mount -o nouuid /dev/nvme2n1 /mnt/restore
+docker run --rm -v /mnt/restore/data:/data \
+  ACCOUNT.dkr.ecr.REGION.amazonaws.com/ghcr/t0k0sh1/taguru:VERSION inspect /data</code></pre>
+        <code>taguru inspect</code> runs the same fully-validating load + WAL replay the server
+        boots with; a non-zero exit means the copy is corrupt, and a snapshot you have never
+        restored is not a backup.</li>
+      <li><b>Keep a second, environment-independent lane:</b> <code>taguru export --url</code>
+        against the running server writes portable JSONL batch streams — ship them to S3 on a
+        schedule. They restore anywhere through <code>taguru import</code>, across versions and
+        machines. Note the export's own caveat: each context's stream is internally consistent,
+        but a multi-context export is not one point in time — the snapshot lane is.</li>
+      <li><b>DR is a copy, not a mirror:</b> snapshots are regional and copy cross-region
+        (DLM can schedule the copy); S3 replicates the export lane. EBS itself is AZ-bound —
+        recovery into another AZ or region is always snapshot-restore, never reattach.</li>
+    </ol>
+    <p class="note warn">
+      With <code>TAGURU_REPLICATE_URL</code> pointed at an S3 bucket the data directory also
+      ships continuously (RPO ≈ seconds; recover with <code>taguru restore</code>) — that lane
+      and the promotion runbook are on the
+      <a href="docker-compose.html#model">Docker Compose</a> and
+      <a href="architecture.html#replicas">architecture</a> pages, and they complement, not
+      replace, the snapshot you can hand to <code>taguru inspect</code>.
+    </p>
+  </section>
+
+  <section id="observability">
+    <h2>Observability</h2>
+    <p class="section-sub">Three surfaces, three AWS sinks — nothing needs shell access to the scratch container.</p>
+    <ul>
+      <li><b><code>/metrics</code></b> (Prometheus text) → the CloudWatch agent's Prometheus
+        scrape, or Amazon Managed Prometheus via an ADOT collector. The health-story metrics to
+        alert on are the flush failures behind <code>/health</code>, and — if the embedding tier
+        is wired — the circuit-breaker family (<code>taguru_embedding_breaker_state</code>, …)
+        described on <a href="bedrock.html#embeddings">the Bedrock page</a>.</li>
+      <li><b><code>TAGURU_LOG_FORMAT=json</code></b> → one JSON object per line, which the
+        <code>awslogs</code> Docker log driver or the CloudWatch agent forwards to CloudWatch
+        Logs with fields intact.</li>
+      <li><b><code>OTEL_EXPORTER_OTLP_ENDPOINT</code></b> → an ADOT collector → X-Ray (or any
+        OTLP backend): the full retrieval span tree from <a href="tracing.html">Tracing</a>,
+        with no instrumentation to add.</li>
+    </ul>
+  </section>
+
+  <section id="scale-out">
+    <h2>Scale-out: shards, not replicas</h2>
+    <p class="section-sub">Write scale is disjoint context sets on independent instances — the model is on the <a href="kubernetes.html#sharding">Kubernetes page</a>.</p>
+    <ul>
+      <li>Each shard is a complete stack of this page: its own instance (or pod), its own EBS
+        volume, its own snapshots. Contexts that must be searched together (groups, cross-context
+        search reach only their own shard) cohabit on one shard.</li>
+      <li>In front, <code>taguru router</code> is stateless — run it anywhere, give clients one
+        hostname. If clients address shards directly instead, give each shard <b>its own
+        hostname and target group</b> (host-based ALB rules): context names live in the path, so
+        path-based routing cannot split them.</li>
+      <li>Read scale is the replica pool tailing an S3 bucket
+        (<a href="kubernetes.html#read-pool">the read pool</a>) — replicas are read-only and
+        need only bucket credentials, not EBS.</li>
+    </ul>
+  </section>
+
+  <section id="next">
+    <div class="next-links">
+      <a class="nav-card" href="kubernetes.html" style="flex:1 1 16rem">
+        <span class="nc-title">Kubernetes</span>
+        <p>The manifest EKS runs as-is: replicas: 1 + Recreate, ReadWriteOnce storage, the probe wiring.</p>
+      </a>
+      <a class="nav-card" href="docker-compose.html" style="flex:1 1 16rem">
+        <span class="nc-title">Docker Compose</span>
+        <p>The single-host model an EC2 instance runs: one container, one volume, backups.</p>
+      </a>
+      <a class="nav-card" href="bedrock.html" style="flex:1 1 16rem">
+        <span class="nc-title">Amazon Bedrock</span>
+        <p>The model side: Converse + taguru-mcp, the embedding bridge, floor calibration.</p>
+      </a>
+    </div>
+  </section>
+
+  <footer class="colophon">
+    <span>MIT License</span>
+    <a href="https://github.com/t0k0sh1/taguru">github.com/t0k0sh1/taguru</a>
+  </footer>
+
+</div>
+</main>
+</div>
+</body>
+</html>

@@ -46,6 +46,7 @@
       <div class="side-group-label">Deploy</div>
       <a href="docker-compose.html">Docker Compose</a>
       <a href="kubernetes.html">Kubernetes</a>
+      <a href="aws.html">AWS</a>
       <a href="bedrock.html" aria-current="page">Amazon Bedrock</a>
     </div>
     <div class="side-group">
@@ -71,12 +72,12 @@
     <p class="lede">
       Taguru is model-agnostic — the server speaks HTTP, the bridge speaks MCP over stdio, and
       neither cares which model drives the agent. This page records the three integration points
-      and the corners actually hit while running the whole thing.
+      and the decisions each one forces.
     </p>
     <div class="hero-meta">
-      <span><b>Agent:</b> Claude Sonnet 4.5 (<code>us.</code> inference profile)</span>
-      <span><b>Embeddings:</b> amazon.titan-embed-text-v2:0</span>
-      <span><b>Region:</b> us-east-1</span>
+      <span><b>Agent:</b> any Converse-compatible model</span>
+      <span><b>Embeddings:</b> Titan / Cohere via InvokeModel</span>
+      <span><b>Bridge:</b> an OpenAI-compatible proxy</span>
     </div>
   </header>
 
@@ -95,13 +96,6 @@
       <li>Each <code>tools/list</code> entry maps 1:1 onto a Converse tool: <code>{"toolSpec": {"name", "description", "inputSchema": {"json": &lt;the MCP inputSchema&gt;}}}</code> — the schemas are plain JSON Schema and pass through unmodified.</li>
       <li>On <code>stopReason == "tool_use"</code>, forward each block to <code>tools/call</code> and return the text as a <code>toolResult</code>. Loop until <code>end_turn</code>.</li>
     </ul>
-    <p class="note">
-      Measured with Sonnet 4.5: a Japanese memo containing nine facts was ingested with the eight
-      tool calls the discipline prescribes (create → one batched add_associations →
-      store_passages → audit_coverage → verification). Re-running the same document became a
-      retract-then-reingest diff sync with no weight double-counting — the playbook alone carried
-      the discipline, on a non-Anthropic host API.
-    </p>
     <p>
       <b>Managed agent runtimes</b> (Bedrock AgentCore and the like) want a <b>remote</b> MCP
       endpoint — that exists too: <code>POST /mcp</code> speaks MCP Streamable HTTP behind the
@@ -202,9 +196,9 @@ TAGURU_EMBED_AUTO=1         <span class="c"># don't count on the agent calling r
     <p class="section-sub">The floor is a property of the embedding model. Switching models while keeping the default can silently discard everything.</p>
     <p>
       The built-in floor (0.35) is calibrated for <code>text-embedding-3-large</code> over
-      glosses. Titan V2 (512 dimensions) compresses cosines on Japanese text: measured, true
-      matches landed at 0.2–0.3 with unrelated names around ~0.15 — and the default 0.35 was
-      <b>silently discarding every correct answer</b>. The symptom: resolve returns
+      glosses. Titan V2 (512 dimensions) compresses cosines on Japanese text: true matches
+      typically land around 0.2–0.3 with unrelated names near ~0.15, so the default 0.35 can
+      <b>silently discard every correct answer</b>. The symptom: resolve returns
       <code>[]</code> while the ranking underneath is perfect.
     </p>
     <p>Calibrate once per embedding model — the ritual is mechanical, so the CLI runs it:</p>
@@ -224,7 +218,7 @@ TAGURU_EMBED_AUTO=1         <span class="c"># don't count on the agent calling r
       your own eyes: <code>POST /contexts/{name}/resolve {"cue": "…", "semantic_floor":
       0.05}</code>.
     </p>
-    <p>Measured floors — grow this table by running <code>taguru calibrate</code> and pasting the number:</p>
+    <p>Starting points per model — always confirm with <code>taguru calibrate</code> before trusting one:</p>
     <div class="tbl">
       <table>
         <thead><tr><th>Model</th><th>Floor</th></tr></thead>
@@ -305,6 +299,10 @@ aws bedrock create-foundation-model-agreement --model-id &lt;id&gt; --offer-toke
       <a class="nav-card" href="kubernetes.html" style="flex:1 1 16rem">
         <span class="nc-title">Kubernetes</span>
         <p>replicas: 1 + Recreate, ReadWriteOnce storage, the probe wiring.</p>
+      </a>
+      <a class="nav-card" href="aws.html" style="flex:1 1 16rem">
+        <span class="nc-title">Deploy on AWS</span>
+        <p>The hosting side: EC2/EKS + EBS + ALB — where the server this page wires models into actually runs.</p>
       </a>
       <a class="nav-card" href="mcp-rag-walkthrough.html" style="flex:1 1 16rem">
         <span class="nc-title">Walkthrough</span>

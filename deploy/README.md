@@ -84,3 +84,10 @@ takeover act: while the previous writer looks alive (no clean stop, a
 heartbeat within the last 300s), the boot demands `--take-over` /
 `TAGURU_TAKEOVER=1` before it deposes them. A replica never trips
 that guard — it deposes nobody.
+
+For a worked AWS mapping of this model — EC2/EKS compute, EBS-only
+storage (never EFS), ALB + ACM in front, ECR pull-through cache, DLM
+snapshot backups — see the
+[AWS guide](https://t0k0sh1.github.io/taguru/aws.html); `kubernetes.yaml`
+applies to EKS as-is once the EBS CSI driver and a gp3 StorageClass are
+in place.
