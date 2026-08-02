@@ -313,15 +313,17 @@ TAGURU_EMBED_API_KEY=…   # from Key Vault, like the API tokens</code></pre>
             </tbody>
           </table>
         </div></li>
-      <li><b><code>requestTimeout</code> must cover the request budget.</b> The gateway's
-        backend HTTP settings default to a 30-second request timeout — the same number as
-        <code>TAGURU_REQUEST_TIMEOUT_SECS</code>, which is a coincidence, not a contract. At
-        the boundary the gateway wins: it returns 504 and <i>the server keeps burning its
-        budget behind it</i>, finishing a request nobody is waiting for (it logs 408 when the
-        budget runs out). If you raise <code>TAGURU_REQUEST_TIMEOUT_SECS</code> — say, to give
-        a slow embedding provider its full ceiling across retries — <b>raise
-        <code>requestTimeout</code> past it</b>, or every long request dies at the gateway
-        while the server works on.</li>
+      <li><b><code>requestTimeout</code> must cover the request budget — set it explicitly.</b>
+        The backend HTTP settings carry their own request timeout, and its initial value is
+        tool-dependent: Azure documents a 20-second default, while some tooling writes 30 —
+        neither is coupled to <code>TAGURU_REQUEST_TIMEOUT_SECS</code> (30s), and the
+        documented default is <i>shorter</i> than the server's budget, so an untouched
+        gateway can time out requests the server would have answered. At the boundary the
+        gateway wins: it returns 504 and <i>the server keeps burning its budget behind it</i>,
+        finishing a request nobody is waiting for (it logs 408 when the budget runs out). Set
+        <code>requestTimeout</code> at or above <code>TAGURU_REQUEST_TIMEOUT_SECS</code>, and
+        move both together when a slow embedding provider needs a bigger ceiling across
+        retries.</li>
       <li><b>Connection draining ≥ the request budget.</b> When a backend leaves the pool,
         in-flight requests get exactly <code>drainTimeoutInSec</code> to finish, then the
         connection is cut — a response that arrives seconds after the window closes reaches
