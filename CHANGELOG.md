@@ -8,6 +8,51 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- PPTX connector and an external OCR adapter boundary (#352, implementing
+  ADR 0007 §10 and completing #217's Office/OCR requirements): `PptxConnector`
+  in `taguru_langchain.ingest_connectors.pptx`, reading `.pptx` files — `pip
+  install "langchain-taguru[pptx]"` for its `python-pptx` dependency, kept
+  optional per ADR 0007 §3/§4's packaging decision, the same one
+  `DocxConnector`'s `python-docx` already follows. A slide's shapes are
+  walked in document order, recursing into a group shape's own nested
+  shapes; every non-empty text-frame paragraph and every table (rows joined
+  with `\n`, cells with `" | "`, one paragraph per table) carries a
+  `{"kind": "slide", "value": ...}` locator. Unlike `DocxConnector` (whose
+  one-locator-per-paragraph budget goes to tables, since a DOCX has no
+  page-like structure to spend it on instead), a PPTX slide already has a
+  number, so this connector spends that budget distinguishing a slide's
+  body from its speaker notes instead: notes are read as their own
+  paragraph(s), each carrying `{"kind": "speaker_notes", "value": ...}`
+  rather than being folded into the paragraph next to it (ADR 0007 §7.3). A
+  slide's title is read like any other paragraph (same `slide` locator as
+  its neighbors) and additionally becomes the paragraph-anchored `section`.
+  No OCR engine ships: a presentation left with no extractable text (an
+  image-only deck) is `ocr_required` with empty `text`. A chart, a SmartArt
+  diagram, and an embedded/linked OLE object are each unreachable through
+  this connector's own shape walk — named in a single `partial_extraction`
+  diagnostic rather than silently short-changed. Only `.pptx` is read;
+  `.ppt` (legacy binary) and `.pptm` (macro-enabled) are both
+  `unsupported_format`. Also new,
+  `taguru_langchain.ingest_connectors.ocr`'s `OcrAdapter` (ADR 0007 §10): the
+  external OCR engine boundary a connector calls out to when one is
+  configured — no OCR engine ships in any connector or this package. Given
+  the raw document bytes and the locators naming which pages/units are
+  unusable, an adapter returns whatever text it recovered for them, each
+  still tagged with the locator it was asked about (an adapter is itself
+  just another producer of ADR 0007 §5's normalized-document contract, for
+  the pages it recovers). `PdfConnector` gains a new `ocr_adapter=`
+  parameter (issue #348's own connector, wired here): it offers a
+  configured adapter exactly the pages its own `min_chars_per_page`
+  threshold found unusable, never the whole document, and splices back only
+  a recovered unit that both names a page it actually asked about and
+  clears that same threshold — an adapter's own exception, an unrequested
+  page, or text too thin to count, all degrade to the unconfigured-adapter
+  behavior for the page(s) involved, never a hard failure. Configuring,
+  swapping, or removing an adapter changes `PdfConnector`'s own
+  `parse_options_digest`, so a §6.3 connector-level checkpoint's prior skip
+  decision is correctly invalidated. No change to `src/`, `http_contract`,
+  or `mcp_contract` — this connector, like #348-#351's, is entirely
+  client-side per ADR 0007 §3/§4's packaging decision.
 - S3 (object-storage) connector (#351, implementing ADR 0007 §9):
   `S3Connector`/`sync_object_storage` in
   `taguru_langchain.ingest_connectors.s3`, plus the

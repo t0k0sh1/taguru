@@ -1,15 +1,15 @@
 """Standard ingest connectors (ADR 0007, issue #347): the normalized
 document contract every connector — present or future — produces, and the
-reference ``.md``/``.txt``/``.pdf``/``.html``/``.docx``/S3 connectors that
-prove the contract reaches
+reference ``.md``/``.txt``/``.pdf``/``.html``/``.docx``/``.pptx``/S3
+connectors that prove the contract reaches
 :class:`~taguru_langchain.ingest.TaguruIngester` end to end.
 
 A submodule beside ``ingest.py``, per ADR 0007 §3/§4's packaging decision —
 not a new top-level package, and no new Rust dependency anywhere: parsing a
-PDF/HTML/DOCX/S3 object (#348-#351) stays entirely client-side, exactly as
-this module's own ``.md``/``.txt`` reference connector already does.
+PDF/HTML/DOCX/PPTX/S3 object (#348-#352) stays entirely client-side, exactly
+as this module's own ``.md``/``.txt`` reference connector already does.
 
-Seven pieces:
+Nine pieces:
 
 - :class:`ConnectorDocument` (``document.py``) — the wire-independent shape
   a connector produces: ``text`` plus paragraph-indexed ``locators``/
@@ -24,9 +24,15 @@ Seven pieces:
 - :class:`TextFileConnector` (``text.py``), :class:`PdfConnector`
   (``pdf.py``, issue #348, optional ``pypdf`` dependency via the ``pdf``
   extra), :class:`HtmlConnector` (``html.py``, issue #349, local files and
-  ``http(s)://`` URLs, stdlib-only parsing), and :class:`DocxConnector`
+  ``http(s)://`` URLs, stdlib-only parsing), :class:`DocxConnector`
   (``docx.py``, issue #350, optional ``python-docx`` dependency via the
-  ``docx`` extra) — the reference implementations.
+  ``docx`` extra), and :class:`PptxConnector` (``pptx.py``, issue #352,
+  optional ``python-pptx`` dependency via the ``pptx`` extra) — the
+  reference implementations.
+- :class:`OcrAdapter` (``ocr.py``, ADR 0007 §10, issue #352) — the external
+  OCR engine boundary a connector calls out to when one is configured; no
+  OCR engine ships here or in any connector. :class:`PdfConnector` is the
+  one connector that calls out to a configured adapter today.
 - :mod:`~taguru_langchain.ingest_connectors.objectstore` (issue #351) — the
   object-storage boundary: :class:`ObjectStore`, its ``s3://``
   (:class:`S3ObjectStore`, optional ``boto3`` dependency via the ``s3``
@@ -82,7 +88,9 @@ from .objectstore import (
     object_fingerprint,
     open_object_store,
 )
+from .ocr import OcrAdapter, OcrRecoveredUnit, OcrRequest, OcrResult
 from .pdf import PdfConnector
+from .pptx import PptxConnector
 from .protocol import Connector
 from .s3 import (
     DeletionPolicy,
@@ -122,9 +130,14 @@ __all__ = [
     "ObjectMeta",
     "ObjectNotFoundError",
     "ObjectStore",
+    "OcrAdapter",
+    "OcrRecoveredUnit",
+    "OcrRequest",
+    "OcrResult",
     "PdfConnector",
     "PermanentStoreError",
     "Phase",
+    "PptxConnector",
     "S3Connector",
     "S3ObjectCheckpoint",
     "S3ObjectStore",

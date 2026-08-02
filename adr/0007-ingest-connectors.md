@@ -643,6 +643,54 @@ repurposing an existing one is breaking, exactly like `ErrorCode`
   (§348's) call-out to it when configured; absent a configured adapter, the
   `ocr_required` diagnostic is terminal for that document, not retried.
 
+### 10.1 Implementation note (#352): the adapter interface, and PPTX's own locator budget
+
+`taguru_langchain.ingest_connectors.ocr` fixes the narrow interface this
+section names as three ``Locator``-keyed dataclasses plus one `Protocol`,
+never a bare string in or out (a bare string would lose the per-page
+placement §7's locator shape exists to carry):
+
+```text
+OcrRequest(source, content: bytes, content_type, locators: tuple[Locator, ...])
+OcrRecoveredUnit(locator: Locator, text: str)
+OcrResult(units: tuple[OcrRecoveredUnit, ...], diagnostics: tuple[Diagnostic, ...])
+
+class OcrAdapter(Protocol):
+    name: str
+    version: str
+    def recognize(self, request: OcrRequest) -> OcrResult: ...
+```
+
+`name`/`version` fold into the calling connector's own
+`parse_options_digest` (§6.3) — configuring, swapping, or removing an
+adapter changes the connector's effective fingerprint, the same way any
+other option flip already does. `PdfConnector` (§348) is the only connector
+wired to call out to a configured adapter: it offers exactly the pages its
+own `min_chars_per_page` threshold found unusable, never the whole
+document, and splices back only a recovered unit that both names a page it
+actually asked about and clears that same threshold — an adapter's own
+exception, or a unit for an unrequested page, or text too thin to count,
+all degrade to the unconfigured-adapter behavior for the page(s) involved,
+never a hard failure. The interface itself is deliberately not
+PDF-specific (it is keyed on `Locator`'s open `kind`/`value`, the same
+shape every connector's own `locators` already use); wiring a second
+connector to it is left for a future issue.
+
+#352 also resolves a locator-budget question this ADR's §7.2/§7.3 leave
+open for a page-less, slide-structured format: a PPTX body paragraph
+(ordinary text or a table) carries `{"kind": "slide", "value": "N"}`; its
+speaker notes — read as their own paragraph(s), per §7.3's "own paragraph,
+never folded into the one next to it" — carry `{"kind": "speaker_notes",
+"value": "N"}` instead. A slide's title is read like any other paragraph
+(same `slide` locator as its neighbors) and additionally becomes a
+`SectionEntry` anchored at its own first paragraph. Unlike `DocxConnector`
+(§7/§8's own worked example, whose one-locator-per-paragraph budget goes to
+tables, since a DOCX has no page-like structure to spend it on instead),
+PPTX has exactly one structural axis worth spending that budget on beyond
+the slide number itself — separating a slide's notes from its body — so
+its table paragraphs carry the same `slide` locator as everything else on
+that slide, not a distinct `table` kind.
+
 ## 11. Observability (for #353)
 
 - **Per-source record is an event log, not a snapshot**: a source moves
