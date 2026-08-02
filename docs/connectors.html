@@ -1,0 +1,469 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ingest connectors — Taguru</title>
+  <meta name="description" content="The reference for taguru_langchain.ingest_connectors: PDF, HTML, DOCX, PPTX, and S3 into the batch contract. The Python shape, the credential boundary, what a connector produces, work units and checkpoints, observability, and OCR as a boundary.">
+  <link rel="icon" type="image/png" href="favicon.png">
+  <link rel="stylesheet" href="style.css">
+  <script src="site.js"></script>
+</head>
+<body>
+
+<div class="topbar">
+  <button class="nav-toggle" id="nav-toggle" type="button" aria-label="Toggle menu">☰</button>
+  <a class="brand" href="index.html"><img class="brand-mark" src="logo.png" alt="">Taguru</a>
+  <button class="theme-toggle" type="button" aria-label="Toggle theme">◐</button>
+</div>
+<div class="scrim" id="scrim"></div>
+
+<div class="layout">
+<aside class="sidebar">
+  <a class="brand" href="index.html"><img class="brand-mark" src="logo.png" alt="">Taguru</a>
+  <nav class="side-nav">
+    <div class="side-group">
+      <a href="index.html">Home</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Guide</div>
+      <a href="getting-started.html">Getting started</a>
+      <a href="concepts.html">Concepts</a>
+      <a href="modeling.html">Modeling</a>
+      <a href="troubleshooting.html">Troubleshooting</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Reference</div>
+      <a href="import.html">Batch import</a>
+      <a href="extract.html">Document extraction</a>
+      <a href="connectors.html" aria-current="page">Ingest connectors</a>
+      <a href="benchmark.html">Extraction benchmark</a>
+      <a href="evaluate.html">Retrieval quality gate</a>
+      <a href="evidence.html">Evidence assembly</a>
+      <a href="long-running.html">Long-running ingestion</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Deploy</div>
+      <a href="docker-compose.html">Docker Compose</a>
+      <a href="kubernetes.html">Kubernetes</a>
+      <a href="bedrock.html">Amazon Bedrock</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">How it works</div>
+      <a href="architecture.html">Internal architecture</a>
+      <a href="tracing.html">Tracing</a>
+      <a href="mcp-rag-walkthrough.html">MCP walkthrough</a>
+      <a href="local-rag-walkthrough.html">Local RAG walkthrough</a>
+    </div>
+  </nav>
+  <div class="sidebar-footer">
+    <a href="https://github.com/t0k0sh1/taguru">GitHub ↗</a>
+    <button class="theme-toggle" type="button" aria-label="Toggle theme">◐</button>
+  </div>
+</aside>
+
+<main class="content">
+<div class="page">
+
+  <header class="hero">
+    <div class="eyebrow">reference · ingest connectors</div>
+    <h1>Ingest connectors — <code>taguru_langchain.ingest_connectors</code></h1>
+    <p class="lede">
+      <code>taguru extract</code> reads <code>.md</code>/<code>.txt</code> only — everything else
+      (PDF, HTML, DOCX, PPTX, and objects in S3-compatible storage) goes through this Python
+      SDK module instead. A connector normalizes a source document — plain text plus
+      paragraph-indexed section headings and typed citation locators (page/slide/table/fragment)
+      — into the one <code>ConnectorDocument</code> shape <code>TaguruIngester</code> consumes, so
+      every format lands in the same batch contract as <a href="extract.html"><code>taguru
+      extract</code></a>'s own output (ADR
+      <a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0007-ingest-connectors.md">0007</a>,
+      issues #347–#353).
+    </p>
+  </header>
+
+  <section id="api">
+    <h2>The Python shape, not a CLI</h2>
+    <p class="section-sub">
+      There is no <code>taguru connectors …</code> subcommand and no connector flag on <code>taguru
+      extract</code> — this is an SDK import, not a binary.
+    </p>
+    <pre><code><span class="k">from</span> taguru_langchain <span class="k">import</span> FilesystemCheckpointStore
+<span class="k">from</span> taguru_langchain.ingest_connectors <span class="k">import</span> sync_references
+
+report = sync_references(
+    [<span class="s">"docs/manual.md"</span>, <span class="s">"docs/manual.pdf"</span>, <span class="s">"https://example.com/notes.html"</span>],
+    ingester=ingester,
+    checkpoints=FilesystemCheckpointStore(<span class="s">".taguru-checkpoints"</span>),
+    events_out=<span class="s">"sync.jsonl"</span>,
+)
+print(report.to_dict())  <span class="c"># one JSON object: counts, duration_ms, an events_path reference</span></code></pre>
+    <p class="note">
+      ADR 0007 §3 weighed three packaging shapes: a second Rust binary, a Python SDK module, or a
+      protocol plus a Python reference implementation. It chose the third — connector parsing
+      stays entirely client-side, exactly as the SDK's own <code>.md</code>/<code>.txt</code>
+      reference connector already worked, rather than adding a PDF/HTML/DOCX/PPTX parser
+      dependency (and the corresponding Rust ecosystem immaturity, <code>Cargo.lock</code> audit
+      surface, and <code>scratch</code>-image bloat) to <code>src/</code>. Every connector commit
+      (#347–#353) states "no change to <code>src/</code>, the HTTP contract, or the MCP contract"
+      for this reason — the server-side batch/import contract this page's connectors feed is
+      unchanged; only the <i>producer</i> is new.
+    </p>
+  </section>
+
+  <section id="connectors">
+    <h2>The connectors</h2>
+    <p class="section-sub">
+      Every format connector implements the same <code>Connector</code> protocol: a
+      <code>.read(reference) -&gt; ConnectorDocument</code> method, plus <code>parser</code>/
+      <code>parser_version</code>/<code>parse_options_digest</code> for checkpointing. None of
+      them raise on an ordinary parse failure — a document with problems comes back with empty
+      <code>text</code> and populated <code>diagnostics</code> instead (see
+      <a href="#diagnostics">below</a>).
+    </p>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Class</th><th>Reads</th><th>Locator <code>kind</code></th><th>Install</th></tr></thead>
+        <tbody>
+          <tr><td><code>TextFileConnector</code></td><td><code>.md</code> <code>.txt</code></td><td>— (sections only)</td><td>always available</td></tr>
+          <tr><td><code>PdfConnector</code></td><td><code>.pdf</code></td><td><code>page</code></td><td><code>pip install "langchain-taguru[pdf]"</code></td></tr>
+          <tr><td><code>HtmlConnector</code></td><td><code>.html</code>/<code>.htm</code>/<code>.xhtml</code>, <code>http(s)://</code></td><td><code>fragment</code></td><td>always available (stdlib <code>html.parser</code>)</td></tr>
+          <tr><td><code>DocxConnector</code></td><td><code>.docx</code></td><td><code>table</code></td><td><code>pip install "langchain-taguru[docx]"</code></td></tr>
+          <tr><td><code>PptxConnector</code></td><td><code>.pptx</code></td><td><code>slide</code> / <code>speaker_notes</code></td><td><code>pip install "langchain-taguru[pptx]"</code></td></tr>
+          <tr><td><code>S3Connector</code></td><td><code>s3://</code> objects (dispatches to the row above by extension, then content-type)</td><td>the delegate's own</td><td><code>pip install "langchain-taguru[s3]"</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      Format-specific parser dependencies are opt-in extras, not the default install — a caller
+      ingesting nothing but <code>.md</code>/<code>.txt</code> never pays for a PDF parser it
+      never uses. Constructing a connector whose extra is not installed raises <code>ImportError</code>
+      with the exact <code>pip install</code> line to run.
+    </p>
+    <ul>
+      <li><b><code>PdfConnector</code>.</b> One <code>{"kind": "page", "value": ...}</code> locator per
+        paragraph, derived from the PDF's own page boundaries; its outline (bookmarks), if any,
+        becomes <code>sections</code> and the document <code>title</code>. A page whose extracted
+        text has fewer than <code>min_chars_per_page</code> (default 16) non-whitespace characters
+        is <code>ocr_required</code> rather than silently passed through as low-quality text.
+        Encrypted and corrupt PDFs are reported the same structured way, never a raised
+        exception.</li>
+      <li><b><code>HtmlConnector</code>.</b> Boilerplate (script/style/nav/aside, and a page's own
+        header/footer when nothing scopes content to a <code>&lt;main&gt;</code>/<code>&lt;article&gt;</code>)
+        is stripped before <code>text</code> is built. The heading hierarchy survives as a
+        breadcrumb <code>section</code> (<code>"Guide &gt; Installation"</code>); each heading's
+        own <code>id</code> (or its nearest <code>id</code>-bearing ancestor's) becomes a
+        <code>fragment</code> locator on every paragraph up to the next heading. A URL fetch's
+        source id is the <i>final</i>, fragment-stripped, canonicalized URL — <code>&lt;link
+        rel="canonical"&gt;</code>, when present, only ever populates
+        <code>metadata.canonical_url</code>, never the source id. By default a fetch also refuses
+        any destination (including one reached only via a redirect) that resolves to a private,
+        loopback, link-local, or multicast address; pass <code>allow_private_networks=True</code>
+        to fetch one intentionally.</li>
+      <li><b><code>DocxConnector</code>.</b> The document body is walked in real document order —
+        paragraphs and tables interleaved, never read as two separate collections. A table (top-level
+        or nested inside another table's cell) becomes exactly one paragraph carrying a
+        <code>table</code> locator; an ordinary body paragraph never carries a locator, which is
+        what makes "this paragraph has a locator" mean "this paragraph is a table." A
+        password-protected <code>.docx</code> is recognized by its container's own signature and
+        reported <code>encrypted</code> before ever being opened as a zip. Footnotes, endnotes,
+        comments, and text-box content are named in a single <code>partial_extraction</code>
+        diagnostic rather than silently short-changed. Only <code>.docx</code> is read;
+        <code>.doc</code> and <code>.docm</code> are both <code>unsupported_format</code>.</li>
+      <li><b><code>PptxConnector</code>.</b> A slide's shapes are walked in document order, recursing
+        into group shapes. Every non-empty text-frame paragraph and every table carries a
+        <code>slide</code> locator; a slide's speaker notes are read as their own paragraph(s)
+        carrying <code>speaker_notes</code> instead. A slide's title becomes the paragraph-anchored
+        <code>section</code>. Charts, SmartArt, and embedded/linked OLE objects are named in a
+        single <code>partial_extraction</code> diagnostic. Only <code>.pptx</code> is read;
+        <code>.ppt</code> and <code>.pptm</code> are both <code>unsupported_format</code>.</li>
+      <li><b><code>S3Connector</code>/<code>sync_object_storage</code>.</b> Lists a bucket/prefix and
+        dispatches each object to whichever connector above its extension (or, failing that, its
+        content-type) names, then re-stamps the delegate's <code>source</code>/
+        <code>metadata.origin_uri</code>/<code>display_name</code> to the object's own S3 identity.
+        See <a href="#boundary">the credential boundary</a> and <a href="#checkpoints">checkpoints</a>
+        below for what makes a rerun cheap.</li>
+    </ul>
+  </section>
+
+  <section id="boundary">
+    <h2>The credential boundary survives</h2>
+    <p class="section-sub">
+      The same posture <a href="extract.html#boundary">document extraction</a> holds for chat
+      model credentials applies here to storage credentials.
+    </p>
+    <ul>
+      <li><b>S3: the standard AWS credential chain only.</b> <code>S3ObjectStore</code>'s only
+        construction knobs are <code>endpoint_url</code>, <code>region_name</code>, and
+        <code>profile_name</code> — none of them is credential material, and there is deliberately
+        no parameter this class could accept an access key or secret through. Credentials always
+        come from <code>boto3</code>'s own chain (environment, shared config/credentials file, an
+        EC2/ECS/Lambda role, …). An <code>endpoint_url</code> with userinfo embedded
+        (<code>https://user:pass@host</code>) is rejected outright.</li>
+      <li><b>URLs: canonicalization is the only representation.</b> <code>HtmlConnector</code>
+        fetches always strip userinfo and a deny-listed set of query parameters
+        (<code>signature</code>, <code>sig</code>, <code>token</code>, <code>access_token</code>,
+        <code>x-amz-signature</code>, <code>x-amz-credential</code>,
+        <code>x-amz-security-token</code>, <code>apikey</code>, <code>api_key</code>) before the
+        result becomes a source id, a checkpoint key, a batch's <code>source</code>, a log line, or
+        an observability event — the same one value serves every purpose; there is no separate
+        "redacted display value" to keep in sync with it.</li>
+      <li><b>Auth failures are permanent, never retried.</b> Object-storage errors classify into two
+        buckets: access-denied/invalid-credential/expired-token/no-such-bucket style codes are
+        permanent (raised immediately, no retry), everything else is transient. Status codes are
+        not trusted alone for this — S3 returns 404 for a missing bucket too — the error
+        <i>code</i> decides.</li>
+    </ul>
+  </section>
+
+  <section id="documents">
+    <h2>What a connector produces</h2>
+    <p>
+      A connector never numbers its own paragraphs — it produces <code>text</code> and lets the
+      same splitter <a href="extract.html#chunking">document extraction</a> uses decide where
+      paragraphs begin and end, so a connector's <code>locators</code>/<code>sections</code> stay
+      addressed against whatever the server's own canonical paragraph numbering turns out to be.
+      <code>ConnectorDocument.sections</code>/<code>.locators</code> round-trip losslessly through
+      <code>/import</code> into <code>Citation.section</code>/<code>.locator</code> on every
+      <code>recall</code>/<code>explore</code>/<code>activate</code>/<code>cite_passage</code>
+      response — see <a href="import.html#locator-lines">import.html's locator lines</a>.
+    </p>
+    <p class="note">
+      <code>fingerprint_inputs.raw_content_sha256</code> hashes the object's <b>raw bytes before
+      parsing</b> — a different question from <code>taguru extract</code>'s manifest, which hashes
+      the extracted <code>text</code>. The two are intentionally not interchangeable: one answers
+      "did the object change," the other "did the parsed content change."
+    </p>
+  </section>
+
+  <section id="locators">
+    <h2>Citation locators, by connector</h2>
+    <p>
+      <a href="import.html#locator-lines">A locator</a> (<code>{kind, value}</code>) names the
+      exact paragraph it was recorded for — unlike <code>section</code>, it does not extend to the
+      next paragraph. <code>kind</code> is an open string; the standard connectors populate it as
+      follows:
+    </p>
+    <div class="tbl">
+      <table>
+        <thead><tr><th><code>kind</code></th><th>Connector</th><th><code>value</code></th></tr></thead>
+        <tbody>
+          <tr><td><code>page</code></td><td><code>PdfConnector</code></td><td>1-based page number, e.g. <code>"12"</code></td></tr>
+          <tr><td><code>fragment</code></td><td><code>HtmlConnector</code></td><td>the nearest heading's <code>id</code></td></tr>
+          <tr><td><code>table</code></td><td><code>DocxConnector</code></td><td><code>"3"</code>, or <code>"3.1"</code> for a table nested in table 3's cell</td></tr>
+          <tr><td><code>slide</code></td><td><code>PptxConnector</code></td><td>1-based slide number</td></tr>
+          <tr><td><code>speaker_notes</code></td><td><code>PptxConnector</code></td><td>1-based slide number the notes belong to</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      A notable asymmetry: <code>DocxConnector</code> gives an ordinary body paragraph <b>no</b>
+      locator at all, so "this paragraph has a locator" means "this paragraph is a table." A DOCX
+      has no page-like structure of its own to spend a locator budget on instead; a PPTX slide
+      already has a number, so its budget goes to distinguishing slide body from speaker notes
+      rather than to tables.
+    </p>
+  </section>
+
+  <section id="units">
+    <h2>Work units and size limits</h2>
+    <p>
+      The work unit is <b>one file or one object</b> — one <code>ConnectorDocument</code>, one
+      source id, one retract-then-apply unit — the same granularity as
+      <a href="long-running.html#units"><code>taguru extract</code>'s own work units</a>. A
+      connector does not split a PDF into per-page or per-section documents on its own; page/slide
+      boundaries surface as <a href="#locators">locators</a> within one document, not as separate
+      source ids. <code>sub_source_id()</code> exposes a grammar for a finer-grained id
+      (<code>manual.pdf#installation</code>) for a runner that wants to split a document itself
+      before feeding it through, but the standard connectors do not call it.
+    </p>
+    <p>
+      Model-input chunking (how much text one LLM call sees) is a separate, later layer —
+      <code>TaguruIngester</code>'s own chunking runs after a connector hands back one document's
+      full text, and is independent of any locator a connector emitted. Three size ceilings apply
+      before that:
+    </p>
+    <ul>
+      <li><b>Raw bytes.</b> <code>max_file_bytes</code> (default 64 MiB for PDF/DOCX/PPTX/S3, 16
+        MiB for HTML) rejects an oversized source as <code>content_too_large</code> before parsing
+        it.</li>
+      <li><b>S3 listing size.</b> <code>S3Connector</code> checks an object's listed size against
+        the same ceiling before fetching it at all.</li>
+      <li><b>Extracted text.</b> A parsed document's own text is capped separately (8 MiB) —
+        <code>content_too_large</code> again if parsing itself produced more text than that.</li>
+    </ul>
+  </section>
+
+  <section id="checkpoints">
+    <h2>Checkpoints: no new format</h2>
+    <p class="section-sub">
+      A connector's own fetch/parse work is independently resumable, composing with — never
+      replacing — the same <code>CheckpointStore</code> <a href="extract.html#checkpoints">chunk
+      checkpoints</a> already use.
+    </p>
+    <pre><code><span class="k">from</span> taguru_langchain.ingest_connectors <span class="k">import</span> ConnectorCheckpoint
+
+checkpoint = ConnectorCheckpoint(
+    FilesystemCheckpointStore(<span class="s">".taguru-checkpoints"</span>), namespace=<span class="s">"connector"</span>
+)
+cached = checkpoint.load(source, fresh_fingerprint)  <span class="c"># None on any mismatch — never a false hit</span></code></pre>
+    <p>
+      There is no dedicated connector manifest file or directory — every layer keys into the same
+      <code>CheckpointStore</code> under its own namespace: <code>connector:</code> (a whole
+      <code>ConnectorDocument</code>, keyed by source), <code>s3-object:</code> (a single object's
+      fingerprint gate), <code>s3-inventory:</code> (a prefix's last-seen object list, for deletion
+      detection), and <code>file-probe:</code> (a local file's cheap <code>--dry-run</code> stat).
+      A missing, corrupt, or fingerprint-mismatched checkpoint always degrades to "unseen, redo the
+      work" — never to a false hit. <code>ConnectorCheckpoint.load</code> additionally refuses a
+      checkpoint whose stored <code>source</code> doesn't match the one being loaded, so two
+      distinct sources that happen to fetch byte-identical content can't swap checkpoints under a
+      buggy or lossy custom store.
+    </p>
+    <p>
+      For S3, checkpoint fingerprints prefer, in order: <code>version_id</code> &gt;
+      <code>checksum</code> &gt; <code>(size, last_modified)</code> &gt; a bare <code>ETag</code>
+      as the last resort — some S3-compatible stores compute an ETag in a way that isn't a
+      reliable content hash for multipart uploads, so it is never the first choice. An object
+      whose listing metadata is unchanged is never even fetched; one whose bytes are unchanged
+      despite a metadata bump (a tag edit, a copy-in-place) is fetched but never re-ingested — two
+      independent skip gates, both fail toward re-doing the work.
+    </p>
+    <p>
+      Deleted objects are never retracted by default: <code>report.deleted_detected</code> names
+      them, but nothing changes in <code>taguru</code> until you opt in —
+      <code>deletion_policy="retract"</code> withdraws exactly what this connector's own prior
+      listing no longer sees; <code>"mirror"</code> also reconciles against the context's actual
+      source list, so it self-heals even on a first run with no prior listing to diff against.
+    </p>
+  </section>
+
+  <section id="observability">
+    <h2>Run report and event log</h2>
+    <p class="section-sub">
+      <code>sync_references</code> and <code>sync_object_storage</code> both return the same
+      <code>RunReport</code> shape (ADR 0007 §11) — one event/summary vocabulary across every
+      driver.
+    </p>
+    <p>
+      Every source moves through some subset of seven phases:
+      <code>discovered</code> → <code>unchanged</code> | <code>parsed</code> → <code>extracted</code>
+      → <code>imported</code>, or <code>skipped</code> / <code>failed</code> off that path.
+      <code>report.events</code> is the full per-source phase history (<code>SourceEvent</code>:
+      <code>source</code>, <code>phase</code>, <code>elapsed_ms</code>, <code>bytes</code>,
+      <code>parser</code>, <code>diagnostic</code>); pass <code>events_out=</code> a path to stream
+      it as JSONL as the run happens — one line per phase transition, flushed immediately, written
+      even under <code>dry_run=True</code> since the sidecar is a dry run's whole product.
+    </p>
+    <p class="note warn">
+      <b>Counts tally each source's LAST phase only</b> — never every phase it passed through. A
+      run summary reading <code>{"discovered": 0, "imported": 2}</code> is normal, not a bug: both
+      sources reached <code>discovered</code> on the way to <code>imported</code>, and only the
+      final phase is counted. <code>report.events</code>/the JSONL sidecar is where the full
+      transition history lives if you need it.
+    </p>
+    <p>
+      Two more details worth knowing before writing a JSONL consumer:
+    </p>
+    <ul>
+      <li><b>Identify duplicates by <code>diagnostic.code</code>, not by <code>source</code>.</b> A
+        rejected duplicate reference is recorded as a <code>skipped</code>/<code>duplicate_source</code>
+        event but never touches the summary tally — grouping by <code>source</code> instead can
+        conflate a duplicate-input case with a genuinely interrupted-and-resumed run, since
+        <code>sync_object_storage</code>'s own duplicate-key case has <code>reference == source</code>.</li>
+      <li><b><code>elapsed_ms</code> is per-source, not per-run.</b> It measures elapsed time since
+        that source's own first event, not since the run started; <code>discovered</code> is
+        always <code>0.0</code>. <code>bytes</code> is the raw object's own size, not the parsed
+        text's byte length.</li>
+    </ul>
+    <p>
+      <code>report.to_dict()</code> is a single JSON object — counts, <code>duration_ms</code>,
+      <code>interrupted</code>, and an <code>events</code> field that is the event <i>count</i> (an
+      int, not the array) plus an <code>events_path</code> reference, so the summary stays O(1)
+      regardless of corpus size.
+    </p>
+  </section>
+
+  <section id="dry-run">
+    <h2>Two different dry runs</h2>
+    <p>
+      A driver's own <code>dry_run=True</code> is <b>stricter</b> than
+      <code>TaguruIngester.ingest_text</code>'s <code>dry_run</code> (which still calls the model
+      and only skips <code>import_batches</code>). At the driver level, <code>dry_run=True</code>
+      means no network fetch, no local file read beyond a cheap <code>stat</code>, and no write to
+      the corpus or to either checkpoint store — this driver-level flag is never forwarded into
+      the connector bridge; a real (non-dry) call always runs with the bridge's own
+      <code>dry_run=False</code>.
+    </p>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Reference kind</th><th><code>dry_run=True</code> verdict</th></tr></thead>
+        <tbody>
+          <tr><td>Local file</td><td><code>unchanged</code> only if <code>size</code>, <code>mtime_ns</code>, <code>parser</code>, <code>parser_version</code>, AND <code>parse_options_digest</code> all still match the last real run; any one mismatch reports <code>parsed</code></td></tr>
+          <tr><td>URL</td><td>always <code>parsed</code> — no <code>HEAD</code>, no network access at all</td></tr>
+          <tr><td>S3 object</td><td><code>unchanged</code> is trustworthy — the bucket listing already carries every fingerprint field needed, with no fetch required to check it</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="diagnostics">
+    <h2>Diagnostics</h2>
+    <p>
+      A closed vocabulary of nine codes, mirroring the shape of
+      <a href="extract.html#diagnostics"><code>taguru extract</code>'s own diagnostics
+      sidecar</a>: <code>unreadable</code>, <code>unsupported_format</code>, <code>encrypted</code>,
+      <code>corrupt</code>, <code>ocr_required</code>, <code>source_id_too_long</code>,
+      <code>content_too_large</code>, <code>partial_extraction</code>, <code>duplicate_source</code>.
+      A connector's <code>.read()</code> never raises for an ordinary parse problem — it returns a
+      <code>ConnectorDocument</code> with empty <code>text</code> and one or more
+      <code>Diagnostic</code> entries (<code>code</code>, <code>message</code>, <code>source</code>)
+      instead, the same "never a silently empty passage" posture extraction takes. New codes may
+      be added over time; an existing code's meaning is never repurposed.
+    </p>
+  </section>
+
+  <section id="ocr">
+    <h2>OCR is a boundary, not an engine</h2>
+    <p>
+      No OCR engine ships in this package or in any connector (ADR 0007 §10). <code>OcrAdapter</code>
+      is the external boundary a connector calls out to when one is configured — given the raw
+      document bytes and the locators naming which pages/units are unusable, an adapter returns
+      whatever text it could recover, each unit still tagged with the locator it was asked about.
+      <code>PdfConnector</code> is the one connector wired to call an adapter today
+      (<code>ocr_adapter=</code>), and only for the exact pages its own <code>min_chars_per_page</code>
+      threshold found unusable — never the whole document. An adapter's own failure (an exception,
+      or simply recovering nothing) leaves that page exactly <code>ocr_required</code>, as if no
+      adapter had been configured at all.
+    </p>
+    <pre><code><span class="k">from</span> taguru_langchain.ingest_connectors <span class="k">import</span> PdfConnector
+
+document = PdfConnector(ocr_adapter=MyOcrAdapter()).read(<span class="s">"docs/scanned.pdf"</span>)</code></pre>
+  </section>
+
+  <section id="next">
+    <h2>Where to go next</h2>
+    <div class="next-links">
+      <a class="nav-card" href="extract.html" style="flex:1 1 16rem">
+        <span class="nc-title">Document extraction reference</span>
+        <p>The .md/.txt CLI producer this SDK module complements — manifest, checkpoints, diagnostics.</p>
+      </a>
+      <a class="nav-card" href="long-running.html" style="flex:1 1 16rem">
+        <span class="nc-title">Long-running ingestion</span>
+        <p>Interrupt, checkpoint, resume — the same guarantees, now including connector work units.</p>
+      </a>
+      <a class="nav-card" href="local-rag-walkthrough.html" style="flex:1 1 16rem">
+        <span class="nc-title">Local RAG walkthrough</span>
+        <p>A worked PDF-to-corpus example, and where a standard connector fits into it.</p>
+      </a>
+    </div>
+  </section>
+
+  <footer class="colophon">
+    <span>MIT License</span>
+    <a href="https://github.com/t0k0sh1/taguru">github.com/t0k0sh1/taguru</a>
+  </footer>
+
+</div>
+</main>
+</div>
+</body>
+</html>
