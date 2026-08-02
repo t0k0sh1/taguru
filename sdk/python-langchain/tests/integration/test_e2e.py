@@ -367,8 +367,9 @@ def test_s3_connector_syncs_a_file_bucket_of_pdf_html_docx_pptx_to_citations(
     server, using a `file://` bucket in place of a real S3 endpoint — the
     same substitution issue #351 itself specifies ("minio/localstack を使
     わず file:// バケットでテスト"): PDF/HTML/DOCX/PPTX objects (the latter
-    added for #352, dispatched by the PPTX MIME-type fallback entry
-    `_CONTENT_TYPE_SUFFIXES` gained alongside its extension) are listed and
+    added for #352, whose entry `_CONTENT_TYPE_SUFFIXES` also gained
+    alongside its extension, even though this object's own `.pptx`
+    extension is what actually dispatches it here) are listed and
     dispatched by extension, each one's own citation locator survives sync,
     a second pass with nothing changed on disk re-fetches and re-ingests
     NEITHER checkpoint layer's own work (ADR 0007 §6.3), and deleting an

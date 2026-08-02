@@ -262,17 +262,17 @@ a page — leaves that page exactly `ocr_required`, as if no adapter had
 been configured at all:
 
 ```python
-from taguru_langchain.ingest_connectors import OcrAdapter, OcrRecoveredUnit, OcrRequest, OcrResult
+from taguru_langchain.ingest_connectors import OcrRecoveredUnit, OcrRequest, OcrResult
 
 class MyOcrAdapter:
     name = "my-ocr-engine"
     version = "1.0"
 
     def recognize(self, request: OcrRequest) -> OcrResult:
-        units = [
+        units = tuple(
             OcrRecoveredUnit(locator=locator, text=my_engine.recognize(request.content, locator))
             for locator in request.locators
-        ]
+        )
         return OcrResult(units=units)
 
 document = PdfConnector(ocr_adapter=MyOcrAdapter()).read("docs/scanned.pdf")

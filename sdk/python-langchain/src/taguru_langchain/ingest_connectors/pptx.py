@@ -243,8 +243,12 @@ def _build_slide(
             if index is None:
                 continue
             if is_title and title_index is None:
-                label = paragraph.text.strip()
-                if label and byte_len(label) <= MAX_SECTION_BYTES:
+                # The committed (sanitized) paragraph text, not the raw
+                # `paragraph.text` — `sanitize_paragraph_text` can collapse
+                # an interior blank-line run, and the section label must
+                # match what `result.paragraphs[index]` actually holds.
+                label = result.paragraphs[index]
+                if byte_len(label) <= MAX_SECTION_BYTES:
                     title_index = index
                     title_label = label
 

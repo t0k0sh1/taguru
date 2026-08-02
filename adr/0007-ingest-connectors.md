@@ -643,8 +643,7 @@ repurposing an existing one is breaking, exactly like `ErrorCode`
   (§348's) call-out to it when configured; absent a configured adapter, the
   `ocr_required` diagnostic is terminal for that document, not retried.
 
-### 10.1 Implementation note (#352): the adapter interface, and PPTX's own
-locator budget
+### 10.1 Implementation note (#352): the adapter interface, and PPTX's own locator budget
 
 `taguru_langchain.ingest_connectors.ocr` fixes the narrow interface this
 section names as three ``Locator``-keyed dataclasses plus one `Protocol`,
