@@ -1,0 +1,10 @@
+{"bytes": 14, "diagnostic": null, "elapsed_ms": 0.0, "kind": "source_event", "parser": null, "phase": "discovered", "source": "<tmp>/probed.md"}
+{"bytes": 14, "diagnostic": null, "elapsed_ms": 0.0, "kind": "source_event", "parser": null, "phase": "discovered", "source": "<tmp>/unprobed.md"}
+{"bytes": 10, "diagnostic": null, "elapsed_ms": 0.0, "kind": "source_event", "parser": null, "phase": "discovered", "source": "<tmp>/unsupported.exe"}
+{"bytes": 0, "diagnostic": null, "elapsed_ms": 0.0, "kind": "source_event", "parser": null, "phase": "discovered", "source": "<tmp>/missing.md"}
+{"bytes": 0, "diagnostic": null, "elapsed_ms": 0.0, "kind": "source_event", "parser": null, "phase": "discovered", "source": "http://127.0.0.1:1/unreachable.html"}
+{"bytes": 14, "diagnostic": null, "elapsed_ms": 0.0, "kind": "source_event", "parser": null, "phase": "unchanged", "source": "<tmp>/probed.md"}
+{"bytes": 14, "diagnostic": null, "elapsed_ms": 0.0, "kind": "source_event", "parser": null, "phase": "parsed", "source": "<tmp>/unprobed.md"}
+{"bytes": 10, "diagnostic": {"code": "unsupported_format", "message": "no installed connector supports extension '.exe'", "source": "<tmp>/unsupported.exe"}, "elapsed_ms": 0.0, "kind": "source_event", "parser": null, "phase": "skipped", "source": "<tmp>/unsupported.exe"}
+{"bytes": 0, "diagnostic": {"code": "unreadable", "message": "[Errno 2] No such file or directory: '<tmp>/missing.md'", "source": "<tmp>/missing.md"}, "elapsed_ms": 0.0, "kind": "source_event", "parser": null, "phase": "skipped", "source": "<tmp>/missing.md"}
+{"bytes": 0, "diagnostic": null, "elapsed_ms": 0.0, "kind": "source_event", "parser": null, "phase": "parsed", "source": "http://127.0.0.1:1/unreachable.html"}

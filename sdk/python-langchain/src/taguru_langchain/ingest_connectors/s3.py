@@ -23,7 +23,9 @@ Two independent pieces:
   applies both checkpoint layers, calls
   :func:`~taguru_langchain.ingest_connectors.bridge.ingest_connector_document`
   for anything that needs it, detects deletions against a persisted prefix
-  inventory, and returns an :class:`S3SyncReport`.
+  inventory, and returns a
+  :class:`~taguru_langchain.ingest_connectors.observability.RunReport`
+  (``S3SyncReport`` here is a deprecated alias of it — ADR 0007 §11.1).
 
 Deliberately NOT a reimplementation of `src/ship.rs`'s Rust
 ``object_store``-backed path — see
@@ -39,11 +41,10 @@ import json
 import os
 import tempfile
 import threading
-import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Final, Literal, cast, get_args
+from typing import Final, Literal, TextIO, cast, get_args
 
 from ..checkpoints import CheckpointStore
 from ..ingest import TaguruIngester, _normalize_stop
@@ -59,8 +60,6 @@ from .document import (
     FingerprintInputs,
     options_digest,
 )
-from .docx import DocxConnector
-from .html import HtmlConnector
 from .objectstore import (
     FetchedObject,
     FingerprintTier,
@@ -71,11 +70,12 @@ from .objectstore import (
     TransientStoreError,
     object_fingerprint,
 )
-from .pdf import PdfConnector
-from .pptx import PptxConnector
+from .observability import Phase as Phase  # re-exported: issue #351/#352 published it from here
+from .observability import RunRecorder, RunReport
+from .observability import SourceEvent as SourceEvent  # re-exported, same reason
 from .protocol import Connector
+from .references import default_connectors
 from .sources import SourceIdRegistry, check_source_id
-from .text import TextFileConnector
 
 PARSER_NAME: Final = "taguru-s3-connector"
 PARSER_VERSION: Final = "1.0.0"
@@ -95,10 +95,6 @@ _CONTENT_TYPE_SUFFIXES: Final[dict[str, str]] = {
     "text/markdown": ".md",
     "text/plain": ".txt",
 }
-
-
-def _elapsed_ms(started: float) -> float:
-    return (time.monotonic() - started) * 1000.0
 
 
 def _suffix_from_key(key: str) -> str:
@@ -123,29 +119,6 @@ def _connector_for_suffix(connectors: Sequence[Connector], suffix: str) -> Conne
         if connector.supports(probe):
             return connector
     return None
-
-
-def _default_connectors() -> tuple[Connector, ...]:
-    """The installed reference connectors, in ADR 0007's own PDF/HTML/DOCX/
-    PPTX order plus the original ``.md``/``.txt`` reference — an optional
-    dependency's connector (``pdf``, ``docx``, ``pptx``) is simply absent
-    when its extra was never installed, so a bucket holding that format
-    legitimately reports ``unsupported_format`` rather than raising at
-    construction."""
-    connectors: list[Connector] = [TextFileConnector(), HtmlConnector()]
-    try:
-        connectors.append(PdfConnector())
-    except ImportError:
-        pass
-    try:
-        connectors.append(DocxConnector())
-    except ImportError:
-        pass
-    try:
-        connectors.append(PptxConnector())
-    except ImportError:
-        pass
-    return tuple(connectors)
 
 
 def _failure_document(
@@ -231,8 +204,10 @@ class S3Connector:
     handles it.
 
     ``connectors`` (default: every connector this package installed —
-    :func:`_default_connectors`) is tried in order via each one's own
-    ``supports()``; a caller may pass a customized subset/ordering (e.g. a
+    :func:`~taguru_langchain.ingest_connectors.references.default_connectors`,
+    shared with :func:`~taguru_langchain.ingest_connectors.references.
+    sync_references`) is tried in order via each one's own ``supports()``;
+    a caller may pass a customized subset/ordering (e.g. a
     ``PdfConnector(extract_outline=False)``). ``max_file_bytes`` (default
     64 MiB) caps the raw object size, checked against the LISTING's own
     size — before any fetch, mirroring every other connector's own
@@ -247,7 +222,7 @@ class S3Connector:
         max_file_bytes: int = _DEFAULT_MAX_FILE_BYTES,
     ) -> None:
         self._store = store
-        self._connectors = tuple(connectors) if connectors is not None else _default_connectors()
+        self._connectors = tuple(connectors) if connectors is not None else default_connectors()
         self._max_file_bytes = max_file_bytes
 
     @property
@@ -422,44 +397,13 @@ class S3Connector:
         return document
 
 
-Phase = Literal["discovered", "unchanged", "parsed", "extracted", "imported", "skipped", "failed"]
-"""ADR 0007 §11's seven-state per-source phase vocabulary, verbatim."""
-
-
-@dataclass(slots=True, frozen=True, kw_only=True)
-class SourceEvent:
-    """One phase transition for one source (ADR 0007 §11) — a source's
-    full per-run history is the ordered subsequence of :class:`S3SyncReport`
-    ``events`` sharing its ``source``."""
-
-    source: str
-    phase: Phase
-    elapsed_ms: float
-    bytes: int = 0
-    parser: str | None = None
-    diagnostic: Diagnostic | None = None
-
-
-@dataclass(slots=True, frozen=True, kw_only=True)
-class S3SyncReport:
-    """One run's summary (ADR 0007 §11): counts are a tally of each
-    source's LAST phase event only — a source that reached ``imported``
-    counts once, under ``imported``, never separately under
-    ``discovered``/``parsed`` too. ``deleted_detected``/``retracted`` and
-    ``tags_dropped`` are additive to that seven-state vocabulary, specific
-    to this connector (ADR 0007 §9)."""
-
-    discovered: int = 0
-    unchanged: int = 0
-    parsed: int = 0
-    extracted: int = 0
-    imported: int = 0
-    skipped: int = 0
-    failed: int = 0
-    deleted_detected: int = 0
-    retracted: int = 0
-    tags_dropped: int = 0
-    events: tuple[SourceEvent, ...] = ()
+S3SyncReport = RunReport
+"""Deprecated alias — see
+:data:`~taguru_langchain.ingest_connectors.observability.S3SyncReport`
+(the canonical definition; ADR 0007 §11.1) for why this is now an alias of
+:class:`~taguru_langchain.ingest_connectors.observability.RunReport`
+rather than its own dataclass. Kept here too since issue #351/#352
+published this name from this module."""
 
 
 _S3_OBJECT_CHECKPOINT_VERSION: Final = 1
@@ -652,31 +596,46 @@ def sync_object_storage(
     deletion_policy: DeletionPolicy = "report",
     dry_run: bool = False,
     should_stop: Callable[[], bool] | threading.Event | None = None,
-) -> S3SyncReport:
+    events_out: str | Path | TextIO | None = None,
+) -> RunReport:
     """Enumerates ``store.list(prefix)`` and syncs every object into
     ``ingester``, applying both checkpoint layers, ADR 0007 §9's deletion
     policy, and ``dry_run``.
 
+    The full listing is drained into memory and every object reported
+    ``discovered`` BEFORE any object is fetched (ADR 0007 §11's
+    "enumerate all discovered work before the first fetch," issue #353) —
+    a behavior change from this function's original #351 implementation,
+    which interleaved listing and fetching one object at a time and so
+    could stop mid-listing on ``should_stop``. A useful side effect: since
+    the listing itself now always finishes before ``should_stop`` is ever
+    consulted, an interruption during fetch/import no longer needs to
+    forfeit the run's own prefix inventory — ``listing_completed`` here
+    tracks only whether ``store.list()`` itself raised, not whether
+    processing finished, so the inventory (and therefore next run's
+    deletion detection) stays accurate even after an interrupted run.
+
     ``deletion_policy`` (default ``"report"``, #217's explicit
     default-no-destructive-sync requirement): ``"report"`` never retracts
     — a deleted object only shows up in the returned report's
-    ``deleted_detected`` count and its own ``SourceEvent``s carry no
-    special marker beyond simply no longer appearing as ``discovered``
-    this run. ``"retract"``/``"mirror"`` are both explicit opt-in and
-    require ``ingester.client`` (a synchronous core-SDK client — an
-    async-only ``TaguruIngester`` has none, and raises instead of
-    guessing). ``"mirror"`` additionally reconciles against the server's
-    actual source list under this prefix, self-healing even without a
-    prior inventory.
+    ``deleted_detected`` count and its own events carry no special marker
+    beyond simply no longer appearing as ``discovered`` this run.
+    ``"retract"``/``"mirror"`` are both explicit opt-in and require
+    ``ingester.client`` (a synchronous core-SDK client — an async-only
+    ``TaguruIngester`` has none, and raises instead of guessing).
+    ``"mirror"`` additionally reconciles against the server's actual
+    source list under this prefix, self-healing even without a prior
+    inventory.
 
     ``dry_run`` tallies every listed object as would-be-``parsed`` or
-    ``unchanged`` — never ``discovered``, since :class:`S3SyncReport`'s
-    counts reflect each source's LAST phase only; the full ``discovered``
-    → ``parsed``/``unchanged`` transition is still visible in ``events``.
-    Nothing is fetched, parsed, ingested, or written to the checkpoint/
-    inventory store. S3's own listing already carries ADR 0007 §9's
-    fingerprint fields, so ``unchanged`` is exactly as reliable here as on
-    a real run (ADR 0007 §11).
+    ``unchanged`` — never ``discovered``, since the report's counts
+    reflect each source's LAST phase only; the full ``discovered`` →
+    ``parsed``/``unchanged`` transition is still visible in the returned
+    events (and ``events_out``, if given). Nothing is fetched, parsed,
+    ingested, or written to the checkpoint/inventory store. S3's own
+    listing already carries ADR 0007 §9's fingerprint fields, so
+    ``unchanged`` is exactly as reliable here as on a real run
+    (ADR 0007 §11).
     """
     if deletion_policy not in _DELETION_POLICIES:
         raise ValueError(f"deletion_policy must be one of {sorted(_DELETION_POLICIES)}")
@@ -687,91 +646,94 @@ def sync_object_storage(
     connector_checkpoint = ConnectorCheckpoint(checkpoints)
     registry = SourceIdRegistry()
 
-    events: list[SourceEvent] = []
-    last_phase: dict[str, Phase] = {}
-    tags_dropped_total = 0
-    seen_sources: set[str] = set()
-
-    def record(
-        source: str,
-        phase: Phase,
-        *,
-        elapsed_ms: float,
-        object_bytes: int = 0,
-        parser: str | None = None,
-        diagnostic: Diagnostic | None = None,
-    ) -> None:
-        events.append(
-            SourceEvent(
-                source=source,
-                phase=phase,
-                elapsed_ms=elapsed_ms,
-                bytes=object_bytes,
-                parser=parser,
-                diagnostic=diagnostic,
+    # A `with` block, not a bare construct-then-close: `events_out`'s file
+    # handle must close even when something below raises (a deletion-policy
+    # `ValueError`, a connector bug `read_object_result` doesn't catch, an
+    # `ingest_connector_document` failure) — `recorder.close()` at the end
+    # of a straight-line function body never runs in that case.
+    with RunRecorder(connector=PARSER_NAME, events_out=events_out) as recorder:
+        listing_completed = True
+        metas: list[ObjectMeta] = []
+        try:
+            for meta in store.list(prefix):
+                metas.append(meta)
+        except (TransientStoreError, PermanentStoreError) as error:
+            # The LISTING itself failed — nothing was safely enumerated this
+            # pass, so the inventory must not be overwritten (ADR 0007 §9: an
+            # incomplete pass degrades to "no prior run to compare against"
+            # next time, never a false deletion).
+            listing_completed = False
+            listing_source = f"{store.base_uri}/{prefix}"
+            recorder.discovered(listing_source)
+            recorder.record(
+                listing_source,
+                "failed",
+                diagnostic=Diagnostic(code="unreadable", message=str(error), source=listing_source),
             )
-        )
-        last_phase[source] = phase
+            metas = []
 
-    listing_completed = True
-    try:
-        for meta in store.list(prefix):
-            if stop():
-                listing_completed = False
-                break
-
+        # Pass 1 (ADR 0007 §11): enumerate and report every object as
+        # `discovered` before any of them is fetched.
+        seen_sources: set[str] = set()
+        work: list[tuple[str, ObjectMeta]] = []
+        for meta in metas:
             source = f"{store.base_uri}/{meta.key}"
             if not registry.claim(source):
-                continue  # a duplicate key from the store's own listing
+                # A duplicate key in the store's own listing.
+                recorder.duplicate(source, of=source)
+                continue
             seen_sources.add(source)
+            recorder.discovered(source, source_bytes=max(meta.size, 0))
+            work.append((source, meta))
 
-            started = time.monotonic()
-
-            record(source, "discovered", elapsed_ms=0.0)
+        # Pass 2: fetch/parse/import (or, under dry_run, just the cheap
+        # fingerprint comparison the listing already carries).
+        interrupted = False
+        for source, meta in work:
+            if stop():
+                interrupted = True
+                break
 
             fingerprint = object_fingerprint(meta)
             if fingerprint is not None and object_checkpoint.load(source) == fingerprint:
-                record(source, "unchanged", elapsed_ms=_elapsed_ms(started))
+                recorder.record(source, "unchanged")
                 continue
 
             if dry_run:
-                record(source, "parsed", elapsed_ms=_elapsed_ms(started))
+                recorder.record(source, "parsed")
                 continue
 
             try:
                 result = active_connector.read_object_result(meta)
             except ObjectNotFoundError:
-                record(
+                recorder.record(
                     source,
                     "skipped",
-                    elapsed_ms=_elapsed_ms(started),
                     diagnostic=Diagnostic(
                         code="unreadable", message="object no longer exists", source=source
                     ),
                 )
                 continue
             except (TransientStoreError, PermanentStoreError) as error:
-                record(
+                recorder.record(
                     source,
                     "failed",
-                    elapsed_ms=_elapsed_ms(started),
                     diagnostic=Diagnostic(code="unreadable", message=str(error), source=source),
                 )
                 continue
 
-            tags_dropped_total += result.tags_dropped
+            recorder.add_dropped(tags=result.tags_dropped)
             document = result.document
 
             if not document.text:
                 diagnostic = document.diagnostics[0] if document.diagnostics else None
-                record(source, "failed", elapsed_ms=_elapsed_ms(started), diagnostic=diagnostic)
+                recorder.record(source, "failed", diagnostic=diagnostic)
                 continue
 
-            record(
+            recorder.record(
                 source,
                 "parsed",
-                elapsed_ms=_elapsed_ms(started),
-                object_bytes=len(document.text.encode("utf-8")),
+                source_bytes=max(meta.size, 0),
                 parser=document.fingerprint_inputs.parser,
             )
 
@@ -782,19 +744,24 @@ def sync_object_storage(
             if connector_checkpoint.load(source, document.fingerprint_inputs) is not None:
                 if fingerprint is not None:
                     object_checkpoint.save(source, fingerprint)
-                record(source, "unchanged", elapsed_ms=_elapsed_ms(started))
+                recorder.record(source, "unchanged")
                 continue
 
-            outcome = ingest_connector_document(ingester, document, should_stop=should_stop)
+            with recorder.attached(ingester):
+                outcome = ingest_connector_document(ingester, document, should_stop=should_stop)
+
+            recorder.add_dropped(
+                locators=outcome.locators_dropped, sections=outcome.sections_dropped
+            )
+
             if outcome.interrupted:
-                record(source, "skipped", elapsed_ms=_elapsed_ms(started))
-                listing_completed = False
+                recorder.record(source, "skipped")
+                interrupted = True
                 break
             if not outcome.ok:
-                record(
+                recorder.record(
                     source,
                     "failed",
-                    elapsed_ms=_elapsed_ms(started),
                     diagnostic=Diagnostic(
                         code="unreadable",
                         message=outcome.error or "ingest failed",
@@ -806,53 +773,20 @@ def sync_object_storage(
             connector_checkpoint.save(document)
             if fingerprint is not None:
                 object_checkpoint.save(source, fingerprint)
-            record(
-                source,
-                "imported",
-                elapsed_ms=_elapsed_ms(started),
-                parser=document.fingerprint_inputs.parser,
-            )
-    except (TransientStoreError, PermanentStoreError) as error:
-        # The LISTING itself failed — nothing was safely enumerated this
-        # pass, so the inventory must not be overwritten (ADR 0007 §9: an
-        # incomplete pass degrades to "no prior run to compare against"
-        # next time, never a false deletion).
-        listing_completed = False
-        listing_source = f"{store.base_uri}/{prefix}"
-        record(
-            listing_source,
-            "failed",
-            elapsed_ms=0.0,
-            diagnostic=Diagnostic(code="unreadable", message=str(error), source=listing_source),
+            recorder.record(source, "imported", parser=document.fingerprint_inputs.parser)
+
+        deleted, retracted = _handle_deletions(
+            store=store,
+            prefix=prefix,
+            checkpoints=checkpoints,
+            object_checkpoint=object_checkpoint,
+            connector_checkpoint=connector_checkpoint,
+            ingester=ingester,
+            seen_sources=frozenset(seen_sources),
+            listing_completed=listing_completed,
+            deletion_policy=deletion_policy,
+            dry_run=dry_run,
         )
+        recorder.add_deletions(detected=deleted, retracted=retracted)
 
-    deleted, retracted = _handle_deletions(
-        store=store,
-        prefix=prefix,
-        checkpoints=checkpoints,
-        object_checkpoint=object_checkpoint,
-        connector_checkpoint=connector_checkpoint,
-        ingester=ingester,
-        seen_sources=frozenset(seen_sources),
-        listing_completed=listing_completed,
-        deletion_policy=deletion_policy,
-        dry_run=dry_run,
-    )
-
-    tallies: dict[str, int] = {}
-    for phase in last_phase.values():
-        tallies[phase] = tallies.get(phase, 0) + 1
-
-    return S3SyncReport(
-        discovered=tallies.get("discovered", 0),
-        unchanged=tallies.get("unchanged", 0),
-        parsed=tallies.get("parsed", 0),
-        extracted=tallies.get("extracted", 0),
-        imported=tallies.get("imported", 0),
-        skipped=tallies.get("skipped", 0),
-        failed=tallies.get("failed", 0),
-        deleted_detected=deleted,
-        retracted=retracted,
-        tags_dropped=tags_dropped_total,
-        events=tuple(events),
-    )
+        return recorder.finish(interrupted=interrupted)

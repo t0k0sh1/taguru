@@ -11,6 +11,7 @@ import dataclasses
 import io
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
@@ -44,6 +45,18 @@ def _ingester(
         async_client=async_client,
         **overrides,  # type: ignore[arg-type]
     )
+
+
+def test_phase_and_source_event_still_import_from_the_s3_submodule() -> None:
+    """Issue #351/#352 published `Phase`/`SourceEvent` from this module;
+    issue #353 moved their canonical definition to `observability.py` but
+    keeps them importable from here too (`S3SyncReport` already was)."""
+    from taguru_langchain.ingest_connectors import observability
+    from taguru_langchain.ingest_connectors.s3 import Phase, S3SyncReport, SourceEvent
+
+    assert Phase is observability.Phase
+    assert SourceEvent is observability.SourceEvent
+    assert S3SyncReport is observability.RunReport
 
 
 # ---------------------------------------------------------------------------
@@ -454,6 +467,45 @@ def test_retract_without_a_sync_client_raises_instead_of_guessing(
         )
 
 
+def test_events_out_is_closed_even_when_the_pass_raises(
+    tmp_path: Path, sync_client: Taguru, async_client: AsyncTaguru, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`sync_object_storage` manages its `RunRecorder` with a `with` block
+    specifically so an exception anywhere in the pass (here,
+    `_handle_deletions`'s own `ValueError` for `deletion_policy="retract"`
+    without a sync client) still closes the `events_out` file handle,
+    instead of leaking it."""
+    import taguru_langchain.ingest_connectors.s3 as s3_module
+
+    store = FakeObjectStore("reports")
+    store.put("a.md", b"alpha")
+    checkpoints = RecordingCheckpointStore()
+    sync_object_storage(
+        store, "", ingester=_ingester(sync_client, async_client), checkpoints=checkpoints
+    )
+    store.delete("a.md")
+
+    closed = []
+    original_close = s3_module.RunRecorder.close
+
+    def recording_close(self: object) -> None:
+        closed.append(True)
+        original_close(self)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(s3_module.RunRecorder, "close", recording_close)
+
+    with pytest.raises(ValueError, match="requires ingester.client"):
+        sync_object_storage(
+            store,
+            "",
+            ingester=_ingester(None, async_client),
+            checkpoints=checkpoints,
+            deletion_policy="retract",
+            events_out=tmp_path / "events.jsonl",
+        )
+    assert closed == [True]
+
+
 def test_dry_run_touches_nothing(
     sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
 ) -> None:
@@ -559,9 +611,19 @@ def test_a_listing_failure_fails_the_pass_and_never_writes_the_inventory(
     assert not any(key.startswith("s3-inventory:") for key in checkpoints.state)
 
 
-def test_should_stop_mid_pass_leaves_the_inventory_unwritten(
+def test_should_stop_before_any_fetch_still_discovers_everything_and_writes_the_inventory(
     sync_client: Taguru, async_client: AsyncTaguru
 ) -> None:
+    """Issue #353 (ADR 0007 §11) changed this: the full listing is now
+    always drained and every object reported `discovered` BEFORE
+    `should_stop` is consulted at all — so an immediate stop no longer
+    leaves the listing itself incomplete. Because the listing (and
+    therefore `seen_sources`) is always complete regardless of where
+    fetch/import got interrupted, the inventory this run leaves behind is
+    trustworthy and gets saved, unlike the pre-#353 behavior this test
+    used to pin (interleaved listing+fetch, where a stop this early meant
+    the listing was itself incomplete and had to skip saving the
+    inventory to avoid manufacturing false deletions next run)."""
     store = FakeObjectStore("reports")
     store.put("a.md", b"alpha")
     store.put("b.md", b"beta")
@@ -575,8 +637,161 @@ def test_should_stop_mid_pass_leaves_the_inventory_unwritten(
         should_stop=lambda: True,
     )
 
-    assert report.discovered == 0
-    assert not any(key.startswith("s3-inventory:") for key in checkpoints.state)
+    assert report.interrupted is True
+    assert report.discovered == 2
+    assert report.imported == 0
+    assert store.get_calls == {}  # every discover landed before the first fetch
+    assert any(key.startswith("s3-inventory:") for key in checkpoints.state)
+
+
+# ---------------------------------------------------------------------------
+# Cross-connector observability (ADR 0007 §11, issue #353) — the pieces
+# S3's own report now shares with sync_references's.
+# ---------------------------------------------------------------------------
+
+
+def test_events_out_writes_the_same_shape_as_the_returned_events(
+    tmp_path: Path, sync_client: Taguru, async_client: AsyncTaguru
+) -> None:
+    store = FakeObjectStore("reports")
+    store.put("a.md", b"alpha content")
+    events_path = tmp_path / "events.jsonl"
+
+    report = sync_object_storage(
+        store,
+        "",
+        ingester=_ingester(sync_client, async_client),
+        checkpoints=RecordingCheckpointStore(),
+        events_out=events_path,
+    )
+
+    on_disk = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines()]
+    from_report = [event.to_dict() for event in report.events]
+    assert on_disk == from_report
+    assert report.events_path == str(events_path)
+    phases = [line["phase"] for line in on_disk if line["source"] == "s3://reports/a.md"]
+    assert phases == ["discovered", "parsed", "extracted", "imported"]
+
+
+def test_duration_ms_is_non_negative_on_a_real_run(
+    sync_client: Taguru, async_client: AsyncTaguru
+) -> None:
+    """A monotonic clock's own resolution can make a fast run measure
+    `0.0` — only non-negativity is a guaranteed property, never a strict
+    positive."""
+    store = FakeObjectStore("reports")
+    store.put("a.md", b"alpha content")
+    report = sync_object_storage(
+        store,
+        "",
+        ingester=_ingester(sync_client, async_client),
+        checkpoints=RecordingCheckpointStore(),
+    )
+    assert report.duration_ms >= 0.0
+
+
+def test_parsed_bytes_is_the_objects_own_size_not_the_parsed_texts(
+    sync_client: Taguru, async_client: AsyncTaguru
+) -> None:
+    """Issue #353 changed this: `parsed`'s `bytes` used to be the PARSED
+    TEXT's byte length (`len(document.text.encode())`); it is now the raw
+    object's own size, matching every other connector driver's convention
+    (`SourceEvent.bytes` is "the source's own bytes, never the parsed
+    text's" — a sum over that column would otherwise be meaningless for
+    phases that carry no text)."""
+    store = FakeObjectStore("reports")
+    body = b"alpha content, deliberately longer than the parsed text will be"
+    store.put("a.md", body)
+    report = sync_object_storage(
+        store,
+        "",
+        ingester=_ingester(sync_client, async_client),
+        checkpoints=RecordingCheckpointStore(),
+    )
+    parsed_event = next(e for e in report.events if e.phase == "parsed")
+    assert parsed_event.bytes == len(body)
+
+
+def test_duplicate_listing_key_does_not_disturb_the_winning_occurrences_tally(
+    sync_client: Taguru, async_client: AsyncTaguru
+) -> None:
+    store = FakeObjectStore("reports")
+    store.put("a.md", b"alpha content")
+
+    class _DuplicateListingStore:
+        """Wraps a real `FakeObjectStore`, yielding its one object TWICE
+        from `list()` — simulating a store bug/quirk (ADR 0007 §11.1); a
+        real S3-compatible listing should never do this, but the driver
+        must not corrupt its own tally if one does."""
+
+        def __init__(self, inner: FakeObjectStore) -> None:
+            self._inner = inner
+
+        @property
+        def base_uri(self) -> str:
+            return self._inner.base_uri
+
+        def list(self, prefix: str) -> object:
+            metas = list(self._inner.list(prefix))
+            return iter(metas + metas)
+
+        def get(self, key: str, *, version_id: str | None = None) -> object:
+            return self._inner.get(key, version_id=version_id)
+
+        def object_tags(self, key: str) -> object:
+            return self._inner.object_tags(key)
+
+    report = sync_object_storage(
+        _DuplicateListingStore(store),  # type: ignore[arg-type]
+        "",
+        ingester=_ingester(sync_client, async_client),
+        checkpoints=RecordingCheckpointStore(),
+    )
+    assert report.imported == 1
+    assert store.get_calls == {"a.md": 1}
+    assert any(
+        e.diagnostic is not None and e.diagnostic.code == "duplicate_source" for e in report.events
+    )
+
+
+def test_locators_and_sections_dropped_are_surfaced_on_the_report(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    """ADR 0007 §5's `locators_dropped`/`sections_dropped` were previously
+    unreachable from `sync_object_storage` (it discarded `IngestOutcome`
+    entirely) — issue #353 wires them into the run report. The server (not
+    the connector) is what actually computes a drop count, so this drives
+    it the same way `test_ingester.py::
+    test_ingest_text_propagates_section_and_locator_counts_from_the_server`
+    does: `fake_server.import_result_override`."""
+    fake_server.import_result_override = {
+        "context": "sake",
+        "source": "s3://reports/a.md",
+        "created": True,
+        "retracted": 0,
+        "associations": 0,
+        "aliases": 0,
+        "passage_stored": True,
+        "passage_dropped": False,
+        "questions_stored": 0,
+        "questions_dropped": 0,
+        "sections_stored": 0,
+        "sections_dropped": 2,
+        "locators_stored": 0,
+        "locators_dropped": 4,
+        "association_paragraphs_dropped": 0,
+    }
+    store = FakeObjectStore("reports")
+    store.put("a.md", b"alpha content")
+    report = sync_object_storage(
+        store,
+        "",
+        ingester=_ingester(sync_client, async_client),
+        checkpoints=RecordingCheckpointStore(),
+    )
+    assert report.imported == 1
+    assert report.locators_dropped == 4
+    assert report.sections_dropped == 2
 
 
 # ---------------------------------------------------------------------------

@@ -9,7 +9,7 @@ not a new top-level package, and no new Rust dependency anywhere: parsing a
 PDF/HTML/DOCX/PPTX/S3 object (#348-#352) stays entirely client-side, exactly
 as this module's own ``.md``/``.txt`` reference connector already does.
 
-Nine pieces:
+Eleven pieces:
 
 - :class:`ConnectorDocument` (``document.py``) — the wire-independent shape
   a connector produces: ``text`` plus paragraph-indexed ``locators``/
@@ -50,6 +50,17 @@ Nine pieces:
   into ``TaguruIngester.ingest_text``; :func:`aingest_connector_document`/
   :func:`aingest_connector_documents` are the async twins, bridging into
   ``TaguruIngester.aingest_text`` instead.
+- :mod:`~taguru_langchain.ingest_connectors.observability` (ADR 0007 §11,
+  issue #353) — the one event/summary shape every connector driver emits:
+  :class:`RunReport`, :class:`SourceEvent`, :class:`RunRecorder` (the
+  shared bookkeeping), and :class:`SourceEventSink` (the append-only
+  per-source JSONL sidecar). ``S3SyncReport`` is now a deprecated alias of
+  :class:`RunReport`.
+- :func:`sync_references`/:func:`plan_references`/:func:`default_connectors`
+  (``references.py``, issue #353) — the cross-connector driver for every
+  local-file/``http(s)://`` reference (``.md``/``.txt``/PDF/HTML/DOCX/
+  PPTX): dispatch, ``dry_run``, and a :class:`RunReport`, the non-S3 twin
+  of :func:`sync_object_storage`.
 """
 
 from __future__ import annotations
@@ -60,7 +71,7 @@ from .bridge import (
     ingest_connector_document,
     ingest_connector_documents,
 )
-from .checkpoint import ConnectorCheckpoint
+from .checkpoint import ConnectorCheckpoint, FileProbe, FileProbeCheckpoint
 from .document import (
     CONNECTOR_DOCUMENT_VERSION,
     DIAGNOSTIC_CODES,
@@ -88,19 +99,28 @@ from .objectstore import (
     object_fingerprint,
     open_object_store,
 )
+from .observability import (
+    PHASES,
+    RUN_SUMMARY_VERSION,
+    Phase,
+    RunRecorder,
+    RunReport,
+    S3SyncReport,
+    SourceEvent,
+    SourceEventSink,
+)
 from .ocr import OcrAdapter, OcrRecoveredUnit, OcrRequest, OcrResult
 from .pdf import PdfConnector
 from .pptx import PptxConnector
 from .protocol import Connector
-from .s3 import (
-    DeletionPolicy,
-    Phase,
-    S3Connector,
-    S3ObjectCheckpoint,
-    S3SyncReport,
-    SourceEvent,
-    sync_object_storage,
+from .references import (
+    ReferenceKind,
+    ReferencePlan,
+    default_connectors,
+    plan_references,
+    sync_references,
 )
+from .s3 import DeletionPolicy, S3Connector, S3ObjectCheckpoint, sync_object_storage
 from .sources import (
     SourceIdRegistry,
     canonicalize_url,
@@ -113,6 +133,8 @@ from .text import TextFileConnector
 __all__ = [
     "CONNECTOR_DOCUMENT_VERSION",
     "DIAGNOSTIC_CODES",
+    "PHASES",
+    "RUN_SUMMARY_VERSION",
     "Connector",
     "ConnectorCheckpoint",
     "ConnectorDocument",
@@ -123,6 +145,8 @@ __all__ = [
     "DocxConnector",
     "FetchedObject",
     "FileObjectStore",
+    "FileProbe",
+    "FileProbeCheckpoint",
     "FingerprintInputs",
     "FingerprintTier",
     "HtmlConnector",
@@ -138,12 +162,17 @@ __all__ = [
     "PermanentStoreError",
     "Phase",
     "PptxConnector",
+    "ReferenceKind",
+    "ReferencePlan",
+    "RunRecorder",
+    "RunReport",
     "S3Connector",
     "S3ObjectCheckpoint",
     "S3ObjectStore",
     "S3SyncReport",
     "SectionEntry",
     "SourceEvent",
+    "SourceEventSink",
     "SourceIdRegistry",
     "TextFileConnector",
     "TransientStoreError",
@@ -151,12 +180,15 @@ __all__ = [
     "aingest_connector_documents",
     "canonicalize_url",
     "check_source_id",
+    "default_connectors",
     "file_source_id",
     "ingest_connector_document",
     "ingest_connector_documents",
     "object_fingerprint",
     "open_object_store",
     "options_digest",
+    "plan_references",
     "sub_source_id",
     "sync_object_storage",
+    "sync_references",
 ]

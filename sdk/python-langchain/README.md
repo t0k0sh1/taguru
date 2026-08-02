@@ -344,6 +344,54 @@ store, prefix = open_object_store('s3://reports/', endpoint_url='http://localhos
 "
 ```
 
+### Observability (ADR 0007 §11)
+
+`sync_object_storage` and `sync_references` (issue #353's cross-connector
+driver for every local-file/`http(s)://` reference — `.md`/`.txt`/PDF/
+HTML/DOCX/PPTX, the non-S3 twin of `sync_object_storage` above) both
+return the same `RunReport`: `discovered`/`unchanged`/`parsed`/
+`extracted`/`imported`/`skipped`/`failed` counts (each source tallied
+once, under its LAST phase only — never separately under every phase it
+passed through), plus `duration_ms` and `interrupted`. `report.events` is
+the full per-source phase history when you need it (`SourceEvent`:
+`source`, `phase`, `elapsed_ms`, `bytes`, `parser`, `diagnostic`); pass
+`events_out=` a path (or an already-open text stream) to also stream it as
+JSONL — one line per phase transition, written the moment it happens — as
+the run happens. "Append-only" describes the sidecar within ONE run: a
+path is opened fresh (truncating any prior content) every call, so it
+records exactly that run's own events, never a log accumulated across
+multiple calls; pass an already-open stream instead if you want to
+control that yourself (e.g. to append across runs). Written even under
+`dry_run=True`, since the sidecar is a dry run's whole product and the
+path is one you named explicitly:
+
+```python
+from taguru_langchain.ingest_connectors import sync_references
+
+report = sync_references(
+    ["docs/manual.md", "docs/manual.pdf", "https://example.com/notes.html"],
+    ingester=ingester,
+    checkpoints=FilesystemCheckpointStore(".taguru-checkpoints"),
+    events_out="sync.jsonl",
+)
+print(report.to_dict())  # one JSON object: counts, duration_ms, an events_path reference
+```
+
+`sync_references`'s own `dry_run=True` means exactly "no fetch beyond a
+local file's cheap `stat`, no write anywhere, including the checkpoint
+stores" — a stricter, driver-level meaning than `TaguruIngester.
+ingest_text`'s own `dry_run` (which still calls the model and only skips
+`import_batches`); a local file reports `unchanged` only when its `size`,
+`mtime_ns`, `parser`, `parser_version`, AND `parse_options_digest` all
+still match what the last real run recorded — a changed parser or parsing
+option is enough to report `parsed` even with byte-identical file
+metadata — `parsed` on any of the five mismatching (never a false
+`unchanged`), and a URL is always `parsed` — no `HEAD`, no network access
+at all under `dry_run`. `S3SyncReport` is now a deprecated alias of
+`RunReport` — `sync_object_storage`'s own
+`tags_dropped`/`deleted_detected`/`retracted` counters are part of that
+one shared shape, present (structurally zero) on every driver's report.
+
 Three more constructor arguments bound how a chunk's structured-output
 retry behaves, all optional and all unchanged by default: `fact_budget`
 asks the model to keep a chunk's answer to at most N associations;

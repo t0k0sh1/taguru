@@ -1,6 +1,12 @@
 """ConnectorCheckpoint (ADR 0007 §6.3, issue #347): "did I already fetch
 and parse this object," composing with — never replacing —
-:class:`~taguru_langchain.checkpoints.CheckpointStore`."""
+:class:`~taguru_langchain.checkpoints.CheckpointStore`.
+
+Also :class:`~taguru_langchain.ingest_connectors.checkpoint.FileProbeCheckpoint`
+(ADR 0007 §11, issue #353): the local-file twin of
+:class:`~taguru_langchain.ingest_connectors.s3.S3ObjectCheckpoint` — "does
+this file's cheap metadata match what we saw last time," answerable with no
+read at all, consulted only under ``--dry-run``."""
 
 from __future__ import annotations
 
@@ -19,6 +25,7 @@ from taguru_langchain.ingest_connectors import (
     FingerprintInputs,
     LocatorEntry,
 )
+from taguru_langchain.ingest_connectors.checkpoint import FileProbe, FileProbeCheckpoint
 
 from .test_checkpoints import (
     FailingDeleteStore,
@@ -147,3 +154,120 @@ def test_delete_failure_is_silently_ignored() -> None:
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         checkpoint.delete("doc.md")  # must not raise or warn
+
+
+# ---------------------------------------------------------------------------
+# FileProbeCheckpoint — the cheap "skip the dry-run reparse" layer
+# ---------------------------------------------------------------------------
+
+
+def _probe(**overrides: object) -> FileProbe:
+    defaults: dict[str, object] = {
+        "size": 4096,
+        "mtime_ns": 1_700_000_000_000_000_000,
+        "parser": "taguru-text-connector",
+        "parser_version": "1.0.0",
+        "parse_options_digest": "cafef00d",
+    }
+    defaults.update(overrides)
+    return FileProbe(**defaults)  # type: ignore[arg-type]
+
+
+def test_file_probe_checkpoint_round_trips() -> None:
+    checkpoint = FileProbeCheckpoint(RecordingCheckpointStore())
+    checkpoint.save("docs/manual.md", _probe())
+    assert checkpoint.load("docs/manual.md") == _probe()
+
+
+def test_file_probe_checkpoint_is_none_when_never_saved() -> None:
+    checkpoint = FileProbeCheckpoint(RecordingCheckpointStore())
+    assert checkpoint.load("never-seen.md") is None
+
+
+def test_file_probe_checkpoint_is_none_on_corrupt_bytes() -> None:
+    store = RecordingCheckpointStore(seed={"file-probe:docs/manual.md": b"not json {"})
+    checkpoint = FileProbeCheckpoint(store)
+    assert checkpoint.load("docs/manual.md") is None
+
+
+def test_file_probe_checkpoint_is_none_when_source_does_not_match() -> None:
+    """Same store-contract caveat `ConnectorCheckpoint` guards against: a
+    lookup under a different source than the one the payload was recorded
+    for must never return that payload."""
+    payload = json.dumps(
+        {
+            "version": 1,
+            "source": "a.md",
+            "size": 1,
+            "mtime_ns": 1,
+            "parser": "taguru-text-connector",
+            "parser_version": "1.0.0",
+            "parse_options_digest": "x",
+        }
+    ).encode("utf-8")
+    store = RecordingCheckpointStore(seed={"file-probe:b.md": payload})
+    checkpoint = FileProbeCheckpoint(store)
+    assert checkpoint.load("b.md") is None
+
+
+def test_file_probe_checkpoint_is_none_on_a_stale_version() -> None:
+    """A future version bump must not honor an old-format entry — the same
+    degrade-to-uncached posture every version check in this SDK takes,
+    never a partial/best-effort read of a mismatched version."""
+    payload = json.dumps(
+        {
+            "version": 0,
+            "source": "docs/manual.md",
+            "size": 1,
+            "mtime_ns": 1,
+            "parser": "taguru-text-connector",
+            "parser_version": "1.0.0",
+            "parse_options_digest": "x",
+        }
+    ).encode("utf-8")
+    store = RecordingCheckpointStore(seed={"file-probe:docs/manual.md": payload})
+    checkpoint = FileProbeCheckpoint(store)
+    assert checkpoint.load("docs/manual.md") is None
+
+
+def test_file_probe_checkpoint_delete_removes_the_entry() -> None:
+    checkpoint = FileProbeCheckpoint(RecordingCheckpointStore())
+    checkpoint.save("docs/manual.md", _probe())
+    checkpoint.delete("docs/manual.md")
+    assert checkpoint.load("docs/manual.md") is None
+
+
+def test_file_probe_checkpoint_load_failure_is_silently_uncached() -> None:
+    checkpoint = FileProbeCheckpoint(FailingLoadStore())
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert checkpoint.load("docs/manual.md") is None
+
+
+def test_file_probe_checkpoint_save_failure_does_not_raise() -> None:
+    checkpoint = FileProbeCheckpoint(FailingSaveStore())
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        checkpoint.save("docs/manual.md", _probe())
+
+
+def test_file_probe_checkpoint_delete_failure_is_silently_ignored() -> None:
+    checkpoint = FileProbeCheckpoint(FailingDeleteStore())
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        checkpoint.delete("docs/manual.md")  # must not raise or warn
+
+
+def test_file_probe_checkpoint_namespace_prevents_collision_with_connector_checkpoint(
+    tmp_path: Path,
+) -> None:
+    store = FilesystemCheckpointStore(tmp_path)
+    file_probe_checkpoint = FileProbeCheckpoint(store)
+    connector_checkpoint = ConnectorCheckpoint(store)
+    file_probe_checkpoint.save("shared-source.md", _probe())
+    connector_checkpoint.save(_document(source="shared-source.md"))
+
+    assert file_probe_checkpoint.load("shared-source.md") == _probe()
+    assert connector_checkpoint.load(
+        "shared-source.md", _document(source="shared-source.md").fingerprint_inputs
+    ) == _document(source="shared-source.md")

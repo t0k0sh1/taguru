@@ -18,6 +18,7 @@ from taguru_langchain.ingest_connectors import (
     ingest_connector_document,
     open_object_store,
     sync_object_storage,
+    sync_references,
 )
 
 
@@ -467,6 +468,54 @@ def test_s3_connector_syncs_a_file_bucket_of_pdf_html_docx_pptx_to_citations(
     finally:
         if client.contexts.exists("ceramics-s3"):
             client.contexts.delete("ceramics-s3")
+
+
+def test_sync_references_end_to_end_with_events_sidecar(client: Taguru, tmp_path: Path) -> None:
+    """`sync_references` (issue #353) — the non-S3 twin of
+    `sync_object_storage` above — against the real server: a local file
+    imports, a second pass over the same file is `unchanged` (no re-fetch,
+    no re-import), and `events_out` writes the same per-source phase
+    trail `report.events` carries, on disk, as it happens."""
+    reference = tmp_path / "manual.md"
+    reference.write_text("The kiln reaches 1000C during raku firing.", encoding="utf-8")
+    checkpoints = FilesystemCheckpointStore(tmp_path / "checkpoints")
+    events_path = tmp_path / "sync.jsonl"
+    llm = FakeListChatModel(
+        responses=[json.dumps({"associations": [], "aliases": [], "questions": []})] * 4
+    )
+    ingester = TaguruIngester(
+        context="ceramics-references",
+        llm=llm,
+        client=client,
+        create_context=True,
+        context_description="sync_references round trip (issue #353)",
+    )
+    try:
+        report = sync_references(
+            [str(reference)],
+            ingester=ingester,
+            checkpoints=checkpoints,
+            events_out=events_path,
+        )
+        assert report.imported == 1
+        assert report.failed == 0
+        assert report.events_path == str(events_path)
+
+        on_disk_phases = [
+            json.loads(line)["phase"]
+            for line in events_path.read_text(encoding="utf-8").splitlines()
+        ]
+        assert on_disk_phases == ["discovered", "parsed", "extracted", "imported"]
+
+        ctx = client.context("ceramics-references")
+        assert str(reference) in ctx.lookup_passages([str(reference)]).passages
+
+        second = sync_references([str(reference)], ingester=ingester, checkpoints=checkpoints)
+        assert second.unchanged == 1
+        assert second.imported == 0
+    finally:
+        if client.contexts.exists("ceramics-references"):
+            client.contexts.delete("ceramics-references")
 
 
 def test_pptx_connector_document_round_trips_slide_and_notes_locators_to_citations(

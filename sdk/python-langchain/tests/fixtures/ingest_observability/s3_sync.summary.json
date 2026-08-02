@@ -1,0 +1,21 @@
+{
+  "connector": "taguru-s3-connector",
+  "connector_run": 1,
+  "deleted_detected": 0,
+  "discovered": 0,
+  "duration_ms": 0.0,
+  "events": 15,
+  "events_path": null,
+  "extracted": 0,
+  "failed": 1,
+  "imported": 2,
+  "interrupted": false,
+  "kind": "run_summary",
+  "locators_dropped": 0,
+  "parsed": 0,
+  "retracted": 0,
+  "sections_dropped": 0,
+  "skipped": 1,
+  "tags_dropped": 8,
+  "unchanged": 1
+}
