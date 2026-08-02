@@ -9,13 +9,18 @@
 //! (scrape) time.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::extract::{MatchedPath, Request, State};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
+// parking_lot, not std::sync: a panic while one of these is held must
+// not poison the lock — `track_http` wraps every request, so a
+// poisoned metrics lock would turn one contained panic into a
+// process-wide failure on every later scrape and request.
+use parking_lot::{Mutex, RwLock};
 
 use crate::registry::AppState;
 
@@ -78,7 +83,7 @@ impl Histogram {
         // low buckets, where this server's common case lives, are
         // exactly where that skews `histogram_quantile` the most.
         let micros = elapsed.as_micros();
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         if let Some(bin) = LATENCY_BUCKETS
             .iter()
             .position(|&(bound, _)| micros <= u128::from(bound) * 1000)
@@ -90,7 +95,7 @@ impl Histogram {
     }
 
     fn snapshot(&self) -> HistogramSnapshot {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock();
         let mut running = 0u64;
         let mut cumulative = [0u64; LATENCY_BUCKETS.len()];
         for (slot, count) in cumulative.iter_mut().zip(&state.counts) {
@@ -757,13 +762,12 @@ impl Metrics {
     pub fn record_http(&self, method: &str, route: &str, status: u16, elapsed: Duration) {
         let stat = self.route_stat(method, route);
         stat.latency.observe(elapsed);
-        if let Some(counter) = stat.by_status.read().unwrap().get(&status) {
+        if let Some(counter) = stat.by_status.read().get(&status) {
             counter.fetch_add(1, Ordering::Relaxed);
             return;
         }
         stat.by_status
             .write()
-            .unwrap()
             .entry(status)
             .or_insert_with(|| AtomicU64::new(0))
             .fetch_add(1, Ordering::Relaxed);
@@ -773,7 +777,6 @@ impl Metrics {
         if let Some(stat) = self
             .http
             .read()
-            .unwrap()
             .get(&(method.to_string(), route.to_string()))
         {
             return Arc::clone(stat);
@@ -781,7 +784,6 @@ impl Metrics {
         Arc::clone(
             self.http
                 .write()
-                .unwrap()
                 .entry((method.to_string(), route.to_string()))
                 .or_default(),
         )
@@ -821,7 +823,7 @@ impl Metrics {
         // still-unhealed failure (and one transient failure flip the whole
         // server to 503). Health stays degraded while the set is non-empty.
         {
-            let mut failing = self.flush_failing.lock().unwrap();
+            let mut failing = self.flush_failing.lock();
             if ok {
                 failing.remove(name);
             } else {
@@ -1047,7 +1049,7 @@ impl Metrics {
         behind_records: u64,
         age_secs: u64,
     ) {
-        self.replication_lag.lock().unwrap().insert(
+        self.replication_lag.lock().insert(
             (context.to_string(), lane),
             ReplicationLag {
                 behind_records,
@@ -1061,7 +1063,6 @@ impl Metrics {
     pub fn forget_replication_lane(&self, context: &str, lane: &'static str) {
         self.replication_lag
             .lock()
-            .unwrap()
             .remove(&(context.to_string(), lane));
     }
 
@@ -1118,7 +1119,7 @@ impl Metrics {
         applied_seq: u64,
         shipped_seq: u64,
     ) {
-        let mut lag = self.replica_lag.lock().unwrap();
+        let mut lag = self.replica_lag.lock();
         let entry = lag.entry((context.to_string(), lane)).or_default();
         entry.applied_seq = applied_seq;
         entry.shipped_seq = shipped_seq;
@@ -1135,7 +1136,7 @@ impl Metrics {
     /// applied this poll: the applied seq stays where it was (or at 0
     /// for a lane never applied), and the age starts counting.
     pub fn note_replica_shipped(&self, context: &str, lane: &'static str, shipped_seq: u64) {
-        let mut lag = self.replica_lag.lock().unwrap();
+        let mut lag = self.replica_lag.lock();
         let entry = lag.entry((context.to_string(), lane)).or_default();
         entry.shipped_seq = shipped_seq;
         if entry.applied_seq < shipped_seq && entry.behind_since_epoch == 0 {
@@ -1145,7 +1146,7 @@ impl Metrics {
 
     /// Drops a vanished context's replica lag rows (both lanes).
     pub fn forget_replica_context(&self, context: &str) {
-        let mut lag = self.replica_lag.lock().unwrap();
+        let mut lag = self.replica_lag.lock();
         lag.remove(&(context.to_string(), "graph"));
         lag.remove(&(context.to_string(), "passages"));
     }
@@ -1160,7 +1161,7 @@ impl Metrics {
     /// results, so a family that fails to land shows its gap from
     /// zero instead of a stale success.
     pub fn reset_replica_lanes(&self) {
-        self.replica_lag.lock().unwrap().clear();
+        self.replica_lag.lock().clear();
     }
 
     /// The full Prometheus text-exposition body. Deterministic: the
@@ -1169,7 +1170,7 @@ impl Metrics {
     pub fn render_prometheus(&self, gauges: &GaugeSnapshot) -> String {
         let mut out = String::new();
 
-        let http = self.http.read().unwrap();
+        let http = self.http.read();
         let mut routes: Vec<(&(String, String), &Arc<RouteStat>)> = http.iter().collect();
         routes.sort_by(|a, b| a.0.cmp(b.0));
 
@@ -1180,7 +1181,7 @@ impl Metrics {
             "Total HTTP requests by method, route template, and status code.",
         );
         for ((method, route), stat) in &routes {
-            let statuses = stat.by_status.read().unwrap();
+            let statuses = stat.by_status.read();
             let mut by_status: Vec<(u16, u64)> = statuses
                 .iter()
                 .map(|(&status, count)| (status, count.load(Ordering::Relaxed)))
@@ -1844,7 +1845,7 @@ impl Metrics {
             self.replication_last_success_epoch.load(Ordering::Relaxed),
         );
         {
-            let lag = self.replication_lag.lock().unwrap();
+            let lag = self.replication_lag.lock();
             push_header(
                 &mut out,
                 "taguru_replication_lag_records",
@@ -1908,7 +1909,7 @@ impl Metrics {
                 "Failed tailer polls (bucket errors, un-appliable families); the tailer retries.",
                 self.replica_poll_errors.load(Ordering::Relaxed),
             );
-            let lag = self.replica_lag.lock().unwrap();
+            let lag = self.replica_lag.lock();
             push_header(
                 &mut out,
                 "taguru_replica_applied_seq",
