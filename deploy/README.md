@@ -91,3 +91,10 @@ snapshot backups — see the
 [AWS guide](https://t0k0sh1.github.io/taguru/aws.html); `kubernetes.yaml`
 applies to EKS as-is once the EBS CSI driver and a gp3 StorageClass are
 in place.
+
+The Azure mapping — VM or AKS compute, Managed Disk-only storage (never
+Azure Files), Application Gateway in front, direct Azure OpenAI
+embeddings — is the
+[Azure guide](https://t0k0sh1.github.io/taguru/azure.html);
+`kubernetes.yaml` applies to AKS as-is, with no storage setup at all
+(the default StorageClass is already the Azure Disk CSI driver).
