@@ -334,6 +334,76 @@ fn health_refuses_both_url_flag_and_positional() {
 }
 
 #[test]
+fn health_url_flag_does_not_swallow_a_following_flag() {
+    // --url --help must not treat "--help" as the URL value (a
+    // confusing "invalid URL" failure instead of the usage error an
+    // operator reaching for the manual actually wants).
+    let output = run(&["health", "--url", "--help"]);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("--url needs a server URL"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn calibrate_url_flag_does_not_swallow_a_following_flag() {
+    let dir = std::env::temp_dir().join(format!(
+        "taguru-cli-calibrate-urlflag-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
+    let probes = dir.join("probes.tsv");
+    std::fs::write(&probes, "a paraphrase\texpected\n").expect("probes file must be writable");
+
+    let output = run(&[
+        "calibrate",
+        "--context",
+        "sake",
+        "--probes",
+        &probes.display().to_string(),
+        "--url",
+        "--json",
+    ]);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("--url needs a server URL"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn communities_url_flag_does_not_swallow_a_following_flag() {
+    let output = run(&["communities", "--context", "sake", "--url", "--json"]);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("--url needs a server URL"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn calibrate_refuses_both_url_flag_and_positional() {
     let dir =
         std::env::temp_dir().join(format!("taguru-cli-calibrate-both-{}", std::process::id()));

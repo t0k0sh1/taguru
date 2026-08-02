@@ -127,8 +127,11 @@ pub fn run(args: &[String]) -> i32 {
                 None => return usage("--config needs a file path"),
             },
             "--url" => match rest.next() {
-                Some(url) if explicit_url.is_none() => {
+                Some(url) if explicit_url.is_none() && !url.starts_with('-') => {
                     explicit_url = Some(url.trim_end_matches('/').to_string());
+                }
+                Some(_) if explicit_url.is_none() => {
+                    return usage("--url needs a server URL");
                 }
                 Some(_) => {
                     return usage("either --url or a positional URL, not both");
