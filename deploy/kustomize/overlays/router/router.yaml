@@ -1,4 +1,4 @@
-# The sharding router (issue #130): `taguru route` in front of the
+# The sharding router (issue #130): `taguru router` in front of the
 # shard writers this overlay renders beside it — one Service for
 # clients, context verbs routed to the owning shard, groups and
 # cross-context search spanning every shard with the single-instance
@@ -39,7 +39,7 @@ spec:
       containers:
         - name: taguru
           image: ghcr.io/t0k0sh1/taguru:0.6.0 # pin; `latest` moves
-          args: ["route"]
+          args: ["router"]
           ports:
             - containerPort: 8248
               name: http

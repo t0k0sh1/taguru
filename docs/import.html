@@ -372,7 +372,7 @@ taguru import --url "$TAGURU_URL" --dry-run backups/   <span class="c"># preview
       <li>
         The input is split on <b>batch boundaries only</b>, never mid-batch: a batch runs from its
         <code>taguru_batch</code> header line to the next <code>taguru_batch</code>/<code>taguru_group</code>
-        line or EOF, the exact rule <code>taguru route</code>'s own cross-shard import splitting
+        line or EOF, the exact rule <code>taguru router</code>'s own cross-shard import splitting
         already uses. Whole batches are packed into each request up to a byte budget starting at
         4&nbsp;MiB (half the 8&nbsp;MiB default <code>TAGURU_MAX_BODY_BYTES</code>, leaving headroom
         for a server configured lower).

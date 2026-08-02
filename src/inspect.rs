@@ -28,11 +28,14 @@ const USAGE: &str =
     "usage: taguru inspect PATH   (a data directory, one .ctx image, or one .group record)\n";
 
 pub fn run(args: &[String]) -> i32 {
+    // Anywhere in the argument list, like every other subcommand: an
+    // operator halfway through composing flags asks for the manual
+    // without first deleting what they typed.
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        print!("{USAGE}");
+        return 0;
+    }
     let path = match args {
-        [flag] if flag == "--help" || flag == "-h" => {
-            print!("{USAGE}");
-            return 0;
-        }
         [path] => Path::new(path.as_str()),
         _ => {
             eprint!("{USAGE}");

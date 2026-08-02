@@ -400,9 +400,9 @@ wait `Retry-After`) /
 `POST /maintenance/compact` sweep is running — wait `Retry-After` and
 retry) / `storage_full` / `read_only_replica` (403: this server is a
 read replica — do NOT retry here; send the write to the writer the
-message names) / `shard_unreachable` (502 from a `taguru route`
-router: a shard this request needs did not answer — retry once the
-shard or its load balancer does).
+message names) / `shard_unreachable` (502 from a `taguru router`: a shard
+this request needs did not answer — retry once the shard or its load
+balancer does).
 
 **Rejected `add_associations`, `store_passages`, and `import` calls carry
 structured detail** (additive fields, present only where they apply —
@@ -507,7 +507,7 @@ responsibility.
   retracted in the instant it is read drops from that page while the
   rows after it still follow — so a short page is not the last one.
   Stop only once a page comes back empty.
-- Behind a `taguru route` router (sharded deployments), the
+- Behind a `taguru router` (sharded deployments), the
   cross-context searches and the `/contexts` listing may answer 200
   with an extra top-level `unreached` array —
   `[{shard, contexts, error}]` — when a shard could not be REACHED:

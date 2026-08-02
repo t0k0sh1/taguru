@@ -168,6 +168,16 @@ pub fn run(args: &[String]) -> i32 {
     if let Err(message) = crate::remote::reject_userinfo(&base) {
         return crate::config::subcommand_usage_error("communities", &message);
     }
+    // `reject_userinfo` deliberately leaves an unparsable `base` alone;
+    // refuse it outright here instead (issue #248 item 8, matching
+    // `evaluate`/`benchmark search`/`calibrate`'s own fix, issue #289 /
+    // #281 / #288) rather than letting a malformed string reach `Api`.
+    if url::Url::parse(&base).is_err() {
+        return crate::config::subcommand_usage_error(
+            "communities",
+            "the URL could not be parsed as a URL",
+        );
+    }
     let api = Api::new(base);
 
     let contexts = match &group {

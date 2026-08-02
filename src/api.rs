@@ -205,7 +205,7 @@ pub(crate) enum ErrorCode {
     /// purpose — a deliberate refusal that retrying cannot change, so
     /// no SDK or client retry loop ever forms around it.
     ReadOnlyReplica,
-    /// 502 from `taguru route` when a shard the request needs cannot
+    /// 502 from `taguru router` when a shard the request needs cannot
     /// be REACHED (connect, timeout, torn body) — distinct from a
     /// shard that answered an error, which passes through with the
     /// shard's own code. Retryable once the shard (or its LB) answers.

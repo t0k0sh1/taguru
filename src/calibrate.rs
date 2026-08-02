@@ -285,6 +285,20 @@ pub fn run(args: &[String]) -> i32 {
     if let Err(message) = crate::remote::reject_userinfo(&base) {
         return crate::config::subcommand_usage_error("calibrate", &message);
     }
+    // `reject_userinfo` deliberately leaves an unparsable `base` alone —
+    // safe for every other consumer, none of which write `base`
+    // anywhere first. `calibrate` writes it into `Report.url` before
+    // any request is made, and a string that fails to parse as a URL
+    // can still be, or contain, `user:pass@host` text (e.g. a
+    // malformed host); refuse it here instead of letting the report
+    // carry it (issue #248 item 8, mirroring `evaluate`'s and
+    // `benchmark search`'s own fix, issue #289 / #281 / #288).
+    if url::Url::parse(&base).is_err() {
+        return crate::config::subcommand_usage_error(
+            "calibrate",
+            "the URL could not be parsed as a URL",
+        );
+    }
     let api = Api::new(base.clone());
     match calibrate(&api, &context, &probes, as_json) {
         Ok(report) => {

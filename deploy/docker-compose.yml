@@ -78,7 +78,7 @@ services:
   #
   # taguru-router:
   #   image: ghcr.io/t0k0sh1/taguru:0.6.0
-  #   command: ["route"]
+  #   command: ["router"]
   #   ports:
   #     - "127.0.0.1:8250:8248"
   #   environment:

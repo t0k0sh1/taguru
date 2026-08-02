@@ -1,6 +1,6 @@
 # The sharded fleet (issue #130): two PVC writer shards — the base
 # manifest instantiated twice under shards/ with distinct names and
-# selector labels — plus the stateless `taguru route` front door and
+# selector labels — plus the stateless `taguru router` front door and
 # its context→shard map. Clients get one URL (the `taguru-router`
 # Service); groups and cross-context search span both shards with the
 # single-instance merge semantics.

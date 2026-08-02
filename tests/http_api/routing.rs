@@ -1,4 +1,4 @@
-//! `taguru route` (issue #130): the stateless scatter-gather router.
+//! `taguru router` (issue #130): the stateless scatter-gather router.
 //! The load-bearing property is EQUIVALENCE — the router over split
 //! shards must answer what one instance holding the same contexts
 //! answers, for every multi-context verb, merges and cursors and
@@ -582,4 +582,24 @@ fn the_router_health_names_its_own_version() {
     assert_eq!(body["router"], json!(true), "{body}");
     assert_eq!(body["shards"], json!(1), "{body}");
     assert_eq!(body["version"], json!(env!("CARGO_PKG_VERSION")), "{body}");
+}
+
+/// Issue #248 item 9: `route` is a deprecated alias for `router`, not
+/// just a `--help` synonym — it must dispatch into the exact same
+/// running router, answering `/health` identically.
+#[test]
+fn the_route_alias_dispatches_into_a_real_router_identically_to_router() {
+    let shard = Server::start("route-alias-shard");
+    let router = Server::start_router_via(
+        "route-alias",
+        &format!("sake = {}\n", shard.base),
+        &[],
+        "route",
+    );
+
+    let (status, body) = router.call("GET", "/health", None);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["status"], json!("ok"), "{body}");
+    assert_eq!(body["router"], json!(true), "{body}");
+    assert_eq!(body["shards"], json!(1), "{body}");
 }

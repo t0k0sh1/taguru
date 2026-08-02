@@ -275,7 +275,7 @@ load-bearing ones:
 | `TAGURU_TAKEOVER` | off | `1` (or `serve --take-over`) acknowledges deposing the bucket's newest writer while it still looks alive — starting a writer against a bucket IS the promotion act |
 | `TAGURU_REPLICA` | off | `1` (or `serve --replica`) serves the bucket lineage read-only, tailing it continuously: reads scale across replicas, writes answer 403 `read_only_replica` naming the writer, per-context lag on `/metrics` |
 | `TAGURU_WRITER_URL` | — | Where a replica's write-refusal points clients (the writer's base URL / LB name); unset = the refusal names only the bucket's fence holder |
-| `TAGURU_ROUTE_MAP` | — | `taguru route` only: the context→shard map file (`context = shard-url` per line, optional `* = shard-url` fallback); edits take a router restart |
+| `TAGURU_ROUTE_MAP` | — | `taguru router` only: the context→shard map file (`context = shard-url` per line, optional `* = shard-url` fallback); edits take a router restart |
 | `TAGURU_CACHE_BYTES` | 512 MiB | Resident budget for unpinned contexts (LRU eviction) |
 | `TAGURU_RETRIEVAL_CACHE_BYTES` | 32 MiB | Exact-match result cache for recall/query/passage search — an identical request against an unchanged corpus answers without re-running the search; invalidated by the revision counters (`0` = off) |
 | `TAGURU_SEMANTIC_CACHE_THRESHOLD` | unset (off) | Semantic tier over the exact cache, passage search only: a paraphrased query whose embedding cosine clears this floor (`[0,1]`; start at `0.94`) AND passes a negation/number/entity guard serves the equivalent earlier query's cached result. Needs the exact cache and `TAGURU_EMBED_PASSAGES` |
@@ -333,7 +333,7 @@ and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
   process at a time (serve or import) via an advisory lock — dependable
   on local disks, *not* on NFS/EFS. Deploys are stop-then-start. Scale
   reads with replicas (below); scale writes by giving independent
-  shards disjoint sets of contexts and putting `taguru route` in front
+  shards disjoint sets of contexts and putting `taguru router` in front
   (below) — contexts no longer need to cohabit to be searched or
   grouped together.
 - **Key rotation never costs a restart.** The auth table —
@@ -374,7 +374,7 @@ and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
   runbook lives in the
   [architecture page](https://t0k0sh1.github.io/taguru/architecture.html#replicas)
   and is rehearsed by an integration test.
-- **Sharding, with one front door.** `taguru route` is a stateless
+- **Sharding, with one front door.** `taguru router` is a stateless
   scatter-gather router over sharded instances: `TAGURU_ROUTE_MAP`
   names a file of `context = shard-url` lines (plus an optional
   `* = shard-url` fallback), context verbs proxy to the owning shard,
@@ -401,7 +401,7 @@ and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
 - **Health and metrics.** `GET /health` is readiness (503 while the
   write path is degraded — route away, don't restart) and its `200`
   body names the server's own version (`{"status": "ok", "version":
-  "…"}`). `taguru route`'s own `/health` always answers `200` with
+  "…"}`). `taguru router`'s own `/health` always answers `200` with
   `router`/`shards`/`version` beside `status` — it reports the
   router's own state, not shard readiness, since the router has no
   degraded write path of its own to report; a load balancer wanting
