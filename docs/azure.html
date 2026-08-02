@@ -1,0 +1,439 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Deploy on Azure — Taguru</title>
+  <meta name="description" content="Deploying Taguru on Azure: VM or AKS compute, Managed Disk-only storage (never Azure Files), Application Gateway + Key Vault in front, direct Azure OpenAI embeddings with no bridge, snapshot backups, Azure Monitor observability.">
+  <link rel="icon" type="image/png" href="favicon.png">
+  <link rel="stylesheet" href="style.css">
+  <script src="site.js"></script>
+</head>
+<body>
+
+<div class="topbar">
+  <button class="nav-toggle" id="nav-toggle" type="button" aria-label="Toggle menu">☰</button>
+  <a class="brand" href="index.html"><img class="brand-mark" src="logo.png" alt="">Taguru</a>
+  <button class="theme-toggle" type="button" aria-label="Toggle theme">◐</button>
+</div>
+<div class="scrim" id="scrim"></div>
+
+<div class="layout">
+<aside class="sidebar">
+  <a class="brand" href="index.html"><img class="brand-mark" src="logo.png" alt="">Taguru</a>
+  <nav class="side-nav">
+    <div class="side-group">
+      <a href="index.html">Home</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Guide</div>
+      <a href="getting-started.html">Getting started</a>
+      <a href="concepts.html">Concepts</a>
+      <a href="modeling.html">Modeling</a>
+      <a href="troubleshooting.html">Troubleshooting</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Reference</div>
+      <a href="import.html">Batch import</a>
+      <a href="extract.html">Document extraction</a>
+      <a href="connectors.html">Ingest connectors</a>
+      <a href="benchmark.html">Extraction benchmark</a>
+      <a href="evaluate.html">Retrieval quality gate</a>
+      <a href="evidence.html">Evidence assembly</a>
+      <a href="long-running.html">Long-running ingestion</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Deploy</div>
+      <a href="docker-compose.html">Docker Compose</a>
+      <a href="kubernetes.html">Kubernetes</a>
+      <a href="aws.html">AWS</a>
+      <a href="azure.html" aria-current="page">Azure</a>
+      <a href="bedrock.html">Amazon Bedrock</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">How it works</div>
+      <a href="architecture.html">Internal architecture</a>
+      <a href="tracing.html">Tracing</a>
+      <a href="mcp-rag-walkthrough.html">MCP walkthrough</a>
+      <a href="local-rag-walkthrough.html">Local RAG walkthrough</a>
+    </div>
+  </nav>
+  <div class="sidebar-footer">
+    <a href="https://github.com/t0k0sh1/taguru">GitHub ↗</a>
+    <button class="theme-toggle" type="button" aria-label="Toggle theme">◐</button>
+  </div>
+</aside>
+
+<main class="content">
+<div class="page">
+
+  <header class="hero">
+    <div class="eyebrow">deploy · azure</div>
+    <h1>Deploy on Azure</h1>
+    <p class="lede">
+      The same single-writer, single-data-directory design that decides the AWS mapping decides
+      the Azure one — with two twists of its own. Azure is the platform where the storage trap
+      is easiest to step into: its container services persist to Azure Files, exactly the
+      network-filesystem case the design rules out. And it is the platform with the thinnest
+      embedding integration: Azure OpenAI speaks the API the embed client already speaks, so
+      there is no bridge to run and the default floor is already calibrated for the obvious
+      model choice.
+    </p>
+    <div class="hero-meta">
+      <span><b>Compute:</b> VM (Docker/systemd) or AKS</span>
+      <span><b>Storage:</b> Managed Disk — never Azure Files</span>
+      <span><b>TLS:</b> Application Gateway + Key Vault cert in front</span>
+      <span><b>Embeddings:</b> Azure OpenAI, direct — no bridge</span>
+    </div>
+  </header>
+
+  <section id="constraints">
+    <h2>The three constraints that decide everything</h2>
+    <p class="section-sub">
+      The general model is on the <a href="docker-compose.html#model">Docker Compose</a> and
+      <a href="kubernetes.html#model">Kubernetes</a> pages; this page is only the Azure
+      projection of it.
+    </p>
+    <ul>
+      <li><b>One data directory, one writer — and network filesystems are out.</b> On Azure
+        that means <b>Managed Disk only, never Azure Files</b>. An SMB share does refuse a
+        second server — but as a bare <code>Permission denied (os error 13)</code> at startup,
+        which reads as a permissions bug and sends you debugging <code>fsGroup</code> instead
+        of the real problem; and the refusal rides on an SMB lease, the same
+        partition-can-hand-the-lock-away class the <a href="aws.html#constraints">AWS page</a>
+        documents for NFS. NFS-protocol Azure Files shares carry that lease failure mode
+        directly. A single-attached managed disk has no version of this problem.</li>
+      <li><b>Availability is restore time.</b> Deploys are stop-then-start, there is no
+        failover, and the availability story is snapshots plus (optionally) a replica to
+        promote by hand — see <a href="architecture.html#replicas">the promotion runbook</a>.
+        Azure adds one genuinely useful lane here: a <b>ZRS managed disk</b> is a
+        zone-redundant block device that stays single-attach — when a zone dies, detach it
+        from the dead VM and attach it to a VM in another zone, no snapshot restore in the
+        path. Availability = restore time still holds; ZRS just makes the cross-zone restore
+        a reattach.</li>
+      <li><b>TLS belongs to the layer in front.</b> A bearer token is the whole credential, so
+        the server must never be reachable over plain HTTP from outside. On Azure that layer
+        is Application Gateway v2 (add WAF if it faces the internet) with its certificate in
+        Key Vault; the server behind it speaks HTTP on 8248 to the gateway alone.</li>
+    </ul>
+  </section>
+
+  <section id="compute">
+    <h2>Compute: VM or AKS, and why not the rest</h2>
+    <p class="section-sub">Anything that cannot keep one managed disk attached to one long-lived process is out.</p>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Service</th><th>Fit</th><th>Why</th></tr></thead>
+        <tbody>
+          <tr><td>VM + Docker (or the bare binary under systemd)</td><td>✓ the simplest honest fit</td><td>One VM, one Premium SSD data disk, one container. The <a href="docker-compose.html">Docker Compose page</a> applies nearly verbatim.</td></tr>
+          <tr><td>AKS</td><td>✓ with <code>deploy/kubernetes.yaml</code> as-is</td><td>The default StorageClass is already the Azure Disk CSI driver with <code>WaitForFirstConsumer</code> — the manifest's <code>replicas: 1</code> + <code>Recreate</code> + RWO PVC land unchanged, no storage setup at all.</td></tr>
+          <tr><td>Container Apps / ACI</td><td>✗</td><td>Their only persistence is Azure Files — the constraint above rules the whole category out, not a configuration within it.</td></tr>
+          <tr><td>App Service</td><td>✗</td><td>Shared/ephemeral filesystem semantics, persistent content on Azure Files — same class of problem, plus no say over the storage at all.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <h3>VM</h3>
+    <ul>
+      <li><b>Keep the data directory on its own data disk</b> (Premium SSD; ZRS if you want the
+        cross-zone reattach lane), separate from the OS disk: snapshots, restores, and VM
+        replacement then never touch the OS. Azure exposes data disks by LUN under a stable
+        path. Format, mount, and create the data directory <b>owned by uid 65532</b> before
+        the first start — the image is the binary alone on <code>scratch</code>, with no shell
+        and no <code>mkdir</code>, so the host does this once:
+        <pre><code>DEV=$(readlink -f /dev/disk/azure/scsi1/lun0)
+mkfs -t xfs "$DEV" &amp;&amp; mount "$DEV" /mnt/taguru
+mkdir -p /mnt/taguru/data &amp;&amp; chown 65532:65532 /mnt/taguru/data</code></pre></li>
+      <li><b>Plan the egress before the first boot.</b> A VM without a public IP has <b>no
+        default outbound access</b> on subnets created since default outbound retirement —
+        package installs, the registry pull, and the Azure OpenAI endpoint are all silently
+        unreachable until the subnet has a NAT Gateway (or another explicit outbound method).
+        The failure is quiet: cloud-init just fails to install anything.</li>
+      <li><b>No SSH required.</b> A system-assigned managed identity lets the boot script read
+        secrets from Key Vault (below), and Run Command / Bastion cover the rare interactive
+        need.</li>
+      <li><code>docker run --restart unless-stopped</code> (or a systemd unit with
+        <code>Restart=on-failure</code>) is the restart policy — restarts are the host's job,
+        not the gateway's (see <a href="#network">the probe split</a>).</li>
+      <li><b>VM size:</b> memory ≈ <code>TAGURU_CACHE_BYTES</code> (default 512 MiB) + pinned
+        contexts + headroom — a B2s runs the default profile; measure with
+        <code>taguru estimate</code> before scaling up.</li>
+      <li><b>Zone recovery is a reattach if the disk is ZRS.</b> An LRS disk is zone-bound and
+        recovery into another zone is a snapshot restore; a ZRS disk detaches from the dead
+        VM and attaches to a standby in any zone of the region, data intact — run
+        <code>taguru inspect</code> after the first rehearsal, not the first outage.</li>
+    </ul>
+    <h3>AKS</h3>
+    <ul>
+      <li><b><code>deploy/kubernetes.yaml</code> applies unchanged.</b> Everything the
+        <a href="kubernetes.html">Kubernetes page</a> says — the probe wiring,
+        <code>fsGroup: 65532</code>, the grace period — holds on AKS, and unlike EKS there is
+        no CSI or StorageClass work: the built-in default class provisions a managed disk in
+        the pod's zone on first consumption.</li>
+      <li><b>Never let the PVC land on <code>azurefile</code>.</b> The cluster ships
+        <code>azurefile*</code> classes next to the disk ones, and picking one <i>appears</i>
+        to work — one replica comes up and serves. The failure arrives later and wears a
+        costume: a second pod against the same share (a scale-out mistake, or a RollingUpdate
+        overlap where the new pod starts before the old one exits) crash-loops with
+        <code>data directory is not usable: Permission denied</code> — an SMB lock surfacing
+        as a permissions error. On a RollingUpdate that reads as a deploy stuck for no reason.
+        Keep the PVC on the disk classes and the failure class does not exist.</li>
+      <li><b>Two guards, two layers.</b> On a managed disk, a second pod on <i>another</i> node
+        is refused by the platform (<code>Multi-Attach error</code> — the volume stays where
+        it is), and a second pod on the <i>same</i> node — which ReadWriteOnce does not
+        prevent — is refused by the server's own lock with an explicit message
+        (<code>data directory is held by another taguru process</code>). Both refusals are
+        loud and correct; neither exists on a file share.</li>
+      <li><b>A <code>Recreate</code> rollout on the same node costs seconds</b> — single-digit
+        in practice, with the PV reattached, not reprovisioned. A reschedule to another node
+        adds the detach/attach round trip; another zone needs the snapshot walk (an LRS RWO
+        disk cannot follow the pod across zones — see the ZRS note above for the exception).</li>
+      <li><b>Fronting with Application Gateway:</b> AGIC (the Application Gateway Ingress
+        Controller) or Application Gateway for Containers routes into the pod; either way the
+        health-check and timeout rules are <a href="#network">the section below</a> — they
+        belong to the gateway, whichever controller programs it.</li>
+      <li><b>Grace vs. drain:</b> <code>terminationGracePeriodSeconds: 60</code> in the
+        manifest covers the drain plus the final flush. Keep the gateway's connection-draining
+        window at or below it — a drain window longer than the pod's remaining lifetime just
+        resets whatever is still in flight when the pod dies.</li>
+    </ul>
+    <p class="note">
+      The stateless and read-pool variants (<code>kubernetes-stateless.yaml</code>,
+      <code>kubernetes-replicas.yaml</code>) work on AKS the same way, with
+      <code>TAGURU_REPLICATE_URL</code> pointed at Blob Storage and the pod's credentials
+      granted via workload identity — see <a href="kubernetes.html#stateless">the Kubernetes
+      page</a>.
+    </p>
+  </section>
+
+  <section id="image">
+    <h2>The image: mirror ghcr.io through ACR</h2>
+    <p class="section-sub">Keep pulls inside Azure and survive a ghcr.io outage without changing what you run.</p>
+    <ul>
+      <li>The one-shot mirror is <code>az acr import</code> — it copies the manifest as-is, so
+        <b>a digest pin carries over unchanged</b>:
+        <pre><code>az acr import --name REGISTRY \
+  --source ghcr.io/t0k0sh1/taguru:VERSION \
+  --image taguru:VERSION</code></pre>
+        Re-run it per release (CI is the natural place); reference the image as
+        <code>REGISTRY.azurecr.io/taguru@sha256:…</code>, pinned exactly as
+        <a href="docker-compose.html#image">the image guidance</a> says.</li>
+      <li>For pull-on-demand instead of import-per-release, ACR's <b>artifact cache</b> rules
+        mirror <code>ghcr.io</code> the way ECR's pull-through cache does, with upstream
+        credentials (a GitHub token with <code>read:packages</code>) stored in Key Vault.</li>
+      <li>Pullers authenticate with managed identity (<code>AcrPull</code> role) — no registry
+        passwords in the boot script; on AKS, attach the registry to the cluster and the
+        kubelet identity gets <code>AcrPull</code> for you.</li>
+    </ul>
+  </section>
+
+  <section id="secrets">
+    <h2>Secrets: Key Vault feeds the boot, identity does the auth</h2>
+    <p class="section-sub"><code>TAGURU_API_TOKENS</code> (and <code>TAGURU_KEY_SCOPES</code>, the embedding key, …) come from Key Vault at boot; nothing lands in a manifest or a template.</p>
+    <ul>
+      <li><b>VM:</b> a system-assigned managed identity plus the <code>Key Vault Secrets
+        User</code> role is the whole credential chain — the boot script trades the IMDS
+        token for the secrets:
+        <pre><code>T=$(curl -s -H Metadata:true \
+  'http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&amp;resource=https%3A%2F%2Fvault.azure.net' \
+  | jq -r .access_token)
+TOKENS=$(curl -s -H "Authorization: Bearer $T" \
+  'https://VAULT.vault.azure.net/secrets/taguru-api-tokens?api-version=7.4' | jq -r .value)
+docker run -d --restart unless-stopped -p 8248:8248 \
+  -e TAGURU_API_TOKENS="$TOKENS" -e TAGURU_LOG_FORMAT=json \
+  -v /mnt/taguru/data:/data REGISTRY.azurecr.io/taguru@sha256:…</code></pre>
+        Remember the value's shape: <code>name:token</code> pairs — a bare token is refused at
+        startup (<i>refusing to start with broken credentials</i>), by design.</li>
+      <li><b>AKS:</b> the Secrets Store CSI driver (Key Vault provider) or External Secrets
+        Operator materializes the Key Vault entry as the <code>taguru-keys</code> Secret the
+        manifest already consumes, authenticated by workload identity. For live key rotation,
+        mount it as a file and pass <code>--config</code> — the manifest's comments carry the
+        exact steps.</li>
+      <li><code>TAGURU_PUBLIC_URL</code> (for claude.ai-connector OAuth on <code>/mcp</code>) is
+        plain configuration, not a secret — set it beside the rest of the environment.</li>
+    </ul>
+  </section>
+
+  <section id="embeddings">
+    <h2>Embeddings: Azure OpenAI, direct — the only cloud with no bridge</h2>
+    <p class="section-sub">The embed client POSTs OpenAI-shaped JSON with a <code>Bearer</code> header; Azure OpenAI accepts exactly that.</p>
+    <ul>
+      <li><b>Point the client straight at the resource</b> — the v1 surface takes the API key
+        as a Bearer token and the deployment name as <code>model</code>, which is precisely
+        what the client sends:
+        <pre><code>TAGURU_EMBED_URL=https://RESOURCE.openai.azure.com/openai/v1/embeddings
+TAGURU_EMBED_MODEL=DEPLOYMENT_NAME
+TAGURU_EMBED_API_KEY=…   # from Key Vault, like the API tokens</code></pre>
+        No LiteLLM, no proxy, no header rewriting. (The older deployment-scoped
+        <code>…/openai/deployments/NAME/embeddings?api-version=…</code> endpoint also accepts
+        the Bearer form — but the v1 URL is the one to write down: one URL, standard body,
+        nothing Azure-shaped for the client to know.)</li>
+      <li><b>Deploy <code>text-embedding-3-large</code> and the default floor is already
+        home.</b> <code>TAGURU_SEMANTIC_FLOOR</code>'s default 0.35 is calibrated for exactly
+        this model. One honest caveat from measurement: on Japanese content, true paraphrase
+        matches land roughly 0.35–0.55 — the default sits at the <i>bottom</i> of the true
+        band, and a marginal true match can dip just under it. Run
+        <code>taguru calibrate --context NAME --probes FILE</code> against your own content
+        once (see <a href="bedrock.html#embeddings">the calibration story</a>) rather than
+        trusting any table, this one included.</li>
+      <li><b>The circuit breaker and budgets apply unchanged:</b> embedding attempts are cut at
+        <code>min(TAGURU_EMBED_TIMEOUT_SECS, remaining request budget)</code> and repeated
+        provider failures trip the breaker — the knobs and the metrics to alert on are on the
+        <a href="bedrock.html#embeddings">Bedrock page</a>.</li>
+      <li><b>Document extraction</b> (<code>taguru extract</code>) speaks to Azure OpenAI chat
+        models over the same v1 surface; its credentials live in the offline producer's
+        environment only, never on the server — see <a href="extract.html">Document
+        extraction</a>.</li>
+    </ul>
+    <p class="note">
+      The agent side — Claude via Microsoft Foundry driving <code>taguru-mcp</code>, or a
+      remote-MCP agent service registering <code>https://your-host/mcp</code> — rides through
+      the same gateway this page fronts the server with; the MCP endpoint needs nothing
+      Azure-specific.
+    </p>
+  </section>
+
+  <section id="network">
+    <h2>Network: Application Gateway in front, one port behind</h2>
+    <p class="section-sub">One NSG rule chain and a strict division of labor between the two health endpoints.</p>
+    <ul>
+      <li><b>Reachability:</b> the gateway's frontend accepts 443 from clients (WAF SKU if
+        that's the internet); the backend subnet's NSG accepts 8248 <b>from the gateway's
+        subnet only</b>. Nothing else reaches the server — a bearer token is the whole
+        credential, and the token never travels unencrypted because TLS terminates at the
+        gateway, certificate served from Key Vault.</li>
+      <li><b>Create a custom health probe for <code>GET /health</code></b> — the default probe
+        asks for <code>/</code>, which is not a health surface. Then keep the division of
+        labor straight:
+        <div class="tbl" style="margin-top:0.6rem">
+          <table>
+            <thead><tr><th>Signal</th><th>Endpoint</th><th>Who acts</th></tr></thead>
+            <tbody>
+              <tr><td>Routing: is this backend serving?</td><td><code>/health</code> (503 while the write path is degraded)</td><td>The gateway routes away and back — it never restarts anything.</td></tr>
+              <tr><td>Restart: is the process wedged?</td><td><code>/live</code></td><td>Docker's restart policy, systemd, or the kubelet's liveness probe. The gateway has no restart lever, so pointing its probe at <code>/live</code> would just mask write-path failures.</td></tr>
+            </tbody>
+          </table>
+        </div></li>
+      <li><b><code>requestTimeout</code> must cover the request budget — set it explicitly.</b>
+        The backend HTTP settings carry their own request timeout, and its initial value is
+        tool-dependent: Azure documents a 20-second default, while some tooling writes 30 —
+        neither is coupled to <code>TAGURU_REQUEST_TIMEOUT_SECS</code> (30s), and the
+        documented default is <i>shorter</i> than the server's budget, so an untouched
+        gateway can time out requests the server would have answered. At the boundary the
+        gateway wins: it returns 504 and <i>the server keeps burning its budget behind it</i>,
+        finishing a request nobody is waiting for (it logs 408 when the budget runs out). Set
+        <code>requestTimeout</code> at or above <code>TAGURU_REQUEST_TIMEOUT_SECS</code>, and
+        move both together when a slow embedding provider needs a bigger ceiling across
+        retries.</li>
+      <li><b>Connection draining ≥ the request budget.</b> When a backend leaves the pool,
+        in-flight requests get exactly <code>drainTimeoutInSec</code> to finish, then the
+        connection is cut — a response that arrives seconds after the window closes reaches
+        no one. Size the drain window to <code>TAGURU_REQUEST_TIMEOUT_SECS</code> or above,
+        and keep it at or below the pod grace period on AKS (see
+        <a href="#compute">grace vs. drain</a>).</li>
+      <li>Once the server is reachable beyond the VNet, set
+        <code>TAGURU_RATE_LIMIT_PER_MIN</code>; WAF policies on the gateway are optional on
+        top.</li>
+    </ul>
+  </section>
+
+  <section id="backup">
+    <h2>Backups and DR: disk snapshots + an export lane</h2>
+    <p class="section-sub">Every writer is fsync+rename, so a managed-disk snapshot is safe at any instant — even mid-write, with the server running.</p>
+    <ol>
+      <li><b>Automate snapshots</b> with Azure Backup's managed-disk policy (or scheduled
+        incremental snapshots), on whatever cadence bounds your RPO. <code>POST /flush</code>
+        first when you want a snapshot to contain this second's writes rather than the last
+        flush interval's.</li>
+      <li><b>Rehearse the restore</b>: create a disk from the snapshot, attach it, and run the
+        image against it — XFS twins need <code>-o nouuid</code> to mount beside their
+        original:
+        <pre><code>mount -o nouuid $(readlink -f /dev/disk/azure/scsi1/lun1) /mnt/restore
+docker run --rm -v /mnt/restore/data:/data \
+  REGISTRY.azurecr.io/taguru@sha256:… inspect /data</code></pre>
+        <code>taguru inspect</code> runs the same fully-validating load + WAL replay the
+        server boots with; a non-zero exit means the copy is corrupt, and a snapshot you have
+        never restored is not a backup.</li>
+      <li><b>ZRS is the zone lane, snapshots are the region lane.</b> A ZRS data disk turns a
+        zone outage into detach-and-reattach (rehearse it: attach to a VM in another zone,
+        mount, <code>taguru inspect</code>) — but it is one disk with one write history, not a
+        backup. Cross-region recovery is always a snapshot or export restore.</li>
+      <li><b>Keep a second, environment-independent lane:</b> <code>taguru export --url</code>
+        against the running server writes portable JSONL batch streams — ship them to Blob
+        Storage on a schedule. They restore anywhere through <code>taguru import</code>,
+        across versions and machines. Note the export's own caveat: each context's stream is
+        internally consistent, but a multi-context export is not one point in time — the
+        snapshot lane is.</li>
+    </ol>
+    <p class="note warn">
+      With <code>TAGURU_REPLICATE_URL</code> pointed at a Blob Storage container the data
+      directory also ships continuously (RPO ≈ seconds; recover with
+      <code>taguru restore</code>) — that lane and the promotion runbook are on the
+      <a href="docker-compose.html#model">Docker Compose</a> and
+      <a href="architecture.html#replicas">architecture</a> pages, and they complement, not
+      replace, the snapshot you can hand to <code>taguru inspect</code>.
+    </p>
+  </section>
+
+  <section id="observability">
+    <h2>Observability</h2>
+    <p class="section-sub">Three surfaces, three Azure sinks — nothing needs shell access to the scratch container.</p>
+    <ul>
+      <li><b><code>/metrics</code></b> (Prometheus text) → Azure Monitor managed Prometheus
+        (on AKS, enable the metrics add-on and a pod annotation covers the scrape; on a VM,
+        the Azure Monitor agent's Prometheus collection). The health-story metrics to alert
+        on are the flush failures behind <code>/health</code> and — with the embedding tier
+        wired — the circuit-breaker family described on
+        <a href="bedrock.html#embeddings">the Bedrock page</a>.</li>
+      <li><b><code>TAGURU_LOG_FORMAT=json</code></b> → one JSON object per line, which
+        Container Insights (AKS) or the Azure Monitor agent (VM) forwards to Log Analytics
+        with fields intact.</li>
+      <li><b><code>OTEL_EXPORTER_OTLP_ENDPOINT</code></b> → an OpenTelemetry collector →
+        Application Insights (or any OTLP backend): the full retrieval span tree from
+        <a href="tracing.html">Tracing</a>, with no instrumentation to add.</li>
+    </ul>
+  </section>
+
+  <section id="scale-out">
+    <h2>Scale-out: shards, not replicas</h2>
+    <p class="section-sub">Write scale is disjoint context sets on independent instances — the model is on the <a href="kubernetes.html#sharding">Kubernetes page</a>.</p>
+    <ul>
+      <li>Each shard is a complete stack of this page: its own VM (or pod), its own managed
+        disk, its own snapshots. Contexts that must be searched together (groups,
+        cross-context search reach only their own shard) cohabit on one shard.</li>
+      <li>In front, <code>taguru router</code> is stateless — run it anywhere, give clients one
+        hostname. If clients address shards directly instead, give each shard <b>its own
+        hostname</b> (multi-site listeners on the gateway): context names live in the path,
+        so path-based routing cannot split them.</li>
+      <li>Read scale is the replica pool tailing a bucket
+        (<a href="kubernetes.html#read-pool">the read pool</a>) — replicas are read-only and
+        need only storage credentials, not a disk.</li>
+    </ul>
+  </section>
+
+  <section id="next">
+    <div class="next-links">
+      <a class="nav-card" href="kubernetes.html" style="flex:1 1 16rem">
+        <span class="nc-title">Kubernetes</span>
+        <p>The manifest AKS runs as-is: replicas: 1 + Recreate, ReadWriteOnce storage, the probe wiring.</p>
+      </a>
+      <a class="nav-card" href="docker-compose.html" style="flex:1 1 16rem">
+        <span class="nc-title">Docker Compose</span>
+        <p>The single-host model an Azure VM runs: one container, one volume, backups.</p>
+      </a>
+      <a class="nav-card" href="bedrock.html" style="flex:1 1 16rem">
+        <span class="nc-title">Amazon Bedrock</span>
+        <p>The embedding bridge and floor calibration — the general story Azure lets you skip.</p>
+      </a>
+    </div>
+  </section>
+
+  <footer class="colophon">
+    <span>MIT License</span>
+    <a href="https://github.com/t0k0sh1/taguru">github.com/t0k0sh1/taguru</a>
+  </footer>
+
+</div>
+</main>
+</div>
+</body>
+</html>

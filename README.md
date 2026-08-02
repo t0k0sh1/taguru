@@ -25,7 +25,7 @@ playbook for clients itself: `GET /protocol` (the content of
 **Documentation: <https://t0k0sh1.github.io/taguru/>** — getting
 started, concepts, context & group modeling, the import/extract/
 evaluate/evidence-assembly references, deployment guides (Docker
-Compose, Kubernetes, AWS, Amazon Bedrock), a compatibility and local-RAG
+Compose, Kubernetes, AWS, Azure, Amazon Bedrock), a compatibility and local-RAG
 troubleshooting guide, the internal architecture, and a walkthrough of
 an LLM retrieving over MCP.
 
@@ -510,7 +510,8 @@ and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
 Worked deployments, probe wiring, and the reasoning behind them:
 [Docker Compose](https://t0k0sh1.github.io/taguru/docker-compose.html) ·
 [Kubernetes](https://t0k0sh1.github.io/taguru/kubernetes.html) ·
-[AWS](https://t0k0sh1.github.io/taguru/aws.html) —
+[AWS](https://t0k0sh1.github.io/taguru/aws.html) ·
+[Azure](https://t0k0sh1.github.io/taguru/azure.html) —
 the manifests themselves are in [deploy/](deploy/).
 
 ## SDKs and examples
