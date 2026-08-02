@@ -235,6 +235,14 @@ fn dry_run_json_url_with_a_named_context_uses_the_single_context_path() {
         metrics_text.contains("route=\"/contexts/{name}\""),
         "a named CONTEXT argument must call GET /contexts/{{name}}, not enumerate: {metrics_text}"
     );
+    assert!(
+        !metrics_text.contains("route=\"/contexts\""),
+        "a named CONTEXT argument must not enumerate contexts: {metrics_text}"
+    );
+    assert!(
+        !metrics_text.contains("route=\"/contexts/{name}/compact\""),
+        "--dry-run must not compact the named context: {metrics_text}"
+    );
 
     drop(server);
     let _ = std::fs::remove_dir_all(&scratch);

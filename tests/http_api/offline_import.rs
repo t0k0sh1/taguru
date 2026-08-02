@@ -108,7 +108,10 @@ fn an_offline_import_json_represents_a_refused_batch_in_failed_batches() {
          \"create\": {\"description\": \"d\"}}\n\
          {\"subject\": \"s\", \"label\": \"l\", \"object\": \"o\", \"weight\": 1.0}\n\
          {\"taguru_batch\": 1, \"context\": \"missing\", \"source\": \"bad.md\"}\n\
-         {\"subject\": \"s2\", \"label\": \"l2\", \"object\": \"o2\", \"weight\": 1.0}\n",
+         {\"subject\": \"s2\", \"label\": \"l2\", \"object\": \"o2\", \"weight\": 1.0}\n\
+         {\"taguru_batch\": 1, \"context\": \"c\", \"source\": \"c.md\", \
+         \"create\": {\"description\": \"d\"}}\n\
+         {\"subject\": \"s3\", \"label\": \"l3\", \"object\": \"o3\", \"weight\": 1.0}\n",
     )
     .unwrap();
 
@@ -122,9 +125,13 @@ fn an_offline_import_json_represents_a_refused_batch_in_failed_batches() {
     let report: Value = serde_json::from_str(&stdout)
         .unwrap_or_else(|error| panic!("--json must be one JSON document: {error}\n{stdout}"));
 
+    // Two batches landed — one before the refusal, one after — proving
+    // the run keeps going past a refused batch the same way the
+    // human-readable path does; only the middle one is missing.
     let landed = report["batches"].as_array().unwrap();
-    assert_eq!(landed.len(), 1, "{report}");
+    assert_eq!(landed.len(), 2, "{report}");
     assert_eq!(landed[0]["context"], "a");
+    assert_eq!(landed[1]["context"], "c");
 
     let failed = &report["failed_batches"][0];
     assert_eq!(failed["context"], "missing");
@@ -140,6 +147,11 @@ fn an_offline_import_json_represents_a_refused_batch_in_failed_batches() {
     let server = Server::start_on("import-json-failed-batch", data_dir);
     let (status, _) = server.call("GET", "/contexts/a", None);
     assert_eq!(status, 200, "the batch before the refusal must have landed");
+    let (status, _) = server.call("GET", "/contexts/c", None);
+    assert_eq!(
+        status, 200,
+        "the batch after the refusal must still have landed"
+    );
 
     let _ = std::fs::remove_dir_all(&batches);
 }
