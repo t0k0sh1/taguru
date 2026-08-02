@@ -47,6 +47,18 @@ def _ingester(
     )
 
 
+def test_phase_and_source_event_still_import_from_the_s3_submodule() -> None:
+    """Issue #351/#352 published `Phase`/`SourceEvent` from this module;
+    issue #353 moved their canonical definition to `observability.py` but
+    keeps them importable from here too (`S3SyncReport` already was)."""
+    from taguru_langchain.ingest_connectors import observability
+    from taguru_langchain.ingest_connectors.s3 import Phase, S3SyncReport, SourceEvent
+
+    assert Phase is observability.Phase
+    assert SourceEvent is observability.SourceEvent
+    assert S3SyncReport is observability.RunReport
+
+
 # ---------------------------------------------------------------------------
 # S3Connector — dispatch, identity re-stamping, size/source-id/tag handling
 # ---------------------------------------------------------------------------
@@ -455,6 +467,45 @@ def test_retract_without_a_sync_client_raises_instead_of_guessing(
         )
 
 
+def test_events_out_is_closed_even_when_the_pass_raises(
+    tmp_path: Path, sync_client: Taguru, async_client: AsyncTaguru, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`sync_object_storage` manages its `RunRecorder` with a `with` block
+    specifically so an exception anywhere in the pass (here,
+    `_handle_deletions`'s own `ValueError` for `deletion_policy="retract"`
+    without a sync client) still closes the `events_out` file handle,
+    instead of leaking it."""
+    import taguru_langchain.ingest_connectors.s3 as s3_module
+
+    store = FakeObjectStore("reports")
+    store.put("a.md", b"alpha")
+    checkpoints = RecordingCheckpointStore()
+    sync_object_storage(
+        store, "", ingester=_ingester(sync_client, async_client), checkpoints=checkpoints
+    )
+    store.delete("a.md")
+
+    closed = []
+    original_close = s3_module.RunRecorder.close
+
+    def recording_close(self: object) -> None:
+        closed.append(True)
+        original_close(self)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(s3_module.RunRecorder, "close", recording_close)
+
+    with pytest.raises(ValueError, match="requires ingester.client"):
+        sync_object_storage(
+            store,
+            "",
+            ingester=_ingester(None, async_client),
+            checkpoints=checkpoints,
+            deletion_policy="retract",
+            events_out=tmp_path / "events.jsonl",
+        )
+    assert closed == [True]
+
+
 def test_dry_run_touches_nothing(
     sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
 ) -> None:
@@ -622,9 +673,12 @@ def test_events_out_writes_the_same_shape_as_the_returned_events(
     assert phases == ["discovered", "parsed", "extracted", "imported"]
 
 
-def test_duration_ms_is_positive_on_a_real_run(
+def test_duration_ms_is_non_negative_on_a_real_run(
     sync_client: Taguru, async_client: AsyncTaguru
 ) -> None:
+    """A monotonic clock's own resolution can make a fast run measure
+    `0.0` — only non-negativity is a guaranteed property, never a strict
+    positive."""
     store = FakeObjectStore("reports")
     store.put("a.md", b"alpha content")
     report = sync_object_storage(

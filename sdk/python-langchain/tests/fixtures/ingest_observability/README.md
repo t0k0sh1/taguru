@@ -16,7 +16,14 @@ tests that read it instead.
 - `s3_sync.jsonl` / `s3_sync.summary.json` — `sync_object_storage` over a
   `FakeObjectStore`: imported, unchanged (pre-seeded listing fingerprint),
   failed (unsupported extension), skipped (an object that vanished between
-  listing and fetch), a duplicate listing key, and `tags_dropped`.
+  listing and fetch), a duplicate listing key, and `tags_dropped`. The
+  duplicate-key event's `source` is IDENTICAL to the claimed object's own
+  events (`s3://<bucket>/a.md` on both) — unlike `references_run.jsonl`
+  below, S3's duplicate-key case has no separate input string to key the
+  rejected event by. Identify it via `diagnostic.code ==
+  "duplicate_source"`, not by assuming `source` alone partitions one
+  contiguous per-source sub-sequence (`RunRecorder.duplicate`'s own
+  docstring, `observability.py`).
 - `references_dry_run.jsonl` / `references_dry_run.summary.json` —
   `sync_references(dry_run=True)`: the per-kind dry-run table (§11) —
   local file matching its file-probe checkpoint (`unchanged`), local file

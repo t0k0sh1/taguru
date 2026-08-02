@@ -210,6 +210,26 @@ def test_file_probe_checkpoint_is_none_when_source_does_not_match() -> None:
     assert checkpoint.load("b.md") is None
 
 
+def test_file_probe_checkpoint_is_none_on_a_stale_version() -> None:
+    """A future version bump must not honor an old-format entry — the same
+    degrade-to-uncached posture every version check in this SDK takes,
+    never a partial/best-effort read of a mismatched version."""
+    payload = json.dumps(
+        {
+            "version": 0,
+            "source": "docs/manual.md",
+            "size": 1,
+            "mtime_ns": 1,
+            "parser": "taguru-text-connector",
+            "parser_version": "1.0.0",
+            "parse_options_digest": "x",
+        }
+    ).encode("utf-8")
+    store = RecordingCheckpointStore(seed={"file-probe:docs/manual.md": payload})
+    checkpoint = FileProbeCheckpoint(store)
+    assert checkpoint.load("docs/manual.md") is None
+
+
 def test_file_probe_checkpoint_delete_removes_the_entry() -> None:
     checkpoint = FileProbeCheckpoint(RecordingCheckpointStore())
     checkpoint.save("docs/manual.md", _probe())

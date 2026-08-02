@@ -804,7 +804,20 @@ mechanism to the implementation:
   make this impossible: it appends a `skipped`/`duplicate_source` event
   keyed by the REJECTED reference, never touching the claimed source's
   own phase history. `duplicate_source` is a new, additive
-  (ADR 0005 §4-compatible) §8 diagnostic code.
+  (ADR 0005 §4-compatible) §8 diagnostic code. The REJECTED-reference key
+  is only guaranteed distinct from `source` for `sync_references` (an
+  input string differing from the canonical id it collided with, e.g. two
+  URLs differing only by a stripped query parameter). `sync_object_
+  storage`'s own duplicate-KEY case — the identical key appearing twice
+  in one `store.list()` pass — has no separate input identity to key by,
+  so `reference == source` there; a JSONL consumer must therefore
+  identify a `duplicate()` event by `diagnostic.code ==
+  "duplicate_source"`, never by assuming `source` alone partitions one
+  contiguous per-source sub-sequence (grouping naively by `source` in
+  that case reads as `discovered` → `skipped` →
+  `parsed`/`extracted`/`imported`, indistinguishable at a glance from an
+  interrupted-then-recovered import). The tally itself is unaffected
+  either way, since `duplicate()` never writes to it.
 - **A URL's post-redirect identity does not match the id it was
   `discovered` under.** §6.1 stamps a fetched document's `source` with the
   final, post-redirect URL; a driver plans and reports `discovered` before

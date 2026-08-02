@@ -561,6 +561,46 @@ def test_ingest_failure_is_reported_failed_and_the_run_continues(tmp_path: Path)
     )
 
 
+class _RaisingIngester:
+    """An ingester whose `ingest_text` raises — unlike a connector's own
+    `read()`, `sync_references` does not wrap the bridge call in a
+    try/except, so this exercises `RunRecorder` being managed by a `with`
+    block: `events_out`'s file handle must still close."""
+
+    def __init__(self) -> None:
+        self.on_event: Callable[[object], None] | None = None
+
+    def ingest_text(self, text: str, **kwargs: object) -> IngestOutcome:
+        raise RuntimeError("ingester exploded")
+
+
+def test_events_out_is_closed_even_when_ingest_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import taguru_langchain.ingest_connectors.references as references_module
+
+    reference = _write(tmp_path, "a.md", "paragraph one.")
+    events_path = tmp_path / "events.jsonl"
+
+    closed = []
+    original_close = references_module.RunRecorder.close
+
+    def recording_close(self: object) -> None:
+        closed.append(True)
+        original_close(self)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(references_module.RunRecorder, "close", recording_close)
+
+    with pytest.raises(RuntimeError, match="ingester exploded"):
+        sync_references(
+            [reference],
+            ingester=_RaisingIngester(),  # type: ignore[arg-type]
+            checkpoints=RecordingCheckpointStore(),
+            events_out=events_path,
+        )
+    assert closed == [True]
+
+
 class _RaisingConnector:
     parser = "raising-connector"
     parser_version = "1.0.0"

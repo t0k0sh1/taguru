@@ -113,10 +113,18 @@ def test_run_report_events_jsonl_renders_one_line_per_event() -> None:
         SourceEvent(source="a.md", phase="parsed", elapsed_ms=5.0),
     )
     report = RunReport(events=events)
-    lines = report.events_jsonl().splitlines()
+    rendered = report.events_jsonl()
+    lines = rendered.splitlines()
     assert len(lines) == 2
     assert json.loads(lines[0])["phase"] == "discovered"
     assert json.loads(lines[1])["phase"] == "parsed"
+    # Trailing-newline-terminated, matching what SourceEventSink.write()
+    # produces incrementally on disk for the same run.
+    assert rendered.endswith("\n")
+
+
+def test_run_report_events_jsonl_is_empty_string_with_no_events() -> None:
+    assert RunReport(events=()).events_jsonl() == ""
 
 
 def test_s3_sync_report_is_the_run_report_alias() -> None:
@@ -411,6 +419,23 @@ def test_caller_supplied_text_io_is_never_closed_by_the_sink(tmp_path: Path) -> 
     stream.close()
 
 
+def test_write_to_a_caller_closed_stream_degrades_instead_of_raising(tmp_path: Path) -> None:
+    """A caller-supplied `TextIO` is never owned by the sink (the test
+    above) — if the caller closes it first, a later `write` must degrade
+    like any other write failure (one warning, then silent), not raise
+    `ValueError: I/O operation on closed file` mid-sync."""
+    path = tmp_path / "events.jsonl"
+    stream = path.open("w", encoding="utf-8")
+    sink = SourceEventSink(stream)
+    stream.close()
+    with pytest.warns(RuntimeWarning, match="writing to"):
+        sink.write(SourceEvent(source="a.md", phase="discovered", elapsed_ms=0.0))
+    # No further warnings — later writes silently no-op rather than raising.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        sink.write(SourceEvent(source="b.md", phase="discovered", elapsed_ms=0.0))
+
+
 def test_sink_path_property_reports_a_caller_stream_name(tmp_path: Path) -> None:
     path = tmp_path / "events.jsonl"
     with path.open("w", encoding="utf-8") as stream:
@@ -443,3 +468,6 @@ def test_recorder_events_out_writes_the_same_shape_as_finish(tmp_path: Path) -> 
     from_report = [event.to_dict() for event in report.events]
     assert on_disk == from_report
     assert report.events_path == str(path)
+    # Byte-for-byte, not just parsed-equal: `events_jsonl()`'s own trailing
+    # newline must match what the sink wrote incrementally to `path`.
+    assert report.events_jsonl() == path.read_text(encoding="utf-8")

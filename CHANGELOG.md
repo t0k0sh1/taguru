@@ -45,13 +45,8 @@ Entries that change an on-disk format or a response shape say so.
   is handled by `RunRecorder.retarget()`: `discovered` keeps the
   pre-redirect URL (the honest history), every later phase and the tally
   itself move to the post-redirect one, and the reference counts exactly
-  once either way. `S3SyncReport` (`sync_object_storage`'s own report
-  type, published by #351/#352) is now a deprecated alias of `RunReport`
-  rather than its own dataclass — a slotted, frozen dataclass subclass
-  re-declares its base's `__slots__` on this SDK's Python 3.10 floor (the
-  `inherited_slots` fix landed in 3.11), so an alias is the only option
-  correct on the whole supported range. New `FileProbeCheckpoint`/
-  `FileProbe` in `taguru_langchain.ingest_connectors.checkpoint`.
+  once either way. New `FileProbeCheckpoint`/`FileProbe` in
+  `taguru_langchain.ingest_connectors.checkpoint`.
 - PPTX connector and an external OCR adapter boundary (#352, implementing
   ADR 0007 §10 and completing #217's Office/OCR requirements): `PptxConnector`
   in `taguru_langchain.ingest_connectors.pptx`, reading `.pptx` files — `pip
@@ -339,6 +334,17 @@ Entries that change an on-disk format or a response shape say so.
   side effect) the run's own prefix inventory stays trustworthy and gets
   saved even after an interrupted pass, since `seen_sources` is always a
   complete snapshot regardless of where fetch/import got interrupted.
+- `S3SyncReport` (`sync_object_storage`'s own report type, published by
+  #351/#352) is now a deprecated alias of the new `RunReport` (#353)
+  rather than its own dataclass — a slotted, frozen dataclass subclass
+  re-declares its base's `__slots__` on this SDK's Python 3.10 floor (the
+  `inherited_slots` fix landed in 3.11), so an alias is the only option
+  correct on the whole supported range. Consumer-visible: code that
+  subclassed `S3SyncReport`, checked `type(report) is S3SyncReport`, or
+  relied on it carrying only S3's own fields now sees `RunReport`'s wider
+  field set (`connector`, `duration_ms`, `interrupted`, `events`,
+  `events_path`); `isinstance`/attribute access and every field #351/#352
+  already published are unaffected.
 
 ## [0.6.0] - 2026-08-01
 

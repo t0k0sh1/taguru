@@ -356,9 +356,14 @@ passed through), plus `duration_ms` and `interrupted`. `report.events` is
 the full per-source phase history when you need it (`SourceEvent`:
 `source`, `phase`, `elapsed_ms`, `bytes`, `parser`, `diagnostic`); pass
 `events_out=` a path (or an already-open text stream) to also stream it as
-append-only JSONL, one line per phase transition, as the run happens —
-written even under `dry_run=True`, since the sidecar is a dry run's whole
-product and the path is one you named explicitly:
+JSONL — one line per phase transition, written the moment it happens — as
+the run happens. "Append-only" describes the sidecar within ONE run: a
+path is opened fresh (truncating any prior content) every call, so it
+records exactly that run's own events, never a log accumulated across
+multiple calls; pass an already-open stream instead if you want to
+control that yourself (e.g. to append across runs). Written even under
+`dry_run=True`, since the sidecar is a dry run's whole product and the
+path is one you named explicitly:
 
 ```python
 from taguru_langchain.ingest_connectors import sync_references
@@ -376,11 +381,14 @@ print(report.to_dict())  # one JSON object: counts, duration_ms, an events_path 
 local file's cheap `stat`, no write anywhere, including the checkpoint
 stores" — a stricter, driver-level meaning than `TaguruIngester.
 ingest_text`'s own `dry_run` (which still calls the model and only skips
-`import_batches`); a local file reports `unchanged` only when its size and
-mtime still match what the last real run recorded, `parsed` on any
-mismatch (never a false `unchanged`), and a URL is always `parsed` — no
-`HEAD`, no network access at all under `dry_run`. `S3SyncReport` is now a
-deprecated alias of `RunReport` — `sync_object_storage`'s own
+`import_batches`); a local file reports `unchanged` only when its `size`,
+`mtime_ns`, `parser`, `parser_version`, AND `parse_options_digest` all
+still match what the last real run recorded — a changed parser or parsing
+option is enough to report `parsed` even with byte-identical file
+metadata — `parsed` on any of the five mismatching (never a false
+`unchanged`), and a URL is always `parsed` — no `HEAD`, no network access
+at all under `dry_run`. `S3SyncReport` is now a deprecated alias of
+`RunReport` — `sync_object_storage`'s own
 `tags_dropped`/`deleted_detected`/`retracted` counters are part of that
 one shared shape, present (structurally zero) on every driver's report.
 

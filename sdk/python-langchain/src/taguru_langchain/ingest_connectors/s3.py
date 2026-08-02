@@ -70,7 +70,9 @@ from .objectstore import (
     TransientStoreError,
     object_fingerprint,
 )
+from .observability import Phase as Phase  # re-exported: issue #351/#352 published it from here
 from .observability import RunRecorder, RunReport
+from .observability import SourceEvent as SourceEvent  # re-exported, same reason
 from .protocol import Connector
 from .references import default_connectors
 from .sources import SourceIdRegistry, check_source_id
@@ -643,142 +645,148 @@ def sync_object_storage(
     object_checkpoint = S3ObjectCheckpoint(checkpoints)
     connector_checkpoint = ConnectorCheckpoint(checkpoints)
     registry = SourceIdRegistry()
-    recorder = RunRecorder(connector=PARSER_NAME, events_out=events_out)
 
-    listing_completed = True
-    metas: list[ObjectMeta] = []
-    try:
-        for meta in store.list(prefix):
-            metas.append(meta)
-    except (TransientStoreError, PermanentStoreError) as error:
-        # The LISTING itself failed — nothing was safely enumerated this
-        # pass, so the inventory must not be overwritten (ADR 0007 §9: an
-        # incomplete pass degrades to "no prior run to compare against"
-        # next time, never a false deletion).
-        listing_completed = False
-        listing_source = f"{store.base_uri}/{prefix}"
-        recorder.discovered(listing_source)
-        recorder.record(
-            listing_source,
-            "failed",
-            diagnostic=Diagnostic(code="unreadable", message=str(error), source=listing_source),
-        )
-        metas = []
-
-    # Pass 1 (ADR 0007 §11): enumerate and report every object as
-    # `discovered` before any of them is fetched.
-    seen_sources: set[str] = set()
-    work: list[tuple[str, ObjectMeta]] = []
-    for meta in metas:
-        source = f"{store.base_uri}/{meta.key}"
-        if not registry.claim(source):
-            recorder.duplicate(source, of=source)  # a duplicate key in the store's own listing
-            continue
-        seen_sources.add(source)
-        recorder.discovered(source, source_bytes=max(meta.size, 0))
-        work.append((source, meta))
-
-    # Pass 2: fetch/parse/import (or, under dry_run, just the cheap
-    # fingerprint comparison the listing already carries).
-    interrupted = False
-    for source, meta in work:
-        if stop():
-            interrupted = True
-            break
-
-        fingerprint = object_fingerprint(meta)
-        if fingerprint is not None and object_checkpoint.load(source) == fingerprint:
-            recorder.record(source, "unchanged")
-            continue
-
-        if dry_run:
-            recorder.record(source, "parsed")
-            continue
-
+    # A `with` block, not a bare construct-then-close: `events_out`'s file
+    # handle must close even when something below raises (a deletion-policy
+    # `ValueError`, a connector bug `read_object_result` doesn't catch, an
+    # `ingest_connector_document` failure) — `recorder.close()` at the end
+    # of a straight-line function body never runs in that case.
+    with RunRecorder(connector=PARSER_NAME, events_out=events_out) as recorder:
+        listing_completed = True
+        metas: list[ObjectMeta] = []
         try:
-            result = active_connector.read_object_result(meta)
-        except ObjectNotFoundError:
-            recorder.record(
-                source,
-                "skipped",
-                diagnostic=Diagnostic(
-                    code="unreadable", message="object no longer exists", source=source
-                ),
-            )
-            continue
+            for meta in store.list(prefix):
+                metas.append(meta)
         except (TransientStoreError, PermanentStoreError) as error:
+            # The LISTING itself failed — nothing was safely enumerated this
+            # pass, so the inventory must not be overwritten (ADR 0007 §9: an
+            # incomplete pass degrades to "no prior run to compare against"
+            # next time, never a false deletion).
+            listing_completed = False
+            listing_source = f"{store.base_uri}/{prefix}"
+            recorder.discovered(listing_source)
+            recorder.record(
+                listing_source,
+                "failed",
+                diagnostic=Diagnostic(code="unreadable", message=str(error), source=listing_source),
+            )
+            metas = []
+
+        # Pass 1 (ADR 0007 §11): enumerate and report every object as
+        # `discovered` before any of them is fetched.
+        seen_sources: set[str] = set()
+        work: list[tuple[str, ObjectMeta]] = []
+        for meta in metas:
+            source = f"{store.base_uri}/{meta.key}"
+            if not registry.claim(source):
+                # A duplicate key in the store's own listing.
+                recorder.duplicate(source, of=source)
+                continue
+            seen_sources.add(source)
+            recorder.discovered(source, source_bytes=max(meta.size, 0))
+            work.append((source, meta))
+
+        # Pass 2: fetch/parse/import (or, under dry_run, just the cheap
+        # fingerprint comparison the listing already carries).
+        interrupted = False
+        for source, meta in work:
+            if stop():
+                interrupted = True
+                break
+
+            fingerprint = object_fingerprint(meta)
+            if fingerprint is not None and object_checkpoint.load(source) == fingerprint:
+                recorder.record(source, "unchanged")
+                continue
+
+            if dry_run:
+                recorder.record(source, "parsed")
+                continue
+
+            try:
+                result = active_connector.read_object_result(meta)
+            except ObjectNotFoundError:
+                recorder.record(
+                    source,
+                    "skipped",
+                    diagnostic=Diagnostic(
+                        code="unreadable", message="object no longer exists", source=source
+                    ),
+                )
+                continue
+            except (TransientStoreError, PermanentStoreError) as error:
+                recorder.record(
+                    source,
+                    "failed",
+                    diagnostic=Diagnostic(code="unreadable", message=str(error), source=source),
+                )
+                continue
+
+            recorder.add_dropped(tags=result.tags_dropped)
+            document = result.document
+
+            if not document.text:
+                diagnostic = document.diagnostics[0] if document.diagnostics else None
+                recorder.record(source, "failed", diagnostic=diagnostic)
+                continue
+
             recorder.record(
                 source,
-                "failed",
-                diagnostic=Diagnostic(code="unreadable", message=str(error), source=source),
+                "parsed",
+                source_bytes=max(meta.size, 0),
+                parser=document.fingerprint_inputs.parser,
             )
-            continue
 
-        recorder.add_dropped(tags=result.tags_dropped)
-        document = result.document
+            # ADR 0007 §6.3: skip the model call/import entirely when this
+            # exact fetched-and-parsed content was already ingested —
+            # composes with, never replaces, `ingester`'s own per-chunk
+            # checkpoint.
+            if connector_checkpoint.load(source, document.fingerprint_inputs) is not None:
+                if fingerprint is not None:
+                    object_checkpoint.save(source, fingerprint)
+                recorder.record(source, "unchanged")
+                continue
 
-        if not document.text:
-            diagnostic = document.diagnostics[0] if document.diagnostics else None
-            recorder.record(source, "failed", diagnostic=diagnostic)
-            continue
+            with recorder.attached(ingester):
+                outcome = ingest_connector_document(ingester, document, should_stop=should_stop)
 
-        recorder.record(
-            source,
-            "parsed",
-            source_bytes=max(meta.size, 0),
-            parser=document.fingerprint_inputs.parser,
-        )
+            recorder.add_dropped(
+                locators=outcome.locators_dropped, sections=outcome.sections_dropped
+            )
 
-        # ADR 0007 §6.3: skip the model call/import entirely when this
-        # exact fetched-and-parsed content was already ingested —
-        # composes with, never replaces, `ingester`'s own per-chunk
-        # checkpoint.
-        if connector_checkpoint.load(source, document.fingerprint_inputs) is not None:
+            if outcome.interrupted:
+                recorder.record(source, "skipped")
+                interrupted = True
+                break
+            if not outcome.ok:
+                recorder.record(
+                    source,
+                    "failed",
+                    diagnostic=Diagnostic(
+                        code="unreadable",
+                        message=outcome.error or "ingest failed",
+                        source=source,
+                    ),
+                )
+                continue
+
+            connector_checkpoint.save(document)
             if fingerprint is not None:
                 object_checkpoint.save(source, fingerprint)
-            recorder.record(source, "unchanged")
-            continue
+            recorder.record(source, "imported", parser=document.fingerprint_inputs.parser)
 
-        with recorder.attached(ingester):
-            outcome = ingest_connector_document(ingester, document, should_stop=should_stop)
+        deleted, retracted = _handle_deletions(
+            store=store,
+            prefix=prefix,
+            checkpoints=checkpoints,
+            object_checkpoint=object_checkpoint,
+            connector_checkpoint=connector_checkpoint,
+            ingester=ingester,
+            seen_sources=frozenset(seen_sources),
+            listing_completed=listing_completed,
+            deletion_policy=deletion_policy,
+            dry_run=dry_run,
+        )
+        recorder.add_deletions(detected=deleted, retracted=retracted)
 
-        recorder.add_dropped(locators=outcome.locators_dropped, sections=outcome.sections_dropped)
-
-        if outcome.interrupted:
-            recorder.record(source, "skipped")
-            interrupted = True
-            break
-        if not outcome.ok:
-            recorder.record(
-                source,
-                "failed",
-                diagnostic=Diagnostic(
-                    code="unreadable",
-                    message=outcome.error or "ingest failed",
-                    source=source,
-                ),
-            )
-            continue
-
-        connector_checkpoint.save(document)
-        if fingerprint is not None:
-            object_checkpoint.save(source, fingerprint)
-        recorder.record(source, "imported", parser=document.fingerprint_inputs.parser)
-
-    deleted, retracted = _handle_deletions(
-        store=store,
-        prefix=prefix,
-        checkpoints=checkpoints,
-        object_checkpoint=object_checkpoint,
-        connector_checkpoint=connector_checkpoint,
-        ingester=ingester,
-        seen_sources=frozenset(seen_sources),
-        listing_completed=listing_completed,
-        deletion_policy=deletion_policy,
-        dry_run=dry_run,
-    )
-    recorder.add_deletions(detected=deleted, retracted=retracted)
-
-    report = recorder.finish(interrupted=interrupted)
-    recorder.close()
-    return report
+        return recorder.finish(interrupted=interrupted)

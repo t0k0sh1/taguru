@@ -450,98 +450,106 @@ def sync_references(
     active_connectors = tuple(connectors) if connectors is not None else default_connectors()
     connector_checkpoint = ConnectorCheckpoint(checkpoints)
     file_probe_checkpoint = FileProbeCheckpoint(checkpoints)
-    recorder = RunRecorder(connector=PARSER_NAME, events_out=events_out)
 
-    plans = plan_references(references, connectors=active_connectors)
+    # A `with` block, not a bare construct-then-close: `events_out`'s file
+    # handle must close even when something below raises (a connector's
+    # `read()` catches its own exceptions, but `ingest_connector_document`,
+    # `connector_checkpoint.load`/`save`, or `recorder.record` itself do
+    # not) — `recorder.close()` at the end of a straight-line function body
+    # never runs in that case.
+    with RunRecorder(connector=PARSER_NAME, events_out=events_out) as recorder:
+        plans = plan_references(references, connectors=active_connectors)
 
-    work: list[ReferencePlan] = []
-    for plan in plans:
-        if _is_duplicate(plan):
-            recorder.duplicate(plan.reference, of=plan.source)
-            continue
-        recorder.discovered(plan.source, source_bytes=plan.source_bytes)
-        work.append(plan)
+        work: list[ReferencePlan] = []
+        for plan in plans:
+            if _is_duplicate(plan):
+                recorder.duplicate(plan.reference, of=plan.source)
+                continue
+            recorder.discovered(plan.source, source_bytes=plan.source_bytes)
+            work.append(plan)
 
-    interrupted = False
-    for plan in work:
-        if stop():
-            interrupted = True
-            break
+        interrupted = False
+        for plan in work:
+            if stop():
+                interrupted = True
+                break
 
-        if plan.diagnostic is not None:
-            recorder.record(plan.source, "skipped", diagnostic=plan.diagnostic)
-            continue
+            if plan.diagnostic is not None:
+                recorder.record(plan.source, "skipped", diagnostic=plan.diagnostic)
+                continue
 
-        connector = plan.connector
-        if connector is None:
-            # Unreachable by construction (plan_references only omits a
-            # diagnostic when it also resolved a connector) — handled
-            # defensively rather than raising mid-run.
-            recorder.record(
-                plan.source,
-                "failed",
-                diagnostic=Diagnostic(
-                    code="unreadable", message="no connector resolved", source=plan.source
-                ),
+            connector = plan.connector
+            if connector is None:
+                # Unreachable by construction (plan_references only omits a
+                # diagnostic when it also resolved a connector) — handled
+                # defensively rather than raising mid-run.
+                recorder.record(
+                    plan.source,
+                    "failed",
+                    diagnostic=Diagnostic(
+                        code="unreadable", message="no connector resolved", source=plan.source
+                    ),
+                )
+                continue
+
+            if dry_run:
+                _dry_run_plan(plan, recorder=recorder, file_probe_checkpoint=file_probe_checkpoint)
+                continue
+
+            try:
+                document = connector.read(plan.reference)
+            except Exception as error:  # noqa: BLE001 - a connector bug must not abort the run
+                recorder.record(
+                    plan.source,
+                    "failed",
+                    diagnostic=Diagnostic(
+                        code="unreadable", message=str(error), source=plan.source
+                    ),
+                )
+                continue
+
+            if document.source != plan.source:
+                recorder.retarget(plan.source, document.source)
+            source = document.source
+
+            if not document.text:
+                diagnostic = document.diagnostics[0] if document.diagnostics else None
+                recorder.record(source, "failed", diagnostic=diagnostic)
+                continue
+
+            recorder.record(source, "parsed", parser=document.fingerprint_inputs.parser)
+
+            if connector_checkpoint.load(source, document.fingerprint_inputs) is not None:
+                _save_file_probe(file_probe_checkpoint, plan, document)
+                recorder.record(source, "unchanged")
+                continue
+
+            with recorder.attached(ingester):
+                outcome = ingest_connector_document(ingester, document, should_stop=should_stop)
+
+            recorder.add_dropped(
+                locators=outcome.locators_dropped, sections=outcome.sections_dropped
             )
-            continue
 
-        if dry_run:
-            _dry_run_plan(plan, recorder=recorder, file_probe_checkpoint=file_probe_checkpoint)
-            continue
+            if outcome.interrupted:
+                recorder.record(source, "skipped")
+                interrupted = True
+                break
+            if not outcome.ok:
+                recorder.record(
+                    source,
+                    "failed",
+                    diagnostic=Diagnostic(
+                        code="unreadable", message=outcome.error or "ingest failed", source=source
+                    ),
+                )
+                continue
 
-        try:
-            document = connector.read(plan.reference)
-        except Exception as error:  # noqa: BLE001 - a connector bug must not abort the whole run
-            recorder.record(
-                plan.source,
-                "failed",
-                diagnostic=Diagnostic(code="unreadable", message=str(error), source=plan.source),
-            )
-            continue
-
-        if document.source != plan.source:
-            recorder.retarget(plan.source, document.source)
-        source = document.source
-
-        if not document.text:
-            diagnostic = document.diagnostics[0] if document.diagnostics else None
-            recorder.record(source, "failed", diagnostic=diagnostic)
-            continue
-
-        recorder.record(source, "parsed", parser=document.fingerprint_inputs.parser)
-
-        if connector_checkpoint.load(source, document.fingerprint_inputs) is not None:
+            connector_checkpoint.save(document)
             _save_file_probe(file_probe_checkpoint, plan, document)
-            recorder.record(source, "unchanged")
-            continue
+            recorder.record(source, "imported", parser=document.fingerprint_inputs.parser)
 
-        with recorder.attached(ingester):
-            outcome = ingest_connector_document(ingester, document, should_stop=should_stop)
-
-        recorder.add_dropped(locators=outcome.locators_dropped, sections=outcome.sections_dropped)
-
-        if outcome.interrupted:
-            recorder.record(source, "skipped")
-            interrupted = True
-            break
-        if not outcome.ok:
-            recorder.record(
-                source,
-                "failed",
-                diagnostic=Diagnostic(
-                    code="unreadable", message=outcome.error or "ingest failed", source=source
-                ),
-            )
-            continue
-
-        connector_checkpoint.save(document)
-        _save_file_probe(file_probe_checkpoint, plan, document)
-        recorder.record(source, "imported", parser=document.fingerprint_inputs.parser)
-
-    report = recorder.finish(interrupted=interrupted)
-    recorder.close()
-    return report
+        return recorder.finish(interrupted=interrupted)
 
 
 __all__ = [

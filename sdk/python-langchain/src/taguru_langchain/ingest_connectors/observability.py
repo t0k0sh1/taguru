@@ -156,10 +156,16 @@ class RunReport:
 
     def events_jsonl(self) -> str:
         """Renders :attr:`events` as newline-delimited JSON, one line per
-        phase transition — the same shape a :class:`SourceEventSink` writes
-        incrementally. Only meaningful when ``keep_events=True`` collected
-        them (:class:`RunRecorder`'s default); empty otherwise."""
-        return "\n".join(json.dumps(event.to_dict(), ensure_ascii=False) for event in self.events)
+        phase transition, each terminated by its own ``\\n`` — the same
+        on-disk shape a :class:`SourceEventSink` writes incrementally
+        (every :meth:`SourceEventSink.write` appends one line plus a
+        trailing newline), so this method's output is byte-identical to
+        what ``events_out=`` would have written for the same run. Only
+        meaningful when ``keep_events=True`` collected them
+        (:class:`RunRecorder`'s default); ``""`` when there are none."""
+        return "".join(
+            json.dumps(event.to_dict(), ensure_ascii=False) + "\n" for event in self.events
+        )
 
 
 S3SyncReport = RunReport
@@ -223,7 +229,12 @@ class SourceEventSink:
         try:
             self._stream.write(json.dumps(event.to_dict(), ensure_ascii=False) + "\n")
             self._stream.flush()
-        except OSError as error:
+        except (OSError, ValueError) as error:
+            # `ValueError` covers "I/O operation on closed file" — a
+            # caller-supplied `TextIO` this sink never owns (docstring
+            # above) may already be closed by the time a later `write`
+            # lands; that must degrade exactly like any other write
+            # failure, never raise mid-sync.
             if not self._warned:
                 warnings.warn(
                     f"SourceEventSink: writing to {self._path!r} raised {error!r}; "
@@ -416,7 +427,28 @@ class RunRecorder:
         ``imported`` back into ``skipped`` just because a later, redundant
         input happened to name the same thing). Calling :meth:`record`
         instead of this method for a known duplicate is the bug this
-        method exists to make impossible."""
+        method exists to make impossible.
+
+        The event this writes is only guaranteed distinguishable from
+        ``of``'s own events BY VALUE (``diagnostic.code ==
+        "duplicate_source"``), not always by ``source``: for
+        :func:`~taguru_langchain.ingest_connectors.references.
+        sync_references`, ``reference`` is the rejected INPUT string,
+        which differs from the canonical ``of`` whenever two distinct
+        inputs collide (e.g. two URLs differing only by a stripped query
+        parameter) — the common case this method was designed around.
+        :mod:`~taguru_langchain.ingest_connectors.s3`'s own duplicate-key
+        case (the exact same key appearing twice in one `store.list()`
+        pass, a store bug/quirk) has no separate "input" identity to key
+        by, so ``reference`` and ``of`` are the same string there; a
+        JSONL consumer grouping strictly by ``source`` would see that
+        source's history as ``discovered`` → ``skipped`` →
+        ``parsed``/``extracted``/``imported`` and could misread it as an
+        interrupted-then-recovered run rather than "one duplicate listing
+        entry, one real import." The tally itself stays correct either
+        way (this method never touches it); a consumer that needs to
+        separate the two must check ``diagnostic.code`` rather than
+        assuming ``source`` alone identifies one JSONL sub-sequence."""
         event = SourceEvent(
             source=reference,
             phase="skipped",
