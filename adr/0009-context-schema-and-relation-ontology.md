@@ -270,14 +270,36 @@ the knowledge/config split `dice_floor`'s own doc states outright.
 ### 5.1 Persistence: a standalone file, not the sidecar
 
 **Decision: `{stem}.schema.json`, a new file, copying `GroupRecord`'s
-pattern field for field** — atomic write-then-rename (`write_atomic`, the
-same primitive `write_group` uses), a rename marker analogous to
-`group_renaming_marker_path`, and a `{stem}.schema.corrupt` quarantine for a
-file that reads but does not parse, following the exact posture
-`scan_groups`' doc states for groups (`src/groups.rs:292-309`): an
-unreadable file refuses the boot (trouble reading it is always news), a
-malformed one keeps its name and loses its content, mangled bytes
-preserved for hand recovery.
+pattern field for field, with one deliberate divergence** — atomic
+write-then-rename (`write_atomic`, the same primitive `write_group` uses)
+and a rename marker analogous to `group_renaming_marker_path`, but **not**
+`scan_groups`' "malformed keeps its name and loses its content" recovery
+(`src/groups.rs:292-309`).
+
+**Why the divergence: an empty schema is not a safe default to fail
+into.** For a group, replacing an unparseable file with a fresh empty
+record and continuing the boot is safe — the consequence is "no
+membership," a routing-only concern. For a schema, the equivalent
+"replace with a fresh empty record" is indistinguishable from `mode: off`
+(§5.3's document shape), which **silently disables `strict` enforcement**
+for a context whose operator explicitly turned it on — the exact failure
+mode §5.3 already refuses to allow for a version mismatch, and this ADR
+will not allow it for a parse failure either. A schema file present but
+unparseable therefore **refuses the boot** — the same posture already
+used for an unreadable file, extended to cover a malformed one too — with
+the mangled bytes quarantined to `{stem}.schema.corrupt` for hand recovery,
+exactly as `scan_groups` already does before the refusal. There is no
+"boot with an empty schema and log a warning" path: a context that had a
+schema comes back with that schema, or it does not come back.
+
+**Corollary for `move_context_files`' best-effort straggler tolerance**
+(below, this section). `move_context_files` (`src/registry.rs:2859`) already
+returns the first sidecar-move error to the caller and keeps the rename
+marker in place for retry rather than silently dropping a straggler — this
+was true before this ADR and needs no new mechanism. What this Decision
+adds is only that the schema file must be covered by that same guarantee
+like every other sidecar: a schema move failure is reported and retried
+until it completes, never treated as "file absent, so `off`."
 
 **Rejected: a fifth `ContextMeta` field.** `MetaFile` (`src/registry.rs:
 340`) is parsed at boot for every context to seed the directory and
@@ -296,12 +318,16 @@ retractable by `retract_source`.
 **Placement in `context_files` and why it goes last.** `context_files`
 (`src/registry.rs:2829`) grows from `[String; 9]` to `[String; 10]`, with
 the schema file **at index 9, the end**. `move_context_files` (`:2859`)
-treats index 0 (`.ctx`) as the pivot everything else follows — a missing or
-lagging schema file must never block a context rename, so it goes where a
-straggler is already tolerated as best-effort. Replication needs zero
-changes: `classify` (`src/ship.rs:616`) already ships any file that is
-neither the lock, the replication record, nor a `*.tmp{N}` stager, as
-`Published`.
+treats index 0 (`.ctx`) as the pivot everything else follows — a lagging
+schema file must never block a context rename, so it goes where a
+straggler is already tolerated as best-effort. "Best-effort" here means
+what it already means for every other sidecar: the rename keeps trying
+and the caller learns of a straggler through the returned error and the
+retained rename marker, **not** that a straggler is silently treated as
+absent — the corollary above applies at both ends, source and
+destination stem. Replication needs zero changes: `classify`
+(`src/ship.rs:616`) already ships any file that is neither the lock, the
+replication record, nor a `*.tmp{N}` stager, as `Published`.
 
 ### 5.2 Revision and cache invalidation
 
@@ -325,6 +351,39 @@ this compact stays valid and keeps answering with content this context no
 longer holds"). `PUT /contexts/{name}/schema` therefore does, under the
 entry write lock, exactly what `bump_config_revision` (`:2274-2295`)
 already does for `dice_floor`, plus `invalidate_cache_identity` (`:737`).
+
+**Write order across the two durable artifacts, and why it is not free.**
+`dice_floor`'s content and its `config_revision` live in the *same*
+`MetaFile`, written by the *same* `write_meta` call — genuinely atomic, no
+crash window possible between them. §5.1 deliberately puts the schema's
+content in a *separate* file from its revision (which still lives in
+`MetaFile`), so that same atomicity does not come for free here and must
+be designed in: **the durable write order is revision-then-content** —
+`bump_config_revision`'s `write_meta` (`:2274-2295`) lands *before*
+`{stem}.schema.json`'s `write_atomic`, both still under the one entry
+write lock so no in-process reader observes a moment where they disagree
+(`bump_config_revision`'s own doc: "Called AFTER the publish... so a
+reader observing the new value always sees the new content" — mirrored
+here as *before* the new content lands, not after, since content ordering
+is reversed relative to that caller). A crash between the two durable
+writes therefore always fails toward **extra**, never **missed**,
+invalidation: `MetaFile.revision.config` already advanced while
+`{stem}.schema.json` still holds its pre-`PUT` bytes, so a replica or a
+restarted process that notices the new revision fetches and finds nothing
+new — a wasted refetch, not a stale enforcement. The mirror order
+(content first, revision second) is the one this ADR refuses: a crash in
+that window would leave a durably-changed schema behind a revision number
+that never advanced, which is exactly the "changed but nobody was told"
+failure `bump_config_revision`'s own "a failed sidecar write... heals by
+the next flush" contract does not cover for a genuine process crash (that
+healing pattern deliberately tolerates the reverse: the revision may lag
+the content that's identically stored right there in the SAME file — it
+never tolerates a *separate* content file changing durably underneath an
+unmoved revision, which is precisely what §5.1's split introduces and
+this ordering closes). A `PUT` that never returns 200 to its caller is,
+under this order, always safe to retry — the schema document is replaced
+wholesale, not by delta, so retrying is idempotent regardless of which
+side of the crash window the previous attempt reached.
 
 **Cost accepted**: re-minting invalidates every cached retrieval for the
 context, not only graph-lane ones, and is process-local — but a schema
@@ -352,19 +411,29 @@ the other along." Surfaced in `version_facts()` (`src/api.rs:141`) as
 }
 ```
 
-**Version handling has one deliberate asymmetry.** The file *at rest* is
-`#[serde(default)]` within a version it reads, mirroring `GroupRecord`
-(`src/groups.rs:51-60`, "the struct-level `serde(default)` keeps every
-pre-nesting group file loading unchanged"). The `schema` stamp itself is a
-**hard refusal** on an unread value, in `parse_group`'s exact wording shape
-(`"taguru_group {} is not a version this taguru reads (it reads {}),"`
-`src/ingest.rs:1438-1443`) — without that gate, lenient tolerance would let
-an older binary silently drop constraints it doesn't understand and
-under-enforce a `strict` context, the one failure mode a validation feature
-must never have. The *wire* (the `PUT` body, and the `taguru_schema` export
-record, §13.3) is `#[serde(deny_unknown_fields)]` like every other line
-struct — a mistyped constraint name is a hard refusal, never a silent
-no-op.
+**Version handling is symmetric, on purpose — this ADR does *not* copy
+`GroupRecord`'s tolerant-default convention.** `GroupRecord` uses
+`#[serde(default)]` at rest so an older binary can silently load a file a
+newer one wrote with an extra field (`src/groups.rs:51-60`, "the
+struct-level `serde(default)` keeps every pre-nesting group file loading
+unchanged") — safe there because a dropped `groups` field degrades to "no
+nesting," a routing-only consequence. That degradation is exactly the
+failure mode §5.1 already refuses to allow for a schema: an older binary
+silently dropping a field it doesn't recognize is indistinguishable from
+under-enforcing `strict`, whether the field silently disappears because
+the binary is older or because the file failed to parse at all. So both
+directions get the same hard-refusal treatment: **`deny_unknown_fields`
+applies to the persisted struct exactly as it does to the wire** (the
+`PUT` body and the `taguru_schema` export record, §13.3) — an on-disk
+file naming a field this binary does not know is a hard refusal identical
+in wording to an unread `schema` stamp, not a silent drop. Consequently
+**`SCHEMA_VERSION` bumps on every shape change, additive or breaking** —
+unlike `BATCH_VERSION`/`GROUP_VERSION`, which only bump for a
+breaking change and rely on `serde(default)` tolerance for additive ones.
+This is a stricter discipline than either of those two deliberately
+accepts, and it is deliberate here for the same reason `strict` itself
+exists: a validation feature must fail loud, never quiet, when it cannot
+prove it is applying the constraints it was told to.
 
 **Caps**, each a named constant sized in `MAX_GROUP_MEMBERS`'s style
 (`src/groups.rs:44`): `MAX_SCHEMA_TYPES`, `MAX_SCHEMA_RELATIONS`,
@@ -444,15 +513,36 @@ the same way it reports any other unsourced edge.
 naming a rename (`src/export.rs:315`, `:353`). `schema:type` gets the same
 three guards, fixed as part of this Decision:
 
-1. An association line whose label is `schema:type` in a context with no
-   schema, or `mode == off`, is an ordinary association and nothing more —
-   no special meaning imposed on a context that never opted in.
-2. `add_label_alias` refuses an alias resolving to `schema:type` — a
-   second spelling would let a producer assert types without knowing it.
+1. An association line whose label is `schema:type` in a context with **no
+   installed schema document** is an ordinary association and nothing
+   more — no special meaning imposed on a context that never opted in.
+   This is Decision #12's byte-identical guarantee applied to the one
+   label an operator could otherwise coincidentally already be using.
+2. `add_label_alias` refuses an alias resolving to `schema:type` **once a
+   schema exists** — a second spelling would let a producer assert types
+   without knowing it; in a schema-free context this guard, like the
+   label itself, is inert.
 3. `PUT /schema` refuses a relation definition named `schema:type`.
 
+**One gate for guard 1 and the three exclusions below, stated once so
+they cannot drift apart: "installed schema document," not "`mode !=
+off`."** Whether a schema *validates* writes is §7.1/§7.2's separate,
+mode-gated question — `mode == off` already short-circuits the entire
+check at §7.2 step 1, for every label, not only `schema:type`. Whether
+`schema:type` is read, audited, or traversed *specially at all* is this
+gate, and it does not borrow mode's threshold: an operator who installs a
+schema but leaves it in `off` while drafting types has already committed
+to the reserved label meaning something, and `off` only means "don't
+enforce it yet," not "pretend the label is ordinary." Conflating the two
+gates is exactly what would make guard 1 above disagree with §12's
+read-side population of `types` below (both must key off the same
+condition) — this paragraph is the single place that condition is
+defined; every consumer below cites it rather than restating its own
+threshold.
+
 **The three exclusions this Decision fixes, so type-name concepts do not
-quietly distort unrelated features:**
+quietly distort unrelated features whenever a schema document exists for
+the context** (§12 extends this same gate to `describe`/`resolve`):
 
 1. `activate`/`explore` do not traverse `schema:type` by default.
 2. `schema:type` is excluded from the vocabulary block `system_prompt`
@@ -471,6 +561,15 @@ different posture from open-world domain/range checking, and this ADR
 fixes it as an explicit opt-in rather than something an implementer
 guesses at.
 
+**`closed_labels` never applies to `schema:type` itself.** §6.3 guard 3
+forbids a relation definition named `schema:type` from ever existing, so
+under a naive "any label absent from `relations` is unknown" reading,
+every legitimate type assertion would itself be flagged the moment
+`closed_labels` is set — silently defeating the type model `closed_labels`
+was never meant to touch. `closed_labels`, like every other check in
+§7.2, is scoped to `fact_ops` only (§7.2 step 3's partition); `type_ops`
+are exempt by construction, not by a special case bolted onto the check.
+
 ## 7. Validation semantics and the ordering guarantee (for S3, S4, S5)
 
 ### 7.1 Mode: storage, default, and changing it mid-corpus
@@ -485,10 +584,16 @@ it. Keeping mode and document in one file makes "what the schema says" and
 ADR 0005 §4) so a client can route without a second call — echoed, never
 authoritative.
 
-**Default is `off`, meaning no file at all — byte-identical to today's
-behavior.** This is not merely a default; it is the mechanism by which the
-issue's own first acceptance criterion ("schemaなしcontextは現在と同じ動作
-を維持する") holds by construction.
+**Default is `off`, meaning no file was ever written for this context —
+byte-identical to today's behavior.** This is not merely a default; it is
+the mechanism by which the issue's own first acceptance criterion
+("schemaなしcontextは現在と同じ動作を維持する") holds by construction. It is
+a narrower condition than "no file is currently readable": per §5.1, a
+context whose schema file exists but is corrupt, quarantined, or mid-move
+refuses the boot rather than silently falling back to this default —
+"never had one" and "have one I currently cannot read" are kept
+distinguishable on purpose, so `off` never means anything but "never
+opted in."
 
 **Mode may change while violations exist — deliberately, and this is the
 part to document rather than let someone discover.** `PUT /schema` never
@@ -547,11 +652,17 @@ verbatim with `preview_batch` (`:2520`) so the two can never disagree
 5. **Expand** each concept's type set through the schema's precomputed
    `is_a` ancestor closure (§6.2) — a set union against a precomputed map,
    never a walk.
-6. **Judge, collect-all.** For each `fact_op` whose resolved label has a
-   relation definition: a domain violation is `domain` non-empty **and**
-   the subject's expanded set non-empty **and** the two disjoint;
-   symmetrically for `range`/object. An empty type set never violates
-   (§6.1); an empty `domain`/`range` never constrains. Collect **every**
+6. **Judge, collect-all — `fact_ops` only, `type_ops` are never judged.**
+   For each `fact_op` whose resolved label has a relation definition: a
+   domain violation is `domain` non-empty **and** the subject's expanded
+   set non-empty **and** the two disjoint; symmetrically for
+   `range`/object. An empty type set never violates (§6.1); an empty
+   `domain`/`range` never constrains. When `closed_labels` is set, a
+   `fact_op` whose resolved label has *no* relation definition is
+   additionally a violation (`Issue::unknown_reference`, §6.4) — scoped to
+   `fact_ops` by this same partition, so a `type_op` (always labeled
+   `schema:type`, which §6.3 guard 3 forbids from ever appearing in
+   `relations`) can never be flagged by `closed_labels`. Collect **every**
    violation, following `interpret_associations`' own discipline
    (`src/api/associations.rs:167-176`, collecting every item's issues in
    one pass rather than rejecting at the first bad field), bounded by
@@ -651,7 +762,7 @@ import form extends `alias_rejection_issue`'s grammar
 (`batches[{index}].{namespace}['{alias}']`, `src/api/import.rs:119-123`)
 with the per-item index an alias path had no need for.
 
-```
+```text
 expected: "'青嶺酒造' typed as one of [Brewery] (or a subtype), for relation '杜氏'"
 actual:   "typed as [Person]"
 ```
@@ -712,7 +823,7 @@ read-side minimum.
 |---|---|
 | `cardinality` (one / optional-one / many) | Requires a per-`(subject, label)` existing-edge read on the write path, whose correct answer under retract-then-apply is genuinely ambiguous: a batch replacing a source's facts transiently violates a one-to-one during the retract→apply window (`src/ingest.rs:2294-2299`). Needs its own design. |
 | `inverse`, `symmetric` | Both are **inference** — asserting edges nobody stated — which §14 puts out of scope outright. A purely validating symmetric check ("refuse `A r B` unless `B r A` exists") is cardinality-shaped and carries the same batch-ordering hazard §7.2 solves for types, without §7.2's clean union answer. |
-| `deprecated` relation + replacement | An audit/producer-guidance signal (§10, §11), never a refusal. |
+| `deprecated` relation + replacement | Would be an audit/producer-guidance signal, never a refusal — but §5.3's document shape has no field to mark a relation deprecated or name its replacement, so there is nothing for §10's audit or §11's producer guidance to read yet. Fully deferred: a follow-up ADR fixes the field shape before either surface can act on it, not an implicit part of this design. |
 | self-loop policy, negative-weight policy | Both are relation-independent flags expressible later inside `relations[label]` with no shape change; nothing about `domain`/`range` forecloses them. |
 | transitive closure, OWL reasoning | The issue itself defers these; §14. |
 
@@ -739,12 +850,16 @@ canonical, and the fix is an ordinary alias.
 
 **`POST /contexts/{name}/schema/audit`** reports, over the live graph:
 untyped concepts, unknown relation labels (only meaningful with
-`closed_labels`), domain/range violations, and deprecated-relation usage
-(§9.2) — several independent checks in one response, in `DriftAudit`'s
-shape (`src/api/vocabulary.rs:187`): one paged section (mirroring
-`page_by`, `:237`), and framed, like `audit_vocabulary` itself
+`closed_labels`, and never `schema:type` itself, per §6.4), and
+domain/range violations — several independent checks in one response, in
+`DriftAudit`'s shape (`src/api/vocabulary.rs:187`): one paged section
+(mirroring `page_by`, `:237`), and framed, like `audit_vocabulary` itself
 (`:37-40`), as "candidates for review, not verdicts" — this audit never
-auto-applies a fix.
+auto-applies a fix. Deprecated-relation usage is **not** in this list —
+§9.2 defers it because the document has no field to mark a relation
+deprecated yet; a follow-up ADR adds both the field and this audit's
+check for it together, rather than the audit inventing a convention the
+schema shape does not yet define.
 
 **`POST /contexts/{name}/schema/validate`** takes a *proposed* document and
 evaluates it against the live graph without persisting it — the pre-flight
@@ -817,14 +932,20 @@ SDK's point of view.
 **Decision**: `describe` returns types; `resolve` returns types on top
 candidates only; `query` gains a type filter. Both halves of the
 acceptance criterion ("取得・filter") are covered, each on the endpoint
-where it fits its existing shape.
+where it fits its existing shape. **All three are gated by §6.3's single
+condition — an installed schema document for the context — not by
+mode**: a context with no schema populates none of this (§6.3 guard 1
+applies identically here), and a schema in `off` still reports whatever
+types it defines, exactly as `describe`/`resolve` already report
+ungated facts regardless of any other server-side policy toggle.
 
 - **`describe`** — `ConceptDescription` (`src/context.rs:356`) gains
   `types: Vec<String>`, populated inside `Context::describe`
   (`src/context/query.rs:176`)'s existing outgoing-chain walk, filtered to
-  `schema:type` and reusing the same dead-edge skip. `describe`'s own doc
-  already frames it as "the 'what is known about X' overview... BEFORE
-  fetching facts" — a concept's types are exactly that.
+  `schema:type` and reusing the same dead-edge skip — empty for a context
+  with no schema, per the gate above. `describe`'s own doc already frames
+  it as "the 'what is known about X' overview... BEFORE fetching facts" —
+  a concept's types are exactly that.
 - **`resolve`** — `TieredResolution` (`src/api/resolve.rs:39`) gains
   `types: Option<Vec<String>>` beside `kind`/`gloss`, attached to the same
   top candidates `gloss` already is, for the same cost reason. **Not a
