@@ -102,7 +102,7 @@ impl Server {
             .expect("kill must run");
     }
 
-    /// Spawns `taguru route` over the given map contents (written to a
+    /// Spawns `taguru router` over the given map contents (written to a
     /// scratch file). The returned handle's `data_dir` is that scratch
     /// directory — the router itself holds no data; the field only
     /// keeps Drop's cleanup working.
@@ -114,7 +114,7 @@ impl Server {
         std::fs::write(&map_path, map_contents).expect("route map must be writable");
 
         let mut command = Command::new(env!("CARGO_BIN_EXE_taguru"));
-        command.arg("route");
+        command.arg("router");
         common::scrub_taguru_env(&mut command)
             .env("TAGURU_ADDR", "127.0.0.1:0")
             .env("TAGURU_ROUTE_MAP", &map_path);

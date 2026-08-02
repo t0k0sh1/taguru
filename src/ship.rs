@@ -1450,11 +1450,23 @@ pub(crate) struct RestoreReport {
     pub(crate) records: usize,
 }
 
+const RESTORE_USAGE: &str = "\
+usage: taguru restore --out DIR [--config FILE] [URL]
+
+Materialize a data directory from a replication bucket (the newest
+complete generation): every published file, plus each context's two
+log lanes reassembled from their shipped segments. The URL defaults
+to TAGURU_REPLICATE_URL; credentials ride each cloud's default chain.
+DIR must not already contain a data directory — restore refuses to
+mix two histories. Verify the result with: taguru inspect DIR
+";
+
 /// `taguru restore --out DIR [URL]`: materializes a data directory
 /// from the bucket's newest COMPLETE generation. Exit codes follow the
 /// house rule: 0 restored · 1 bucket unusable (no fence, no complete
 /// generation, corrupt segments) · 2 usage error.
 pub(crate) fn run(args: &[String]) -> i32 {
+    let usage = |message: &str| crate::config::subcommand_usage_error("restore", message);
     let mut out: Option<PathBuf> = None;
     let mut url: Option<String> = None;
     let mut config: Option<PathBuf> = None;
@@ -1462,34 +1474,25 @@ pub(crate) fn run(args: &[String]) -> i32 {
     while let Some(arg) = rest.next() {
         match arg.as_str() {
             "--help" | "-h" => {
-                println!(
-                    "usage: taguru restore --out DIR [--config FILE] [URL]\n\
-                     \n\
-                     Materialize a data directory from a replication bucket (the newest\n\
-                     complete generation): every published file, plus each context's two\n\
-                     log lanes reassembled from their shipped segments. The URL defaults\n\
-                     to TAGURU_REPLICATE_URL; credentials ride each cloud's default chain.\n\
-                     DIR must not already contain a data directory — restore refuses to\n\
-                     mix two histories. Verify the result with: taguru inspect DIR"
-                );
+                print!("{RESTORE_USAGE}");
                 return 0;
             }
             "--out" => match rest.next() {
                 Some(path) if out.is_none() => out = Some(PathBuf::from(path)),
-                Some(_) => crate::config::usage_error("--out given twice"),
-                None => crate::config::usage_error("--out needs a directory path"),
+                Some(_) => return usage("--out given twice"),
+                None => return usage("--out needs a directory path"),
             },
             "--config" => match rest.next() {
                 Some(path) if config.is_none() => config = Some(PathBuf::from(path)),
-                Some(_) => crate::config::usage_error("--config given twice"),
-                None => crate::config::usage_error("--config needs a file path"),
+                Some(_) => return usage("--config given twice"),
+                None => return usage("--config needs a file path"),
             },
             flag if flag.starts_with('-') => {
-                crate::config::usage_error(&format!("'restore' does not take '{flag}'"))
+                return usage(&format!("'restore' does not take '{flag}'"));
             }
             positional => {
                 if url.replace(positional.to_string()).is_some() {
-                    crate::config::usage_error(&format!(
+                    return usage(&format!(
                         "'restore' takes one optional URL, got '{positional}'"
                     ));
                 }
@@ -1501,12 +1504,10 @@ pub(crate) fn run(args: &[String]) -> i32 {
         crate::config::load_config(path);
     }
     let Some(out) = out else {
-        crate::config::usage_error("restore needs --out DIR (the directory to materialize)");
+        return usage("restore needs --out DIR (the directory to materialize)");
     };
     let Some(url) = url.or_else(|| std::env::var("TAGURU_REPLICATE_URL").ok()) else {
-        crate::config::usage_error(
-            "restore needs a bucket URL — pass one, or set TAGURU_REPLICATE_URL",
-        );
+        return usage("restore needs a bucket URL — pass one, or set TAGURU_REPLICATE_URL");
     };
 
     // Refuse a target that already holds data: a restore layered over

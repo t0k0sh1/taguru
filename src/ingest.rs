@@ -1449,7 +1449,7 @@ pub(crate) fn parse_stream(mut reader: impl BufRead) -> Result<Stream, String> {
 /// Group-record bytes belong to no batch — they are re-rendered from
 /// the parsed records instead of sliced. Lives beside the parser
 /// because the boundary rule is a property of the stream FORMAT, not
-/// of either caller: `route`'s cross-shard import scatter-gather and
+/// of either caller: `router`'s cross-shard import scatter-gather and
 /// `import --url`'s chunk packer both need the same ranges and must
 /// never compute them two different ways.
 pub(crate) fn split_batches(body: &[u8]) -> Vec<std::ops::Range<usize>> {

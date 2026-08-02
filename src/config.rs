@@ -48,10 +48,12 @@ pub(crate) fn fmt_bytes(bytes: u64) -> String {
 /// Every variable the server reads, for typo detection: a config file
 /// is where a misspelled knob silently becomes a no-op, and unlike the
 /// shell it is worth linting.
-pub(crate) const KNOWN_KEYS: [&str; 58] = [
+pub(crate) const KNOWN_KEYS: [&str; 60] = [
     "TAGURU_ADDR",
     "TAGURU_DATA_DIR",
     "TAGURU_CACHE_BYTES",
+    "TAGURU_RETRIEVAL_CACHE_BYTES",
+    "TAGURU_SEMANTIC_CACHE_THRESHOLD",
     "TAGURU_FLUSH_SECS",
     "TAGURU_WAL",
     "TAGURU_WAL_MAX_BYTES",
@@ -206,6 +208,15 @@ pub(crate) fn parse_config(text: &str) -> Result<Vec<(String, String)>, String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Both vars are read by `registry/boot.rs` and documented in
+    /// README/docs, but were missing from this list (issue #248 item 7)
+    /// — a config file setting either earned a false "typo?" warning.
+    #[test]
+    fn known_keys_includes_the_cache_tuning_variables() {
+        assert!(KNOWN_KEYS.contains(&"TAGURU_RETRIEVAL_CACHE_BYTES"));
+        assert!(KNOWN_KEYS.contains(&"TAGURU_SEMANTIC_CACHE_THRESHOLD"));
+    }
 
     #[test]
     fn config_lines_parse_the_env_file_dialect() {

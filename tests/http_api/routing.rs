@@ -1,4 +1,4 @@
-//! `taguru route` (issue #130): the stateless scatter-gather router.
+//! `taguru router` (issue #130): the stateless scatter-gather router.
 //! The load-bearing property is EQUIVALENCE — the router over split
 //! shards must answer what one instance holding the same contexts
 //! answers, for every multi-context verb, merges and cursors and

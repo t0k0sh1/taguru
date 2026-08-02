@@ -526,6 +526,18 @@ fn inspect_help_flag_prints_usage_and_exits_zero() {
 }
 
 #[test]
+fn inspect_help_flag_works_anywhere_in_the_argument_list() {
+    // Not just as the sole argument (issue #248 item 10): an operator
+    // halfway through composing `inspect PATH` reaches for --help
+    // without first deleting the path they already typed.
+    let output = run(&["inspect", "/nonexistent/data", "--help"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("usage: taguru inspect PATH"), "{stdout}");
+    assert!(String::from_utf8_lossy(&output.stderr).is_empty());
+}
+
+#[test]
 fn inspect_refuses_the_wrong_number_of_arguments() {
     for args in [&["inspect"][..], &["inspect", "a", "b"][..]] {
         let output = run(args);
@@ -2304,6 +2316,25 @@ fn top_level_help_documents_exit_code_3_for_threshold_violations() {
     assert!(stdout.contains('3'), "{stdout}");
 }
 
+/// Issue #248 item 6: the top-level --help must name every
+/// sub-subcommand `benchmark`/`communities` has, not just the first
+/// one — a regression guard, not a re-derivation of the USAGE text.
+#[test]
+fn top_level_help_covers_every_sub_subcommand_and_flag() {
+    let output = run(&["--help"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for needle in [
+        "taguru benchmark extract",
+        "taguru benchmark compare",
+        "taguru benchmark search",
+        "taguru evaluate compare",
+        "--group",
+        "--into",
+    ] {
+        assert!(stdout.contains(needle), "missing {needle:?}: {stdout}");
+    }
+}
+
 // ADR 0008 §10: the stdio bridge propagates trace context on its
 // outbound calls, in both directions — injecting from its own active
 // span, and adopting a parent an MCP client attached via `params._meta`.
@@ -2589,5 +2620,106 @@ fn the_stdio_bridge_forwards_tracestate_from_meta() {
         headers.get("tracestate").map(String::as_str),
         Some("vendor=abc123"),
         "{headers:?}"
+    );
+}
+
+// Issue #248 item 8: `calibrate`/`communities` gain the same
+// unparsable-URL rejection `evaluate`/`benchmark search` already have
+// (issue #289 / #281 / #288) — a string that fails to parse as a URL,
+// but isn't caught by `reject_userinfo` (which deliberately leaves an
+// unparsable `base` alone), must not reach `Api::new` or any report.
+
+#[test]
+fn calibrate_rejects_a_url_that_does_not_parse() {
+    let dir = std::env::temp_dir().join(format!("taguru-cli-calibrate-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
+    let probes = dir.join("probes.tsv");
+    std::fs::write(&probes, "a paraphrase\texpected\n").expect("probes file must be writable");
+
+    let output = run(&[
+        "calibrate",
+        "--context",
+        "sake",
+        "--probes",
+        &probes.display().to_string(),
+        "not-a-url",
+    ]);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("could not be parsed as a URL"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+// Issue #248 item 9: `route` is renamed to `router` (every design doc
+// and the module itself already called it "the router"); `route`
+// keeps working as a deprecated alias, warning on stderr.
+
+#[test]
+fn router_help_flag_prints_usage_and_exits_zero_with_no_warning() {
+    let output = run(&["router", "--help"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("taguru router"),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).is_empty());
+}
+
+#[test]
+fn route_still_works_as_a_deprecated_alias_for_router() {
+    let output = run(&["route", "--help"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("taguru router"),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("'route' is a deprecated alias for 'router'"),
+        "{stderr}"
+    );
+}
+
+// Issue #248 item 3: `restore`'s usage errors now name the subcommand
+// and point at its own --help, like every other subcommand, instead
+// of the bare `usage_error` format that pointed at `taguru --help`.
+
+#[test]
+fn restore_usage_errors_name_the_subcommand_and_its_own_help() {
+    let output = run(&["restore", "--out", "/tmp/wherever", "one-url", "two-url"]);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("taguru: restore:") && stderr.contains("taguru restore --help"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn restore_help_flag_prints_usage_and_exits_zero() {
+    let output = run(&["restore", "--help"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("usage: taguru restore --out DIR"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn communities_rejects_a_url_that_does_not_parse() {
+    let output = run(&["communities", "--context", "sake", "not-a-url"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("could not be parsed as a URL"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
