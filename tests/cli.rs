@@ -2673,14 +2673,17 @@ fn router_help_flag_prints_usage_and_exits_zero_with_no_warning() {
 
 #[test]
 fn route_still_works_as_a_deprecated_alias_for_router() {
-    let output = run(&["route", "--help"]);
-    assert_eq!(output.status.code(), Some(0));
-    assert!(
-        String::from_utf8_lossy(&output.stdout).contains("taguru router"),
-        "{}",
-        String::from_utf8_lossy(&output.stdout)
+    let router_output = run(&["router", "--help"]);
+    let route_output = run(&["route", "--help"]);
+
+    assert_eq!(route_output.status.code(), Some(0));
+    // Identical usage text either name is invoked under — the alias
+    // changes nothing about what gets printed, only that it warns.
+    assert_eq!(
+        route_output.stdout, router_output.stdout,
+        "'route' and 'router' --help must print the exact same usage text"
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = String::from_utf8_lossy(&route_output.stderr);
     assert!(
         stderr.contains("'route' is a deprecated alias for 'router'"),
         "{stderr}"
