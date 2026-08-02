@@ -44,6 +44,29 @@ pub(crate) fn wal_path(dir: &Path, stem: &str) -> PathBuf {
     dir.join(format!("{stem}.wal.jsonl"))
 }
 
+/// The optional per-context schema document (ADR 0009 §5.1). Built with
+/// `format!`, not `path.with_extension`, on purpose: `{stem}.schema.json`
+/// is two dot segments, and `with_extension` would replace only the
+/// last one, mangling the `.schema` half. Never discovered by an
+/// extension scan the way `.ctx`/`.group` are — `Path::extension()`
+/// would answer `Some("json")` and hand back the wrong stem — so this
+/// builder is the only way a caller reaches the file, exactly like
+/// [`meta_path`], which has the same two-segment shape for the same
+/// reason.
+pub(crate) fn schema_path(dir: &Path, stem: &str) -> PathBuf {
+    dir.join(format!("{stem}.schema.json"))
+}
+
+/// Where a schema file's bytes are set aside when they read but do not
+/// parse — evidence for hand recovery, [`crate::groups::scan_groups`]'s
+/// `{stem}.group.corrupt` convention applied to schema (see
+/// `crate::schema`'s module doc for why the parallel stops there: a
+/// schema, unlike a group, never falls back to an empty record after
+/// setting the bytes aside).
+pub(crate) fn schema_corrupt_path(dir: &Path, stem: &str) -> PathBuf {
+    dir.join(format!("{stem}.schema.corrupt"))
+}
+
 /// The durable-deletion marker: while it exists, boot resumes the
 /// unlinks (see `delete`/`scan_data_dir`). One builder so the writer,
 /// the boot sweep, and the create-time cleanup can never disagree
@@ -178,7 +201,7 @@ pub(super) fn write_rename_marker(path: &Path, from: &str, to: &str) -> io::Resu
 /// parses the `(from, to)` pair, moves that pair's files via
 /// `move_files`, and returns every pair resumed (see [`ResumedRename`]
 /// for what the two per-rename booleans mean and why the caller needs
-/// both). `scan_data_dir` (`.renaming`, a nine-file context family) and
+/// both). `scan_data_dir` (`.renaming`, a ten-file context family) and
 /// `groups::scan_groups` (`.grouprenaming`, one file) share this exact
 /// shape and differ only in what "moving the files" means for their
 /// entity — `entity` names it for the log lines (`"context"` /

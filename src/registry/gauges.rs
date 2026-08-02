@@ -83,6 +83,7 @@ impl AppState {
                 &guard.stats,
                 &entry.usage.snapshot(),
                 entry.revision_snapshot(&guard),
+                guard.schema_digest.as_deref(),
             );
             if let Err(error) = outcome {
                 entry.usage_dirty.store(true, Ordering::Relaxed);

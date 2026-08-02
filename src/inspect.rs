@@ -28,8 +28,10 @@ use crate::groups::{
 };
 use crate::registry::{
     IMPORT_MARKER_EXTENSION, ImportMarker, bm25_path, meta_path, name_from_stem, passages_path,
-    passages_wal_path, pvectors_path, scanned_stem_and_name, sources_path, vectors_path, wal_path,
+    passages_wal_path, pvectors_path, scanned_stem_and_name, schema_digest_of, sources_path,
+    vectors_path, wal_path,
 };
+use crate::schema;
 use crate::wal;
 
 const USAGE: &str = "\
@@ -558,6 +560,34 @@ fn inspect_directory(dir: &Path, as_json: bool) -> i32 {
             }
         };
 
+        // Unlike `meta.json` (self-healing, below — a WARNING, not a
+        // failure), an unreadable, malformed, invalid, or digest-
+        // mismatched schema refuses the boot outright (ADR 0009 §5.1,
+        // §5.2): a schema is never allowed to fall back to "as if
+        // absent," since that is indistinguishable from `mode: off` and
+        // would silently disable `strict`. Reported the same severity
+        // as a corrupt image, for the same reason — the server will not
+        // start on this directory. `set_aside_corrupt: false` — inspect
+        // audits a directory (often a backup, sometimes read-only media)
+        // and must never write to it, unlike the boot/cold-load callers
+        // this same check backs; the module doc on `load_schema` names
+        // this as its one caller-visible side effect.
+        if let Err(error) =
+            schema::load_schema(dir, stem, schema_digest_of(dir, stem).as_deref(), false)
+        {
+            if as_json {
+                context_rows.push(ContextRow::corrupt(
+                    name.clone(),
+                    "corrupt_schema",
+                    error.to_string(),
+                ));
+            } else {
+                println!("{name}: CORRUPT schema — {error}");
+            }
+            failures += 1;
+            continue;
+        }
+
         // The same parse a boot-time replay would run, but READ-ONLY:
         // inspect audits a directory (often a backup) and must never
         // mutate it, so where the server would truncate a torn tail it
@@ -767,6 +797,37 @@ fn inspect_directory(dir: &Path, as_json: bool) -> i32 {
         vectors_total += vector_bytes;
         index_total += index_bytes;
         passages_total += passage_bytes;
+    }
+
+    // `{stem}.schema.corrupt`: bytes an earlier boot (or this very
+    // scan, above) set aside from a schema file that read but did not
+    // parse — evidence for hand recovery, ignored by every other pass.
+    // `crate::groups::scan_groups`' `.group.corrupt` NOTE, applied to
+    // schema.
+    for path in &entries {
+        if path.extension().and_then(|e| e.to_str()) != Some("corrupt") {
+            continue;
+        }
+        let Some(schema_stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !schema_stem.ends_with(".schema") {
+            continue;
+        }
+        let file = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+        if as_json {
+            notices.push(Notice::note(
+                "set_aside_schema_bytes",
+                file.to_string(),
+                "bytes an earlier boot set aside from a schema that did not parse (evidence \
+                 for hand recovery; every scan ignores it)",
+            ));
+        } else {
+            println!(
+                "{file}: NOTE — bytes an earlier boot set aside from a schema that did not \
+                 parse (evidence for hand recovery; every scan ignores it)"
+            );
+        }
     }
 
     // Surviving import batch markers: each names a source whose

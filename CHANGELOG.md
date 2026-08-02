@@ -8,6 +8,30 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- The optional per-context schema document's on-disk file family (#379,
+  S1 of #218's ADR 0009 split — foundation only: no enforcement, no
+  `PUT`/`GET` route yet). A new standalone `{stem}.schema.json`
+  (`SCHEMA_VERSION: u64 = 1`, `mode`/`closed_labels`/`types`/
+  `relations`, `is_a` cycle/depth validation with an `MAX_TYPE_DEPTH =
+  8` ancestor-closure precompute) follows `GroupRecord`'s
+  write-then-rename pattern, with one deliberate divergence: a schema
+  file that is unreadable, does not parse, does not validate, or whose
+  digest disagrees with what `ContextMeta.schema_digest` recorded — in
+  either direction, including a digest recorded with the file itself
+  missing — refuses the boot outright, never a fresh-empty-record
+  fallback, since an empty schema is indistinguishable from `mode: off`
+  and would silently disable `strict` for a context whose operator
+  explicitly turned it on. A schema-free context (no file, no recorded
+  digest) boots byte-identical to every context before this change. Widens
+  `context_files` from nine entries to ten (schema last, so a missing
+  or lagging schema file never blocks a context rename) and adds
+  `schema_formats: [1]` to `GET /version`/`version_facts()` beside
+  `batch_formats`. **Downgrade note**: a data directory touched by this
+  version may carry stray `{stem}.schema.json` files an older binary's
+  nine-entry `context_files` will not delete on `DELETE
+  /contexts/{name}` or move on rename — harmless litter on a writer
+  (remove by hand before downgrading), automatically swept on a
+  replica's next `hydrate_shared`.
 - `compact --dry-run` and `compact --json`, `import --json`, and
   `inspect --json` (#371, split from #248's flag-consistency audit — the
   fuller mechanical rollout of `--dry-run`/`--parallel`/`--json` across
