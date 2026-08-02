@@ -36,6 +36,7 @@
       <div class="side-group-label">Reference</div>
       <a href="import.html">Batch import</a>
       <a href="extract.html">Document extraction</a>
+      <a href="connectors.html">Ingest connectors</a>
       <a href="benchmark.html">Extraction benchmark</a>
       <a href="evaluate.html">Retrieval quality gate</a>
       <a href="evidence.html">Evidence assembly</a>
@@ -193,13 +194,17 @@ print(taguru.__version__, tl.__version__)"</span></code></pre>
   <section id="pdf-to-sections">
     <h2>PDF into numbered sections</h2>
     <p class="section-sub">Extraction happens through the SDK here, not the CLI — <code>taguru extract</code> reads <code>.md</code>/<code>.txt</code> only.</p>
-    <p class="note warn">
+    <p class="note">
       <b><code>taguru extract</code> does not read PDFs.</b> The CLI producer is documented
       against <code>.md</code>/<code>.txt</code> (<a href="extract.html#cli">the CLI shape</a>);
-      pointing it at a PDF directory extracts nothing. Converting a PDF to text is this
-      pipeline's job — plain <code>pypdf</code>, no LangChain document loader needed for this
-      much — before any Taguru code runs at all. If you would rather stay on the CLI path after
-      this step, write each section out
+      pointing it at a PDF directory extracts nothing. The standard
+      <a href="connectors.html"><code>PdfConnector</code></a> is the shortest path today when one
+      document per PDF is the granularity you want. This walkthrough instead splits each PDF into
+      numbered sections by hand — plain <code>pypdf</code>, no LangChain document loader needed
+      for this much — because it wants one source id <b>per section</b>
+      (<code>paper.pdf#3</code>-shaped), finer than a connector's one-document-per-file default; see
+      <a href="long-running.html#units">work units</a> for when that finer split earns its keep.
+      If you would rather stay on the CLI path after this step, write each section out
       as its own <code>.md</code> file and hand the directory to <code>taguru extract</code> +
       <a href="import.html"><code>taguru import</code></a> instead of the SDK path below —
       everything from <a href="#modeling">context and group modeling</a> onward applies

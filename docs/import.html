@@ -36,6 +36,7 @@
       <div class="side-group-label">Reference</div>
       <a href="import.html" aria-current="page">Batch import</a>
       <a href="extract.html">Document extraction</a>
+      <a href="connectors.html">Ingest connectors</a>
       <a href="benchmark.html">Extraction benchmark</a>
       <a href="evaluate.html">Retrieval quality gate</a>
       <a href="evidence.html">Evidence assembly</a>
@@ -217,20 +218,23 @@ taguru import --url http://127.0.0.1:8248 batch/   <span class="c"># send to a r
       what is stored — a separate follow-up.
     </p>
 
-    <h3>Locator lines</h3>
+    <h3 id="locator-lines">Locator lines</h3>
     <p>
       <code>paragraph</code> / <code>locator: {kind, value}</code>: a typed citation locator (ADR
       0007 §7) — a page, slide, sheet, table, or other position, independent of
       <code>section</code> and stored alongside it (0-based, same split convention as
-      questions/sections; refused without a passage line). <code>kind</code> is an open string
-      (<code>"page"</code>, <code>"slide"</code>, <code>"sheet"</code>, <code>"table"</code>, and
-      whatever a future connector needs); <code>value</code> is free text since its natural
-      representation varies by kind (<code>"12"</code> for a page, <code>"A1:C4"</code> for a
-      spreadsheet range). Unlike a section, a locator does <b>not</b> extend to the next paragraph
-      — it names only the exact paragraph it was recorded for. Locators naming paragraphs absent
-      from the split are dropped at store time and counted (<code>locators_dropped</code>; same
-      usual cause as questions/sections). The same resolution reaches
-      <code>attributions[].locator</code> on <code>recall</code>, <code>query</code>,
+      questions/sections; refused without a passage line). <code>kind</code> is an open string;
+      the standard <a href="connectors.html">ingest connectors</a> populate it as
+      <code>"page"</code> (<code>PdfConnector</code>), <code>"fragment"</code>
+      (<code>HtmlConnector</code>), <code>"table"</code> (<code>DocxConnector</code>), and
+      <code>"slide"</code>/<code>"speaker_notes"</code> (<code>PptxConnector</code>) — see
+      <a href="connectors.html#locators">the full mapping</a>. <code>value</code> is free text
+      since its natural representation varies by kind (<code>"12"</code> for a page,
+      <code>"installation"</code> for an HTML fragment id). Unlike a section, a locator does <b>not</b>
+      extend to the next paragraph — it names only the exact paragraph it was recorded for.
+      Locators naming paragraphs absent from the split are dropped at store time and counted
+      (<code>locators_dropped</code>; same usual cause as questions/sections). The same resolution
+      reaches <code>attributions[].locator</code> on <code>recall</code>, <code>query</code>,
       <code>explore</code>, <code>activate</code>, <code>unreachable_from</code>, and
       <code>POST /contexts/{name}/citations</code>'s <code>locator</code>, exactly like
       <code>section</code>.

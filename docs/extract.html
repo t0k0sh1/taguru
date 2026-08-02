@@ -36,6 +36,7 @@
       <div class="side-group-label">Reference</div>
       <a href="import.html">Batch import</a>
       <a href="extract.html" aria-current="page">Document extraction</a>
+      <a href="connectors.html">Ingest connectors</a>
       <a href="benchmark.html">Extraction benchmark</a>
       <a href="evaluate.html">Retrieval quality gate</a>
       <a href="evidence.html">Evidence assembly</a>
@@ -85,9 +86,10 @@
   --out batches/ docs/                <span class="c"># every .md/.txt under docs/, in name order</span>
 taguru import batches/               <span class="c"># offline — or POST each file to /import</span></code></pre>
     <p class="note">
-      PDFs are not among the formats above. Converting one to text first and driving
-      <code>TaguruIngester</code> from the SDK instead of this CLI is the
-      <a href="local-rag-walkthrough.html">local RAG walkthrough</a>'s approach.
+      PDFs are not among the formats above — nor are HTML, DOCX, PPTX, or objects in S3-compatible
+      storage. The standard <a href="connectors.html">ingest connectors</a> (Python SDK) read all
+      of those into the same batch contract this page describes; the
+      <a href="local-rag-walkthrough.html">local RAG walkthrough</a> shows one worked end to end.
     </p>
     <pre><code>TAGURU_EXTRACT_URL      OpenAI-compatible /chat/completions endpoint (required)
 TAGURU_EXTRACT_MODEL    model name (required)

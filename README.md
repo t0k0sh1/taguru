@@ -232,10 +232,27 @@ taguru import batches/
 
 The server never holds model credentials; `TAGURU_EXTRACT_*` lives in
 the offline producer's environment only, and local or bridged models
-(Ollama, LiteLLM in front of Bedrock) work the same way. Full
-contracts:
+(Ollama, LiteLLM in front of Bedrock) work the same way.
+
+`taguru extract` reads `.md`/`.txt` only. For PDF, HTML, DOCX, PPTX, or
+objects in S3-compatible storage, the Python SDK's
+`taguru_langchain.ingest_connectors` module is the producer instead —
+same normalized document shape, same batch contract, and its own
+checkpoint discipline (no separate manifest file — see
+[ingest connectors](https://t0k0sh1.github.io/taguru/connectors.html#checkpoints)),
+plus its own observability (run report, event log):
+
+```python
+from taguru_langchain.ingest_connectors import sync_references
+
+report = sync_references(["manuals/", "https://example.com/guide"],
+                          ingester=ingester, checkpoints=checkpoints)
+```
+
+Full contracts:
 [batch import](https://t0k0sh1.github.io/taguru/import.html) ·
 [document extraction](https://t0k0sh1.github.io/taguru/extract.html) ·
+[ingest connectors](https://t0k0sh1.github.io/taguru/connectors.html) ·
 [long-running ingestion](https://t0k0sh1.github.io/taguru/long-running.html)
 (interrupt, checkpoint, resume).
 
