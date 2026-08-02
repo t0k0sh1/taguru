@@ -8,7 +8,7 @@ knobs people retune, without copy-editing one YAML per combination.
 base/                  the single-writer PVC model   (kubernetes.yaml)
 overlays/stateless/    boot-from-bucket, emptyDir    (kubernetes-stateless.yaml)
 overlays/replicas/     writer + bucket-tailing read pool, one apply
-overlays/router/       two writer shards + the taguru route front door
+overlays/router/       two writer shards + the taguru router front door
 verify.sh              CI's checks, runnable locally
 ```
 

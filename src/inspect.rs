@@ -42,6 +42,11 @@ usage: taguru inspect PATH [--json]   (a data directory, one .ctx image, or one 
 ";
 
 pub fn run(args: &[String]) -> i32 {
+    // --help/-h anywhere in the argument list, like every other
+    // subcommand: an operator halfway through composing flags asks
+    // for the manual without first deleting what they typed. Folded
+    // into the same loop as --json's own parsing, rather than a
+    // separate up-front scan, since both need one pass over `args`.
     let mut as_json = false;
     let mut positionals: Vec<&str> = Vec::new();
     for arg in args {

@@ -39,7 +39,7 @@ USAGE:
                                         scale horizontally, and the replica
                                         doubles as the warm standby a manual
                                         promotion turns into the next writer
-  taguru route [--config FILE]          start the stateless scatter-gather
+  taguru router [--config FILE]         start the stateless scatter-gather
                                         router over sharded instances:
                                         TAGURU_ROUTE_MAP names a file of
                                         'context = shard-url' lines (plus an
@@ -51,7 +51,9 @@ USAGE:
                                         semantics, and /mcp works unchanged.
                                         No data directory, no state — scale
                                         routers freely behind one LB. Auth is
-                                        pass-through: the shards enforce keys
+                                        pass-through: the shards enforce keys.
+                                        'route' still works as a deprecated
+                                        alias (a warning goes to stderr)
   taguru version                        print this binary's version; a running
                                         server reports its own version in its
                                         GET /health response body
@@ -103,6 +105,20 @@ USAGE:
                                         run) cell, and assemble manifest.json/
                                         runs/*.jsonl (ADR 0003; see: taguru
                                         benchmark extract --help)
+  taguru benchmark compare [--with-text] RESULTS_DIR
+                                        derive measurements.json/
+                                        measurements.csv and differences.jsonl
+                                        from a finished results directory
+                                        (ADR 0003 §9.3/§9.4; see: taguru
+                                        benchmark compare --help)
+  taguru benchmark search --eval FILE [--url URL] [--config FILE]
+                          [--run N] [--context-prefix NAME] [--skip-import]
+                          RESULTS_DIR
+                                        build one per-model corpus from a
+                                        finished results directory and
+                                        compare their search results (ADR
+                                        0003 §11; see: taguru benchmark
+                                        search --help)
   taguru evaluate --eval FILE --context NAME [--url URL] [--config FILE]
                   [--thresholds FILE] [--assembly] [--max-items N]
                   [--max-bytes N] [--max-tokens N] [--rerank MODEL]
@@ -133,17 +149,23 @@ USAGE:
                                         a property of the model, remeasured
                                         per switch (see: taguru calibrate
                                         --help); URL defaults to TAGURU_ADDR
-  taguru communities --context NAME [--dry-run] [--json] [URL]
+  taguru communities --context NAME [--into NAME] [--dry-run] [--json] [URL]
+  taguru communities --group NAME [--dry-run] [--json] [URL]
                                         derive (or refresh) a community-
                                         summaries artifact from a running
                                         server's context: server-side
                                         detection, LLM summaries of what
                                         changed only, written back as an
-                                        ordinary context that
+                                        ordinary context (default
+                                        'NAME::communities', or --into's
+                                        name) that
                                         POST /contexts/{name}/communities/search
-                                        serves with a staleness verdict
-                                        (see: taguru communities --help);
-                                        URL defaults to TAGURU_ADDR
+                                        serves with a staleness verdict;
+                                        --group derives one artifact per
+                                        member context instead, transitively,
+                                        with no cross-context merge (see:
+                                        taguru communities --help); URL
+                                        defaults to TAGURU_ADDR
   taguru --help                         this text
 
 CONFIGURATION FILE (--config FILE, or TAGURU_CONFIG=FILE):
@@ -156,6 +178,15 @@ ENVIRONMENT (every knob; unset = the shown default):
   TAGURU_ADDR                  bind address (127.0.0.1:8248; port 0 = pick free)
   TAGURU_DATA_DIR              data directory (./data)
   TAGURU_CACHE_BYTES           resident budget for unpinned contexts (512 MiB)
+  TAGURU_RETRIEVAL_CACHE_BYTES  exact-match result cache for recall/query/
+                               passage search, invalidated by the revision
+                               counters (32 MiB; 0 = off)
+  TAGURU_SEMANTIC_CACHE_THRESHOLD  semantic tier over the exact cache,
+                               passage search only: a paraphrased query
+                               clearing this cosine floor (plus a negation/
+                               number/entity guard) serves the earlier
+                               query's cached result; needs the exact cache
+                               and TAGURU_EMBED_PASSAGES (unset = off)
   TAGURU_FLUSH_SECS            image flush interval (5)
   TAGURU_WAL                   fsync write-ahead log, 0/false = off (on)
   TAGURU_WAL_MAX_BYTES         per-context WAL ceiling, 0 = none (256 MiB)
@@ -183,7 +214,7 @@ ENVIRONMENT (every knob; unset = the shown default):
                                clients (the writer's own base URL or LB
                                name); unset = the refusal names only the
                                bucket's fence holder
-  TAGURU_ROUTE_MAP             route mode only: the context→shard map file,
+  TAGURU_ROUTE_MAP             router mode only: the context→shard map file,
                                'context = shard-url' per line, # comments,
                                optional '* = shard-url' for contexts the map
                                does not name; edits take a router restart
@@ -324,7 +355,7 @@ impl Command {
     }
 }
 
-/// `taguru route`'s settings: the config file alone — the map itself
+/// `taguru router`'s settings: the config file alone — the map itself
 /// rides `TAGURU_ROUTE_MAP` like every other knob rides a variable.
 pub struct RouteArgs {
     pub config: Option<PathBuf>,
@@ -344,7 +375,7 @@ pub struct ServeArgs {
 }
 
 /// Parses the process arguments, running and exiting for everything
-/// except the server modes (`serve`, `route`), whose settings it
+/// except the server modes (`serve`, `router`), whose settings it
 /// returns.
 pub fn dispatch() -> Command {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -354,7 +385,18 @@ pub fn dispatch() -> Command {
         Some("--config") | Some("--take-over") | Some("--replica") => {
             Command::Serve(parse_serve(&args))
         }
-        Some("route") => Command::Route(parse_route(&args[1..])),
+        Some("router") => Command::Route(parse_route(&args[1..])),
+        // Deprecated alias (issue #248 item 9): the module and every
+        // design doc call this "the router"; the subcommand name
+        // itself lagged behind. Removing the alias is its own
+        // follow-up issue, filed once the rename lands.
+        Some("route") => {
+            eprintln!(
+                "taguru: 'route' is a deprecated alias for 'router' and will be removed in a \
+                 future release"
+            );
+            Command::Route(parse_route(&args[1..]))
+        }
         Some("version") => {
             refuse_extras("version", &args[1..]);
             println!("taguru {}", env!("CARGO_PKG_VERSION"));
@@ -383,8 +425,9 @@ pub fn dispatch() -> Command {
     }
 }
 
-/// `route` takes one optional `--config FILE` and nothing else — the
-/// shard map is a variable (`TAGURU_ROUTE_MAP`), not an argument.
+/// `router` (or its deprecated alias `route`) takes one optional
+/// `--config FILE` and nothing else — the shard map is a variable
+/// (`TAGURU_ROUTE_MAP`), not an argument.
 fn parse_route(args: &[String]) -> RouteArgs {
     let mut config = None;
     let mut rest = args.iter();
@@ -399,7 +442,7 @@ fn parse_route(args: &[String]) -> RouteArgs {
                 print!("{USAGE}");
                 exit(0)
             }
-            other => usage_error(&format!("'route' does not take '{other}'")),
+            other => usage_error(&format!("'router' does not take '{other}'")),
         }
     }
     let config = config.or_else(|| std::env::var("TAGURU_CONFIG").ok().map(PathBuf::from));

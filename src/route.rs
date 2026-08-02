@@ -1,4 +1,5 @@
-//! `taguru route`: a stateless scatter-gather router over sharded
+//! `taguru router` (`route` is a deprecated alias, issue #248 item 9):
+//! a stateless scatter-gather router over sharded
 //! instances (issue #130) — the write-scaling leg beside the replica
 //! pool's read scaling. One URL serves the whole HTTP surface over a
 //! static context→shard map; groups and multi-context search span

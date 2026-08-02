@@ -148,7 +148,7 @@ npm ls langchain-taguru</code></pre>
       <code>GET /health</code>'s own success body carries a version too, per
       <a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0002-remote-cli-access.md">ADR 0002</a> §10 —
       <code>{"status": "ok", "version": "…"}</code> — for scripts that already poll it and would
-      rather not add a second call. <code>taguru route</code>'s own <code>/health</code> carries
+      rather not add a second call. <code>taguru router</code>'s own <code>/health</code> carries
       the same field beside its <code>router</code>/<code>shards</code> keys. A server built before
       this field existed (0.4.x and earlier) still answers the bare text <code>ok</code> with no
       version at all; the <code>--url</code> forms of <code>import</code>/<code>export</code>/

@@ -543,7 +543,7 @@ pub(crate) fn run(args: &[String]) -> i32 {
                 return 0;
             }
             // A flag given twice is a usage error, never a silent
-            // last-wins — matching `serve`/`route`'s own `--config`
+            // last-wins — matching `serve`/`router`'s own `--config`
             // guard and `benchmark`'s convention throughout: a
             // scripted invocation that accidentally concatenates two
             // flag sets (e.g. two `--out`s) must not silently export

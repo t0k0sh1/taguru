@@ -102,11 +102,24 @@ impl Server {
             .expect("kill must run");
     }
 
-    /// Spawns `taguru route` over the given map contents (written to a
+    /// Spawns `taguru router` over the given map contents (written to a
     /// scratch file). The returned handle's `data_dir` is that scratch
     /// directory — the router itself holds no data; the field only
     /// keeps Drop's cleanup working.
     pub fn start_router(tag: &str, map_contents: &str, extra_env: &[(&str, &str)]) -> Self {
+        Self::start_router_via(tag, map_contents, extra_env, "router")
+    }
+
+    /// Same as [`start_router`](Self::start_router), but naming the
+    /// subcommand explicitly — `"route"` exercises the deprecated
+    /// alias's real dispatch (issue #248 item 9), not just its
+    /// `--help` text.
+    pub fn start_router_via(
+        tag: &str,
+        map_contents: &str,
+        extra_env: &[(&str, &str)],
+        subcommand: &str,
+    ) -> Self {
         let dir = std::env::temp_dir().join(format!("taguru-router-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("router scratch dir must be creatable");
@@ -114,7 +127,7 @@ impl Server {
         std::fs::write(&map_path, map_contents).expect("route map must be writable");
 
         let mut command = Command::new(env!("CARGO_BIN_EXE_taguru"));
-        command.arg("route");
+        command.arg(subcommand);
         common::scrub_taguru_env(&mut command)
             .env("TAGURU_ADDR", "127.0.0.1:0")
             .env("TAGURU_ROUTE_MAP", &map_path);
