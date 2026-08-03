@@ -135,6 +135,20 @@ fn schema_type_is_ordinary_until_a_schema_exists_then_hidden_from_labels_and_tra
 /// normalization and the propagation walk must both drop `schema:type`
 /// edges, or a heavily-typed concept's real facts would be diluted by
 /// its own hidden type assertions.
+///
+/// Reachability alone cannot tell the two halves apart (propagation
+/// stopping is enough to make `旧銘酒造` unreachable even if the fan
+/// denominator still counts the hidden edge), and — per
+/// [`Context::activate`]'s own contract — a fact returned *directly
+/// from the origin* is `activation(origin) * decay * |sum|`,
+/// independent of the origin's own fan-out, so checking a one-hop
+/// fact's strength would not catch dilution either. Only a fact
+/// *beyond* the origin depends on how much the origin's own total
+/// divides the flow reaching it, so this checks a two-hop fact's
+/// strength instead: `青嶺酒造 →(所在地)→ 広島 →(属する)→ 中国地方`.
+/// `広島`'s activation is `score(所在地) / total(青嶺酒造)` — larger
+/// once `schema:type` no longer inflates that total — and `中国地方`'s
+/// returned strength scales with `広島`'s activation.
 #[test]
 fn activate_never_propagates_through_schema_type_once_a_schema_exists() {
     let server = Server::start("schema-type-label-activate");
@@ -147,32 +161,62 @@ fn activate_never_propagates_through_schema_type_once_a_schema_exists() {
              "weight": 1.0, "source": "a.md"},
             {"subject": "旧銘酒造", "label": "schema:type", "object": "Brewery",
              "weight": 1.0, "source": "a.md"},
+            {"subject": "青嶺酒造", "label": "所在地", "object": "広島",
+             "weight": 1.0, "source": "a.md"},
+            {"subject": "広島", "label": "属する", "object": "中国地方",
+             "weight": 1.0, "source": "a.md"},
         ])),
     );
 
-    let reaches_the_other_brewery = |server: &Server| {
-        let activated = server.ok(
+    let activate = |server: &Server| {
+        server.ok(
             "POST",
             "/contexts/sake/activate",
             Some(json!({"origins": ["青嶺酒造"]})),
-        );
+        )
+    };
+    let reaches_the_other_brewery = |activated: &serde_json::Value| {
         activated["matches"]
             .as_array()
             .unwrap()
             .iter()
             .any(|activation| activation["association"]["subject"] == "旧銘酒造")
     };
+    let two_hop_strength = |activated: &serde_json::Value| {
+        activated["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|activation| activation["association"]["object"] == "中国地方")
+            .map(|activation| activation["strength"].as_f64().unwrap())
+    };
+
+    let before = activate(&server);
     assert!(
-        reaches_the_other_brewery(&server),
+        reaches_the_other_brewery(&before),
         "before a schema exists, activate propagates through schema:type like any other \
          label"
     );
+    let diluted_strength =
+        two_hop_strength(&before).expect("中国地方 is reachable in two hops: {before}");
 
     server.ok("PUT", "/contexts/sake/schema", Some(off_document()));
 
+    let after = activate(&server);
     assert!(
-        !reaches_the_other_brewery(&server),
+        !reaches_the_other_brewery(&after),
         "once a schema exists, activate must never propagate through schema:type"
+    );
+    // The fan denominator must drop the schema:type edge too, not only
+    // the walk — otherwise 青嶺酒造's real fan-out still counts its own
+    // now-hidden type assertion, and everything beyond it stays
+    // diluted by exactly the same amount as before.
+    let undiluted_strength =
+        two_hop_strength(&after).expect("中国地方 is still reachable in two hops: {after}");
+    assert!(
+        undiluted_strength > diluted_strength,
+        "the fan total must exclude schema:type too: diluted={diluted_strength} \
+         undiluted={undiluted_strength}"
     );
 }
 
@@ -223,20 +267,20 @@ fn type_name_concepts_are_excluded_from_the_vocabulary_twin_audit_once_a_schema_
         ])),
     );
 
-    let has_the_type_name_pair = |audit: &serde_json::Value| {
+    let has_pair = |audit: &serde_json::Value, a: &str, b: &str| {
         audit["lexical_concepts"]
             .as_array()
             .unwrap()
             .iter()
             .any(|pair| {
                 let names = [pair["a"].as_str().unwrap(), pair["b"].as_str().unwrap()];
-                names.contains(&"Organization") && names.contains(&"Organisation")
+                names.contains(&a) && names.contains(&b)
             })
     };
 
     let before = server.ok("POST", "/contexts/sake/vocabulary/audit", None);
     assert!(
-        has_the_type_name_pair(&before),
+        has_pair(&before, "Organization", "Organisation"),
         "guard 1 (no schema yet): a type-name concept is an ordinary twin candidate: \
          {before}"
     );
@@ -245,8 +289,17 @@ fn type_name_concepts_are_excluded_from_the_vocabulary_twin_audit_once_a_schema_
 
     let after = server.ok("POST", "/contexts/sake/vocabulary/audit", None);
     assert!(
-        !has_the_type_name_pair(&after),
+        !has_pair(&after, "Organization", "Organisation"),
         "once a schema exists, a type name must never be proposed as a spelling-drift \
          candidate: {after}"
+    );
+    // The exclusion is scoped to type names alone — 山田商店/山田商会
+    // are ordinary subject-side concepts, near-duplicate spellings in
+    // their own right, and must still survive the audit. Without this,
+    // the assertion above would also pass on a bug that emptied the
+    // whole audit rather than just excluding type names.
+    assert!(
+        has_pair(&after, "山田商店", "山田商会"),
+        "an ordinary concept pair must still be audited: {after}"
     );
 }

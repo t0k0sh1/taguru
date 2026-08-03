@@ -1016,11 +1016,16 @@ mod tests {
             None,
         )];
         let env = env(&context, schema, &ops);
-        // No fact_ops at all, so nothing is judged either way — the
-        // real assertion is that `build` did not panic/misbehave on the
-        // empty-subjects path, which an empty violations list here
-        // does not by itself prove, so additionally exercise a fact_op
-        // against the same concept afterward in a second env build.
+        // `violations` is empty either way, because a type_op is never
+        // judged (§7.2 step 6) — that alone can't distinguish the
+        // guarded path from the degenerate one. Only `env.types` can:
+        // had `query_any(&[], ...)` run, the unrelated `私 好き りんご`
+        // fact would have landed in it as if it were a type assertion.
+        assert_eq!(
+            env.types.keys().collect::<Vec<_>>(),
+            vec!["青嶺酒造"],
+            "only the batch half's own type_op may populate `types`"
+        );
         assert_eq!(schema_issues(&env, &ops, "").violations.len(), 0);
     }
 }

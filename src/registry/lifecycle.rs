@@ -813,7 +813,22 @@ impl AppState {
 
     /// ADR 0009 §6.3 guard 2's `add_label_alias` bullet: the pre-flight
     /// an alias-creating write consults before it runs, mirroring
-    /// `predicted_alias_rejection`'s own read-only-prediction shape.
+    /// `predicted_alias_rejection`'s own read-only-prediction shape —
+    /// including that shape's own known race: this check and the
+    /// write it precedes take two SEPARATE lock acquisitions, not one
+    /// held across both, so a `PUT /schema` install landing in the
+    /// gap between them is not caught here. That gap is not new to
+    /// this guard — `apply_batch` already runs
+    /// `predicted_alias_rejection` and its subsequent `add_aliases`/
+    /// `add_associations` the same two-lock-acquisitions way, and ADR
+    /// 0009 §7.3 explicitly declines to make the write path atomic
+    /// against concurrent mutation ("that is #187's scope"). Closing
+    /// it here would mean re-running this check under `add_aliases`'
+    /// own write lock, which — because `Context` has no schema
+    /// knowledge (§7.3's own reasoning for keeping the check a layer
+    /// up) — reaches into every other `add_aliases`/`logged_write`
+    /// caller too; deferred as the same kind of cross-cutting
+    /// atomicity work #187 already owns, not attempted piecemeal here.
     /// Only meaningful once [`AppState::hidden_label`] says a schema
     /// exists — a schema-free context's `schema:type` stays an ordinary
     /// label (guard 1), so nothing here refuses anything for it.
