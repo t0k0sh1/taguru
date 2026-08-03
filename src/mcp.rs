@@ -63,6 +63,8 @@ mod tests {
             "sources": ["s"], "source": "s", "query": "q", "paragraph": 0,
             "stream": "{}", "to": "ctx2", "expected": "x",
             "subject": "s", "label": "l", "object": "o",
+            "schema": 1, "mode": "strict", "closed_labels": false,
+            "types": {}, "relations": {},
         });
         for tool in tool_definitions() {
             let name = tool["name"].as_str().expect("definitions carry names");
