@@ -63,6 +63,8 @@ mod tests {
             "sources": ["s"], "source": "s", "query": "q", "paragraph": 0,
             "stream": "{}", "to": "ctx2", "expected": "x",
             "subject": "s", "label": "l", "object": "o",
+            "schema": 1, "mode": "strict", "closed_labels": false,
+            "types": {}, "relations": {},
         });
         for tool in tool_definitions() {
             let name = tool["name"].as_str().expect("definitions carry names");
@@ -265,6 +267,8 @@ mod tests {
             "origins": ["x"], "passages": {}, "sources": ["s"], "source": "s",
             "query": "q", "paragraph": 0, "to": "ctx2", "expected": "x",
             "subject": "s", "label": "l", "object": "o",
+            "schema": 1, "mode": "strict", "closed_labels": false,
+            "types": {}, "relations": {},
         });
         let cases = [
             ("rename_context", "to"),
@@ -290,6 +294,11 @@ mod tests {
             ("explain_search", "source"),
             ("cite_passage", "source"),
             ("audit_coverage", "origins"),
+            ("put_schema", "schema"),
+            ("put_schema", "mode"),
+            ("put_schema", "closed_labels"),
+            ("put_schema", "types"),
+            ("put_schema", "relations"),
         ];
         for (tool, key) in cases {
             let mut arguments = base.clone();

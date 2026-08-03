@@ -1,0 +1,37 @@
+{
+  "contract": "http_contract",
+  "method": "POST",
+  "operation": "add_associations_warn",
+  "request": [
+    {
+      "label": "schema:type",
+      "object": "Person",
+      "source": "a.md",
+      "subject": "高瀬",
+      "weight": 1.0
+    },
+    {
+      "label": "杜氏",
+      "object": "個人A",
+      "source": "a.md",
+      "subject": "高瀬",
+      "weight": 1.0
+    }
+  ],
+  "response": {
+    "issues": [
+      {
+        "actual": "typed as [Person]",
+        "expected": "'高瀬' typed as one of [Brewery] (or a subtype), for relation '杜氏'",
+        "kind": "domain",
+        "path": "associations[1].subject"
+      }
+    ],
+    "result": 2,
+    "schema_violations": 1,
+    "status": "ok",
+    "time": 0.0
+  },
+  "route": "/contexts/{name}/associations",
+  "status": 200
+}
