@@ -84,8 +84,11 @@ pub async fn explore(
     }
     // ADR 0009 §6.3 exclusion 1: `schema:type` never bridges a walk.
     // Resolved before `read_context` — see `AppState::hidden_label`'s
-    // own doc for why it must not run inside that closure.
-    let hidden = state.hidden_label(&name);
+    // own doc for why it must not run inside that closure. Its slow
+    // path is real disk I/O under a write lock, so — like every other
+    // load-bearing call on this handler's path — it runs off the async
+    // worker.
+    let hidden = tokio::task::block_in_place(|| state.hidden_label(&name));
     let excluded: Vec<&str> = hidden.into_iter().collect();
     match state.read_context(&name, |context| {
         let origins: Vec<&str> = request.origins.iter().map(String::as_str).collect();
@@ -152,8 +155,9 @@ pub async fn activate(
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }
-    // ADR 0009 §6.3 exclusion 1, the ranked sibling of `explore`'s.
-    let hidden = state.hidden_label(&name);
+    // ADR 0009 §6.3 exclusion 1, the ranked sibling of `explore`'s —
+    // same reason for `block_in_place` as there.
+    let hidden = tokio::task::block_in_place(|| state.hidden_label(&name));
     let excluded: Vec<&str> = hidden.into_iter().collect();
     match state.read_context(&name, |context| {
         let origins: Vec<&str> = request.origins.iter().map(String::as_str).collect();

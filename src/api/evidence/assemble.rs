@@ -327,8 +327,10 @@ pub async fn assemble_evidence(
         let _guard = activate_span.enter();
         // ADR 0009 §6.3 exclusion 1, same as `POST /contexts/{name}/activate`
         // — resolved before `read_context`, per `AppState::hidden_label`'s
-        // own doc.
-        let hidden = state.hidden_label(&name);
+        // own doc. Its slow path is real disk I/O under a write lock,
+        // so — like every other lane in this handler — it runs off the
+        // async worker.
+        let hidden = tokio::task::block_in_place(|| state.hidden_label(&name));
         let excluded: Vec<&str> = hidden.into_iter().collect();
         match state.read_context(&name, |context| {
             context.activate_excluding(

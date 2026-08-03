@@ -253,6 +253,11 @@ impl Context {
                 .collect();
             return (self.label_name_index.len(), page);
         }
+        // Deduplicated first: `excluded` carries no documented
+        // no-duplicates invariant, and counting a repeated name once
+        // per occurrence would subtract more than `label_name_index`
+        // actually contains, underflowing the `usize` total below.
+        let excluded: HashSet<&str> = excluded.iter().copied().collect();
         let hidden = excluded
             .iter()
             .filter(|name| self.label_name_index.contains(**name))
@@ -260,7 +265,7 @@ impl Context {
         let page = self
             .label_name_index
             .range::<str, _>((start, Bound::Unbounded))
-            .filter(|name| !excluded.contains(&name.as_str()))
+            .filter(|name| !excluded.contains(name.as_str()))
             .take(limit)
             .cloned()
             .collect();
@@ -400,6 +405,35 @@ mod tests {
 
         let (_, exhausted) = context.label_page(Some("location"), 2);
         assert!(exhausted.is_empty());
+    }
+    #[test]
+    fn label_page_excluding_omits_the_hidden_label_from_the_page_and_the_total() {
+        let mut context = Context::default();
+        context.associate("蔵", "founded", "1907", 1.0).unwrap();
+        context.associate("蔵", "brand", "青嶺", 1.0).unwrap();
+
+        let (total, page) = context.label_page_excluding(None, 10, &["brand"]);
+        assert_eq!(total, 1, "the hidden label must not count toward total");
+        assert_eq!(page, vec!["founded".to_string()]);
+
+        // A name never interned costs nothing and changes nothing.
+        let (total, page) = context.label_page_excluding(None, 10, &["never-interned"]);
+        assert_eq!(total, 2);
+        assert_eq!(page, vec!["brand".to_string(), "founded".to_string()]);
+    }
+    #[test]
+    fn label_page_excluding_deduplicates_excluded_so_the_total_never_underflows() {
+        let mut context = Context::default();
+        context.associate("蔵", "founded", "1907", 1.0).unwrap();
+
+        // The same interned name repeated in `excluded` must be
+        // subtracted once, not once per occurrence — a naive
+        // `excluded.len()` count would underflow `label_name_index.len()`
+        // here (1 label, 3 repeated exclusions).
+        let (total, page) =
+            context.label_page_excluding(None, 10, &["founded", "founded", "founded"]);
+        assert_eq!(total, 0);
+        assert!(page.is_empty());
     }
     #[test]
     fn labels_lists_the_relation_vocabulary_in_insertion_order() {

@@ -171,8 +171,10 @@ pub async fn labels(
     // lock, which would deadlock against `read_context`'s read lock
     // held for the whole closure. `?prefix=schema:` must not be a
     // back door around the same exclusion, so it applies on both
-    // branches below, not only the cursor one.
-    let hidden = state.hidden_label(&name);
+    // branches below, not only the cursor one. That same slow path is
+    // real disk I/O, so it runs off the async worker like every other
+    // load-bearing call on this handler's path.
+    let hidden = tokio::task::block_in_place(|| state.hidden_label(&name));
     let excluded: Vec<&str> = hidden.into_iter().collect();
     // A `prefix` filter defines the population rather than a cursor, so
     // — like `pinned` on `list_contexts` — it forces the whole-vocabulary

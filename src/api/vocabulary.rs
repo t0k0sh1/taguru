@@ -56,12 +56,6 @@ fn twin_pairs<S>(pairs: Vec<(String, String, S)>) -> Vec<TwinPair<S>> {
         .collect()
 }
 
-/// Shared body of `audit_vocabulary` and `audit_drift`'s `include_twins`
-/// section: lexical fork candidates always, semantic ones when
-/// embeddings are configured and the deadline allows. Callers run this
-/// inside `block_in_place` — it does its own CPU-bound pairwise sweeps
-/// and must never run on an async worker (see the comment this carried
-/// forward from `audit_vocabulary`, below).
 /// ADR 0009 §6.3 exclusion 3: the union of declared type names and
 /// every live (`count > 0`) `schema:type` edge's object — the same
 /// population §6.2 already reports as an always-on audit line ("type
