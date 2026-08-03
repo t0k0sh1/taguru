@@ -40,6 +40,11 @@ serve` while writing this, not just written from reading the code.
      it doesn't change where taguru is listening). Docker Desktop's
      `host.docker.internal` proxies through the host network stack and
      tolerates the loopback default, but `0.0.0.0` works either way.
+     Local development only: `0.0.0.0` listens on every interface, not
+     just loopback, and `ops:demo-token` is a token this document
+     publishes — replace it with your own, and don't run this bind on
+     a host reachable from an untrusted network without firewalling
+     8248/tcp.
    - the single-host compose:
      `TAGURU_API_TOKENS='ops:demo-token' docker compose -f ../docker-compose.yml up -d`
      — then point `prometheus.yml` at `taguru:8248` and join this
