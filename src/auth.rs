@@ -766,6 +766,7 @@ pub(crate) fn required_role(method: &Method, route: &str) -> Role {
         | (&Method::GET, "/groups/{name}/export")
         | (&Method::GET, "/contexts/{name}")
         | (&Method::GET, "/contexts/{name}/labels")
+        | (&Method::GET, "/contexts/{name}/schema")
         | (&Method::GET, "/contexts/{name}/aliases")
         | (&Method::GET, "/contexts/{name}/sources")
         | (&Method::GET, "/contexts/{name}/embeddings")
@@ -798,6 +799,7 @@ pub(crate) fn required_role(method: &Method, route: &str) -> Role {
         // drives, context creation and per-source re-sync included.
         (&Method::PUT, "/contexts/{name}")
         | (&Method::PATCH, "/contexts/{name}")
+        | (&Method::PUT, "/contexts/{name}/schema")
         | (&Method::PUT, "/groups/{name}")
         | (&Method::PATCH, "/groups/{name}")
         | (&Method::POST, "/contexts/{name}/associations")
@@ -1590,6 +1592,22 @@ mod tests {
         assert_eq!(
             required_role(&Method::DELETE, "/contexts/{name}"),
             Role::Admin
+        );
+    }
+
+    /// ADR 0009 §12.5: `GET /schema` sits beside the other context
+    /// GETs; `PUT` is `Write` (an ingest-loop verb an agent performs),
+    /// not `Admin`, the same classification context creation itself
+    /// already gets.
+    #[test]
+    fn schema_get_is_read_and_put_is_write() {
+        assert_eq!(
+            required_role(&Method::GET, "/contexts/{name}/schema"),
+            Role::Read
+        );
+        assert_eq!(
+            required_role(&Method::PUT, "/contexts/{name}/schema"),
+            Role::Write
         );
     }
 

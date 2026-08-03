@@ -72,6 +72,11 @@ impl AppState {
                         usage,
                         revision,
                         schema_digest,
+                        // Not schema-verified here (see the comment
+                        // above): the family is not local yet, so
+                        // there is nothing to resolve. `ensure_hot`
+                        // populates this once hydration lands it.
+                        None,
                     ))
                 });
             }
@@ -370,16 +375,18 @@ fn scan_data_dir(data_dir: &Path) -> io::Result<(BTreeMap<String, Arc<Entry>>, R
             // through; every other case is folded into the `?` below
             // and stops the boot for the whole directory, exactly as
             // an unreadable `.ctx` already does one candidate over.
-            if let Err(error) = schema::load_schema(data_dir, stem, schema_digest.as_deref(), true)
-            {
-                return (
-                    index,
-                    Err(io::Error::new(
-                        error.kind(),
-                        format!("context '{name}': {error}"),
-                    )),
-                );
-            }
+            let schema = match schema::load_schema(data_dir, stem, schema_digest.as_deref(), true) {
+                Ok(schema) => schema.map(Arc::new),
+                Err(error) => {
+                    return (
+                        index,
+                        Err(io::Error::new(
+                            error.kind(),
+                            format!("context '{name}': {error}"),
+                        )),
+                    );
+                }
+            };
             // The gauge must see leftover logs from the first scrape,
             // not only after each context's first touch.
             let wal_bytes = fs::metadata(wal_path(data_dir, stem))
@@ -401,6 +408,7 @@ fn scan_data_dir(data_dir: &Path) -> io::Result<(BTreeMap<String, Arc<Entry>>, R
                         usage,
                         revision,
                         schema_digest,
+                        schema,
                     )),
                 )),
             )

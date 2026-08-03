@@ -42,6 +42,7 @@ mod resolve_match;
 mod retrieval_cache;
 mod retrieval_core;
 mod routing;
+mod schema;
 mod search_log;
 mod search_plan;
 mod semantic_cache;

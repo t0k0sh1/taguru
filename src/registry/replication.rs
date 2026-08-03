@@ -42,6 +42,7 @@ impl AppState {
                 usage,
                 revision,
                 schema_digest,
+                None,
             ))
         });
     }
@@ -79,6 +80,14 @@ impl AppState {
         // left over from a load that quarantined on the OLD value
         // cannot linger past this refresh either way.
         inner.schema_digest = schema_digest;
+        // Dropped, not re-resolved inline: the digest may have just
+        // changed and re-verifying against a schema file the shared
+        // hydration pass has not necessarily re-fetched yet would risk
+        // the exact stale-content-under-a-fresh-digest window ADR 0009
+        // §5.2 exists to catch. `schema_of`/`ensure_hot`'s lazy
+        // resolution re-checks the file against this fresh digest on
+        // next read, same as any other cold entry.
+        inner.schema = None;
         // Monotonic re-seed: the writer's sidecar lags its shipped WAL
         // by a flush interval, and this replica's own last load may
         // already have replayed past it — a tailed refresh must move
