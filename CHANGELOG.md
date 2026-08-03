@@ -8,6 +8,35 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- The reserved `schema:type` label's remaining namespace guards, its
+  three read-side exclusions, and the shared pre-write check (#381, S3
+  of #218's ADR 0009 split — library-level only, no write entrance
+  wired yet, that is S4/#382 and S5/#383). `POST /contexts/{name}/aliases`
+  now refuses a `labels` alias resolving to `schema:type` once a schema
+  document exists for the context, in every mode including `off` (the
+  gate is "a document exists," never "mode != off," per ADR 0009 §6.3).
+  Once a schema exists, `schema:type` is invisible in three places it
+  would otherwise quietly distort: `POST /contexts/{name}/explore` and
+  `/activate` (plus the `assemble-evidence` endpoint's own activate
+  lane) never traverse it — a type name is a hub, so without this a
+  neighborhood search would put every instance of one type a couple of
+  hops from every other; `GET /contexts/{name}/labels`'s default page
+  and `?prefix=` both omit it; and `POST /contexts/{name}/vocabulary/audit`
+  (and `audit_drift?include_twins`) never proposes a type name as a
+  concept-spelling fork candidate. A schema-free context is unaffected
+  in all three places — the exclusion costs one extra lock probe
+  (`AppState::hidden_label`) and nothing else. `taguru extract`'s
+  accumulated relation-label vocabulary (the `system_prompt` block a
+  producer sees) also never offers `schema:type`, unconditionally,
+  since extract has no notion of whether a target context has a schema
+  at all. New library-level pieces, none yet reachable from a write
+  path: `Context::explore_excluding`/`activate_excluding`/
+  `label_page_excluding`/`canonical_concept` (additive siblings of the
+  existing methods, so the published `taguru` crate's signatures are
+  unchanged), and `schema::schema_issues` — the one pure function ADR
+  0009 §7.2's `TypeEnv` union and §8's two new `Issue` kinds
+  (`"domain"`, `"range"`) compile down to, built so the two future write
+  entrances share it and cannot drift apart.
 - `GET`/`PUT /contexts/{name}/schema` (#380, S2 of #218's ADR 0009
   split — the management routes over S1's file family; still no
   enforcement against the graph, that is S3/#381). `PUT` installs a

@@ -165,6 +165,17 @@ pub async fn labels(
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }
+    // ADR 0009 §6.3 exclusion 2: `schema:type` is invisible on this
+    // endpoint's default page — resolved before `read_context` since
+    // `AppState::hidden_label`'s slow path takes this entry's write
+    // lock, which would deadlock against `read_context`'s read lock
+    // held for the whole closure. `?prefix=schema:` must not be a
+    // back door around the same exclusion, so it applies on both
+    // branches below, not only the cursor one. That same slow path is
+    // real disk I/O, so it runs off the async worker like every other
+    // load-bearing call on this handler's path.
+    let hidden = tokio::task::block_in_place(|| state.hidden_label(&name));
+    let excluded: Vec<&str> = hidden.into_iter().collect();
     // A `prefix` filter defines the population rather than a cursor, so
     // — like `pinned` on `list_contexts` — it forces the whole-vocabulary
     // path instead of the BTreeMap-seeking `label_page` fast path, which
@@ -181,7 +192,9 @@ pub async fn labels(
                 let mut labels: Vec<String> =
                     context.labels().into_iter().map(String::from).collect();
                 labels.sort();
-                labels.retain(|label| label.starts_with(prefix));
+                labels.retain(|label| {
+                    label.starts_with(prefix) && !excluded.contains(&label.as_str())
+                });
                 let total = labels.len();
                 let labels: Vec<String> = labels
                     .into_iter()
@@ -197,7 +210,8 @@ pub async fn labels(
             })
         }),
         None => state.read_context(&name, |context| {
-            let (total, labels) = context.label_page(query.after.as_deref(), limit);
+            let (total, labels) =
+                context.label_page_excluding(query.after.as_deref(), limit, &excluded);
             LabelPage { total, labels }
         }),
     };

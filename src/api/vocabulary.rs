@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
 use axum::extract::State;
@@ -6,10 +6,12 @@ use axum::response::Response;
 
 use serde::{Deserialize, Serialize};
 
+use taguru::context::Context;
 use taguru::deadline::Deadline;
 
 use crate::limits::HeavyOpsLimiter;
 use crate::registry::{AccessError, AppState};
+use crate::schema::SCHEMA_TYPE_LABEL;
 
 use super::{
     AppBytes, AppPath, AssociationOut, MatchCursor, access_error, association_out,
@@ -54,6 +56,24 @@ fn twin_pairs<S>(pairs: Vec<(String, String, S)>) -> Vec<TwinPair<S>> {
         .collect()
 }
 
+/// ADR 0009 §6.3 exclusion 3: the union of declared type names and
+/// every live (`count > 0`) `schema:type` edge's object — the same
+/// population §6.2 already reports as an always-on audit line ("type
+/// names asserted but absent from `types`"), reused here as the
+/// membership test that keeps type-name concepts out of
+/// [`vocabulary_audit`]'s twin sweep. `Organization`/`Organisation`
+/// drifting apart is a schema-authoring question once a schema exists,
+/// never a spelling-drift candidate.
+fn type_name_concepts(context: &Context, declared: &BTreeSet<String>) -> BTreeSet<String> {
+    let mut names = declared.clone();
+    for assoc in context.query_any(&[], &[SCHEMA_TYPE_LABEL], &[]) {
+        if assoc.count > 0 {
+            names.insert(assoc.object);
+        }
+    }
+    names
+}
+
 /// Shared body of `audit_vocabulary` and `audit_drift`'s `include_twins`
 /// section: lexical fork candidates always, semantic ones when
 /// embeddings are configured and the deadline allows. Callers run this
@@ -67,6 +87,27 @@ fn vocabulary_audit(
     cosine_floor: f32,
     deadline: Deadline,
 ) -> Result<VocabularyAudit, AccessError> {
+    // ADR 0009 §6.3's gate — "an installed schema document exists,"
+    // never "mode != off" — resolved before `read_context` per
+    // `AppState::hidden_label`'s own doc (its slow path takes a write
+    // lock `read_context` cannot be entered under). A schema-free
+    // context (the common case) pays one extra lock probe and no extra
+    // graph read at all: `declared_types` stays empty and the sweep
+    // below never runs `type_name_concepts`.
+    let schema = state.schema_of(name);
+    let declared_types: BTreeSet<String> = match &schema {
+        Some(Ok(Some(installed))) => installed.document().types.keys().cloned().collect(),
+        _ => BTreeSet::new(),
+    };
+    // A schema recorded but currently unreadable maps to "hidden"
+    // too — `crate::schema`'s own module doc: every trouble case there
+    // is a hard refusal, never a silent fallback, and this exclusion
+    // must not be the one place that quietly un-reserves the label
+    // because a read failed. `declared_types` stays empty in that arm
+    // (the document itself couldn't be read), so only the live sweep
+    // still applies.
+    let hidden = matches!(schema, Some(Ok(Some(_))) | Some(Err(_)));
+
     // BOTH halves are CPU-bound pairwise sweeps — the lexical one is
     // O(Σ posting_len²) over the whole vocabulary, seconds at tens of
     // thousands of concepts. Neither may run on an async worker: with
@@ -74,15 +115,24 @@ fn vocabulary_audit(
     // every worker and starved every other request, /health included.
     let lexical = state
         .read_context(name, |context| {
-            let concepts = context
+            let mut concepts = context
                 .similar_concepts(dice_floor, deadline)
                 .map_err(|_| AccessError::DeadlineExceeded)?;
             let labels = context
                 .similar_labels(dice_floor, deadline)
                 .map_err(|_| AccessError::DeadlineExceeded)?;
-            Ok((concepts, labels))
+            let type_names = if hidden {
+                type_name_concepts(context, &declared_types)
+            } else {
+                BTreeSet::new()
+            };
+            if !type_names.is_empty() {
+                concepts.retain(|(a, b, _)| !type_names.contains(a) && !type_names.contains(b));
+            }
+            Ok((concepts, labels, type_names))
         })
         .and_then(std::convert::identity)?;
+    let type_names = lexical.2;
 
     // The lexical half already spent the budget checking its own
     // deadline; skip the semantic half rather than fail a request that
@@ -98,11 +148,14 @@ fn vocabulary_audit(
             semantic_note: Some("意味的検出はスキップ (期限切れ)".to_string()),
         });
     }
-    let Some((semantic_concepts, semantic_labels, semantic_note)) =
+    let Some((mut semantic_concepts, semantic_labels, semantic_note)) =
         state.semantic_twins(name, cosine_floor, deadline)
     else {
         return Err(AccessError::NotFound);
     };
+    if !type_names.is_empty() {
+        semantic_concepts.retain(|(a, b, _)| !type_names.contains(a) && !type_names.contains(b));
+    }
 
     Ok(VocabularyAudit {
         lexical_concepts: twin_pairs(lexical.0),

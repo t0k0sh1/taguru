@@ -2,8 +2,10 @@
 //! `{stem}.schema.json`, holding entity types (an `is_a` hierarchy) and
 //! relation `domain`/`range` constraints (ADR 0009). This module owns
 //! the document's shape, its on-disk round trip, and the `is_a`
-//! validation/closure precompute — nothing here enforces anything
-//! against a graph write; that is `schema_issues`' job (#381).
+//! validation/closure precompute; [`check`] owns the pure
+//! `schema_issues` every write entrance shares (S3, #381) — nothing
+//! *here*, in the document module itself, enforces anything against a
+//! graph write.
 //!
 //! Structurally this follows [`crate::groups::GroupRecord`]'s pattern —
 //! atomic write-then-rename, a rename marker the registry already
@@ -31,6 +33,18 @@ use crate::registry::{schema_corrupt_path, schema_path};
 use crate::sha256::sha256_hex;
 use crate::storage::write_atomic;
 
+// `schema_issues` (S3, #381) is complete and unit-tested, but no write
+// entrance calls it yet — that is S4 (#382, `predicted_schema_rejection`/
+// `preview_batch`) and S5 (#383, the associations pre-write arm), by
+// design (#381's own scope note: "library-level only; no write entrance
+// wired yet"). `#[allow(dead_code)]` on the module covers everything
+// inside it; the re-export below additionally needs `unused_imports`
+// silenced until one of those issues starts using it.
+#[allow(dead_code)]
+mod check;
+#[allow(unused_imports)]
+pub(crate) use check::{SchemaCheck, SchemaCheckInput, SchemaEnv, schema_issues};
+
 /// This binary's only readable document shape. Independent of
 /// `BATCH_VERSION`/`GROUP_VERSION`/`IMAGE_VERSION` — [`GroupRecord`]'s
 /// own doc gives the justification verbatim: separate "so either shape
@@ -47,14 +61,20 @@ pub(crate) const SCHEMA_VERSION: u64 = 1;
 
 /// The reserved relation label type assertions ride under (ADR 0009
 /// §6.3) — an ordinary association carrying `{subject, "schema:type",
-/// object}`, exactly like `EMPTY_SOURCE`/`UNSOURCED_SOURCE`
-/// (`src/export.rs:37-39`) are reserved `namespace:value` ids. `install`
-/// refuses a document that names it as a relation (guard 3); the
-/// migration-boundary guard in `PUT /schema` (#380) additionally refuses
-/// on any already-persisted `label_alias` that resolves to it. Neither
-/// guard here yet resolves a batch-local alias or `add_label_alias`
-/// itself — those are guards 1 and 2, S3's (#381) job once the reserved
-/// label is actually read anywhere.
+/// object}`, exactly like `UNSOURCED_SOURCE`/`EMPTY_SOURCE`
+/// (`src/context.rs:195`, `src/export.rs:110`) are reserved
+/// `namespace:value` ids. Three guards keep any path from resolving a
+/// label to this one once a schema document exists (never gated on
+/// mode — see [`check::SchemaCheck::reserved`]'s own doc for why):
+/// `install` refuses a document that names it as a relation (guard 3,
+/// checked here); `PUT /schema`'s
+/// migration-boundary check refuses on any already-persisted
+/// `label_alias` that resolves to it (guard 2's install-time half,
+/// `src/registry/lifecycle.rs`); and the aliases handler plus
+/// `schema_issues`' `SchemaCheck::reserved` refuse `add_label_alias`
+/// and a batch's own inline `batch.labels` respectively (guard 2's
+/// other two halves, guard 1 is what happens in their absence — this
+/// label is inert in a schema-free context).
 pub(crate) const SCHEMA_TYPE_LABEL: &str = "schema:type";
 
 /// Ceiling on the number of declared types — a schema is meant to be a
@@ -239,7 +259,7 @@ impl InstalledSchema {
     /// an UNDECLARED type name — legal everywhere, never a violation on
     /// its own (§6.2) — answers its own singleton, since it has no
     /// hierarchy above it to consult.
-    #[allow(dead_code)] // read by schema_issues once S3 (#381) lands
+    #[allow(dead_code)] // called by check::SchemaEnv::build; see mod check's own allow
     pub(crate) fn closure_of(&self, type_name: &str) -> BTreeSet<String> {
         let mut closure = self.ancestors.get(type_name).cloned().unwrap_or_default();
         closure.insert(type_name.to_string());
