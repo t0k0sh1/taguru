@@ -111,6 +111,25 @@ fn key_scopes_gate_roles_contexts_the_directory_and_mcp() {
         "{refusal}"
     );
     assert_eq!(call("DELETE", "/contexts/sake", None, "rtok").0, 403);
+    // ADR 0009 §12.5: `GET /schema` sits beside the other retrieval
+    // GETs (a reader reaches it), `PUT /schema` is Write — an ingest
+    // verb, not Admin — so a reader is refused it exactly like the
+    // associations write above.
+    assert_eq!(call("GET", "/contexts/sake/schema", None, "rtok").0, 404);
+    let schema_document = json!({
+        "schema": 1, "mode": "off", "closed_labels": false,
+        "types": {}, "relations": {}
+    });
+    assert_eq!(
+        call(
+            "PUT",
+            "/contexts/sake/schema",
+            Some(schema_document.clone()),
+            "rtok"
+        )
+        .0,
+        403
+    );
 
     // Write: ingest yes, operator verbs no.
     assert_eq!(
@@ -122,6 +141,17 @@ fn key_scopes_gate_roles_contexts_the_directory_and_mcp() {
         )
         .0,
         200
+    );
+    assert_eq!(
+        call(
+            "PUT",
+            "/contexts/bunko/schema",
+            Some(schema_document),
+            "wtok"
+        )
+        .0,
+        200,
+        "PUT /schema is Write, the same classification context creation itself gets"
     );
     // The role hierarchy (Admin ⊃ Write ⊃ Read) puts drift/audit's
     // Role::Read within reach of a write key too.

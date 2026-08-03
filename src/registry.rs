@@ -386,6 +386,18 @@ pub struct DirectoryEntry {
     /// older shard reads zeros instead of refusing the row.
     #[serde(default)]
     pub revision: ContextRevision,
+    /// `off`/`warn`/`strict`, echoed read-only from the installed
+    /// schema's own `mode` field (ADR 0009 §7.1) so a client can route
+    /// without a second `GET /schema` call — `null` for a context that
+    /// never installed one, exactly like `GET /schema`'s own 404
+    /// distinguishes the two states (never a bare `"off"` standing in
+    /// for "no document"). Also `null`, transiently, for a schema
+    /// recorded but not yet locally resolved (a replica mid-hydration,
+    /// a rename's freshly registered entry) — the same lag posture
+    /// `loaded` already has for the image itself. `serde(default)` like
+    /// `revision` above, for the same older-shard-merge reason.
+    #[serde(default)]
+    pub schema_mode: Option<String>,
 }
 
 /// Whether a context's network is resident. Cold entries keep only
@@ -548,6 +560,7 @@ impl Entry {
         usage: ContextUsage,
         revision: ContextRevision,
         schema_digest: Option<String>,
+        schema: Option<Arc<crate::schema::InstalledSchema>>,
     ) -> Self {
         Self {
             inner: RwLock::new(EntryInner {
@@ -564,6 +577,7 @@ impl Entry {
                 load_failure: None,
                 image_generation: 0,
                 schema_digest,
+                schema,
             }),
             dirty: AtomicBool::new(false),
             flushing: AtomicBool::new(false),
@@ -746,12 +760,22 @@ struct EntryInner {
     /// sidecar at scan/register, like `graph_revision`/`config_revision`
     /// above, and re-persisted by every `write_meta` call this entry
     /// makes so a flush can never let it quietly revert to `None`.
-    /// Nothing in this issue writes a NEW value here (that is `PUT
-    /// /contexts/{name}/schema`'s job); this field exists so a value a
-    /// hand-edited sidecar or a future `PUT` recorded survives every
-    /// flush cycle intact, the same durability story `config_revision`
-    /// already has.
+    /// `PUT /contexts/{name}/schema` (#380) is the one path that writes
+    /// a NEW value here; this field exists so a value a hand-edited
+    /// sidecar or a `PUT` recorded survives every flush cycle intact,
+    /// the same durability story `config_revision` already has.
     schema_digest: Option<String>,
+    /// The resident, validated schema this digest describes — `None`
+    /// either for a schema-free context (`schema_digest` is also `None`)
+    /// or for one whose schema is recorded but not yet resolved locally
+    /// (a family mid-hydration on a replica, or a rename's freshly
+    /// registered entry): [`AppState::schema_of`] tells the two apart
+    /// and lazily resolves the second case. Populated at boot/cold-load
+    /// by [`crate::schema::load_schema`] (§5.2's consistency check,
+    /// already run there) and by `PUT /schema` itself on install — never
+    /// re-derived speculatively, so a `GET` never re-reads the file this
+    /// field's own digest already vouches for.
+    schema: Option<Arc<crate::schema::InstalledSchema>>,
 }
 
 impl EntryInner {
@@ -858,6 +882,24 @@ enum RenameOutcome {
     Ok,
     RolledBack(RenameContextError),
     Stuck(RenameContextError),
+}
+
+/// Why a `PUT /contexts/{name}/schema` (#380) did not persist.
+#[derive(Debug)]
+pub enum PutSchemaError {
+    /// An already-persisted `label_alias` resolves to
+    /// [`schema::SCHEMA_TYPE_LABEL`] — ADR 0009 §6.3 guard 3's
+    /// migration-boundary counterpart. Carries the offending alias so
+    /// the caller can name it and instruct a rename, mirroring
+    /// `EMPTY_SOURCE`'s own collision wording (`src/export.rs:315`).
+    ReservedAlias(String),
+    /// Loading the context to inspect its live label-alias table
+    /// failed — mirrors `update_meta`'s own `ensure_hot` failure arm.
+    Load(String),
+    /// A sidecar or schema-file write failed. The in-memory state has
+    /// already been rolled back (best-effort for the schema file's own
+    /// write — see [`AppState::put_schema`]'s doc).
+    Io(io::Error),
 }
 
 #[derive(Debug)]
@@ -2493,6 +2535,10 @@ fn describe_entry(name: String, entry: &Entry) -> Option<DirectoryEntry> {
         stats,
         usage: entry.usage.snapshot(),
         revision: entry.revision_snapshot(&inner),
+        schema_mode: inner
+            .schema
+            .as_ref()
+            .map(|schema| schema.document().mode.as_str().to_string()),
     })
 }
 
@@ -2611,11 +2657,14 @@ fn ensure_hot(
     // one already passed the same check to get this far) but the only
     // check the replica path gets, so it always runs rather than only
     // when a hydrator is present.
-    if let Err(error) = schema::load_schema(data_dir, &stem, inner.schema_digest.as_deref(), true) {
-        let error = format!("context '{name}': {error}");
-        metrics.record_cache_load(false);
-        inner.load_failure = Some((std::time::Instant::now(), error.clone()));
-        return Err(error);
+    match schema::load_schema(data_dir, &stem, inner.schema_digest.as_deref(), true) {
+        Ok(schema) => inner.schema = schema.map(Arc::new),
+        Err(error) => {
+            let error = format!("context '{name}': {error}");
+            metrics.record_cache_load(false);
+            inner.load_failure = Some((std::time::Instant::now(), error.clone()));
+            return Err(error);
+        }
     }
     let loaded = fs::read(image_path(data_dir, &stem))
         .map_err(|e| format!("context '{name}' image unreadable: {e}"))

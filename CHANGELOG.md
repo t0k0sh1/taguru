@@ -8,6 +8,28 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- `GET`/`PUT /contexts/{name}/schema` (#380, S2 of #218's ADR 0009
+  split — the management routes over S1's file family; still no
+  enforcement against the graph, that is S3/#381). `PUT` installs a
+  schema document wholesale — `schema::install`'s validation (version,
+  caps, `is_a` cycles/depth) plus a newly-added guard refusing a
+  `relations` entry named `schema:type` (the reserved type-assertion
+  label, ADR 0009 §6.3) and a migration-boundary guard refusing the
+  install when an already-persisted `label_alias` resolves to that same
+  reserved label. A successful `PUT` bumps the context's `config`
+  revision and re-mints `cache_identity` under the entry write lock —
+  durable write order is revision-then-content, so a crash between the
+  two always fails toward extra cache invalidation, never a served
+  mismatch — and is a no-op (nothing bumped, nothing re-minted) when
+  the document is byte-identical to what is already installed. `GET`
+  answers 404 `no_schema` for a context that never installed one,
+  distinct from 404 `no_context` for a missing context (ADR 0009 §6.3's
+  load-bearing distinction). `DirectoryEntry` gains a read-only,
+  additive `schema_mode: Option<String>` field (`GET /contexts` and
+  `GET /contexts/{name}`), echoing the installed document's `mode`
+  (`null` before install). Auth: `GET` is `Read`, `PUT` is `Write` (an
+  ingest-loop verb, not Admin) — both replica-refused/scoped like every
+  other context route.
 - The optional per-context schema document's on-disk file family (#379,
   S1 of #218's ADR 0009 split — foundation only: no enforcement, no
   `PUT`/`GET` route yet). A new standalone `{stem}.schema.json`

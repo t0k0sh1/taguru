@@ -96,6 +96,7 @@ impl AppState {
                     // sweep above just removed any stray file an
                     // earlier generation of this name left behind.
                     None,
+                    None,
                 )),
             );
         });
@@ -550,6 +551,13 @@ impl AppState {
             usage,
             revision,
             schema_digest,
+            // Not resolved here even though the schema file (if any)
+            // moved with the rest of the family a few lines up: this
+            // mirrors the hydrator-registration case above rather than
+            // re-reading a file the entry is about to go Cold over
+            // anyway. `AppState::schema_of` resolves it lazily on first
+            // read, or `ensure_hot` does on first load.
+            None,
         ));
         self.0
             .registry
@@ -719,6 +727,190 @@ impl AppState {
                 self.recount_entry(inner);
             }
             result
+        };
+        self.enforce_budget(name);
+        Some(outcome)
+    }
+
+    /// The resident schema for `name` — `Ok(None)` for a schema-free
+    /// context (`GET /contexts/{name}/schema`, #380, turns that into a
+    /// 404). Outer `None` means no such context.
+    ///
+    /// The common case is already resolved without touching disk: boot
+    /// and every cold-load already ran `load_schema` (ADR 0009 §5.2's
+    /// consistency check) into [`EntryInner::schema`], and a
+    /// `schema_digest` of `None` — set only by `put_schema` below, under
+    /// this same lock — never means anything but "no schema". Only a
+    /// digest recorded but not yet checked against its bytes LOCALLY
+    /// (a replica mid-hydration, or a rename's freshly registered
+    /// entry — see `EntryInner::schema`'s own doc) falls through to the
+    /// slow path, which reuses `ensure_hot` rather than calling
+    /// `schema::load_schema` directly: `ensure_hot` is the one place
+    /// that also runs the hydrator, so a replica whose family has not
+    /// been fetched yet resolves correctly here too, not just a purely
+    /// local rename. Heavier than strictly needed (it loads the full
+    /// graph image to get there), but `GET /schema` is an infrequent
+    /// management call, not a retrieval hot path.
+    pub fn schema_of(
+        &self,
+        name: &str,
+    ) -> Option<Result<Option<Arc<schema::InstalledSchema>>, String>> {
+        let entry = self.lookup(name)?;
+        {
+            let inner = entry.inner.read();
+            if matches!(inner.slot, Slot::Deleted) {
+                return None;
+            }
+            if inner.schema.is_some() || inner.schema_digest.is_none() {
+                return Some(Ok(inner.schema.clone()));
+            }
+        }
+        let outcome = {
+            let mut guard = entry.lock_unless_deleted()?;
+            let inner = &mut *guard;
+            if let Err(error) = ensure_hot(
+                &self.0.data_dir,
+                name,
+                inner,
+                &self.0.metrics,
+                self.0.hydrator.as_deref(),
+            ) {
+                return Some(Err(error));
+            }
+            self.recount_entry(inner);
+            Ok(inner.schema.clone())
+        };
+        self.enforce_budget(name);
+        Some(outcome)
+    }
+
+    /// `PUT /contexts/{name}/schema` (#380): installs `installed` as
+    /// `name`'s schema document, replacing whatever was there wholesale
+    /// — there is no delta form, so a retry after a failure below is
+    /// always safe regardless of which side of it the previous attempt
+    /// reached (ADR 0009 §5.2). Does exactly what `bump_config_revision`
+    /// already does for `dice_floor`, plus `invalidate_cache_identity`:
+    /// a schema mutation can change what `query`'s future type filter
+    /// (§12.3) returns, so a retrieval-cache key minted before this call
+    /// must not keep answering with the old constraints.
+    ///
+    /// Outer `None` means no such context. `Ok` carries the installed
+    /// document back (including when the call was a no-op — see below)
+    /// so the handler can answer `GET`-shaped without a second lookup.
+    pub fn put_schema(
+        &self,
+        name: &str,
+        installed: schema::InstalledSchema,
+    ) -> Option<Result<schema::SchemaDocument, PutSchemaError>> {
+        let entry = self.lookup(name)?;
+        let outcome = {
+            let mut guard = entry.lock_unless_deleted()?;
+            let inner = &mut *guard;
+            // Unconditional, unlike `update_meta`'s `pinned`-gated load:
+            // the migration-boundary guard just below needs the LIVE
+            // label-alias table, which only a hot context has, on every
+            // call — aliases can be added between one `PUT` and the
+            // next, so a resolution cached from an earlier call would
+            // miss one created since.
+            if let Err(error) = ensure_hot(
+                &self.0.data_dir,
+                name,
+                inner,
+                &self.0.metrics,
+                self.0.hydrator.as_deref(),
+            ) {
+                self.recount_entry(inner);
+                return Some(Err(PutSchemaError::Load(error)));
+            }
+            self.recount_entry(inner);
+            // ADR 0009 §6.3 guard 3's migration-boundary counterpart:
+            // an already-persisted `label_alias` resolving to the
+            // reserved type label. (Guard 2 itself — refusing
+            // `add_label_alias`/a batch's own `batch.labels` from ever
+            // CREATING such an alias once a schema exists — is S3's
+            // (#381) job, so this check runs on every `PUT`, not only
+            // the off-to-installed transition the ADR names: without
+            // guard 2 yet in place, a violating alias can still be
+            // created AFTER this schema installs.)
+            let Slot::Hot(context) = &inner.slot else {
+                unreachable!("ensure_hot leaves the slot hot");
+            };
+            if let Some((alias, _)) = context
+                .label_aliases()
+                .into_iter()
+                .find(|(_, canonical)| *canonical == schema::SCHEMA_TYPE_LABEL)
+            {
+                return Some(Err(PutSchemaError::ReservedAlias(alias.to_string())));
+            }
+            let bytes = match schema::document_bytes(installed.document()) {
+                Ok(bytes) => bytes,
+                Err(error) => return Some(Err(PutSchemaError::Io(error))),
+            };
+            let digest = crate::sha256::sha256_hex(&bytes);
+            // A PUT that changes nothing bumps nothing — the same
+            // idempotent-update discipline `update_meta` keeps for a
+            // no-op PATCH — so a retried or duplicate `PUT` of the same
+            // document never churns the retrieval cache.
+            if inner.schema.is_some() && inner.schema_digest.as_deref() == Some(digest.as_str()) {
+                Ok(installed.document().clone())
+            } else {
+                let stem = file_stem(name);
+                let previous_digest = inner.schema_digest.clone();
+                inner.config_revision += 1;
+                inner.schema_digest = Some(digest);
+                // Revision-then-content (ADR 0009 §5.2): this write
+                // lands BEFORE the schema file's own `write_atomic`
+                // below, both under this entry's write lock, so a
+                // crash between the two always fails toward extra
+                // invalidation (revision advanced, content unchanged)
+                // rather than a served mismatch (content changed,
+                // revision stale).
+                let meta_result = write_meta(
+                    &self.0.data_dir,
+                    &stem,
+                    &inner.meta,
+                    &inner.stats,
+                    &entry.usage.snapshot(),
+                    entry.revision_snapshot(inner),
+                    inner.schema_digest.as_deref(),
+                );
+                match meta_result {
+                    Err(error) => {
+                        inner.config_revision -= 1;
+                        inner.schema_digest = previous_digest;
+                        Err(PutSchemaError::Io(error))
+                    }
+                    Ok(()) => match schema::write_schema_bytes(&self.0.data_dir, &stem, &bytes) {
+                        Ok(()) => {
+                            let document = installed.document().clone();
+                            inner.schema = Some(Arc::new(installed));
+                            inner.invalidate_cache_identity();
+                            Ok(document)
+                        }
+                        Err(error) => {
+                            inner.config_revision -= 1;
+                            inner.schema_digest = previous_digest.clone();
+                            // Best-effort restore of the sidecar to the
+                            // pre-PUT digest; if this ALSO fails, the
+                            // next boot's digest check (§5.2) refuses
+                            // rather than silently serving the
+                            // mismatch — the same fail-closed posture
+                            // `load_schema` already enforces, not a new
+                            // mechanism this call adds.
+                            let _ = write_meta(
+                                &self.0.data_dir,
+                                &stem,
+                                &inner.meta,
+                                &inner.stats,
+                                &entry.usage.snapshot(),
+                                entry.revision_snapshot(inner),
+                                previous_digest.as_deref(),
+                            );
+                            Err(PutSchemaError::Io(error))
+                        }
+                    },
+                }
+            }
         };
         self.enforce_budget(name);
         Some(outcome)
@@ -1690,5 +1882,236 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    fn valid_schema_document() -> schema::SchemaDocument {
+        schema::SchemaDocument {
+            schema: schema::SCHEMA_VERSION,
+            mode: schema::SchemaMode::Strict,
+            closed_labels: false,
+            types: BTreeMap::from([("Brewery".to_string(), schema::TypeDef::default())]),
+            relations: BTreeMap::new(),
+        }
+    }
+
+    /// The core #380 contract: a `PUT` bumps the `config` revision,
+    /// persists the digest to the sidecar, echoes `schema_mode`, and
+    /// re-mints `cache_identity` (ADR 0009 §5.2) — exactly what
+    /// `bump_config_revision` already does for `dice_floor`, plus the
+    /// identity re-mint.
+    #[test]
+    fn put_schema_bumps_config_revision_persists_the_digest_and_mints_a_fresh_cache_identity() {
+        let dir = scratch_dir("put-schema-basic");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state.create("sake", ContextMeta::default()).unwrap();
+
+        let before_revision = state.directory_entry("sake").unwrap().revision.config;
+        let before_identity = state.lookup("sake").unwrap().inner.read().cache_identity;
+
+        let installed = schema::install(valid_schema_document()).unwrap();
+        let document = state.put_schema("sake", installed).unwrap().unwrap();
+        assert_eq!(document.mode, schema::SchemaMode::Strict);
+
+        let entry = state.directory_entry("sake").unwrap();
+        assert_eq!(entry.revision.config, before_revision + 1);
+        assert_eq!(entry.schema_mode.as_deref(), Some("strict"));
+
+        let after_identity = state.lookup("sake").unwrap().inner.read().cache_identity;
+        assert_ne!(
+            before_identity, after_identity,
+            "a schema PUT must re-mint cache_identity so a retrieval-cache key minted \
+             before it becomes unreachable (ADR 0009 §5.2)"
+        );
+
+        let sidecar = read_meta_file(&dir, &file_stem("sake"));
+        let bytes = fs::read(schema_path(&dir, &file_stem("sake"))).unwrap();
+        assert_eq!(
+            sidecar.schema_digest.as_deref(),
+            Some(crate::sha256::sha256_hex(&bytes).as_str()),
+            "the recorded digest must match the bytes actually on disk"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// "A PUT that changes nothing bumps nothing" — `update_meta`'s own
+    /// idempotent-update discipline, mirrored here so a retried or
+    /// duplicate `PUT` of the identical document never churns the
+    /// retrieval cache.
+    #[test]
+    fn a_repeated_put_of_the_same_document_bumps_nothing() {
+        let dir = scratch_dir("put-schema-noop");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state.create("sake", ContextMeta::default()).unwrap();
+
+        let installed = schema::install(valid_schema_document()).unwrap();
+        state.put_schema("sake", installed).unwrap().unwrap();
+        let revision_after_first = state.directory_entry("sake").unwrap().revision.config;
+        let identity_after_first = state.lookup("sake").unwrap().inner.read().cache_identity;
+
+        let installed_again = schema::install(valid_schema_document()).unwrap();
+        state.put_schema("sake", installed_again).unwrap().unwrap();
+
+        let entry = state.directory_entry("sake").unwrap();
+        assert_eq!(
+            entry.revision.config, revision_after_first,
+            "identical content must not bump the revision"
+        );
+        assert_eq!(
+            state.lookup("sake").unwrap().inner.read().cache_identity,
+            identity_after_first,
+            "identical content must not re-mint cache_identity"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// ADR 0009 §6.3 guard 3's migration-boundary counterpart: an
+    /// already-persisted `label_alias` resolving to the reserved type
+    /// label refuses the `PUT` outright — nothing written, not even
+    /// the sidecar digest.
+    #[test]
+    fn put_schema_refuses_when_a_persisted_label_alias_resolves_to_the_reserved_type_label() {
+        let dir = scratch_dir("put-schema-reserved-alias");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state.create("sake", ContextMeta::default()).unwrap();
+        // Legal today — guard 1: `schema:type` is an ordinary label in
+        // a context with no installed schema — and it interns the
+        // label id `add_label_alias`'s canonical must resolve against.
+        state
+            .add_associations(
+                "sake",
+                vec![assoc_op(
+                    "蔵",
+                    schema::SCHEMA_TYPE_LABEL,
+                    "Brewery",
+                    1.0,
+                    Some("a.md"),
+                )],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        state
+            .add_aliases(
+                "sake",
+                &BTreeMap::new(),
+                &BTreeMap::from([("種別".to_string(), schema::SCHEMA_TYPE_LABEL.to_string())]),
+            )
+            .unwrap()
+            .unwrap();
+
+        let installed = schema::install(valid_schema_document()).unwrap();
+        let error = state.put_schema("sake", installed).unwrap().unwrap_err();
+        assert!(
+            matches!(&error, PutSchemaError::ReservedAlias(alias) if alias == "種別"),
+            "{error:?}"
+        );
+        assert!(
+            !schema_path(&dir, &file_stem("sake")).exists(),
+            "a refused PUT must not write the schema file"
+        );
+        assert_eq!(
+            read_meta_file(&dir, &file_stem("sake")).schema_digest,
+            None,
+            "a refused PUT must not touch the sidecar's digest"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// ADR 0009 §5.2's write order, proven rather than merely asserted
+    /// in a comment: force the schema file's own write to fail right
+    /// after the sidecar's `write_meta` already landed (2 persistence
+    /// checkpoints — `write_meta`'s one `write_atomic` call's stage +
+    /// commit — succeed, then the schema file's own stage fails). The
+    /// sidecar must already be durable by the time the schema file
+    /// write is even attempted, and the best-effort restore this
+    /// failure triggers must bring the sidecar back to its exact
+    /// pre-PUT state (the restore's own write is unfaulted, since the
+    /// injector is single-shot).
+    #[test]
+    fn a_schema_file_write_failure_rolls_back_the_sidecar_after_the_revision_already_landed() {
+        let dir = scratch_dir("put-schema-write-order");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state.create("sake", ContextMeta::default()).unwrap();
+        let before = read_meta_file(&dir, &file_stem("sake"));
+
+        let installed = schema::install(valid_schema_document()).unwrap();
+        fail_persistence_ops_after(2);
+        let error = state.put_schema("sake", installed).unwrap().unwrap_err();
+        let exhausted = clear_persistence_fault();
+        assert!(!exhausted, "the fault must have fired, not merely run out");
+        assert!(matches!(error, PutSchemaError::Io(_)), "{error:?}");
+
+        assert!(
+            !schema_path(&dir, &file_stem("sake")).exists(),
+            "the schema file must never land when its own write fails"
+        );
+        let after = read_meta_file(&dir, &file_stem("sake"));
+        assert_eq!(after.schema_digest, before.schema_digest);
+        assert_eq!(after.revision.config, before.revision.config);
+
+        let entry = state.lookup("sake").unwrap();
+        let inner = entry.inner.read();
+        assert_eq!(inner.schema_digest, before.schema_digest);
+        assert_eq!(inner.config_revision, before.revision.config);
+        assert!(inner.schema.is_none());
+        drop(inner);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `schema_of`'s two direct cases: a schema-free context answers
+    /// `Ok(None)` without touching disk, and a missing context answers
+    /// the outer `None` — both without a `PUT` ever having run.
+    #[test]
+    fn schema_of_reports_a_schema_free_context_and_a_missing_one() {
+        let dir = scratch_dir("schema-of-absent");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state.create("sake", ContextMeta::default()).unwrap();
+
+        assert!(
+            state.schema_of("sake").unwrap().unwrap().is_none(),
+            "a fresh context has no schema"
+        );
+        assert!(state.schema_of("nope").is_none());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The lazy-resolution path `EntryInner::schema`'s doc names: a
+    /// rename's freshly registered destination entry starts with
+    /// `schema: None` even though `schema_digest` carried over from
+    /// the sidecar (§2 of #380's plan) — `schema_of` must resolve it
+    /// rather than misreport the schema as absent.
+    #[test]
+    fn schema_of_lazily_resolves_after_a_rename_carried_the_digest_but_not_the_schema() {
+        let dir = scratch_dir("schema-of-rename");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state.create("sake", ContextMeta::default()).unwrap();
+        let installed = schema::install(valid_schema_document()).unwrap();
+        state.put_schema("sake", installed).unwrap().unwrap();
+
+        state.rename_context("sake", "shochu").unwrap();
+        assert!(
+            state
+                .lookup("shochu")
+                .unwrap()
+                .inner
+                .read()
+                .schema
+                .is_none(),
+            "the freshly registered entry must not resolve the schema up front"
+        );
+
+        let resolved = state
+            .schema_of("shochu")
+            .unwrap()
+            .unwrap()
+            .expect("the schema must resolve, not read as absent");
+        assert_eq!(resolved.document().mode, schema::SchemaMode::Strict);
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

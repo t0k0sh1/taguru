@@ -226,6 +226,55 @@ fn passage_search_and_recall_invalidate_along_their_own_lanes_only() {
     );
 }
 
+/// ADR 0009 §5.2: unlike a bare config change (`PATCH .../{name}`,
+/// asserted above to leave recall's entries standing — recall keys on
+/// `[graph, passages]`, not `config`), a schema `PUT` additionally
+/// re-mints `cache_identity`, which every op's key carries regardless
+/// of lane. A schema change can alter what a FUTURE type-filtered
+/// query returns, so it must invalidate every cached retrieval for the
+/// context, recall included — the coarse, whole-context cost the ADR
+/// accepts rather than adding a fourth revision lane.
+#[test]
+fn a_schema_put_invalidates_recall_unlike_a_bare_config_change() {
+    let server = Server::start("rcache-schema-put");
+    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(assoc("青嶺酒造", "杜氏", "高瀬")),
+    );
+
+    let recall = || {
+        server.ok(
+            "POST",
+            "/contexts/sake/recall",
+            Some(json!({"cue": "青嶺"})),
+        )
+    };
+    recall();
+    recall();
+    assert_eq!(cache_hits(&server, "recall"), 1);
+
+    server.ok(
+        "PUT",
+        "/contexts/sake/schema",
+        Some(json!({
+            "schema": 1,
+            "mode": "off",
+            "closed_labels": false,
+            "types": {},
+            "relations": {}
+        })),
+    );
+    recall();
+    assert_eq!(
+        cache_misses(&server, "recall"),
+        2,
+        "a schema PUT must invalidate every cached retrieval for the context, not just \
+         the config lane a bare metadata PATCH leaves alone"
+    );
+}
+
 /// Scope isolation falls out of resolved-target keying: two keys whose
 /// grants slice a group differently resolve different target lists and
 /// never share an entry — while two keys reaching the identical

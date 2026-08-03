@@ -45,6 +45,18 @@ use crate::storage::write_atomic;
 /// [`GroupRecord`]: crate::groups::GroupRecord
 pub(crate) const SCHEMA_VERSION: u64 = 1;
 
+/// The reserved relation label type assertions ride under (ADR 0009
+/// §6.3) — an ordinary association carrying `{subject, "schema:type",
+/// object}`, exactly like `EMPTY_SOURCE`/`UNSOURCED_SOURCE`
+/// (`src/export.rs:37-39`) are reserved `namespace:value` ids. `install`
+/// refuses a document that names it as a relation (guard 3); the
+/// migration-boundary guard in `PUT /schema` (#380) additionally refuses
+/// on any already-persisted `label_alias` that resolves to it. Neither
+/// guard here yet resolves a batch-local alias or `add_label_alias`
+/// itself — those are guards 1 and 2, S3's (#381) job once the reserved
+/// label is actually read anywhere.
+pub(crate) const SCHEMA_TYPE_LABEL: &str = "schema:type";
+
 /// Ceiling on the number of declared types — a schema is meant to be a
 /// small, hand-authored vocabulary, not an import target; this bounds
 /// `PUT`-time validation work and every `GET`'s response size.
@@ -77,6 +89,20 @@ pub(crate) enum SchemaMode {
     Off,
     Warn,
     Strict,
+}
+
+impl SchemaMode {
+    /// The same spelling `#[serde(rename_all = "lowercase")]` gives this
+    /// enum on the wire — for `DirectoryEntry.schema_mode`'s echo (#380),
+    /// which carries the mode as a plain string rather than a nested
+    /// enum so an older client reads it without knowing this type.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Warn => "warn",
+            Self::Strict => "strict",
+        }
+    }
 }
 
 /// One declared entity type: its direct parents, if any. `Organization:
@@ -125,6 +151,12 @@ pub(crate) enum SchemaViolation {
     UnknownVersion(u64),
     TooManyTypes(usize),
     TooManyRelations(usize),
+    /// A relation definition literally named [`SCHEMA_TYPE_LABEL`] — ADR
+    /// 0009 §6.3 guard 3, symmetric with guard 2's refusal of a
+    /// `label_alias` resolving to the same reserved label (checked by
+    /// `PUT /schema`, not here: an alias is registry state, not part of
+    /// this document).
+    ReservedRelation,
     NameTooLong(String),
     TooManyRelationTypes {
         relation: String,
@@ -155,6 +187,10 @@ impl std::fmt::Display for SchemaViolation {
             Self::TooManyRelations(count) => write!(
                 f,
                 "{count} relations is over the {MAX_SCHEMA_RELATIONS}-relation cap"
+            ),
+            Self::ReservedRelation => write!(
+                f,
+                "relation '{SCHEMA_TYPE_LABEL}' is reserved for type assertions — rename it"
             ),
             Self::NameTooLong(name) => {
                 write!(f, "'{name}' is over the {MAX_NAME_BYTES}-byte name cap")
@@ -191,7 +227,9 @@ pub(crate) struct InstalledSchema {
 }
 
 impl InstalledSchema {
-    #[allow(dead_code)] // read by schema_issues once S3 (#381) lands
+    /// The validated document — `GET /schema` (#380) serves this
+    /// verbatim, and `DirectoryEntry.schema_mode` (#380) echoes its
+    /// `mode` field alone.
     pub(crate) fn document(&self) -> &SchemaDocument {
         &self.document
     }
@@ -223,6 +261,9 @@ pub(crate) fn install(document: SchemaDocument) -> Result<InstalledSchema, Schem
     }
     if document.relations.len() > MAX_SCHEMA_RELATIONS {
         return Err(SchemaViolation::TooManyRelations(document.relations.len()));
+    }
+    if document.relations.contains_key(SCHEMA_TYPE_LABEL) {
+        return Err(SchemaViolation::ReservedRelation);
     }
     // Every name the document mentions, not just the declared keys:
     // an `is_a` parent or a `domain`/`range` entry may legitimately
@@ -337,16 +378,31 @@ fn closure_of_declared<'a>(
     Ok((depth, ancestors))
 }
 
-/// Persists one schema document via the registry's staged write (fsync,
-/// rename, parent fsync): a crash mid-write leaves the previous version
-/// intact. No caller yet (`PUT /schema` is #380's job); the round trip
-/// lives here so its test coverage sits beside the shape it writes.
-#[allow(dead_code)] // written by PUT /schema once S2 (#380) lands
-pub(crate) fn write_schema(dir: &Path, stem: &str, document: &SchemaDocument) -> io::Result<()> {
-    write_atomic(
-        &schema_path(dir, stem),
-        &serde_json::to_vec_pretty(document)?,
-    )
+/// The exact bytes [`write_schema_bytes`] writes for a document — split
+/// out from it so `PUT /schema` (#380) can hash the SAME bytes it is
+/// about to persist (`sha256_hex`, for `MetaFile::schema_digest`)
+/// instead of re-serializing and risking the two silently drifting
+/// apart (e.g. a future serde attribute changing output without both
+/// call sites being touched).
+pub(crate) fn document_bytes(document: &SchemaDocument) -> io::Result<Vec<u8>> {
+    serde_json::to_vec_pretty(document).map_err(io::Error::from)
+}
+
+/// Persists one schema document's already-serialized bytes via the
+/// registry's staged write (fsync, rename, parent fsync): a crash
+/// mid-write leaves the previous version intact. Takes bytes rather
+/// than a `&SchemaDocument` so a caller that already hashed the bytes
+/// (`PUT /schema`, #380) writes exactly what it hashed.
+pub(crate) fn write_schema_bytes(dir: &Path, stem: &str, bytes: &[u8]) -> io::Result<()> {
+    write_atomic(&schema_path(dir, stem), bytes)
+}
+
+/// Serializes then persists in one call — the test round trip's
+/// convenience wrapper; `PUT /schema` (#380) uses the two halves above
+/// directly so it can hash what it writes.
+#[cfg(test)]
+fn write_schema(dir: &Path, stem: &str, document: &SchemaDocument) -> io::Result<()> {
+    write_schema_bytes(dir, stem, &document_bytes(document)?)
 }
 
 /// Loads and verifies `{stem}.schema.json` against what `ContextMeta`
@@ -542,6 +598,26 @@ mod tests {
             install(document),
             Err(SchemaViolation::UnknownVersion(SCHEMA_VERSION + 1))
         );
+    }
+
+    #[test]
+    fn a_relation_named_the_reserved_type_label_refuses() {
+        let mut document = valid();
+        document
+            .relations
+            .insert(SCHEMA_TYPE_LABEL.to_string(), RelationDef::default());
+        assert_eq!(install(document), Err(SchemaViolation::ReservedRelation));
+    }
+
+    #[test]
+    fn document_bytes_hashes_to_what_write_schema_bytes_persists() {
+        let dir = scratch_dir("schema-bytes");
+        fs::create_dir_all(&dir).unwrap();
+        let document = valid();
+        let bytes = document_bytes(&document).unwrap();
+        write_schema_bytes(&dir, "sake", &bytes).unwrap();
+        assert_eq!(fs::read(schema_path(&dir, "sake")).unwrap(), bytes);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -848,6 +848,10 @@ fn routes(
         )
         .route("/contexts/{name}/labels", get(api::labels))
         .route(
+            "/contexts/{name}/schema",
+            get(api::get_schema).put(api::put_schema),
+        )
+        .route(
             "/contexts/{name}/aliases",
             get(api::list_aliases)
                 .post(api::add_aliases)

@@ -37,6 +37,7 @@ mod explore;
 mod groups;
 mod import;
 mod recall;
+mod schema;
 // pub(crate): `taguru evaluate` (the CLI) deserializes resolve
 // responses into the real `TieredResolution` instead of a hand-copied
 // mirror that would drift silently.
@@ -68,6 +69,7 @@ pub use import::{
 pub(crate) use import::import_outcome;
 pub use recall::{cross_query, cross_recall, query, recall};
 pub use resolve::{explain_resolve, explain_resolve_label, resolve, resolve_label};
+pub use schema::{get_schema, put_schema};
 pub use sources::{
     citation, cross_search_passages, explain_search_passages, list_sources, lookup_passages,
     retract_source, search_passages, store_passages,
@@ -190,6 +192,12 @@ pub(crate) enum ErrorCode {
     NoSource,
     NoParagraph,
     NoGroup,
+    /// `GET /contexts/{name}/schema` on a context that exists but never
+    /// installed one — distinct from `NoContext` (ADR 0009 §6.3
+    /// deliberately keeps "never had a schema" and "context itself is
+    /// missing" apart, the way `NoGroup` already stays apart from
+    /// `NoContext`).
+    NoSchema,
     UnknownPath,
     MethodNotAllowed,
     Timeout,
@@ -236,6 +244,7 @@ impl ErrorCode {
             Self::NoSource => "no_source",
             Self::NoParagraph => "no_paragraph",
             Self::NoGroup => "no_group",
+            Self::NoSchema => "no_schema",
             Self::UnknownPath => "unknown_path",
             Self::MethodNotAllowed => "method_not_allowed",
             Self::Timeout => "timeout",
@@ -273,6 +282,7 @@ impl ErrorCode {
             | Self::NoSource
             | Self::NoParagraph
             | Self::NoGroup
+            | Self::NoSchema
             | Self::UnknownPath => StatusCode::NOT_FOUND,
             Self::MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED,
             Self::Timeout => StatusCode::REQUEST_TIMEOUT,

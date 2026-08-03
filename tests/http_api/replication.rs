@@ -629,6 +629,12 @@ fn a_replica_serves_reads_tails_the_writer_and_refuses_writes() {
     assert_eq!(hits["hits"][0]["source"], "第2段落", "{hits}");
     let groups = replica.ok("GET", "/groups", None);
     assert_eq!(groups["groups"][0]["name"], "breweries", "{groups}");
+    // `GET /schema` is a read (ADR 0009 §12.5) — it passes the replica
+    // gate like every other retrieval GET; the 404 below is the
+    // ordinary "no schema installed" answer, not a replica refusal.
+    let (status, answer) = replica.call("GET", "/contexts/sake/schema", None);
+    assert_eq!(status, 404, "{answer}");
+    assert_eq!(answer["code"], "no_schema", "{answer}");
 
     // The scrape carries the replica shape from boot; the generation
     // gauge lands with the tailer's first poll.
@@ -649,6 +655,14 @@ fn a_replica_serves_reads_tails_the_writer_and_refuses_writes() {
             "POST",
             "/contexts/sake/associations",
             Some(json!([{"subject": "a", "label": "l", "object": "o", "weight": 1.0}])),
+        ),
+        (
+            "PUT",
+            "/contexts/sake/schema",
+            Some(json!({
+                "schema": 1, "mode": "off", "closed_labels": false,
+                "types": {}, "relations": {}
+            })),
         ),
         ("DELETE", "/contexts/sake", None),
         ("POST", "/flush", None),

@@ -17,6 +17,7 @@
             "graph": 1,
             "passages": 1
           },
+          "schema_mode": null,
           "semantic_floor": null,
           "stats": {
             "arena_slack": 0,

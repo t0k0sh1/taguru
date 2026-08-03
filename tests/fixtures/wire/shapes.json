@@ -27,6 +27,7 @@
       "no_source",
       "no_paragraph",
       "no_group",
+      "no_schema",
       "unknown_path",
       "method_not_allowed",
       "timeout",
@@ -44,6 +45,7 @@
       "read_only_replica",
       "shard_unreachable"
     ],
+    "response.result.contexts[].schema_mode": ["off", "warn", "strict"],
     "response.result.items[].kind": ["association", "passage", "community"],
     "response.result.items[].lane_ranks[].lane": [
       "graph_query",
