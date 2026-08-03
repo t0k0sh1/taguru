@@ -141,9 +141,8 @@
         image is the binary alone on <code>scratch</code>, with no shell and no
         <code>mkdir</code>, so the host does this once:
         <pre><code>mkfs.ext4 -F /dev/disk/by-id/google-taguru-data
-mkdir -p /mnt/taguru/data
 mount /dev/disk/by-id/google-taguru-data /mnt/taguru
-chown 65532:65532 /mnt/taguru/data</code></pre></li>
+mkdir -p /mnt/taguru/data &amp;&amp; chown 65532:65532 /mnt/taguru/data</code></pre></li>
       <li><code>docker run --restart unless-stopped</code> (or a systemd unit with
         <code>Restart=on-failure</code>) is the restart policy — restarts are the host's job,
         not the load balancer's (see <a href="#network">the probe split</a>).</li>
@@ -310,10 +309,15 @@ volumeBindingMode: WaitForFirstConsumer</code></pre>
     <ul>
       <li><b>GCE VM:</b> the attached service account plus
         <code>roles/secretmanager.secretAccessor</code> is the whole credential chain — the
-        boot script reads the secret directly, no token exchange to write by hand:
-        <pre><code>TOKENS=$(gcloud secrets versions access latest --secret=taguru-api-tokens)
+        boot script reads the secret directly, no token exchange to write by hand. Write it to
+        a permission-restricted file rather than <code>-e</code>: a command-line environment
+        variable lands in <code>docker inspect</code> and any other user's <code>ps</code>
+        output on the same host, not just shell history.
+        <pre><code>install -m 600 /dev/null /etc/taguru.env
+echo "TAGURU_API_TOKENS=$(gcloud secrets versions access latest --secret=taguru-api-tokens)" >> /etc/taguru.env
+echo "TAGURU_LOG_FORMAT=json" >> /etc/taguru.env
 docker run -d --restart unless-stopped -p 8248:8248 \
-  -e TAGURU_API_TOKENS="$TOKENS" -e TAGURU_LOG_FORMAT=json \
+  --env-file /etc/taguru.env \
   -v /mnt/taguru/data:/data REGION-docker.pkg.dev/PROJECT/taguru-mirror/t0k0sh1/taguru:VERSION</code></pre></li>
       <li><b>GKE:</b> the Secret Manager add-on
         (<code>gcloud container clusters update --enable-secret-manager</code>) mounts a secret
@@ -426,10 +430,20 @@ spec:
     <h2>Network: external load balancer in front, one port behind</h2>
     <p class="section-sub">One firewall rule and a strict division of labor between the two health endpoints — verified against a live backend.</p>
     <ul>
-      <li><b>Reachability:</b> the load balancer's frontend accepts 443 from clients; the
-        backend's firewall rule accepts 8248 <b>from the load balancer's health-check ranges
-        only</b>. Nothing else reaches the server — a bearer token is the whole credential, and
-        it never travels unencrypted because TLS terminates at the load balancer.</li>
+      <li><b>Reachability — the source ranges differ by load balancer type.</b> The frontend
+        accepts 443 from clients; the backend's firewall rule accepts 8248 from the load
+        balancer itself, and what that means depends on which external Application Load
+        Balancer is in front. A <b>global</b> one (what GKE's default Ingress class
+        provisions, and what this page's own testing used) sends both health checks and proxied
+        traffic from Google's well-known ranges (<code>130.211.0.0/22</code>,
+        <code>35.191.0.0/16</code>) — allow those two and nothing else reaches the server. A
+        <b>regional</b> external Application Load Balancer is Envoy-based: health checks still
+        come from those same ranges, but proxied traffic to the backend originates from your
+        VPC's <b>proxy-only subnet</b> instead — allowing only the health-check ranges leaves
+        the health check passing while every real request is dropped by the firewall. Allow the
+        proxy-only subnet's CIDR too if you provision a regional one. Either way, a bearer token
+        is the whole credential, and it never travels unencrypted because TLS terminates at the
+        load balancer.</li>
       <li><b>A <code>BackendConfig</code> pointed at <code>GET /health</code>, on GKE</b> —
         verified live: with a custom health check configured this way, the backend service
         reported <code>healthState: HEALTHY</code> against the running pod within seconds.
@@ -459,10 +473,14 @@ spec:
         keep it at or below the pod's grace period on GKE (see
         <a href="#compute">grace vs. drain</a>).</li>
       <li><b>The Google-managed certificate needs a real, resolvable hostname</b> before it will
-        issue — point DNS at the load balancer's static IP first, then create the
-        <code>ManagedCertificate</code>; it stays <code>Provisioning</code> until the domain
-        resolves and the challenge succeeds, which can take longer than the first impatient
-        check.</li>
+        issue — point DNS at the load balancer's static IP first. On GKE that's a
+        <code>ManagedCertificate</code> resource referenced from the Ingress; on a VM fronted by
+        a manually configured load balancer it's the same certificate manager under a plain
+        <code>gcloud</code> call instead:
+        <pre><code>gcloud compute ssl-certificates create taguru-cert \
+  --domains=HOST --global</code></pre>
+        Either path stays <code>Provisioning</code> until the domain resolves and the challenge
+        succeeds, which can take longer than the first impatient check.</li>
       <li>Once the server is reachable beyond the VPC, set
         <code>TAGURU_RATE_LIMIT_PER_MIN</code>; Cloud Armor in front is optional on top.</li>
     </ul>
@@ -478,9 +496,11 @@ spec:
   --max-retention-days=14</code></pre>
         <code>POST /flush</code> first when you want a snapshot to contain this second's
         writes rather than the last flush interval's.</li>
-      <li><b>Rehearse the restore</b>: create a disk from the snapshot, attach it, and run the
-        image against it:
+      <li><b>Rehearse the restore</b>: create a disk from the snapshot, attach it to a running
+        VM, mount it, and run the image against it:
         <pre><code>gcloud compute disks create taguru-restore-test --source-snapshot=SNAPSHOT --zone=ZONE
+gcloud compute instances attach-disk RESTORE_VM --zone=ZONE --disk=taguru-restore-test
+mkdir -p /mnt/restore &amp;&amp; mount /dev/disk/by-id/google-taguru-restore-test /mnt/restore
 docker run --rm -v /mnt/restore/data:/data \
   REGION-docker.pkg.dev/PROJECT/taguru-mirror/t0k0sh1/taguru:VERSION inspect /data</code></pre>
         <code>taguru inspect</code> runs the same fully-validating load + WAL replay the server
