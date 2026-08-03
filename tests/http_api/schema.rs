@@ -375,6 +375,55 @@ fn off_mode_never_reports_issues_even_over_the_same_violation() {
         !body.as_object().unwrap().contains_key("issues"),
         "off must not carry an issues key at all: {body}"
     );
+    assert!(
+        !body.as_object().unwrap().contains_key("schema_violations"),
+        "off must not carry a schema_violations key at all: {body}"
+    );
+}
+
+/// `warn`'s `issues` list is capped the same way a `strict` refusal's
+/// is (`MAX_LISTED_ISSUES = 20`, `src/api.rs`) — a context sending a
+/// huge batch cannot balloon the response — but `schema_violations`
+/// is the count BEFORE that cap, so the true total survives even past
+/// the twenty listed.
+#[test]
+fn warn_mode_schema_violations_survives_truncation_past_the_listed_issue_cap() {
+    let server = Server::start("schema-warn-truncation");
+    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    let mut warn = valid_document();
+    warn["mode"] = json!("warn");
+    server.ok("PUT", "/contexts/sake/schema", Some(warn));
+
+    // 21 independent subjects, each typed Person (violating 杜氏's
+    // domain, [Brewery]) and each asserting 杜氏 once — one violation
+    // per subject, one more than MAX_LISTED_ISSUES.
+    let batch: Vec<serde_json::Value> = (0..21)
+        .flat_map(|i| {
+            let subject = format!("人{i}");
+            [
+                json!({"subject": subject, "label": "schema:type", "object": "Person", "weight": 1.0, "source": "a.md"}),
+                json!({"subject": subject, "label": "杜氏", "object": "個人A", "weight": 1.0, "source": "a.md"}),
+            ]
+        })
+        .collect();
+    let (status, body) = server.call(
+        "POST",
+        "/contexts/sake/associations",
+        Some(serde_json::Value::Array(batch)),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["result"], json!(42), "every op still writes: {body}");
+    assert_eq!(
+        body["schema_violations"],
+        json!(21),
+        "the true count survives truncation: {body}"
+    );
+    let issues = body["issues"].as_array().expect("issues array");
+    assert_eq!(
+        issues.len(),
+        20,
+        "MAX_LISTED_ISSUES caps the listed issues: {body}"
+    );
 }
 
 /// ADR 0009 §7.2's ordering guarantee: `TypeEnv` is built in full
