@@ -512,9 +512,12 @@ pub async fn import_batch(
         let mut outcomes: Vec<ImportOutcome> = Vec::with_capacity(total);
         // `warn`-mode schema violations (ADR 0009 §8.3), accumulated
         // across every batch in the stream with this batch's own
-        // `batches[{index}]` prefix already applied — the envelope's
-        // `issues` truncates the whole stream's total at the end
-        // (`ok_with_issues`), not per batch.
+        // `batches[{index}]` prefix already applied. Capped as it is
+        // collected, not just at the end (`ok_with_issues` truncates
+        // too, but a large `warn`-mode stream must not first pile up a
+        // multiple of `MAX_LISTED_ISSUES` — one per batch — only to
+        // discard the excess); the true per-batch count still rides
+        // `ImportOutcome.schema_violations` regardless of this cap.
         let mut warn_issues: Vec<Issue> = Vec::new();
         for (index, batch) in stream.batches.iter().enumerate() {
             // Each landed batch is durable (retract-then-apply), so a
@@ -620,7 +623,10 @@ pub async fn import_batch(
                         "import batch applied",
                     );
                     outcomes.push(import_outcome(batch, &applied));
-                    warn_issues.extend(schema_issues_in_batch(index, applied.schema_issues));
+                    if warn_issues.len() < crate::api::MAX_LISTED_ISSUES {
+                        warn_issues.extend(schema_issues_in_batch(index, applied.schema_issues));
+                        warn_issues.truncate(crate::api::MAX_LISTED_ISSUES);
+                    }
                 }
                 Err(refusal) => {
                     let note = import_batch_note(

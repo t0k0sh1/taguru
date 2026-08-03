@@ -155,6 +155,59 @@ fn warn_domain_violation_applies_and_reports_the_same_issue() {
     assert_eq!(associations_count(&server), json!(2), "{body}");
 }
 
+/// `count` independent domain violations in one batch (distinct
+/// subjects/objects, so none of them collide) — for exercising the
+/// envelope's cross-batch `issues` cap independently of any one
+/// batch's own truncation.
+fn many_domain_violations_batch(source: &str, count: usize) -> String {
+    let mut batch =
+        format!("{{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"{source}\"}}\n");
+    for i in 0..count {
+        batch.push_str(&format!(
+            "{{\"subject\": \"P{i}\", \"label\": \"schema:type\", \"object\": \"Person\", \
+             \"weight\": 1.0}}\n\
+             {{\"subject\": \"P{i}\", \"label\": \"杜氏\", \"object\": \"O{i}\", \"weight\": \
+             1.0}}\n"
+        ));
+    }
+    batch
+}
+
+/// `warn` across a multi-batch stream whose combined violations exceed
+/// `MAX_LISTED_ISSUES` (ADR 0009 §8.3): the envelope's `issues` caps at
+/// 20 regardless of how many batches contributed, while each batch's
+/// own `ImportOutcome.schema_violations` keeps its full, untruncated
+/// count — the cap is the envelope's, not lost from the per-batch
+/// tally.
+#[test]
+fn warn_across_batches_caps_the_envelope_but_not_each_batchs_own_count() {
+    let server = Server::start("schema-import-warn-cap");
+    seed(&server, "warn");
+
+    let stream = format!(
+        "{}{}",
+        many_domain_violations_batch("a.md", 11),
+        many_domain_violations_batch("b.md", 11)
+    );
+    let (status, body) = post_import(&server, &stream, None);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body["result"]["batches"][0]["schema_violations"],
+        json!(11),
+        "{body}"
+    );
+    assert_eq!(
+        body["result"]["batches"][1]["schema_violations"],
+        json!(11),
+        "{body}"
+    );
+    assert_eq!(
+        body["issues"].as_array().unwrap().len(),
+        20,
+        "22 violations occurred but the envelope must cap at MAX_LISTED_ISSUES: {body}"
+    );
+}
+
 /// `warn`, `?dry_run=true`: the preview reports the same violation
 /// count without writing anything.
 #[test]
@@ -195,8 +248,8 @@ fn off_mode_never_reports_a_violation_and_omits_issues_entirely() {
 }
 
 /// ADR 0009 §7.2's ordering guarantee: a fact op typed later in the
-/// SAME batch validates identically to one typed earlier — `TypeEnv` is
-/// built in full before any op is judged.
+/// SAME batch validates identically to one typed earlier — `SchemaEnv`
+/// is built in full before any op is judged.
 #[test]
 fn a_type_declared_after_the_fact_it_types_still_validates() {
     let server = Server::start("schema-import-order");

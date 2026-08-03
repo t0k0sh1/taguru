@@ -811,10 +811,10 @@ fn summarize_chunk_outcomes(outcomes: &[Value]) -> String {
         .iter()
         .filter(|outcome| outcome["passage_stored"].as_bool() == Some(true))
         .count();
-    // Present on any server old enough to predate #382, so absent
-    // (`as_u64()` on `None` → `None`) reads as 0 the same way a real
-    // schema-free batch's own count would — a remote run against such a
-    // server never prints a warning line it cannot back up.
+    // Absent on any server old enough to predate #382, so a missing
+    // field (`as_u64()` on `None` → `None`) reads as 0 the same way a
+    // real schema-free batch's own count would — a remote run against
+    // such a server never prints a warning line it cannot back up.
     let schema_violations: u64 = outcomes
         .iter()
         .filter_map(|o| o["schema_violations"].as_u64())
