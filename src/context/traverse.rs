@@ -46,7 +46,7 @@ impl Context {
     /// nothing, and `max_depth == 0` returns nothing — zero hops of
     /// association-following reaches no associations.
     pub fn explore(&self, origins: &[&str], max_depth: usize) -> Vec<Recollection> {
-        self.explore_excluding(origins, max_depth, &[])
+        self.explore_impl(origins, max_depth, |_| true)
     }
 
     /// [`Context::explore`] with a set of relation labels hidden from the
@@ -62,10 +62,17 @@ impl Context {
     ///
     /// Additive alongside [`Context::explore`] rather than a signature
     /// change, since `Context` is published API (ADR 0009 §6.3's own
-    /// framing: exclusions must not touch a schema-free caller). `excluded`
-    /// is resolved to label ids once, up front; names that were never
-    /// interned cost one `HashMap` probe and nothing more, so a caller
-    /// passing `&[]` walks the exact `explore` path.
+    /// framing: exclusions must not touch a schema-free caller).
+    /// [`Context::explore`] and this share [`Context::explore_impl`],
+    /// monomorphized per call site on the `visible` closure — `explore`'s
+    /// own instantiation passes the constant `|_| true`, which the
+    /// compiler can see is unconditionally true and fold the whole check
+    /// away, rather than a runtime-empty `HashSet` a single shared
+    /// non-generic body would still have to branch on per edge. That
+    /// distinction is not cosmetic: an earlier version filtered
+    /// unconditionally and regressed `bench_activate`'s instruction count
+    /// by several percent even with the exclusion set empty, purely from
+    /// the extra iterator-adaptor/closure-call machinery in the hot loop.
     pub fn explore_excluding(
         &self,
         origins: &[&str],
@@ -76,7 +83,17 @@ impl Context {
             .iter()
             .filter_map(|name| self.label_ids.get(*name).copied())
             .collect();
+        self.explore_impl(origins, max_depth, move |label: LabelId| {
+            !excluded_ids.contains(&label)
+        })
+    }
 
+    fn explore_impl(
+        &self,
+        origins: &[&str],
+        max_depth: usize,
+        visible: impl Fn(LabelId) -> bool,
+    ) -> Vec<Recollection> {
         let mut node_distances: HashMap<ConceptId, usize> = HashMap::new();
         let mut parents: HashMap<ConceptId, ConceptId> = HashMap::new();
         let mut frontier: VecDeque<ConceptId> = VecDeque::new();
@@ -105,14 +122,8 @@ impl Context {
                 // attribution records — so it must not act as a bridge to
                 // otherwise-unrelated live facts. count == 0 is the
                 // dead-edge test everywhere else (heaviest, compacted, the
-                // export); apply it here too. `is_empty()` short-circuits
-                // before ever hashing the label — see `activate_excluding`'s
-                // identical guard, added after a measured callgrind
-                // regression from paying a `HashSet` lookup per edge on
-                // the (overwhelmingly common) schema-free path.
-                if edge.count == 0
-                    || (!excluded_ids.is_empty() && excluded_ids.contains(&edge.label))
-                {
+                // export); apply it here too.
+                if edge.count == 0 || !visible(edge.label) {
                     continue;
                 }
                 reached.entry(edge_id).or_insert((hop, concept_id));
@@ -213,7 +224,7 @@ impl Context {
     /// `decay == 1.0` through dedicated relays, activation barely decays
     /// and the walk still covers whatever stays above the floor.
     pub fn activate(&self, origins: &[&str], decay: f64, limit: usize) -> (usize, Vec<Activation>) {
-        self.activate_excluding(origins, decay, limit, &[])
+        self.activate_impl(origins, decay, limit, |_| true)
     }
 
     /// [`Context::activate`] with a set of relation labels hidden from
@@ -226,8 +237,14 @@ impl Context {
     /// the "quietly distort unrelated features" ADR 0009 §6.3 rules out
     /// — so both chains are filtered identically. Additive alongside
     /// [`Context::activate`] for the same published-API reason
-    /// [`Context::explore_excluding`] documents; `&[]` walks the exact
-    /// `activate` path.
+    /// [`Context::explore_excluding`] documents, and — like
+    /// [`Context::explore`]/[`Context::explore_excluding`] sharing
+    /// [`Context::explore_impl`] — the two share [`Context::activate_impl`],
+    /// monomorphized per call so `activate`'s own instantiation compiles
+    /// down to the exact pre-exclusion code: see `explore_impl`'s doc for
+    /// why a single shared body checking a possibly-empty `HashSet` at
+    /// runtime is not equivalent (it measurably regressed
+    /// `bench_activate`'s instruction count even with nothing excluded).
     pub fn activate_excluding(
         &self,
         origins: &[&str],
@@ -239,16 +256,18 @@ impl Context {
             .iter()
             .filter_map(|name| self.label_ids.get(*name).copied())
             .collect();
-        // Short-circuit on `is_empty()` — an O(1) length check — before
-        // ever hashing an edge's label: a schema-free `activate` (the
-        // overwhelming majority of calls) must not pay a `HashSet`
-        // lookup per edge in this hot loop for a set that is always
-        // empty. Measured: without this, `bench_activate` regressed
-        // instruction count by ~6.5%, all of it this one hash.
-        let visible = |edge_id: &EdgeId| {
-            excluded_ids.is_empty() || !excluded_ids.contains(&self.edges[*edge_id as usize].label)
-        };
+        self.activate_impl(origins, decay, limit, move |label: LabelId| {
+            !excluded_ids.contains(&label)
+        })
+    }
 
+    fn activate_impl(
+        &self,
+        origins: &[&str],
+        decay: f64,
+        limit: usize,
+        visible: impl Fn(LabelId) -> bool,
+    ) -> (usize, Vec<Activation>) {
         // NaN must shrink every signal to nothing (like decay == 0.0),
         // not propagate — clamp alone would let it through, since the
         // score gate below is a `<=` that a NaN score never satisfies.
@@ -299,8 +318,10 @@ impl Context {
                 // fold — it must not dilute a neighbor's share of real
                 // facts, the same reason `activate_excluding` filters
                 // the propagation loop below identically.
-                .filter(|&edge_id| self.edges[edge_id as usize].count > 0)
-                .filter(visible)
+                .filter(|&edge_id| {
+                    let edge = &self.edges[edge_id as usize];
+                    edge.count > 0 && visible(edge.label)
+                })
                 .map(|edge_id| self.edges[edge_id as usize].sum.abs())
                 .fold(0.0, |mut acc, magnitude| {
                     // Individually-finite magnitudes can sum past f64's
@@ -315,8 +336,10 @@ impl Context {
             for edge_id in self
                 .outgoing(concept)
                 .chain(self.incoming(concept))
-                .filter(|&edge_id| self.edges[edge_id as usize].count > 0)
-                .filter(visible)
+                .filter(|&edge_id| {
+                    let edge = &self.edges[edge_id as usize];
+                    edge.count > 0 && visible(edge.label)
+                })
             {
                 let edge = &self.edges[edge_id as usize];
                 // Ranking: fan-independent, so a busy endpoint doesn't
