@@ -511,7 +511,8 @@ Worked deployments, probe wiring, and the reasoning behind them:
 [Docker Compose](https://t0k0sh1.github.io/taguru/docker-compose.html) ·
 [Kubernetes](https://t0k0sh1.github.io/taguru/kubernetes.html) ·
 [AWS](https://t0k0sh1.github.io/taguru/aws.html) ·
-[Azure](https://t0k0sh1.github.io/taguru/azure.html) —
+[Azure](https://t0k0sh1.github.io/taguru/azure.html) ·
+[Google Cloud](https://t0k0sh1.github.io/taguru/gcp.html) —
 the manifests themselves are in [deploy/](deploy/).
 
 ## SDKs and examples

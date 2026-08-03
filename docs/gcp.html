@@ -1,0 +1,583 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Deploy on Google Cloud — Taguru</title>
+  <meta name="description" content="Deploying Taguru on Google Cloud: GCE or GKE compute, Persistent Disk storage with the Regional PD cross-zone upgrade, external HTTPS load balancer + Secret Manager in front, Vertex AI embeddings behind a LiteLLM bridge, snapshot backups, Cloud Logging/Monitoring observability.">
+  <link rel="icon" type="image/png" href="favicon.png">
+  <link rel="stylesheet" href="style.css">
+  <script src="site.js"></script>
+</head>
+<body>
+
+<div class="topbar">
+  <button class="nav-toggle" id="nav-toggle" type="button" aria-label="Toggle menu">☰</button>
+  <a class="brand" href="index.html"><img class="brand-mark" src="logo.png" alt="">Taguru</a>
+  <button class="theme-toggle" type="button" aria-label="Toggle theme">◐</button>
+</div>
+<div class="scrim" id="scrim"></div>
+
+<div class="layout">
+<aside class="sidebar">
+  <a class="brand" href="index.html"><img class="brand-mark" src="logo.png" alt="">Taguru</a>
+  <nav class="side-nav">
+    <div class="side-group">
+      <a href="index.html">Home</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Guide</div>
+      <a href="getting-started.html">Getting started</a>
+      <a href="concepts.html">Concepts</a>
+      <a href="modeling.html">Modeling</a>
+      <a href="troubleshooting.html">Troubleshooting</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Reference</div>
+      <a href="import.html">Batch import</a>
+      <a href="extract.html">Document extraction</a>
+      <a href="connectors.html">Ingest connectors</a>
+      <a href="benchmark.html">Extraction benchmark</a>
+      <a href="evaluate.html">Retrieval quality gate</a>
+      <a href="evidence.html">Evidence assembly</a>
+      <a href="long-running.html">Long-running ingestion</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Deploy</div>
+      <a href="docker-compose.html">Docker Compose</a>
+      <a href="kubernetes.html">Kubernetes</a>
+      <a href="aws.html">AWS</a>
+      <a href="azure.html">Azure</a>
+      <a href="gcp.html" aria-current="page">Google Cloud</a>
+      <a href="bedrock.html">Amazon Bedrock</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">How it works</div>
+      <a href="architecture.html">Internal architecture</a>
+      <a href="tracing.html">Tracing</a>
+      <a href="mcp-rag-walkthrough.html">MCP walkthrough</a>
+      <a href="local-rag-walkthrough.html">Local RAG walkthrough</a>
+    </div>
+  </nav>
+  <div class="sidebar-footer">
+    <a href="https://github.com/t0k0sh1/taguru">GitHub ↗</a>
+    <button class="theme-toggle" type="button" aria-label="Toggle theme">◐</button>
+  </div>
+</aside>
+
+<main class="content">
+<div class="page">
+
+  <header class="hero">
+    <div class="eyebrow">deploy · google cloud</div>
+    <h1>Deploy on Google Cloud</h1>
+    <p class="lede">
+      The same single-writer, single-data-directory design that decides the AWS and Azure
+      mappings decides the Google Cloud one, with one genuine upgrade neither of those offers:
+      a <b>Regional Persistent Disk</b> stays single-attach while replicating synchronously
+      across two zones, so a zone outage becomes a force-attach instead of a snapshot restore.
+      The other twist runs the other way — Vertex AI's embedding models are not
+      OpenAI-compatible and authenticate with short-lived OAuth2 tokens, so unlike Azure OpenAI
+      this is the platform that needs a bridge, the same seat the
+      <a href="bedrock.html">Bedrock page</a>'s proxy sits in.
+    </p>
+    <div class="hero-meta">
+      <span><b>Compute:</b> GCE VM or GKE — never Cloud Run</span>
+      <span><b>Storage:</b> Persistent Disk, Regional PD for cross-zone RPO≈0</span>
+      <span><b>TLS:</b> external HTTPS load balancer + Google-managed cert</span>
+      <span><b>Embeddings:</b> Vertex AI behind a LiteLLM bridge</span>
+    </div>
+  </header>
+
+  <section id="constraints">
+    <h2>The three constraints that decide everything</h2>
+    <p class="section-sub">
+      The general model is on the <a href="docker-compose.html#model">Docker Compose</a> and
+      <a href="kubernetes.html#model">Kubernetes</a> pages; this page is only the Google Cloud
+      projection of it.
+    </p>
+    <ul>
+      <li><b>One data directory, one writer — and network filesystems are out.</b> On Google
+        Cloud that means <b>Persistent Disk only, never Filestore</b>. Filestore is NFS, the
+        same protocol the <a href="aws.html#constraints">AWS page</a> rules out for EFS: a
+        second writer isn't refused cleanly, it's refused (or worse, silently tolerated at the
+        protocol level) through an NFS lock that a partition can hand away. A zonal or regional
+        Persistent Disk enforces single-attach at the platform layer, before the advisory lock
+        ever has to.</li>
+      <li><b>Availability is restore time — and Google Cloud has a real upgrade to it.</b>
+        Deploys are stop-then-start, there is no failover, and the baseline story is snapshots
+        plus (optionally) a replica to promote by hand — see
+        <a href="architecture.html#replicas">the promotion runbook</a>. A <b>Regional Persistent
+        Disk</b> changes the baseline itself: it replicates synchronously to a second zone in
+        the same region while staying a single-attach block device, and on a zone outage
+        <code>--force-attach</code> moves it to a VM in the surviving zone with no snapshot
+        restore in the path — RPO effectively zero, not "since the last snapshot." See
+        <a href="#failover">the failover procedure</a> below.</li>
+      <li><b>TLS belongs to the layer in front.</b> A bearer token is the whole credential, so
+        the server must never be reachable over plain HTTP from outside. On Google Cloud that
+        layer is the external Application Load Balancer with a Google-managed certificate; the
+        server behind it speaks HTTP on 8248 to the load balancer alone.</li>
+    </ul>
+  </section>
+
+  <section id="compute">
+    <h2>Compute: GCE or GKE, and why not Cloud Run</h2>
+    <p class="section-sub">Anything that cannot keep one block device attached to one long-lived process is out — verified against the platform, not assumed from its marketing copy.</p>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Service</th><th>Fit</th><th>Why</th></tr></thead>
+        <tbody>
+          <tr><td>GCE VM + Docker (or the bare binary under systemd)</td><td>✓ the simplest honest fit</td><td>One VM, one Persistent Disk, one container. The <a href="docker-compose.html">Docker Compose page</a> applies nearly verbatim.</td></tr>
+          <tr><td>GKE Standard or Autopilot</td><td>✓ with <code>deploy/kubernetes.yaml</code> as-is</td><td>Verified on a live Autopilot cluster: the manifest applies unmodified — Autopilot only <i>adds</i> an <code>ephemeral-storage</code> resource default and a <code>seccompProfile</code>/dropped <code>NET_RAW</code> capability, never overrides what the manifest already sets. The unspecified <code>storageClassName</code> resolves to <code>standard-rwo</code> (pd-balanced, RWO) with no setup.</td></tr>
+          <tr><td>Cloud Run</td><td>✗</td><td>Checked against the current volume types (<code>gcloud run deploy --help</code>): <code>cloud-storage</code> (GCS FUSE — object semantics), <code>nfs</code> (Filestore), and <code>in-memory</code> only. No block-device option exists in the product at all — this isn't a configuration to avoid, there's nothing to configure.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <h3>GCE VM</h3>
+    <ul>
+      <li><b>Keep the data directory on its own Persistent Disk</b>, separate from the boot
+        disk: snapshots, restores, and VM replacement then never touch the OS. Format, mount,
+        and create the data directory <b>owned by uid 65532</b> before the first start — the
+        image is the binary alone on <code>scratch</code>, with no shell and no
+        <code>mkdir</code>, so the host does this once:
+        <pre><code>mkfs.ext4 -F /dev/disk/by-id/google-taguru-data
+mkdir -p /mnt/taguru/data
+mount /dev/disk/by-id/google-taguru-data /mnt/taguru
+chown 65532:65532 /mnt/taguru/data</code></pre></li>
+      <li><code>docker run --restart unless-stopped</code> (or a systemd unit with
+        <code>Restart=on-failure</code>) is the restart policy — restarts are the host's job,
+        not the load balancer's (see <a href="#network">the probe split</a>).</li>
+      <li><b>VM size:</b> memory ≈ <code>TAGURU_CACHE_BYTES</code> (default 512 MiB) + pinned
+        contexts + headroom — an e2-small runs the default profile; measure with
+        <code>taguru estimate</code> before scaling up. A shared-core machine type is fine for
+        the server itself, but building anything <i>on</i> the VM (not needed for normal
+        operation — the image ships prebuilt) is a different story: a
+        <code>cargo build --release</code> on an e2-small (2 vCPU burstable, 2 GiB RAM) was
+        still linking the final binary past the half-hour mark, memory dropping under 100 MiB
+        free at points. Extracting the published image's own binary
+        (<code>docker create</code> + <code>docker cp</code>, matched to the VM's architecture)
+        and copying it over took under a minute and is what any failover rehearsal should do —
+        never compile on the box you're trying to bring back up.</li>
+      <li><b>Zone recovery is a force-attach if the disk is a Regional PD.</b> A zonal disk is
+        zone-bound and recovery into another zone is a snapshot restore; a Regional PD detaches
+        from the dead VM (or is force-attached over its objection) and attaches to a standby in
+        its replica zone, data intact — see <a href="#failover">the failover procedure</a>.</li>
+    </ul>
+    <h3>GKE</h3>
+    <ul>
+      <li><b><code>deploy/kubernetes.yaml</code> applies unchanged — verified, not assumed.</b>
+        Applied verbatim to a fresh Autopilot cluster: the pod reached <code>1/1 Running</code>
+        with <code>readOnlyRootFilesystem</code>, <code>runAsUser: 65532</code>, and
+        <code>fsGroup: 65532</code> all honored exactly as written, and
+        <code>GET /health</code>/<code>GET /live</code> both answered 200 immediately. The only
+        changes Autopilot made were additive: it defaulted an <code>ephemeral-storage</code>
+        request/limit the manifest doesn't set, and injected
+        <code>seccompProfile: RuntimeDefault</code> plus a dropped <code>NET_RAW</code>
+        capability. Nothing the manifest specifies was overridden or rejected.</li>
+      <li><b>Never let the PVC land on the Filestore or GCS FUSE storage classes.</b> A GKE
+        cluster ships <code>standard-rwo</code>/<code>premium-rwo</code> (Persistent Disk)
+        alongside <code>enterprise-multishare-rwx</code> and GCS FUSE-backed classes — picking
+        one of the latter <i>appears</i> to work, one replica comes up and serves, and the
+        failure arrives later wearing the same costume the
+        <a href="azure.html#compute">Azure page</a> documents for <code>azurefile</code>: a
+        second pod against the same network-backed volume surfaces as a permissions or lock
+        error, not an obvious storage misconfiguration. Leave <code>storageClassName</code>
+        unset (it resolves to the PD-backed default) or name a PD class explicitly.</li>
+      <li><b>Two guards, two layers.</b> On a Persistent Disk, a second pod on <i>another</i>
+        node is refused by the platform (the volume stays attached where it is), and a second
+        pod on the <i>same</i> node — which ReadWriteOnce does not prevent — is refused by the
+        server's own lock with an explicit message (<code>data directory is held by another
+        taguru process</code>). Both refusals are loud and correct; neither exists on a
+        network-backed share.</li>
+      <li><b>Regional PD as a GKE StorageClass:</b> verified live —
+        <pre><code>apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: regional-pd
+provisioner: pd.csi.storage.gke.io
+parameters:
+  type: pd-balanced
+  replication-type: regional-pd
+volumeBindingMode: WaitForFirstConsumer</code></pre>
+        A PVC naming this class provisioned and bound cleanly on Autopilot with no other
+        changes to the manifest — only the PVC's <code>storageClassName</code> needs to
+        change to move a deployment from zonal to regional storage.</li>
+      <li><b>Fronting with an external Application Load Balancer:</b> a <code>BackendConfig</code>
+        pointed at <code>GET /health</code> plus a standard <code>Ingress</code> is enough —
+        see <a href="#network">the section below</a> for the verified health-check wiring.</li>
+      <li><b>Grace vs. drain:</b> <code>terminationGracePeriodSeconds: 60</code> in the manifest
+        covers the drain plus the final flush. Keep the load balancer's connection-draining
+        timeout at or below it — a drain window longer than the pod's remaining lifetime just
+        resets whatever is still in flight when the pod dies.</li>
+    </ul>
+    <p class="note">
+      The stateless and read-pool variants (<code>kubernetes-stateless.yaml</code>,
+      <code>kubernetes-replicas.yaml</code>) work on GKE the same way, with
+      <code>TAGURU_REPLICATE_URL</code> pointed at a GCS bucket and the pod's credentials
+      granted via Workload Identity — see <a href="kubernetes.html#stateless">the Kubernetes
+      page</a> and <a href="#backup">Backups and DR</a> below for the bucket side, verified
+      end to end.
+    </p>
+  </section>
+
+  <section id="image">
+    <h2>The image: mirror ghcr.io through Artifact Registry</h2>
+    <p class="section-sub">Keep pulls inside Google Cloud and survive a ghcr.io outage without changing what you run.</p>
+    <ul>
+      <li>Artifact Registry's <b>remote repository</b> mode mirrors <code>ghcr.io</code> on
+        first pull — verified live, a cold pull through a freshly created remote repository
+        resolved and cached the published image with no extra configuration:
+        <pre><code>gcloud artifacts repositories create taguru-mirror \
+  --repository-format=docker --mode=remote-repository \
+  --remote-docker-repo=https://ghcr.io \
+  --location=REGION</code></pre>
+        The image reference becomes
+        <code>REGION-docker.pkg.dev/PROJECT/taguru-mirror/t0k0sh1/taguru:VERSION</code>. The
+        cache stores the same manifest, so <b>a digest pin carries over unchanged</b> — pin
+        exactly as <a href="docker-compose.html#image">the image guidance</a> says.</li>
+      <li>Pullers authenticate with the node's (or pod's, via Workload Identity) service
+        account holding <code>roles/artifactregistry.reader</code> — no registry passwords in
+        the boot script; on GKE, the default node service account already has this once the
+        repository exists in the same project.</li>
+    </ul>
+  </section>
+
+  <section id="storage">
+    <h2>Persistent Disk, and the Regional PD upgrade</h2>
+    <p class="section-sub">A zonal disk is the default fit; a Regional PD is the one change that turns a zone outage into a reattach instead of a restore.</p>
+    <ul>
+      <li><b>pd-balanced is the default choice</b> for the data directory — pd-ssd if the write
+        volume genuinely needs the extra IOPS, measured, not assumed.</li>
+      <li><b>A Regional PD is created with two replica zones, not a region:</b>
+        <pre><code>gcloud compute disks create taguru-data \
+  --region=REGION --replica-zones=ZONE-A,ZONE-B \
+  --type=pd-balanced --size=10GB</code></pre>
+        It attaches, formats, and mounts exactly like a zonal disk — nothing about the
+        server's use of <code>/data</code> changes. The difference only shows up when a zone
+        goes away.</li>
+      <li><b>On GKE, the same trade is one StorageClass parameter</b>
+        (<code>replication-type: regional-pd</code>, shown in <a href="#compute">Compute</a>
+        above) — verified to provision and bind without touching the deployment manifest at
+        all.</li>
+      <li><b>Regional PD is not a backup.</b> It is one disk with one write history,
+        replicated — a bad write replicates too. Snapshots and the export lane
+        (<a href="#backup">below</a>) are still the only defense against corruption or
+        accidental deletion; Regional PD only removes zone failure from the list of things a
+        restore is needed for.</li>
+    </ul>
+  </section>
+
+  <section id="failover">
+    <h2>Regional PD failover: the procedure</h2>
+    <p class="section-sub">Rehearsed on a live VM pair, not described from the API reference.</p>
+    <ol>
+      <li><b>Normal operation:</b> the Regional PD is attached read-write to one VM, in one of
+        its two replica zones — exactly like a zonal disk from the server's point of view.
+        <code>POST /flush</code> before a planned failover so the surviving zone's copy is
+        current to the second, not the last flush interval.</li>
+      <li><b>The zone with the attached VM becomes unavailable</b> (an outage, or a deliberate
+        drain for maintenance). The disk is still attached to the now-unreachable VM as far as
+        the platform's bookkeeping is concerned.</li>
+      <li><b>Force-attach from a VM in the surviving zone:</b>
+        <pre><code>gcloud compute instances attach-disk taguru-vm-standby \
+  --zone=ZONE-B --disk=taguru-data --disk-scope=regional \
+  --force-attach</code></pre>
+        <code>--force-attach</code> succeeds even though the disk shows as attached elsewhere,
+        and the platform keeps trying to detach it from the dead VM in the background — the
+        standby does not wait on that.</li>
+      <li><b>Mount and start the server on the standby</b> exactly as on the primary — same
+        UID, same mount path. No snapshot restore, no <code>taguru restore</code>: the block
+        device itself is current as of the last synchronously-replicated write.</li>
+      <li><b>Verify with <code>taguru inspect /data</code></b> before serving traffic — the
+        same fully-validating load + WAL replay the server boots with. A non-zero exit means
+        investigate before routing anything at the standby.</li>
+      <li><b>Rehearse this before an outage forces it.</b> The mechanics are simple, but the
+        first time anyone runs <code>--force-attach</code> should not be during an actual zone
+        loss — the flag name alone invites hesitation at 3 a.m.</li>
+    </ol>
+    <p class="note">
+      On GKE, the same disk resource is what a <code>regional-pd</code> StorageClass provisions
+      underneath; the CSI driver performs the equivalent force-attach when the scheduler moves
+      the pod to a node in the surviving zone after the original node becomes
+      <code>NotReady</code> — the manual procedure above is what to reach for on a bare VM, or
+      to understand what the driver is doing on your behalf.
+    </p>
+  </section>
+
+  <section id="secrets">
+    <h2>Secrets: Secret Manager feeds the boot</h2>
+    <p class="section-sub"><code>TAGURU_API_TOKENS</code> (and <code>TAGURU_KEY_SCOPES</code>, the embedding key, …) come from Secret Manager at boot; nothing lands in a manifest or a template.</p>
+    <ul>
+      <li><b>GCE VM:</b> the attached service account plus
+        <code>roles/secretmanager.secretAccessor</code> is the whole credential chain — the
+        boot script reads the secret directly, no token exchange to write by hand:
+        <pre><code>TOKENS=$(gcloud secrets versions access latest --secret=taguru-api-tokens)
+docker run -d --restart unless-stopped -p 8248:8248 \
+  -e TAGURU_API_TOKENS="$TOKENS" -e TAGURU_LOG_FORMAT=json \
+  -v /mnt/taguru/data:/data REGION-docker.pkg.dev/PROJECT/taguru-mirror/t0k0sh1/taguru:VERSION</code></pre></li>
+      <li><b>GKE:</b> the Secret Manager add-on
+        (<code>gcloud container clusters update --enable-secret-manager</code>) mounts a secret
+        directly through a <code>SecretProviderClass</code> — verified live, including one trap
+        that cost real debugging time: the CSI driver name is
+        <b><code>secrets-store-gke.csi.k8s.io</code></b>, not the community
+        <code>secrets-store.csi.k8s.io</code> most tutorials reference. Get the driver name
+        wrong and the pod sticks in <code>ContainerCreating</code> with <code>driver name … not
+        found in the list of registered CSI drivers</code> — a message that reads like the
+        add-on isn't enabled at all, when it is.
+        <pre><code>apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: taguru-secrets
+spec:
+  provider: gke
+  parameters:
+    secrets: |
+      - resourceName: "projects/PROJECT_NUMBER/secrets/taguru-api-tokens/versions/latest"
+        path: "taguru-api-tokens"</code></pre>
+        Grant access straight to the pod's Kubernetes service account, no separate Google
+        service account needed:
+        <pre><code>gcloud secrets add-iam-policy-binding taguru-api-tokens \
+  --role=roles/secretmanager.secretAccessor \
+  --member="principal://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/PROJECT_ID.svc.id.goog/subject/ns/NAMESPACE/sa/KSA_NAME"</code></pre>
+        Mount it as a file and pass <code>--config</code> for live key rotation — the
+        manifest's comments carry the exact steps.</li>
+      <li><code>TAGURU_PUBLIC_URL</code> (for claude.ai-connector OAuth on <code>/mcp</code>) is
+        plain configuration, not a secret — set it beside the rest of the environment.</li>
+    </ul>
+  </section>
+
+  <section id="embeddings">
+    <h2>Embeddings: Vertex AI needs a bridge</h2>
+    <p class="section-sub">Verified against the live API, not the desk-analysis assumption: Vertex's OpenAI-compatible surface covers chat, not embeddings.</p>
+    <ul>
+      <li><b>The OpenAI-compatible <code>/embeddings</code> endpoint does not work.</b> Vertex
+        publishes an OpenAI-compatible surface at
+        <code>…/endpoints/openapi/chat/completions</code> that answers real chat requests
+        correctly — verified live. The equivalent
+        <code>…/endpoints/openapi/embeddings</code> returned <code>500 INTERNAL</code> for
+        every embedding model tried (<code>gemini-embedding-001</code>,
+        <code>text-embedding-005</code>, with and without the <code>google/</code> publisher
+        prefix). The embed client (<code>src/embedding.rs</code>) speaks exactly this
+        OpenAI-shaped protocol and nothing else, so <b>a bridge is required</b> — this is the
+        one cloud, alongside Bedrock, where the model has to sit behind a proxy rather than
+        take the client's request directly.</li>
+      <li><b>LiteLLM bridges it cleanly — for one model.</b> Pointed at
+        <code>vertex_ai/gemini-embedding-001</code> with Application Default Credentials,
+        LiteLLM's OpenAI-compatible <code>/v1/embeddings</code> returned correct, distinct
+        vectors for distinct inputs, and fed a real <code>taguru calibrate</code> run without
+        any client-side changes.
+        <pre><code>model_list:
+  - model_name: gemini-embedding-001
+    litellm_params:
+      model: vertex_ai/gemini-embedding-001
+      vertex_project: PROJECT
+      vertex_location: REGION
+      dimensions: 768   # see the note below — pin this</code></pre></li>
+      <li><b><code>text-embedding-005</code> through the same bridge is broken, not just
+        untested.</b> Verified live: every request to
+        <code>vertex_ai/text-embedding-005</code> through LiteLLM 1.95.0 returned the
+        <i>identical</i> vector regardless of input text — cosine 1.0 between embeddings of
+        completely unrelated strings. The native Vertex <code>:predict</code> endpoint embeds
+        this model correctly; the failure is specific to this LiteLLM version's handling of
+        it. <b>Use <code>gemini-embedding-001</code></b> until this is independently confirmed
+        fixed, and treat "the bridge returns 200 with plausible-looking numbers" as
+        insufficient — diff two embeddings of clearly different inputs before trusting a
+        bridge configuration.</li>
+      <li><b>Pin <code>dimensions</code> in the bridge config — the client never asks for one.</b>
+        <code>gemini-embedding-001</code> defaults to 3072 dimensions; the embed client's
+        request body is <code>{"model", "input"}</code> only, with no
+        <code>dimensions</code> field to negotiate a smaller width. Setting
+        <code>dimensions: N</code> in LiteLLM's <code>litellm_params</code> (verified: it maps
+        to Vertex's own <code>outputDimensionality</code>) fixes the width server-side with no
+        code change needed — pick a width once, before the first gloss is embedded, since
+        changing it later means re-embedding everything.</li>
+      <li><b>Calibrate before trusting any floor for this model — measured overlap, not a clean
+        number.</b> A real <code>taguru calibrate</code> run against
+        <code>gemini-embedding-001</code>, at both 768 and 3072 dimensions, over a small mixed
+        Japanese corpus (sake brands, a mountain, an author, a castle) returned <b>OVERLAP</b>
+        both times: the best non-expected candidate's cosine landed inside the range of
+        expected-match cosines, most often because a subject's own gloss text names its
+        related concept directly (a brand's gloss reads "…産地。秋田県", and "秋田県" is itself
+        a concept in the corpus). Unlike Bedrock's Titan V2, where calibration reliably finds
+        a clean gap around 0.2, Vertex embeddings on a small corpus did not separate cleanly at
+        either width tried. This is exactly the case <code>taguru calibrate</code> is built to
+        refuse to paper over — see <a href="bedrock.html#floor">the calibration walkthrough</a>.
+        <b>Run it against your own, larger corpus</b> before picking
+        <code>TAGURU_SEMANTIC_FLOOR</code>; no table entry here would be honest.</li>
+      <li><b>Document extraction</b> (<code>taguru extract</code>) can use Vertex's
+        OpenAI-compatible <code>/chat/completions</code> directly for one-shot runs —
+        <code>TAGURU_EXTRACT_API_KEY=$(gcloud auth print-access-token)</code> — since that
+        surface works and the credential only needs to last one run. Steady use should still
+        go through the same LiteLLM bridge, since a raw access token expires in about an hour
+        and <code>TAGURU_EXTRACT_API_KEY</code> is read once at process start. Model
+        credentials stay in the offline producer's environment, never on the server — see
+        <a href="extract.html">Document extraction</a>.</li>
+    </ul>
+    <p class="note">
+      The agent side needs none of this: Claude on Vertex AI
+      (<code>CLAUDE_CODE_USE_VERTEX=1</code>) drives <code>taguru-mcp</code> over stdio
+      unchanged, and a managed agent runtime registering
+      <code>https://your-host/mcp</code> rides through the same load balancer this page fronts
+      the server with.
+    </p>
+  </section>
+
+  <section id="network">
+    <h2>Network: external load balancer in front, one port behind</h2>
+    <p class="section-sub">One firewall rule and a strict division of labor between the two health endpoints — verified against a live backend.</p>
+    <ul>
+      <li><b>Reachability:</b> the load balancer's frontend accepts 443 from clients; the
+        backend's firewall rule accepts 8248 <b>from the load balancer's health-check ranges
+        only</b>. Nothing else reaches the server — a bearer token is the whole credential, and
+        it never travels unencrypted because TLS terminates at the load balancer.</li>
+      <li><b>A <code>BackendConfig</code> pointed at <code>GET /health</code>, on GKE</b> —
+        verified live: with a custom health check configured this way, the backend service
+        reported <code>healthState: HEALTHY</code> against the running pod within seconds.
+        Then keep the division of labor straight:
+        <div class="tbl" style="margin-top:0.6rem">
+          <table>
+            <thead><tr><th>Signal</th><th>Endpoint</th><th>Who acts</th></tr></thead>
+            <tbody>
+              <tr><td>Routing: is this backend serving?</td><td><code>/health</code> (503 while the write path is degraded)</td><td>The load balancer routes away and back — it never restarts anything.</td></tr>
+              <tr><td>Restart: is the process wedged?</td><td><code>/live</code></td><td>Docker's restart policy, systemd, or the kubelet's liveness probe. The load balancer has no restart lever, so pointing its check at <code>/live</code> would just mask write-path failures.</td></tr>
+            </tbody>
+          </table>
+        </div></li>
+      <li><b>The backend service timeout defaults to 30 seconds — verified via
+        <code>gcloud compute backend-services create --help</code> — which happens to equal
+        <code>TAGURU_REQUEST_TIMEOUT_SECS</code>'s own default.</b> That's a coincidence worth
+        not relying on: the server always answers within its own request budget (embedding
+        attempts are cut at the request's remaining time, not their own nominal ceiling), so
+        with both left at their defaults nothing ever hits the load balancer's limit. Raise
+        <code>TAGURU_REQUEST_TIMEOUT_SECS</code> — say, to give a slow embedding bridge more
+        room across retries — and <code>--timeout</code> on the backend service has to move
+        with it, or the load balancer returns 504 while the server is still mid-request and
+        would have answered.</li>
+      <li><b>Connection draining ≥ the request budget.</b> When a backend leaves the pool,
+        in-flight requests get exactly the configured drain timeout to finish, then the
+        connection is cut. Size it to <code>TAGURU_REQUEST_TIMEOUT_SECS</code> or above, and
+        keep it at or below the pod's grace period on GKE (see
+        <a href="#compute">grace vs. drain</a>).</li>
+      <li><b>The Google-managed certificate needs a real, resolvable hostname</b> before it will
+        issue — point DNS at the load balancer's static IP first, then create the
+        <code>ManagedCertificate</code>; it stays <code>Provisioning</code> until the domain
+        resolves and the challenge succeeds, which can take longer than the first impatient
+        check.</li>
+      <li>Once the server is reachable beyond the VPC, set
+        <code>TAGURU_RATE_LIMIT_PER_MIN</code>; Cloud Armor in front is optional on top.</li>
+    </ul>
+  </section>
+
+  <section id="backup">
+    <h2>Backups and DR: snapshot schedules + an export lane</h2>
+    <p class="section-sub">Every writer is fsync+rename, so a Persistent Disk snapshot is safe at any instant — even mid-write, with the server running.</p>
+    <ol>
+      <li><b>Automate snapshots with a resource policy</b> — verified CLI shape:
+        <pre><code>gcloud compute resource-policies create snapshot-schedule taguru-snap \
+  --region=REGION --daily-schedule --start-time=13:00 \
+  --max-retention-days=14</code></pre>
+        <code>POST /flush</code> first when you want a snapshot to contain this second's
+        writes rather than the last flush interval's.</li>
+      <li><b>Rehearse the restore</b>: create a disk from the snapshot, attach it, and run the
+        image against it:
+        <pre><code>gcloud compute disks create taguru-restore-test --source-snapshot=SNAPSHOT --zone=ZONE
+docker run --rm -v /mnt/restore/data:/data \
+  REGION-docker.pkg.dev/PROJECT/taguru-mirror/t0k0sh1/taguru:VERSION inspect /data</code></pre>
+        <code>taguru inspect</code> runs the same fully-validating load + WAL replay the server
+        boots with; a non-zero exit means the copy is corrupt, and a snapshot you have never
+        restored is not a backup.</li>
+      <li><b>Regional PD is the zone lane, snapshots are the region and corruption lane</b> —
+        see <a href="#failover">the failover procedure</a> for the former; a Regional PD is
+        still one write history, so it does not replace the latter.</li>
+      <li><b>Keep a second, environment-independent lane:</b> <code>taguru export --url</code>
+        against the running server writes portable JSONL batch streams — ship them to Cloud
+        Storage on a schedule. They restore anywhere through <code>taguru import</code>, across
+        versions and machines. Note the export's own caveat: each context's stream is
+        internally consistent, but a multi-context export is not one point in time — the
+        snapshot lane is.</li>
+    </ol>
+    <p class="note warn">
+      With <code>TAGURU_REPLICATE_URL=gs://BUCKET</code> the data directory also ships
+      continuously — verified end to end: a running server shipped its first generation to a
+      bucket within a second of boot, and <code>taguru restore --out DIR gs://BUCKET</code>
+      into an empty directory followed by <code>taguru inspect</code> came back clean, no
+      corruption, no manual repair. Credentials ride Application Default Credentials on a VM
+      or Workload Identity on GKE — nothing cloud-specific to configure beyond the bucket URL.
+      This lane complements, not replaces, the snapshot you can hand to
+      <code>taguru inspect</code> — see
+      <a href="architecture.html#replicas">the promotion runbook</a> for the read-replica side
+      of the same mechanism.
+    </p>
+  </section>
+
+  <section id="observability">
+    <h2>Observability</h2>
+    <p class="section-sub">Three surfaces, three Google Cloud sinks — verified against a live GKE deployment, including one nesting detail worth knowing before it surprises you.</p>
+    <ul>
+      <li><b><code>/metrics</code></b> (Prometheus text format, confirmed against a live pod) →
+        Google Cloud Managed Service for Prometheus, via a <code>PodMonitoring</code> resource
+        on GKE or the Ops Agent's Prometheus receiver on a VM. The health-story metrics to
+        alert on are the flush failures behind <code>/health</code> and — with the embedding
+        tier wired — the circuit-breaker family described on
+        <a href="bedrock.html#embeddings">the Bedrock page</a>.</li>
+      <li><b><code>TAGURU_LOG_FORMAT=json</code></b> → Cloud Logging ingests it correctly, but
+        not entirely the way the field names suggest. Verified against real log entries from a
+        GKE pod: the <code>level</code> field <i>does</i> get mapped automatically to Cloud
+        Logging's <code>severity</code> (a <code>WARN</code> line surfaces as
+        <code>severity: WARNING</code> in a <code>gcloud logging read</code> query) — but the
+        human-readable text stays nested at <code>jsonPayload.fields.message</code>, not the
+        top-level <code>jsonPayload.message</code> Cloud Logging's console uses for its default
+        one-line summary. Filtering and alerting on severity works out of the box; expect to
+        expand each entry (or write a log-based view) to read the message itself.</li>
+      <li><b><code>OTEL_EXPORTER_OTLP_ENDPOINT</code></b> → an OpenTelemetry collector →
+        Cloud Trace: the full retrieval span tree from <a href="tracing.html">Tracing</a>, with
+        no instrumentation to add.</li>
+    </ul>
+  </section>
+
+  <section id="scale-out">
+    <h2>Scale-out: shards, not replicas</h2>
+    <p class="section-sub">Write scale is disjoint context sets on independent instances — the model is on the <a href="kubernetes.html#sharding">Kubernetes page</a>.</p>
+    <ul>
+      <li>Each shard is a complete stack of this page: its own VM (or pod), its own Persistent
+        Disk, its own snapshots. Contexts that must be searched together (groups, cross-context
+        search reach only their own shard) cohabit on one shard.</li>
+      <li>In front, <code>taguru router</code> is stateless — run it anywhere, give clients one
+        hostname. If clients address shards directly instead, give each shard <b>its own
+        hostname</b> behind the load balancer: context names live in the path, so path-based
+        routing cannot split them.</li>
+      <li>Read scale is the replica pool tailing a bucket
+        (<a href="kubernetes.html#read-pool">the read pool</a>) — replicas are read-only and
+        need only storage credentials, not a disk, verified via the same
+        <code>TAGURU_REPLICATE_URL</code>/<code>taguru restore</code> path as
+        <a href="#backup">Backups and DR</a> above.</li>
+    </ul>
+  </section>
+
+  <section id="next">
+    <div class="next-links">
+      <a class="nav-card" href="kubernetes.html" style="flex:1 1 16rem">
+        <span class="nc-title">Kubernetes</span>
+        <p>The manifest GKE runs as-is: replicas: 1 + Recreate, ReadWriteOnce storage, the probe wiring.</p>
+      </a>
+      <a class="nav-card" href="docker-compose.html" style="flex:1 1 16rem">
+        <span class="nc-title">Docker Compose</span>
+        <p>The single-host model a GCE VM runs: one container, one volume, backups.</p>
+      </a>
+      <a class="nav-card" href="bedrock.html" style="flex:1 1 16rem">
+        <span class="nc-title">Amazon Bedrock</span>
+        <p>The other cloud that needs an embedding bridge — the general calibration story in full.</p>
+      </a>
+    </div>
+  </section>
+
+  <footer class="colophon">
+    <span>MIT License</span>
+    <a href="https://github.com/t0k0sh1/taguru">github.com/t0k0sh1/taguru</a>
+  </footer>
+
+</div>
+</main>
+</div>
+</body>
+</html>

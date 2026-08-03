@@ -98,3 +98,12 @@ embeddings — is the
 [Azure guide](https://t0k0sh1.github.io/taguru/azure.html);
 `kubernetes.yaml` applies to AKS as-is, with no storage setup at all
 (the default StorageClass is already the Azure Disk CSI driver).
+
+The Google Cloud mapping — GCE or GKE compute, Persistent Disk storage
+(never Filestore), an external HTTPS load balancer in front, Vertex AI
+embeddings behind a LiteLLM bridge, and a Regional Persistent Disk for
+cross-zone failover with no snapshot restore in the path — is the
+[Google Cloud guide](https://t0k0sh1.github.io/taguru/gcp.html);
+`kubernetes.yaml` applies to GKE Autopilot as-is, verified live: the
+only changes Autopilot makes are additive (an `ephemeral-storage`
+default, a `seccompProfile`), never an override.
