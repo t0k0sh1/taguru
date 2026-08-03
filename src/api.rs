@@ -319,7 +319,7 @@ impl ErrorCode {
 /// corrective-issue contract (`extract.rs`'s lenient walk builds the
 /// same four fields for a retrying LLM); this is the twin for a caller
 /// that can never itself retry the model — the MCP host.
-#[derive(Serialize, Clone)]
+#[derive(Debug, Serialize, Clone)]
 pub(crate) struct Issue {
     pub path: String,
     pub kind: &'static str,
@@ -400,6 +400,58 @@ impl Issue {
             kind: "unknown_reference",
             expected: expected.into(),
             actual: "not present in this request".to_string(),
+        }
+    }
+
+    /// The `closed_labels` (ADR 0009 §6.4) twin of [`Issue::unknown_reference`]:
+    /// same `kind` token (the wire vocabulary §8.1 fixes is the token, not
+    /// the constructor), but a truthful `actual` — the label was never
+    /// declared in this context's schema, which is a different fact from
+    /// "not present in this request."
+    #[allow(dead_code)] // called by schema::schema_issues; wired to a response by S4/S5 (#382/#383)
+    pub(crate) fn undeclared_label(path: impl Into<String>, expected: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            kind: "unknown_reference",
+            expected: expected.into(),
+            actual: "not declared in this context's schema".to_string(),
+        }
+    }
+
+    /// ADR 0009 §8.1's `"domain"` kind: the subject's asserted types are
+    /// disjoint from a relation's declared `domain`.
+    #[allow(dead_code)] // called by schema::schema_issues; wired to a response by S4/S5 (#382/#383)
+    pub(crate) fn domain(
+        path: impl Into<String>,
+        expected: impl Into<String>,
+        actual: impl Into<String>,
+    ) -> Self {
+        Self {
+            path: path.into(),
+            kind: "domain",
+            expected: expected.into(),
+            actual: actual.into(),
+        }
+    }
+
+    /// ADR 0009 §8.1's `"range"` kind: the object's asserted types are
+    /// disjoint from a relation's declared `range`. Named `range_type`
+    /// rather than `range` because [`Issue::range`] already owns that
+    /// identifier for a numeric-range failure — the two `kind` values
+    /// happen to share the wire string `"range"` (ADR 0009 §8.1 fixes the
+    /// token), but `path` always tells them apart: `.weight` for the
+    /// numeric case, `.subject`/`.object` for this one.
+    #[allow(dead_code)] // called by schema::schema_issues; wired to a response by S4/S5 (#382/#383)
+    pub(crate) fn range_type(
+        path: impl Into<String>,
+        expected: impl Into<String>,
+        actual: impl Into<String>,
+    ) -> Self {
+        Self {
+            path: path.into(),
+            kind: "range",
+            expected: expected.into(),
+            actual: actual.into(),
         }
     }
 

@@ -82,13 +82,19 @@ pub async fn explore(
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }
+    // ADR 0009 §6.3 exclusion 1: `schema:type` never bridges a walk.
+    // Resolved before `read_context` — see `AppState::hidden_label`'s
+    // own doc for why it must not run inside that closure.
+    let hidden = state.hidden_label(&name);
+    let excluded: Vec<&str> = hidden.into_iter().collect();
     match state.read_context(&name, |context| {
         let origins: Vec<&str> = request.origins.iter().map(String::as_str).collect();
         // The clamp turns "omitted = the whole component" into
         // "omitted = the server's hop ceiling".
-        context.explore(
+        context.explore_excluding(
             &origins,
             clamp(request.max_depth, Context::UNBOUNDED, MAX_EXPLORE_DEPTH),
+            &excluded,
         )
     }) {
         Ok(matches) => {
@@ -146,12 +152,16 @@ pub async fn activate(
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }
+    // ADR 0009 §6.3 exclusion 1, the ranked sibling of `explore`'s.
+    let hidden = state.hidden_label(&name);
+    let excluded: Vec<&str> = hidden.into_iter().collect();
     match state.read_context(&name, |context| {
         let origins: Vec<&str> = request.origins.iter().map(String::as_str).collect();
-        context.activate(
+        context.activate_excluding(
             &origins,
             request.decay.unwrap_or(0.5),
             clamp(request.limit, 20, MAX_MATCH_LIMIT),
+            &excluded,
         )
     }) {
         Ok((total, matches)) => {

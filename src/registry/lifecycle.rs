@@ -781,6 +781,59 @@ impl AppState {
         Some(outcome)
     }
 
+    /// ADR 0009 §6.3's one gate for the reserved `schema:type` label:
+    /// "an installed schema document exists," never "mode != off." An
+    /// operator who installs a schema but leaves it in `off` while
+    /// drafting types has already committed to the reserved label
+    /// meaning something — `off` only means "don't enforce domain/range
+    /// yet," not "pretend the label is ordinary." `Some(SCHEMA_TYPE_LABEL)`
+    /// whenever this context has ever had a schema installed, in any
+    /// mode; `None` only for a context that never installed one (or an
+    /// unknown/deleted name). A schema recorded but currently unreadable
+    /// (`schema_of`'s `Err` arm) maps CONSERVATIVELY to "hidden" — per
+    /// [`schema`]'s own module doc, every trouble case there is a hard
+    /// refusal, never a silent fallback, and this helper must not be the
+    /// one place that quietly un-reserves the label because a read
+    /// failed.
+    ///
+    /// ⚠ Never call this from inside a [`AppState::read_context`]
+    /// closure: the slow path (through [`AppState::schema_of`]) takes
+    /// this entry's write lock, while `read_context` already holds its
+    /// read lock for the whole closure — parking_lot's `RwLock` is
+    /// neither reentrant nor reader-preferring, so that ordering
+    /// deadlocks. Resolve the hidden label first, then pass the
+    /// `Option<&str>` into the closure.
+    pub fn hidden_label(&self, name: &str) -> Option<&'static str> {
+        match self.schema_of(name)? {
+            Ok(Some(_)) => Some(schema::SCHEMA_TYPE_LABEL),
+            Ok(None) => None,
+            Err(_) => Some(schema::SCHEMA_TYPE_LABEL),
+        }
+    }
+
+    /// ADR 0009 §6.3 guard 2's `add_label_alias` bullet: the pre-flight
+    /// an alias-creating write consults before it runs, mirroring
+    /// `predicted_alias_rejection`'s own read-only-prediction shape.
+    /// Only meaningful once [`AppState::hidden_label`] says a schema
+    /// exists — a schema-free context's `schema:type` stays an ordinary
+    /// label (guard 1), so nothing here refuses anything for it.
+    /// Deliberately does not chase a multi-hop alias chain: once a
+    /// schema exists, no *live* alias can ever resolve to the reserved
+    /// label (this guard and `PUT /schema`'s migration-boundary check
+    /// both stand in its way going forward), so a direct value
+    /// comparison against `labels` is the whole check.
+    pub fn reserved_alias_conflict(
+        &self,
+        name: &str,
+        labels: &BTreeMap<String, String>,
+    ) -> Option<String> {
+        self.hidden_label(name)?;
+        labels
+            .iter()
+            .find(|(_, canonical)| canonical.as_str() == schema::SCHEMA_TYPE_LABEL)
+            .map(|(alias, _)| alias.clone())
+    }
+
     /// `PUT /contexts/{name}/schema` (#380): installs `installed` as
     /// `name`'s schema document, replacing whatever was there wholesale
     /// — there is no delta form, so a retry after a failure below is
@@ -820,15 +873,18 @@ impl AppState {
                 return Some(Err(PutSchemaError::Load(error)));
             }
             self.recount_entry(inner);
-            // ADR 0009 §6.3 guard 3's migration-boundary counterpart:
-            // an already-persisted `label_alias` resolving to the
-            // reserved type label. (Guard 2 itself — refusing
+            // ADR 0009 §6.3 guard 2's install-time bullet: an
+            // already-persisted `label_alias` resolving to the reserved
+            // type label. Guard 2's other two bullets — refusing
             // `add_label_alias`/a batch's own `batch.labels` from ever
-            // CREATING such an alias once a schema exists — is S3's
-            // (#381) job, so this check runs on every `PUT`, not only
-            // the off-to-installed transition the ADR names: without
-            // guard 2 yet in place, a violating alias can still be
-            // created AFTER this schema installs.)
+            // CREATING such an alias once a schema exists — are
+            // `AppState::reserved_alias_conflict` (the aliases handler)
+            // and `schema_issues`' `SchemaCheck::reserved` (a future
+            // write entrance, S4/S5) respectively; neither existed
+            // before this schema's own document did, so this call site
+            // is the one place a violating alias predating them could
+            // still slip through, and it stays on every `PUT` (not only
+            // the off-to-installed transition) for exactly that reason.
             let Slot::Hot(context) = &inner.slot else {
                 unreachable!("ensure_hot leaves the slot hot");
             };

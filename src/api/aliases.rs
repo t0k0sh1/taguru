@@ -163,6 +163,25 @@ pub async fn add_aliases(
             }
         }
     }
+    // ADR 0009 §6.3 guard 2's `add_label_alias` bullet: once a schema
+    // exists (any mode — `AppState::hidden_label`'s own doc), no path
+    // may create an alias resolving to the reserved type label. A
+    // schema-free context never reaches `reserved_alias_conflict`'s
+    // inner check (`hidden_label` short-circuits), so this costs a
+    // schema-free write nothing beyond one lock probe.
+    if let Some(alias) =
+        tokio::task::block_in_place(|| state.reserved_alias_conflict(&name, &request.labels))
+    {
+        return error(
+            ErrorCode::InvalidArgument,
+            format!(
+                "label alias '{alias}' would resolve to '{}', the relation label reserved \
+                 for type assertions (ADR 0009 §6.3) — rename the alias",
+                crate::schema::SCHEMA_TYPE_LABEL
+            ),
+            started_at,
+        );
+    }
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }

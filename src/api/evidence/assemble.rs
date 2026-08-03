@@ -325,11 +325,17 @@ pub async fn assemble_evidence(
             taguru.activation.count = tracing::field::Empty,
         );
         let _guard = activate_span.enter();
+        // ADR 0009 §6.3 exclusion 1, same as `POST /contexts/{name}/activate`
+        // — resolved before `read_context`, per `AppState::hidden_label`'s
+        // own doc.
+        let hidden = state.hidden_label(&name);
+        let excluded: Vec<&str> = hidden.into_iter().collect();
         match state.read_context(&name, |context| {
-            context.activate(
+            context.activate_excluding(
                 &anchor_refs,
                 request.activate_decay.unwrap_or(0.5),
                 clamp(request.activate_limit, 20, MAX_MATCH_LIMIT),
+                &excluded,
             )
         }) {
             Ok((total, matches)) => {

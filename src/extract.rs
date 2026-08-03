@@ -4488,12 +4488,22 @@ struct Fact {
 }
 
 impl Extraction {
-    /// The relation spellings this document settled on.
+    /// The relation spellings this document settled on. ADR 0009 §6.3
+    /// exclusion 2: `schema:type` never enters this vocabulary — `extract`
+    /// has no notion of whether the target context even has a schema, so
+    /// unlike the server-side exclusions (gated on "a schema document
+    /// exists") this one is unconditional, the same way a producer never
+    /// needs to know a server-side reserved id exists to simply never
+    /// coin one. Filtering here, rather than where `system_prompt` emits
+    /// its vocabulary block, covers both places this set accumulates —
+    /// live extraction output and `absorb_vocabulary`'s reread of past
+    /// batch files — with one line instead of two.
     fn label_vocabulary(&self) -> BTreeSet<String> {
         self.associations
             .iter()
             .map(|fact| fact.label.clone())
             .chain(self.labels.values().cloned())
+            .filter(|label| label != crate::schema::SCHEMA_TYPE_LABEL)
             .collect()
     }
 }

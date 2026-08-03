@@ -222,19 +222,61 @@ impl Context {
     /// the whole vocabulary on every call — the paged sibling of
     /// [`Context::labels`].
     pub fn label_page(&self, after: Option<&str>, limit: usize) -> (usize, Vec<String>) {
+        self.label_page_excluding(after, limit, &[])
+    }
+
+    /// [`Context::label_page`] with a hidden-label set removed from both
+    /// the page and the cursor-independent `total` — the read-side half of
+    /// ADR 0009 §6.3's reserved-label exclusion, additive so the published
+    /// [`Context::label_page`] signature never breaks. `excluded` is
+    /// resolved once up front; a name that was never interned costs one
+    /// `BTreeSet` probe and nothing more, so a schema-free caller passing
+    /// `&[]` takes the exact `label_page` path.
+    pub fn label_page_excluding(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+        excluded: &[&str],
+    ) -> (usize, Vec<String>) {
         use std::ops::Bound;
 
         let start = match after {
             Some(after) => Bound::Excluded(after),
             None => Bound::Unbounded,
         };
+        if excluded.is_empty() {
+            let page = self
+                .label_name_index
+                .range::<str, _>((start, Bound::Unbounded))
+                .take(limit)
+                .cloned()
+                .collect();
+            return (self.label_name_index.len(), page);
+        }
+        let hidden = excluded
+            .iter()
+            .filter(|name| self.label_name_index.contains(**name))
+            .count();
         let page = self
             .label_name_index
             .range::<str, _>((start, Bound::Unbounded))
+            .filter(|name| !excluded.contains(&name.as_str()))
             .take(limit)
             .cloned()
             .collect();
-        (self.label_name_index.len(), page)
+        (self.label_name_index.len() - hidden, page)
+    }
+
+    /// Exact (never fuzzy) resolution of a spelling — alias or
+    /// canonical — to its canonical concept name. `None` when the
+    /// spelling was never interned. Distinct from [`Context::resolve`],
+    /// which is a similarity search; this is a lookup, the basis a schema
+    /// check needs to key a concept's type set by its one true name
+    /// regardless of which spelling an association used.
+    pub fn canonical_concept(&self, spelling: &str) -> Option<&str> {
+        self.concept_ids
+            .get(spelling)
+            .map(|&id| self.concept_name(id))
     }
 
     /// Every canonical concept spelling in insertion order — the
