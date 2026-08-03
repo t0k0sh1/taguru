@@ -2,9 +2,11 @@
 # taguru itself is NOT started here — bring your own (a local
 # `cargo run`, `deploy/docker-compose.yml`, or a real deployment) and
 # point prometheus.yml at it. Validated topology: taguru as a host
-# process, scraped via `host.docker.internal` (Docker Desktop
-# resolves this out of the box; the extra_hosts line below is what
-# Linux needs for the same address to work).
+# process, scraped via `host.docker.internal` — the extra_hosts line
+# below only makes that name resolve on Linux (Docker Desktop already
+# does); taguru itself still has to bind somewhere the container's
+# gateway route reaches, i.e. TAGURU_ADDR=0.0.0.0:8248, not the
+# loopback-only default (README's "Start taguru" step).
 #
 #   docker compose up -d
 #   open http://localhost:3000   # admin/admin, change on first login

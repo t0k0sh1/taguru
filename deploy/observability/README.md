@@ -13,8 +13,9 @@ serve` while writing this, not just written from reading the code.
   own (see below) and point [`prometheus.yml`](prometheus.yml) at it.
 - [`prometheus.yml`](prometheus.yml) — one scrape job, `taguru`,
   targeting `host.docker.internal:8248` by default (Docker Desktop
-  resolves this natively; the compose file's `extra_hosts` line is
-  what makes the same address work on Linux).
+  resolves this natively; the compose file's `extra_hosts` line adds
+  the same name resolution on Linux — but resolution alone isn't
+  enough, see the "Start taguru" step below).
 - [`grafana/provisioning/`](grafana/provisioning) — a Prometheus
   datasource (`uid: prometheus`, pointed at the `prometheus` service
   on the compose network) and a dashboard provider, both loaded on
@@ -30,7 +31,15 @@ serve` while writing this, not just written from reading the code.
 
 1. **Start taguru.** Any of these work, since only `/metrics` matters
    here:
-   - locally: `TAGURU_API_TOKENS='ops:demo-token' TAGURU_METRICS_PER_CONTEXT=all cargo run --release`
+   - locally: `TAGURU_ADDR=0.0.0.0:8248 TAGURU_API_TOKENS='ops:demo-token' TAGURU_METRICS_PER_CONTEXT=all cargo run --release`
+     — `TAGURU_ADDR` matters here: the default (`127.0.0.1:8248`) only
+     accepts connections from the host itself, and on Linux the
+     Prometheus container reaches `host.docker.internal` through the
+     gateway route, not loopback, so a loopback-bound taguru is
+     unreachable from it (`extra_hosts` above only resolves the name;
+     it doesn't change where taguru is listening). Docker Desktop's
+     `host.docker.internal` proxies through the host network stack and
+     tolerates the loopback default, but `0.0.0.0` works either way.
    - the single-host compose:
      `TAGURU_API_TOKENS='ops:demo-token' docker compose -f ../docker-compose.yml up -d`
      — then point `prometheus.yml` at `taguru:8248` and join this
@@ -69,11 +78,13 @@ serve` while writing this, not just written from reading the code.
    they're rate()-windowed, so a server that's been idle for 5
    minutes legitimately shows zero.
 
-5. **Tear down:** `docker compose down` removes both containers;
-   nothing here persists state outside them (Prometheus's TSDB and
-   Grafana's sqlite both live in anonymous container volumes, so
-   `down` — without `-v`, which isn't needed since none are named —
-   already discards them on the next `up`).
+5. **Tear down:** `docker compose down -v` removes both containers and
+   Prometheus's TSDB, which the image declares as an anonymous volume
+   at `/prometheus` — plain `docker compose down` leaves that volume
+   behind, so the next `up` resumes with the old series still there.
+   Grafana's sqlite database lives in the container's own writable
+   layer (no volume declared), so it's gone as soon as the container
+   is removed either way.
 
 ## Verified, not just documented
 
