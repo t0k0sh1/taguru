@@ -1966,3 +1966,87 @@ fn importing_into_an_absent_context_needs_a_create_block() {
     let _ = std::fs::remove_dir_all(&batches);
     let _ = std::fs::remove_dir_all(&data_dir);
 }
+
+/// A schema document (#382, S4 of #218's ADR 0009 split): one relation
+/// (`杜氏`: domain `Brewery`, range `Person`) — mirrors
+/// `tests/http_api/schema_import.rs::document`, kept as its own small
+/// copy since offline import needs no other schema fixture.
+fn schema_document(mode: &str) -> Value {
+    json!({
+        "schema": 1,
+        "mode": mode,
+        "closed_labels": false,
+        "types": {
+            "Brewery": {"is_a": []},
+            "Person": {"is_a": []}
+        },
+        "relations": {
+            "杜氏": {"domain": ["Brewery"], "range": ["Person"]}
+        }
+    })
+}
+
+/// A domain violation: `田中` typed `Person`, disjoint from `杜氏`'s
+/// declared `domain: [Brewery]` — the offline-import twin of
+/// `schema_import.rs::domain_violation_batch`.
+const DOMAIN_VIOLATION_BATCH: &str = "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\"}\n\
+     {\"subject\": \"田中\", \"label\": \"schema:type\", \"object\": \"Person\", \"weight\": 1.0}\n\
+     {\"subject\": \"田中\", \"label\": \"杜氏\", \"object\": \"青嶺酒造\", \"weight\": 1.0}\n";
+
+/// `taguru import`'s report line gains `schema warnings: N` in `warn`
+/// mode (ADR 0009 §8.3) — the offline CLI's only view of a warning,
+/// since it has no JSON envelope to carry path-addressed `Issue`s in.
+#[test]
+fn import_report_line_names_schema_warnings_in_warn_mode() {
+    let server = Server::start("schema-import-cli-warn");
+    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "PUT",
+        "/contexts/sake/schema",
+        Some(schema_document("warn")),
+    );
+    let data_dir = server.stop_gracefully();
+
+    let batches = batch_dir("schema-import-cli-warn");
+    let file = batches.join("batch.jsonl");
+    std::fs::write(&file, DOMAIN_VIOLATION_BATCH).unwrap();
+
+    let (code, stdout, stderr) = run_import(&data_dir, &[file.to_str().unwrap()]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("schema warnings: 1"), "{stdout}");
+
+    let _ = std::fs::remove_dir_all(&batches);
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+/// `strict`: a schema violation refuses the batch — exit 1, the
+/// refusal on stderr, and nothing landed (the same predicted-rejection
+/// guarantee `apply_batch` gives an alias conflict).
+#[test]
+fn import_refuses_a_strict_schema_violation_and_writes_nothing() {
+    let server = Server::start("schema-import-cli-strict");
+    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "PUT",
+        "/contexts/sake/schema",
+        Some(schema_document("strict")),
+    );
+    let data_dir = server.stop_gracefully();
+
+    let batches = batch_dir("schema-import-cli-strict");
+    let file = batches.join("batch.jsonl");
+    std::fs::write(&file, DOMAIN_VIOLATION_BATCH).unwrap();
+
+    let (code, stdout, stderr) = run_import(&data_dir, &[file.to_str().unwrap()]);
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stderr.contains("nothing was applied"), "{stderr}");
+
+    let server = Server::start_on("schema-import-cli-strict-reboot", data_dir);
+    assert_eq!(
+        server.ok("GET", "/contexts/sake", None)["stats"]["associations"],
+        json!(0),
+        "the refused batch must not have written the type assertion or the fact"
+    );
+
+    let _ = std::fs::remove_dir_all(&batches);
+}

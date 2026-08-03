@@ -831,6 +831,11 @@ export interface ImportOutcome {
   locators_stored: number;
   locators_dropped: number;
   association_paragraphs_dropped: number;
+  /**
+   * `warn`-mode schema violations this batch's associations raised (ADR
+   * 0009 §8.3). Absent only from a server that predates the field.
+   */
+  schema_violations?: number;
 }
 
 /**

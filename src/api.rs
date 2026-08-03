@@ -93,6 +93,14 @@ pub struct ApiResponse<T> {
     result: T,
     status: &'static str,
     time: f64,
+    /// `warn`-mode schema violations (ADR 0009 §8.3): field-for-field
+    /// identical to [`ApiError`]'s own `issues`, so a client's violation
+    /// handler is the same code whether the write refused (`strict`) or
+    /// succeeded with warnings (`warn`). Absent from every response with
+    /// nothing to say — `off` mode and all of today's traffic included —
+    /// keeping every existing success response byte-identical.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    issues: Vec<Issue>,
 }
 
 impl<T> ApiResponse<T> {
@@ -101,6 +109,16 @@ impl<T> ApiResponse<T> {
             result,
             status: "ok",
             time: started_at.elapsed().as_secs_f64(),
+            issues: Vec::new(),
+        }
+    }
+
+    fn ok_with_issues(result: T, issues: Vec<Issue>, started_at: Instant) -> Self {
+        Self {
+            result,
+            status: "ok",
+            time: started_at.elapsed().as_secs_f64(),
+            issues,
         }
     }
 }
@@ -408,7 +426,6 @@ impl Issue {
     /// the constructor), but a truthful `actual` — the label was never
     /// declared in this context's schema, which is a different fact from
     /// "not present in this request."
-    #[allow(dead_code)] // called by schema::schema_issues; wired to a response by S4/S5 (#382/#383)
     pub(crate) fn undeclared_label(path: impl Into<String>, expected: impl Into<String>) -> Self {
         Self {
             path: path.into(),
@@ -420,7 +437,6 @@ impl Issue {
 
     /// ADR 0009 §8.1's `"domain"` kind: the subject's asserted types are
     /// disjoint from a relation's declared `domain`.
-    #[allow(dead_code)] // called by schema::schema_issues; wired to a response by S4/S5 (#382/#383)
     pub(crate) fn domain(
         path: impl Into<String>,
         expected: impl Into<String>,
@@ -441,7 +457,6 @@ impl Issue {
     /// happen to share the wire string `"range"` (ADR 0009 §8.1 fixes the
     /// token), but `path` always tells them apart: `.weight` for the
     /// numeric case, `.subject`/`.object` for this one.
-    #[allow(dead_code)] // called by schema::schema_issues; wired to a response by S4/S5 (#382/#383)
     pub(crate) fn range_type(
         path: impl Into<String>,
         expected: impl Into<String>,
@@ -568,6 +583,24 @@ impl ApiError {
 
 pub(crate) fn ok<T: Serialize>(result: T, started_at: Instant) -> Response {
     (StatusCode::OK, Json(ApiResponse::ok(result, started_at))).into_response()
+}
+
+/// [`ok`], carrying `warn`-mode schema violations (ADR 0009 §8.3) in the
+/// envelope's `issues` — truncated at [`MAX_LISTED_ISSUES`] like every
+/// other collect-all pass, via [`truncate_issues`]; the true count is
+/// each result's own concern (e.g. `ImportOutcome.schema_violations`),
+/// not this envelope's.
+pub(crate) fn ok_with_issues<T: Serialize>(
+    result: T,
+    issues: Vec<Issue>,
+    started_at: Instant,
+) -> Response {
+    let (issues, _total) = truncate_issues(issues);
+    (
+        StatusCode::OK,
+        Json(ApiResponse::ok_with_issues(result, issues, started_at)),
+    )
+        .into_response()
 }
 
 /// The one constructor every JSON error response goes through, status

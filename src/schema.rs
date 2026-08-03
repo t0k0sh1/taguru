@@ -33,17 +33,13 @@ use crate::registry::{schema_corrupt_path, schema_path};
 use crate::sha256::sha256_hex;
 use crate::storage::write_atomic;
 
-// `schema_issues` (S3, #381) is complete and unit-tested, but no write
-// entrance calls it yet — that is S4 (#382, `predicted_schema_rejection`/
-// `preview_batch`) and S5 (#383, the associations pre-write arm), by
-// design (#381's own scope note: "library-level only; no write entrance
-// wired yet"). `#[allow(dead_code)]` on the module covers everything
-// inside it; the re-export below additionally needs `unused_imports`
-// silenced until one of those issues starts using it.
-#[allow(dead_code)]
+// `schema_issues` (S3, #381) is the one pure function every schema-
+// checking write entrance shares. S4 (#382) wires it into
+// `predicted_schema_rejection`/`preview_batch` (`src/ingest.rs`), the
+// import path; S5 (#383, the associations pre-write arm) is the one
+// still to land.
 mod check;
-#[allow(unused_imports)]
-pub(crate) use check::{SchemaCheck, SchemaCheckInput, SchemaEnv, schema_issues};
+pub(crate) use check::{SchemaCheckInput, SchemaEnv, schema_issues};
 
 /// This binary's only readable document shape. Independent of
 /// `BATCH_VERSION`/`GROUP_VERSION`/`IMAGE_VERSION` — [`GroupRecord`]'s
@@ -259,7 +255,6 @@ impl InstalledSchema {
     /// an UNDECLARED type name — legal everywhere, never a violation on
     /// its own (§6.2) — answers its own singleton, since it has no
     /// hierarchy above it to consult.
-    #[allow(dead_code)] // called by check::SchemaEnv::build; see mod check's own allow
     pub(crate) fn closure_of(&self, type_name: &str) -> BTreeSet<String> {
         let mut closure = self.ancestors.get(type_name).cloned().unwrap_or_default();
         closure.insert(type_name.to_string());
