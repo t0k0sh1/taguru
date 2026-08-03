@@ -141,8 +141,10 @@
         image is the binary alone on <code>scratch</code>, with no shell and no
         <code>mkdir</code>, so the host does this once:
         <pre><code>mkfs.ext4 -F /dev/disk/by-id/google-taguru-data
+mkdir -p /mnt/taguru
 mount /dev/disk/by-id/google-taguru-data /mnt/taguru
-mkdir -p /mnt/taguru/data &amp;&amp; chown 65532:65532 /mnt/taguru/data</code></pre></li>
+mkdir -p /mnt/taguru/data &amp;&amp; chown 65532:65532 /mnt/taguru/data
+echo '/dev/disk/by-id/google-taguru-data /mnt/taguru ext4 discard,defaults,nofail 0 2' &gt;&gt; /etc/fstab</code></pre></li>
       <li><code>docker run --restart unless-stopped</code> (or a systemd unit with
         <code>Restart=on-failure</code>) is the restart policy — restarts are the host's job,
         not the load balancer's (see <a href="#network">the probe split</a>).</li>
