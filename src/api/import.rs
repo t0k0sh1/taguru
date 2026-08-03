@@ -17,7 +17,8 @@ use crate::registry::AppState;
 use super::groups::{scope_refusal, scoped_member_contexts};
 use super::{
     AppBytes, AppPath, AppQuery, ErrorCode, Issue, RefusalDetail, access_error, access_error_noted,
-    deadline_exceeded, error, group_not_found, key_name, nesting_error_code, ok, validation_error,
+    deadline_exceeded, error, group_not_found, key_name, nesting_error_code, ok,
+    ok_with_issues_total, validation_error,
 };
 
 /// `POST /import`'s query string.
@@ -56,6 +57,12 @@ pub struct ImportOutcome {
     /// batch's passage split does not have — the association itself
     /// still landed. Reported like `questions_dropped`/`sections_dropped`.
     pub association_paragraphs_dropped: usize,
+    /// `warn`-mode schema violations this batch's associations raised
+    /// (ADR 0009 §8.3) — the true count, surviving the response
+    /// envelope's own `issues` truncation. Always 0 for `off`, no
+    /// schema, or `strict` (a `strict` violation refuses the batch
+    /// instead, so it never reaches an `ImportOutcome` at all).
+    pub schema_violations: usize,
 }
 
 /// What a `POST /import` body accomplished — one [`ImportOutcome`] per
@@ -108,6 +115,7 @@ pub(crate) fn import_outcome(
         locators_stored: applied.locators_stored,
         locators_dropped: applied.locators_dropped,
         association_paragraphs_dropped: applied.association_paragraphs_dropped,
+        schema_violations: applied.schema_violations,
     }
 }
 
@@ -138,6 +146,25 @@ fn alias_rejection_issue(batch_index: usize, rejection: &AliasRejection) -> Issu
             Issue::conflict(path, "context capacity available", "context is full")
         }
     }
+}
+
+/// Extends `schema::schema_issues`' batch-relative paths
+/// (`associations[{i}]...`, `labels['{alias}']`) with the stream
+/// position [`crate::ingest::predicted_schema_rejection`] itself has no
+/// way to know (ADR 0009 §8.2's import grammar,
+/// `batches[{b}].associations[{a}]...`) — the schema twin of
+/// [`alias_rejection_issue`]'s own `batches[{index}]` prefix. Shared by
+/// both the strict-refusal arm below and the warn-mode success path, so
+/// the two present identical `Issue` values for the same violation (ADR
+/// 0009 §8.3).
+fn schema_issues_in_batch(batch_index: usize, issues: Vec<Issue>) -> Vec<Issue> {
+    issues
+        .into_iter()
+        .map(|issue| Issue {
+            path: format!("batches[{batch_index}].{}", issue.path),
+            ..issue
+        })
+        .collect()
 }
 
 /// The `integrity` verdict for a mid-stream import refusal (issue
@@ -235,6 +262,33 @@ fn import_refusal(
                 message,
                 RefusalDetail {
                     issues: vec![issue],
+                    integrity: Some(integrity),
+                    durable_batches,
+                    retryable_after_correction: Some(true),
+                },
+                started_at,
+            )
+        }
+        // Predicted before anything mutated, same position as
+        // `Rejected` above — no create, no marker, no retraction, so
+        // there is no write to note here either. ADR 0009 §8.1: a
+        // reserved-label collision is a namespace conflict (409, like
+        // an alias `Conflict`); a domain/range violation is a refused
+        // value (400).
+        crate::ingest::ApplyRefusal::Schema(rejection) => {
+            let (integrity, durable_batches) = stream_integrity(durable_batches, dry_run);
+            let code = if rejection.reserved {
+                ErrorCode::Conflict
+            } else {
+                ErrorCode::InvalidArgument
+            };
+            let message = format!("{note}{}", rejection.text());
+            let issues = schema_issues_in_batch(batch_index, rejection.issues);
+            validation_error(
+                code,
+                message,
+                RefusalDetail {
+                    issues,
                     integrity: Some(integrity),
                     durable_batches,
                     retryable_after_correction: Some(true),
@@ -456,6 +510,20 @@ pub async fn import_batch(
     // async worker rather than just one call in it.
     let outcome = tokio::task::block_in_place(|| {
         let mut outcomes: Vec<ImportOutcome> = Vec::with_capacity(total);
+        // `warn`-mode schema violations (ADR 0009 §8.3), accumulated
+        // across every batch in the stream with this batch's own
+        // `batches[{index}]` prefix already applied. `warn_issues` is
+        // capped as it is collected, not just at the end — a large
+        // `warn`-mode stream must not first pile up a multiple of
+        // `MAX_LISTED_ISSUES` (one batch's worth each) only to discard
+        // the excess. `warn_total`, unlike the list, is never capped —
+        // `ok_with_issues_total` (`src/api.rs`) needs the true
+        // cross-batch count, which `warn_issues.len()` alone could no
+        // longer answer once the cap trims a later batch's
+        // contribution; each batch's own `ImportOutcome.schema_violations`
+        // carries its individual count regardless of either total.
+        let mut warn_issues: Vec<Issue> = Vec::new();
+        let mut warn_total: usize = 0;
         for (index, batch) in stream.batches.iter().enumerate() {
             // Each landed batch is durable (retract-then-apply), so a
             // budget that runs out partway is safe to report as a
@@ -560,6 +628,11 @@ pub async fn import_batch(
                         "import batch applied",
                     );
                     outcomes.push(import_outcome(batch, &applied));
+                    warn_total += applied.schema_violations;
+                    if warn_issues.len() < crate::api::MAX_LISTED_ISSUES {
+                        warn_issues.extend(schema_issues_in_batch(index, applied.schema_issues));
+                        warn_issues.truncate(crate::api::MAX_LISTED_ISSUES);
+                    }
                 }
                 Err(refusal) => {
                     let note = import_batch_note(
@@ -626,17 +699,19 @@ pub async fn import_batch(
                 }
             }
         }
-        Ok((outcomes, group_outcomes))
+        Ok((outcomes, group_outcomes, warn_issues, warn_total))
     });
-    let (outcomes, group_outcomes) = match outcome {
+    let (outcomes, group_outcomes, warn_issues, warn_total) = match outcome {
         Ok(applied) => applied,
         Err(refusal) => return *refusal,
     };
-    ok(
+    ok_with_issues_total(
         ImportStreamOutcome {
             batches: outcomes,
             groups: group_outcomes,
         },
+        warn_issues,
+        warn_total,
         started_at,
     )
 }

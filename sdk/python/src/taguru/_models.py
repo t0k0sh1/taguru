@@ -794,6 +794,9 @@ class ImportOutcome:
     locators_stored: int
     locators_dropped: int
     association_paragraphs_dropped: int
+    #: ``warn``-mode schema violations this batch's associations raised
+    #: (ADR 0009 §8.3). Defaulted for a server predating this field.
+    schema_violations: int = 0
 
 
 @dataclass(slots=True, frozen=True)

@@ -406,13 +406,20 @@ balancer does).
 
 **Rejected `add_associations`, `store_passages`, and `import` calls carry
 structured detail** (additive fields, present only where they apply —
-absent entirely from every other error and from every success):
+absent entirely from every other error and, outside the one exception
+below, from every success):
 `issues` (up to 20, with the true count named in `error` when there are
 more) is an array of `{"path", "kind", "expected", "actual"}` — `path`
 locates the offending field exactly (`associations[1].weight`,
 `passages['doc'].questions[2].question`, `batches[0].concepts['alias']`),
 `kind` is one of `missing` / `type` / `empty` / `too_long` / `range` /
-`over_limit` / `unknown_reference` / `conflict`, and `expected`/`actual`
+`over_limit` / `unknown_reference` / `conflict` / `domain` — a context
+schema's `domain`/`range` constraint on a relation (ADR 0009 §8.1)
+adds `domain` and reuses the wire string `"range"` for the object side,
+so a `range` issue on `associations[1].subject`/`.object` means the
+schema's `domain`/`range` constraint, never the numeric-weight `range`
+above; `path` always disambiguates (`.weight` for the numeric case,
+`.subject`/`.object` for the schema case). `expected`/`actual`
 describe the mismatch in the same words a human reads in `error`.
 `integrity` says what a rejection actually left behind:
 `"nothing_written"` (the whole call, or the whole rejected
@@ -441,6 +448,17 @@ are complementary, not redundant. The server never retries the
 extracting LLM itself here — MCP has no model call to retry — so
 correction and resubmission are entirely the calling host's
 responsibility.
+
+**The one success-envelope exception:** `import` against a context
+whose schema mode is `warn` (ADR 0009 §7.1) answers `200` with the
+batch applied, but the same `issues` array rides the success envelope
+alongside `result` — `domain`/`range` violations this write raised,
+identical `Issue` values to what a `strict` context would have refused
+with. `warn` never refuses a write; it reports. Each affected batch's
+own `ImportOutcome.schema_violations` carries the true count, surviving
+`issues`' own 20-item cap. `off` mode and a schema-free context both
+omit `issues` from a success exactly as before — this exception fires
+only under `warn`.
 
 - `401` auth (above). `404` unknown context or group. `409` duplicate
   create / alias conflict / a `POST /maintenance/compact` overlapping

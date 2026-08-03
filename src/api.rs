@@ -613,6 +613,22 @@ pub(crate) fn ok_with_issues<T: Serialize>(
     started_at: Instant,
 ) -> Response {
     let (issues, total) = truncate_issues(issues);
+    ok_with_issues_total(result, issues, total, started_at)
+}
+
+/// [`ok_with_issues`] for a caller that has already capped `issues`
+/// itself and tracked the true count separately — `POST /import`'s
+/// multi-batch stream, where `issues` is accumulated (and capped) one
+/// batch at a time as it streams, so re-deriving the total from
+/// `issues.len()` after the fact would undercount once the cap has
+/// trimmed some batch's contribution. `issues` is NOT re-truncated
+/// here — the caller's own cap already applies.
+pub(crate) fn ok_with_issues_total<T: Serialize>(
+    result: T,
+    issues: Vec<Issue>,
+    total: usize,
+    started_at: Instant,
+) -> Response {
     (
         StatusCode::OK,
         Json(ApiResponse::ok_with_issues(

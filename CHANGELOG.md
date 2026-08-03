@@ -8,6 +8,32 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- `strict`/`warn` schema enforcement on `POST /import` and `taguru
+  import` (#382, S4 of #218's ADR 0009 split — the first write entrance
+  to call S3/#381's `schema::schema_issues`; `POST
+  /contexts/{name}/associations` is S5/#383). A new
+  `predicted_schema_rejection`, checked right after
+  `predicted_alias_rejection` and shared verbatim between `apply_batch`
+  and `preview_batch` so a dry run can never disagree with the real
+  import: `strict` refuses a batch whose associations would violate the
+  context's schema — 400 `invalid_argument` (409 `conflict` for a
+  batch's own `labels` alias resolving to the reserved `schema:type`,
+  mode-independent per ADR 0009 §6.3), before anything mutates
+  (`nothing_written`, or `durable_prefix` naming how many earlier
+  batches in the stream already landed), with a path-addressed `Issue`
+  per violation (`batches[{b}].associations[{a}].subject`/`.object`,
+  `kind: "domain"`/`"range"`). `warn` applies the batch and reports
+  instead: `ApiResponse` gains an additive `issues` array (present only
+  under `warn` with at least one violation — every other response,
+  `off` included, is byte-identical to before), and `ImportOutcome`
+  gains `schema_violations: usize`, the true count surviving `issues`'
+  own truncation. `off` and a schema-free context are unaffected —
+  `predicted_schema_rejection` returns before a single lock is taken.
+  `taguru import`'s report line gains `, schema warnings: N`; a remote
+  `--url` run's per-chunk summary line does too. Wire fixture
+  (`tests/fixtures/wire/http/import.json`) and both SDKs'
+  `ImportOutcome` (`schema_violations`, defaulted/optional so an older
+  server's response still decodes) updated to match.
 - The reserved `schema:type` label's remaining namespace guards, its
   three read-side exclusions, and the shared pre-write check (#381, S3
   of #218's ADR 0009 split — library-level only, no write entrance

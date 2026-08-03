@@ -574,6 +574,11 @@ fn dry_run_outcome_of(batch: &Batch) -> crate::api::ImportOutcome {
         locators_stored: batch.locators.len(),
         locators_dropped: 0,
         association_paragraphs_dropped: 0,
+        // Same rationale as every other field above: a real schema
+        // judgment needs a booted state (`predicted_schema_rejection`
+        // reads the live graph), which this parse-only path deliberately
+        // avoids — reported as 0 rather than guessed.
+        schema_violations: 0,
     }
 }
 
@@ -806,9 +811,17 @@ fn summarize_chunk_outcomes(outcomes: &[Value]) -> String {
         .iter()
         .filter(|outcome| outcome["passage_stored"].as_bool() == Some(true))
         .count();
+    // Absent on any server old enough to predate #382, so a missing
+    // field (`as_u64()` on `None` → `None`) reads as 0 the same way a
+    // real schema-free batch's own count would — a remote run against
+    // such a server never prints a warning line it cannot back up.
+    let schema_violations: u64 = outcomes
+        .iter()
+        .filter_map(|o| o["schema_violations"].as_u64())
+        .sum();
     format!(
         "{} batch(es){} ({retracted} association(s) retracted): +{associations} \
-         association(s), +{aliases} alias(es){}",
+         association(s), +{aliases} alias(es){}{}",
         outcomes.len(),
         match created {
             0 => String::new(),
@@ -817,6 +830,10 @@ fn summarize_chunk_outcomes(outcomes: &[Value]) -> String {
         match passages {
             0 => String::new(),
             passages => format!(", {passages} passage(s) stored"),
+        },
+        match schema_violations {
+            0 => String::new(),
+            violations => format!(", {violations} schema warning(s)"),
         },
     )
 }
@@ -2049,6 +2066,20 @@ pub(crate) struct Applied {
     /// only the paragraph pointer is cleared — and surfaced for the same
     /// reason: so the loss is a reported number, not a silent one.
     pub(crate) association_paragraphs_dropped: usize,
+    /// `warn`-mode schema violations this batch's associations raised
+    /// (ADR 0009 §8.3) — the true count, surviving truncation, mirrored
+    /// into `ImportOutcome.schema_violations`. Always 0 for `off`, no
+    /// schema, or `strict` (a `strict` violation refuses the batch
+    /// instead — see [`ApplyRefusal::Schema`] — so it never reaches
+    /// here).
+    pub(crate) schema_violations: usize,
+    /// The same violations, capped at `MAX_LISTED_ISSUES` and with
+    /// batch-relative paths (`associations[{i}]...`, no `batches[{b}].`
+    /// prefix — that is `src/api/import.rs`'s to add, once it knows this
+    /// batch's stream position). Not part of `ImportOutcome` itself: the
+    /// HTTP handler reads this to build the response envelope's
+    /// `issues`; the CLI only reports the count.
+    pub(crate) schema_issues: Vec<crate::api::Issue>,
 }
 
 /// Why a batch did not (fully) apply — one shape for both entrances:
@@ -2082,6 +2113,13 @@ pub(crate) enum ApplyRefusal {
     /// message, so the HTTP endpoint can name the offending alias as a
     /// path-addressed `Issue` instead of prose alone.
     Rejected(AliasRejection),
+    /// Predicted before anything mutated, same position as `Rejected`
+    /// (checked right after it): this batch's own associations would
+    /// violate a `strict` context's schema, or its own `labels`
+    /// declares the reserved `schema:type` alias (ADR 0009 §6.3 guard
+    /// 2, §7.2 step 7). Structured for the same reason `Rejected` is —
+    /// path-addressed `Issue`s an MCP host corrects and resends.
+    Schema(SchemaRejection),
 }
 
 /// Which alias namespace a predicted rejection concerns — concepts
@@ -2131,19 +2169,21 @@ impl AliasRejection {
 
 impl ApplyRefusal {
     /// Whether the batch may have durably written anything before the
-    /// refusal. Only [`ApplyRefusal::NoContext`] and
-    /// [`ApplyRefusal::Rejected`] provably precede the first write —
-    /// the latter is a predicted alias rejection, checked before the
-    /// context is even created. Everything past that point starts
-    /// with the source retraction, itself a durable write, so a later
-    /// refusal (a passage that would not persist, a partial prefix of
-    /// associations or aliases) leaves real changes behind. `Io` from
-    /// a failed create or a failed batch-marker write is the
-    /// over-approximation (both precede the first graph write); the
-    /// refresh pass answers an absent context with its no-op `None`
-    /// arm anyway.
+    /// refusal. Only [`ApplyRefusal::NoContext`], [`ApplyRefusal::Rejected`],
+    /// and [`ApplyRefusal::Schema`] provably precede the first write —
+    /// all three are predicted before the context is even created.
+    /// Everything past that point starts with the source retraction,
+    /// itself a durable write, so a later refusal (a passage that
+    /// would not persist, a partial prefix of associations or aliases)
+    /// leaves real changes behind. `Io` from a failed create or a
+    /// failed batch-marker write is the over-approximation (both
+    /// precede the first graph write); the refresh pass answers an
+    /// absent context with its no-op `None` arm anyway.
     pub(crate) fn wrote_anything(&self) -> bool {
-        !matches!(self, Self::NoContext(_) | Self::Rejected(_))
+        !matches!(
+            self,
+            Self::NoContext(_) | Self::Rejected(_) | Self::Schema(_)
+        )
     }
 
     /// How many ops this refusal's batch durably wrote before failing.
@@ -2157,6 +2197,7 @@ impl ApplyRefusal {
         match self {
             Self::Partial { applied, .. } => *applied,
             Self::NoContext(_) | Self::Io(_) | Self::Access(_) | Self::Rejected(_) => 0,
+            Self::Schema(_) => 0,
         }
     }
 
@@ -2188,6 +2229,7 @@ impl ApplyRefusal {
             Self::Access(AccessError::QuotaExceeded(message)) => message.clone(),
             Self::Partial { message, .. } => message.clone(),
             Self::Rejected(rejection) => rejection.text(),
+            Self::Schema(rejection) => rejection.text(),
         }
     }
 }
@@ -2281,15 +2323,151 @@ fn predicted_alias_rejection(state: &AppState, batch: &Batch) -> Option<AliasRej
     state.read_context(&batch.context, check).ok().flatten()
 }
 
+/// `warn`-mode schema violations this batch's own associations raised
+/// (ADR 0009 §8.3), capped like every other collect-all pass — empty
+/// whenever the batch is clean, the context has no schema, or the
+/// schema's mode is `off`.
+#[cfg_attr(test, derive(Debug))]
+pub(crate) struct SchemaWarnings {
+    pub(crate) issues: Vec<crate::api::Issue>,
+    pub(crate) total: usize,
+}
+
+impl SchemaWarnings {
+    fn none() -> Self {
+        Self {
+            issues: Vec::new(),
+            total: 0,
+        }
+    }
+}
+
+/// A predicted schema rejection (ADR 0009 §7.2, §6.3): this batch's own
+/// associations would violate a `strict` context's domain/range
+/// constraints, or this batch's own `labels` declares the reserved
+/// `schema:type` alias — named precisely enough to build path-addressed
+/// `Issue`s from, exactly like [`AliasRejection`] beside it. `reserved`
+/// tells [`ApplyRefusal::text`] and the HTTP status
+/// (`src/api/import.rs`) which of the two this is: a reserved-label
+/// collision is a namespace conflict (409, like an alias `Conflict`), a
+/// domain/range violation is a refused value (400, ADR 0009 §8.1).
+#[cfg_attr(test, derive(Debug))]
+pub(crate) struct SchemaRejection {
+    pub(crate) issues: Vec<crate::api::Issue>,
+    pub(crate) total: usize,
+    pub(crate) reserved: bool,
+}
+
+impl SchemaRejection {
+    pub(crate) fn text(&self) -> String {
+        let what = if self.reserved {
+            "this batch's label aliases"
+        } else {
+            "this batch's associations"
+        };
+        crate::api::collected_validation_message(what, &self.issues, self.total)
+    }
+}
+
+/// Predicts, without writing anything, whether this batch's own
+/// associations would violate a `strict` context's schema, or its own
+/// `labels` declares the reserved `schema:type` alias (ADR 0009 §6.3
+/// guard 2's batch-local bullet, checked regardless of mode) — the
+/// schema twin of [`predicted_alias_rejection`], run right after it: an
+/// alias conflict is caught first, so by the time this runs every
+/// concept/label spelling this batch's own `associations` use is
+/// already known not to collide with its own `concepts`/`labels`
+/// declarations, which `schema::check::SchemaEnv` relies on (its own
+/// doc, `src/schema/check.rs:88-94`). Shared between [`apply_batch`]
+/// and [`preview_batch`] for the same reason `predicted_alias_rejection`
+/// is: a dry run can never disagree about this call either.
+///
+/// No schema installed for this context — including one that does not
+/// exist yet — returns `Ok` before a single lock is taken
+/// (`AppState::schema_of`'s own fast path for `schema_digest.is_none()`):
+/// the zero-cost path every schema-free context takes, ADR 0009 §7.2
+/// step 1. A schema recorded but currently unreadable is never treated
+/// as schema-free — `src/schema.rs`'s own module doc fixes that as a
+/// hard refusal, never a silent fallback — so this maps such a read
+/// failure to [`ApplyRefusal::Io`] instead of proceeding.
+fn predicted_schema_rejection(
+    state: &AppState,
+    batch: &Batch,
+) -> Result<SchemaWarnings, ApplyRefusal> {
+    let schema = match state.schema_of(&batch.context) {
+        None | Some(Ok(None)) => return Ok(SchemaWarnings::none()),
+        Some(Ok(Some(schema))) => schema,
+        Some(Err(message)) => {
+            return Err(ApplyRefusal::Io(format!(
+                "schema for context '{}' could not be read: {message}",
+                batch.context
+            )));
+        }
+    };
+
+    // The exact ops the write will apply, not the raw batch (ADR 0009
+    // §7.2 step 2) — `None` here (not the paragraph count `apply_batch`
+    // does not have yet either) matches `apply_batch`'s own call
+    // (`corrected_associations(batch, None)`), so the two entrances
+    // build this from the identical input.
+    let (ops, _) = corrected_associations(batch, None);
+
+    let check = state
+        .read_context(&batch.context, |context| {
+            let env = crate::schema::SchemaEnv::build(
+                context,
+                crate::schema::SchemaCheckInput {
+                    schema: schema.clone(),
+                    ops: &ops,
+                    declared_labels: &batch.labels,
+                    // `apply_batch` retracts `batch.source` before
+                    // applying (`:2354-2357` at the time of writing) —
+                    // the live-half exclusion this passes on to
+                    // `SchemaEnv::build` judges against the graph state
+                    // this write is about to leave behind, not its
+                    // current one (ADR 0009 §7.2 step 4).
+                    retracted_source: Some(&batch.source),
+                },
+            );
+            crate::schema::schema_issues(&env, &ops, "")
+        })
+        .map_err(ApplyRefusal::Access)?;
+
+    if !check.reserved.is_empty() {
+        let (issues, total) = crate::api::truncate_issues(check.reserved);
+        return Err(ApplyRefusal::Schema(SchemaRejection {
+            issues,
+            total,
+            reserved: true,
+        }));
+    }
+
+    let (issues, total) = crate::api::truncate_issues(check.violations);
+    if schema.document().mode == crate::schema::SchemaMode::Strict && total > 0 {
+        return Err(ApplyRefusal::Schema(SchemaRejection {
+            issues,
+            total,
+            reserved: false,
+        }));
+    }
+    // `off` and a clean `strict` batch both fall through here with an
+    // empty `issues`/`total` — constructing `SchemaWarnings` either way
+    // rather than special-casing keeps this function's one dispatch
+    // point exactly what ADR 0009 §7.2 step 7 describes.
+    Ok(SchemaWarnings { issues, total })
+}
+
 /// Applies one validated batch: ensure the context, retract the
 /// source, then land passage → associations → aliases. Aliases go
 /// last on purpose — an alias needs its canonical interned, and the
 /// associations just before are what intern it. Before any of that,
 /// [`predicted_alias_rejection`] checks whether this batch's own alias
-/// operations would resolve to a conflict; a predicted rejection
-/// refuses the whole batch with [`ApplyRefusal::Rejected`] up front,
-/// so a bad alias no longer surfaces only after the associations (or
-/// the retraction) have already landed.
+/// operations would resolve to a conflict, then [`predicted_schema_rejection`]
+/// checks whether they would violate the context's schema; either
+/// predicted rejection refuses the whole batch ([`ApplyRefusal::Rejected`]
+/// / [`ApplyRefusal::Schema`]) up front, so a bad alias or a schema
+/// violation no longer surfaces only after the associations (or the
+/// retraction) have already landed.
 ///
 /// Past that point, the four mutations are separately durable, so a
 /// crash between them leaves the source half-applied with every store
@@ -2309,6 +2487,7 @@ pub(crate) fn apply_batch(state: &AppState, batch: &Batch) -> Result<Applied, Ap
     if let Some(rejection) = predicted_alias_rejection(state, batch) {
         return Err(ApplyRefusal::Rejected(rejection));
     }
+    let schema_warnings = predicted_schema_rejection(state, batch)?;
 
     let mut created = false;
     if state.directory_entry(&batch.context).is_none() {
@@ -2498,29 +2677,34 @@ pub(crate) fn apply_batch(state: &AppState, batch: &Batch) -> Result<Applied, Ap
         locators_stored,
         locators_dropped,
         association_paragraphs_dropped,
+        schema_violations: schema_warnings.total,
+        schema_issues: schema_warnings.issues,
     })
 }
 
 /// The read-only twin of [`apply_batch`], for `POST
 /// /import?dry_run=true`: reports what a batch WOULD do without
 /// writing anything — no context created, no marker opened, no source
-/// retracted. Runs the same [`predicted_alias_rejection`] check first,
-/// so a batch whose aliases would conflict is refused here exactly as
-/// it would be by `apply_batch` — the two entrances can never
-/// disagree on that call. Every other write step in `apply_batch` has
-/// a cheap read-only counterpart here, except the `associations` and
-/// `aliases` counts, which stay OPTIMISTIC (every op this batch
-/// carries, corrected the same way `apply_batch` corrects them): a
-/// capacity cap (507) can only surface by actually applying the op,
-/// so those two COUNTS remain advisory even though an alias CONFLICT
-/// no longer is — the real import can still apply fewer associations
-/// or aliases than previewed. Every other field (`retracted`, the
-/// drop counts) reads through to the same state a real batch would
-/// query, so it matches exactly.
+/// retracted. Runs the same [`predicted_alias_rejection`] and
+/// [`predicted_schema_rejection`] checks first, in the same order
+/// `apply_batch` does, so a batch whose aliases would conflict or whose
+/// associations would violate the schema is refused here exactly as it
+/// would be by `apply_batch` — the two entrances can never disagree on
+/// either call. Every other write step in `apply_batch` has a cheap
+/// read-only counterpart here, except the `associations` and `aliases`
+/// counts, which stay OPTIMISTIC (every op this batch carries,
+/// corrected the same way `apply_batch` corrects them): a capacity cap
+/// (507) can only surface by actually applying the op, so those two
+/// COUNTS remain advisory even though an alias CONFLICT or a schema
+/// VIOLATION no longer is — the real import can still apply fewer
+/// associations or aliases than previewed. Every other field
+/// (`retracted`, the drop counts, `schema_violations`) reads through to
+/// the same state a real batch would query, so it matches exactly.
 pub(crate) fn preview_batch(state: &AppState, batch: &Batch) -> Result<Applied, ApplyRefusal> {
     if let Some(rejection) = predicted_alias_rejection(state, batch) {
         return Err(ApplyRefusal::Rejected(rejection));
     }
+    let schema_warnings = predicted_schema_rejection(state, batch)?;
 
     let created = state.directory_entry(&batch.context).is_none();
     if created && batch.create.is_none() {
@@ -2575,6 +2759,8 @@ pub(crate) fn preview_batch(state: &AppState, batch: &Batch) -> Result<Applied, 
         locators_stored: batch.locators.len() - locators_dropped,
         locators_dropped,
         association_paragraphs_dropped,
+        schema_violations: schema_warnings.total,
+        schema_issues: schema_warnings.issues,
     })
 }
 
@@ -2582,7 +2768,7 @@ pub(crate) fn preview_batch(state: &AppState, batch: &Batch) -> Result<Applied, 
 fn report(batch: &Batch, applied: &Applied) -> String {
     format!(
         "context '{}'{} ← source '{}' ({} association(s) retracted): +{} \
-         association(s), +{} alias(es){}{}{}{}{}",
+         association(s), +{} alias(es){}{}{}{}{}{}",
         batch.context,
         if applied.created { " (created)" } else { "" },
         batch.source,
@@ -2620,6 +2806,10 @@ fn report(batch: &Batch, applied: &Applied) -> String {
             dropped => {
                 format!(", {dropped} association paragraph locator(s) dropped: no such paragraph")
             }
+        },
+        match applied.schema_violations {
+            0 => String::new(),
+            violations => format!(", schema warnings: {violations}"),
         }
     )
 }
@@ -3214,6 +3404,8 @@ mod tests {
             locators_stored: 0,
             locators_dropped: 0,
             association_paragraphs_dropped: 0,
+            schema_violations: 0,
+            schema_issues: Vec::new(),
         };
         let line = report(&batch, &dropped);
         assert!(line.contains("previous passage dropped"), "{line}");

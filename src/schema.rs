@@ -33,10 +33,10 @@ use crate::registry::{schema_corrupt_path, schema_path};
 use crate::sha256::sha256_hex;
 use crate::storage::write_atomic;
 
-// `schema_issues` (S3, #381) is called from the associations pre-write
-// arm (S5, #383, `src/api/associations.rs`). `predicted_schema_rejection`
-// (S4, #382, the import entrance) has not landed yet, so this is still
-// the only caller.
+// `schema_issues` (S3, #381) is the one pure function every schema-
+// checking write entrance shares — both now wired: S4 (#382,
+// `predicted_schema_rejection`/`preview_batch`, `src/ingest.rs`) and
+// S5 (#383, the associations pre-write arm, `src/api/associations.rs`).
 mod check;
 pub(crate) use check::{SchemaCheckInput, SchemaEnv, schema_issues};
 
@@ -254,7 +254,6 @@ impl InstalledSchema {
     /// an UNDECLARED type name — legal everywhere, never a violation on
     /// its own (§6.2) — answers its own singleton, since it has no
     /// hierarchy above it to consult.
-    #[allow(dead_code)] // called by check::SchemaEnv::build; see mod check's own allow
     pub(crate) fn closure_of(&self, type_name: &str) -> BTreeSet<String> {
         let mut closure = self.ancestors.get(type_name).cloned().unwrap_or_default();
         closure.insert(type_name.to_string());
