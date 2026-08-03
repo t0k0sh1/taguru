@@ -407,7 +407,9 @@ and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
   degraded write path of its own to report; a load balancer wanting
   shard readiness must probe each shard's `/health` directly, not the
   router's. `GET /live` is liveness, `GET /metrics` is Prometheus
-  text.
+  text — [`deploy/observability/`](deploy/observability/) is a
+  worked, actually-run Prometheus + Grafana setup scraping it,
+  `docker compose up -d` away from a dashboard.
   `TAGURU_METRICS_PER_CONTEXT=all` (or top-`N` by disk size) adds
   per-context capacity gauges — disk bytes by file family, resident
   bytes, pinned, counts — measured at flush time, never by the scrape.

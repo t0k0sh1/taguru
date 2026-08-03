@@ -1,0 +1,16 @@
+# Scrapes taguru's own exposition (README.md, "Health and metrics"):
+# GET /metrics needs no bearer token. 15s matches the default
+# TAGURU_METRICS_PER_CONTEXT cost is measured at flush time, not
+# scrape time, so a short interval here is cheap.
+#
+# taguru running elsewhere than the host: replace the target below
+# with that address (a `deploy/docker-compose.yml` taguru joined to
+# this same compose network would be `taguru:8248`; a real deployment
+# is whatever host:port TAGURU_ADDR binds).
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: taguru
+    static_configs:
+      - targets: ["host.docker.internal:8248"]
