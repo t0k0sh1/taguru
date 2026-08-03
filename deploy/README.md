@@ -24,6 +24,15 @@ directory.
   the promotion-time RPO — is on `/metrics`. Its header carries the
   manual-promotion runbook in short form.
 
+- [`observability/`](observability/) — Prometheus scraping `/metrics`
+  plus a provisioned Grafana dashboard on top, `docker compose up -d`
+  away from either variant above. The
+  [README there](observability/README.md) is a worked, actually-run
+  procedure, not just a compose file: request rate/latency by route,
+  in-flight requests, errors by kind, search outcomes, cache hit
+  ratio, and per-context disk bytes, every panel keyed to a metric
+  name that's really in `src/metrics.rs`.
+
 When several writers each own a disjoint set of contexts, `taguru
 route` puts one front door on the fleet: a stateless router (no
 volume, no keys — shards enforce auth) whose `TAGURU_ROUTE_MAP` file

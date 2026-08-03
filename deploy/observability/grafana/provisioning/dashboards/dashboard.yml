@@ -1,0 +1,9 @@
+apiVersion: 1
+
+providers:
+  - name: taguru
+    folder: taguru
+    type: file
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
