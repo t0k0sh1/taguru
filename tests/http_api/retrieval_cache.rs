@@ -273,6 +273,28 @@ fn a_schema_put_invalidates_recall_unlike_a_bare_config_change() {
         "a schema PUT must invalidate every cached retrieval for the context, not just \
          the config lane a bare metadata PATCH leaves alone"
     );
+
+    // The other half of the same contract: `put_schema` skips the
+    // digest/revision bump and never re-mints `cache_identity` when the
+    // document is byte-identical to what is already installed, so a
+    // repeated PUT must not evict the entry the miss just above cached.
+    server.ok(
+        "PUT",
+        "/contexts/sake/schema",
+        Some(json!({
+            "schema": 1,
+            "mode": "off",
+            "closed_labels": false,
+            "types": {},
+            "relations": {}
+        })),
+    );
+    recall();
+    assert_eq!(
+        cache_hits(&server, "recall"),
+        2,
+        "an identical schema PUT is a no-op and must not invalidate the cache"
+    );
 }
 
 /// Scope isolation falls out of resolved-target keying: two keys whose

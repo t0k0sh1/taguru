@@ -44,10 +44,16 @@ pub async fn get_schema(
             started_at,
         ),
         Some(Err(message)) => {
+            // The detail (which can name the data directory's own
+            // filesystem path — `schema::load_schema`'s digest-mismatch
+            // and unreadable-file messages both do) is for the operator,
+            // not an authenticated HTTP client: logged here, never
+            // forwarded into the response.
+            tracing::warn!(context = %name, error = %message, "schema load failed");
             state.metrics().record_error(ErrorKind::Load);
             error(
                 ErrorCode::Internal,
-                format!("context '{name}' schema could not be loaded: {message}"),
+                format!("context '{name}' schema could not be loaded — see server logs"),
                 started_at,
             )
         }
@@ -117,18 +123,23 @@ pub async fn put_schema(
             started_at,
         ),
         Some(Err(PutSchemaError::Load(message))) => {
+            // Same posture as `get_schema`'s Load arm just above: the
+            // detail can name a filesystem path, so it is logged, not
+            // returned.
+            tracing::warn!(context = %name, error = %message, "schema load failed");
             state.metrics().record_error(ErrorKind::Load);
             error(
                 ErrorCode::Internal,
-                format!("context '{name}' could not be loaded: {message}"),
+                format!("context '{name}' could not be loaded — see server logs"),
                 started_at,
             )
         }
         Some(Err(PutSchemaError::Io(io_error))) => {
+            tracing::warn!(context = %name, error = %io_error, "schema write failed");
             state.metrics().record_error(ErrorKind::Io);
             error(
                 ErrorCode::Internal,
-                format!("context '{name}' schema not persisted: {io_error}"),
+                format!("context '{name}' schema not persisted — see server logs"),
                 started_at,
             )
         }

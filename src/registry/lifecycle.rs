@@ -757,10 +757,7 @@ impl AppState {
     ) -> Option<Result<Option<Arc<schema::InstalledSchema>>, String>> {
         let entry = self.lookup(name)?;
         {
-            let inner = entry.inner.read();
-            if matches!(inner.slot, Slot::Deleted) {
-                return None;
-            }
+            let inner = entry.read_unless_deleted()?;
             if inner.schema.is_some() || inner.schema_digest.is_none() {
                 return Some(Ok(inner.schema.clone()));
             }
@@ -2076,6 +2073,37 @@ mod tests {
             "a fresh context has no schema"
         );
         assert!(state.schema_of("nope").is_none());
+        assert!(
+            state
+                .put_schema("nope", schema::install(valid_schema_document()).unwrap())
+                .is_none(),
+            "a PUT against a context that never existed must answer the outer None, \
+             not a PutSchemaError"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `lookup` — the first step of both `schema_of` and `put_schema` —
+    /// already answers `None` for a name `delete` has removed from the
+    /// registry, so both report the outer `None` for a deleted context
+    /// exactly like a never-created one, without either method needing
+    /// its own tombstone-detection logic beyond the shared
+    /// `read_unless_deleted`/`lock_unless_deleted` gate every other
+    /// post-lookup operation in this file already goes through.
+    #[test]
+    fn schema_of_and_put_schema_report_the_outer_none_for_a_deleted_context() {
+        let dir = scratch_dir("schema-of-deleted");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state.create("sake", ContextMeta::default()).unwrap();
+        state.delete("sake").unwrap().unwrap();
+
+        assert!(state.schema_of("sake").is_none());
+        assert!(
+            state
+                .put_schema("sake", schema::install(valid_schema_document()).unwrap())
+                .is_none()
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

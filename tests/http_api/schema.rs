@@ -50,6 +50,11 @@ fn schema_round_trips_and_distinguishes_not_installed_from_no_context() {
         body["code"], "no_context",
         "a missing CONTEXT must not be mistaken for a missing schema: {body}"
     );
+    // The write side of the same distinction: a PUT against a context
+    // that does not exist at all is `no_context`, not `no_schema`.
+    let (status, body) = server.call("PUT", "/contexts/nope/schema", Some(valid_document()));
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(body["code"], "no_context", "{body}");
 
     let installed = server.ok("PUT", "/contexts/sake/schema", Some(valid_document()));
     assert_eq!(installed, valid_document());
