@@ -189,7 +189,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "add_associations",
-            "Write facts as a batch (one document = one call, up to 10,000 associations; split larger documents), a source id on every element; single-fact calls cost a full durable write each, so collect a document's facts first. Discipline: check spellings with resolve/resolve_label and reuse before minting; don't re-assert paraphrases within one document; negation = positive label + negative weight; make implicit membership an explicit edge; weave ordered procedures with the three edges 最初の工程/次の工程/工程 (details in get_protocol). All-or-nothing: a rejected batch writes nothing (`integrity: \"nothing_written\"` in the error), and a rejection lists every offending `associations[i].field` as a path-addressed issue. Correct exactly those fields in your own copy of the batch and resend the COMPLETE batch — never delete an item to work around a rejection, never invent a fact that was not already there, and never call add_associations again for just the fixed items (that would silently omit everything else). If store_passages for the same source also runs, note it is a SEPARATE write — a document's facts can land while its passage store still fails, or vice versa; POST /import is the only all-or-nothing per-source call across both.",
+            "Write facts as a batch (one document = one call, up to 10,000 associations; split larger documents), a source id on every element; single-fact calls cost a full durable write each, so collect a document's facts first. Discipline: check spellings with resolve/resolve_label and reuse before minting; don't re-assert paraphrases within one document; negation = positive label + negative weight; make implicit membership an explicit edge; weave ordered procedures with the three edges 最初の工程/次の工程/工程 (details in get_protocol). All-or-nothing: a rejected batch writes nothing (`integrity: \"nothing_written\"` in the error), and a rejection lists every offending `associations[i].field` as a path-addressed issue. Correct exactly those fields in your own copy of the batch and resend the COMPLETE batch — never delete an item to work around a rejection, never invent a fact that was not already there, and never call add_associations again for just the fixed items (that would silently omit everything else). If store_passages for the same source also runs, note it is a SEPARATE write — a document's facts can land while its passage store still fails, or vice versa; POST /import is the only all-or-nothing per-source call across both. If this context has an installed schema (get_schema) in strict mode, a batch violating a relation's domain/range also refuses this way — issues[].kind is 'domain' or 'range', naming which side; in warn mode the same batch writes and the violations ride along in the success result's issues instead.",
             object_schema(
                 json!({
                     "context": context,
@@ -490,6 +490,50 @@ pub(super) fn tool_definitions() -> Vec<Value> {
                     "labels": { "type": "array", "items": { "type": "string" }, "description": "alias spellings to withdraw" }
                 }),
                 &["context"],
+            ),
+        ),
+        (
+            "get_schema",
+            "The installed schema document (entity types, relation domain/range constraints, and enforcement mode), or a 404 distinguishing 'no schema installed' from 'no such context'.",
+            object_schema(json!({ "context": context }), &["context"]),
+        ),
+        (
+            "put_schema",
+            "Install a schema document wholesale (no delta form; a retry after any failure is always safe). off leaves every write unenforced; warn lets a domain/range-violating write through and reports the violations back (issues[], on add_associations and import alike); strict refuses the whole write before anything lands, the same nothing_written shape a shape-invalid batch already gets. types/relations are keyed by name; a type's is_a names direct parents (cycles and >8-deep chains refuse); a relation's domain/range each cap at 64 type names. The relation label 'schema:type' is reserved for type assertions and refuses here if named directly.",
+            object_schema(
+                json!({
+                    "context": context,
+                    "schema": { "type": "integer", "description": "document format version this binary reads (currently 1)" },
+                    "mode": { "type": "string", "enum": ["off", "warn", "strict"] },
+                    "closed_labels": { "type": "boolean", "description": "when true, an association whose label has no relation entry here refuses too, not just a domain/range mismatch" },
+                    "types": {
+                        "type": "object",
+                        "additionalProperties": {
+                            "type": "object",
+                            "properties": { "is_a": { "type": "array", "items": { "type": "string" }, "description": "direct parent type names" } }
+                        },
+                        "description": "entity type name -> its declaration"
+                    },
+                    "relations": {
+                        "type": "object",
+                        "additionalProperties": {
+                            "type": "object",
+                            "properties": {
+                                "domain": { "type": "array", "items": { "type": "string" }, "description": "types (or a subtype) the subject must have; empty means unconstrained" },
+                                "range": { "type": "array", "items": { "type": "string" }, "description": "types (or a subtype) the object must have; empty means unconstrained" }
+                            }
+                        },
+                        "description": "relation label -> its domain/range declaration"
+                    }
+                }),
+                &[
+                    "context",
+                    "schema",
+                    "mode",
+                    "closed_labels",
+                    "types",
+                    "relations",
+                ],
             ),
         ),
         (

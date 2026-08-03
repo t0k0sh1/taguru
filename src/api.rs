@@ -93,14 +93,24 @@ pub struct ApiResponse<T> {
     result: T,
     status: &'static str,
     time: f64,
-    /// `warn`-mode schema violations (ADR 0009 §8.3): field-for-field
-    /// identical to [`ApiError`]'s own `issues`, so a client's violation
-    /// handler is the same code whether the write refused (`strict`) or
-    /// succeeded with warnings (`warn`). Absent from every response with
-    /// nothing to say — `off` mode and all of today's traffic included —
-    /// keeping every existing success response byte-identical.
+    /// ADR 0009 §8.3's `warn`-mode carrier: the same [`Issue`] values a
+    /// `strict` refusal would have listed, present here instead because
+    /// the write went ahead. Absent on every response with nothing to
+    /// say — `off` mode, and all traffic before this field existed — so
+    /// adding it is not a wire-shape break ([`HTTP_CONTRACT`] unchanged).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     issues: Vec<Issue>,
+    /// The true count behind `issues` once [`MAX_LISTED_ISSUES`] has
+    /// truncated it — mirrors why `Applied.association_paragraphs_dropped`
+    /// (`src/ingest.rs`) turns a silent loss into a reported number.
+    /// Zero (the overwhelming common case) is omitted rather than sent
+    /// as `0`.
+    #[serde(skip_serializing_if = "is_zero")]
+    schema_violations: usize,
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 
 impl<T> ApiResponse<T> {
@@ -110,15 +120,21 @@ impl<T> ApiResponse<T> {
             status: "ok",
             time: started_at.elapsed().as_secs_f64(),
             issues: Vec::new(),
+            schema_violations: 0,
         }
     }
 
-    fn ok_with_issues(result: T, issues: Vec<Issue>, started_at: Instant) -> Self {
+    /// [`Self::ok`] plus ADR 0009 §8.3's `warn`-mode envelope fields —
+    /// `issues` already truncated to [`MAX_LISTED_ISSUES`] by the
+    /// caller (via [`truncate_issues`]), `total` the count before that
+    /// truncation.
+    fn ok_with_issues(result: T, issues: Vec<Issue>, total: usize, started_at: Instant) -> Self {
         Self {
             result,
             status: "ok",
             time: started_at.elapsed().as_secs_f64(),
             issues,
+            schema_violations: total,
         }
     }
 }
@@ -585,20 +601,39 @@ pub(crate) fn ok<T: Serialize>(result: T, started_at: Instant) -> Response {
     (StatusCode::OK, Json(ApiResponse::ok(result, started_at))).into_response()
 }
 
-/// [`ok`], carrying `warn`-mode schema violations (ADR 0009 §8.3) in the
-/// envelope's `issues` — truncated at [`MAX_LISTED_ISSUES`] like every
-/// other collect-all pass, via [`truncate_issues`]; the true count is
-/// each result's own concern (e.g. `ImportOutcome.schema_violations`),
-/// not this envelope's.
+/// [`ok`], plus ADR 0009 §8.3's `warn`-mode `issues`: the write already
+/// went ahead, and these ride out in the success envelope rather than
+/// refusing anything. `issues` is truncated to [`MAX_LISTED_ISSUES`]
+/// here, the same cap [`validation_error`] applies to a `strict`
+/// refusal's list, so a `warn` context sending a huge batch cannot
+/// balloon the response either.
 pub(crate) fn ok_with_issues<T: Serialize>(
     result: T,
     issues: Vec<Issue>,
     started_at: Instant,
 ) -> Response {
-    let (issues, _total) = truncate_issues(issues);
+    let (issues, total) = truncate_issues(issues);
+    ok_with_issues_total(result, issues, total, started_at)
+}
+
+/// [`ok_with_issues`] for a caller that has already capped `issues`
+/// itself and tracked the true count separately — `POST /import`'s
+/// multi-batch stream, where `issues` is accumulated (and capped) one
+/// batch at a time as it streams, so re-deriving the total from
+/// `issues.len()` after the fact would undercount once the cap has
+/// trimmed some batch's contribution. `issues` is NOT re-truncated
+/// here — the caller's own cap already applies.
+pub(crate) fn ok_with_issues_total<T: Serialize>(
+    result: T,
+    issues: Vec<Issue>,
+    total: usize,
+    started_at: Instant,
+) -> Response {
     (
         StatusCode::OK,
-        Json(ApiResponse::ok_with_issues(result, issues, started_at)),
+        Json(ApiResponse::ok_with_issues(
+            result, issues, total, started_at,
+        )),
     )
         .into_response()
 }

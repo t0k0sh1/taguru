@@ -402,6 +402,52 @@ fn store_passages_response_shape() {
     );
 }
 
+/// S5 (#383): `warn` mode's `issues`/`schema_violations` on
+/// `POST /contexts/{name}/associations` are new, wire-visible fields
+/// on `ApiResponse` — additive (`HTTP_CONTRACT` unchanged, both are
+/// `skip_serializing_if`-omitted on every response with nothing to
+/// say), but still a shape an SDK consumer needs pinned so it stops
+/// being invisible to the cross-language contract check the moment a
+/// context actually turns `warn` on.
+#[test]
+fn add_associations_warn_mode_response_shape() {
+    let server = Server::start("contract-associations-warn");
+    server.ok("PUT", "/contexts/corpus-g", None);
+    server.ok(
+        "PUT",
+        "/contexts/corpus-g/schema",
+        Some(json!({
+            "schema": 1,
+            "mode": "warn",
+            "closed_labels": false,
+            "types": {"Brewery": {"is_a": []}, "Person": {"is_a": []}},
+            "relations": {"杜氏": {"domain": ["Brewery"], "range": ["Person"]}}
+        })),
+    );
+
+    let request = json!([
+        {"subject": "高瀬", "label": "schema:type", "object": "Person", "weight": 1.0, "source": "a.md"},
+        {"subject": "高瀬", "label": "杜氏", "object": "個人A", "weight": 1.0, "source": "a.md"},
+    ]);
+    let (status, body) = server.call(
+        "POST",
+        "/contexts/corpus-g/associations",
+        Some(request.clone()),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["result"], json!(2), "{body}");
+    assert_eq!(body["schema_violations"], json!(1), "{body}");
+    assert!(body["issues"].is_array(), "{body}");
+    http_fixture(
+        "add_associations_warn",
+        "POST",
+        "/contexts/{name}/associations",
+        Some(request),
+        status,
+        body,
+    );
+}
+
 #[test]
 fn import_reports_locator_bookkeeping() {
     let server = Server::start("contract-import");

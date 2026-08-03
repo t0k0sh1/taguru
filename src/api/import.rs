@@ -17,8 +17,8 @@ use crate::registry::AppState;
 use super::groups::{scope_refusal, scoped_member_contexts};
 use super::{
     AppBytes, AppPath, AppQuery, ErrorCode, Issue, RefusalDetail, access_error, access_error_noted,
-    deadline_exceeded, error, group_not_found, key_name, nesting_error_code, ok, ok_with_issues,
-    validation_error,
+    deadline_exceeded, error, group_not_found, key_name, nesting_error_code, ok,
+    ok_with_issues_total, validation_error,
 };
 
 /// `POST /import`'s query string.
@@ -512,13 +512,18 @@ pub async fn import_batch(
         let mut outcomes: Vec<ImportOutcome> = Vec::with_capacity(total);
         // `warn`-mode schema violations (ADR 0009 §8.3), accumulated
         // across every batch in the stream with this batch's own
-        // `batches[{index}]` prefix already applied. Capped as it is
-        // collected, not just at the end (`ok_with_issues` truncates
-        // too, but a large `warn`-mode stream must not first pile up a
-        // multiple of `MAX_LISTED_ISSUES` — one per batch — only to
-        // discard the excess); the true per-batch count still rides
-        // `ImportOutcome.schema_violations` regardless of this cap.
+        // `batches[{index}]` prefix already applied. `warn_issues` is
+        // capped as it is collected, not just at the end — a large
+        // `warn`-mode stream must not first pile up a multiple of
+        // `MAX_LISTED_ISSUES` (one batch's worth each) only to discard
+        // the excess. `warn_total`, unlike the list, is never capped —
+        // `ok_with_issues_total` (`src/api.rs`) needs the true
+        // cross-batch count, which `warn_issues.len()` alone could no
+        // longer answer once the cap trims a later batch's
+        // contribution; each batch's own `ImportOutcome.schema_violations`
+        // carries its individual count regardless of either total.
         let mut warn_issues: Vec<Issue> = Vec::new();
+        let mut warn_total: usize = 0;
         for (index, batch) in stream.batches.iter().enumerate() {
             // Each landed batch is durable (retract-then-apply), so a
             // budget that runs out partway is safe to report as a
@@ -623,6 +628,7 @@ pub async fn import_batch(
                         "import batch applied",
                     );
                     outcomes.push(import_outcome(batch, &applied));
+                    warn_total += applied.schema_violations;
                     if warn_issues.len() < crate::api::MAX_LISTED_ISSUES {
                         warn_issues.extend(schema_issues_in_batch(index, applied.schema_issues));
                         warn_issues.truncate(crate::api::MAX_LISTED_ISSUES);
@@ -693,18 +699,19 @@ pub async fn import_batch(
                 }
             }
         }
-        Ok((outcomes, group_outcomes, warn_issues))
+        Ok((outcomes, group_outcomes, warn_issues, warn_total))
     });
-    let (outcomes, group_outcomes, warn_issues) = match outcome {
+    let (outcomes, group_outcomes, warn_issues, warn_total) = match outcome {
         Ok(applied) => applied,
         Err(refusal) => return *refusal,
     };
-    ok_with_issues(
+    ok_with_issues_total(
         ImportStreamOutcome {
             batches: outcomes,
             groups: group_outcomes,
         },
         warn_issues,
+        warn_total,
         started_at,
     )
 }

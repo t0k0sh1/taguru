@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::time::Instant;
 
 use axum::extract::State;
@@ -8,13 +9,15 @@ use serde_json::Value;
 
 use taguru::deadline::Deadline;
 
+use crate::metrics::ErrorKind;
 use crate::registry::{AppState, AssocOp};
+use crate::schema::{SchemaCheckInput, SchemaEnv, SchemaMode, schema_issues};
 
 use super::{
     AppJson, AppPath, ErrorCode, Issue, MAX_ASSOCIATION_WEIGHT, MAX_ASSOCIATIONS_PER_REQUEST,
     MAX_NAME_BYTES, RefusalDetail, access_error, collected_validation_message, deadline_exceeded,
-    describe_value, empty, error, key_name, ok, oversized, partial_write_error, truncate_issues,
-    validation_error,
+    describe_value, empty, error, key_name, ok, ok_with_issues, oversized, partial_write_error,
+    truncate_issues, validation_error,
 };
 
 /// Reads one `associations[index]` item's required, non-empty,
@@ -228,25 +231,87 @@ pub async fn add_associations(
     }
     let associations = match interpret_associations(&body) {
         Ok(associations) => associations,
-        Err(issues) => {
-            let (issues, total) = truncate_issues(issues);
-            let message = collected_validation_message("the associations batch", &issues, total);
+        Err(issues) => return associations_refusal(issues, started_at),
+    };
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
+    }
+
+    // ADR 0009 §7.3: the schema check runs entirely before
+    // `state.add_associations` below, so `strict` never reaches the
+    // non-atomic partial-write arm — the same position the
+    // shape-validation refusal above already occupies. `schema_of` is
+    // resolved OUTSIDE `read_context`: its slow path takes the entry's
+    // write lock, which would deadlock under `read_context`'s own read
+    // lock (`AppState::hidden_label`'s own doc), so the ordering here
+    // mirrors `audit_vocabulary` (`src/api/vocabulary.rs:97-115`).
+    let schema = tokio::task::block_in_place(|| state.schema_of(&name));
+    let installed = match schema {
+        // No such context, or a context that has never installed a
+        // schema — the overwhelming common case. Skip the check
+        // entirely; a missing context still gets its ordinary 404 from
+        // `state.add_associations`'s own `AccessError::NotFound` below.
+        None | Some(Ok(None)) => None,
+        Some(Ok(Some(installed))) => Some(installed),
+        // A schema recorded but currently unreadable maps CONSERVATIVELY
+        // to a hard refusal — `crate::schema`'s own module doc: every
+        // trouble case there is a refusal, never a silent fallback, and
+        // this must not be the one write path that quietly skips
+        // enforcement because a read failed. Unlike a schema violation,
+        // no correction on the caller's side fixes this.
+        Some(Err(message)) => {
+            tracing::warn!(context = %name, error = %message, "schema load failed");
+            state.metrics().record_error(ErrorKind::Load);
             return validation_error(
-                ErrorCode::InvalidArgument,
-                message,
+                ErrorCode::Internal,
+                format!("context '{name}' schema could not be loaded — see server logs"),
                 RefusalDetail {
-                    issues,
                     integrity: Some("nothing_written"),
-                    retryable_after_correction: Some(true),
+                    retryable_after_correction: Some(false),
                     ..Default::default()
                 },
                 started_at,
             );
         }
     };
-    if deadline.expired() {
-        return deadline_exceeded(started_at);
+    let mut warn_issues = Vec::new();
+    if let Some(installed) = installed {
+        // This route has no inline label-alias declaration (no
+        // `labels` field), and never retracts a source — each item
+        // carries its own optional `source` (§7.3's "there is no
+        // source retraction on this path").
+        let declared_labels = BTreeMap::new();
+        let env = match state.read_context(&name, |context| {
+            SchemaEnv::build(
+                context,
+                SchemaCheckInput {
+                    schema: installed.clone(),
+                    ops: &associations,
+                    declared_labels: &declared_labels,
+                    retracted_source: None,
+                },
+            )
+        }) {
+            Ok(env) => env,
+            Err(failure) => return access_error(&state, failure, &name, started_at),
+        };
+        let check = schema_issues(&env, &associations, "");
+        // ADR 0009 §6.3 guard 2: a reserved-label conflict refuses
+        // regardless of mode — this route has no inline `labels`
+        // declaration today, so `reserved` is always empty in
+        // practice, but the dispatch does not assume that.
+        if !check.reserved.is_empty() {
+            return associations_refusal(check.reserved, started_at);
+        }
+        if !check.violations.is_empty() && installed.document().mode == SchemaMode::Strict {
+            return associations_refusal(check.violations, started_at);
+        }
+        // `warn`: ride the violations out in the success envelope
+        // instead of refusing. Empty on `off` (`schema_issues` never
+        // populates `violations` when the document's mode is `off`).
+        warn_issues = check.violations;
     }
+
     let total = associations.len();
     // The write stages ops in the WAL and fsyncs before returning, so
     // keep it off the async worker like `store_passages` and the flush.
@@ -259,7 +324,11 @@ pub async fn add_associations(
             if applied > 0 {
                 state.note_write(&name);
             }
-            ok(applied, started_at)
+            if warn_issues.is_empty() {
+                ok(applied, started_at)
+            } else {
+                ok_with_issues(applied, warn_issues, started_at)
+            }
         }
         // Items before the failing one are applied (each item is
         // all-or-nothing in the library); report how far the batch got.
@@ -271,6 +340,28 @@ pub async fn add_associations(
             })
         }
     }
+}
+
+/// The one collect-all refusal shape both the shape-validation pass
+/// (`interpret_associations`) and the schema pre-write check dispatch
+/// into: `integrity: "nothing_written"`, since neither ever reaches the
+/// write below, and correctable by definition (ADR 0009 §8.2:
+/// "`retryable_after_correction` is `Some(true)` always — a schema
+/// violation is by definition correctable").
+fn associations_refusal(issues: Vec<Issue>, started_at: Instant) -> Response {
+    let (issues, total) = truncate_issues(issues);
+    let message = collected_validation_message("the associations batch", &issues, total);
+    validation_error(
+        ErrorCode::InvalidArgument,
+        message,
+        RefusalDetail {
+            issues,
+            integrity: Some("nothing_written"),
+            retryable_after_correction: Some(true),
+            ..Default::default()
+        },
+        started_at,
+    )
 }
 
 #[derive(Debug, Deserialize)]

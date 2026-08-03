@@ -1,6 +1,6 @@
 //! The MCP-over-HTTP transport itself: initialize/tools/call and citation.
 
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::support::*;
 
@@ -355,6 +355,94 @@ fn mcp_tool_call_carries_structured_content_on_a_rejected_ingestion_write() {
         route_error_text.contains("missing required argument 'associations'"),
         "{route_error_text}"
     );
+}
+
+/// S5 (#383): a `strict`-context schema violation refuses through MCP
+/// exactly like a shape-invalid batch does above — `route_tool`/
+/// `ToolError` need no schema-specific code at all, since the HTTP
+/// error body (schema `issues` included) is forwarded verbatim.
+#[test]
+fn mcp_tool_call_carries_structured_content_on_a_schema_violation() {
+    let server = Server::start("mcp-schema-structured");
+    server.ok("PUT", "/contexts/sake", Some(json!({})));
+    server.ok(
+        "PUT",
+        "/contexts/sake/schema",
+        Some(json!({
+            "schema": 1,
+            "mode": "strict",
+            "closed_labels": false,
+            "types": {"Brewery": {}, "Person": {}},
+            "relations": {"杜氏": {"domain": ["Brewery"], "range": ["Person"]}}
+        })),
+    );
+
+    let (status, reply) = server.call(
+        "POST",
+        "/mcp",
+        Some(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "add_associations",
+                   "arguments": {"context": "sake", "associations": [
+                       {"subject": "高瀬", "label": "schema:type", "object": "Person", "weight": 1.0, "source": "a.md"},
+                       {"subject": "高瀬", "label": "杜氏", "object": "個人A", "weight": 1.0, "source": "a.md"}
+                   ]}}})),
+    );
+    assert_eq!(status, 200, "the JSON-RPC envelope still succeeds: {reply}");
+    assert_eq!(reply["result"]["isError"], true, "{reply}");
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("HTTP 400"), "{text}");
+    assert!(text.contains("associations[1].subject"), "{text}");
+
+    let structured = &reply["result"]["structuredContent"];
+    assert_eq!(structured["code"], json!("invalid_argument"), "{reply}");
+    assert_eq!(structured["integrity"], json!("nothing_written"), "{reply}");
+    let issues = structured["issues"].as_array().expect("issues array");
+    assert_eq!(issues.len(), 1, "{reply}");
+    assert_eq!(
+        issues[0]["path"],
+        json!("associations[1].subject"),
+        "{reply}"
+    );
+    assert_eq!(issues[0]["kind"], json!("domain"), "{reply}");
+}
+
+/// The `get_schema`/`put_schema` MCP tools (S5, #383) round-trip a
+/// document through the same route the HTTP surface uses — no
+/// bespoke MCP logic, `route_tool` is a pure mapping.
+#[test]
+fn mcp_get_and_put_schema_round_trip_through_the_http_route() {
+    let server = Server::start("mcp-schema-tools");
+    server.ok("PUT", "/contexts/sake", Some(json!({})));
+
+    let document = json!({
+        "schema": 1,
+        "mode": "warn",
+        "closed_labels": false,
+        "types": {"Brewery": {"is_a": []}},
+        "relations": {}
+    });
+    let put_reply = server.call_tool(
+        1,
+        "put_schema",
+        json!({
+            "context": "sake",
+            "schema": 1,
+            "mode": "warn",
+            "closed_labels": false,
+            "types": {"Brewery": {}},
+            "relations": {}
+        }),
+    );
+    assert!(put_reply.get("isError").is_none(), "{put_reply}");
+
+    let get_reply = server.call_tool(2, "get_schema", json!({"context": "sake"}));
+    assert!(get_reply.get("isError").is_none(), "{get_reply}");
+    // A success carries no `structuredContent` (`tool_response`'s `Ok`
+    // arm) — the tool's `content[0].text` is the raw HTTP response
+    // body, exactly like every other read tool.
+    let text = get_reply["content"][0]["text"].as_str().unwrap();
+    let body: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(body["result"], document, "{text}");
 }
 
 /// issue #182: the MCP `import` tool reports the same durable-prefix

@@ -34,10 +34,9 @@ use crate::sha256::sha256_hex;
 use crate::storage::write_atomic;
 
 // `schema_issues` (S3, #381) is the one pure function every schema-
-// checking write entrance shares. S4 (#382) wires it into
-// `predicted_schema_rejection`/`preview_batch` (`src/ingest.rs`), the
-// import path; S5 (#383, the associations pre-write arm) is the one
-// still to land.
+// checking write entrance shares — both now wired: S4 (#382,
+// `predicted_schema_rejection`/`preview_batch`, `src/ingest.rs`) and
+// S5 (#383, the associations pre-write arm, `src/api/associations.rs`).
 mod check;
 pub(crate) use check::{SchemaCheckInput, SchemaEnv, schema_issues};
 
