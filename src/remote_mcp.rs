@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::body::{Body, Bytes};
-use axum::http::{Request, StatusCode, header};
+use axum::http::{HeaderMap, Request, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use http_body_util::LengthLimitError;
 use serde_json::{Value, json};
@@ -45,11 +45,13 @@ use crate::mcp;
 /// stamped onto the dispatched call the same way — without this, a
 /// tool call would run past `enforce_timeout`'s race unchecked, since
 /// the dispatched request never passes back through that layer.
+#[allow(clippy::too_many_arguments)] // the outer request's context, spread flat
 pub async fn serve(
     dispatch: Router,
     instructions: Arc<String>,
     key: Option<crate::auth::AuthKey>,
     scope: Option<crate::auth::KeyScope>,
+    headers: HeaderMap,
     body: Bytes,
     max_result_bytes: usize,
     deadline: Deadline,
@@ -95,12 +97,26 @@ pub async fn serve(
         mcp::Message::Request { id, call } => (id, call),
     };
 
+    // 2026-07-28's per-request contract, applied before any dispatch: a
+    // request that declares the stateless era (via `_meta` or the
+    // mirrored header) must carry consistent, supported metadata — and
+    // one that declares neither runs under the legacy `initialize`
+    // contract untouched, exactly the dual-era split the spec draws.
+    let era = match modern_gate(&headers, &message, &id) {
+        Ok(era) => era,
+        Err(refusal) => return rpc_over_http(StatusCode::BAD_REQUEST, refusal),
+    };
+
     let reply = match call {
         mcp::Call::Initialize { protocol_version } => mcp::response(
             id,
             mcp::initialize_result(protocol_version.as_deref(), &instructions),
         ),
         mcp::Call::Ping => mcp::response(id, json!({})),
+        // Mandatory under 2026-07-28, and answered on the legacy era
+        // too: a dual-era client's first message may be exactly this
+        // probe, sent to learn which era the server speaks.
+        mcp::Call::Discover => mcp::response(id, mcp::discover_result(&instructions)),
         mcp::Call::ToolsList => mcp::response(id, mcp::tools_result()),
         mcp::Call::Tool { name, arguments } if name == "retrieve" => {
             // retrieve issues a variable number of dispatched calls
@@ -218,10 +234,197 @@ pub async fn serve(
             mcp::response(id, mcp::tool_response(outcome))
         }
         mcp::Call::Unknown { method } => {
-            mcp::error_response(id, -32601, format!("unknown method '{method}'"))
+            // 2026-07-28 pins the HTTP status for an unimplemented RPC
+            // to 404 — the JSON-RPC body is what tells it apart from a
+            // legacy server that does not host /mcp at all. The legacy
+            // era keeps its 200: those clients read only the body, and
+            // some treat a non-2xx envelope as transport failure.
+            let status = match era {
+                Era::Modern => StatusCode::NOT_FOUND,
+                Era::Legacy => StatusCode::OK,
+            };
+            return rpc_over_http(
+                status,
+                mcp::error_response(id, -32601, format!("unknown method '{method}'")),
+            );
         }
     };
     rpc_over_http(StatusCode::OK, reply)
+}
+
+/// Which wire contract one request runs under.
+enum Era {
+    /// The `initialize`-handshake revisions (2025-11-25 and earlier):
+    /// no required headers, no per-request `_meta` version.
+    Legacy,
+    /// Revision 2026-07-28 and later: version and identity travel on
+    /// every request, mirrored into headers for intermediaries.
+    Modern,
+}
+
+/// Sorts one request into its [`Era`] and enforces every header rule
+/// the modern era imposes: `MCP-Protocol-Version` agreeing with the
+/// body's `_meta`, the version actually being implemented, `Mcp-Method`
+/// agreeing with `method`, and `Mcp-Name` agreeing with `params.name`
+/// on a `tools/call`. Any failure is the JSON-RPC error body to send
+/// back — the spec's `HeaderMismatch` (-32020) or
+/// `UnsupportedProtocolVersion` (-32022), each under HTTP 400, which
+/// the caller stamps on.
+///
+/// A legacy version in `MCP-Protocol-Version` alone selects
+/// [`Era::Legacy`]: clients have mirrored that header since 2025-06-18,
+/// so its mere presence proves nothing about the era.
+fn modern_gate(headers: &HeaderMap, message: &Value, id: &Value) -> Result<Era, Value> {
+    let header_version = headers
+        .get("mcp-protocol-version")
+        .and_then(|value| value.to_str().ok());
+    let meta_version = mcp::request_protocol_version(message);
+    let version = match (meta_version, header_version) {
+        (None, None) => return Ok(Era::Legacy),
+        (None, Some(header)) if mcp::SUPPORTED_PROTOCOL_VERSIONS.contains(&header) => {
+            return Ok(Era::Legacy);
+        }
+        (None, Some(header)) if mcp::MODERN_PROTOCOL_VERSIONS.contains(&header) => {
+            return Err(header_mismatch(
+                id,
+                format!(
+                    "MCP-Protocol-Version is '{header}' but the body carries no \
+                     _meta {}",
+                    mcp::META_PROTOCOL_VERSION
+                ),
+            ));
+        }
+        (None, Some(header)) => return Err(unsupported_version(id, header)),
+        (Some(meta), Some(header)) if meta != header => {
+            return Err(header_mismatch(
+                id,
+                format!(
+                    "MCP-Protocol-Version header '{header}' does not match the body's '{meta}'"
+                ),
+            ));
+        }
+        (Some(meta), None) => {
+            return Err(header_mismatch(
+                id,
+                format!(
+                    "the body declares protocol version '{meta}' but the required \
+                     MCP-Protocol-Version header is missing"
+                ),
+            ));
+        }
+        (Some(meta), Some(_)) => meta,
+    };
+    if !mcp::MODERN_PROTOCOL_VERSIONS.contains(&version) {
+        return Err(unsupported_version(id, version));
+    }
+    let body_method = message.get("method").and_then(Value::as_str).unwrap_or("");
+    match headers
+        .get("mcp-method")
+        .and_then(|value| value.to_str().ok())
+    {
+        Some(method) if method == body_method => {}
+        Some(method) => {
+            return Err(header_mismatch(
+                id,
+                format!("Mcp-Method header '{method}' does not match body method '{body_method}'"),
+            ));
+        }
+        None => {
+            return Err(header_mismatch(
+                id,
+                "the required Mcp-Method header is missing".to_string(),
+            ));
+        }
+    }
+    if body_method == "tools/call" {
+        let body_name = message
+            .get("params")
+            .and_then(|params| params.get("name"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        match headers
+            .get("mcp-name")
+            .and_then(|value| value.to_str().ok())
+            .map(decode_sentinel)
+        {
+            Some(Ok(name)) if name == body_name => {}
+            Some(Ok(name)) => {
+                return Err(header_mismatch(
+                    id,
+                    format!("Mcp-Name header '{name}' does not match body name '{body_name}'"),
+                ));
+            }
+            Some(Err(())) => {
+                return Err(header_mismatch(
+                    id,
+                    "Mcp-Name header carries an undecodable base64 sentinel".to_string(),
+                ));
+            }
+            None => {
+                return Err(header_mismatch(
+                    id,
+                    "the required Mcp-Name header is missing".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(Era::Modern)
+}
+
+fn header_mismatch(id: &Value, message: String) -> Value {
+    mcp::error_response(id.clone(), mcp::HEADER_MISMATCH, message)
+}
+
+fn unsupported_version(id: &Value, requested: &str) -> Value {
+    mcp::unsupported_version_error(id.clone(), requested)
+}
+
+/// A header value, through the spec's Base64 sentinel if it wears one:
+/// `=?base64?…?=` marks a value that could not ride as plain ASCII
+/// (servers MUST decode before comparing against the body — a client
+/// is free to encode even a plain-ASCII name). Anything unmarked is
+/// itself the value.
+fn decode_sentinel(value: &str) -> Result<String, ()> {
+    let Some(encoded) = value
+        .strip_prefix("=?base64?")
+        .and_then(|rest| rest.strip_suffix("?="))
+    else {
+        return Ok(value.to_string());
+    };
+    base64_decode(encoded).and_then(|bytes| String::from_utf8(bytes).map_err(|_| ()))
+}
+
+/// RFC 4648 §4 decoding (the standard `+`/`/` alphabet the sentinel
+/// carries), padding optional — decode-only, the mirror of oauth.rs's
+/// encode-only `base64url`, and just as deliberately dependency-free.
+fn base64_decode(text: &str) -> Result<Vec<u8>, ()> {
+    fn sextet(byte: u8) -> Result<u32, ()> {
+        match byte {
+            b'A'..=b'Z' => Ok(u32::from(byte - b'A')),
+            b'a'..=b'z' => Ok(u32::from(byte - b'a') + 26),
+            b'0'..=b'9' => Ok(u32::from(byte - b'0') + 52),
+            b'+' => Ok(62),
+            b'/' => Ok(63),
+            _ => Err(()),
+        }
+    }
+    let stripped = text.trim_end_matches('=').as_bytes();
+    let mut out = Vec::with_capacity(stripped.len() * 3 / 4);
+    for chunk in stripped.chunks(4) {
+        let mut acc: u32 = 0;
+        for &byte in chunk {
+            acc = (acc << 6) | sextet(byte)?;
+        }
+        match chunk.len() {
+            4 => out.extend_from_slice(&[(acc >> 16) as u8, (acc >> 8) as u8, acc as u8]),
+            3 => out.extend_from_slice(&[(acc >> 10) as u8, (acc >> 2) as u8]),
+            2 => out.push((acc >> 4) as u8),
+            // A lone trailing sextet encodes fewer bits than a byte —
+            // no valid base64 ends this way.
+            _ => return Err(()),
+        }
+    }
+    Ok(out)
 }
 
 /// One in-process round trip against the API routes — the transport
@@ -375,6 +578,7 @@ mod tests {
             Arc::new(String::new()),
             None,
             None,
+            HeaderMap::new(),
             Bytes::from(body.to_string()),
             usize::MAX,
             Deadline::unbounded(),
@@ -434,6 +638,7 @@ mod tests {
             Arc::new(String::new()),
             None,
             None,
+            HeaderMap::new(),
             Bytes::from(body.to_string()),
             1024,
             Deadline::unbounded(),
@@ -477,6 +682,7 @@ mod tests {
             Arc::new(String::new()),
             None,
             None,
+            HeaderMap::new(),
             Bytes::from(body.to_string()),
             1024,
             Deadline::unbounded(),
@@ -544,6 +750,7 @@ mod tests {
             Arc::new(String::new()),
             None,
             None,
+            HeaderMap::new(),
             Bytes::from(body.to_string()),
             1024,
             Deadline::unbounded(),
@@ -624,6 +831,7 @@ mod tests {
             Arc::new(String::new()),
             None,
             None,
+            HeaderMap::new(),
             Bytes::from(body.to_string()),
             1024,
             Deadline::unbounded(),
@@ -645,6 +853,7 @@ mod tests {
             Arc::new(String::new()),
             None,
             None,
+            HeaderMap::new(),
             Bytes::from(body.to_string()),
             usize::MAX,
             Deadline::unbounded(),
@@ -685,6 +894,7 @@ mod tests {
             Arc::new(String::new()),
             None,
             None,
+            HeaderMap::new(),
             Bytes::from(body.to_string()),
             usize::MAX,
             already_expired,
@@ -723,6 +933,7 @@ mod tests {
             Arc::new(String::new()),
             None,
             None,
+            HeaderMap::new(),
             Bytes::from(body.to_string()),
             usize::MAX,
             already_expired,
@@ -735,6 +946,261 @@ mod tests {
         assert_eq!(reply["result"]["isError"], true, "{reply}");
         let text = reply["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("exceeded its budget"), "{text}");
+    }
+
+    /// One serve() round trip with explicit headers, against a router
+    /// that answers `GET /contexts` — enough for a `list_contexts`
+    /// tools/call or any dispatch-free method.
+    async fn roundtrip(headers: HeaderMap, body: Value) -> (u16, Value) {
+        let router = Router::new().route("/contexts", axum::routing::get(|| async { "[]" }));
+        let response = serve(
+            router,
+            Arc::new("manual".to_string()),
+            None,
+            None,
+            headers,
+            Bytes::from(body.to_string()),
+            usize::MAX,
+            Deadline::unbounded(),
+        )
+        .await;
+        let status = response.status().as_u16();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    /// The standard 2026-07-28 request headers, body `_meta` half in
+    /// [`modern_body`].
+    fn modern_headers(method: &str, name: Option<&str>) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("mcp-protocol-version", "2026-07-28".parse().unwrap());
+        headers.insert("mcp-method", method.parse().unwrap());
+        if let Some(name) = name {
+            headers.insert("mcp-name", name.parse().unwrap());
+        }
+        headers
+    }
+
+    fn modern_body(method: &str, mut params: Value) -> Value {
+        params.as_object_mut().unwrap().insert(
+            "_meta".to_string(),
+            json!({ "io.modelcontextprotocol/protocolVersion": "2026-07-28" }),
+        );
+        json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params })
+    }
+
+    /// The modern happy path end to end: matching headers and `_meta`,
+    /// a `tools/call` naming its tool in `Mcp-Name`, a 200 whose result
+    /// wears the 2026-07-28 envelope.
+    #[tokio::test]
+    async fn a_conforming_modern_tools_call_runs_and_answers_complete() {
+        let (status, reply) = roundtrip(
+            modern_headers("tools/call", Some("list_contexts")),
+            modern_body(
+                "tools/call",
+                json!({ "name": "list_contexts", "arguments": {} }),
+            ),
+        )
+        .await;
+        assert_eq!(status, 200, "{reply}");
+        assert_eq!(reply["result"]["resultType"], "complete", "{reply}");
+        assert_ne!(reply["result"]["isError"], json!(true), "{reply}");
+    }
+
+    /// `server/discover` answers on both eras — with modern headers,
+    /// and bare (the backward-compatibility probe of a client that has
+    /// not yet learned which era this server speaks).
+    #[tokio::test]
+    async fn server_discover_answers_on_either_era() {
+        let (status, reply) = roundtrip(
+            HeaderMap::new(),
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "server/discover" }),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(
+            reply["result"]["supportedVersions"][0], "2026-07-28",
+            "{reply}"
+        );
+        assert_eq!(reply["result"]["instructions"], "manual", "{reply}");
+
+        let (status, reply) = roundtrip(
+            modern_headers("server/discover", None),
+            modern_body("server/discover", json!({})),
+        )
+        .await;
+        assert_eq!(status, 200, "{reply}");
+        assert_eq!(reply["result"]["resultType"], "complete", "{reply}");
+    }
+
+    /// Requests carrying neither modern `_meta` nor any version header
+    /// — and ones carrying the header legacy clients have mirrored
+    /// since 2025-06-18 — run under the initialize contract untouched.
+    #[tokio::test]
+    async fn legacy_requests_are_untouched_by_the_modern_gate() {
+        let (status, reply) = roundtrip(
+            HeaderMap::new(),
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" }),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert!(reply["error"].is_null(), "{reply}");
+
+        let mut legacy_header = HeaderMap::new();
+        legacy_header.insert("mcp-protocol-version", "2025-06-18".parse().unwrap());
+        let (status, reply) = roundtrip(
+            legacy_header,
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" }),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert!(reply["error"].is_null(), "{reply}");
+    }
+
+    /// Every shape of header/body disagreement the spec's server
+    /// validation names is a 400 with `HeaderMismatch` (-32020): a
+    /// version header contradicting `_meta`, a declared version whose
+    /// required header is missing, a missing `Mcp-Method`, and an
+    /// `Mcp-Name` that does not name the called tool.
+    #[tokio::test]
+    async fn header_body_disagreements_are_refused_with_header_mismatch() {
+        let mut contradicting = modern_headers("tools/list", None);
+        contradicting.insert("mcp-protocol-version", "2025-11-25".parse().unwrap());
+        let disagreements = [
+            (contradicting, modern_body("tools/list", json!({}))),
+            (
+                HeaderMap::new(),
+                modern_body("tools/list", json!({})), // _meta but no headers at all
+            ),
+            (
+                {
+                    let mut headers = modern_headers("tools/list", None);
+                    headers.remove("mcp-method");
+                    headers
+                },
+                modern_body("tools/list", json!({})),
+            ),
+            (
+                modern_headers("tools/call", Some("delete_context")),
+                modern_body(
+                    "tools/call",
+                    json!({ "name": "list_contexts", "arguments": {} }),
+                ),
+            ),
+            (
+                modern_headers("tools/call", None), // Mcp-Name required for tools/call
+                modern_body(
+                    "tools/call",
+                    json!({ "name": "list_contexts", "arguments": {} }),
+                ),
+            ),
+        ];
+        for (headers, body) in disagreements {
+            let (status, reply) = roundtrip(headers, body.clone()).await;
+            assert_eq!(status, 400, "{body} → {reply}");
+            assert_eq!(reply["error"]["code"], -32020, "{body} → {reply}");
+        }
+    }
+
+    /// A version this build does not implement — declared consistently,
+    /// or via the header alone — earns 400 with
+    /// `UnsupportedProtocolVersionError` and the list to retry from.
+    #[tokio::test]
+    async fn an_unimplemented_version_is_refused_with_the_supported_list() {
+        let mut headers = HeaderMap::new();
+        headers.insert("mcp-protocol-version", "2099-01-01".parse().unwrap());
+        headers.insert("mcp-method", "tools/list".parse().unwrap());
+        let mut body = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {} });
+        body["params"]["_meta"] =
+            json!({ "io.modelcontextprotocol/protocolVersion": "2099-01-01" });
+        let (status, reply) = roundtrip(headers, body).await;
+        assert_eq!(status, 400);
+        assert_eq!(reply["error"]["code"], -32022, "{reply}");
+        assert_eq!(
+            reply["error"]["data"]["supported"][0], "2026-07-28",
+            "{reply}"
+        );
+        assert_eq!(reply["error"]["data"]["requested"], "2099-01-01", "{reply}");
+
+        let mut header_only = HeaderMap::new();
+        header_only.insert("mcp-protocol-version", "2099-01-01".parse().unwrap());
+        let (status, reply) = roundtrip(
+            header_only,
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
+        )
+        .await;
+        assert_eq!(status, 400);
+        assert_eq!(reply["error"]["code"], -32022, "{reply}");
+    }
+
+    /// 2026-07-28 pins an unimplemented RPC to HTTP 404 (the JSON-RPC
+    /// body tells it apart from a server with no /mcp at all); the
+    /// legacy era keeps its 200 envelope for the same -32601.
+    #[tokio::test]
+    async fn an_unknown_method_is_404_modern_but_200_legacy() {
+        let (status, reply) = roundtrip(
+            modern_headers("subscriptions/listen", None),
+            modern_body("subscriptions/listen", json!({})),
+        )
+        .await;
+        assert_eq!(status, 404, "{reply}");
+        assert_eq!(reply["error"]["code"], -32601, "{reply}");
+
+        let (status, reply) = roundtrip(
+            HeaderMap::new(),
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "subscriptions/listen" }),
+        )
+        .await;
+        assert_eq!(status, 200, "{reply}");
+        assert_eq!(reply["error"]["code"], -32601, "{reply}");
+    }
+
+    /// An `Mcp-Name` wearing the Base64 sentinel must be decoded before
+    /// comparison — a client is free to encode even a plain-ASCII name.
+    #[tokio::test]
+    async fn an_mcp_name_in_base64_sentinel_form_is_decoded_before_comparing() {
+        // "list_contexts", RFC 4648 standard alphabet with padding.
+        let (status, reply) = roundtrip(
+            modern_headers("tools/call", Some("=?base64?bGlzdF9jb250ZXh0cw==?=")),
+            modern_body(
+                "tools/call",
+                json!({ "name": "list_contexts", "arguments": {} }),
+            ),
+        )
+        .await;
+        assert_eq!(status, 200, "{reply}");
+        assert_ne!(reply["result"]["isError"], json!(true), "{reply}");
+    }
+
+    /// The sentinel decoder against the spec's own examples, plus the
+    /// shapes it must refuse.
+    #[test]
+    fn decode_sentinel_matches_the_spec_examples() {
+        assert_eq!(decode_sentinel("us-west1"), Ok("us-west1".to_string()));
+        assert_eq!(
+            decode_sentinel("=?base64?SGVsbG8sIOS4lueVjA==?="),
+            Ok("Hello, 世界".to_string())
+        );
+        assert_eq!(
+            decode_sentinel("=?base64?IHBhZGRlZCA=?="),
+            Ok(" padded ".to_string())
+        );
+        assert_eq!(
+            decode_sentinel("=?base64?bGluZTEKbGluZTI=?="),
+            Ok("line1\nline2".to_string())
+        );
+        // A sentinel wrapping a doubly-encoded literal decodes to the
+        // literal itself.
+        assert_eq!(
+            decode_sentinel("=?base64?PT9iYXNlNjQ/bGl0ZXJhbD89?="),
+            Ok("=?base64?literal?=".to_string())
+        );
+        // Not base64 inside the sentinel, and a length no valid base64
+        // has: refused, not passed through as if literal.
+        assert_eq!(decode_sentinel("=?base64?!!!?="), Err(()));
+        assert_eq!(decode_sentinel("=?base64?A?="), Err(()));
     }
 
     /// An id of a disallowed JSON-RPC type (object/array/bool) must come
@@ -754,6 +1220,7 @@ mod tests {
             Arc::new(String::new()),
             None,
             None,
+            HeaderMap::new(),
             Bytes::from(body.to_string()),
             usize::MAX,
             Deadline::unbounded(),

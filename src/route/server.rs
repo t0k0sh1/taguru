@@ -141,6 +141,7 @@ pub(crate) async fn run(config: Option<PathBuf>) {
                         instructions,
                         None,
                         None,
+                        headers,
                         body,
                         mcp_max_result_bytes,
                         deadline,
@@ -246,9 +247,10 @@ fn routes(state: RouterState) -> Router<RouterState> {
         }))
 }
 
-/// Whether an MCP message is an `initialize` — the one method whose
-/// reply carries the manual. A cheap peek, not a validation: anything
-/// unparseable goes to `remote_mcp::serve` for its own refusal.
+/// Whether an MCP message is an `initialize` or a `server/discover` —
+/// the two methods whose reply carries the manual (one per era). A
+/// cheap peek, not a validation: anything unparseable goes to
+/// `remote_mcp::serve` for its own refusal.
 fn wants_instructions(body: &Bytes) -> bool {
     serde_json::from_slice::<Value>(body)
         .ok()
@@ -256,7 +258,7 @@ fn wants_instructions(body: &Bytes) -> bool {
             message
                 .get("method")
                 .and_then(Value::as_str)
-                .map(|method| method == "initialize")
+                .map(|method| method == "initialize" || method == "server/discover")
         })
         .unwrap_or(false)
 }

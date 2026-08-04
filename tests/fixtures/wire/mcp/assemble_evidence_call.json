@@ -8,12 +8,19 @@
     ]
   },
   "response": {
+    "_meta": {
+      "io.modelcontextprotocol/serverInfo": {
+        "name": "taguru",
+        "version": "0.0.0"
+      }
+    },
     "content": [
       {
         "text": "{\"result\":{\"budget\":{\"bytes_used\":260,\"items_used\":1,\"limits\":{\"max_bytes\":65536,\"max_items\":40,\"max_tokens\":4000},\"tokens_used\":65},\"citations\":[],\"items\":[{\"association\":{\"attributions\":[],\"count\":1,\"label\":\"rel\",\"object\":\"b\",\"subject\":\"a\",\"weight\":1.0},\"bytes\":256,\"candidate_id\":\"association\\u0000a\\u0000rel\\u0000b\",\"citation_refs\":[],\"estimated_tokens\":64,\"fused_rank\":1,\"kind\":\"association\",\"lane_ranks\":[{\"lane\":\"graph_activate\",\"rank\":1}]}],\"omitted\":[],\"omitted_by_reason\":{},\"omitted_total\":0,\"plan\":{\"lanes\":{\"activate\":{\"ran\":true},\"citations\":{\"ran\":true},\"communities\":{\"ran\":false,\"reason\":\"include_communities was false\"},\"passages\":{\"ran\":true},\"query\":{\"ran\":false,\"reason\":\"no 'labels' given\"},\"resolve\":{\"ran\":true}},\"reranker\":{\"configured\":false,\"ran\":false},\"selection\":{\"contradiction_groups\":0,\"dedup_dropped\":0,\"diversity_tier_width\":10}}},\"status\":\"ok\",\"time\":0.0}",
         "type": "text"
       }
-    ]
+    ],
+    "resultType": "complete"
   },
   "route": "tools/call assemble_evidence",
   "status": 200

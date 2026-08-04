@@ -547,12 +547,14 @@ async fn serve(serve_args: cli::ServeArgs, auth_source: auth::AuthSource) {
             move |deadline: axum::Extension<Deadline>,
                   key: Option<axum::Extension<auth::AuthKey>>,
                   scope: Option<axum::Extension<auth::KeyScope>>,
+                  headers: axum::http::HeaderMap,
                   body: axum::body::Bytes| {
                 remote_mcp::serve(
                     mcp_dispatch.clone(),
                     Arc::clone(&mcp_instructions),
                     key.map(|extension| extension.0),
                     scope.map(|extension| extension.0),
+                    headers,
                     body,
                     mcp_max_result_bytes,
                     deadline.0,

@@ -5,13 +5,20 @@
     "context": "mcp-error-corpus"
   },
   "response": {
+    "_meta": {
+      "io.modelcontextprotocol/serverInfo": {
+        "name": "taguru",
+        "version": "0.0.0"
+      }
+    },
     "content": [
       {
         "text": "missing required argument 'origins'",
         "type": "text"
       }
     ],
-    "isError": true
+    "isError": true,
+    "resultType": "complete"
   },
   "route": "tools/call assemble_evidence",
   "status": 200
