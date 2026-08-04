@@ -43,6 +43,7 @@ mod retrieval_cache;
 mod retrieval_core;
 mod routing;
 mod schema;
+mod schema_audit;
 mod schema_export_import;
 mod schema_import;
 mod schema_type_label;

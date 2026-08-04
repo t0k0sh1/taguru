@@ -764,6 +764,77 @@ pub(super) fn tool_definitions() -> Vec<Value> {
             ),
         ),
         (
+            "audit_schema",
+            "ADR 0009 schema audit: judges every live association against the installed schema document, surfacing what a `strict` flip would refuse without waiting for one — the pre-existing violations `strict` itself can never show (it only judges a write as it happens). Four candidates-not-verdicts sections in one call: violations (domain/range mismatches, paginated, worst-first), untyped_concepts (asserted no schema:type of their own), undeclared_types (asserted type names absent from `types`, always reported), unknown_labels (relation labels absent from `relations`, only when closed_labels is set), and reserved_alias_conflicts (a persisted label alias resolving to the reserved schema:type label). Never auto-applies a fix. 404 if the context has no installed schema.",
+            object_schema(
+                json!({
+                    "context": context,
+                    "limit": { "type": "integer", "minimum": 0, "description": "default 100, capped at 1000 — pages violations only" },
+                    "after": {
+                        "type": "object",
+                        "description": "resume past the previous page's last violation — copy every field verbatim from it. total stays constant across pages",
+                        "properties": {
+                            "weight": { "type": "number" },
+                            "subject": { "type": "string" },
+                            "label": { "type": "string" },
+                            "object": { "type": "string" }
+                        },
+                        "required": ["weight", "subject", "label", "object"]
+                    }
+                }),
+                &["context"],
+            ),
+        ),
+        (
+            "validate_schema",
+            "Dry-run of a PROPOSED schema document (same shape as put_schema's own arguments) against the live graph — never persisted, and reads the installed schema for no purpose (the proposed document alone drives the judgment, even in a context with none installed yet). The pre-flight before flipping mode to strict: run this first with the intended document to see every violations()/untyped_concepts/undeclared_types/unknown_labels finding it would produce once installed. Same response shape as audit_schema.",
+            object_schema(
+                json!({
+                    "context": context,
+                    "document": {
+                        "type": "object",
+                        "description": "the proposed schema document, same shape as put_schema's own arguments (schema, mode, closed_labels, types, relations), never installed",
+                        "properties": {
+                            "schema": { "type": "integer", "description": "document format version this binary reads (currently 1)" },
+                            "mode": { "type": "string", "enum": ["off", "warn", "strict"] },
+                            "closed_labels": { "type": "boolean" },
+                            "types": {
+                                "type": "object",
+                                "additionalProperties": {
+                                    "type": "object",
+                                    "properties": { "is_a": { "type": "array", "items": { "type": "string" } } }
+                                }
+                            },
+                            "relations": {
+                                "type": "object",
+                                "additionalProperties": {
+                                    "type": "object",
+                                    "properties": {
+                                        "domain": { "type": "array", "items": { "type": "string" } },
+                                        "range": { "type": "array", "items": { "type": "string" } }
+                                    }
+                                }
+                            }
+                        },
+                        "required": ["schema", "mode", "closed_labels", "types", "relations"]
+                    },
+                    "limit": { "type": "integer", "minimum": 0, "description": "default 100, capped at 1000 — pages violations only" },
+                    "after": {
+                        "type": "object",
+                        "description": "resume past the previous page's last violation — copy every field verbatim from it. total stays constant across pages",
+                        "properties": {
+                            "weight": { "type": "number" },
+                            "subject": { "type": "string" },
+                            "label": { "type": "string" },
+                            "object": { "type": "string" }
+                        },
+                        "required": ["weight", "subject", "label", "object"]
+                    }
+                }),
+                &["context", "document"],
+            ),
+        ),
+        (
             "flush",
             "Persist every dirty context to disk now; answers the flushed names (admin role). The backup handshake's first half: flush, then snapshot the data directory — the same discipline the operator docs describe, reachable by an agent tending its own memory.",
             object_schema(json!({}), &[]),

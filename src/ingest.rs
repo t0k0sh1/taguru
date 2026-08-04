@@ -2790,7 +2790,11 @@ fn predicted_schema_rejection(
                     retracted_source: Some(&batch.source),
                 },
             );
-            crate::schema::schema_issues(&env, &ops, "")
+            crate::schema::schema_issues(
+                &env,
+                &ops,
+                crate::schema::IssuePath::Request { prefix: "" },
+            )
         })
         .map_err(ApplyRefusal::Access)?;
 

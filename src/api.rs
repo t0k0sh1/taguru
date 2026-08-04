@@ -70,7 +70,7 @@ pub use import::{
 pub(crate) use import::{import_outcome, schema_import_outcome};
 pub use recall::{cross_query, cross_recall, query, recall};
 pub use resolve::{explain_resolve, explain_resolve_label, resolve, resolve_label};
-pub use schema::{get_schema, put_schema};
+pub use schema::{audit_schema, get_schema, put_schema, validate_schema};
 pub use sources::{
     citation, cross_search_passages, explain_search_passages, list_sources, lookup_passages,
     retract_source, search_passages, store_passages,

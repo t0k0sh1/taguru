@@ -483,6 +483,19 @@ pub fn route_tool(
                 ],
             )),
         ),
+        "audit_schema" => (
+            "POST",
+            format!("{}/schema/audit", context_path("context")?),
+            Some(pick(arguments, &["limit", "after"])),
+        ),
+        "validate_schema" => {
+            need_present(arguments, "document")?;
+            (
+                "POST",
+                format!("{}/schema/validate", context_path("context")?),
+                Some(pick(arguments, &["document", "limit", "after"])),
+            )
+        }
         _ => return Err(format!("unknown tool '{name}'")),
     })
 }

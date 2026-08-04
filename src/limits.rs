@@ -105,8 +105,9 @@ pub(crate) fn shed(
 
 /// A shared, non-queuing permit pool for the whole-context CPU/disk
 /// sweeps exposed by the API. Unlike the global in-flight ceiling this
-/// gate is applied only to `audit_vocabulary`, `compact_context`, and
-/// `audit_drift` (which runs the same pairwise scan as
+/// gate is applied only to `audit_vocabulary`, `compact_context`,
+/// `audit_schema`, `validate_schema` (ADR 0009 §10 — both unconditionally
+/// O(edges)), and `audit_drift` (which runs the same pairwise scan as
 /// `audit_vocabulary` when `include_twins` is set); ordinary requests
 /// retain the rest of the worker pool during a burst.
 #[derive(Clone)]

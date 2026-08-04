@@ -774,6 +774,15 @@ fn routes(
             "/contexts/{name}/communities",
             get(api::analyze_communities),
         )
+        // ADR 0009 §10: both O(edges), with no cheap default path —
+        // unlike `audit_drift` just below, neither ever conditionally
+        // skips the full scan, so both join this unconditional group
+        // rather than carrying the limiter as an extension.
+        .route("/contexts/{name}/schema/audit", post(api::audit_schema))
+        .route(
+            "/contexts/{name}/schema/validate",
+            post(api::validate_schema),
+        )
         .route_layer(axum::middleware::from_fn_with_state(
             heavy_ops_limiter.clone(),
             limits::enforce_heavy_ops,

@@ -1,11 +1,37 @@
 use std::collections::{HashMap, HashSet};
 
+use crate::deadline::{Deadline, DeadlineExceeded};
+
 use super::{
     Association, ConceptDescription, Context, EdgeFollow, EdgeId, LabelId, LabelUsage,
     keep_narrowest_anchor,
 };
 
 impl Context {
+    /// Every edge in the context, dead ones included, in edge-id order —
+    /// the same population `query_any(&[], &[], &[])`'s degenerate arm
+    /// returns, but deadline-checked like `unsourced_edges`/
+    /// `dead_canonical_aliases` for a caller (ADR 0009 §10's schema
+    /// audit) that means to walk every one of them rather than stumbling
+    /// into the full scan by accident. `query_any` itself stays
+    /// deadline-free: every one of its OTHER callers passes a
+    /// constrained position, so the full-scan arm never runs on their
+    /// behalf, and adding a `Result` to every `query`/`recall` caller for
+    /// a branch none of them take would be pure churn.
+    pub fn all_associations(
+        &self,
+        deadline: Deadline,
+    ) -> Result<Vec<Association>, DeadlineExceeded> {
+        let mut out = Vec::with_capacity(self.edges.len());
+        for edge_id in 0..self.edges.len() as u32 {
+            if deadline.expired() {
+                return Err(DeadlineExceeded);
+            }
+            out.push(self.association(edge_id));
+        }
+        Ok(out)
+    }
+
     /// Recalls every association touching `cue`, whether it appears as the
     /// subject, the relation label, or the object. This lets a relation
     /// label (e.g. "好き") act as a search cue in its own right, not just a

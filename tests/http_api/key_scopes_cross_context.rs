@@ -86,6 +86,23 @@ fn key_scopes_gate_roles_contexts_the_directory_and_mcp() {
         call("POST", "/contexts/sake/drift/audit", None, "rtok").0,
         200
     );
+    // schema/validate (#385, ADR 0009 §12.5) is Role::Read too — it
+    // never persists anything, so a reader key reaches it directly.
+    // `sake` has no installed schema, which is exactly why `validate`
+    // (unlike `audit`) still answers 200 here.
+    assert_eq!(
+        call(
+            "POST",
+            "/contexts/sake/schema/validate",
+            Some(json!({"document": {
+                "schema": 1, "mode": "off", "closed_labels": false,
+                "types": {}, "relations": {}
+            }})),
+            "rtok"
+        )
+        .0,
+        200
+    );
     // #305's evidence assembly is Role::Read too — an unclassified
     // route would fail closed to Admin (auth.rs's own rule), so this
     // pins it reaches a scoped reader directly.
@@ -157,6 +174,14 @@ fn key_scopes_gate_roles_contexts_the_directory_and_mcp() {
     // Role::Read within reach of a write key too.
     assert_eq!(
         call("POST", "/contexts/bunko/drift/audit", None, "wtok").0,
+        200
+    );
+    // schema/audit (#385, ADR 0009 §12.5) is Role::Read too — `bunko`
+    // now has the schema just installed above, so the unscoped reader
+    // key reaches schema/audit directly, the same way it reaches
+    // drift/audit.
+    assert_eq!(
+        call("POST", "/contexts/bunko/schema/audit", None, "rtok").0,
         200
     );
     assert_eq!(call("DELETE", "/contexts/bunko", None, "wtok").0, 403);
