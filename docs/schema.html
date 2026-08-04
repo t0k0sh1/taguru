@@ -188,8 +188,10 @@
         <code>relations</code> declares an entry named <code>schema:type</code>.</li>
     </ol>
     <p>
-      And three exclusions keep it out of surfaces that were never meant to see it: it is never
-      traversed by <code>activate</code>/<code>explore</code>, it never appears in the extraction
+      And a set of exclusions keeps it out of surfaces that were never meant to see it: it is never
+      traversed by <code>activate</code>/<code>explore</code> or by
+      <code>unreachable_from</code>'s coverage audit (where a shared type name would otherwise
+      bridge disconnected facts and hide genuine orphans), it never appears in the extraction
       vocabulary block or <code>list_labels</code>'s default page, and type-name concepts are
       excluded from <code>audit_vocabulary</code>'s twin sweep once a schema exists. The single
       gate for all of this is "an installed schema document exists," never "<code>mode !=
@@ -255,9 +257,18 @@
     </p>
     <p>
       The MCP tools <code>get_schema</code>, <code>put_schema</code>, <code>validate_schema</code>,
-      and <code>audit_schema</code> round-trip onto these same four routes; <code>add_associations</code>
-      and <code>import</code> inherit write-time enforcement for free, since MCP is a pure mapping
-      onto the HTTP surface.
+      and <code>audit_schema</code> round-trip onto these same four routes, as do the Python and
+      TypeScript SDKs' <code>get_schema</code>/<code>put_schema</code>/<code>validate_schema</code>/
+      <code>audit_schema</code> (<code>getSchema</code>/<code>putSchema</code>/… in TypeScript);
+      <code>add_associations</code> and <code>import</code> inherit write-time enforcement for free,
+      since MCP is a pure mapping onto the HTTP surface.
+    </p>
+    <p>
+      For routing without a second call, <code>GET /contexts</code>'s directory rows also carry a
+      read-only <code>schema_mode</code> — the installed document's own <code>mode</code>, or
+      <code>null</code> for a context that never installed one (never a bare <code>off</code>
+      standing in for "no document", the same distinction <code>GET /schema</code>'s own 404
+      draws).
     </p>
   </section>
 

@@ -112,8 +112,8 @@ describe("graph writes and reads", () => {
     await client.contexts.create(name);
     const ctx = client.context(name);
     const op = { subject: "s", label: "l", object: "o", weight: 1.0, source: "a" };
-    expect(await ctx.addAssociations([op])).toBe(1);
-    expect(await ctx.addAssociations([{ ...op, source: "b" }])).toBe(1);
+    expect((await ctx.addAssociations([op])).applied).toBe(1);
+    expect((await ctx.addAssociations([{ ...op, source: "b" }])).applied).toBe(1);
 
     const page = await ctx.query({ subject: "s", label: "l" });
     expect(page.total).toBe(1);

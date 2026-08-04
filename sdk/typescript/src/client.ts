@@ -10,6 +10,7 @@ import { IncompatibleServerError, NotFoundError, TaguruError, TransportError } f
 import type {
   Activation,
   ActivationPage,
+  AddAssociationsResult,
   AliasEntry,
   AliasPage,
   AssocOp,
@@ -33,6 +34,7 @@ import type {
   GroupEntry,
   GroupPage,
   ImportResult,
+  Issue,
   LabelPage,
   LocatorSpec,
   MatchCursor,
@@ -48,6 +50,7 @@ import type {
   RetractAssociationOutcome,
   RetractOutcome,
   RetrievalResult,
+  SchemaAudit,
   SchemaDocument,
   SearchExplanation,
   SearchPlan,
@@ -85,6 +88,7 @@ import {
   sleep,
   sortedEntries,
   unwrapEnvelope,
+  unwrapEnvelopeFull,
 } from "./transport.js";
 
 export interface TaguruOptions {
@@ -327,6 +331,19 @@ export class Taguru {
     return unwrapEnvelope(response.status, response.text);
   }
 
+  /**
+   * @internal `requestJson` plus the envelope's warn-mode carrier — see
+   * `unwrapEnvelopeFull`.
+   */
+  async requestJsonFull(
+    method: string,
+    path: string,
+    options: SendOptions = {},
+  ): Promise<{ result: unknown; issues: Issue[]; schema_violations: number }> {
+    const response = await this.send(method, path, options);
+    return unwrapEnvelopeFull(response.status, response.text);
+  }
+
   /** @internal */
   streamUrl(path: string): {
     url: string;
@@ -381,7 +398,11 @@ export class Taguru {
       content: data,
       contentType: "application/x-ndjson",
     });
-    return normalizeImportOutcomes(unwrapEnvelope(response.status, response.text));
+    const { result, issues, schema_violations } = unwrapEnvelopeFull(
+      response.status,
+      response.text,
+    );
+    return normalizeImportOutcomes(result, issues, schema_violations);
   }
 
   /** Apply an NDJSON batch file (see `importBatches`). */
@@ -800,6 +821,15 @@ export class Context {
     return this.client.requestJson("POST", this.path + suffix, { jsonBody, retry });
   }
 
+  /** `post` plus the envelope's warn-mode carrier — see `unwrapEnvelopeFull`. */
+  private async postFull(
+    suffix: string,
+    jsonBody?: unknown,
+    retry?: RetryClass,
+  ): Promise<{ result: unknown; issues: Issue[]; schema_violations: number }> {
+    return this.client.requestJsonFull("POST", this.path + suffix, { jsonBody, retry });
+  }
+
   // -- entry resolution ---------------------------------------------------
 
   /**
@@ -1044,24 +1074,84 @@ export class Context {
     return result as SchemaDocument;
   }
 
+  /**
+   * Install (or replace) the context's schema document; returns it as
+   * installed (ADR 0009 §5). Refuses (400) a document whose `relations`
+   * declare the reserved `schema:type` label, and refuses to install over
+   * a persisted label alias resolving to it — rename the alias first
+   * (§6.3). Installing changes what `strict` refuses from this point on;
+   * dry-run a candidate with `validateSchema` before flipping.
+   */
+  async putSchema(document: SchemaDocument): Promise<SchemaDocument> {
+    const result = await this.client.requestJson("PUT", `${this.path}/schema`, {
+      jsonBody: document,
+    });
+    return result as SchemaDocument;
+  }
+
+  /**
+   * Judge every live association against the installed document (ADR 0009
+   * §10) — the pre-existing violations `strict` can never surface on its
+   * own, since a write entrance only judges a write as it happens.
+   * Candidates for review, not verdicts; nothing is auto-fixed. `after`
+   * resumes past the previous page's last violation; `total` stays
+   * constant across pages. Throws NotFoundError when the context has no
+   * schema installed (404 `no_schema`).
+   */
+  async auditSchema(
+    options: { limit?: number; after?: MatchCursor } = {},
+  ): Promise<SchemaAudit> {
+    const result = await this.post(
+      "/schema/audit",
+      dropUndefined({ limit: options.limit, after: options.after }),
+    );
+    return result as SchemaAudit;
+  }
+
+  /**
+   * The same judgment as `auditSchema`, but over a PROPOSED document that
+   * is never persisted — the pre-flight to run before a `strict` flip
+   * (ADR 0009 §10). Works identically whether the context already has a
+   * schema or none at all.
+   */
+  async validateSchema(
+    document: SchemaDocument,
+    options: { limit?: number; after?: MatchCursor } = {},
+  ): Promise<SchemaAudit> {
+    const result = await this.post(
+      "/schema/validate",
+      dropUndefined({ document, limit: options.limit, after: options.after }),
+    );
+    return result as SchemaAudit;
+  }
+
   // -- graph writes ---------------------------------------------------------
 
   /**
-   * Assert a batch of associations; returns the applied count.
+   * Assert a batch of associations.
    *
-   * Weight ACCUMULATES on re-assertion, so this call is never blindly retried
-   * after an ambiguous transport failure. Server cap: 10,000 per request (use
-   * `addAssociationsBatched` to auto-chunk).
+   * Returns the applied count plus, for a context whose schema runs in
+   * `warn` mode, the schema violations the write raised anyway (ADR 0009
+   * §8.3) — check `result.issues` where a `strict` context would have
+   * thrown. Weight ACCUMULATES on re-assertion, so this call is never
+   * blindly retried after an ambiguous transport failure. Server cap:
+   * 10,000 per request (use `addAssociationsBatched` to auto-chunk).
    */
-  async addAssociations(associations: AssocOp[]): Promise<number> {
-    const result = await this.post("/associations", associations, "unsafe_on_ambiguous");
-    return Number(result);
+  async addAssociations(associations: AssocOp[]): Promise<AddAssociationsResult> {
+    const { result, issues, schema_violations } = await this.postFull(
+      "/associations",
+      associations,
+      "unsafe_on_ambiguous",
+    );
+    return { applied: Number(result), issues, schema_violations };
   }
 
   /**
    * Chunked `addAssociations` for arbitrarily large batches. Chunks are
    * independent requests: a failure mid-way leaves earlier chunks applied
    * (that is why this is a separate, opt-in method).
+   * `issues`/`schema_violations` aggregate every chunk's warn-mode carrier,
+   * in chunk order.
    */
   async addAssociationsBatched(
     associations: AssocOp[],
@@ -1071,11 +1161,16 @@ export class Context {
     const maxChunkBytes = options.max_chunk_bytes ?? MAX_CHUNK_BYTES;
     let applied = 0;
     let chunks = 0;
+    const issues: Issue[] = [];
+    let schemaViolations = 0;
     for (const chunk of chunkAssociations(associations, chunkSize, maxChunkBytes)) {
-      applied += await this.addAssociations(chunk);
+      const outcome = await this.addAssociations(chunk);
+      applied += outcome.applied;
+      issues.push(...outcome.issues);
+      schemaViolations += outcome.schema_violations;
       chunks += 1;
     }
-    return { applied, chunks };
+    return { applied, chunks, issues, schema_violations: schemaViolations };
   }
 
   /**

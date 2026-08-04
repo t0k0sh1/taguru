@@ -2,8 +2,9 @@
 //! exclusions (#381, S3 of #218's ADR 0009 split, §6.3): inert until a
 //! schema document exists for the context (guard 1), an alias refusal
 //! that fires in every mode including `off` once one does (guard 2's
-//! `add_label_alias` bullet), and the three exclusions the label's
-//! representation cost requires — traversal, the default label page,
+//! `add_label_alias` bullet), and the exclusions the label's
+//! representation cost requires — traversal (`explore`/`activate` and
+//! the `unreachable_from` coverage audit), the default label page,
 //! and the vocabulary twin audit. `PUT /schema`'s own refusals (guard
 //! 3, guard 2's migration-boundary bullet) live in `schema.rs`; the
 //! domain/range judgment itself (`schema_issues`) has no write entrance
@@ -218,6 +219,63 @@ fn activate_never_propagates_through_schema_type_once_a_schema_exists() {
         "the fan total must exclude schema:type too: diluted={diluted_strength} \
          undiluted={undiluted_strength}"
     );
+}
+
+/// The coverage audit gets the same traversal exclusion as
+/// `explore`/`activate`: once a schema exists, a `schema:type` edge to a
+/// shared type name must not bridge otherwise-disconnected facts in
+/// `unreachable_from`'s reachability walk — that hub would silently
+/// under-report genuine orphans, the one failure mode a coverage audit
+/// exists to catch. The hidden edges themselves are also never reported
+/// as orphans (`explore_excluding`'s "never reported, never a bridge"
+/// contract), so the audit sees exactly the non-typing fact graph.
+#[test]
+fn unreachable_from_never_travels_through_schema_type_once_a_schema_exists() {
+    let server = Server::start("schema-type-label-coverage");
+    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([
+            {"subject": "蔵", "label": "銘柄", "object": "青嶺",
+             "weight": 1.0, "source": "a.md"},
+            // An island fact, connected to the origin cluster only
+            // through the two schema:type edges' shared type object.
+            {"subject": "孤島", "label": "l", "object": "先",
+             "weight": 1.0, "source": "a.md"},
+            {"subject": "蔵", "label": "schema:type", "object": "Brewery",
+             "weight": 1.0, "source": "a.md"},
+            {"subject": "孤島", "label": "schema:type", "object": "Brewery",
+             "weight": 1.0, "source": "a.md"},
+        ])),
+    );
+
+    let audit = |server: &Server| {
+        server.ok(
+            "POST",
+            "/contexts/sake/unreachable_from",
+            Some(json!({"origins": ["蔵"]})),
+        )
+    };
+
+    let before = audit(&server);
+    assert_eq!(
+        before["total"],
+        json!(0),
+        "before a schema exists, schema:type bridges like any other label and the island \
+         counts as covered: {before}"
+    );
+
+    server.ok("PUT", "/contexts/sake/schema", Some(off_document()));
+
+    let after = audit(&server);
+    assert_eq!(
+        after["total"],
+        json!(1),
+        "once a schema exists, the type hub no longer bridges — the island is a genuine \
+         orphan, and the hidden schema:type edges themselves are not reported: {after}"
+    );
+    assert_eq!(after["matches"][0]["subject"], json!("孤島"), "{after}");
 }
 
 /// Guard 2's refusal must fire against a fresh alias in `warn`/`strict`

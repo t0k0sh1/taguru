@@ -16,6 +16,7 @@ import os
 import tempfile
 import time
 from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,7 @@ from .._errors import IncompatibleServerError, NotFoundError, TaguruError, Trans
 from .._models import (
     Activation,
     ActivationPage,
+    AddAssociationsResult,
     AliasEntry,
     AliasPage,
     Association,
@@ -47,6 +49,7 @@ from .._models import (
     GroupEntry,
     GroupPage,
     ImportResult,
+    Issue,
     LabelPage,
     MatchPage,
     PassageHit,
@@ -57,6 +60,7 @@ from .._models import (
     RetractAssociationOutcome,
     RetractOutcome,
     RetrievalResult,
+    SchemaAudit,
     SchemaDocument,
     SearchExplanation,
     SearchPlan,
@@ -90,6 +94,7 @@ from .._shared import (
     run_blocking,
     run_contract_probe,
     unwrap_envelope,
+    unwrap_envelope_full,
 )
 from .._types import (
     AssocOp,
@@ -289,6 +294,20 @@ class AsyncTaguru:
         response = await self._send(method, path, params=params, json_body=json_body, retry=retry)
         return unwrap_envelope(response)
 
+    async def _request_json_full(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: Mapping[str, Any] | None = None,
+        json_body: Any = None,
+        retry: RetryClass = RetryClass.SAFE,
+    ) -> tuple[Any, list[Issue], int]:
+        """``_request_json`` plus the envelope's warn-mode carrier —
+        ``(result, issues, schema_violations)``, see ``unwrap_envelope_full``."""
+        response = await self._send(method, path, params=params, json_body=json_body, retry=retry)
+        return unwrap_envelope_full(response)
+
     # -- server-level operations -------------------------------------------
 
     async def health(self) -> None:
@@ -326,7 +345,8 @@ class AsyncTaguru:
         response = await self._send(
             "POST", "/import", content=content, content_type="application/x-ndjson"
         )
-        return normalize_import_outcomes(unwrap_envelope(response))
+        result, issues, schema_violations = unwrap_envelope_full(response)
+        return normalize_import_outcomes(result, issues, schema_violations)
 
     async def import_file(self, path: str | Path) -> ImportResult:
         """Apply an NDJSON batch file (see ``import_batches``)."""
@@ -736,6 +756,15 @@ class AsyncContext:
             "POST", self._path + suffix, json_body=json_body, retry=retry
         )
 
+    async def _post_full(
+        self, suffix: str, json_body: Any = None, retry: RetryClass = RetryClass.SAFE
+    ) -> tuple[Any, list[Issue], int]:
+        """``_post`` plus the envelope's warn-mode carrier — see
+        ``unwrap_envelope_full``."""
+        return await self._client._request_json_full(
+            "POST", self._path + suffix, json_body=json_body, retry=retry
+        )
+
     # -- entry resolution ---------------------------------------------------
 
     async def resolve(
@@ -987,19 +1016,73 @@ class AsyncContext:
         result = await self._client._request_json("GET", self._path + "/schema")
         return decode(SchemaDocument, result)  # type: ignore[no-any-return]
 
+    async def put_schema(self, document: SchemaDocument | Mapping[str, Any]) -> SchemaDocument:
+        """Install (or replace) the context's schema document; returns it
+        as installed (ADR 0009 §5).
+
+        Refuses (400) a document whose ``relations`` declare the reserved
+        ``schema:type`` label, and refuses to install over a persisted
+        label alias resolving to it — rename the alias first (§6.3).
+        Installing changes what ``strict`` refuses from this point on;
+        dry-run a candidate with ``validate_schema`` before flipping.
+        """
+        body = asdict(document) if isinstance(document, SchemaDocument) else dict(document)
+        result = await self._client._request_json("PUT", self._path + "/schema", json_body=body)
+        return decode(SchemaDocument, result)  # type: ignore[no-any-return]
+
+    async def audit_schema(
+        self, *, limit: int | None = None, after: MatchCursor | None = None
+    ) -> SchemaAudit:
+        """Judge every live association against the installed document
+        (ADR 0009 §10) — the pre-existing violations ``strict`` can never
+        surface on its own, since a write entrance only judges a write as
+        it happens. Candidates for review, not verdicts; nothing is
+        auto-fixed.
+
+        ``after`` resumes past the previous page's last violation;
+        ``total`` stays constant across pages. Raises ``NotFoundError``
+        when the context has no schema installed (404 ``no_schema``).
+        """
+        body = drop_none({"limit": limit, "after": after})
+        result = await self._post("/schema/audit", body)
+        return decode(SchemaAudit, result)  # type: ignore[no-any-return]
+
+    async def validate_schema(
+        self,
+        document: SchemaDocument | Mapping[str, Any],
+        *,
+        limit: int | None = None,
+        after: MatchCursor | None = None,
+    ) -> SchemaAudit:
+        """The same judgment as ``audit_schema``, but over a PROPOSED
+        document that is never persisted — the pre-flight to run before a
+        ``strict`` flip (ADR 0009 §10). Works identically whether the
+        context already has a schema or none at all.
+        """
+        doc = asdict(document) if isinstance(document, SchemaDocument) else dict(document)
+        body = drop_none({"document": doc, "limit": limit, "after": after})
+        result = await self._post("/schema/validate", body)
+        return decode(SchemaAudit, result)  # type: ignore[no-any-return]
+
     # -- graph writes ---------------------------------------------------------
 
-    async def add_associations(self, associations: Sequence[AssocOp]) -> int:
-        """Assert a batch of associations; returns the applied count.
+    async def add_associations(self, associations: Sequence[AssocOp]) -> AddAssociationsResult:
+        """Assert a batch of associations.
 
-        Weight ACCUMULATES on re-assertion, so this call is never blindly
-        retried after an ambiguous transport failure. Server cap: 10,000 per
-        request (use ``add_associations_batched`` to auto-chunk).
+        Returns the applied count plus, for a context whose schema runs in
+        ``warn`` mode, the schema violations the write raised anyway
+        (ADR 0009 §8.3) — check ``result.issues`` where a ``strict``
+        context would have raised. Weight ACCUMULATES on re-assertion, so
+        this call is never blindly retried after an ambiguous transport
+        failure. Server cap: 10,000 per request (use
+        ``add_associations_batched`` to auto-chunk).
         """
-        result = await self._post(
+        result, issues, schema_violations = await self._post_full(
             "/associations", list(associations), retry=RetryClass.UNSAFE_ON_AMBIGUOUS
         )
-        return int(result)
+        return AddAssociationsResult(
+            applied=int(result), issues=issues, schema_violations=schema_violations
+        )
 
     async def add_associations_batched(
         self,
@@ -1012,13 +1095,25 @@ class AsyncContext:
 
         Chunks are independent requests: a failure mid-way leaves earlier
         chunks applied (that is why this is a separate, opt-in method).
+        ``issues``/``schema_violations`` aggregate every chunk's warn-mode
+        carrier, in chunk order.
         """
         applied = 0
         chunks = 0
+        issues: list[Issue] = []
+        schema_violations = 0
         for chunk in chunk_associations(list(associations), chunk_size, max_chunk_bytes):
-            applied += await self.add_associations(chunk)
+            outcome = await self.add_associations(chunk)
+            applied += outcome.applied
+            issues.extend(outcome.issues)
+            schema_violations += outcome.schema_violations
             chunks += 1
-        return BatchApplyResult(applied=applied, chunks=chunks)
+        return BatchApplyResult(
+            applied=applied,
+            chunks=chunks,
+            issues=issues,
+            schema_violations=schema_violations,
+        )
 
     async def retract_association(
         self, subject: str, label: str, object: str

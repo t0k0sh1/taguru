@@ -154,4 +154,43 @@ def test_add_associations_batched_sums_applied_counts() -> None:
     )
     assert result.applied == 5
     assert result.chunks == 3
+    assert result.issues == []
+    assert result.schema_violations == 0
     assert batches == [2, 2, 1]
+
+
+def test_add_associations_surfaces_the_warn_mode_envelope_carrier() -> None:
+    """ADR 0009 §8.3: a ``warn``-mode write's violations ride the success
+    envelope beside ``result`` — the SDK must hand them to the caller, not
+    strip them with the envelope."""
+    issue = {
+        "path": "associations[0].object",
+        "kind": "range",
+        "expected": "one of [Brewery]",
+        "actual": "Prefecture",
+    }
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "result": 1,
+                "status": "ok",
+                "time": 0.001,
+                "issues": [issue],
+                "schema_violations": 3,
+            },
+        )
+
+    client = sync_client(handler)
+    outcome = client.context("sake").add_associations([_op(0)])
+    assert outcome.applied == 1
+    assert outcome.schema_violations == 3
+    assert [(i.path, i.kind, i.expected, i.actual) for i in outcome.issues] == [
+        (issue["path"], issue["kind"], issue["expected"], issue["actual"])
+    ]
+
+    # Batched aggregation carries the same fields through, in chunk order.
+    batched = client.context("sake").add_associations_batched([_op(0), _op(1)], chunk_size=1)
+    assert batched.schema_violations == 6
+    assert len(batched.issues) == 2

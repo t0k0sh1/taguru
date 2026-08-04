@@ -40,10 +40,10 @@ def test_429_retries_even_on_unsafe_write_route() -> None:
     """Rate limiting rejects before the handler runs — nothing was applied."""
     handler = FlakyHandler(1, lambda: err_response(429, "budget", {"retry-after": "0"}))
     client = sync_client(handler)
-    applied = client.context("sake").add_associations(
+    outcome = client.context("sake").add_associations(
         [{"subject": "s", "label": "l", "object": "o", "weight": 1.0}]
     )
-    assert applied == 0
+    assert outcome.applied == 0
     assert handler.calls == 2
 
 

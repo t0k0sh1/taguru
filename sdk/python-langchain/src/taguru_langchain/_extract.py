@@ -385,7 +385,7 @@ def corrective_message(parse_error: str, length_limited: bool, fact_budget: int)
     )
 
 
-# -- the prompt (mirrors extract.rs system_prompt, PROMPT_VERSION 2) -------------
+# -- the prompt (mirrors extract.rs system_prompt, PROMPT_VERSION 3) -------------
 
 
 def system_prompt(

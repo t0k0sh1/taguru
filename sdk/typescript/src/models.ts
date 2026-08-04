@@ -502,6 +502,49 @@ export interface SchemaDocument {
   relations: Record<string, RelationDef>;
 }
 
+/**
+ * One of `SchemaAudit`'s name-list sections: the true count of names the
+ * check surfaced, and a name-ordered prefix capped server-side (at 100).
+ */
+export interface AuditNames {
+  total: number;
+  names: string[];
+}
+
+/**
+ * `AuditNames`'s sibling for `reserved_alias_conflicts` (`alias ->
+ * canonical`, not a bare name set), capped the same way.
+ */
+export interface AuditAliases {
+  total: number;
+  aliases: Record<string, string>;
+}
+
+/**
+ * One live association the schema audit flagged, alongside every issue it
+ * raised.
+ */
+export interface SchemaViolation {
+  association: Association;
+  issues: Issue[];
+}
+
+/**
+ * ADR 0009 §10's schema audit: five independent read-only checks over the
+ * live graph in one response — candidates for review, not verdicts. Only
+ * `violations` pages (`total` stays constant across pages, like every
+ * other match list); the other four sections each carry their own true
+ * count with a capped prefix.
+ */
+export interface SchemaAudit {
+  total: number;
+  violations: SchemaViolation[];
+  untyped_concepts: AuditNames;
+  undeclared_types: AuditNames;
+  unknown_labels: AuditNames;
+  reserved_alias_conflicts: AuditAliases;
+}
+
 // -- aliases ---------------------------------------------------------------------
 
 /** One page of aliases; the cursor spans both namespaces (concepts first). */
@@ -857,6 +900,46 @@ export interface CompactOutcome {
   aliases_dropped: number;
 }
 
+/**
+ * One path-addressed schema violation (ADR 0009 §8.1/§8.3). The same four
+ * fields a `strict` refusal's error body lists — under `warn` they ride the
+ * success envelope instead, because the write went ahead. `path` names the
+ * offending element of the request, `kind` is the violation kind (e.g.
+ * `"range"`, `"unknown_reference"`), and `expected`/`actual` say what the
+ * schema wanted versus what the request carried.
+ */
+export interface Issue {
+  path: string;
+  kind: string;
+  expected: string;
+  actual: string;
+}
+
+/**
+ * What installing one `taguru_schema` record via import accomplished. No
+ * outcome verb (unlike `GroupImportOutcome`): the install cannot distinguish
+ * itself from a no-op PUT of the identical document (ADR 0009 §13).
+ */
+export interface SchemaImportOutcome {
+  context: string;
+  mode: string;
+  types: number;
+  relations: number;
+}
+
+/**
+ * What `addAssociations` accomplished, warn-mode issues included. `issues`
+ * is the (possibly truncated) violation list from the response envelope;
+ * `schema_violations` is the true count behind it (ADR 0009 §8.3). Both are
+ * empty/zero for `off` mode, no schema, or a fully conforming write — and a
+ * `strict` violation throws instead, so it never reaches this type.
+ */
+export interface AddAssociationsResult {
+  applied: number;
+  issues: Issue[];
+  schema_violations: number;
+}
+
 /** Outcome of one applied batch (one source's retract-then-apply). */
 export interface ImportOutcome {
   context: string;
@@ -893,16 +976,31 @@ export interface GroupImportOutcome {
   groups: number;
 }
 
-/** What `POST /import` accomplished: per-batch outcomes plus any group restores. */
+/**
+ * What `POST /import` accomplished: per-batch outcomes plus any group
+ * restores and `taguru_schema` installs. `issues`/`schema_violations` are
+ * the response envelope's warn-mode carrier (ADR 0009 §8.3), stream-wide;
+ * each batch's own `ImportOutcome.schema_violations` breaks the count down
+ * per source, surviving `issues`' truncation.
+ */
 export interface ImportResult {
   batches: ImportOutcome[];
   groups: GroupImportOutcome[];
+  schemas: SchemaImportOutcome[];
+  issues: Issue[];
+  schema_violations: number;
 }
 
-/** Outcome of `addAssociationsBatched`: chunks are independent writes. */
+/**
+ * Outcome of `addAssociationsBatched`: chunks are independent writes.
+ * `issues`/`schema_violations` aggregate every chunk's warn-mode carrier
+ * (ADR 0009 §8.3), in chunk order.
+ */
 export interface BatchApplyResult {
   applied: number;
   chunks: number;
+  issues: Issue[];
+  schema_violations: number;
 }
 
 /**

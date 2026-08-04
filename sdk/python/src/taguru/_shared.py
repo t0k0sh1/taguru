@@ -12,7 +12,13 @@ import httpx
 
 from ._decode import decode
 from ._errors import TaguruError, error_for_status
-from ._models import GroupImportOutcome, ImportOutcome, ImportResult
+from ._models import (
+    GroupImportOutcome,
+    ImportOutcome,
+    ImportResult,
+    Issue,
+    SchemaImportOutcome,
+)
 from ._retry import parse_retry_after
 from ._types import AssocOp
 
@@ -110,6 +116,18 @@ def raise_for_response(response: httpx.Response) -> NoReturn:
 
 def unwrap_envelope(response: httpx.Response) -> Any:
     """Extract ``result`` from the ``{"result", "status": "ok", "time"}`` envelope."""
+    return unwrap_envelope_full(response)[0]
+
+
+def unwrap_envelope_full(response: httpx.Response) -> tuple[Any, list[Issue], int]:
+    """``unwrap_envelope`` plus the envelope's warn-mode carrier.
+
+    Returns ``(result, issues, schema_violations)`` — the latter two are
+    ADR 0009 §8.3's fields, riding *beside* ``result`` on a ``warn``-mode
+    write whose associations violated the context's schema. Both are
+    empty/zero on every other response (and on servers predating the
+    fields), so result-only callers go through ``unwrap_envelope``.
+    """
     try:
         data = response.json()
     except ValueError as exc:
@@ -119,7 +137,13 @@ def unwrap_envelope(response: httpx.Response) -> Any:
             body=response.text,
         ) from exc
     if isinstance(data, dict) and data.get("status") == "ok" and "result" in data:
-        return data["result"]
+        raw_issues = data.get("issues")
+        issues = (
+            [decode(Issue, issue) for issue in raw_issues] if isinstance(raw_issues, list) else []
+        )
+        raw_violations = data.get("schema_violations")
+        violations = raw_violations if isinstance(raw_violations, int) else 0
+        return data["result"], issues, violations
     raise TaguruError(
         "response is not the taguru envelope shape",
         status=response.status_code,
@@ -127,19 +151,36 @@ def unwrap_envelope(response: httpx.Response) -> Any:
     )
 
 
-def normalize_import_outcomes(result: Any) -> ImportResult:
-    """Normalize /import's response to ``ImportResult(batches, groups)``.
+def normalize_import_outcomes(
+    result: Any, issues: list[Issue] | None = None, schema_violations: int = 0
+) -> ImportResult:
+    """Normalize /import's response to :class:`ImportResult`.
 
-    Current servers always answer ``{batches: [...], groups: [...]}``
-    (``groups`` omitted entirely when the stream carried none); servers
-    predating that change answered a bare outcome for a single batch — both
-    parse here, so callers never branch on response shape.
+    Current servers always answer ``{batches: [...], groups: [...],
+    schemas: [...]}`` (``groups``/``schemas`` omitted entirely when the
+    stream carried none); servers predating that change answered a bare
+    outcome for a single batch — both parse here, so callers never branch
+    on response shape. ``issues``/``schema_violations`` are the response
+    envelope's warn-mode carrier, passed through by ``import_batches``.
     """
+    issues = issues if issues is not None else []
     if isinstance(result, dict) and isinstance(result.get("batches"), list):
         batches = [decode(ImportOutcome, outcome) for outcome in result["batches"]]
         groups = [decode(GroupImportOutcome, group) for group in result.get("groups", [])]
-        return ImportResult(batches=batches, groups=groups)
-    return ImportResult(batches=[decode(ImportOutcome, result)], groups=[])
+        schemas = [decode(SchemaImportOutcome, schema) for schema in result.get("schemas", [])]
+        return ImportResult(
+            batches=batches,
+            groups=groups,
+            schemas=schemas,
+            issues=issues,
+            schema_violations=schema_violations,
+        )
+    return ImportResult(
+        batches=[decode(ImportOutcome, result)],
+        groups=[],
+        issues=issues,
+        schema_violations=schema_violations,
+    )
 
 
 async def run_blocking(fn: Any, *args: Any) -> Any:

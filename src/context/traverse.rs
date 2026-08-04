@@ -466,6 +466,48 @@ impl Context {
         origins: &[&str],
         deadline: Deadline,
     ) -> Result<Vec<Association>, DeadlineExceeded> {
+        self.unreachable_from_impl(origins, deadline, |_| true)
+    }
+
+    /// [`Context::unreachable_from`] with a set of relation labels hidden
+    /// from the audit entirely — never a bridge in the reachability walk,
+    /// never reported as an orphan. This is ADR 0009 §6.3's traversal
+    /// exclusion applied to the coverage audit, for the same reason
+    /// [`Context::explore_excluding`] exists: a hub label (many concepts
+    /// sharing one type) would otherwise connect every typed instance to
+    /// every other, silently under-reporting facts that are genuinely
+    /// disconnected from the origins in every non-typing sense. The
+    /// report side is excluded too — a hidden edge is invisible to this
+    /// audit, not a fact it should flag — mirroring `explore_excluding`'s
+    /// "never reported, never a bridge" contract rather than inventing a
+    /// third semantics.
+    ///
+    /// Additive alongside [`Context::unreachable_from`] rather than a
+    /// signature change, since `Context` is published API — the same
+    /// framing as [`Context::explore_excluding`], with which it also
+    /// shares the monomorphized-`visible`-closure structure (the
+    /// unfiltered caller's `|_| true` folds away entirely).
+    pub fn unreachable_from_excluding(
+        &self,
+        origins: &[&str],
+        deadline: Deadline,
+        excluded: &[&str],
+    ) -> Result<Vec<Association>, DeadlineExceeded> {
+        let excluded_ids: HashSet<LabelId> = excluded
+            .iter()
+            .filter_map(|name| self.label_ids.get(*name).copied())
+            .collect();
+        self.unreachable_from_impl(origins, deadline, move |label: LabelId| {
+            !excluded_ids.contains(&label)
+        })
+    }
+
+    fn unreachable_from_impl(
+        &self,
+        origins: &[&str],
+        deadline: Deadline,
+        visible: impl Fn(LabelId) -> bool,
+    ) -> Result<Vec<Association>, DeadlineExceeded> {
         let mut visited: HashSet<ConceptId> = HashSet::new();
         let mut frontier: VecDeque<ConceptId> = VecDeque::new();
         for &origin in origins {
@@ -485,7 +527,7 @@ impl Context {
                 // chains and must not act as a bridge between otherwise
                 // disconnected live facts — same dead-edge test as
                 // `explore` and `heaviest`.
-                if edge.count == 0 {
+                if edge.count == 0 || !visible(edge.label) {
                     continue;
                 }
                 for neighbor in [edge.subject, edge.object] {
@@ -498,15 +540,16 @@ impl Context {
 
         // An edge's endpoints reach each other through it, so checking one
         // endpoint decides the whole edge. Retracted edges (count == 0)
-        // are no longer facts at all, so they're excluded rather than
-        // reported as unreachable ones.
+        // are no longer facts at all, and hidden-label edges are invisible
+        // to the audit, so both are excluded rather than reported as
+        // unreachable ones.
         let mut out = Vec::new();
         for edge_id in 0..self.edges.len() as u32 {
             if deadline.expired() {
                 return Err(DeadlineExceeded);
             }
             let edge = &self.edges[edge_id as usize];
-            if edge.count > 0 && !visited.contains(&edge.subject) {
+            if edge.count > 0 && visible(edge.label) && !visited.contains(&edge.subject) {
                 out.push(self.association(edge_id));
             }
         }

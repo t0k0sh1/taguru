@@ -108,8 +108,8 @@ def test_associations_accumulate_weight_and_validate(client: Taguru, fresh_name:
     client.contexts.create(fresh_name)
     ctx = client.context(fresh_name)
     op = {"subject": "s", "label": "l", "object": "o", "weight": 1.0, "source": "a"}
-    assert ctx.add_associations([op]) == 1
-    assert ctx.add_associations([{**op, "source": "b"}]) == 1
+    assert ctx.add_associations([op]).applied == 1
+    assert ctx.add_associations([{**op, "source": "b"}]).applied == 1
 
     page = ctx.query(subject="s", label="l")
     assert page.total == 1

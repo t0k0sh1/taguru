@@ -108,6 +108,16 @@ classes:
     list_labels: { route: "GET /contexts/{name}/labels", options: [limit, after, prefix] }
     iter_labels: { route: "GET /contexts/{name}/labels", options: [limit, prefix] }
     get_schema: { route: "GET /contexts/{name}/schema" }
+    put_schema:
+      route: "PUT /contexts/{name}/schema"
+      args: [document]
+    audit_schema:
+      route: "POST /contexts/{name}/schema/audit"
+      options: [limit, after]
+    validate_schema:
+      route: "POST /contexts/{name}/schema/validate"
+      args: [document]
+      options: [limit, after]
     add_associations:
       route: "POST /contexts/{name}/associations"
       args: [associations]

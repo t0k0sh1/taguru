@@ -8,6 +8,33 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- Both core SDKs gain the rest of the schema surface:
+  `put_schema`/`putSchema`, `audit_schema`/`auditSchema`, and
+  `validate_schema`/`validateSchema`, alongside the existing
+  `get_schema`/`getSchema` — closing the parity gap with HTTP and MCP,
+  which already exposed all four; an SDK-only integration previously
+  had to drop to raw HTTP to install, audit, or dry-run a schema.
+  `audit`/`validate` decode the shared `SchemaAudit` shape
+  (`{total, violations: [{association, issues}], untyped_concepts,
+  undeclared_types, unknown_labels, reserved_alias_conflicts}`,
+  ADR 0009 §10) with `violations` paging like every other match list;
+  Python's `put_schema`/`validate_schema` accept either a plain mapping
+  or the decoded `SchemaDocument` dataclass. Recorded in
+  `sdk/spec/surface.yaml` like every other cross-language method.
+- `POST /contexts/{name}/unreachable_from` joins ADR 0009 §6.3's
+  traversal exclusion, amending #381's three-exclusion list: once a
+  schema document is installed, `schema:type` edges are invisible to
+  the coverage audit — never a bridge in the reachability walk (a
+  shared type name would otherwise put every typed instance in one
+  reachable component and silently under-report genuine orphans, the
+  one failure mode this audit exists to catch) and never reported as
+  orphans themselves, the same "never reported, never a bridge"
+  contract `explore_excluding` documents. Backed by the new additive
+  `Context::unreachable_from_excluding` (the same
+  monomorphized-`visible`-closure pattern as `explore_excluding`, so
+  the unfiltered path pays nothing); gated, like every §6.3 exclusion,
+  on document existence alone, never `mode` — a schema-free context
+  answers byte-identically to before.
 - Schema metrics and a documentation reference page (#388, S10 of
   #218's ADR 0009 split §15) — closing the split: strict/warn's actual
   effect was previously invisible on `/metrics`, and the feature had no
@@ -618,6 +645,24 @@ Entries that change an on-disk format or a response shape say so.
   host application's call.
 
 ### Changed
+- **Breaking (SDKs):** `add_associations`/`addAssociations` returns
+  `AddAssociationsResult {applied, issues, schema_violations}` instead
+  of the bare applied count, and `BatchApplyResult`/`ImportResult` gain
+  `issues`/`schema_violations` fields (`ImportResult` also `schemas`,
+  one `SchemaImportOutcome` per `taguru_schema` record the stream
+  restored). Both SDKs previously unwrapped only the envelope's
+  `result`, which made ADR 0009 §8.3's `warn`-mode carrier — the
+  `issues`/`schema_violations` fields riding *beside* `result` on a
+  write whose associations violated the schema — unreachable through
+  the SDK by any means: a `strict` refusal's issues survive in the
+  error body, but flipping a context to `warn` silently hid the same
+  violations from SDK callers, the exact asymmetry §8.3's "identical
+  `Issue` values in both modes" contract exists to prevent. Migration:
+  `applied = ctx.add_associations(ops)` becomes
+  `ctx.add_associations(ops).applied`; a caller that ignored the
+  return value is unaffected, and every new field is empty/zero for
+  `off` mode, no schema, a conforming write, or a server predating the
+  fields.
 - `ManifestEntry`/`CheckpointFingerprint` (Rust) and their SDK
   checkpoint-fingerprint twins gain a `schema_digest` field (#386, S8 of
   #218's ADR 0009 split §11), so that swapping in a different schema
@@ -659,6 +704,28 @@ Entries that change an on-disk format or a response shape say so.
   field set (`connector`, `duration_ms`, `interrupted`, `events`,
   `events_path`); `isinstance`/attribute access and every field #351/#352
   already published are unaffected.
+
+### Fixed
+- Documentation drift, in the live protocol manual first: the document
+  `GET /protocol` and every MCP `initialize.instructions` actually
+  serve (`src/llm-protocol.md`) had no route-table rows for
+  `GET/PUT /contexts/{name}/schema`,
+  `POST /contexts/{name}/schema/audit`,
+  `POST /contexts/{name}/schema/validate`, or the pre-existing
+  `POST /contexts/{name}/drift/audit`, no `schema_mode` in
+  `GET /contexts`' documented row shape, and no `no_schema` in the
+  stable error-`code` vocabulary — all three already shipped and
+  fixture-pinned. All added; `docs/schema.html` now also names the
+  directory row's `schema_mode` and the SDK schema methods, and its
+  §6.3 exclusion list includes the coverage audit. Env-var docs catch
+  up too: `docs/getting-started.html`'s table gains
+  `TAGURU_PASSAGES_WAL_MAX_BYTES`, `TAGURU_AUTH_FAIL_LIMIT_PER_MIN`,
+  `TAGURU_CROSS_SEARCH_CONCURRENCY`, and `TAGURU_EMBED_PARALLEL`, and
+  README's MCP section documents `TAGURU_MCP_MAX_CONCURRENT_TOOLS`
+  and `TAGURU_MCP_MAX_RESULT_BYTES` — previously in `taguru --help`
+  and `KNOWN_KEYS` only. One stale mirror comment
+  (`sdk/python-langchain/.../_extract.py`, "PROMPT_VERSION 2" over a
+  `PROMPT_VERSION = 3` constant) now matches its TypeScript twin.
 
 ## [0.6.0] - 2026-08-01
 
