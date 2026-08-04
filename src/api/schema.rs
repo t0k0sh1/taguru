@@ -160,7 +160,7 @@ pub async fn put_schema(
     }
 }
 
-/// Ceiling on how many names each of [`SchemaAudit`]'s three small
+/// Ceiling on how many entries each of [`SchemaAudit`]'s four small
 /// sections lists — `total` still reports the true count past this cap,
 /// the same "count everything, list a bounded prefix" contract
 /// [`crate::api::MAX_LISTED_ISSUES`] applies to a validation refusal's
@@ -168,7 +168,7 @@ pub async fn put_schema(
 /// larger than one audit response should carry.
 const MAX_AUDIT_NAMES: usize = 100;
 
-/// One of [`SchemaAudit`]'s three small sections: the true count of
+/// One of [`SchemaAudit`]'s three name-list sections: the true count of
 /// names this check surfaced, and a name-ordered prefix of them capped
 /// at [`MAX_AUDIT_NAMES`].
 #[derive(Debug, Serialize)]
@@ -185,6 +185,29 @@ fn audit_names(names: BTreeSet<String>) -> AuditNames {
     }
 }
 
+/// [`AuditNames`]'s sibling for `reserved_alias_conflicts` (`alias ->
+/// canonical`, not a bare name set) — capped the same way at
+/// [`MAX_AUDIT_NAMES`]. An operator can in principle register many
+/// aliases resolving to `schema:type` before ever installing a schema
+/// (ADR 0009 §6.3 guard 1 leaves the label ordinary until then), so this
+/// section is bounded defensively like every other one here, even
+/// though a well-behaved server keeps it empty once a schema exists —
+/// `PUT /schema`'s own migration-boundary guard already refuses to
+/// install over a pre-existing conflict.
+#[derive(Debug, Serialize)]
+pub struct AuditAliases {
+    pub total: usize,
+    pub aliases: BTreeMap<String, String>,
+}
+
+fn audit_aliases(aliases: BTreeMap<String, String>) -> AuditAliases {
+    let total = aliases.len();
+    AuditAliases {
+        total,
+        aliases: aliases.into_iter().take(MAX_AUDIT_NAMES).collect(),
+    }
+}
+
 /// One live association [`schema_issues`] flagged, alongside every issue
 /// it raised. An audit finding travels with the edge it is about,
 /// unlike a write entrance's issues, which travel with a request
@@ -196,10 +219,10 @@ pub struct SchemaViolationOut {
     pub issues: Vec<Issue>,
 }
 
-/// ADR 0009 §10's schema audit: four independent read-only checks over
+/// ADR 0009 §10's schema audit: five independent read-only checks over
 /// the live graph in one response, in `DriftAudit`'s shape
 /// (`src/api/vocabulary.rs`) — only `violations`/`total` page (the same
-/// `page_by` rank every other match list uses); the other three
+/// `page_by` rank every other match list uses); the other four
 /// sections are small enough in practice to return whole, each capped at
 /// [`MAX_AUDIT_NAMES`] with its own true count. Framed exactly like
 /// `audit_vocabulary`'s own doc (`src/api/vocabulary.rs:38-41`):
@@ -244,7 +267,7 @@ pub struct SchemaAudit {
     /// reads empty for any context whose schema installed cleanly;
     /// non-empty here means the next `PUT /schema` (this document or any
     /// other) will refuse until the alias is renamed.
-    pub reserved_alias_conflicts: BTreeMap<String, String>,
+    pub reserved_alias_conflicts: AuditAliases,
 }
 
 /// Request body for `POST /contexts/{name}/schema/audit` — an absent
@@ -311,7 +334,7 @@ fn schema_audit(
     // `schema_issues` only branches on `mode` to skip work when it is
     // `Off`; forcing it to `Strict` here is exactly "judge every op,"
     // nothing more (see [`schema::InstalledSchema::enforcing`]).
-    let enforcing = schema.enforcing();
+    let enforcing = schema::InstalledSchema::enforcing(&schema);
 
     let raw = state
         .read_context(name, |context| -> Result<RawAudit, AccessError> {
@@ -326,8 +349,8 @@ fn schema_audit(
             let mut live_labels: BTreeSet<String> = BTreeSet::new();
             let mut typed_concepts: BTreeSet<String> = BTreeSet::new();
             let mut asserted_type_names: BTreeSet<String> = BTreeSet::new();
-            let mut fact_edges: Vec<Association> = Vec::new();
-            let mut fact_ops: Vec<AssocOp> = Vec::new();
+            let mut fact_edges: Vec<Association> = Vec::with_capacity(live.len());
+            let mut fact_ops: Vec<AssocOp> = Vec::with_capacity(live.len());
 
             for association in live {
                 live_concepts.insert(association.subject.clone());
@@ -359,6 +382,15 @@ fn schema_audit(
                 .filter(|(_, canonical)| *canonical == SCHEMA_TYPE_LABEL)
                 .map(|(alias, canonical)| (alias.to_string(), canonical.to_string()))
                 .collect();
+
+            // `SchemaEnv::build` runs its own live `query_any` sweep
+            // (scoped to the concepts `fact_ops` mentions) on top of the
+            // full scan `all_associations` already spent — recheck the
+            // deadline before paying for it, the same pre-flight every
+            // other heavy step in this closure gets.
+            if deadline.expired() {
+                return Err(AccessError::DeadlineExceeded);
+            }
 
             // The same union every write entrance builds (S3, #381) —
             // reused verbatim rather than re-deriving type membership by
@@ -448,7 +480,7 @@ fn schema_audit(
         untyped_concepts: audit_names(raw.untyped_concepts),
         undeclared_types: audit_names(raw.undeclared_types),
         unknown_labels: audit_names(raw.unknown_labels),
-        reserved_alias_conflicts: raw.reserved_alias_conflicts,
+        reserved_alias_conflicts: audit_aliases(raw.reserved_alias_conflicts),
     })
 }
 

@@ -683,6 +683,21 @@ mod tests {
         let (_, _, body) =
             route_tool("audit_drift", &json!({"context": "sake", "after": cursor})).unwrap();
         assert_eq!(body.unwrap()["after"], cursor);
+
+        let (_, _, body) =
+            route_tool("audit_schema", &json!({"context": "sake", "after": cursor})).unwrap();
+        assert_eq!(body.unwrap()["after"], cursor);
+
+        let document = json!({
+            "schema": 1, "mode": "strict", "closed_labels": false,
+            "types": {}, "relations": {}
+        });
+        let (_, _, body) = route_tool(
+            "validate_schema",
+            &json!({"context": "sake", "document": document, "after": cursor}),
+        )
+        .unwrap();
+        assert_eq!(body.unwrap()["after"], cursor);
     }
 
     #[test]

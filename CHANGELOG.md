@@ -21,7 +21,7 @@ Entries that change an on-disk format or a response shape say so.
   pre-existing violations are otherwise invisible, so `audit`/`validate`
   judge as `strict` would regardless of the document's actual `mode` —
   an `off` or `warn` context reports the same violations a `strict` one
-  does. Four candidates-not-verdicts sections in one `DriftAudit`-shaped
+  does. Five candidates-not-verdicts sections in one `DriftAudit`-shaped
   response, framed exactly like `audit_vocabulary`'s own doc — nothing
   is ever auto-applied: `violations` (domain/range mismatches, the only
   section that pages, worst-magnitude-first like every other match

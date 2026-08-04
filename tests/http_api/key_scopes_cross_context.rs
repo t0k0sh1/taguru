@@ -176,6 +176,14 @@ fn key_scopes_gate_roles_contexts_the_directory_and_mcp() {
         call("POST", "/contexts/bunko/drift/audit", None, "wtok").0,
         200
     );
+    // schema/audit (#385, ADR 0009 §12.5) is Role::Read too — `bunko`
+    // now has the schema just installed above, so the unscoped reader
+    // key reaches schema/audit directly, the same way it reaches
+    // drift/audit.
+    assert_eq!(
+        call("POST", "/contexts/bunko/schema/audit", None, "rtok").0,
+        200
+    );
     assert_eq!(call("DELETE", "/contexts/bunko", None, "wtok").0, 403);
     assert_eq!(call("POST", "/flush", None, "wtok").0, 403);
 

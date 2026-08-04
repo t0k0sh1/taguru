@@ -106,15 +106,18 @@ fn audit_answers_the_same_regardless_of_mode() {
         ])),
     );
 
-    let mut totals = Vec::new();
+    let mut audits = Vec::new();
     for mode in ["off", "warn", "strict"] {
         let mut document = strict_document();
         document["mode"] = json!(mode);
         server.ok("PUT", "/contexts/sake/schema", Some(document));
-        let audit = server.ok("POST", "/contexts/sake/schema/audit", None);
-        totals.push(audit["total"].as_u64().unwrap());
+        audits.push(server.ok("POST", "/contexts/sake/schema/audit", None));
     }
-    assert_eq!(totals, vec![1, 1, 1]);
+    // The whole response, not just `total` — every section (violations'
+    // issue detail included) must be identical across modes, not merely
+    // the same count.
+    assert_eq!(audits[0], audits[1], "off vs warn: {audits:?}");
+    assert_eq!(audits[1], audits[2], "warn vs strict: {audits:?}");
 }
 
 /// `untyped_concepts` excludes concepts that are themselves asserted
@@ -264,6 +267,16 @@ fn audit_violations_page_like_every_other_match_list() {
 
     let full = server.ok("POST", "/contexts/sake/schema/audit", None);
     assert_eq!(full["total"], json!(3), "{full}");
+    let full_matches = full["violations"].as_array().unwrap();
+    // Worst-magnitude-first, exactly like `drift/audit`'s `unsourced`.
+    assert_eq!(
+        full_matches
+            .iter()
+            .map(|v| v["association"]["object"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["弟子1", "弟子2", "弟子3"],
+        "{full}"
+    );
 
     let first = server.ok(
         "POST",
@@ -272,7 +285,14 @@ fn audit_violations_page_like_every_other_match_list() {
     );
     assert_eq!(first["total"], json!(3), "{first}");
     let first_matches = first["violations"].as_array().unwrap();
-    assert_eq!(first_matches.len(), 2, "{first}");
+    assert_eq!(
+        first_matches
+            .iter()
+            .map(|v| v["association"]["object"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["弟子1", "弟子2"],
+        "{first}"
+    );
     let last = &first_matches[1]["association"];
     let cursor = json!({
         "weight": last["weight"], "subject": last["subject"],
@@ -285,7 +305,18 @@ fn audit_violations_page_like_every_other_match_list() {
     );
     assert_eq!(second["total"], json!(3), "{second}");
     let second_matches = second["violations"].as_array().unwrap();
-    assert_eq!(second_matches.len(), 1, "{second}");
+    // Resumes exactly where the first page stopped — 弟子3 alone, never
+    // 弟子1/弟子2 again — and the two pages together reconstruct the
+    // whole unpaginated order with no gap or duplicate.
+    assert_eq!(
+        second_matches
+            .iter()
+            .map(|v| v["association"]["object"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["弟子3"],
+        "{second}"
+    );
+    assert_eq!(second_matches[0], full_matches[2], "{second} vs {full}");
 }
 
 /// §6.3 guard 2's migration-boundary bullet refuses `PUT /schema`
@@ -325,7 +356,7 @@ fn validate_surfaces_a_pre_existing_reserved_alias_conflict() {
     );
     assert_eq!(
         audit["reserved_alias_conflicts"],
-        json!({"種類": "schema:type"}),
+        json!({"total": 1, "aliases": {"種類": "schema:type"}}),
         "{audit}"
     );
 
@@ -412,8 +443,10 @@ fn validate_works_whether_or_not_a_schema_is_already_installed() {
         "/contexts/sake/schema/validate",
         Some(json!({"document": strict_document()})),
     );
-    assert_eq!(without["total"], with["total"], "{without} vs {with}");
-    assert_eq!(without["violations"], with["violations"]);
+    // The whole response, not just `total`/`violations` — every section
+    // must agree, since the resident schema plays no part in `validate`
+    // at all.
+    assert_eq!(without, with, "{without} vs {with}");
 }
 
 /// A malformed proposed document (here: a relation named the reserved

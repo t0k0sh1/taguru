@@ -270,18 +270,21 @@ impl InstalledSchema {
     /// pass when `mode == Off` — so forcing `mode` to `Strict` here is
     /// exactly "judge every op," nothing more, and the precomputed `is_a`
     /// closures carry over unchanged since the hierarchy never depends on
-    /// mode. Returns `self` unchanged (no clone) when already non-`Off`.
-    pub(crate) fn enforcing(self: &Arc<Self>) -> Arc<InstalledSchema> {
-        if self.document.mode == SchemaMode::Off {
+    /// mode. Returns `schema` unchanged (no clone) when already
+    /// non-`Off` — an associated function taking `&Arc<Self>` rather
+    /// than an `Arc`-receiver method, so `InstalledSchema` itself stays
+    /// usable without always being wrapped in one.
+    pub(crate) fn enforcing(schema: &Arc<InstalledSchema>) -> Arc<InstalledSchema> {
+        if schema.document.mode == SchemaMode::Off {
             Arc::new(InstalledSchema {
                 document: SchemaDocument {
                     mode: SchemaMode::Strict,
-                    ..self.document.clone()
+                    ..schema.document.clone()
                 },
-                ancestors: self.ancestors.clone(),
+                ancestors: schema.ancestors.clone(),
             })
         } else {
-            Arc::clone(self)
+            Arc::clone(schema)
         }
     }
 }

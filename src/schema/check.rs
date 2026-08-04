@@ -667,6 +667,24 @@ mod tests {
         assert!(issue.actual.contains("Person"), "{}", issue.actual);
     }
 
+    /// [`IssuePath::Edge`]'s twin of the test above (#385, ADR 0009 §10's
+    /// schema audit): the path names only the side, never a request-body
+    /// coordinate — the audit already travels the offending association
+    /// alongside the issue, so there is no index for `path` to carry.
+    #[test]
+    fn edge_path_names_the_side_alone() {
+        let mut context = Context::default();
+        context
+            .associate_from("山田太郎", SCHEMA_TYPE_LABEL, "Person", 1.0, "a.md", None)
+            .unwrap();
+        let schema = installed(doc(SchemaMode::Strict, false));
+        let ops = [assoc_op("山田太郎", "杜氏", "鈴木一郎", 1.0, None)];
+        let env = env(&context, schema, &ops);
+        let check = schema_issues(&env, &ops, IssuePath::Edge);
+        assert_eq!(check.violations.len(), 1);
+        assert_eq!(check.violations[0].path, "subject");
+    }
+
     #[test]
     fn range_violation_is_reported_on_the_object_path() {
         let mut context = Context::default();
