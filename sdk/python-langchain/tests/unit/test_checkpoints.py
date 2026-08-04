@@ -12,7 +12,11 @@ from langchain_core.documents import Document
 from taguru import AsyncTaguru, ServerError, Taguru
 
 from taguru_langchain import TaguruIngester
-from taguru_langchain.checkpoints import CheckpointStore, FilesystemCheckpointStore
+from taguru_langchain.checkpoints import (
+    CheckpointStore,
+    FilesystemCheckpointStore,
+    _CheckpointFingerprint,
+)
 
 from .conftest import FakeServer
 from .test_ingester import (
@@ -254,6 +258,37 @@ def test_a_changed_fact_budget_invalidates_checkpoints_even_though_content_is_un
         checkpoint_store=store,
         chunk_bytes=CROSS_CHUNK_BYTES,
         fact_budget=3,
+    )
+    outcome = ingester2.ingest_text(DOC_TEXT, source=source)
+    assert outcome.ok
+    assert outcome.chunks_reused == 0
+    assert len(llm2.seen_prompts) == 2  # both chunks re-extracted
+
+
+def test_a_changed_schema_invalidates_checkpoints_even_though_content_is_unchanged(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    """ADR 0009 §11.1's schema_digest, the checkpoint twin of
+    extract.rs's own CheckpointFingerprint.schema_digest field: swapping
+    in a different schema document re-extracts every chunk, exactly like
+    any other computation input changing."""
+    store = RecordingCheckpointStore()
+    source = _seed_failed_run(sync_client, async_client, store)
+    assert _unit_count(store, source) == 1
+
+    fake_server.schema_document = {
+        "schema": 1,
+        "mode": "warn",
+        "closed_labels": False,
+        "types": {"Brewery": {"is_a": []}},
+        "relations": {},
+    }
+    ingester2, llm2 = _build_ingester(
+        sync_client,
+        async_client,
+        [CHUNK1_ANSWER, CHUNK2_CORRECTED_ANSWER],
+        checkpoint_store=store,
+        chunk_bytes=CROSS_CHUNK_BYTES,
     )
     outcome = ingester2.ingest_text(DOC_TEXT, source=source)
     assert outcome.ok
@@ -542,6 +577,30 @@ def test_fingerprint_mismatch_on_each_field_invalidates(
     assert outcome.ok
     assert outcome.chunks_reused == 0
     assert len(llm2.seen_prompts) == 2  # nothing reused — a settings mismatch invalidates all
+
+
+def test_checkpoint_fingerprint_defaults_schema_digest_for_pre_existing_files() -> None:
+    """A checkpoint file written before ``--schema``/schema fetching
+    existed carries no ``schema_digest`` key at all — it must still
+    parse (not be treated as unreadable/corrupt) and default to ``""``,
+    the same "no schema" value a fresh schema-less run resolves to.
+    Port of extract.rs
+    checkpoint_fingerprints_default_the_schema_digest_for_pre_existing_files."""
+    data = {
+        "sha256": "h",
+        "model": "m",
+        "prompt_version": 3,
+        "context": "sake",
+        "questions_n": 0,
+        "no_passage": False,
+        "description": "",
+        "fact_budget": 0,
+        "structured_output": "",
+        "lossy": False,
+    }
+    fingerprint = _CheckpointFingerprint.from_dict(data)
+    assert fingerprint is not None
+    assert fingerprint.schema_digest == ""
 
 
 def test_a_changed_structured_output_mode_invalidates_checkpoints(
@@ -921,5 +980,5 @@ def test_model_identity_is_derived_from_a_model_attribute_when_present(
         async_client=async_client,
         checkpoint_store=RecordingCheckpointStore(),
     )  # must not raise — model identity derived from llm.model
-    fingerprint = ingester._checkpoint_fingerprint("some text")  # noqa: SLF001
+    fingerprint = ingester._checkpoint_fingerprint("some text", "")  # noqa: SLF001
     assert fingerprint.model == "_NamedFakeChatModel:demo-v1"

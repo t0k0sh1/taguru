@@ -17,11 +17,15 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
-from taguru import LocatorSpec, SectionSpec
+from taguru import LocatorSpec, SchemaDocument, SectionSpec, TypeDef
 
 # Kept equal to src/extract.rs's PROMPT_VERSION: a prompt revision in either
-# producer must bump both.
-PROMPT_VERSION = 2
+# producer must bump both. 3 (ADR 0009 §11.1): system_prompt() gained the
+# schema block. A schema DOCUMENT's own content changing without a prompt
+# revision is instead covered by the checkpoint's schema digest
+# (checkpoints.py) — the same division --fact-budget (a computation input)
+# and PROMPT_VERSION (the prompt's wording) already draw.
+PROMPT_VERSION = 3
 # Prompt-input chunk cap (bytes); the stored passage is never chunked.
 CHUNK_BYTES = 24 * 1024
 # How many existing relation labels the prompt offers for reuse.
@@ -32,6 +36,9 @@ MAX_ASSOCIATION_WEIGHT = 1_000_000.0
 MAX_QUESTION_BYTES = 512
 MAX_QUESTIONS_PER_PARAGRAPH = 8
 MAX_PASSAGE_BYTES = 8 * 1024 * 1024
+# ADR 0009 §6.3: the relation label reserved for type assertions. Kept
+# equal to src/schema.rs's SCHEMA_TYPE_LABEL.
+SCHEMA_TYPE_LABEL = "schema:type"
 
 
 # -- the shape the model is asked for (lenient; merge() validates strictly) ----
@@ -99,6 +106,19 @@ class ModelOutput(BaseModel):
 #   this schema only enforces the universal >= 0 half.
 # - Cross-item rules: deduplication, and an alias's canonical naming a
 #   subject/object/label the associations actually contain.
+# - A concept's entity type set (ADR 0009 §6.1): known only per-context, at
+#   validation time — the same argument the paragraph-count entry above
+#   already makes, just for a schema document instead of a document's own
+#   paragraph count.
+# - "The object of relation R must be a concept some other item in this
+#   answer typed as T" (ADR 0009 §7.2): a cross-item rule exactly like
+#   deduplication and dangling-canonical above, checked by
+#   schema_output_issues() instead.
+# - Allowed relation labels are deliberately never rendered as an enum: a
+#   structurally-constrained model could then never propose a new relation,
+#   which ADR 0009 (and #218 before it) requires stays possible even in a
+#   context with a schema — constraining the model's *shape* is not the
+#   same as constraining its *content*.
 #
 # "title" is required content, not decoration: with_structured_output()
 # derives the tool/function name a bare JSON Schema is bound under from this
@@ -368,7 +388,12 @@ def corrective_message(parse_error: str, length_limited: bool, fact_budget: int)
 # -- the prompt (mirrors extract.rs system_prompt, PROMPT_VERSION 2) -------------
 
 
-def system_prompt(vocabulary: list[str], questions: int, fact_budget: int = 0) -> str:
+def system_prompt(
+    vocabulary: list[str],
+    questions: int,
+    fact_budget: int = 0,
+    schema: SchemaDocument | None = None,
+) -> str:
     prompt = (
         "You extract knowledge from one document into an association graph.\n"
         "Answer with a single JSON object and nothing else:\n"
@@ -417,7 +442,95 @@ def system_prompt(vocabulary: list[str], questions: int, fact_budget: int = 0) -
         )
         prompt += ", ".join(vocabulary[:VOCABULARY_CAP])
         prompt += "\n"
+    if schema is not None and schema.mode != "off":
+        prompt += _schema_block(schema, vocabulary)
     return prompt
+
+
+def _schema_ancestors(types: dict[str, TypeDef]) -> dict[str, set[str]]:
+    """Precomputes every declared type's `is_a` transitive closure — the
+    producer-side mirror of schema.rs's `type_ancestors`/
+    `closure_of_declared`. A cycle just stops expanding at the repeat:
+    this producer never refuses a schema the way `schema::install` does —
+    the server is the source of truth for that."""
+    ancestors: dict[str, set[str]] = {}
+
+    def expand(name: str, visiting: frozenset[str]) -> set[str]:
+        if name in ancestors:
+            return ancestors[name]
+        type_def = types.get(name)
+        if type_def is None or name in visiting:
+            return set()
+        visiting = visiting | {name}
+        result: set[str] = set()
+        for parent in type_def.is_a:
+            result.add(parent)
+            result |= expand(parent, visiting)
+        ancestors[name] = result
+        return result
+
+    for name in types:
+        expand(name, frozenset())
+    return ancestors
+
+
+def _schema_closure(name: str, ancestors: dict[str, set[str]]) -> set[str]:
+    """One type name's self-inclusive `is_a` closure — mirrors
+    `InstalledSchema::closure_of`."""
+    return {name} | ancestors.get(name, set())
+
+
+def _relation_line(label: str, domain: list[str], range_: list[str]) -> str | None:
+    """One relation constraint line for `_schema_block`: `label: domain →
+    range` when both sides are declared, `label domain: …`/`label range:
+    …` when only one is — never rendering the word "any" for an
+    undeclared side, since undeclared genuinely means unconstrained, not
+    "matches anything." `None` when neither side is declared."""
+    if domain and range_:
+        return f"{label}: {', '.join(domain)} → {', '.join(range_)}"
+    if domain:
+        return f"{label} domain: {', '.join(domain)}"
+    if range_:
+        return f"{label} range: {', '.join(range_)}"
+    return None
+
+
+def _schema_block(document: SchemaDocument, vocabulary: list[str]) -> str:
+    """ADR 0009 §11.1: the block `system_prompt()` appends after the
+    vocabulary block, only when a schema is installed and its `mode !=
+    "off"`. Ported field-for-field from extract.rs's `schema_block`: the
+    allowed entity type names and each constrained relation's
+    domain/range, each independently capped at VOCABULARY_CAP. A
+    constrained relation already in `vocabulary` sorts first."""
+    block = ""
+    if document.types:
+        names = sorted(document.types)[:VOCABULARY_CAP]
+        block += (
+            "\nThis context has a schema. A concept may be given an entity type via one "
+            f'association per type on the reserved relation label "{SCHEMA_TYPE_LABEL}" (e.g. '
+            f'{{"subject": "…", "label": "{SCHEMA_TYPE_LABEL}", "object": "TypeName"}}) — '
+            f"reuse these exact spellings: {', '.join(names)}\n"
+        )
+    live_vocabulary = set(vocabulary)
+    constrained = [
+        (label, relation)
+        for label, relation in document.relations.items()
+        if relation.domain or relation.range
+    ]
+    constrained.sort(key=lambda item: (item[0] not in live_vocabulary, item[0]))
+    lines = [
+        line
+        for label, relation in constrained[:VOCABULARY_CAP]
+        if (line := _relation_line(label, relation.domain, relation.range)) is not None
+    ]
+    if lines:
+        block += (
+            "\nRelation constraints in this schema — when one of these labels is used, give "
+            "its subject/object the entity type shown (via a schema:type assertion):\n"
+        )
+        for line in lines:
+            block += f"- {line}\n"
+    return block
 
 
 def user_message(source: str, index: int, total: int, text: str) -> str:
@@ -1104,6 +1217,143 @@ def cross_output_issues(outputs: list[ModelOutput]) -> list[tuple[int, list[str]
     return issues_by_output
 
 
+def schema_output_issues(
+    outputs: list[ModelOutput], schema: SchemaDocument
+) -> list[tuple[int, list[str]]]:
+    """ADR 0009 §11.2: the schema-side sibling of `cross_output_issues` —
+    identical two-pass, per-output-index shape. `schema:type` assertions
+    across every output are unioned FIRST (a type asserted in output 3
+    licenses a fact in output 1), then every fact association is judged
+    against the completed set — the producer-side mirror of
+    `schema_issues`/`SchemaEnv` (src/schema/check.rs), the one function
+    every live write entrance already shares. There is no live graph to
+    merge into and no alias resolution to do: `cross_output_issues`
+    already refuses any alias whose spelling names something the
+    associations already contain, so every subject/object/label spelling
+    reaching here is already this answer's own canonical."""
+    asserted: dict[str, set[str]] = {}
+    for output in outputs:
+        for item in output.associations:
+            subject = (item.subject or "").strip()
+            label = (item.label or "").strip()
+            object_ = (item.object or "").strip()
+            if label == SCHEMA_TYPE_LABEL and subject and object_:
+                asserted.setdefault(subject, set()).add(object_)
+
+    ancestors = _schema_ancestors(schema.types)
+    types: dict[str, set[str]] = {
+        concept: {
+            name for asserted_name in names for name in _schema_closure(asserted_name, ancestors)
+        }
+        for concept, names in asserted.items()
+    }
+
+    issues_by_output: list[tuple[int, list[str]]] = []
+    for output_index, output in enumerate(outputs):
+        issues: list[str] = []
+
+        # Guard 2 (ADR 0009 §6.3), mode-independent: this answer's own
+        # alias declarations must never name the reserved label as a
+        # canonical.
+        for alias_index, alias_item in enumerate(output.aliases):
+            if alias_item.kind == "label" and alias_item.canonical == SCHEMA_TYPE_LABEL:
+                issues.append(
+                    f"aliases[{alias_index}].canonical: '{SCHEMA_TYPE_LABEL}' is reserved for "
+                    "type assertions (ADR 0009 §6.3) — rename the alias"
+                )
+
+        if schema.mode != "off":
+            for assoc_index, item in enumerate(output.associations):
+                subject = (item.subject or "").strip()
+                label = (item.label or "").strip()
+                object_ = (item.object or "").strip()
+                if not label or label == SCHEMA_TYPE_LABEL:
+                    continue  # type ops are never judged, §7.2 step 6
+                relation = schema.relations.get(label)
+                if relation is not None:
+                    subject_types = types.get(subject)
+                    if _schema_side_violates(relation.domain, subject_types):
+                        text = _schema_violation_text(
+                            subject, relation.domain, label, subject_types
+                        )
+                        issues.append(f"associations[{assoc_index}].subject: {text}")
+                    object_types = types.get(object_)
+                    if _schema_side_violates(relation.range, object_types):
+                        text = _schema_violation_text(object_, relation.range, label, object_types)
+                        issues.append(f"associations[{assoc_index}].object: {text}")
+                elif schema.closed_labels:
+                    issues.append(
+                        f"associations[{assoc_index}].label: '{label}' names no relation "
+                        "declared in this context's schema (closed_labels)"
+                    )
+
+        if issues:
+            issues_by_output.append((output_index, issues))
+    return issues_by_output
+
+
+# Cap on how many type names one violation message enumerates — same
+# bound and reasoning as src/schema/check.rs's own MAX_ISSUE_TYPE_NAMES: a
+# relation's declared domain/range is itself capped, but a concept's
+# asserted type set is not.
+MAX_ISSUE_TYPE_NAMES = 8
+
+
+def _schema_side_violates(declared: list[str], types: set[str] | None) -> bool:
+    """A domain/range violation is `declared` non-empty (an unconstrained
+    side never violates), the concept's expanded type set non-empty
+    (untyped never violates, §6.1), and the two disjoint — the
+    producer-side mirror of src/schema/check.rs's `side_violates`."""
+    if not declared:
+        return False
+    if not types:
+        return False
+    return set(declared).isdisjoint(types)
+
+
+def _join_capped_names(names: Sequence[str]) -> str:
+    ordered = sorted(names)
+    if len(ordered) <= MAX_ISSUE_TYPE_NAMES:
+        return ", ".join(ordered)
+    remainder = len(ordered) - MAX_ISSUE_TYPE_NAMES
+    return f"{', '.join(ordered[:MAX_ISSUE_TYPE_NAMES])}, … (+{remainder} more)"
+
+
+def _schema_violation_text(
+    name: str, declared: list[str], relation: str, types: set[str] | None
+) -> str:
+    """One violation's corrective text: what was expected (the declared
+    set as written, never the `is_a` closure) and what the concept was
+    actually asserted as (never the closure either) — mirrors
+    src/schema/check.rs's `expected_types`/`actual_types` split, restated
+    as one sentence for a corrective LLM turn instead of two structured
+    fields."""
+    expected = _join_capped_names(declared)
+    actual = _join_capped_names(sorted(types)) if types else ""
+    return (
+        f"'{name}' must be typed as one of [{expected}] (or a subtype, via a schema:type "
+        f"assertion) for relation '{relation}', but is typed as [{actual}]"
+    )
+
+
+def combined_cross_output_issues(
+    outputs: list[ModelOutput], schema: SchemaDocument | None
+) -> list[tuple[int, list[str]]]:
+    """Issue #199 Stage 2's cross-output judgment, widened to a schema
+    document when one is installed (ADR 0009 §11): `cross_output_issues`'s
+    alias judgment and `schema_output_issues`'s domain/range judgment are
+    two independent per-output-index issue lists, merged into one before
+    a single corrective turn is spent per offending output. Output order
+    in, output order out."""
+    merged: dict[int, list[str]] = {}
+    for index, issues in cross_output_issues(outputs):
+        merged.setdefault(index, []).extend(issues)
+    if schema is not None:
+        for index, issues in schema_output_issues(outputs, schema):
+            merged.setdefault(index, []).extend(issues)
+    return sorted(merged.items())
+
+
 # -- merge (mirrors extract.rs merge(): trim, validate, dedup, alias checks) ------
 
 
@@ -1130,8 +1380,14 @@ class Extraction:
     dropped: int = 0
 
     def label_vocabulary(self) -> list[str]:
+        # ADR 0009 §6.3 exclusion 2: schema:type never enters the offered
+        # vocabulary — mirrors extract.rs's own Extraction::label_vocabulary
+        # filter, kept here for parity even though TaguruIngester's own
+        # vocabulary always comes live from list_labels() (which already
+        # excludes it server-side) rather than from this accumulator.
         names = {fact.label for fact in self.associations}
         names.update(self.labels.values())
+        names.discard(SCHEMA_TYPE_LABEL)
         return sorted(names)
 
 

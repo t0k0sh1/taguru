@@ -212,6 +212,13 @@ class _CheckpointFingerprint:
     fact_budget: int
     structured_output: str
     lossy: bool
+    schema_digest: str = ""
+    """The fetched schema document's digest (``""`` = no schema). A
+    checkpoint file written before this field existed defaults to ``""``
+    on load (``from_dict``'s ``.get``) — matches a schema-less rerun, the
+    same "new field defaults to the value that changes today's behavior
+    least" precedent every other field here already sets. Mirrors
+    src/extract.rs's ``CheckpointFingerprint.schema_digest``."""
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -225,6 +232,7 @@ class _CheckpointFingerprint:
             "fact_budget": self.fact_budget,
             "structured_output": self.structured_output,
             "lossy": self.lossy,
+            "schema_digest": self.schema_digest,
         }
 
     @classmethod
@@ -243,6 +251,7 @@ class _CheckpointFingerprint:
                 fact_budget=int(data["fact_budget"]),
                 structured_output=str(data["structured_output"]),
                 lossy=bool(data["lossy"]),
+                schema_digest=str(data.get("schema_digest", "")),
             )
         except (KeyError, TypeError, ValueError):
             return None

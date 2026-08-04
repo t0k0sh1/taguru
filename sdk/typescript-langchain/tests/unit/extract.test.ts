@@ -5,11 +5,13 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { Ajv2020 } from "ajv/dist/2020.js";
+import type { RelationDef, SchemaDocument, TypeDef } from "taguru";
 import { describe, expect, it } from "vitest";
 
 import {
   candidateJson,
   chunk,
+  combinedCrossOutputIssues,
   correctiveAssistantTurnContent,
   correctiveMessage,
   correctiveValidationMessage,
@@ -27,6 +29,8 @@ import {
   MODEL_OUTPUT_JSON_SCHEMA,
   parseModelOutput,
   renderBatch,
+  SCHEMA_TYPE_LABEL,
+  schemaOutputIssues,
   splitParagraphs,
   SyntaxFault,
   systemPrompt,
@@ -57,6 +61,26 @@ const output = (partial: Partial<ModelOutput>): ModelOutput => ({
   aliases: [],
   questions: [],
   ...partial,
+});
+
+const testSchema = (
+  types: Record<string, string[]>,
+  relations: Record<string, [string[], string[]]>,
+  mode: string,
+  closedLabels = false,
+): SchemaDocument => ({
+  schema: 1,
+  mode: mode as SchemaDocument["mode"],
+  closed_labels: closedLabels,
+  types: Object.fromEntries(
+    Object.entries(types).map(([name, isA]): [string, TypeDef] => [name, { is_a: isA }]),
+  ),
+  relations: Object.fromEntries(
+    Object.entries(relations).map(([label, [domain, range]]): [string, RelationDef] => [
+      label,
+      { domain, range },
+    ]),
+  ),
 });
 
 describe("merge (extract.rs golden ports)", () => {
@@ -246,6 +270,35 @@ describe("the system prompt's fact budget", () => {
 
   it("states the fact budget when set", () => {
     expect(systemPrompt([], 0, 5)).toContain("at most 5 association(s) total");
+  });
+});
+
+describe("the system prompt's schema block", () => {
+  it("offers the schema types and a relation line when mode is not off", () => {
+    const schema = testSchema(
+      { Brewery: [], Person: [] },
+      { 杜氏: [["Brewery"], ["Person"]] },
+      "warn",
+    );
+    const prompt = systemPrompt([], 0, 0, schema);
+    expect(prompt).toContain("Brewery");
+    expect(prompt).toContain("Person");
+    expect(prompt).toContain(SCHEMA_TYPE_LABEL);
+    expect(prompt).toContain("杜氏: Brewery → Person");
+  });
+
+  it("omits the arrow for a relation constrained on one side only", () => {
+    const schema = testSchema({ Brewery: [] }, { 代表銘柄: [["Brewery"], []] }, "warn");
+    const prompt = systemPrompt([], 0, 0, schema);
+    expect(prompt).toContain("代表銘柄 domain: Brewery");
+    expect(prompt).not.toContain("any");
+  });
+
+  it("omits the schema block when mode is off", () => {
+    const schema = testSchema({ Brewery: [] }, {}, "off");
+    const prompt = systemPrompt([], 0, 0, schema);
+    expect(prompt).not.toContain("Brewery");
+    expect(prompt).not.toContain(SCHEMA_TYPE_LABEL);
   });
 });
 
@@ -574,6 +627,142 @@ describe("crossOutputIssues (extract.rs/Python golden ports)", () => {
       }),
     ];
     expect(crossOutputIssues(outputs)).toEqual([]);
+  });
+});
+
+describe("schemaOutputIssues (extract.rs/Python golden ports)", () => {
+  it("lets a type asserted in a later output license an earlier fact", () => {
+    const schema = testSchema(
+      { Brewery: [], Person: [] },
+      { 杜氏: [["Brewery"], ["Person"]] },
+      "strict",
+    );
+    const outputs = [
+      output({ associations: [association("青嶺酒造", "杜氏", "高瀬", 1.0)] }),
+      output({
+        associations: [
+          association("青嶺酒造", SCHEMA_TYPE_LABEL, "Brewery", 1.0),
+          association("高瀬", SCHEMA_TYPE_LABEL, "Person", 1.0),
+        ],
+      }),
+    ];
+    expect(schemaOutputIssues(outputs, schema)).toEqual([]);
+  });
+
+  it("names domain and range violations by output", () => {
+    const schema = testSchema(
+      { Brewery: [], Person: [], Place: [] },
+      { 杜氏: [["Brewery"], ["Person"]] },
+      "strict",
+    );
+    const outputs = [
+      // Domain violation: 青嶺酒造 is typed Person, not Brewery.
+      output({ associations: [association("青嶺酒造", "杜氏", "高瀬", 1.0)] }),
+      // Range violation: 地蔵 is typed Place, not Person.
+      output({ associations: [association("石蔵", "杜氏", "地蔵", 1.0)] }),
+      // Type assertions arrive in a THIRD, later output — proving the
+      // union happens before any output is judged.
+      output({
+        associations: [
+          association("青嶺酒造", SCHEMA_TYPE_LABEL, "Person", 1.0),
+          association("高瀬", SCHEMA_TYPE_LABEL, "Person", 1.0),
+          association("石蔵", SCHEMA_TYPE_LABEL, "Brewery", 1.0),
+          association("地蔵", SCHEMA_TYPE_LABEL, "Place", 1.0),
+        ],
+      }),
+    ];
+    const issues = schemaOutputIssues(outputs, schema);
+    expect(issues).toHaveLength(2);
+    expect(issues[0]![0]).toBe(0);
+    expect(issues[0]![1].some((m) => m.startsWith("associations[0].subject"))).toBe(true);
+    expect(issues[1]![0]).toBe(1);
+    expect(issues[1]![1].some((m) => m.startsWith("associations[0].object"))).toBe(true);
+  });
+
+  it("never flags an untyped concept", () => {
+    const schema = testSchema(
+      { Brewery: [], Person: [] },
+      { 杜氏: [["Brewery"], ["Person"]] },
+      "strict",
+    );
+    const outputs = [output({ associations: [association("青嶺酒造", "杜氏", "高瀬", 1.0)] })];
+    expect(schemaOutputIssues(outputs, schema)).toEqual([]);
+  });
+
+  it("lets an is_a subtype satisfy the declared type", () => {
+    const schema = testSchema(
+      { Organization: [], Brewery: ["Organization"], Person: [] },
+      { 所在地: [["Organization"], ["Person"]] },
+      "strict",
+    );
+    const outputs = [
+      output({
+        associations: [
+          association("青嶺酒造", SCHEMA_TYPE_LABEL, "Brewery", 1.0),
+          association("高瀬", SCHEMA_TYPE_LABEL, "Person", 1.0),
+          association("青嶺酒造", "所在地", "高瀬", 1.0),
+        ],
+      }),
+    ];
+    expect(schemaOutputIssues(outputs, schema)).toEqual([]);
+  });
+
+  it("flags an undeclared label under closed_labels", () => {
+    const schema = testSchema({}, { 杜氏: [[], []] }, "strict", true);
+    const outputs = [output({ associations: [association("青嶺酒造", "創業年", "1907", 1.0)] })];
+    const issues = schemaOutputIssues(outputs, schema);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]![1][0]).toContain("closed_labels");
+  });
+
+  it("flags an alias naming the reserved type label as canonical", () => {
+    // Guard 2 (ADR 0009 §6.3) fires regardless of mode — "off" here proves
+    // it is not gated on enforcement the way domain/range judgment is.
+    const schema = testSchema({}, {}, "off");
+    const outputs = [output({ aliases: [alias("型", SCHEMA_TYPE_LABEL, "label")] })];
+    const issues = schemaOutputIssues(outputs, schema);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]![1][0]).toContain("reserved");
+  });
+
+  it("is empty when mode is off even with a violation", () => {
+    const schema = testSchema(
+      { Brewery: [], Person: [] },
+      { 杜氏: [["Brewery"], ["Person"]] },
+      "off",
+    );
+    const outputs = [
+      output({
+        associations: [
+          association("青嶺酒造", SCHEMA_TYPE_LABEL, "Person", 1.0),
+          association("青嶺酒造", "杜氏", "高瀬", 1.0),
+        ],
+      }),
+    ];
+    expect(schemaOutputIssues(outputs, schema)).toEqual([]);
+  });
+});
+
+describe("combinedCrossOutputIssues", () => {
+  it("merges alias and schema findings per output", () => {
+    const schema = testSchema(
+      { Brewery: [], Person: [] },
+      { 杜氏: [["Brewery"], ["Person"]] },
+      "strict",
+    );
+    const outputs = [
+      output({
+        associations: [
+          association("青嶺酒造", SCHEMA_TYPE_LABEL, "Person", 1.0), // wrong type
+          association("青嶺酒造", "杜氏", "高瀬", 1.0), // domain violation
+        ],
+        aliases: [alias("蔵元", "存在しない", "concept")], // dangling alias
+      }),
+    ];
+    const issues = combinedCrossOutputIssues(outputs, schema);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]![0]).toBe(0);
+    expect(issues[0]![1]).toHaveLength(2);
   });
 });
 

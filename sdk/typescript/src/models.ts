@@ -459,6 +459,38 @@ export interface LabelPage {
   labels: string[];
 }
 
+// -- schema ------------------------------------------------------------------------
+
+/**
+ * One entity type's `is_a` parents (ADR 0009 §6.2) — an undeclared
+ * parent is legal, a leaf ancestor with nothing further above it.
+ */
+export interface TypeDef {
+  is_a: string[];
+}
+
+/**
+ * One relation label's domain/range constraint (ADR 0009 §6). An empty
+ * side is unconstrained, never "matches anything."
+ */
+export interface RelationDef {
+  domain: string[];
+  range: string[];
+}
+
+/**
+ * A context's schema document — the same shape `{stem}.schema.json`/
+ * `GET /contexts/{name}/schema` persist and serve, mirrored
+ * field-for-field from `src/schema.rs`'s `SchemaDocument` (ADR 0009 §5.3).
+ */
+export interface SchemaDocument {
+  schema: number;
+  mode: Open<"off" | "warn" | "strict">;
+  closed_labels: boolean;
+  types: Record<string, TypeDef>;
+  relations: Record<string, RelationDef>;
+}
+
 // -- aliases ---------------------------------------------------------------------
 
 /** One page of aliases; the cursor spans both namespaces (concepts first). */

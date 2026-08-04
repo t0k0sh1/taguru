@@ -315,6 +315,33 @@ describe("TaguruIngester", () => {
     expect(system).toContain("Keep this answer to at most 3 association(s) total");
   });
 
+  it("folds a fetched schema into the system prompt (ADR 0009 §11.4)", async () => {
+    const server = new FakeServer();
+    server.schemaDocument = {
+      schema: 1,
+      mode: "warn",
+      closed_labels: false,
+      types: { Brewery: { is_a: [] }, Person: { is_a: [] } },
+      relations: { 杜氏: { domain: ["Brewery"], range: ["Person"] } },
+    };
+    const { ingester, llm } = makeWithMessages(server, [new AIMessage(MODEL_ANSWER)]);
+    const outcome = await ingester.ingestText(DOC_TEXT, { source: "docs/aomine.md" });
+    expect(outcome.ok).toBe(true);
+    const system = llm.seenPrompts[0]![0]!.content as string;
+    expect(system).toContain("Brewery");
+    expect(system).toContain("杜氏: Brewery → Person");
+  });
+
+  it("omits the schema block from the system prompt when no schema is set", async () => {
+    const server = new FakeServer();
+    expect(server.schemaDocument).toBeNull();
+    const { ingester, llm } = makeWithMessages(server, [new AIMessage(MODEL_ANSWER)]);
+    const outcome = await ingester.ingestText(DOC_TEXT, { source: "docs/aomine.md" });
+    expect(outcome.ok).toBe(true);
+    const system = llm.seenPrompts[0]![0]!.content as string;
+    expect(system).not.toContain("This context has a schema");
+  });
+
   it("max_attempts extends corrective retries past the default, rebuilding not accumulating", async () => {
     const { ingester, llm } = makeWithMessages(
       new FakeServer(),

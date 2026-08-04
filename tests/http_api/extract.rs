@@ -334,6 +334,7 @@ fn scrub_extract_env(command: &mut Command) -> &mut Command {
         .env_remove("TAGURU_EXTRACT_LOSSY")
         .env_remove("TAGURU_EXTRACT_DIAGNOSTICS")
         .env_remove("TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES")
+        .env_remove("TAGURU_EXTRACT_SCHEMA")
         .env_remove("TAGURU_CONFIG")
 }
 
@@ -1151,6 +1152,95 @@ fn extract_fact_budget_flag_is_folded_into_the_system_prompt() {
         "{}",
         requests[0]
     );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+#[test]
+fn extract_schema_flag_folds_the_type_and_relation_block_into_the_system_prompt() {
+    let docs = batch_dir("extract-schema-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let schema_path = docs.join("sake.schema.json");
+    std::fs::write(
+        &schema_path,
+        json!({
+            "schema": 1,
+            "mode": "warn",
+            "closed_labels": false,
+            "types": {
+                "Brewery": {"is_a": []},
+                "Person": {"is_a": []}
+            },
+            "relations": {
+                "杜氏": {"domain": ["Brewery"], "range": ["Person"]}
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let out = batch_dir("extract-schema-out");
+
+    let (url, requests) = stub_chat_server(vec![json!({"associations": []}).to_string()]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--schema",
+            schema_path.to_str().unwrap(),
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+
+    let requests = requests.join().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].contains("Brewery"), "{}", requests[0]);
+    assert!(
+        requests[0].contains("\\u675c\\u6c0f: Brewery \\u2192 Person")
+            || requests[0].contains("杜氏: Brewery → Person"),
+        "{}",
+        requests[0]
+    );
+    assert!(requests[0].contains("schema:type"), "{}", requests[0]);
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+#[test]
+fn extract_schema_flag_fails_the_run_at_startup_when_the_file_does_not_parse() {
+    let docs = batch_dir("extract-schema-invalid-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let schema_path = docs.join("broken.schema.json");
+    std::fs::write(&schema_path, "not json").unwrap();
+    let out = batch_dir("extract-schema-invalid-out");
+
+    // --dry-run calls no provider, but --schema is validated at startup
+    // regardless — an operator-named schema file that fails to parse
+    // must never be silently treated as "no schema".
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[],
+        &[
+            "--dry-run",
+            "--context",
+            "c",
+            "--schema",
+            schema_path.to_str().unwrap(),
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stderr.contains("broken.schema.json"), "{stderr}");
+    assert!(!stdout.contains("would extract"), "{stdout}");
 
     let _ = std::fs::remove_dir_all(&docs);
     let _ = std::fs::remove_dir_all(&out);

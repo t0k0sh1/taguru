@@ -48,6 +48,7 @@ import type {
   RetractAssociationOutcome,
   RetractOutcome,
   RetrievalResult,
+  SchemaDocument,
   SearchExplanation,
   SearchPlan,
   SectionSpec,
@@ -1010,6 +1011,21 @@ export class Context {
       // it while later rows remain, so page until an empty page.
       after = page.labels[page.labels.length - 1]!;
     }
+  }
+
+  /**
+   * The context's schema document (ADR 0009 §5) — the entity types
+   * and relation domain/range constraints `POST
+   * /contexts/{name}/schema/audit`, `taguru extract --schema`, and
+   * both LangChain ingesters read.
+   *
+   * Rejects with `NotFoundError` when the context has no schema
+   * installed (or does not exist) — the same 404 `listLabels`/friends
+   * already give.
+   */
+  async getSchema(): Promise<SchemaDocument> {
+    const result = await this.client.requestJson("GET", `${this.path}/schema`);
+    return result as SchemaDocument;
   }
 
   // -- graph writes ---------------------------------------------------------

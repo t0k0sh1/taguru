@@ -40,6 +40,7 @@ const fingerprint = (overrides: Partial<CheckpointFingerprint> = {}): Checkpoint
   fact_budget: 0,
   structured_output: "",
   lossy: false,
+  schema_digest: "",
   ...overrides,
 });
 
