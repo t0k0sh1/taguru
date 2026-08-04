@@ -27,32 +27,13 @@ fn write_eval_file(dir: &Path, contents: &str) -> PathBuf {
 /// "青嶺酒造", "醸造元", "蔵元" — are each the ONLY stored concept/label
 /// of that spelling, so every resolve call pins to exactly one
 /// candidate: a clean, non-ambiguous fixture.
-fn seed_context(server: &Server, context: &str) {
-    server.ok(
-        "PUT",
-        &format!("/contexts/{context}"),
-        Some(json!({"description": "d"})),
-    );
-    server.ok(
-        "POST",
-        &format!("/contexts/{context}/sources"),
-        Some(json!({"passages": {"corpus/brewery.md": "青嶺は青嶺酒造が造る銘柄です。"}})),
-    );
-    server.ok(
-        "POST",
-        &format!("/contexts/{context}/associations"),
-        Some(json!([
-            {"subject": "青嶺酒造", "label": "醸造元", "object": "蔵元",
-             "weight": 1.0, "source": "corpus/brewery.md", "paragraph": 0},
-        ])),
-    );
-}
-
-/// [`seed_context`], authenticated — for the read-only-key completion
-/// test, where the server enforces bearer auth from boot.
-fn seed_context_with_token(server: &Server, context: &str, token: &str) {
+/// `token` rides every call when given (`Some` for the read-only-key
+/// completion test, where the server enforces bearer auth from boot),
+/// exactly the way [`Server::call`] itself is `call_with_token(...,
+/// None)`.
+fn seed_context(server: &Server, context: &str, token: Option<&str>) {
     let call = |method: &str, path: String, body: Value| {
-        let (status, parsed) = server.call_with_token(method, &path, Some(body), Some(token));
+        let (status, parsed) = server.call_with_token(method, &path, Some(body), token);
         assert_eq!(status, 200, "{method} {path} -> {parsed}");
     };
     call(
@@ -100,7 +81,7 @@ fn write_smoke_eval(dir: &Path) -> PathBuf {
 #[test]
 fn evaluate_runs_both_lanes_and_writes_evaluation_json() {
     let server = Server::start("evaluate-smoke");
-    seed_context(&server, "sake");
+    seed_context(&server, "sake", None);
     let dir = eval_dir("smoke");
     let eval_path = write_smoke_eval(&dir);
     let out_path = dir.join("evaluation.json");
@@ -217,7 +198,7 @@ fn evaluate_completes_on_a_read_only_api_key() {
             ("TAGURU_KEY_SCOPES", r#"{"ci": "read"}"#),
         ],
     );
-    seed_context_with_token(&server, "sake", "tok-admin");
+    seed_context(&server, "sake", Some("tok-admin"));
     let dir = eval_dir("readonly");
     let eval_path = write_smoke_eval(&dir);
     let out_path = dir.join("evaluation.json");
@@ -245,7 +226,7 @@ fn evaluate_completes_on_a_read_only_api_key() {
 #[test]
 fn evaluate_refuses_an_expected_source_the_context_does_not_carry() {
     let server = Server::start("evaluate-missing-source");
-    seed_context(&server, "sake");
+    seed_context(&server, "sake", None);
     let dir = eval_dir("missing-source");
     let eval_path = write_eval_file(
         &dir,
@@ -343,7 +324,7 @@ fn evaluate_marks_an_ambiguous_position_and_never_calls_query_for_it() {
 fn evaluate_runs_the_citation_lane_without_preflighting_it_and_distinguishes_no_source_from_no_paragraph()
  {
     let server = Server::start("evaluate-citations");
-    seed_context(&server, "sake");
+    seed_context(&server, "sake", None);
     let dir = eval_dir("citations");
     // No `expected_sources` at all — the passage-lane search for this
     // query surfaces nothing relevant, exercising ADR 0004 §8's
@@ -426,7 +407,7 @@ fn write_thresholds(dir: &Path, contents: &str) -> PathBuf {
 #[test]
 fn evaluate_exits_0_and_records_a_passing_thresholds_block_when_every_bound_is_satisfied() {
     let server = Server::start("evaluate-thresholds-pass");
-    seed_context(&server, "sake");
+    seed_context(&server, "sake", None);
     let dir = eval_dir("thresholds-pass");
     let eval_path = write_smoke_eval(&dir);
     let thresholds_path = write_thresholds(
@@ -515,7 +496,7 @@ fn evaluate_exits_3_and_records_violations_when_a_threshold_is_not_met() {
             ("TAGURU_KEY_SCOPES", r#"{"ci": "read"}"#),
         ],
     );
-    seed_context_with_token(&server, "sake", "tok-admin");
+    seed_context(&server, "sake", Some("tok-admin"));
     let dir = eval_dir("thresholds-fail");
     let eval_path = write_smoke_eval(&dir);
     // `latency.passage_ms`'s real value is some small, non-deterministic
@@ -599,7 +580,7 @@ fn evaluate_exits_3_and_records_violations_when_a_threshold_is_not_met() {
 #[test]
 fn evaluate_passes_by_default_when_the_corpus_is_in_fact_stable() {
     let server = Server::start("evaluate-thresholds-stable");
-    seed_context(&server, "sake");
+    seed_context(&server, "sake", None);
     let dir = eval_dir("thresholds-stable");
     let eval_path = write_smoke_eval(&dir);
     let thresholds_path = write_thresholds(
