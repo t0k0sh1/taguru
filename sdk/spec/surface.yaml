@@ -107,6 +107,7 @@ classes:
       options: [limit, after]
     list_labels: { route: "GET /contexts/{name}/labels", options: [limit, after, prefix] }
     iter_labels: { route: "GET /contexts/{name}/labels", options: [limit, prefix] }
+    get_schema: { route: "GET /contexts/{name}/schema" }
     add_associations:
       route: "POST /contexts/{name}/associations"
       args: [associations]

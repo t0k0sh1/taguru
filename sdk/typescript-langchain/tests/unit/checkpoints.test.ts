@@ -232,6 +232,34 @@ describe("checkpoint reuse", () => {
     expect(llm2.seenPrompts.length).toBe(2); // both chunks re-extracted
   });
 
+  it("a changed schema invalidates checkpoints even though content is unchanged", async () => {
+    // ADR 0009 §11.1's schema_digest, the checkpoint twin of extract.rs's
+    // own CheckpointFingerprint.schema_digest field: swapping in a
+    // different schema document re-extracts every chunk, exactly like any
+    // other computation input changing.
+    const server = new FakeServer();
+    const store = new RecordingCheckpointStore();
+    const source = await seedFailedRun(server, store);
+    expect(unitCount(store, source)).toBe(1);
+
+    server.schemaDocument = {
+      schema: 1,
+      mode: "warn",
+      closed_labels: false,
+      types: { Brewery: { is_a: [] } },
+      relations: {},
+    };
+    const { ingester: ingester2, llm: llm2 } = buildIngester(
+      server,
+      [CHUNK1_ANSWER, CHUNK2_CORRECTED_ANSWER],
+      { checkpoint_store: store, chunk_bytes: CROSS_CHUNK_BYTES },
+    );
+    const outcome = await ingester2.ingestText(DOC_TEXT, { source });
+    expect(outcome.ok).toBe(true);
+    expect(outcome.chunks_reused).toBe(0);
+    expect(llm2.seenPrompts.length).toBe(2); // both chunks re-extracted
+  });
+
   it("resumes a killed multi-chunk document without recalling completed chunks", async () => {
     const server = new FakeServer();
     const store = new RecordingCheckpointStore();

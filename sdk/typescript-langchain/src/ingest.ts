@@ -15,6 +15,7 @@ import {
   NotFoundError,
   Taguru,
   type ImportOutcome,
+  type SchemaDocument,
 } from "taguru";
 
 import {
@@ -25,10 +26,10 @@ import {
   PROMPT_VERSION,
   VOCABULARY_CAP,
   chunk,
+  combinedCrossOutputIssues,
   correctiveAssistantTurnContent,
   correctiveMessage,
   correctiveValidationMessage,
-  crossOutputIssues,
   effectiveItemRules,
   emptyAnswerDiagnosis,
   evaluateAnswer,
@@ -93,7 +94,7 @@ export interface IngestOutcome {
   llm_calls: number;
   chunks: number;
   /** How many corrective turns (Stage 1 syntax/validity retries plus any
-   * Stage 2 cross-chunk alias correction) this ingest needed — 0 means
+   * Stage 2 cross-chunk correction) this ingest needed — 0 means
    * every chunk's first answer was accepted as-is. */
   correction_attempts: number;
   /** Labels of automatic, information-preserving JSON repairs applied
@@ -148,6 +149,40 @@ const emptyOutcome = (source: string): IngestOutcome => ({
  * stop sequences.
  */
 export type ShouldStop = (() => boolean) | AbortSignal;
+
+/**
+ * Stable (sorted-key) JSON serialization — object key order is otherwise
+ * insertion order, which would make two structurally identical schema
+ * documents hash differently depending on how the server happened to
+ * serialize `types`/`relations` this time.
+ */
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableStringify).join(",")}]`;
+  }
+  if (value !== null && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) =>
+      a < b ? -1 : a > b ? 1 : 0,
+    );
+    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${stableStringify(item)}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+/**
+ * A canonical digest of one fetched schema document, folded into the
+ * checkpoint fingerprint (ADR 0009 §11.1, mirrors src/extract.rs's own
+ * `schema_digest`) so swapping in a different schema document re-extracts
+ * exactly like any other computation input changing. `""` when no schema
+ * was fetched — the same "no schema" value a fresh schema-less run
+ * resolves to.
+ */
+async function schemaDigest(schema: SchemaDocument | null): Promise<string> {
+  if (schema === null) {
+    return "";
+  }
+  return sha256Hex(stableStringify(schema));
+}
 
 function normalizeStop(shouldStop: ShouldStop | undefined): () => boolean {
   if (shouldStop === undefined) {
@@ -416,19 +451,19 @@ function correctiveAskFor(result: AttemptResult, factBudget: number): string {
 }
 
 /**
- * The Stage 2 (cross-chunk alias correction) terminal message for one
+ * The Stage 2 (cross-chunk correction) terminal message for one
  * offending chunk's non-valid reply — mirrors extract.rs's
  * correct_cross_output_issues per-kind texts verbatim.
  */
 function crossChunkFailureMessage(label: string, result: AttemptResult): string {
   if (result.kind === "length_limited") {
     return (
-      `${label}: the cross-chunk alias correction was cut off at the output limit — ` +
+      `${label}: the cross-chunk correction was cut off at the output limit — ` +
       "failing the source rather than importing a truncated correction"
     );
   }
   if (result.kind === "refusal") {
-    return `${label}: the provider refused the cross-chunk alias correction (finish_reason ${result.error})`;
+    return `${label}: the provider refused the cross-chunk correction (finish_reason ${result.error})`;
   }
   if (result.kind === "empty") {
     return `${label}: ${result.error}`;
@@ -436,11 +471,11 @@ function crossChunkFailureMessage(label: string, result: AttemptResult): string 
   if (result.kind === "invalid") {
     const issues = result.issues!;
     return (
-      `${label}: the cross-chunk alias correction still left ${issues.length} invalid item(s) ` +
+      `${label}: the cross-chunk correction still left ${issues.length} invalid item(s) ` +
       `uncorrected: ${issues.join("; ")}`
     );
   }
-  return `${label}: the cross-chunk alias correction was not the JSON object asked for (${result.error})`;
+  return `${label}: the cross-chunk correction was not the JSON object asked for (${result.error})`;
 }
 
 /**
@@ -627,8 +662,12 @@ export class TaguruIngester {
     rules: ItemRules | null,
     chunkTotal: number,
     outcome: IngestOutcome,
+    schema: SchemaDocument | null,
   ): Promise<void> {
-    for (const [recordIndex, issues] of crossOutputIssues(records.map((r) => r.output))) {
+    for (const [recordIndex, issues] of combinedCrossOutputIssues(
+      records.map((r) => r.output),
+      schema,
+    )) {
       const chunkRecord = records[recordIndex]!;
       const label = `chunk ${chunkRecord.chunkIndex + 1}/${chunkTotal}`;
       const messages: BaseMessage[] = [
@@ -682,12 +721,15 @@ export class TaguruIngester {
     // correction can rename an association another chunk's alias depended
     // on, introducing a FRESH cross-chunk issue. This is the bounded
     // re-check, not a second round — any issue here fails the source.
-    const recheck = crossOutputIssues(records.map((r) => r.output));
+    const recheck = combinedCrossOutputIssues(
+      records.map((r) => r.output),
+      schema,
+    );
     if (recheck.length > 0) {
       const [recordIndex, issues] = recheck[0]!;
       const chunkIndex = records[recordIndex]!.chunkIndex;
       throw new Error(
-        `chunk ${chunkIndex + 1}/${chunkTotal}: still has ${issues.length} cross-chunk alias ` +
+        `chunk ${chunkIndex + 1}/${chunkTotal}: still has ${issues.length} cross-chunk ` +
           `issue(s) after correction: ${issues.join("; ")}`,
       );
     }
@@ -713,12 +755,17 @@ export class TaguruIngester {
     });
 
     const vocabulary = await this.fetchVocabulary();
-    const system = systemPrompt(vocabulary, this.questions, this.fact_budget);
+    const schema = await this.fetchSchema();
+    const system = systemPrompt(vocabulary, this.questions, this.fact_budget, schema);
     const paragraphCount = splitParagraphs(text).length;
     const rules = this.itemRules(paragraphCount);
     const chunks = chunk(labeledDocument(text, this.chunk_bytes), this.chunk_bytes);
     outcome.chunks = chunks.length;
-    const checkpoints = await this.loadCheckpoints(options.source, text);
+    const checkpoints = await this.loadCheckpoints(
+      options.source,
+      text,
+      await schemaDigest(schema),
+    );
 
     const records: ChunkRecord[] = [];
     for (let index = 0; index < chunks.length; index += 1) {
@@ -875,7 +922,7 @@ export class TaguruIngester {
     }
 
     if (!this.lossy) {
-      await this.correctCrossChunkIssues(system, records, rules, chunks.length, outcome);
+      await this.correctCrossChunkIssues(system, records, rules, chunks.length, outcome, schema);
     }
 
     const extraction = merge(
@@ -1028,6 +1075,22 @@ export class TaguruIngester {
     }
   }
 
+  /**
+   * The context's schema document (ADR 0009 §11.4), same best-effort
+   * posture as `fetchVocabulary`: a schema-unaware server or a schema-free
+   * context is fine, and this ingester works unchanged either way.
+   */
+  private async fetchSchema(): Promise<SchemaDocument | null> {
+    try {
+      return await this.client.context(this.context).getSchema();
+    } catch (error) {
+      if (error instanceof NotFoundError) {
+        return null;
+      }
+      throw error;
+    }
+  }
+
   // -- checkpoint/resume (issue #212, the TypeScript twin of #211/#210) --
 
   /**
@@ -1036,7 +1099,10 @@ export class TaguruIngester {
    * every output-shaping setting. See CheckpointFingerprint's doc comment
    * for what is deliberately excluded and why.
    */
-  private async checkpointFingerprint(text: string): Promise<CheckpointFingerprint> {
+  private async checkpointFingerprint(
+    text: string,
+    digest: string,
+  ): Promise<CheckpointFingerprint> {
     return {
       sha256: await sha256Hex(text),
       model: this.checkpoint_model_id ?? deriveModelIdentity(this.llm)!,
@@ -1048,6 +1114,7 @@ export class TaguruIngester {
       fact_budget: this.fact_budget,
       structured_output: this.structured_output ? "langchain" : "",
       lossy: this.lossy,
+      schema_digest: digest,
     };
   }
 
@@ -1056,11 +1123,15 @@ export class TaguruIngester {
    * and reported via `console.warn` — the run proceeds as though nothing
    * were cached, never as a hard failure.
    */
-  private async loadCheckpoints(source: string, text: string): Promise<DocumentCheckpoints | null> {
+  private async loadCheckpoints(
+    source: string,
+    text: string,
+    digest: string,
+  ): Promise<DocumentCheckpoints | null> {
     if (this.checkpoint_store === undefined) {
       return null;
     }
-    const fingerprint = await this.checkpointFingerprint(text);
+    const fingerprint = await this.checkpointFingerprint(text, digest);
     let data: Uint8Array | null;
     try {
       data = await this.checkpoint_store.load(source);

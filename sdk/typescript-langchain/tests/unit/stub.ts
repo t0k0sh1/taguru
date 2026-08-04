@@ -52,6 +52,13 @@ export class FakeServer {
    * across an import failure (issue #212). Mirrors the Python conftest's
    * `fail_import` knob. */
   failImport = false;
+  /** The context's schema document (ADR 0009 §11), or null (the default)
+   * for a 404 "no schema" — the same best-effort case
+   * TaguruIngester.fetchSchema treats identically to a schema-unaware
+   * server, so every pre-existing test keeps exercising the schema-free
+   * prompt/checkpoint path unchanged. Mirrors the Python conftest's
+   * `schema_document` knob. */
+  schemaDocument: Record<string, unknown> | null = null;
 
   fetch: typeof fetch = async (input, init) => {
     const url = new URL(String(input));
@@ -178,6 +185,20 @@ export class FakeServer {
     }
     if (path.endsWith("/labels")) {
       return ok({ total: 2, labels: ["代表銘柄", "杜氏"] });
+    }
+    if (path.endsWith("/schema") && (init?.method ?? "GET") === "GET") {
+      if (this.schemaDocument === null) {
+        return new Response(
+          JSON.stringify({
+            status: "error",
+            code: "no_schema",
+            error: "context has no schema document",
+            time: 0.001,
+          }),
+          { status: 404 },
+        );
+      }
+      return ok(this.schemaDocument);
     }
     if (path === "/import") {
       if (this.failImport) {

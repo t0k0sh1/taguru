@@ -10,12 +10,14 @@ import json
 from pathlib import Path
 
 import jsonschema
+from taguru import RelationDef, SchemaDocument, TypeDef
 
 from taguru_langchain._extract import (
     MAX_ASSOCIATION_WEIGHT,
     MAX_LISTED_ISSUES,
     MAX_NAME_BYTES,
     MODEL_OUTPUT_JSON_SCHEMA,
+    SCHEMA_TYPE_LABEL,
     InvalidFault,
     ItemRules,
     ModelAlias,
@@ -25,6 +27,7 @@ from taguru_langchain._extract import (
     SyntaxFault,
     candidate_json,
     chunk,
+    combined_cross_output_issues,
     corrective_assistant_turn_content,
     corrective_message,
     corrective_validation_message,
@@ -38,6 +41,7 @@ from taguru_langchain._extract import (
     merge,
     parse_model_output,
     render_batch,
+    schema_output_issues,
     split_paragraphs,
     system_prompt,
 )
@@ -54,6 +58,24 @@ def association(subject: str, label: str, object_: str, weight: float) -> ModelA
 
 def alias(spelling: str, canonical: str, kind: str) -> ModelAlias:
     return ModelAlias(alias=spelling, canonical=canonical, kind=kind)
+
+
+def _test_schema(
+    types: dict[str, list[str]],
+    relations: dict[str, tuple[list[str], list[str]]],
+    mode: str,
+    closed_labels: bool = False,
+) -> SchemaDocument:
+    return SchemaDocument(
+        schema=1,
+        mode=mode,
+        closed_labels=closed_labels,
+        types={name: TypeDef(is_a=is_a) for name, is_a in types.items()},
+        relations={
+            label: RelationDef(domain=domain, range=range_)
+            for label, (domain, range_) in relations.items()
+        },
+    )
 
 
 def test_merge_folds_duplicates_and_drops_what_the_contract_refuses() -> None:
@@ -377,6 +399,39 @@ def test_the_system_prompt_states_the_fact_budget_when_set() -> None:
     """Port of extract.rs the_system_prompt_states_the_fact_budget_when_set."""
     prompt = system_prompt([], 0, 5)
     assert "at most 5 association(s) total" in prompt
+
+
+def test_the_system_prompt_offers_the_schema_types_and_a_relation_line_when_mode_is_not_off() -> (
+    None
+):
+    """Port of extract.rs
+    the_system_prompt_offers_the_schema_types_and_a_relation_line_when_mode_is_not_off."""
+    schema = _test_schema(
+        {"Brewery": [], "Person": []},
+        {"杜氏": (["Brewery"], ["Person"])},
+        "warn",
+    )
+    prompt = system_prompt([], 0, 0, schema)
+    assert "Brewery" in prompt and "Person" in prompt
+    assert SCHEMA_TYPE_LABEL in prompt
+    assert "杜氏: Brewery → Person" in prompt
+
+
+def test_the_system_prompt_omits_the_arrow_for_a_relation_constrained_on_one_side_only() -> None:
+    """Port of extract.rs
+    the_system_prompt_omits_the_arrow_for_a_relation_constrained_on_one_side_only."""
+    schema = _test_schema({"Brewery": []}, {"代表銘柄": (["Brewery"], [])}, "warn")
+    prompt = system_prompt([], 0, 0, schema)
+    assert "代表銘柄 domain: Brewery" in prompt
+    assert "any" not in prompt
+
+
+def test_the_system_prompt_omits_the_schema_block_when_mode_is_off() -> None:
+    """Port of extract.rs the_system_prompt_omits_the_schema_block_when_mode_is_off."""
+    schema = _test_schema({"Brewery": []}, {}, "off")
+    prompt = system_prompt([], 0, 0, schema)
+    assert "Brewery" not in prompt
+    assert SCHEMA_TYPE_LABEL not in prompt
 
 
 def test_corrective_assistant_turn_content_replays_in_full_by_default() -> None:
@@ -719,6 +774,166 @@ def test_cross_output_issues_skips_aliases_stage_1_already_flagged() -> None:
         )
     ]
     assert cross_output_issues(outputs) == []
+
+
+def test_schema_output_issues_lets_a_type_asserted_in_a_later_output_license_an_earlier_fact() -> (
+    None
+):
+    """Port of extract.rs
+    schema_output_issues_lets_a_type_asserted_in_a_later_output_license_an_earlier_fact."""
+    schema = _test_schema(
+        {"Brewery": [], "Person": []}, {"杜氏": (["Brewery"], ["Person"])}, "strict"
+    )
+    outputs = [
+        ModelOutput(associations=[association("青嶺酒造", "杜氏", "高瀬", 1.0)]),
+        ModelOutput(
+            associations=[
+                association("青嶺酒造", SCHEMA_TYPE_LABEL, "Brewery", 1.0),
+                association("高瀬", SCHEMA_TYPE_LABEL, "Person", 1.0),
+            ]
+        ),
+    ]
+    assert schema_output_issues(outputs, schema) == []
+
+
+def test_schema_output_issues_names_domain_and_range_violations_by_output() -> None:
+    """Port of extract.rs schema_output_issues_names_domain_and_range_violations_by_output."""
+    schema = _test_schema(
+        {"Brewery": [], "Person": [], "Place": []},
+        {"杜氏": (["Brewery"], ["Person"])},
+        "strict",
+    )
+    outputs = [
+        # Domain violation: 青嶺酒造 is typed Person, not Brewery.
+        ModelOutput(associations=[association("青嶺酒造", "杜氏", "高瀬", 1.0)]),
+        # Range violation: 地蔵 is typed Place, not Person.
+        ModelOutput(associations=[association("石蔵", "杜氏", "地蔵", 1.0)]),
+        # Type assertions arrive in a THIRD, later output — proving the
+        # union happens before any output is judged.
+        ModelOutput(
+            associations=[
+                association("青嶺酒造", SCHEMA_TYPE_LABEL, "Person", 1.0),
+                association("高瀬", SCHEMA_TYPE_LABEL, "Person", 1.0),
+                association("石蔵", SCHEMA_TYPE_LABEL, "Brewery", 1.0),
+                association("地蔵", SCHEMA_TYPE_LABEL, "Place", 1.0),
+            ]
+        ),
+    ]
+    issues = schema_output_issues(outputs, schema)
+    assert len(issues) == 2, issues
+    assert issues[0][0] == 0
+    assert any(m.startswith("associations[0].subject") for m in issues[0][1]), issues
+    assert issues[1][0] == 1
+    assert any(m.startswith("associations[0].object") for m in issues[1][1]), issues
+
+
+def test_schema_output_issues_never_flags_an_untyped_concept() -> None:
+    """Port of extract.rs schema_output_issues_never_flags_an_untyped_concept."""
+    schema = _test_schema(
+        {"Brewery": [], "Person": []}, {"杜氏": (["Brewery"], ["Person"])}, "strict"
+    )
+    outputs = [ModelOutput(associations=[association("青嶺酒造", "杜氏", "高瀬", 1.0)])]
+    assert schema_output_issues(outputs, schema) == []
+
+
+def test_schema_output_issues_lets_an_is_a_subtype_satisfy_the_declared_type() -> None:
+    """Port of extract.rs schema_output_issues_lets_an_is_a_subtype_satisfy_the_declared_type."""
+    schema = _test_schema(
+        {"Organization": [], "Brewery": ["Organization"], "Person": []},
+        {"所在地": (["Organization"], ["Person"])},
+        "strict",
+    )
+    outputs = [
+        ModelOutput(
+            associations=[
+                association("青嶺酒造", SCHEMA_TYPE_LABEL, "Brewery", 1.0),
+                association("高瀬", SCHEMA_TYPE_LABEL, "Person", 1.0),
+                association("青嶺酒造", "所在地", "高瀬", 1.0),
+            ]
+        )
+    ]
+    assert schema_output_issues(outputs, schema) == []
+
+
+def test_schema_output_issues_names_only_the_asserted_type_in_a_violation_message() -> None:
+    """The "actual" half of a violation message must name what was
+    asserted (`Brewery`), never its `is_a` closure (`Organization`) —
+    otherwise the model is told to fix a type name it never asserted."""
+    schema = _test_schema(
+        {"Organization": [], "Brewery": ["Organization"], "Person": []},
+        {"杜氏": (["Person"], ["Person"])},
+        "strict",
+    )
+    outputs = [
+        ModelOutput(
+            associations=[
+                association("青嶺酒造", SCHEMA_TYPE_LABEL, "Brewery", 1.0),
+                association("青嶺酒造", "杜氏", "高瀬", 1.0),
+            ]
+        )
+    ]
+    issues = schema_output_issues(outputs, schema)
+    assert len(issues) == 1
+    message = issues[0][1][0]
+    assert "typed as one of [Person]" in message
+    assert "typed as [Brewery]" in message
+    assert "Organization" not in message
+
+
+def test_schema_output_issues_flags_an_undeclared_label_under_closed_labels() -> None:
+    """Port of extract.rs schema_output_issues_flags_an_undeclared_label_under_closed_labels."""
+    schema = _test_schema({}, {"杜氏": ([], [])}, "strict", closed_labels=True)
+    outputs = [ModelOutput(associations=[association("青嶺酒造", "創業年", "1907", 1.0)])]
+    issues = schema_output_issues(outputs, schema)
+    assert len(issues) == 1
+    assert "closed_labels" in issues[0][1][0]
+
+
+def test_schema_output_issues_flags_an_alias_naming_the_reserved_type_label_as_canonical() -> None:
+    """Port of extract.rs
+    schema_output_issues_flags_an_alias_naming_the_reserved_type_label_as_canonical."""
+    # Guard 2 (ADR 0009 §6.3) fires regardless of mode — "off" here proves
+    # it is not gated on enforcement the way domain/range judgment is.
+    schema = _test_schema({}, {}, "off")
+    outputs = [ModelOutput(aliases=[alias("型", SCHEMA_TYPE_LABEL, "label")])]
+    issues = schema_output_issues(outputs, schema)
+    assert len(issues) == 1
+    assert "reserved" in issues[0][1][0]
+
+
+def test_schema_output_issues_is_empty_when_mode_is_off_even_with_a_violation() -> None:
+    """Port of extract.rs schema_output_issues_is_empty_when_mode_is_off_even_with_a_violation."""
+    schema = _test_schema({"Brewery": [], "Person": []}, {"杜氏": (["Brewery"], ["Person"])}, "off")
+    outputs = [
+        ModelOutput(
+            associations=[
+                association("青嶺酒造", SCHEMA_TYPE_LABEL, "Person", 1.0),
+                association("青嶺酒造", "杜氏", "高瀬", 1.0),
+            ]
+        )
+    ]
+    assert schema_output_issues(outputs, schema) == []
+
+
+def test_combined_cross_output_issues_merges_alias_and_schema_findings_per_output() -> None:
+    """Port of extract.rs
+    combined_cross_output_issues_merges_alias_and_schema_findings_per_output."""
+    schema = _test_schema(
+        {"Brewery": [], "Person": []}, {"杜氏": (["Brewery"], ["Person"])}, "strict"
+    )
+    outputs = [
+        ModelOutput(
+            associations=[
+                association("青嶺酒造", SCHEMA_TYPE_LABEL, "Person", 1.0),  # wrong type
+                association("青嶺酒造", "杜氏", "高瀬", 1.0),  # domain violation
+            ],
+            aliases=[alias("蔵元", "存在しない", "concept")],  # dangling alias
+        )
+    ]
+    issues = combined_cross_output_issues(outputs, schema)
+    assert len(issues) == 1
+    assert issues[0][0] == 0
+    assert len(issues[0][1]) == 2, issues
 
 
 def test_indicates_refusal_is_true_only_for_refusal_reasons() -> None:

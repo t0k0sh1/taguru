@@ -44,6 +44,9 @@ __all__ = [
     "ResolveExplanation",
     "ConceptDescription",
     "LabelPage",
+    "TypeDef",
+    "RelationDef",
+    "SchemaDocument",
     "AliasPage",
     "AliasEntry",
     "SourcePage",
@@ -401,6 +404,37 @@ class ConceptDescription:
 class LabelPage:
     total: int
     labels: list[str]
+
+
+@dataclass(slots=True, frozen=True)
+class TypeDef:
+    """One entity type's `is_a` parents (ADR 0009 §6.2) — an undeclared
+    parent is legal, a leaf ancestor with nothing further above it."""
+
+    is_a: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True, frozen=True)
+class RelationDef:
+    """One relation label's domain/range constraint (ADR 0009 §6). An
+    empty side is unconstrained, never "matches anything"."""
+
+    domain: list[str] = field(default_factory=list)
+    range: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True, frozen=True)
+class SchemaDocument:
+    """A context's schema document — the same shape
+    `{stem}.schema.json`/`GET /contexts/{name}/schema` persist and
+    serve, mirrored field-for-field from `src/schema.rs`'s
+    `SchemaDocument` (ADR 0009 §5.3)."""
+
+    schema: int
+    mode: str
+    closed_labels: bool
+    types: dict[str, TypeDef]
+    relations: dict[str, RelationDef]
 
 
 @dataclass(slots=True, frozen=True)

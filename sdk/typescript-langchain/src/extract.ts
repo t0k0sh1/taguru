@@ -9,8 +9,15 @@
  * as one artifact.
  */
 
-// Kept equal to src/extract.rs's PROMPT_VERSION.
-export const PROMPT_VERSION = 2;
+import type { SchemaDocument, TypeDef } from "taguru";
+
+// Kept equal to src/extract.rs's PROMPT_VERSION. 3 (ADR 0009 §11.1):
+// systemPrompt() gained the schema block. A schema DOCUMENT's own content
+// changing without a prompt revision is instead covered by the
+// checkpoint's schema digest (checkpoints.ts) — the same division
+// fact_budget (a computation input) and PROMPT_VERSION (the prompt's
+// wording) already draw.
+export const PROMPT_VERSION = 3;
 export const CHUNK_BYTES = 24 * 1024;
 export const VOCABULARY_CAP = 200;
 export const MAX_NAME_BYTES = 1024;
@@ -18,6 +25,9 @@ export const MAX_ASSOCIATION_WEIGHT = 1_000_000;
 export const MAX_QUESTION_BYTES = 512;
 export const MAX_QUESTIONS_PER_PARAGRAPH = 8;
 export const MAX_PASSAGE_BYTES = 8 * 1024 * 1024;
+// ADR 0009 §6.3: the relation label reserved for type assertions. Kept
+// equal to src/schema.rs's SCHEMA_TYPE_LABEL.
+export const SCHEMA_TYPE_LABEL = "schema:type";
 
 // -- the shape the model is asked for (lenient; merge() validates strictly) ----
 
@@ -80,6 +90,19 @@ export interface ModelOutput {
  *   this schema only enforces the universal >= 0 half.
  * - Cross-item rules: deduplication, and an alias's canonical naming a
  *   subject/object/label the associations actually contain.
+ * - A concept's entity type set (ADR 0009 §6.1): known only per-context, at
+ *   validation time — the same argument the paragraph-count entry above
+ *   already makes, just for a schema document instead of a document's own
+ *   paragraph count.
+ * - "The object of relation R must be a concept some other item in this
+ *   answer typed as T" (ADR 0009 §7.2): a cross-item rule exactly like
+ *   deduplication and dangling-canonical above, checked by
+ *   schemaOutputIssues() instead.
+ * - Allowed relation labels are deliberately never rendered as an enum: a
+ *   structurally-constrained model could then never propose a new relation,
+ *   which ADR 0009 (and #218 before it) requires stays possible even in a
+ *   context with a schema — constraining the model's *shape* is not the
+ *   same as constraining its *content*.
  *
  * `title` is carried for parity with the Rust and Python copies, not because
  * LangChain.js requires it: BaseChatModel.withStructuredOutput() here reads
@@ -385,12 +408,13 @@ export function correctiveValidationMessage(issues: string[]): string {
   );
 }
 
-// -- the prompt (mirrors extract.rs system_prompt, PROMPT_VERSION 2) ---------------
+// -- the prompt (mirrors extract.rs system_prompt, PROMPT_VERSION 3) ---------------
 
 export function systemPrompt(
   vocabulary: string[],
   questions: number,
   factBudget: number = 0,
+  schema: SchemaDocument | null = null,
 ): string {
   let prompt =
     "You extract knowledge from one document into an association graph.\n" +
@@ -439,7 +463,75 @@ export function systemPrompt(
     prompt += vocabulary.slice(0, VOCABULARY_CAP).join(", ");
     prompt += "\n";
   }
+  if (schema !== null && schema.mode !== "off") {
+    prompt += schemaBlock(schema, vocabulary);
+  }
   return prompt;
+}
+
+/**
+ * ADR 0009 §11.1: the block `systemPrompt` appends after the vocabulary
+ * block, only when a schema is installed and its `mode !== "off"`. Same
+ * "reuse these exact spellings" framing as the vocabulary block above,
+ * applied to the allowed entity type names and each constrained relation's
+ * domain/range; types and relations are each independently capped at
+ * VOCABULARY_CAP. A constrained relation already in `vocabulary` (this
+ * run's own live label vocabulary) sorts first, so the labels most likely
+ * to matter for THIS document survive the cut on an oversized schema.
+ */
+function schemaBlock(document: SchemaDocument, vocabulary: string[]): string {
+  let block = "";
+  const typeNames = Object.keys(document.types).sort();
+  if (typeNames.length > 0) {
+    const names = typeNames.slice(0, VOCABULARY_CAP);
+    block +=
+      "\nThis context has a schema. A concept may be given an entity type via one " +
+      `association per type on the reserved relation label "${SCHEMA_TYPE_LABEL}" (e.g. ` +
+      `{"subject": "…", "label": "${SCHEMA_TYPE_LABEL}", "object": "TypeName"}) — ` +
+      `reuse these exact spellings: ${names.join(", ")}\n`;
+  }
+  const liveVocabulary = new Set(vocabulary);
+  const constrained = Object.entries(document.relations).filter(
+    ([, relation]) => relation.domain.length > 0 || relation.range.length > 0,
+  );
+  constrained.sort(([a], [b]) => {
+    const aFirst = liveVocabulary.has(a) ? 0 : 1;
+    const bFirst = liveVocabulary.has(b) ? 0 : 1;
+    return aFirst !== bFirst ? aFirst - bFirst : a < b ? -1 : a > b ? 1 : 0;
+  });
+  const lines = constrained
+    .slice(0, VOCABULARY_CAP)
+    .map(([label, relation]) => relationLine(label, relation.domain, relation.range))
+    .filter((line): line is string => line !== null);
+  if (lines.length > 0) {
+    block +=
+      "\nRelation constraints in this schema — when one of these labels is used, give " +
+      "its subject/object the entity type shown (via a schema:type assertion):\n";
+    for (const line of lines) {
+      block += `- ${line}\n`;
+    }
+  }
+  return block;
+}
+
+/**
+ * One relation constraint line for `schemaBlock`: `label: domain → range`
+ * when both sides are declared, `label domain: …`/`label range: …` when
+ * only one is — never rendering the word "any" for an undeclared side,
+ * since undeclared genuinely means unconstrained, not "matches anything."
+ * `null` when neither side is declared.
+ */
+function relationLine(label: string, domain: string[], range: string[]): string | null {
+  if (domain.length > 0 && range.length > 0) {
+    return `${label}: ${domain.join(", ")} → ${range.join(", ")}`;
+  }
+  if (domain.length > 0) {
+    return `${label} domain: ${domain.join(", ")}`;
+  }
+  if (range.length > 0) {
+    return `${label} range: ${range.join(", ")}`;
+  }
+  return null;
 }
 
 export function userMessage(source: string, index: number, total: number, text: string): string {
@@ -1234,6 +1326,227 @@ export function crossOutputIssues(outputs: ModelOutput[]): Array<[number, string
   return issuesByOutput;
 }
 
+/**
+ * ADR 0009 §11.2: the schema-side sibling of `crossOutputIssues` —
+ * identical two-pass, per-output-index shape. `schema:type` assertions
+ * across every output are unioned FIRST (a type asserted in output 3
+ * licenses a fact in output 1), then every fact association is judged
+ * against the completed set — the producer-side mirror of
+ * `schema_issues`/`SchemaEnv` (src/schema/check.rs), the one function every
+ * live write entrance already shares. There is no live graph to merge into
+ * and no alias resolution to do: `crossOutputIssues` already refuses any
+ * alias whose spelling names something the associations already contain,
+ * so every subject/object/label spelling reaching here is already this
+ * answer's own canonical.
+ */
+export function schemaOutputIssues(
+  outputs: ModelOutput[],
+  schema: SchemaDocument,
+): Array<[number, string[]]> {
+  const asserted = new Map<string, Set<string>>();
+  for (const output of outputs) {
+    for (const item of output.associations) {
+      const subject = (item.subject ?? "").trim();
+      const label = (item.label ?? "").trim();
+      const object = (item.object ?? "").trim();
+      if (label === SCHEMA_TYPE_LABEL && subject && object) {
+        const set = asserted.get(subject) ?? new Set<string>();
+        set.add(object);
+        asserted.set(subject, set);
+      }
+    }
+  }
+
+  const ancestors = schemaAncestors(schema.types);
+  const types = new Map<string, Set<string>>();
+  for (const [concept, names] of asserted) {
+    const expanded = new Set<string>();
+    for (const name of names) {
+      for (const closureName of schemaClosure(name, ancestors)) {
+        expanded.add(closureName);
+      }
+    }
+    types.set(concept, expanded);
+  }
+
+  const issuesByOutput: Array<[number, string[]]> = [];
+  outputs.forEach((output, outputIndex) => {
+    const issues: string[] = [];
+
+    // Guard 2 (ADR 0009 §6.3), mode-independent: this answer's own alias
+    // declarations must never name the reserved label as a canonical.
+    output.aliases.forEach((aliasItem, aliasIndex) => {
+      if (aliasItem.kind === "label" && aliasItem.canonical === SCHEMA_TYPE_LABEL) {
+        issues.push(
+          `aliases[${aliasIndex}].canonical: '${SCHEMA_TYPE_LABEL}' is reserved for type ` +
+            "assertions (ADR 0009 §6.3) — rename the alias",
+        );
+      }
+    });
+
+    if (schema.mode !== "off") {
+      output.associations.forEach((item, assocIndex) => {
+        const subject = (item.subject ?? "").trim();
+        const label = (item.label ?? "").trim();
+        const object = (item.object ?? "").trim();
+        if (!label || label === SCHEMA_TYPE_LABEL) {
+          return; // type ops are never judged, §7.2 step 6
+        }
+        const relation = Object.hasOwn(schema.relations, label)
+          ? schema.relations[label]
+          : undefined;
+        if (relation !== undefined) {
+          const subjectTypes = types.get(subject);
+          if (schemaSideViolates(relation.domain, subjectTypes)) {
+            const text = schemaViolationText(subject, relation.domain, label, subjectTypes);
+            issues.push(`associations[${assocIndex}].subject: ${text}`);
+          }
+          const objectTypes = types.get(object);
+          if (schemaSideViolates(relation.range, objectTypes)) {
+            const text = schemaViolationText(object, relation.range, label, objectTypes);
+            issues.push(`associations[${assocIndex}].object: ${text}`);
+          }
+        } else if (schema.closed_labels) {
+          issues.push(
+            `associations[${assocIndex}].label: '${label}' names no relation declared in ` +
+              "this context's schema (closed_labels)",
+          );
+        }
+      });
+    }
+
+    if (issues.length > 0) {
+      issuesByOutput.push([outputIndex, issues]);
+    }
+  });
+  return issuesByOutput;
+}
+
+/**
+ * Precomputes every declared type's `is_a` transitive closure — the
+ * producer-side mirror of schema.rs's `type_ancestors`/
+ * `closure_of_declared`. A cycle just stops expanding at the repeat: this
+ * producer never refuses a schema the way `schema::install` does — the
+ * server is the source of truth for that.
+ */
+function schemaAncestors(types: Record<string, TypeDef>): Map<string, Set<string>> {
+  const ancestors = new Map<string, Set<string>>();
+
+  function expand(name: string, visiting: Set<string>): Set<string> {
+    const cached = ancestors.get(name);
+    if (cached !== undefined) {
+      return cached;
+    }
+    const typeDef = types[name];
+    if (typeDef === undefined || visiting.has(name)) {
+      return new Set();
+    }
+    const nextVisiting = new Set(visiting);
+    nextVisiting.add(name);
+    const result = new Set<string>();
+    for (const parent of typeDef.is_a) {
+      result.add(parent);
+      for (const grandparent of expand(parent, nextVisiting)) {
+        result.add(grandparent);
+      }
+    }
+    ancestors.set(name, result);
+    return result;
+  }
+
+  for (const name of Object.keys(types)) {
+    expand(name, new Set());
+  }
+  return ancestors;
+}
+
+/** One type name's self-inclusive `is_a` closure — mirrors `InstalledSchema::closure_of`. */
+function schemaClosure(name: string, ancestors: Map<string, Set<string>>): Set<string> {
+  const closure = new Set(ancestors.get(name) ?? []);
+  closure.add(name);
+  return closure;
+}
+
+/**
+ * A domain/range violation is `declared` non-empty (an unconstrained side
+ * never violates), the concept's expanded type set non-empty (untyped
+ * never violates, §6.1), and the two disjoint — the producer-side mirror
+ * of src/schema/check.rs's `side_violates`.
+ */
+function schemaSideViolates(declared: string[], types: Set<string> | undefined): boolean {
+  if (declared.length === 0) {
+    return false;
+  }
+  if (types === undefined || types.size === 0) {
+    return false;
+  }
+  return declared.every((name) => !types.has(name));
+}
+
+// Cap on how many type names one violation message enumerates — same bound
+// and reasoning as src/schema/check.rs's own MAX_ISSUE_TYPE_NAMES: a
+// relation's declared domain/range is itself capped, but a concept's
+// asserted type set is not.
+const MAX_ISSUE_TYPE_NAMES = 8;
+
+function joinCappedNames(names: string[]): string {
+  const ordered = [...names].sort();
+  if (ordered.length <= MAX_ISSUE_TYPE_NAMES) {
+    return ordered.join(", ");
+  }
+  const remainder = ordered.length - MAX_ISSUE_TYPE_NAMES;
+  return `${ordered.slice(0, MAX_ISSUE_TYPE_NAMES).join(", ")}, … (+${remainder} more)`;
+}
+
+/**
+ * One violation's corrective text: what was expected (the declared set as
+ * written, never the `is_a` closure) and what the concept was actually
+ * asserted as (never the closure either) — mirrors src/schema/check.rs's
+ * `expected_types`/`actual_types` split, restated as one sentence for a
+ * corrective LLM turn instead of two structured fields.
+ */
+function schemaViolationText(
+  name: string,
+  declared: string[],
+  relation: string,
+  types: Set<string> | undefined,
+): string {
+  const expected = joinCappedNames(declared);
+  const actual = types !== undefined ? joinCappedNames([...types]) : "";
+  return (
+    `'${name}' must be typed as one of [${expected}] (or a subtype, via a schema:type ` +
+    `assertion) for relation '${relation}', but is typed as [${actual}]`
+  );
+}
+
+/**
+ * Issue #181 Stage 2's cross-output judgment, widened to a schema document
+ * when one is installed (ADR 0009 §11): `crossOutputIssues`'s alias
+ * judgment and `schemaOutputIssues`'s domain/range judgment are two
+ * independent per-output-index issue lists, merged into one before a
+ * single corrective turn is spent per offending output. Output order in,
+ * output order out.
+ */
+export function combinedCrossOutputIssues(
+  outputs: ModelOutput[],
+  schema: SchemaDocument | null,
+): Array<[number, string[]]> {
+  const merged = new Map<number, string[]>();
+  for (const [index, issues] of crossOutputIssues(outputs)) {
+    const existing = merged.get(index) ?? [];
+    existing.push(...issues);
+    merged.set(index, existing);
+  }
+  if (schema !== null) {
+    for (const [index, issues] of schemaOutputIssues(outputs, schema)) {
+      const existing = merged.get(index) ?? [];
+      existing.push(...issues);
+      merged.set(index, existing);
+    }
+  }
+  return [...merged.entries()].sort(([a], [b]) => a - b);
+}
+
 // -- merge (mirrors extract.rs merge()) ----------------------------------------------
 
 export interface Fact {
@@ -1258,6 +1571,12 @@ export function labelVocabulary(extraction: Extraction): string[] {
   for (const canonical of extraction.labels.values()) {
     names.add(canonical);
   }
+  // ADR 0009 §6.3 exclusion 2: schema:type never enters the offered
+  // vocabulary — mirrors extract.rs's own Extraction::label_vocabulary
+  // filter, kept here for parity even though TaguruIngester's own
+  // vocabulary always comes live from listLabels() (which already excludes
+  // it server-side) rather than from this accumulator.
+  names.delete(SCHEMA_TYPE_LABEL);
   return [...names].sort();
 }
 

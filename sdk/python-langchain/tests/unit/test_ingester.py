@@ -568,6 +568,59 @@ def test_fact_budget_is_folded_into_the_system_prompt(
     assert "Keep this answer to at most 3 association(s) total" in system
 
 
+def test_a_fetched_schema_is_folded_into_the_system_prompt(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    """ADR 0009 §11.4: TaguruIngester._fetch_schema pulls the context's
+    live schema into the prompt with the same best-effort posture as
+    _fetch_vocabulary — here the schema-present case."""
+    fake_server.schema_document = {
+        "schema": 1,
+        "mode": "warn",
+        "closed_labels": False,
+        "types": {"Brewery": {"is_a": []}, "Person": {"is_a": []}},
+        "relations": {"杜氏": {"domain": ["Brewery"], "range": ["Person"]}},
+    }
+    ingester, llm = make_ingester(sync_client, async_client, [MODEL_ANSWER])
+    outcome = ingester.ingest_text(DOC_TEXT, source="docs/aomine.md")
+    assert outcome.ok
+    system = llm.seen_prompts[0][0].content
+    assert "Brewery" in system
+    assert "杜氏: Brewery → Person" in system
+
+
+async def test_a_fetched_schema_is_folded_into_the_system_prompt_async(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    """Async twin: same best-effort schema fetch on the aingest_text path."""
+    fake_server.schema_document = {
+        "schema": 1,
+        "mode": "warn",
+        "closed_labels": False,
+        "types": {"Brewery": {"is_a": []}},
+        "relations": {},
+    }
+    ingester, llm = make_ingester(sync_client, async_client, [MODEL_ANSWER])
+    outcome = await ingester.aingest_text(DOC_TEXT, source="docs/aomine.md")
+    assert outcome.ok
+    system = llm.seen_prompts[0][0].content
+    assert "Brewery" in system
+
+
+def test_no_schema_omits_the_schema_block_from_the_system_prompt(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    """The default FakeServer answers 404 (no_schema) — the same
+    best-effort case a schema-unaware server or a schema-free context
+    gives, so the prompt is byte-for-byte today's."""
+    assert fake_server.schema_document is None
+    ingester, llm = make_ingester(sync_client, async_client, [MODEL_ANSWER])
+    outcome = ingester.ingest_text(DOC_TEXT, source="docs/aomine.md")
+    assert outcome.ok
+    system = llm.seen_prompts[0][0].content
+    assert "This context has a schema" not in system
+
+
 def test_max_attempts_env_extends_corrective_retries_past_the_default(
     sync_client: Taguru, async_client: AsyncTaguru
 ) -> None:
@@ -929,7 +982,7 @@ def test_a_cross_chunk_correction_that_does_not_fix_the_issue_fails_without_impo
         [CHUNK1_ANSWER, CHUNK2_SHADOWING_ANSWER, CHUNK2_SHADOWING_ANSWER],
         chunk_bytes=CROSS_CHUNK_BYTES,
     )
-    with pytest.raises(ValueError, match="still has 1 cross-chunk alias issue.s. after correction"):
+    with pytest.raises(ValueError, match="still has 1 cross-chunk issue.s. after correction"):
         ingester.ingest_text(DOC_TEXT, source="docs/aomine.md")
     assert fake_server.imported == []
 
@@ -955,7 +1008,7 @@ def test_a_structurally_invalid_cross_chunk_correction_fails_without_import(
         [CHUNK1_ANSWER, CHUNK2_SHADOWING_ANSWER, chunk2_invalid_correction],
         chunk_bytes=CROSS_CHUNK_BYTES,
     )
-    with pytest.raises(ValueError, match="cross-chunk alias correction still left"):
+    with pytest.raises(ValueError, match="cross-chunk correction still left"):
         ingester.ingest_text(DOC_TEXT, source="docs/aomine.md")
     assert fake_server.imported == []
 

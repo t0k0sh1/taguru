@@ -15,11 +15,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import threading
 import time
 import warnings
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
 from langchain_core.documents import Document
@@ -33,6 +34,7 @@ from taguru import (
     ImportOutcome,
     LocatorSpec,
     NotFoundError,
+    SchemaDocument,
     SectionSpec,
     Taguru,
 )
@@ -49,10 +51,10 @@ from ._extract import (
     ModelOutput,
     SyntaxFault,
     chunk,
+    combined_cross_output_issues,
     corrective_assistant_turn_content,
     corrective_message,
     corrective_validation_message,
-    cross_output_issues,
     effective_item_rules,
     empty_answer_diagnosis,
     evaluate_answer,
@@ -140,7 +142,7 @@ class IngestOutcome:
     chunks: int = 0
     correction_attempts: int = 0
     """How many corrective turns (Stage 1 syntax/validity retries plus any
-    Stage 2 cross-chunk alias correction) this ingest needed — 0 means
+    Stage 2 cross-chunk correction) this ingest needed — 0 means
     every chunk's first answer was accepted as-is."""
     lossless_repairs: list[str] = field(default_factory=list)
     """Labels of automatic, information-preserving JSON repairs applied
@@ -290,17 +292,18 @@ def _corrective_ask(result: _Attempt, fact_budget: int) -> str:
 
 
 def _cross_chunk_failure_message(label: str, result: _Attempt) -> str:
-    """The Stage 2 (cross-chunk alias correction) terminal message for one
-    offending chunk's non-valid reply — mirrors extract.rs's
+    """The Stage 2 (cross-chunk correction, ADR 0009 §11.2 widening it to
+    schema domain/range judgment) terminal message for one offending
+    chunk's non-valid reply — mirrors extract.rs's
     ``correct_cross_output_issues`` per-kind texts verbatim."""
     if result.kind == "length_limited":
         return (
-            f"{label}: the cross-chunk alias correction was cut off at the output limit — "
+            f"{label}: the cross-chunk correction was cut off at the output limit — "
             "failing the source rather than importing a truncated correction"
         )
     if result.kind == "refusal":
         return (
-            f"{label}: the provider refused the cross-chunk alias correction "
+            f"{label}: the provider refused the cross-chunk correction "
             f"(finish_reason {result.error})"
         )
     if result.kind == "empty":
@@ -308,13 +311,23 @@ def _cross_chunk_failure_message(label: str, result: _Attempt) -> str:
     if result.kind == "invalid":
         assert result.issues is not None
         return (
-            f"{label}: the cross-chunk alias correction still left {len(result.issues)} "
+            f"{label}: the cross-chunk correction still left {len(result.issues)} "
             f"invalid item(s) uncorrected: {'; '.join(result.issues)}"
         )
-    return (
-        f"{label}: the cross-chunk alias correction was not the JSON object asked for "
-        f"({result.error})"
-    )
+    return f"{label}: the cross-chunk correction was not the JSON object asked for ({result.error})"
+
+
+def _schema_digest(schema: SchemaDocument | None) -> str:
+    """A canonical digest of one fetched schema document, folded into the
+    checkpoint fingerprint (ADR 0009 §11.1, mirrors src/extract.rs's own
+    ``schema_digest``) so swapping in a different schema document
+    re-extracts exactly like any other computation input changing.
+    ``""`` when no schema was fetched — the same "no schema" value a
+    fresh schema-less run resolves to."""
+    if schema is None:
+        return ""
+    canonical = json.dumps(asdict(schema), sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _normalize_stop(
@@ -534,7 +547,7 @@ class TaguruIngester:
         policy, with a normal (non-length-limited, syntactically bad)
         answer, this reproduces the previous fixed implementation's
         request bodies exactly. Shared by the Stage 1 per-chunk loop and
-        Stage 2's cross-chunk alias correction."""
+        Stage 2's cross-chunk correction."""
         return [
             *base_messages,
             AIMessage(
@@ -642,7 +655,7 @@ class TaguruIngester:
     # callback, so the sync/async twins stay line-for-line identical at
     # every checkpoint insertion point.
 
-    def _checkpoint_fingerprint(self, text: str) -> _CheckpointFingerprint:
+    def _checkpoint_fingerprint(self, text: str, schema_digest: str) -> _CheckpointFingerprint:
         """The compatibility inputs a cached unit's reuse depends on: the
         document's own content plus every setting that shapes what a valid
         answer looks like. Any mismatch on rerun degrades the whole
@@ -663,9 +676,12 @@ class TaguruIngester:
             fact_budget=self.fact_budget,
             structured_output="langchain" if self.structured_output else "",
             lossy=self.lossy,
+            schema_digest=schema_digest,
         )
 
-    def _load_checkpoints(self, source: str, text: str) -> _DocumentCheckpoints | None:
+    def _load_checkpoints(
+        self, source: str, text: str, schema_digest: str
+    ) -> _DocumentCheckpoints | None:
         """``None`` when no store is configured — every checkpoint call site
         below treats that as "nothing to look up, nothing to record". A
         store failure (the store itself raising — a network error, a
@@ -677,7 +693,7 @@ class TaguruIngester:
         warning."""
         if self.checkpoint_store is None:
             return None
-        fingerprint = self._checkpoint_fingerprint(text)
+        fingerprint = self._checkpoint_fingerprint(text, schema_digest)
         try:
             data = self.checkpoint_store.load(source)
         except Exception as error:
@@ -805,12 +821,13 @@ class TaguruIngester:
         self._emit(DocumentStarted(source=source, text_bytes=len(text.encode("utf-8"))))
 
         vocabulary = self._fetch_vocabulary()
-        system = system_prompt(vocabulary, self.questions, self.fact_budget)
+        schema = self._fetch_schema()
+        system = system_prompt(vocabulary, self.questions, self.fact_budget, schema)
         paragraph_count = len(split_paragraphs(text))
         rules = self._item_rules(paragraph_count)
         chunks = chunk(labeled_document(text, self.chunk_bytes), self.chunk_bytes)
         outcome.chunks = len(chunks)
-        checkpoints = self._load_checkpoints(source, text)
+        checkpoints = self._load_checkpoints(source, text, _schema_digest(schema))
 
         records: list[_ChunkRecord] = []
         for index, piece in enumerate(chunks):
@@ -948,7 +965,9 @@ class TaguruIngester:
             )
 
         if not self.lossy:
-            self._correct_cross_chunk_issues(source, system, records, rules, len(chunks), outcome)
+            self._correct_cross_chunk_issues(
+                source, system, records, rules, len(chunks), outcome, schema
+            )
 
         ndjson = self._build_batch(
             source,
@@ -1049,6 +1068,17 @@ class TaguruIngester:
             return []
         return page.labels
 
+    def _fetch_schema(self) -> SchemaDocument | None:
+        """The context's schema document (ADR 0009 §11.4), same
+        best-effort posture as ``_fetch_vocabulary``: a schema-unaware
+        server or a schema-free context is fine, and this ingester works
+        unchanged either way."""
+        assert self.client is not None
+        try:
+            return self.client.context(self.context).get_schema()
+        except NotFoundError:
+            return None
+
     def _attempt_once(self, messages: list[BaseMessage], rules: ItemRules | None) -> _Attempt:
         """Runs one model call for one attempt and classifies it (issue
         #180's §7-style state machine: length -> refusal -> empty ->
@@ -1077,16 +1107,21 @@ class TaguruIngester:
         rules: ItemRules | None,
         chunk_total: int,
         outcome: IngestOutcome,
+        schema: SchemaDocument | None,
     ) -> None:
         """Issue #180 Stage 2: one targeted corrective turn per output
-        ``cross_output_issues`` flags, rebuilding THAT chunk's own
-        conversation base (never the whole document's) and replaying its
-        own final answer as the prior bad turn. Bounded to exactly one
-        extra call per offending chunk regardless of ``max_attempts``: a
-        still-invalid, still-cross-conflicting, length-limited, refused,
-        or empty reply fails the source outright — Stage 2 never loops a
-        second round. Mirrors extract.rs's ``correct_cross_output_issues``."""
-        for record_index, issues in cross_output_issues([r.output for r in records]):
+        ``cross_output_issues`` flags, widened by ADR 0009 §11.2 to
+        ``schema_output_issues``'s domain/range judgment when a schema was
+        fetched — rebuilding THAT chunk's own conversation base (never the
+        whole document's) and replaying its own final answer as the prior
+        bad turn. Bounded to exactly one extra call per offending chunk
+        regardless of ``max_attempts``: a still-invalid,
+        still-cross-conflicting, length-limited, refused, or empty reply
+        fails the source outright — Stage 2 never loops a second round.
+        Mirrors extract.rs's ``correct_cross_output_issues``."""
+        for record_index, issues in combined_cross_output_issues(
+            [r.output for r in records], schema
+        ):
             record = records[record_index]
             label = f"chunk {record.chunk_index + 1}/{chunk_total}"
             messages = self._corrective_turn(
@@ -1139,13 +1174,13 @@ class TaguruIngester:
         # depended on, introducing a FRESH cross-chunk issue. This is the
         # bounded re-check, not a second round — any issue here fails the
         # source.
-        recheck = cross_output_issues([r.output for r in records])
+        recheck = combined_cross_output_issues([r.output for r in records], schema)
         if recheck:
             record_index, issues = recheck[0]
             chunk_index = records[record_index].chunk_index
             raise ValueError(
                 f"chunk {chunk_index + 1}/{chunk_total}: still has {len(issues)} cross-chunk "
-                f"alias issue(s) after correction: {'; '.join(issues)}"
+                f"issue(s) after correction: {'; '.join(issues)}"
             )
 
     # -- async ------------------------------------------------------------------
@@ -1176,12 +1211,13 @@ class TaguruIngester:
         self._emit(DocumentStarted(source=source, text_bytes=len(text.encode("utf-8"))))
 
         vocabulary = await self._afetch_vocabulary()
-        system = system_prompt(vocabulary, self.questions, self.fact_budget)
+        schema = await self._afetch_schema()
+        system = system_prompt(vocabulary, self.questions, self.fact_budget, schema)
         paragraph_count = len(split_paragraphs(text))
         rules = self._item_rules(paragraph_count)
         chunks = chunk(labeled_document(text, self.chunk_bytes), self.chunk_bytes)
         outcome.chunks = len(chunks)
-        checkpoints = await self._aload_checkpoints(source, text)
+        checkpoints = await self._aload_checkpoints(source, text, _schema_digest(schema))
 
         records: list[_ChunkRecord] = []
         for index, piece in enumerate(chunks):
@@ -1320,7 +1356,7 @@ class TaguruIngester:
 
         if not self.lossy:
             await self._acorrect_cross_chunk_issues(
-                source, system, records, rules, len(chunks), outcome
+                source, system, records, rules, len(chunks), outcome, schema
             )
 
         ndjson = self._build_batch(
@@ -1407,7 +1443,9 @@ class TaguruIngester:
                 break
         return outcomes
 
-    async def _aload_checkpoints(self, source: str, text: str) -> _DocumentCheckpoints | None:
+    async def _aload_checkpoints(
+        self, source: str, text: str, schema_digest: str
+    ) -> _DocumentCheckpoints | None:
         """Async twin of ``_load_checkpoints``. The store call itself runs
         via ``asyncio.to_thread`` — unlike ``on_event``'s "must not block"
         callback, a checkpoint store is explicitly meant to reach object
@@ -1415,7 +1453,7 @@ class TaguruIngester:
         there must not stall the event loop."""
         if self.checkpoint_store is None:
             return None
-        fingerprint = self._checkpoint_fingerprint(text)
+        fingerprint = self._checkpoint_fingerprint(text, schema_digest)
         try:
             data = await asyncio.to_thread(self.checkpoint_store.load, source)
         except Exception as error:
@@ -1476,6 +1514,14 @@ class TaguruIngester:
             return []
         return page.labels
 
+    async def _afetch_schema(self) -> SchemaDocument | None:
+        """Async twin of ``_fetch_schema``."""
+        assert self.async_client is not None
+        try:
+            return await self.async_client.context(self.context).get_schema()
+        except NotFoundError:
+            return None
+
     async def _aattempt_once(
         self, messages: list[BaseMessage], rules: ItemRules | None
     ) -> _Attempt:
@@ -1502,9 +1548,12 @@ class TaguruIngester:
         rules: ItemRules | None,
         chunk_total: int,
         outcome: IngestOutcome,
+        schema: SchemaDocument | None,
     ) -> None:
         """Async twin of ``_correct_cross_chunk_issues``."""
-        for record_index, issues in cross_output_issues([r.output for r in records]):
+        for record_index, issues in combined_cross_output_issues(
+            [r.output for r in records], schema
+        ):
             record = records[record_index]
             label = f"chunk {record.chunk_index + 1}/{chunk_total}"
             messages = self._corrective_turn(
@@ -1552,13 +1601,13 @@ class TaguruIngester:
             )
             raise ValueError(message)
 
-        recheck = cross_output_issues([r.output for r in records])
+        recheck = combined_cross_output_issues([r.output for r in records], schema)
         if recheck:
             record_index, issues = recheck[0]
             chunk_index = records[record_index].chunk_index
             raise ValueError(
                 f"chunk {chunk_index + 1}/{chunk_total}: still has {len(issues)} cross-chunk "
-                f"alias issue(s) after correction: {'; '.join(issues)}"
+                f"issue(s) after correction: {'; '.join(issues)}"
             )
 
     # -- lifecycle -------------------------------------------------------------

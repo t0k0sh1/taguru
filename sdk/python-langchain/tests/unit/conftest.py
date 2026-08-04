@@ -80,6 +80,12 @@ class FakeServer:
         # what the server already holds, then assert `retracted`.
         self.sources: list[str] = []
         self.retracted: list[str] = []
+        # The context's schema document (ADR 0009 §11), or None (the
+        # default) for a 404 "no schema" — the same best-effort case
+        # TaguruIngester._fetch_schema treats identically to a
+        # schema-unaware server, so every pre-existing test keeps
+        # exercising the schema-free prompt/checkpoint path unchanged.
+        self.schema_document: dict[str, Any] | None = None
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -229,6 +235,18 @@ class FakeServer:
             )
         if path.endswith("/labels"):
             return ok({"total": 2, "labels": ["代表銘柄", "杜氏"]})
+        if path.endswith("/schema") and request.method == "GET":
+            if self.schema_document is None:
+                return httpx.Response(
+                    404,
+                    json={
+                        "status": "error",
+                        "code": "no_schema",
+                        "error": "context has no schema document",
+                        "time": 0.001,
+                    },
+                )
+            return ok(self.schema_document)
         if path.endswith("/sources/retract"):
             source = body["source"]
             if source in self.sources:

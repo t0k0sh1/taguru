@@ -280,6 +280,15 @@ export interface CheckpointFingerprint {
   fact_budget: number;
   structured_output: string;
   lossy: boolean;
+  /**
+   * The fetched schema document's digest (`""` = no schema). A checkpoint
+   * file written before this field existed defaults to `""` on load
+   * (`fingerprintFromJson`) — matches a schema-less rerun, the same
+   * "new field defaults to the value that changes today's behavior least"
+   * precedent every other field here already sets. Mirrors
+   * src/extract.rs's `CheckpointFingerprint.schema_digest`.
+   */
+  schema_digest: string;
 }
 
 function fingerprintFromJson(data: unknown): CheckpointFingerprint | null {
@@ -289,6 +298,7 @@ function fingerprintFromJson(data: unknown): CheckpointFingerprint | null {
   const raw = data as Record<string, unknown>;
   const { sha256, model, prompt_version, context, questions_n } = raw;
   const { no_passage, description, fact_budget, structured_output, lossy } = raw;
+  const { schema_digest } = raw;
   if (
     typeof sha256 !== "string" ||
     typeof model !== "string" ||
@@ -299,7 +309,8 @@ function fingerprintFromJson(data: unknown): CheckpointFingerprint | null {
     typeof description !== "string" ||
     !Number.isInteger(fact_budget) ||
     typeof structured_output !== "string" ||
-    typeof lossy !== "boolean"
+    typeof lossy !== "boolean" ||
+    (schema_digest !== undefined && typeof schema_digest !== "string")
   ) {
     return null;
   }
@@ -314,6 +325,7 @@ function fingerprintFromJson(data: unknown): CheckpointFingerprint | null {
     fact_budget: fact_budget as number,
     structured_output,
     lossy,
+    schema_digest: typeof schema_digest === "string" ? schema_digest : "",
   };
 }
 
@@ -328,7 +340,8 @@ function fingerprintsEqual(a: CheckpointFingerprint, b: CheckpointFingerprint): 
     a.description === b.description &&
     a.fact_budget === b.fact_budget &&
     a.structured_output === b.structured_output &&
-    a.lossy === b.lossy
+    a.lossy === b.lossy &&
+    a.schema_digest === b.schema_digest
   );
 }
 

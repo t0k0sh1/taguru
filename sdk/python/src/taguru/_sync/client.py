@@ -51,6 +51,7 @@ from .._models import (
     RetractAssociationOutcome,
     RetractOutcome,
     RetrievalResult,
+    SchemaDocument,
     SearchExplanation,
     SearchPlan,
     SourcePage,
@@ -941,6 +942,21 @@ class Context:
             # A short page is not the last one: a concurrent delete can
             # shorten it while later rows remain, so page until an empty page.
             after = page.labels[-1]
+
+    def get_schema(self) -> SchemaDocument:
+        """The context's schema document (ADR 0009 §5) — the entity
+        types and relation domain/range constraints
+        `POST /contexts/{name}/schema/audit`, `taguru extract
+        --schema`, and both LangChain ingesters read.
+
+        Raises ``NotFoundError`` when the context has no schema
+        installed (or does not exist) — the same 404
+        ``list_labels``/friends already give, so a caller distinguishes
+        the two only by checking `list`/`get` on the context itself
+        first, if it needs to.
+        """
+        result = self._client._request_json("GET", self._path + "/schema")
+        return decode(SchemaDocument, result)  # type: ignore[no-any-return]
 
     # -- graph writes ---------------------------------------------------------
 

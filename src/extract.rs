@@ -43,7 +43,7 @@ const USAGE: &str = "\
 usage: taguru extract [--dry-run] [--force] [--no-passage] [--questions N]
                       [--fact-budget N] [--config FILE] [--parallel N]
                       [--structured-output MODE] [--max-output-tokens N]
-                      [--lossy] [--diagnostics-out FILE]
+                      [--lossy] [--diagnostics-out FILE] [--schema FILE]
                       --context NAME [--description TEXT] --out DIR FILE|DIR...
 
 Reads documents (.md/.txt; a directory expands to its files, sorted by
@@ -68,6 +68,7 @@ chat endpoint:
   TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
                       each diagnostics record, capped to this many bytes;
                       unset or 0 = never attach it (metadata only)
+  TAGURU_EXTRACT_SCHEMA  default for --schema (unset, off)
 
   --dry-run           list what would extract or skip; call nothing
   --force             re-extract documents the manifest says are unchanged
@@ -118,6 +119,15 @@ chat endpoint:
                       calls nothing to record.
   --context NAME      the context every batch file targets
   --description TEXT  add a create block (used only if the context is absent)
+  --schema FILE       the target context's schema document (same shape as
+                      {stem}.schema.json / GET /contexts/{name}/schema):
+                      folds allowed entity types and constrained relations
+                      into the system prompt and self-validates each answer
+                      against it, same as the server would (ADR 0009 §11).
+                      Off by default — extract has no server to fetch this
+                      from, so it must be handed the document explicitly. A
+                      file that fails to parse or validate is a startup
+                      error, not a silent skip.
 
 Contract and discipline: docs/extract.html.
 ";
@@ -126,10 +136,18 @@ Contract and discipline: docs/extract.html.
 /// changes so already-extracted documents re-extract under the new
 /// discipline.
 ///
+/// 3 (ADR 0009 §11.1): `system_prompt` gained the schema block — a
+/// document extracted under 2's schema-free wording must never be
+/// silently reused now that a schema can shape the prompt. A schema's
+/// own *content* changing without a version bump is instead covered by
+/// `schema_digest` (`CheckpointFingerprint`/`ManifestEntry`), the same
+/// division `--fact-budget` (a computation input) and `PROMPT_VERSION`
+/// (the prompt's wording) already draw.
+///
 /// `pub(crate)` so `benchmark`'s manifest can record the same prompt
 /// version a cell actually ran under (ADR 0003 §9.1) without
 /// re-declaring it.
-pub(crate) const PROMPT_VERSION: u32 = 2;
+pub(crate) const PROMPT_VERSION: u32 = 3;
 
 /// Document bytes per model call. Chunks split at paragraph
 /// boundaries; facts spanning a boundary can be missed, so the cap
@@ -437,6 +455,65 @@ pub fn run(args: &[String]) -> i32 {
         }
         _ => None,
     };
+    // Flag-over-env, same pattern as --config above. Unlike a parsed
+    // knob, any nonempty path is a valid value, so there is no "bad env
+    // value" usage error here — the FILE's contents are still validated
+    // hard, below.
+    let schema_path = args.schema.or_else(|| {
+        std::env::var("TAGURU_EXTRACT_SCHEMA")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    });
+    // ADR 0009 §11.1/§13: extract has no server to fetch a schema from
+    // (no new credential surface — the same posture as its LLM-only
+    // TAGURU_EXTRACT_* environment), so --schema/TAGURU_EXTRACT_SCHEMA is
+    // the only way one reaches the prompt. Unlike the "best effort,
+    // degrade quietly" postures elsewhere in this file (an unreadable
+    // manifest, a skipped document's unreadable batch), a document the
+    // operator explicitly named that fails to parse or fails
+    // `schema::install`'s own checks is a hard startup error: silently
+    // extracting under no schema when one was asked for would let a
+    // corpus drift out from under a `strict` context unnoticed.
+    let (schema, schema_digest) = match &schema_path {
+        Some(path) => {
+            let bytes = match fs::read(path) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    eprintln!("taguru: extract: reading {}: {error}", path.display());
+                    return 1;
+                }
+            };
+            let document: crate::schema::SchemaDocument = match serde_json::from_slice(&bytes) {
+                Ok(document) => document,
+                Err(error) => {
+                    eprintln!("taguru: extract: parsing {}: {error}", path.display());
+                    return 1;
+                }
+            };
+            let installed = match crate::schema::install(document) {
+                Ok(installed) => installed,
+                Err(violation) => {
+                    eprintln!("taguru: extract: {}: {violation}", path.display());
+                    return 1;
+                }
+            };
+            // Canonical bytes, not the file's own — two files naming the
+            // identical document (different key order, whitespace) must
+            // fingerprint identically, the same reasoning
+            // `document_bytes`'s own doc gives for hashing what will be
+            // persisted rather than what was read.
+            let canonical = match crate::schema::document_bytes(installed.document()) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    eprintln!("taguru: extract: {}: {error}", path.display());
+                    return 1;
+                }
+            };
+            (Some(Arc::new(installed)), sha256_hex(&canonical))
+        }
+        None => (None, String::new()),
+    };
     let mut run = Run {
         context: args.context,
         description: args.description,
@@ -461,6 +538,8 @@ pub fn run(args: &[String]) -> i32 {
         parallel,
         lossy,
         diagnostics,
+        schema,
+        schema_digest,
         stop: StopSignal::install("extract"),
     };
 
@@ -591,6 +670,10 @@ struct Args {
     /// document, nothing else) — resolved in [`run`], same pattern as
     /// `parallel`. Issue #200.
     diagnostics_out: Option<PathBuf>,
+    /// `None` defers to TAGURU_EXTRACT_SCHEMA, and then to no schema at
+    /// all (today's behavior) — resolved in [`run`], same pattern as
+    /// `config`.
+    schema: Option<PathBuf>,
     context: String,
     description: Option<String>,
     out: PathBuf,
@@ -610,6 +693,7 @@ impl Args {
         let mut max_output_tokens: Option<usize> = None;
         let mut lossy: Option<bool> = None;
         let mut diagnostics_out: Option<PathBuf> = None;
+        let mut schema: Option<PathBuf> = None;
         let mut context: Option<String> = None;
         let mut description: Option<String> = None;
         let mut out: Option<PathBuf> = None;
@@ -748,6 +832,21 @@ impl Args {
                         ));
                     }
                 },
+                "--schema" => match rest.next() {
+                    Some(path) if schema.is_none() => schema = Some(PathBuf::from(path)),
+                    Some(_) => {
+                        return Err(crate::config::subcommand_usage_error(
+                            "extract",
+                            "--schema given twice",
+                        ));
+                    }
+                    None => {
+                        return Err(crate::config::subcommand_usage_error(
+                            "extract",
+                            "--schema needs a file path",
+                        ));
+                    }
+                },
                 "--context" => match rest.next() {
                     Some(name) if context.is_none() => context = Some(name.clone()),
                     Some(_) => {
@@ -862,6 +961,7 @@ impl Args {
             max_output_tokens,
             lossy,
             diagnostics_out,
+            schema,
             context,
             description,
             out,
@@ -1200,6 +1300,15 @@ struct Run {
     /// (`None`, the default: no sidecar, stdout/stderr byte-for-byte
     /// today's). Issue #200.
     diagnostics: Option<DiagnosticsSink>,
+    /// Resolved from `--schema`/TAGURU_EXTRACT_SCHEMA (`None`, the
+    /// default: no schema block in the prompt, no schema
+    /// self-validation — today's behavior). ADR 0009 §11.
+    schema: Option<Arc<crate::schema::InstalledSchema>>,
+    /// The canonical digest of `schema`'s document (`""` when `schema`
+    /// is `None`) — folded into `ManifestEntry`/`CheckpointFingerprint`
+    /// so swapping in a different schema document re-extracts, exactly
+    /// as changing any other computation input does.
+    schema_digest: String,
     /// Issue #179's cooperative stop flag, checked between chunks and
     /// between documents.
     stop: StopSignal,
@@ -1243,6 +1352,7 @@ impl Run {
             structured_output: self.structured_output.manifest_value().to_string(),
             max_output_tokens: self.max_output_tokens.unwrap_or(0),
             lossy: self.lossy,
+            schema_digest: self.schema_digest.clone(),
         }
     }
 
@@ -1300,6 +1410,7 @@ impl Run {
                 self.structured_output.manifest_value(),
                 self.max_output_tokens.unwrap_or(0),
                 self.lossy,
+                &self.schema_digest,
             )
             && out_path.is_file()
         {
@@ -1364,12 +1475,14 @@ impl Run {
             ChunkLoopResult::Interrupted => return Ok(Outcome::Interrupted),
         };
         // Issue #199 Stage 2: cross-chunk alias validation (dangling
-        // canonical, shadowing, conflicting mappings) — the judgment
-        // Stage 1 cannot make per-output, only merge() itself could
-        // before this issue, silently. `--lossy` skips it, matching
-        // Stage 1's skip: merge() alone decides what survives.
+        // canonical, shadowing, conflicting mappings), widened by ADR
+        // 0009 §11.2 to the schema's own domain/range judgment when
+        // `--schema` installed one — the judgment Stage 1 cannot make
+        // per-output, only merge() itself could before this issue,
+        // silently. `--lossy` skips it, matching Stage 1's skip:
+        // merge() alone decides what survives.
         if !self.lossy {
-            let cross_issues = cross_output_issues(&outputs);
+            let cross_issues = combined_cross_output_issues(&outputs, self.schema.as_deref());
             if !cross_issues.is_empty() {
                 self.correct_cross_output_issues(
                     source,
@@ -1413,6 +1526,7 @@ impl Run {
             self.structured_output.manifest_value(),
             self.max_output_tokens.unwrap_or(0),
             self.lossy,
+            &self.schema_digest,
             &file_name,
         );
         // The batch is durably written and manifest-recorded — the
@@ -1458,7 +1572,12 @@ impl Run {
             .client
             .as_ref()
             .expect("a non-dry run built the client");
-        let system = system_prompt(&self.vocabulary, self.questions, self.fact_budget);
+        let system = system_prompt(
+            &self.vocabulary,
+            self.questions,
+            self.fact_budget,
+            self.schema.as_deref(),
+        );
         let rules = self.item_rules(paragraph_count);
         let mut outputs = Vec::new();
         for (index, piece) in chunks.iter().enumerate() {
@@ -1518,7 +1637,12 @@ impl Run {
             .client
             .as_ref()
             .expect("a non-dry run built the client");
-        let system = system_prompt(&self.vocabulary, self.questions, self.fact_budget);
+        let system = system_prompt(
+            &self.vocabulary,
+            self.questions,
+            self.fact_budget,
+            self.schema.as_deref(),
+        );
         let rules = self.item_rules(paragraph_count);
         let indexed: Vec<(usize, &String)> = chunks.iter().enumerate().collect();
         let outcomes = crate::registry::dispatch_chunks_concurrently(
@@ -1577,7 +1701,12 @@ impl Run {
             .client
             .as_ref()
             .expect("a non-dry run built the client");
-        let system = system_prompt(&self.vocabulary, self.questions, self.fact_budget);
+        let system = system_prompt(
+            &self.vocabulary,
+            self.questions,
+            self.fact_budget,
+            self.schema.as_deref(),
+        );
         let options = RequestOptions {
             response_format: self
                 .ladder
@@ -1637,8 +1766,7 @@ impl Run {
             if indicates_length_limit(response.finish_reason.as_deref()) {
                 if let Some(sink) = sink {
                     let message =
-                        "the cross-chunk alias correction was cut off at the output limit"
-                            .to_string();
+                        "the cross-chunk correction was cut off at the output limit".to_string();
                     sink.emit(DiagnosticsAttempt {
                         source,
                         stage: "cross_chunk",
@@ -1656,7 +1784,7 @@ impl Run {
                     });
                 }
                 return Err(format!(
-                    "{label}: the cross-chunk alias correction was cut off at the output \
+                    "{label}: the cross-chunk correction was cut off at the output \
                      limit — failing the source rather than importing a truncated correction"
                 ));
             }
@@ -1665,7 +1793,7 @@ impl Run {
             {
                 if let Some(sink) = sink {
                     let message = format!(
-                        "the provider refused the cross-chunk alias correction \
+                        "the provider refused the cross-chunk correction \
                          (finish_reason {reason})"
                     );
                     sink.emit(DiagnosticsAttempt {
@@ -1685,7 +1813,7 @@ impl Run {
                     });
                 }
                 return Err(format!(
-                    "{label}: the provider refused the cross-chunk alias correction \
+                    "{label}: the provider refused the cross-chunk correction \
                      (finish_reason {reason})"
                 ));
             }
@@ -1755,14 +1883,14 @@ impl Run {
                         });
                     }
                     return Err(format!(
-                        "{label}: the cross-chunk alias correction was not the JSON object \
+                        "{label}: the cross-chunk correction was not the JSON object \
                          asked for ({error})"
                     ));
                 }
                 Err(AnswerFault::Invalid(issues)) => {
                     if let Some(sink) = sink {
                         let message = format!(
-                            "the cross-chunk alias correction still left {} invalid item(s) \
+                            "the cross-chunk correction still left {} invalid item(s) \
                              uncorrected: {}",
                             issues.len(),
                             issues.join("; ")
@@ -1784,7 +1912,7 @@ impl Run {
                         });
                     }
                     return Err(format!(
-                        "{label}: the cross-chunk alias correction still left {} invalid \
+                        "{label}: the cross-chunk correction still left {} invalid \
                          item(s) uncorrected: {}",
                         issues.len(),
                         issues.join("; ")
@@ -1797,10 +1925,14 @@ impl Run {
         // depended on, introducing a FRESH cross-output issue. This is
         // the bounded re-check, not a second round — any issue here
         // fails the source.
-        if let Some((output_index, issues)) = cross_output_issues(outputs).into_iter().next() {
+        if let Some((output_index, issues)) =
+            combined_cross_output_issues(outputs, self.schema.as_deref())
+                .into_iter()
+                .next()
+        {
             let chunk_index = outputs[output_index].chunk_index;
             return Err(format!(
-                "chunk {}/{chunk_total}: still has {} cross-chunk alias issue(s) after \
+                "chunk {}/{chunk_total}: still has {} cross-chunk issue(s) after \
                  correction: {}",
                 chunk_index + 1,
                 issues.len(),
@@ -3694,8 +3826,14 @@ fn corrective_assistant_turn(content: &str, cap: Option<usize>) -> serde_json::V
 /// The extraction discipline, distilled from src/llm-protocol.md's
 /// ingest loop for a producer with no live server to resolve against:
 /// consistent spellings inside the run replace check-before-mint,
-/// everything else is what agents follow live.
-fn system_prompt(vocabulary: &BTreeSet<String>, questions: usize, fact_budget: usize) -> String {
+/// everything else is what agents follow live. `schema` folds in ADR
+/// 0009 §11.1's block when one is installed via `--schema`.
+fn system_prompt(
+    vocabulary: &BTreeSet<String>,
+    questions: usize,
+    fact_budget: usize,
+    schema: Option<&crate::schema::InstalledSchema>,
+) -> String {
     let mut prompt = String::from(
         "You extract knowledge from one document into an association graph.\n\
          Answer with a single JSON object and nothing else:\n\
@@ -3752,7 +3890,88 @@ fn system_prompt(vocabulary: &BTreeSet<String>, questions: usize, fact_budget: u
         prompt.push_str(&labels.join(", "));
         prompt.push('\n');
     }
+    if let Some(schema) = schema {
+        let document = schema.document();
+        if document.mode != crate::schema::SchemaMode::Off {
+            prompt.push_str(&schema_block(document, vocabulary));
+        }
+    }
     prompt
+}
+
+/// ADR 0009 §11.1: the block [`system_prompt`] appends after the
+/// vocabulary block, only when a schema is installed and its `mode !=
+/// off`. Same "reuse these exact spellings" framing as the vocabulary
+/// block above, applied to the allowed entity type names and each
+/// constrained relation's domain/range; types and relations are each
+/// independently capped at `VOCABULARY_CAP`. A constrained relation
+/// already in `vocabulary` (this run's own accumulated label
+/// vocabulary) sorts first, so the labels most likely to matter for
+/// THIS document survive the cut on an oversized schema.
+fn schema_block(document: &crate::schema::SchemaDocument, vocabulary: &BTreeSet<String>) -> String {
+    let mut block = String::new();
+    if !document.types.is_empty() {
+        let names: Vec<&str> = document
+            .types
+            .keys()
+            .take(VOCABULARY_CAP)
+            .map(String::as_str)
+            .collect();
+        block.push_str(&format!(
+            "\nThis context has a schema. A concept may be given an entity type via one \
+             association per type on the reserved relation label \"{label}\" (e.g. \
+             {{\"subject\": \"…\", \"label\": \"{label}\", \"object\": \"TypeName\"}}) — \
+             reuse these exact spellings: {}\n",
+            names.join(", "),
+            label = crate::schema::SCHEMA_TYPE_LABEL,
+        ));
+    }
+    let mut relations: Vec<(&str, &crate::schema::RelationDef)> = document
+        .relations
+        .iter()
+        .map(|(label, relation)| (label.as_str(), relation))
+        .filter(|(_, relation)| !relation.domain.is_empty() || !relation.range.is_empty())
+        .collect();
+    relations.sort_by_key(|(label, _)| (!vocabulary.contains(*label), *label));
+    let lines: Vec<String> = relations
+        .into_iter()
+        .take(VOCABULARY_CAP)
+        .filter_map(|(label, relation)| relation_line(label, &relation.domain, &relation.range))
+        .collect();
+    if !lines.is_empty() {
+        block.push_str(
+            "\nRelation constraints in this schema — when one of these labels is used, give \
+             its subject/object the entity type shown (via a schema:type assertion):\n",
+        );
+        for line in &lines {
+            block.push_str("- ");
+            block.push_str(line);
+            block.push('\n');
+        }
+    }
+    block
+}
+
+/// One relation constraint line for [`schema_block`]: `label: domain →
+/// range` when both sides are declared, `label domain: …`/`label
+/// range: …` when only one is — never rendering the word "any" for an
+/// undeclared side, since undeclared genuinely means unconstrained,
+/// not "matches anything." `None` when neither side is declared (an
+/// unconstrained relation entry — legal, e.g. under `closed_labels`
+/// naming it as known — has nothing to say here).
+fn relation_line(
+    label: &str,
+    domain: &BTreeSet<String>,
+    range: &BTreeSet<String>,
+) -> Option<String> {
+    let domain_text = domain.iter().cloned().collect::<Vec<_>>().join(", ");
+    let range_text = range.iter().cloned().collect::<Vec<_>>().join(", ");
+    match (domain.is_empty(), range.is_empty()) {
+        (false, false) => Some(format!("{label}: {domain_text} → {range_text}")),
+        (false, true) => Some(format!("{label} domain: {domain_text}")),
+        (true, false) => Some(format!("{label} range: {range_text}")),
+        (true, true) => None,
+    }
 }
 
 fn user_message(source: &str, index: usize, total: usize, text: &str) -> String {
@@ -4374,6 +4593,19 @@ fn quote_for_issue(text: &str) -> String {
 ///   time; this schema only enforces the universal `>= 0` half.
 /// - Cross-item rules: deduplication, and an alias's `canonical` naming a
 ///   subject/object/label the associations actually contain.
+/// - A concept's entity type set (ADR 0009 §6.1): known only per-context,
+///   at validation time — the same argument the paragraph-count entry
+///   above already makes, just for a schema document instead of a
+///   document's own paragraph count.
+/// - "The object of relation R must be a concept some other item in this
+///   answer typed as T" (ADR 0009 §7.2): a cross-item rule exactly like
+///   deduplication and dangling-canonical above, checked by
+///   [`schema_output_issues`] instead.
+/// - Allowed relation labels are deliberately never rendered as an `enum`:
+///   a structurally-constrained model could then never propose a new
+///   relation, which ADR 0009 (and #218 before it) requires stays
+///   possible even in a context with a schema — constraining the
+///   model's *shape* is not the same as constraining its *content*.
 ///
 /// `title` is required content, not decoration: LangChain's Python
 /// `with_structured_output()` derives the tool/function name a bare JSON
@@ -4600,6 +4832,229 @@ fn cross_output_issues(outputs: &[ChunkOutput]) -> Vec<(usize, Vec<String>)> {
         }
     }
     issues_by_output
+}
+
+/// ADR 0009 §11.2: the schema-side sibling of [`cross_output_issues`]
+/// — identical two-pass, per-output-index shape. `schema:type`
+/// assertions across every output are unioned FIRST (a type asserted
+/// in output 3 licenses a fact in output 1), then every fact
+/// association is judged against the completed set — the
+/// producer-side mirror of `schema_issues`/`SchemaEnv`
+/// (`src/schema/check.rs`), the one function every live write entrance
+/// already shares. Producer-side, so there is no live graph to merge
+/// into: the union is scoped to what THIS answer set asserts, nothing
+/// already stored — and there is no alias resolution to do either,
+/// since [`cross_output_issues`] already refuses any alias whose
+/// spelling names something the associations already contain, so every
+/// subject/object/label spelling reaching here is already this
+/// answer's own canonical.
+fn schema_output_issues(
+    outputs: &[ChunkOutput],
+    schema: &crate::schema::InstalledSchema,
+) -> Vec<(usize, Vec<String>)> {
+    let document = schema.document();
+
+    // Pass 1: union every output's own type assertions before judging
+    // any one of them.
+    let mut asserted: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for chunk in outputs {
+        for item in &chunk.output.associations {
+            let subject = item.subject.as_deref().unwrap_or_default().trim();
+            let label = item.label.as_deref().unwrap_or_default().trim();
+            let object = item.object.as_deref().unwrap_or_default().trim();
+            if label == crate::schema::SCHEMA_TYPE_LABEL
+                && !subject.is_empty()
+                && !object.is_empty()
+            {
+                asserted
+                    .entry(subject.to_string())
+                    .or_default()
+                    .insert(object.to_string());
+            }
+        }
+    }
+    let types: BTreeMap<String, SchemaTypeAssertions> = asserted
+        .into_iter()
+        .map(|(concept, names)| {
+            let mut expanded = BTreeSet::new();
+            for name in &names {
+                expanded.extend(schema.closure_of(name));
+            }
+            (
+                concept,
+                SchemaTypeAssertions {
+                    asserted: names,
+                    expanded,
+                },
+            )
+        })
+        .collect();
+
+    let mut issues_by_output: Vec<(usize, Vec<String>)> = Vec::new();
+    for (output_index, chunk) in outputs.iter().enumerate() {
+        let mut issues = Vec::new();
+
+        // Guard 2 (ADR 0009 §6.3), mode-independent: this answer's own
+        // alias declarations must never name the reserved label as a
+        // canonical — mirrors `schema_issues`' `reserved` list
+        // (`src/schema/check.rs:411`), the one that refuses regardless
+        // of mode.
+        for (alias_index, alias) in chunk.output.aliases.iter().enumerate() {
+            if alias.kind.as_deref() == Some("label")
+                && alias.canonical.as_deref() == Some(crate::schema::SCHEMA_TYPE_LABEL)
+            {
+                issues.push(format!(
+                    "aliases[{alias_index}].canonical: '{}' is reserved for type assertions \
+                     (ADR 0009 §6.3) — rename the alias",
+                    crate::schema::SCHEMA_TYPE_LABEL
+                ));
+            }
+        }
+
+        if document.mode != crate::schema::SchemaMode::Off {
+            for (assoc_index, item) in chunk.output.associations.iter().enumerate() {
+                let subject = item.subject.as_deref().unwrap_or_default().trim();
+                let label = item.label.as_deref().unwrap_or_default().trim();
+                let object = item.object.as_deref().unwrap_or_default().trim();
+                if label.is_empty() || label == crate::schema::SCHEMA_TYPE_LABEL {
+                    continue; // type ops are never judged, §7.2 step 6
+                }
+                match document.relations.get(label) {
+                    Some(relation) => {
+                        if schema_side_violates(&relation.domain, types.get(subject)) {
+                            issues.push(format!(
+                                "associations[{assoc_index}].subject: {}",
+                                schema_violation_text(
+                                    subject,
+                                    &relation.domain,
+                                    label,
+                                    types.get(subject)
+                                ),
+                            ));
+                        }
+                        if schema_side_violates(&relation.range, types.get(object)) {
+                            issues.push(format!(
+                                "associations[{assoc_index}].object: {}",
+                                schema_violation_text(
+                                    object,
+                                    &relation.range,
+                                    label,
+                                    types.get(object)
+                                ),
+                            ));
+                        }
+                    }
+                    None if document.closed_labels => {
+                        issues.push(format!(
+                            "associations[{assoc_index}].label: '{label}' names no relation \
+                             declared in this context's schema (closed_labels)"
+                        ));
+                    }
+                    None => {}
+                }
+            }
+        }
+
+        if !issues.is_empty() {
+            issues_by_output.push((output_index, issues));
+        }
+    }
+    issues_by_output
+}
+
+/// One concept's asserted type population within one answer set: what
+/// was actually asserted (`asserted`) and its `is_a` closure
+/// (`expanded`) — [`schema_side_violates`] only ever tests the
+/// closure, but the corrective message names what was asserted, never
+/// the expansion. Mirrors `src/schema/check.rs`'s own
+/// `TypeAssertions`/`actual_types` split and its stated reason: "the
+/// expanded set's size is a schema-authoring accident, not information
+/// the corrector needs."
+struct SchemaTypeAssertions {
+    asserted: BTreeSet<String>,
+    expanded: BTreeSet<String>,
+}
+
+/// A `domain`/`range` violation is `declared` non-empty (an
+/// unconstrained side never violates), the concept's expanded type set
+/// non-empty (untyped never violates, §6.1), and the two disjoint —
+/// the producer-side mirror of `src/schema/check.rs`'s `side_violates`.
+fn schema_side_violates(declared: &BTreeSet<String>, types: Option<&SchemaTypeAssertions>) -> bool {
+    if declared.is_empty() {
+        return false;
+    }
+    let Some(types) = types else {
+        return false;
+    };
+    if types.expanded.is_empty() {
+        return false;
+    }
+    declared.is_disjoint(&types.expanded)
+}
+
+/// Cap on how many type names one violation message enumerates — same
+/// bound and same reasoning as `src/schema/check.rs`'s own
+/// `MAX_ISSUE_TYPE_NAMES`: a relation's declared `domain`/`range` is
+/// itself capped, but a concept's asserted type set is not.
+const MAX_ISSUE_TYPE_NAMES: usize = 8;
+
+fn join_capped_names<'a>(names: impl Iterator<Item = &'a String>) -> String {
+    let names: Vec<&str> = names.map(String::as_str).collect();
+    if names.len() <= MAX_ISSUE_TYPE_NAMES {
+        names.join(", ")
+    } else {
+        format!(
+            "{}, … (+{} more)",
+            names[..MAX_ISSUE_TYPE_NAMES].join(", "),
+            names.len() - MAX_ISSUE_TYPE_NAMES
+        )
+    }
+}
+
+/// One violation's corrective text: what was expected (the declared
+/// set as written, never the `is_a` closure) and what the concept was
+/// actually asserted as (never the closure either) — same "expected"/
+/// "actual" split `src/schema/check.rs`'s `expected_types`/
+/// `actual_types` use for the API-facing `Issue`, restated here as one
+/// sentence for a corrective LLM turn instead of two structured fields.
+fn schema_violation_text(
+    name: &str,
+    declared: &BTreeSet<String>,
+    relation: &str,
+    types: Option<&SchemaTypeAssertions>,
+) -> String {
+    let expected = join_capped_names(declared.iter());
+    let actual = match types {
+        Some(types) => join_capped_names(types.asserted.iter()),
+        None => String::new(),
+    };
+    format!(
+        "'{name}' must be typed as one of [{expected}] (or a subtype, via a schema:type \
+         assertion) for relation '{relation}', but is typed as [{actual}]"
+    )
+}
+
+/// Issue #199 Stage 2's cross-output judgment, widened to a schema
+/// document when one is installed (ADR 0009 §11): [`cross_output_issues`]'s
+/// alias judgment and [`schema_output_issues`]'s domain/range judgment
+/// are two independent per-output-index issue lists, merged into one
+/// before a single corrective turn is spent per offending output —
+/// exactly as if one combined check had produced them. Output order
+/// in, output order out.
+fn combined_cross_output_issues(
+    outputs: &[ChunkOutput],
+    schema: Option<&crate::schema::InstalledSchema>,
+) -> Vec<(usize, Vec<String>)> {
+    let mut merged: BTreeMap<usize, Vec<String>> = BTreeMap::new();
+    for (index, issues) in cross_output_issues(outputs) {
+        merged.entry(index).or_default().extend(issues);
+    }
+    if let Some(schema) = schema {
+        for (index, issues) in schema_output_issues(outputs, schema) {
+            merged.entry(index).or_default().extend(issues);
+        }
+    }
+    merged.into_iter().collect()
 }
 
 /// `questions_cap` is this run's --questions N (0 = the model was
@@ -4974,6 +5429,15 @@ struct ManifestEntry {
     /// `--force` re-extracts under the new strict-by-default rules.
     #[serde(default)]
     lossy: bool,
+    /// The digest of `--schema`'s document (`""` for no schema, the
+    /// default for entries written before this field existed — the
+    /// same "new field defaults to the value that changes today's
+    /// behavior least" precedent `structured_output`/`lossy` set):
+    /// swapping in a different schema document changes what the prompt
+    /// asks for and what self-validation accepts, so it re-extracts
+    /// like any other computation input.
+    #[serde(default)]
+    schema_digest: String,
     output: String,
 }
 
@@ -5008,6 +5472,7 @@ impl Manifest {
         structured_output: &str,
         max_output_tokens: usize,
         lossy: bool,
+        schema_digest: &str,
     ) -> bool {
         self.documents.get(source).is_some_and(|entry| {
             entry.sha256 == sha256
@@ -5021,6 +5486,7 @@ impl Manifest {
                 && entry.structured_output == structured_output
                 && entry.max_output_tokens == max_output_tokens
                 && entry.lossy == lossy
+                && entry.schema_digest == schema_digest
         })
     }
 
@@ -5038,6 +5504,7 @@ impl Manifest {
         structured_output: &str,
         max_output_tokens: usize,
         lossy: bool,
+        schema_digest: &str,
         output: &str,
     ) {
         self.documents.insert(
@@ -5054,6 +5521,7 @@ impl Manifest {
                 structured_output: structured_output.to_string(),
                 max_output_tokens,
                 lossy,
+                schema_digest: schema_digest.to_string(),
                 output: output.to_string(),
             },
         );
@@ -5131,6 +5599,13 @@ struct CheckpointFingerprint {
     structured_output: String,
     max_output_tokens: usize,
     lossy: bool,
+    /// `--schema`'s document digest (`""` = no schema). Same default
+    /// as [`ManifestEntry::schema_digest`] and the same reasoning: a
+    /// checkpoint file predating this field was necessarily written
+    /// under no schema, so it still matches a schema-less rerun and
+    /// only invalidates once `--schema` is actually engaged.
+    #[serde(default)]
+    schema_digest: String,
 }
 
 /// One durable unit of extraction work: a top-level chunk, or (issue
@@ -6174,6 +6649,273 @@ mod tests {
         assert_eq!(cross_output_issues(&outputs), Vec::new());
     }
 
+    /// Test-only schema builder — mirrors `PUT /schema`'s own document
+    /// shape (`crate::schema::SchemaDocument`), installed through the
+    /// same `crate::schema::install` every real schema goes through, so
+    /// a malformed test fixture fails loudly instead of silently
+    /// producing a schema `schema_output_issues` never actually judges.
+    fn test_schema(
+        types: &[(&str, &[&str])],
+        relations: &[(&str, &[&str], &[&str])],
+        mode: crate::schema::SchemaMode,
+        closed_labels: bool,
+    ) -> crate::schema::InstalledSchema {
+        let document = crate::schema::SchemaDocument {
+            schema: crate::schema::SCHEMA_VERSION,
+            mode,
+            closed_labels,
+            types: types
+                .iter()
+                .map(|(name, is_a)| {
+                    (
+                        name.to_string(),
+                        crate::schema::TypeDef {
+                            is_a: is_a.iter().map(|s| s.to_string()).collect(),
+                        },
+                    )
+                })
+                .collect(),
+            relations: relations
+                .iter()
+                .map(|(label, domain, range)| {
+                    (
+                        label.to_string(),
+                        crate::schema::RelationDef {
+                            domain: domain.iter().map(|s| s.to_string()).collect(),
+                            range: range.iter().map(|s| s.to_string()).collect(),
+                        },
+                    )
+                })
+                .collect(),
+        };
+        crate::schema::install(document).expect("test schema installs")
+    }
+
+    #[test]
+    fn schema_digests_are_stable_across_key_order_and_whitespace() {
+        // The invariant `--schema`'s startup path relies on (documented at
+        // the `document_bytes` canonicalization call in `run`): two files
+        // naming the identical document must fingerprint identically, so a
+        // hand-edited or re-serialized schema file never spuriously
+        // re-extracts every document in the corpus.
+        let ordered = r#"{
+            "schema": 1,
+            "mode": "warn",
+            "closed_labels": false,
+            "types": {"Brewery": {"is_a": ["Organization"]}, "Organization": {"is_a": []}},
+            "relations": {"杜氏": {"domain": ["Brewery"], "range": ["Organization"]}}
+        }"#;
+        let reordered_and_compact = r#"{"relations":{"杜氏":{"range":["Organization"],"domain":["Brewery"]}},"types":{"Organization":{"is_a":[]},"Brewery":{"is_a":["Organization"]}},"mode":"warn","closed_labels":false,"schema":1}"#;
+
+        let a: crate::schema::SchemaDocument = serde_json::from_str(ordered).unwrap();
+        let b: crate::schema::SchemaDocument = serde_json::from_str(reordered_and_compact).unwrap();
+        let installed_a = crate::schema::install(a).expect("schema installs");
+        let installed_b = crate::schema::install(b).expect("schema installs");
+        let bytes_a = crate::schema::document_bytes(installed_a.document()).unwrap();
+        let bytes_b = crate::schema::document_bytes(installed_b.document()).unwrap();
+        assert_eq!(sha256_hex(&bytes_a), sha256_hex(&bytes_b));
+    }
+
+    #[test]
+    fn schema_output_issues_lets_a_type_asserted_in_a_later_output_license_an_earlier_fact() {
+        // The producer-side mirror of ADR 0009 §7.2's ordering
+        // guarantee: a type asserted in a LATER output must still
+        // license a fact in an EARLIER one, exactly like
+        // cross_output_issues_lets_a_canonical_resolved_in_a_later_output_through.
+        let schema = test_schema(
+            &[("Brewery", &[]), ("Person", &[])],
+            &[("杜氏", &["Brewery"], &["Person"])],
+            crate::schema::SchemaMode::Strict,
+            false,
+        );
+        let outputs = vec![
+            chunk_output(ModelOutput {
+                associations: vec![association("青嶺酒造", "杜氏", "高瀬", 1.0)],
+                aliases: Vec::new(),
+                questions: Vec::new(),
+            }),
+            chunk_output(ModelOutput {
+                associations: vec![
+                    association("青嶺酒造", crate::schema::SCHEMA_TYPE_LABEL, "Brewery", 1.0),
+                    association("高瀬", crate::schema::SCHEMA_TYPE_LABEL, "Person", 1.0),
+                ],
+                aliases: Vec::new(),
+                questions: Vec::new(),
+            }),
+        ];
+        assert_eq!(schema_output_issues(&outputs, &schema), Vec::new());
+    }
+
+    #[test]
+    fn schema_output_issues_names_domain_and_range_violations_by_output() {
+        let schema = test_schema(
+            &[("Brewery", &[]), ("Person", &[]), ("Place", &[])],
+            &[("杜氏", &["Brewery"], &["Person"])],
+            crate::schema::SchemaMode::Strict,
+            false,
+        );
+        let outputs = vec![
+            // Domain violation: 青嶺酒造 is typed Person, not Brewery.
+            chunk_output(ModelOutput {
+                associations: vec![association("青嶺酒造", "杜氏", "高瀬", 1.0)],
+                aliases: Vec::new(),
+                questions: Vec::new(),
+            }),
+            // Range violation: 地蔵 is typed Place, not Person.
+            chunk_output(ModelOutput {
+                associations: vec![association("石蔵", "杜氏", "地蔵", 1.0)],
+                aliases: Vec::new(),
+                questions: Vec::new(),
+            }),
+            // Type assertions arrive in a THIRD, later output — proving
+            // the union happens before any output is judged.
+            chunk_output(ModelOutput {
+                associations: vec![
+                    association("青嶺酒造", crate::schema::SCHEMA_TYPE_LABEL, "Person", 1.0),
+                    association("高瀬", crate::schema::SCHEMA_TYPE_LABEL, "Person", 1.0),
+                    association("石蔵", crate::schema::SCHEMA_TYPE_LABEL, "Brewery", 1.0),
+                    association("地蔵", crate::schema::SCHEMA_TYPE_LABEL, "Place", 1.0),
+                ],
+                aliases: Vec::new(),
+                questions: Vec::new(),
+            }),
+        ];
+        let issues = schema_output_issues(&outputs, &schema);
+        assert_eq!(issues.len(), 2, "{issues:?}");
+        assert_eq!(issues[0].0, 0);
+        assert!(
+            issues[0]
+                .1
+                .iter()
+                .any(|m| m.starts_with("associations[0].subject")),
+            "{issues:?}"
+        );
+        assert_eq!(issues[1].0, 1);
+        assert!(
+            issues[1]
+                .1
+                .iter()
+                .any(|m| m.starts_with("associations[0].object")),
+            "{issues:?}"
+        );
+    }
+
+    #[test]
+    fn schema_output_issues_never_flags_an_untyped_concept() {
+        let schema = test_schema(
+            &[("Brewery", &[]), ("Person", &[])],
+            &[("杜氏", &["Brewery"], &["Person"])],
+            crate::schema::SchemaMode::Strict,
+            false,
+        );
+        let outputs = vec![chunk_output(ModelOutput {
+            // Neither side is ever given a schema:type assertion.
+            associations: vec![association("青嶺酒造", "杜氏", "高瀬", 1.0)],
+            aliases: Vec::new(),
+            questions: Vec::new(),
+        })];
+        assert_eq!(schema_output_issues(&outputs, &schema), Vec::new());
+    }
+
+    #[test]
+    fn schema_output_issues_lets_an_is_a_subtype_satisfy_the_declared_type() {
+        let schema = test_schema(
+            &[
+                ("Organization", &[]),
+                ("Brewery", &["Organization"]),
+                ("Person", &[]),
+            ],
+            &[("所在地", &["Organization"], &["Person"])],
+            crate::schema::SchemaMode::Strict,
+            false,
+        );
+        let outputs = vec![chunk_output(ModelOutput {
+            associations: vec![
+                association("青嶺酒造", crate::schema::SCHEMA_TYPE_LABEL, "Brewery", 1.0),
+                association("高瀬", crate::schema::SCHEMA_TYPE_LABEL, "Person", 1.0),
+                association("青嶺酒造", "所在地", "高瀬", 1.0),
+            ],
+            aliases: Vec::new(),
+            questions: Vec::new(),
+        })];
+        assert_eq!(schema_output_issues(&outputs, &schema), Vec::new());
+    }
+
+    #[test]
+    fn schema_output_issues_flags_an_undeclared_label_under_closed_labels() {
+        let schema = test_schema(
+            &[],
+            &[("杜氏", &[], &[])],
+            crate::schema::SchemaMode::Strict,
+            true,
+        );
+        let outputs = vec![chunk_output(ModelOutput {
+            associations: vec![association("青嶺酒造", "創業年", "1907", 1.0)],
+            aliases: Vec::new(),
+            questions: Vec::new(),
+        })];
+        let issues = schema_output_issues(&outputs, &schema);
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].1[0].contains("closed_labels"), "{issues:?}");
+    }
+
+    #[test]
+    fn schema_output_issues_flags_an_alias_naming_the_reserved_type_label_as_canonical() {
+        // Guard 2 (ADR 0009 §6.3) fires regardless of mode — `off` here
+        // proves it is not gated on enforcement the way domain/range
+        // judgment is.
+        let schema = test_schema(&[], &[], crate::schema::SchemaMode::Off, false);
+        let outputs = vec![chunk_output(ModelOutput {
+            associations: Vec::new(),
+            aliases: vec![alias("型", crate::schema::SCHEMA_TYPE_LABEL, "label")],
+            questions: Vec::new(),
+        })];
+        let issues = schema_output_issues(&outputs, &schema);
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].1[0].contains("reserved"), "{issues:?}");
+    }
+
+    #[test]
+    fn schema_output_issues_is_empty_when_mode_is_off_even_with_a_violation() {
+        let schema = test_schema(
+            &[("Brewery", &[]), ("Person", &[])],
+            &[("杜氏", &["Brewery"], &["Person"])],
+            crate::schema::SchemaMode::Off,
+            false,
+        );
+        let outputs = vec![chunk_output(ModelOutput {
+            associations: vec![
+                association("青嶺酒造", crate::schema::SCHEMA_TYPE_LABEL, "Person", 1.0),
+                association("青嶺酒造", "杜氏", "高瀬", 1.0),
+            ],
+            aliases: Vec::new(),
+            questions: Vec::new(),
+        })];
+        assert_eq!(schema_output_issues(&outputs, &schema), Vec::new());
+    }
+
+    #[test]
+    fn combined_cross_output_issues_merges_alias_and_schema_findings_per_output() {
+        let schema = test_schema(
+            &[("Brewery", &[]), ("Person", &[])],
+            &[("杜氏", &["Brewery"], &["Person"])],
+            crate::schema::SchemaMode::Strict,
+            false,
+        );
+        let outputs = vec![chunk_output(ModelOutput {
+            associations: vec![
+                association("青嶺酒造", crate::schema::SCHEMA_TYPE_LABEL, "Person", 1.0), // wrong type
+                association("青嶺酒造", "杜氏", "高瀬", 1.0), // domain violation
+            ],
+            aliases: vec![alias("蔵元", "存在しない", "concept")], // dangling alias
+            questions: Vec::new(),
+        })];
+        let issues = combined_cross_output_issues(&outputs, Some(&schema));
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].0, 0);
+        assert_eq!(issues[0].1.len(), 2, "{issues:?}");
+    }
+
     /// Whitespace-only differences must FOLD, not split: the graph's
     /// normalization does not trim, so merge has to. A padded subject
     /// dedups against its trimmed twin and is stored trimmed, and a
@@ -6417,52 +7159,53 @@ mod tests {
             "",
             0,
             false,
+            "",
             "a.md.jsonl",
         );
         assert!(manifest.matches(
-            "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false
+            "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, ""
         ));
         assert!(!manifest.matches(
-            "a.md", "hash-2", "model-1", "sake", 0, false, "", 0, "", 0, false
+            "a.md", "hash-2", "model-1", "sake", 0, false, "", 0, "", 0, false, ""
         ));
         assert!(!manifest.matches(
-            "a.md", "hash-1", "model-2", "sake", 0, false, "", 0, "", 0, false
+            "a.md", "hash-1", "model-2", "sake", 0, false, "", 0, "", 0, false, ""
         ));
         assert!(!manifest.matches(
-            "b.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false
+            "b.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, ""
         ));
         // A re-pointed --context must re-extract, not keep files whose
         // headers still name the old target.
         assert!(!manifest.matches(
-            "a.md", "hash-1", "model-1", "vats", 0, false, "", 0, "", 0, false
+            "a.md", "hash-1", "model-1", "vats", 0, false, "", 0, "", 0, false, ""
         ));
         // Toggling --no-passage changes whether the batch carries the
         // source passage at all — a skip would keep the stale shape.
         assert!(!manifest.matches(
-            "a.md", "hash-1", "model-1", "sake", 0, true, "", 0, "", 0, false
+            "a.md", "hash-1", "model-1", "sake", 0, true, "", 0, "", 0, false, ""
         ));
         // A changed --description is baked into the batch header, so it
         // must re-extract too rather than skip with the old one.
         assert!(!manifest.matches(
-            "a.md", "hash-1", "model-1", "sake", 0, false, "new desc", 0, "", 0, false
+            "a.md", "hash-1", "model-1", "sake", 0, false, "new desc", 0, "", 0, false, ""
         ));
         // A changed --fact-budget is folded into the system prompt like
         // --questions, so it must re-extract too rather than skip.
         assert!(!manifest.matches(
-            "a.md", "hash-1", "model-1", "sake", 0, false, "", 5, "", 0, false
+            "a.md", "hash-1", "model-1", "sake", 0, false, "", 5, "", 0, false, ""
         ));
         // A changed --structured-output or --max-output-tokens changes
         // what the model can answer — computation inputs like the rest.
         assert!(!manifest.matches(
-            "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "auto", 0, false
+            "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "auto", 0, false, ""
         ));
         assert!(!manifest.matches(
-            "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 2048, false
+            "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 2048, false, ""
         ));
         // Issue #199: a changed --lossy changes what the batch's facts
         // even are (dropped vs. corrected), so it must re-extract too.
         assert!(!manifest.matches(
-            "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, true
+            "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, true, ""
         ));
 
         // A prompt bump invalidates entries recorded under the old one.
@@ -6472,7 +7215,7 @@ mod tests {
             .expect("just recorded")
             .prompt_version = PROMPT_VERSION + 1;
         assert!(!manifest.matches(
-            "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false
+            "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, ""
         ));
 
         let dir = std::env::temp_dir().join(format!("taguru-manifest-{}", std::process::id()));
@@ -6493,11 +7236,12 @@ mod tests {
             "",
             0,
             false,
+            "",
             "a.md.jsonl",
         );
         manifest.save(&path).unwrap();
         assert!(Manifest::load(&path).matches(
-            "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false
+            "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, ""
         ));
         fs::write(&path, "not json").unwrap();
         assert!(Manifest::load(&path).documents.is_empty());
@@ -6514,7 +7258,7 @@ mod tests {
         let legacy = Manifest::load(&path);
         assert_eq!(legacy.documents.len(), 1);
         assert!(!legacy.matches(
-            "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false
+            "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, ""
         ));
 
         // An entry written before the structured_output/
@@ -6533,7 +7277,7 @@ mod tests {
         .unwrap();
         let pre_ladder = Manifest::load(&path);
         assert!(pre_ladder.matches(
-            "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false
+            "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, ""
         ));
         assert!(!pre_ladder.matches(
             "a.md",
@@ -6546,14 +7290,75 @@ mod tests {
             0,
             "json-schema",
             0,
-            false
+            false,
+            ""
         ));
         // Issue #199: an entry from before --lossy existed defaults to
         // `false` (strict) and must NOT match a --lossy run.
         assert!(!pre_ladder.matches(
-            "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, true
+            "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, true, ""
         ));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifests_reextract_when_the_schema_digest_changes() {
+        let mut manifest = Manifest::default();
+        manifest.record(
+            "a.md",
+            "hash-1",
+            "model-1",
+            "sake",
+            0,
+            false,
+            "",
+            0,
+            "",
+            0,
+            false,
+            "digest-1",
+            "a.md.jsonl",
+        );
+        assert!(manifest.matches(
+            "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "digest-1"
+        ));
+        // A different --schema document — even with everything else
+        // identical — must re-extract: the prompt's schema block and
+        // self-validation both changed under it.
+        assert!(!manifest.matches(
+            "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "digest-2"
+        ));
+        // Dropping --schema entirely (querying with "") must also
+        // re-extract a schema-recorded entry, not just swap it.
+        assert!(!manifest.matches(
+            "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, ""
+        ));
+
+        // An entry written before `--schema` existed defaults to "" —
+        // matches a schema-less rerun, mismatches once --schema is
+        // engaged, the same precedent structured_output/lossy set.
+        let mut legacy = Manifest::default();
+        legacy.record(
+            "b.md",
+            "hash-2",
+            "model-1",
+            "sake",
+            0,
+            false,
+            "",
+            0,
+            "",
+            0,
+            false,
+            "",
+            "b.md.jsonl",
+        );
+        assert!(legacy.matches(
+            "b.md", "hash-2", "model-1", "sake", 0, false, "", 0, "", 0, false, ""
+        ));
+        assert!(!legacy.matches(
+            "b.md", "hash-2", "model-1", "sake", 0, false, "", 0, "", 0, false, "digest-1"
+        ));
     }
 
     #[test]
@@ -6755,16 +7560,16 @@ mod tests {
 
     #[test]
     fn the_system_prompt_offers_the_accumulated_vocabulary() {
-        assert!(!system_prompt(&BTreeSet::new(), 0, 0).contains("already in use"));
+        assert!(!system_prompt(&BTreeSet::new(), 0, 0, None).contains("already in use"));
         let vocabulary: BTreeSet<String> = ["杜氏".to_string(), "創業年".to_string()].into();
-        let prompt = system_prompt(&vocabulary, 0, 0);
+        let prompt = system_prompt(&vocabulary, 0, 0, None);
         assert!(
             prompt.contains("杜氏") && prompt.contains("創業年"),
             "{prompt}"
         );
         // The questions ask rides only when asked for.
         assert!(!prompt.contains("search question"));
-        let asking = system_prompt(&vocabulary, 2, 0);
+        let asking = system_prompt(&vocabulary, 2, 0, None);
         assert!(
             asking.contains("up to 2 realistic search question(s)")
                 && asking.contains("bracketed number"),
@@ -6774,14 +7579,63 @@ mod tests {
 
     #[test]
     fn the_system_prompt_omits_the_fact_budget_clause_by_default() {
-        assert!(!system_prompt(&BTreeSet::new(), 0, 0).contains("association(s) total"));
+        assert!(!system_prompt(&BTreeSet::new(), 0, 0, None).contains("association(s) total"));
     }
 
     #[test]
     fn the_system_prompt_states_the_fact_budget_when_set() {
-        let prompt = system_prompt(&BTreeSet::new(), 0, 5);
+        let prompt = system_prompt(&BTreeSet::new(), 0, 5, None);
         assert!(
             prompt.contains("at most 5 association(s) total"),
+            "{prompt}"
+        );
+    }
+
+    #[test]
+    fn the_system_prompt_offers_the_schema_types_and_a_relation_line_when_mode_is_not_off() {
+        let schema = test_schema(
+            &[("Brewery", &[]), ("Person", &[])],
+            &[("杜氏", &["Brewery"], &["Person"])],
+            crate::schema::SchemaMode::Warn,
+            false,
+        );
+        let prompt = system_prompt(&BTreeSet::new(), 0, 0, Some(&schema));
+        assert!(
+            prompt.contains("Brewery") && prompt.contains("Person"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains(crate::schema::SCHEMA_TYPE_LABEL),
+            "{prompt}"
+        );
+        assert!(prompt.contains("杜氏: Brewery → Person"), "{prompt}");
+    }
+
+    #[test]
+    fn the_system_prompt_omits_the_arrow_for_a_relation_constrained_on_one_side_only() {
+        let schema = test_schema(
+            &[("Brewery", &[])],
+            &[("代表銘柄", &["Brewery"], &[])],
+            crate::schema::SchemaMode::Warn,
+            false,
+        );
+        let prompt = system_prompt(&BTreeSet::new(), 0, 0, Some(&schema));
+        assert!(prompt.contains("代表銘柄 domain: Brewery"), "{prompt}");
+        assert!(!prompt.contains("any"), "{prompt}");
+    }
+
+    #[test]
+    fn the_system_prompt_omits_the_schema_block_when_mode_is_off() {
+        let schema = test_schema(
+            &[("Brewery", &[])],
+            &[],
+            crate::schema::SchemaMode::Off,
+            false,
+        );
+        let prompt = system_prompt(&BTreeSet::new(), 0, 0, Some(&schema));
+        assert!(!prompt.contains("Brewery"), "{prompt}");
+        assert!(
+            !prompt.contains(crate::schema::SCHEMA_TYPE_LABEL),
             "{prompt}"
         );
     }
@@ -7017,6 +7871,20 @@ mod tests {
         // Two long paths differing at the tail stay distinct.
         let other = format!("deep/{}/doc2.md", "x".repeat(300));
         assert_ne!(name, checkpoint_file_name(&other));
+    }
+
+    #[test]
+    fn checkpoint_fingerprints_default_the_schema_digest_for_pre_existing_files() {
+        // A checkpoint file written before --schema existed carries no
+        // schema_digest key at all — it must still parse (not be
+        // treated as unreadable/corrupt) and default to "", the same
+        // "no schema" value a fresh schema-less run resolves to.
+        let json = r#"{"sha256":"h","model":"m","prompt_version":3,"context":"sake",
+            "questions_n":0,"no_passage":false,"description":"","fact_budget":0,
+            "structured_output":"","max_output_tokens":0,"lossy":false}"#;
+        let fingerprint: CheckpointFingerprint =
+            serde_json::from_str(json).expect("a pre-existing fingerprint still parses");
+        assert_eq!(fingerprint.schema_digest, "");
     }
 
     #[test]

@@ -8,6 +8,40 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- Schema vocabulary in `taguru extract` and both LangChain ingesters
+  (#386, S8 of #218's ADR 0009 split §11) — the producer side of the
+  schema layer, closing the last gap between what a `strict`/`warn`
+  context enforces on write and what the model is ever told about it.
+  `taguru extract` gains `--schema FILE`/`TAGURU_EXTRACT_SCHEMA` (the
+  same document shape `{stem}.schema.json`/`GET /contexts/{name}/schema`
+  persist and serve); the offline extractor has no server to fetch one
+  from (ADR 0009 §13 gives it no new credential surface either), so the
+  operator hands it the document explicitly, and a file that fails to
+  parse or fails `schema::install`'s own checks is a startup error, not
+  a silent skip. Both LangChain SDKs instead pull it live, mirroring
+  `_fetch_vocabulary`'s own best-effort `NotFoundError → None` posture
+  — a schema-unaware server or a schema-free context works unchanged.
+  When a schema is present and its `mode != off`, `system_prompt` gains
+  one block after the existing vocabulary block: the allowed entity
+  type names, one `label: domain → range` line per constrained relation
+  (budget-capped like the vocabulary block, live-vocabulary relations
+  first), and the instruction to assert types on the reserved
+  `schema:type` label — deliberately never rendered as a JSON Schema
+  `enum`, so a schema-constrained model can still propose a new
+  relation. `PROMPT_VERSION` bumps 2 → 3 in all three producers
+  (non-negotiable: a cached output from the schema-free prompt must
+  never be silently reused now that a schema can shape it). A new
+  `schema_output_issues`/`schemaOutputIssues` — structurally a sibling
+  of `cross_output_issues`, same union-before-judgment, per-output-index
+  shape — judges domain/range and `closed_labels` violations across the
+  full answer set the same way `schema_issues`/`SchemaEnv`
+  (`src/schema/check.rs`) already does server-side, and feeds the
+  existing corrective-retry machinery unchanged: one targeted corrective
+  turn per offending output, never a second round. The core Python
+  and TypeScript SDKs gain `Context.get_schema()`/`Context.getSchema()`
+  (`GET /contexts/{name}/schema`, `sdk/spec/surface.yaml`) as the
+  client method both LangChain ingesters' `_fetch_schema`/`fetchSchema`
+  call.
 - `POST /contexts/{name}/schema/audit` and `POST
   /contexts/{name}/schema/validate` (#385, S7 of #218's ADR 0009 split
   §10). `audit` judges every live association against the resident
@@ -517,6 +551,14 @@ Entries that change an on-disk format or a response shape say so.
   host application's call.
 
 ### Changed
+- `ManifestEntry`/`CheckpointFingerprint` (Rust) and their SDK
+  checkpoint-fingerprint twins gain a `schema_digest` field (#386, S8 of
+  #218's ADR 0009 split §11), so that swapping in a different schema
+  document for `taguru extract`/both LangChain ingesters re-extracts
+  even when the source text is byte-identical. On-disk format change:
+  an entry from before this field existed defaults to `""` and still
+  matches a schema-less rerun, the same precedent `structured_output`/
+  `lossy` already set.
 - `sync_object_storage` (#351) is rewritten onto the shared `RunRecorder`
   (#353) and gains an `events_out=` parameter: a path (truncated on open,
   like `taguru extract`'s own `--diagnostics-out`) or an already-open text
