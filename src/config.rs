@@ -113,22 +113,42 @@ pub(crate) const KNOWN_KEYS: [&str; 61] = [
 ];
 
 /// Test support for the per-command usage-text consistency checks
-/// (cli.rs, extract.rs): every `TAGURU_*` variable a usage text names
-/// at the start of a line must be in [`KNOWN_KEYS`], or configuring
-/// that documented variable would earn the "typo?" warning above.
+/// (cli.rs, extract.rs, ...): every `TAGURU_*` variable a usage text
+/// names — as a documented knob or in passing prose — must be in
+/// [`KNOWN_KEYS`], or configuring that documented variable would earn
+/// the "typo?" warning above.
 #[cfg(test)]
 pub(crate) fn assert_usage_vars_are_known_keys(usage: &str) {
-    for line in usage.lines() {
-        let Some(token) = line.split_whitespace().next() else {
-            continue;
-        };
-        // Prose can start with a variable mid-sentence (extract.rs has
-        // "TAGURU_EMBED_PASSAGES); rides..."); trim trailing
-        // punctuation so the identifier alone is compared.
-        let name = token.trim_end_matches(|c: char| !(c.is_ascii_alphanumeric() || c == '_'));
-        if name.starts_with("TAGURU_") {
-            assert!(KNOWN_KEYS.contains(&name), "{name} missing from KNOWN_KEYS");
+    fn is_ident(b: u8) -> bool {
+        b.is_ascii_alphanumeric() || b == b'_'
+    }
+    let bytes = usage.as_bytes();
+    let mut start = 0;
+    while let Some(offset) = usage[start..].find("TAGURU_") {
+        let begin = start + offset;
+        let mut end = begin;
+        while end < bytes.len() && is_ident(bytes[end]) {
+            end += 1;
         }
+        start = end;
+        if begin > 0 && is_ident(bytes[begin - 1]) {
+            continue;
+        }
+        // `--url "$TAGURU_URL"` (export, import) documents a shell
+        // substitution the reader's own environment supplies — the
+        // stdio bridge's variable — never a knob this process reads.
+        if begin > 0 && bytes[begin - 1] == b'$' {
+            continue;
+        }
+        let name = &usage[begin..end];
+        // A family wildcard ("unknown TAGURU_*" in cli.rs,
+        // "TAGURU_EXTRACT_*" in extract.rs) ends at its trailing
+        // underscore — a reference to many variables, never the name
+        // of one.
+        if name.ends_with('_') {
+            continue;
+        }
+        assert!(KNOWN_KEYS.contains(&name), "{name} missing from KNOWN_KEYS");
     }
 }
 

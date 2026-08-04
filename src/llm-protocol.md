@@ -341,6 +341,7 @@ Source code takes the same discipline; only the naming changes.
 | POST | `/contexts/{name}/schema/validate` | `{document, limit?, after?}` → the same audit shape over the PROPOSED document, validated and evaluated without ever being persisted — the pre-flight before a `strict` flip; works identically with or without an installed schema |
 | GET | `/contexts/{name}/export` | the context as an import batch stream (JSON Lines body, not the JSON envelope) — one batch per source, create block first, aliases last; `POST /import` (or `taguru import`) restores it, per-source retract-then-apply, answering `{batches: [...]}` in stream order (`taguru_group` records ride the same stream, restore after every batch as whole-record replaces, and answer under `groups: [...]`) |
 | POST | `/contexts/{name}/compact` | rebuild the image without dead records (admin; the context's requests wait out the rebuild) → `{bytes_before, bytes_after, dead_edges, aliases_dropped}` |
+| POST | `/flush` | force every context's unflushed state to disk now, ahead of the periodic flusher → the flushed context names; admin, server-wide (refused for a context-scoped key — the answer names every flushed context, grant or no grant) |
 | POST | `/mcp` | the MCP Streamable HTTP transport, stateless profile: each POSTed JSON-RPC message answered as plain `application/json` (no SSE stream, no session id — the spec's stateless profile). Tool calls dispatch in process onto the routes above under the outer request's own auth, scope, deadline, and body cap — one client request, one budget, one log line; `initialize` hands out the same manual `GET /protocol` serves |
 | POST | `/maintenance/compact` | `?min_dead_ratio=0.0` (default; any dead weight at all) → sweep every context whose live dead ratio strictly exceeds it, worst ratio first, each rebuilt like `/contexts/{name}/compact`; admin, server-wide (refused for a context-scoped key, like `/flush`) — closes the server to ordinary traffic for the sweep (`/health` answers `503 maintenance` meanwhile, distinct from an actual fault) and reopens when it ends or the deadline cuts it short → `{contexts:[{name, bytes_before, bytes_after, dead_edges, aliases_dropped}], deadline_exceeded}` |
 
@@ -364,7 +365,7 @@ an invariant (ADR 0006 §12).
 ## Auth
 
 - If the server sets `TAGURU_API_TOKEN`, every request except
-  `/health`, `/live`, `/metrics`, and `/version` needs
+  `GET /health`, `GET /live`, `GET /metrics`, and `GET /version` needs
   `Authorization: Bearer <token>`; missing or wrong → `401` in the
   error shape below.
 - The MCP bridge (taguru-mcp) reads its own `TAGURU_API_TOKEN` and

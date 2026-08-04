@@ -1424,12 +1424,50 @@ async fn wait_signal(stream: Option<&mut tokio::signal::unix::Signal>) {
 
 #[cfg(test)]
 mod tests {
+    /// Whether `handlers` calls axum's `name` method router: the token
+    /// followed by an open paren, not preceded by an identifier byte —
+    /// so `get(` matches in `get(api::get_context)` but never inside
+    /// `get_context(`.
+    fn calls_method(handlers: &str, name: &str) -> bool {
+        let token = format!("{name}(");
+        let bytes = handlers.as_bytes();
+        let mut start = 0;
+        while let Some(offset) = handlers[start..].find(&token) {
+            let index = start + offset;
+            if index == 0 || !(bytes[index - 1].is_ascii_alphanumeric() || bytes[index - 1] == b'_')
+            {
+                return true;
+            }
+            start = index + 1;
+        }
+        false
+    }
+
+    /// Whether the manual documents `method` on `path`: a prose code
+    /// span naming both (`` `GET /protocol` ``), or a table row whose
+    /// method cell names the method and whose text holds the
+    /// backticked path.
+    fn documented(protocol: &str, method: &str, path: &str) -> bool {
+        if protocol.contains(&format!("`{method} {path}`")) {
+            return true;
+        }
+        let path_span = format!("`{path}`");
+        protocol.lines().any(|line| {
+            line.starts_with('|')
+                && line.contains(&path_span)
+                && line
+                    .split('|')
+                    .nth(1)
+                    .is_some_and(|cell| cell.split('/').any(|m| m.trim() == method))
+        })
+    }
+
     /// Every HTTP route registered in this file must appear in
-    /// src/llm-protocol.md, the wire contract integrators read: the
-    /// rename endpoints shipped undocumented because nothing tied the
-    /// router to the doc. Scanning this file's source for route
-    /// registrations' path literals keeps the two in sync without a
-    /// hand-maintained route list that could itself drift.
+    /// src/llm-protocol.md — method included — the wire contract
+    /// integrators read: the rename endpoints shipped undocumented
+    /// because nothing tied the router to the doc. Scanning this
+    /// file's source for route registrations keeps the two in sync
+    /// without a hand-maintained route list that could itself drift.
     #[test]
     fn every_registered_route_is_documented_in_the_protocol() {
         // Built by concatenation so this test's own source (part of
@@ -1437,33 +1475,68 @@ mod tests {
         let needle = concat!(".route", "(");
         let source = include_str!("main.rs");
         let protocol = include_str!("llm-protocol.md");
-        let mut paths = Vec::new();
+        let mut routes = Vec::new();
         let mut rest = source;
         while let Some(found) = rest.find(needle) {
             rest = &rest[found + needle.len()..];
-            // The path is the first string literal after the paren —
-            // on the next line when rustfmt wrapped the call.
-            let Some(open) = rest.find('"') else { break };
-            rest = &rest[open + 1..];
-            let Some(close) = rest.find('"') else { break };
-            paths.push(&rest[..close]);
-            rest = &rest[close + 1..];
+            // Capture the registration's full argument text by walking
+            // its balanced parens, so multi-line handler chains stay
+            // inside; the path is the first string literal, and the
+            // method routers (`get(...)`, chained `.put(...)`, ...)
+            // follow it.
+            let mut depth = 1usize;
+            let mut end = rest.len();
+            for (index, c) in rest.char_indices() {
+                match c {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = index;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let args = &rest[..end];
+            rest = &rest[end..];
+            let Some(open) = args.find('"') else { continue };
+            let after = &args[open + 1..];
+            let Some(close) = after.find('"') else {
+                continue;
+            };
+            let path = &after[..close];
+            let handlers = &after[close + 1..];
+            let methods: Vec<&str> = [
+                ("GET", "get"),
+                ("POST", "post"),
+                ("PUT", "put"),
+                ("PATCH", "patch"),
+                ("DELETE", "delete"),
+            ]
+            .into_iter()
+            .filter(|(_, router)| calls_method(handlers, router))
+            .map(|(method, _)| method)
+            .collect();
+            assert!(!methods.is_empty(), "no method router parsed for {path}");
+            routes.push((path, methods));
         }
         // An empty scan would vacuously pass; pin a floor well under
         // the real count (~50) but far above a broken parse.
         assert!(
-            paths.len() > 30,
-            "route scan looks broken: found only {} paths",
-            paths.len()
+            routes.len() > 30,
+            "route scan looks broken: found only {} routes",
+            routes.len()
         );
-        for path in paths {
-            // A closing backtick right after the path matches both a
-            // table row's bare `/contexts` and prose like
-            // `GET /protocol`, while refusing prefix-only mentions.
-            assert!(
-                protocol.contains(&format!("{path}`")),
-                "{path} is registered in main.rs but not documented in llm-protocol.md"
-            );
+        for (path, methods) in routes {
+            for method in methods {
+                assert!(
+                    documented(protocol, method, path),
+                    "{method} {path} is registered in main.rs \
+                     but not documented in llm-protocol.md"
+                );
+            }
         }
     }
 }

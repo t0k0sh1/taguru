@@ -749,10 +749,12 @@ Entries that change an on-disk format or a response shape say so.
 - More protocol-manual drift, the same class as the schema rows above:
   `POST /contexts/{name}/rename` and `POST /groups/{name}/rename`
   (registered, MCP-exposed, auth-special-cased — but never in the
-  route table) and `POST /mcp` itself (the Streamable HTTP transport
-  the manual never named) are now documented, and a new main.rs test
-  scans the router's registered paths against `llm-protocol.md` so a
-  route can no longer ship undocumented.
+  route table), `POST /mcp` itself (the Streamable HTTP transport the
+  manual never named), and `POST /flush` (previously only name-dropped
+  in the admin-role list) are now documented, and a new main.rs test
+  scans the router's registrations — method and path both — against
+  `llm-protocol.md` so a route can no longer ship undocumented, nor a
+  documented method drift from the registered one.
 
 ## [0.6.0] - 2026-08-01
 
