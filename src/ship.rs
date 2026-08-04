@@ -620,12 +620,17 @@ fn classify(name: &str) -> EntryKind {
     if name == ".taguru.lock" || name == REPLICATION_RECORD {
         return EntryKind::Skip;
     }
-    // `staging_path` builds `{final}.tmp{nonce}` names; matching the
-    // shape (not just ".tmp") keeps a hypothetical user file named
-    // exactly "x.tmp" shippable while excluding every stager.
+    // `staging_path` builds `{final}.tmp{pid}-{nonce}` names; matching
+    // the exact shape through storage's own predicate (not just ".tmp")
+    // keeps a hypothetical user file named exactly "x.tmp" shippable
+    // while excluding every stager. The previous inline check here
+    // required all-digits after "tmp" and so MISSED the hyphenated
+    // names `staging_path` actually builds: a flush racing a ship cycle
+    // put `{stem}.tmp{pid}-{nonce}` into the manifest, the rename then
+    // dropped the object from the next cycle, and a replica hydrating
+    // from the stale manifest refused to boot on the vanished object.
     if let Some(extension) = FsPath::new(name).extension().and_then(|e| e.to_str())
-        && let Some(rest) = extension.strip_prefix("tmp")
-        && rest.chars().all(|c| c.is_ascii_digit())
+        && crate::storage::is_staging_extension(extension)
     {
         return EntryKind::Skip;
     }
@@ -2827,6 +2832,12 @@ mod tests {
         assert_eq!(classify(".taguru.lock"), EntryKind::Skip);
         assert_eq!(classify(REPLICATION_RECORD), EntryKind::Skip);
         assert_eq!(classify("x.ctx.tmp42"), EntryKind::Skip);
+        // The shape `storage::staging_path` actually builds — a flush
+        // racing a ship cycle leaves exactly this beside x.ctx.
+        assert_eq!(classify("x.tmp72943-9"), EntryKind::Skip);
+        assert_eq!(classify("x.meta.tmp72943-10"), EntryKind::Skip);
+        // A name that only WEARS a tmp-ish suffix still ships.
+        assert_eq!(classify("x.tmp"), EntryKind::Published);
         assert_eq!(classify("x.ctx"), EntryKind::Published);
         assert_eq!(classify("x.meta.json"), EntryKind::Published);
         assert_eq!(classify("x.wal.jsonl"), EntryKind::LogLane);

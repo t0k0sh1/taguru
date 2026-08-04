@@ -169,6 +169,31 @@ fn staging_path(path: &Path) -> PathBuf {
     path.with_extension(format!("tmp{}-{nonce}", std::process::id()))
 }
 
+/// True when `extension` has exactly the shape [`staging_path`] builds —
+/// `tmp{pid}-{nonce}`, digits on both sides of the `-` (plus the
+/// hyphen-less `tmp{digits}` form older names carried) — so scanners
+/// that must not over-skip (the shipper's directory classifier,
+/// `ship::classify`) can recognize staging litter without also
+/// swallowing a genuine `*.tmp`-suffixed file. Boot's sweep
+/// (registry/boot.rs) deliberately stays broader
+/// (`starts_with("tmp")`): the data dir is server-owned, so
+/// over-sweeping there is safe, while over-skipping in the shipper
+/// would silently drop a real file from every manifest.
+pub(crate) fn is_staging_extension(extension: &str) -> bool {
+    let Some(rest) = extension.strip_prefix("tmp") else {
+        return false;
+    };
+    let (pid, nonce) = match rest.split_once('-') {
+        Some((pid, nonce)) => (pid, Some(nonce)),
+        None => (rest, None),
+    };
+    !pid.is_empty()
+        && pid.bytes().all(|byte| byte.is_ascii_digit())
+        && nonce.is_none_or(|nonce| {
+            !nonce.is_empty() && nonce.bytes().all(|byte| byte.is_ascii_digit())
+        })
+}
+
 /// Bounded retries for [`stage_bytes`]'s `create_new` loop: enough to
 /// absorb a genuine cross-process name collision (astronomically
 /// unlikely already thanks to `staging_path`'s process-id'd nonce)
@@ -370,6 +395,32 @@ mod tests {
             extension.is_some_and(|e| e.starts_with("tmp")),
             "boot's sweep would silently stop cleaning up this name: {staged:?}"
         );
+    }
+
+    /// The shipper's directory classifier keeps staging litter out of
+    /// every manifest through [`is_staging_extension`] — so the
+    /// predicate must recognize what [`staging_path`] ACTUALLY builds
+    /// (the hyphenated `tmp{pid}-{nonce}`; an earlier all-digits check
+    /// missed it and shipped mid-flush stagers, which a replica then
+    /// failed to boot on once the rename dropped the object), while
+    /// still refusing near-misses a user file could plausibly wear.
+    #[test]
+    fn staging_extension_predicate_matches_staging_path_and_only_it() {
+        let staged = staging_path(Path::new("sake.ctx"));
+        let extension = staged.extension().and_then(|e| e.to_str()).unwrap();
+        assert!(
+            is_staging_extension(extension),
+            "the shipper would ship this stager: {staged:?}"
+        );
+        // The hyphen-less digits form older staging names carried.
+        assert!(is_staging_extension("tmp42"));
+        // Not stagers: no digits, a bare "tmp", torn or non-digit halves.
+        assert!(!is_staging_extension("tmp"));
+        assert!(!is_staging_extension("tmp4a-9"));
+        assert!(!is_staging_extension("tmp42-"));
+        assert!(!is_staging_extension("tmp-9"));
+        assert!(!is_staging_extension("tmp42-9-1"));
+        assert!(!is_staging_extension("bak42"));
     }
 
     /// Simulates two independent allocators (two processes racing the
