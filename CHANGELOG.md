@@ -8,6 +8,35 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- Types on `describe`/`resolve`, and type filters on `query` (#387, S9 of
+  #218's ADR 0009 split §12) — the read-side minimum, closing the last
+  gap between what a schema document declares and what retrieval can
+  ever surface or narrow by. All three are gated by §6.3's single
+  condition (an installed schema document for the context), never by
+  `mode`: a schema-free context is byte-identical to today. `describe`'s
+  `ConceptDescription` gains `types: Vec<String>` — every live
+  `schema:type` object on the concept, collected inside the existing
+  outgoing-chain walk (`Context::describe_typed`,
+  `src/context/query.rs`); `schema:type` is not excluded from the label
+  tally itself, only `activate`/`explore`, the vocabulary block, and the
+  vocabulary audit's twin sweep are (§6.3). `resolve`'s `TieredResolution`
+  gains `types: Option<Vec<String>>`, attached to the top 8 candidates
+  the same one shared read `gloss` already rides
+  (`Context::concept_types`); `resolve_label` candidates never carry it
+  — a relation label has no type. `query` and cross `POST /query` gain
+  optional `subject_types`/`object_types`: an OR-set of declared types,
+  `is_a`-expanded through the schema's precomputed ancestor closures
+  (`schema::expanded_type_sets`, factored out of the same live-read
+  `SchemaEnv::build` already uses, so a filter can never disagree with
+  what `strict` itself would treat as a concept's type) — a filter, never
+  an anchor (leaving subject/label/object all unset is still refused).
+  Evaluated after the position pins and before paging, so `total`
+  reflects the filtered count; a schema-free target answers empty for a
+  non-empty filter rather than erroring, evaluated per-context in the
+  cross variant. Explicitly out of scope, per the ADR: using types to
+  score or rank retrieval candidates. The MCP `describe`/`resolve`/`query`
+  tools and the core Python and TypeScript SDKs (`sdk/spec/surface.yaml`)
+  carry the same fields/options.
 - Schema vocabulary in `taguru extract` and both LangChain ingesters
   (#386, S8 of #218's ADR 0009 split §11) — the producer side of the
   schema layer, closing the last gap between what a `strict`/`warn`

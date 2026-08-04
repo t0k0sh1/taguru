@@ -54,6 +54,15 @@ pub struct TieredResolution {
     /// things. Attached to the top candidates only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gloss: Option<String>,
+    /// The candidate's own declared types (ADR 0009 §12), attached to
+    /// the same top candidates `gloss` already is, for the same cost
+    /// reason — never a filter (`ResolveRequest` is cue + floors +
+    /// limit; a caller who already knows the type knows more than the
+    /// cue does). Absent on `resolve_label` (labels carry no type) and
+    /// on any candidate with no type assertion or no installed schema
+    /// document (ADR 0009 §6.3 guard 1).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub types: Option<Vec<String>>,
 }
 
 fn lexical_tier(resolutions: Vec<Resolution>) -> Vec<TieredResolution> {
@@ -65,6 +74,7 @@ fn lexical_tier(resolutions: Vec<Resolution>) -> Vec<TieredResolution> {
             tier: "lexical".to_string(),
             kind: Some(resolution.kind.as_str().to_string()),
             gloss: None,
+            types: None,
         })
         .collect()
 }
@@ -97,6 +107,7 @@ pub(super) fn merge_tiers(
             tier: "semantic".to_string(),
             kind: None,
             gloss: None,
+            types: None,
         });
     }
     merged
@@ -134,37 +145,46 @@ pub(super) fn trim_to_limit(
 const GLOSSED_CANDIDATES: usize = 8;
 
 /// Attaches each top candidate's gloss — the evidence a caller needs
-/// to tell lookalike names apart without a second round trip. One
-/// shared read after the tiers settle, covering lexical and semantic
+/// to tell lookalike names apart without a second round trip — and,
+/// when `type_label` names an installed schema's reserved label (ADR
+/// 0009 §12, gated by §6.3 guard 1), its declared types. One shared
+/// read after the tiers settle, covering lexical and semantic
 /// candidates alike; if the context vanished in between, the
-/// candidates simply keep gloss = None (the entry answer itself
+/// candidates simply keep gloss/types = None (the entry answer itself
 /// already succeeded, and a decoration must not turn it into an
-/// error).
+/// error). `type_label` is always `None` for `labels == true` —
+/// `resolve_label` candidates are relation labels, which carry no type.
 fn attach_glosses(
     state: &AppState,
     name: &str,
     labels: bool,
+    type_label: Option<&str>,
     mut served: Vec<TieredResolution>,
 ) -> Vec<TieredResolution> {
     let head = served.len().min(GLOSSED_CANDIDATES);
     if head == 0 {
         return served;
     }
-    let glosses = state.read_context(name, |context| {
+    let decorated = state.read_context(name, |context| {
         served[..head]
             .iter()
             .map(|candidate| {
-                if labels {
+                let gloss = if labels {
                     context.label_gloss(&candidate.name, Context::GLOSS_EXAMPLES)
                 } else {
                     context.concept_gloss(&candidate.name, Context::GLOSS_FACTS)
-                }
+                };
+                let types = type_label.map_or(Vec::new(), |type_label| {
+                    context.concept_types(&candidate.name, type_label)
+                });
+                (gloss, types)
             })
             .collect::<Vec<_>>()
     });
-    if let Ok(glosses) = glosses {
-        for (candidate, gloss) in served.iter_mut().zip(glosses) {
+    if let Ok(decorated) = decorated {
+        for (candidate, (gloss, types)) in served.iter_mut().zip(decorated) {
             candidate.gloss = gloss;
+            candidate.types = (!types.is_empty()).then_some(types);
         }
     }
     served
@@ -298,7 +318,15 @@ pub(super) fn resolve_served(
     let limit = clamp(request.limit, MAX_MATCH_LIMIT, MAX_MATCH_LIMIT);
     let tiers = resolve_tiers(state, name, request, labels, deadline, started_at)?;
     let served = trim_to_limit(merge_tiers(tiers.bounded, &tiers.semantic), limit);
-    let served = attach_glosses(state, name, labels, served);
+    // ADR 0009 §12/§6.3: types ride only the concept namespace, gated by
+    // the same single condition `describe`/`explore` resolve — an
+    // installed schema document, never `mode`. Resolved here rather
+    // than inside `attach_glosses` so callers sharing this function
+    // (`assemble_evidence`'s per-origin loop) get it for free too.
+    let type_label = (!labels)
+        .then(|| tokio::task::block_in_place(|| state.hidden_label(name)))
+        .flatten();
+    let served = attach_glosses(state, name, labels, type_label, served);
     let op = if labels {
         SearchOp::ResolveLabel
     } else {

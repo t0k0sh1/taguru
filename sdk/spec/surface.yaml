@@ -28,7 +28,7 @@ classes:
       options: [contexts, groups, limit, after]
     query:
       route: "POST /query"
-      options: [contexts, groups, subject, label, object, limit, after]
+      options: [contexts, groups, subject, label, object, subject_types, object_types, limit, after]
     search_passages:
       route: "POST /sources/search"
       args: [query]
@@ -88,7 +88,7 @@ classes:
     describe: { route: "POST /contexts/{name}/describe", args: [concept] }
     query:
       route: "POST /contexts/{name}/query"
-      options: [subject, label, object, limit, after]
+      options: [subject, label, object, subject_types, object_types, limit, after]
     recall:
       route: "POST /contexts/{name}/recall"
       args: [cue]

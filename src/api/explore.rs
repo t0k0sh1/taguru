@@ -26,6 +26,12 @@ pub struct DescribeRequest {
 /// concept (labels and counts, per role) without materializing a single
 /// association. Check the outline, then `query` just the labels that
 /// matter. An unknown concept comes back as a null result.
+///
+/// ADR 0009 §12: also carries the concept's own types, gated by §6.3's
+/// single condition — an installed schema document for this context,
+/// never `mode` — resolved before `read_context` for the same deadlock
+/// reason `explore`/`activate` resolve `hidden_label` there (see
+/// `AppState::hidden_label`'s own doc).
 pub async fn describe(
     State(state): State<AppState>,
     AppPath(name): AppPath<String>,
@@ -36,7 +42,10 @@ pub async fn describe(
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }
-    match state.read_context(&name, |context| context.describe(&request.concept)) {
+    let type_label = tokio::task::block_in_place(|| state.hidden_label(&name));
+    match state.read_context(&name, |context| {
+        context.describe_typed(&request.concept, type_label)
+    }) {
         Ok(result) => {
             state.note_read(&name, result.is_none());
             ok(result, started_at)

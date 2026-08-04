@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::deadline::{Deadline, DeadlineExceeded};
 
@@ -200,35 +200,99 @@ impl Context {
     /// association materialized), then fetches only the relevant labels
     /// via [`Context::query_any`].
     pub fn describe(&self, concept: &str) -> Option<ConceptDescription> {
+        self.describe_typed(concept, None)
+    }
+
+    /// [`Context::describe`] plus the concept's own types (ADR 0009 §12):
+    /// every live `schema:type` object on this concept's outgoing edges,
+    /// name-ordered, asserted only — never `is_a`-expanded ("the expanded
+    /// set's size is a schema-authoring accident, not information the
+    /// caller needs," the same reasoning `schema::check` gives for
+    /// `TypeAssertions::asserted`). `type_label` is `None` for a
+    /// schema-free context — plain [`Context::describe`] is exactly this
+    /// call with it absent — since `Context` stays schema-unaware by
+    /// design (ADR 0009 §7.3); the caller resolves ADR 0009 §6.3's single
+    /// gate (an installed schema document exists) via
+    /// `AppState::hidden_label` and passes the reserved label through
+    /// only when that gate is open. `schema:type` is not excluded from
+    /// `as_subject`'s own tally — describe reports every live label a
+    /// concept carries, and the reserved label is a live label like any
+    /// other once a schema exists (§6.3 only excludes it from
+    /// activate/explore, the vocabulary block, and the twin sweep).
+    pub fn describe_typed(
+        &self,
+        concept: &str,
+        type_label: Option<&str>,
+    ) -> Option<ConceptDescription> {
         let &id = self.concept_ids.get(concept)?;
-        let tally = |edges: &mut dyn Iterator<Item = EdgeId>| -> Vec<LabelUsage> {
-            let mut counts: HashMap<LabelId, usize> = HashMap::new();
-            for edge_id in edges {
-                let edge = &self.edges[edge_id as usize];
-                // Skip retracted edges (count == 0): describe reports how
-                // often a label is used by LIVE facts, so a withdrawn one
-                // must not inflate the tally. Same dead-edge test as
-                // heaviest/compacted/the export.
-                if edge.count == 0 {
-                    continue;
+        let type_label_id = type_label.and_then(|label| self.label_ids.get(label).copied());
+        let mut types: BTreeSet<String> = BTreeSet::new();
+        let mut tally =
+            |edges: &mut dyn Iterator<Item = EdgeId>, collect_types: bool| -> Vec<LabelUsage> {
+                let mut counts: HashMap<LabelId, usize> = HashMap::new();
+                for edge_id in edges {
+                    let edge = &self.edges[edge_id as usize];
+                    // Skip retracted edges (count == 0): describe reports how
+                    // often a label is used by LIVE facts, so a withdrawn one
+                    // must not inflate the tally. Same dead-edge test as
+                    // heaviest/compacted/the export.
+                    if edge.count == 0 {
+                        continue;
+                    }
+                    if collect_types && type_label_id == Some(edge.label) {
+                        types.insert(self.concept_name(edge.object).to_string());
+                    }
+                    *counts.entry(edge.label).or_insert(0) += 1;
                 }
-                *counts.entry(edge.label).or_insert(0) += 1;
-            }
-            let mut usages: Vec<(LabelId, usize)> = counts.into_iter().collect();
-            usages.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-            usages
-                .into_iter()
-                .map(|(label_id, count)| LabelUsage {
-                    label: self.label_name(label_id).to_string(),
-                    count,
-                })
-                .collect()
-        };
+                let mut usages: Vec<(LabelId, usize)> = counts.into_iter().collect();
+                usages.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                usages
+                    .into_iter()
+                    .map(|(label_id, count)| LabelUsage {
+                        label: self.label_name(label_id).to_string(),
+                        count,
+                    })
+                    .collect()
+            };
+        // Type assertions are `{subject, "schema:type", object}` edges
+        // (ADR 0009 §6.3), so only the outgoing chain can ever carry
+        // one — the incoming call never collects.
+        let as_subject = tally(&mut self.outgoing(id), true);
+        let as_object = tally(&mut self.incoming(id), false);
         Some(ConceptDescription {
             concept: self.concept_name(id).to_string(),
-            as_subject: tally(&mut self.outgoing(id)),
-            as_object: tally(&mut self.incoming(id)),
+            as_subject,
+            as_object,
+            types: types.into_iter().collect(),
         })
+    }
+
+    /// A concept's live types only (ADR 0009 §12), without the label
+    /// tally `describe_typed` also does — [`resolve`](crate) attaches
+    /// this to its top candidates the same cheap way it already attaches
+    /// a gloss, one shared read after the tiers settle. Same walk, same
+    /// dead-edge skip, same gate as `describe_typed`; an unknown concept
+    /// answers empty rather than `None`, since a resolve candidate is by
+    /// construction a name the caller already has reason to believe
+    /// exists.
+    pub fn concept_types(&self, concept: &str, type_label: &str) -> Vec<String> {
+        let Some(&type_label_id) = self.label_ids.get(type_label) else {
+            return Vec::new();
+        };
+        let Some(&id) = self.concept_ids.get(concept) else {
+            return Vec::new();
+        };
+        let mut types: BTreeSet<String> = BTreeSet::new();
+        for edge_id in self.outgoing(id) {
+            let edge = &self.edges[edge_id as usize];
+            if edge.count == 0 {
+                continue;
+            }
+            if edge.label == type_label_id {
+                types.insert(self.concept_name(edge.object).to_string());
+            }
+        }
+        types.into_iter().collect()
     }
 
     /// The full relation-label vocabulary in insertion order — the
@@ -527,6 +591,71 @@ mod tests {
         );
 
         assert!(context.describe("存在しない概念").is_none());
+
+        // `describe` itself never gates on a type label — no schema, no
+        // types, byte-identical to the pre-#387 shape.
+        assert!(description.types.is_empty());
+    }
+    #[test]
+    fn describe_typed_reports_asserted_types_but_never_expands_them() {
+        let mut context = Context::default();
+        associate_profile(&mut context);
+        context
+            .associate_from("山田太郎", "schema:type", "Person", 1.0, "名簿", None)
+            .unwrap();
+        // A second type stays name-ordered against the first.
+        context
+            .associate("山田太郎", "schema:type", "Employee", 1.0)
+            .unwrap();
+
+        let described = context
+            .describe_typed("山田太郎", Some("schema:type"))
+            .unwrap();
+        assert_eq!(described.types, vec!["Employee", "Person"]);
+        // `schema:type` is not excluded from the label tally itself —
+        // ADR 0009 §6.3 only excludes it from activate/explore, the
+        // vocabulary block, and the twin sweep, never from describe.
+        assert!(
+            described
+                .as_subject
+                .iter()
+                .any(|usage| usage.label == "schema:type" && usage.count == 2)
+        );
+
+        // No `type_label` (a schema-free context's own call shape) never
+        // collects types, whatever edges exist.
+        let untyped = context.describe_typed("山田太郎", None).unwrap();
+        assert!(untyped.types.is_empty());
+
+        // A retracted type assertion does not linger — same dead-edge
+        // skip the label tally already uses.
+        context.retract_source("名簿");
+        let after_retraction = context
+            .describe_typed("山田太郎", Some("schema:type"))
+            .unwrap();
+        assert_eq!(after_retraction.types, vec!["Employee"]);
+    }
+    #[test]
+    fn concept_types_answers_empty_for_an_unknown_concept_or_type_label() {
+        let mut context = Context::default();
+        context
+            .associate("青嶺酒造", "schema:type", "Brewery", 1.0)
+            .unwrap();
+
+        assert_eq!(
+            context.concept_types("青嶺酒造", "schema:type"),
+            vec!["Brewery"]
+        );
+        assert!(
+            context
+                .concept_types("存在しない概念", "schema:type")
+                .is_empty()
+        );
+        assert!(
+            context
+                .concept_types("青嶺酒造", "存在しないラベル")
+                .is_empty()
+        );
     }
     #[test]
     fn query_any_pins_a_position_to_any_of_several_names() {

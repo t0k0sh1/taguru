@@ -396,11 +396,16 @@ class Taguru:
         subject: str | Sequence[str] | None = None,
         label: str | Sequence[str] | None = None,
         object: str | Sequence[str] | None = None,
+        subject_types: str | Sequence[str] | None = None,
+        object_types: str | Sequence[str] | None = None,
         limit: int | None = None,
         after: CrossMatchCursor | None = None,
     ) -> CrossMatchPage:
         """Exact-position query across several contexts at once, matches
-        tagged; the same target contract as :meth:`recall`."""
+        tagged; the same target contract as :meth:`recall`. ``subject_types``/
+        ``object_types`` further narrow by declared entity type (``is_a``-
+        expanded) when a target has an installed schema; a schema-free
+        target answers empty for a non-empty filter."""
         body = drop_none(
             {
                 "contexts": list(contexts) if contexts is not None else None,
@@ -408,6 +413,8 @@ class Taguru:
                 "subject": subject,
                 "label": label,
                 "object": object,
+                "subject_types": subject_types,
+                "object_types": object_types,
                 "limit": limit,
                 "after": after,
             }
@@ -827,15 +834,23 @@ class Context:
         subject: str | Sequence[str] | None = None,
         label: str | Sequence[str] | None = None,
         object: str | Sequence[str] | None = None,
+        subject_types: str | Sequence[str] | None = None,
+        object_types: str | Sequence[str] | None = None,
         limit: int | None = None,
         after: MatchCursor | None = None,
     ) -> MatchPage:
-        """Exact-position query; each position takes one name or an OR-set."""
+        """Exact-position query; each position takes one name or an OR-set.
+        ``subject_types``/``object_types`` further narrow by declared
+        entity type (``is_a``-expanded) when this context has an
+        installed schema; a schema-free context answers empty for a
+        non-empty filter."""
         body = drop_none(
             {
                 "subject": subject,
                 "label": label,
                 "object": object,
+                "subject_types": subject_types,
+                "object_types": object_types,
                 "limit": limit,
                 "after": after,
             }

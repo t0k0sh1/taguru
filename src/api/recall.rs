@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -10,8 +10,9 @@ use serde::{Deserialize, Serialize};
 use taguru::context::{Association, Context};
 use taguru::deadline::Deadline;
 
-use crate::metrics::{RetrievalCacheOp, SearchOp};
+use crate::metrics::{ErrorKind, RetrievalCacheOp, SearchOp};
 use crate::registry::AppState;
+use crate::schema::InstalledSchema;
 
 use super::aliases::{OneOrMany, as_refs, validate_positions};
 use super::groups::{scope_allows, scope_refusal};
@@ -19,7 +20,7 @@ use super::{
     AppJson, AppPath, CrossMatchPage, DEFAULT_MATCH_LIMIT, ErrorCode, MAX_MATCH_LIMIT, MatchCursor,
     MatchPage, MatchPlan, access_error, associations_out, bounded_parallel_map, cache_and_serve,
     clamp, cross_associations_out, cross_search_concurrency, deadline_exceeded, error,
-    group_not_found, ok, overlong, page, replay_cached_search, search_log_enabled,
+    group_not_found, not_found, ok, overlong, page, replay_cached_search, search_log_enabled,
 };
 
 #[derive(Debug, Deserialize)]
@@ -319,7 +320,7 @@ async fn cross_matches(
     op: SearchOp,
     limit: Option<usize>,
     after: Option<&CrossMatchCursor>,
-    search: impl Fn(&Context) -> Vec<Association> + Send + Sync + 'static,
+    search: impl Fn(&str, &Context) -> Vec<Association> + Send + Sync + 'static,
     started_at: Instant,
 ) -> Result<CrossPage, Box<Response>> {
     let limit = clamp(limit, DEFAULT_MATCH_LIMIT, MAX_MATCH_LIMIT);
@@ -327,7 +328,8 @@ async fn cross_matches(
     let owned_targets = Arc::clone(targets);
     let job_state = state.clone();
     let fetched = bounded_parallel_map(targets.len(), permits, move |index| {
-        job_state.read_context(&owned_targets[index], &search)
+        let name = &owned_targets[index];
+        job_state.read_context(name, |context| search(name, context))
     })
     .await;
 
@@ -380,6 +382,44 @@ pub struct CrossRecallRequest {
     /// Resume past a previous page's last match — see
     /// [`CrossMatchCursor`].
     pub after: Option<CrossMatchCursor>,
+}
+
+/// [`cross_query`]'s per-target sibling of `query`'s own schema
+/// resolution: every target's installed schema (absent entries mean no
+/// schema, ADR 0009 §6.3 guard 1), resolved for ALL targets up front —
+/// each `schema_of` slow path takes that target's own write lock, so
+/// like every other per-context lookup this handler needs, it cannot
+/// run from inside `cross_matches`'s `read_context` closures. A target
+/// that vanished between `cross_targets`'s existence check and here is
+/// left absent rather than refused here: the real per-target fetch
+/// inside `cross_matches` answers "does this context still exist" on
+/// its own, and repeating that refusal here would only race it. A load
+/// failure aborts the whole response, mirroring `cross_matches`'s own
+/// "first per-context failure aborts" contract.
+fn resolve_cross_type_schemas(
+    state: &AppState,
+    targets: &[String],
+    started_at: Instant,
+) -> Result<BTreeMap<String, Arc<InstalledSchema>>, Box<Response>> {
+    let mut schemas = BTreeMap::new();
+    for name in targets {
+        match tokio::task::block_in_place(|| state.schema_of(name)) {
+            None | Some(Ok(None)) => {}
+            Some(Ok(Some(schema))) => {
+                schemas.insert(name.clone(), schema);
+            }
+            Some(Err(message)) => {
+                tracing::warn!(context = %name, error = %message, "schema load failed");
+                state.metrics().record_error(ErrorKind::Load);
+                return Err(Box::new(error(
+                    ErrorCode::Internal,
+                    format!("context '{name}' schema could not be loaded — see server logs"),
+                    started_at,
+                )));
+            }
+        }
+    }
+    Ok(schemas)
 }
 
 /// [`recall`] across several named contexts at once, every match
@@ -453,7 +493,7 @@ pub async fn cross_recall(
         SearchOp::Recall,
         request.limit,
         request.after.as_ref(),
-        move |context| context.recall(&request.cue),
+        move |_name, context| context.recall(&request.cue),
         started_at,
     )
     .await;
@@ -496,10 +536,94 @@ pub struct QueryRequest {
     pub subject: Option<OneOrMany>,
     pub label: Option<OneOrMany>,
     pub object: Option<OneOrMany>,
+    /// ADR 0009 §12: an OR-set of declared types the SUBJECT must carry
+    /// (`is_a`-expanded), applied after the position pins, never a
+    /// substitute for one — `subject`/`label`/`object` still pin the
+    /// query, this only narrows what comes back. Gated by §6.3's single
+    /// condition (an installed schema document), not by `mode`; a
+    /// schema-free context answers empty for any non-empty filter,
+    /// exactly as it has no types to filter on.
+    pub subject_types: Option<OneOrMany>,
+    /// The same filter, applied to the OBJECT side.
+    pub object_types: Option<OneOrMany>,
     /// Omitted means 100.
     pub limit: Option<usize>,
     /// Resume past a previous page's last match — see [`MatchCursor`].
     pub after: Option<MatchCursor>,
+}
+
+/// Whether `subject_types`/`object_types` name at least one type — the
+/// only condition under which `query`/`cross_query` ever resolve a
+/// schema document at all, so a filter-free call keeps the exact
+/// zero-cost path it always took.
+fn has_type_filter(subject_types: &Option<OneOrMany>, object_types: &Option<OneOrMany>) -> bool {
+    !as_refs(subject_types).is_empty() || !as_refs(object_types).is_empty()
+}
+
+/// The same per-position length cap [`validate_positions`] applies to
+/// `subject`/`label`/`object`, extended to the type filters — they are
+/// list-shaped input too. Kept separate from `validate_positions`
+/// rather than folded in: a type filter is never an anchor (it cannot
+/// satisfy "at least one position pinned" on its own).
+fn overlong_type_filters(
+    subject_types: &Option<OneOrMany>,
+    object_types: &Option<OneOrMany>,
+    started_at: Instant,
+) -> Option<Response> {
+    [
+        ("subject_types", subject_types),
+        ("object_types", object_types),
+    ]
+    .into_iter()
+    .find_map(|(field, position)| overlong(field, as_refs(position).len(), started_at))
+}
+
+/// ADR 0009 §12's `query` type filter, applied to `query_any`'s output
+/// before paging — so `total` reflects the filtered count, exactly as
+/// every other `query`/`recall` cut already does. `schema` is `None`
+/// for a context with no installed schema document (§6.3 guard 1),
+/// under which a non-empty filter can only ever match nothing: no
+/// concept in that context has ever been typed. Scoped to exactly the
+/// concepts these matches mention, on whichever side(s) a filter was
+/// asked for — the same narrowest-read discipline
+/// `schema::expanded_type_sets` documents.
+fn type_filter(
+    context: &Context,
+    schema: Option<&InstalledSchema>,
+    subject_types: &Option<OneOrMany>,
+    object_types: &Option<OneOrMany>,
+    matches: Vec<Association>,
+) -> Vec<Association> {
+    let subject_wanted: BTreeSet<&str> = as_refs(subject_types).into_iter().collect();
+    let object_wanted: BTreeSet<&str> = as_refs(object_types).into_iter().collect();
+    if subject_wanted.is_empty() && object_wanted.is_empty() {
+        return matches;
+    }
+    let Some(schema) = schema else {
+        return Vec::new();
+    };
+    let mut concepts: BTreeSet<&str> = BTreeSet::new();
+    if !subject_wanted.is_empty() {
+        concepts.extend(matches.iter().map(|assoc| assoc.subject.as_str()));
+    }
+    if !object_wanted.is_empty() {
+        concepts.extend(matches.iter().map(|assoc| assoc.object.as_str()));
+    }
+    let concepts: Vec<&str> = concepts.into_iter().collect();
+    let types = crate::schema::expanded_type_sets(context, schema, &concepts);
+    let matches_wanted = |concept: &str, wanted: &BTreeSet<&str>| {
+        wanted.is_empty()
+            || types
+                .get(concept)
+                .is_some_and(|declared| declared.iter().any(|t| wanted.contains(t.as_str())))
+    };
+    matches
+        .into_iter()
+        .filter(|assoc| {
+            matches_wanted(&assoc.subject, &subject_wanted)
+                && matches_wanted(&assoc.object, &object_wanted)
+        })
+        .collect()
 }
 
 pub async fn query(
@@ -517,11 +641,18 @@ pub async fn query(
     ) {
         return refusal;
     }
+    if let Some(refusal) =
+        overlong_type_filters(&request.subject_types, &request.object_types, started_at)
+    {
+        return refusal;
+    }
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }
     // Same shape as `recall`'s key: tagged against the cross variant,
-    // pin lists in position order, limit pre-clamped.
+    // pin lists in position order, limit pre-clamped. ADR 0009 §12's
+    // type filters ride the same key — a filtered and an unfiltered
+    // call for identical positions must never share a cached page.
     let key = state.retrieval_key(
         RetrievalCacheOp::Query,
         std::slice::from_ref(&name),
@@ -530,6 +661,8 @@ pub async fn query(
             as_refs(&request.subject),
             as_refs(&request.label),
             as_refs(&request.object),
+            as_refs(&request.subject_types),
+            as_refs(&request.object_types),
             clamp(request.limit, DEFAULT_MATCH_LIMIT, MAX_MATCH_LIMIT),
             request.after.as_ref(),
         ))
@@ -554,11 +687,40 @@ pub async fn query(
         }
         return ok(found.payload.as_ref(), started_at);
     }
+    // ADR 0009 §12/§6.3: resolved before `read_context` — the same
+    // deadlock rule `describe`/`explore` follow (`AppState::hidden_label`'s
+    // own doc): `schema_of`'s slow path takes this entry's write lock,
+    // which a `read_context` closure already holds the read side of.
+    // Skipped entirely when neither filter was asked for.
+    let schema = if has_type_filter(&request.subject_types, &request.object_types) {
+        match tokio::task::block_in_place(|| state.schema_of(&name)) {
+            None => return not_found(&name, started_at),
+            Some(Ok(schema)) => schema,
+            Some(Err(message)) => {
+                tracing::warn!(context = %name, error = %message, "schema load failed");
+                state.metrics().record_error(ErrorKind::Load);
+                return error(
+                    ErrorCode::Internal,
+                    format!("context '{name}' schema could not be loaded — see server logs"),
+                    started_at,
+                );
+            }
+        }
+    } else {
+        None
+    };
     match state.read_context(&name, |context| {
-        context.query_any(
+        let matches = context.query_any(
             &as_refs(&request.subject),
             &as_refs(&request.label),
             &as_refs(&request.object),
+        );
+        type_filter(
+            context,
+            schema.as_deref(),
+            &request.subject_types,
+            &request.object_types,
+            matches,
         )
     }) {
         Ok(result) => {
@@ -610,6 +772,11 @@ pub struct CrossQueryRequest {
     pub subject: Option<OneOrMany>,
     pub label: Option<OneOrMany>,
     pub object: Option<OneOrMany>,
+    /// [`QueryRequest::subject_types`], cross-context — evaluated
+    /// per-target against that target's own installed schema (or none).
+    pub subject_types: Option<OneOrMany>,
+    /// [`QueryRequest::object_types`], cross-context.
+    pub object_types: Option<OneOrMany>,
     /// Omitted means 100.
     pub limit: Option<usize>,
     /// Resume past a previous page's last match — see
@@ -637,6 +804,11 @@ pub async fn cross_query(
     ) {
         return refusal;
     }
+    if let Some(refusal) =
+        overlong_type_filters(&request.subject_types, &request.object_types, started_at)
+    {
+        return refusal;
+    }
     let targets = match cross_targets(
         &state,
         &scope,
@@ -652,7 +824,8 @@ pub async fn cross_query(
         return deadline_exceeded(started_at);
     }
     // Same resolved-target keying as `cross_recall` — see the comment
-    // there.
+    // there. ADR 0009 §12's type filters ride the key exactly as they
+    // do in `query`.
     let key = state.retrieval_key(
         RetrievalCacheOp::Query,
         &targets,
@@ -661,6 +834,8 @@ pub async fn cross_query(
             as_refs(&request.subject),
             as_refs(&request.label),
             as_refs(&request.object),
+            as_refs(&request.subject_types),
+            as_refs(&request.object_types),
             clamp(request.limit, DEFAULT_MATCH_LIMIT, MAX_MATCH_LIMIT),
             request.after.as_ref(),
         ))
@@ -685,6 +860,18 @@ pub async fn cross_query(
         }
         return ok(found.payload.as_ref(), started_at);
     }
+    // ADR 0009 §12/§6.3: every target's schema, resolved before
+    // `cross_matches` fans out — see `resolve_cross_type_schemas`'s own
+    // doc for why it cannot run from inside a target's `read_context`
+    // closure. Skipped entirely when neither filter was asked for.
+    let schemas = if has_type_filter(&request.subject_types, &request.object_types) {
+        match resolve_cross_type_schemas(&state, &targets, started_at) {
+            Ok(schemas) => schemas,
+            Err(refusal) => return *refusal,
+        }
+    } else {
+        BTreeMap::new()
+    };
     // Computed before `search` moves `subject`/`label`/`object` out of
     // `request` — `OneOrMany` has no `Clone` to fall back on.
     let subject_log = as_refs(&request.subject).join(",");
@@ -696,11 +883,18 @@ pub async fn cross_query(
         SearchOp::Query,
         request.limit,
         request.after.as_ref(),
-        move |context| {
-            context.query_any(
+        move |target, context| {
+            let matches = context.query_any(
                 &as_refs(&request.subject),
                 &as_refs(&request.label),
                 &as_refs(&request.object),
+            );
+            type_filter(
+                context,
+                schemas.get(target).map(Arc::as_ref),
+                &request.subject_types,
+                &request.object_types,
+                matches,
             )
         },
         started_at,

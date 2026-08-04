@@ -247,7 +247,15 @@ pub fn route_tool(
             Some(pick(
                 arguments,
                 &[
-                    "contexts", "groups", "subject", "label", "object", "limit", "after",
+                    "contexts",
+                    "groups",
+                    "subject",
+                    "label",
+                    "object",
+                    "subject_types",
+                    "object_types",
+                    "limit",
+                    "after",
                 ],
             )),
         ),

@@ -130,6 +130,43 @@ describe("envelope and raw-body handling", () => {
     expect(bodies[0]).toBe('{"subject":"高瀬","label":["住所","職歴"]}');
   });
 
+  it("query sends subject_types and object_types", async () => {
+    // ADR 0009 §12: the type filter rides the request body beside the
+    // position pins, dropped like every other absent field when omitted.
+    const bodies: Array<string | undefined> = [];
+    const client = stubClient((req) => {
+      bodies.push(req.body);
+      return okBody({ total: 0, matches: [] });
+    });
+    await client
+      .context("sake")
+      .query({ subject: "青嶺酒造", subject_types: ["Brewery", "Organization"] });
+    expect(bodies[0]).toBe(
+      '{"subject":"青嶺酒造","subject_types":["Brewery","Organization"]}',
+    );
+  });
+
+  it("describe and resolve decode types", async () => {
+    // ADR 0009 §12's read-side types decode into the existing interfaces
+    // without any special casing.
+    const described = stubClient(() =>
+      okBody({
+        concept: "青嶺酒造",
+        as_subject: [],
+        as_object: [],
+        types: ["Brewery", "Organization"],
+      }),
+    );
+    const outline = await described.context("sake").describe("青嶺酒造");
+    expect(outline?.types).toEqual(["Brewery", "Organization"]);
+
+    const resolved = stubClient(() =>
+      okBody([{ name: "青嶺酒造", score: 1.0, tier: "lexical", types: ["Brewery"] }]),
+    );
+    const candidates = await resolved.context("sake").resolve("青嶺");
+    expect(candidates[0]?.types).toEqual(["Brewery"]);
+  });
+
   it("#60: after cursor rides the request body verbatim", async () => {
     // The client mints no cursor of its own — it only relays the last
     // page's last row back to the server, whatever shape it has.
