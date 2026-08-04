@@ -124,10 +124,13 @@ pub(crate) async fn run(config: Option<PathBuf>) {
                         reattach_authorization,
                     ));
                 async move {
-                    // Only `initialize` reads the manual — a tool call
-                    // must never spend its budget probing shards for
-                    // text it will not use (with every shard down, the
-                    // probes would eat the whole deadline first).
+                    // Only `initialize` and `server/discover` read the
+                    // manual — both carry it as `instructions` — so only
+                    // they pay the shard probe (once; the result is
+                    // cached). A tool call must never spend its budget
+                    // probing shards for text it will not use (with
+                    // every shard down, the probes would eat the whole
+                    // deadline first).
                     let instructions = if wants_instructions(&body) {
                         state.mcp_instructions(deadline).await
                     } else {

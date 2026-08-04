@@ -662,7 +662,11 @@ fn dispatch(bridge: &Bridge, instructions: &str, classified: mcp::Message) -> Op
 /// — used directly by the tests below. `main`'s loop does not call
 /// this: it needs to see the classified message itself first, to queue
 /// a `tools/call` for the tool worker pool instead (see `dispatch`'s
-/// doc).
+/// doc). This is therefore a MIRROR of that loop's gate order — batch
+/// rejection, then version rejection, then dispatch — and a gate
+/// added or reordered there must be reflected here in the same move,
+/// or the tests keep passing against an order production no longer
+/// runs.
 #[cfg(test)]
 fn handle(bridge: &Bridge, instructions: &str, message: &Value) -> Option<Value> {
     if message.is_array() {

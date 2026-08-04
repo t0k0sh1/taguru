@@ -1180,6 +1180,16 @@ mod tests {
             }))
             .is_none()
         );
+        // An id of a type JSON-RPC forbids never reaches -32022 either:
+        // it falls through to the ordinary InvalidId refusal, so the
+        // malformed id is not echoed into this error's body.
+        assert!(
+            modern_version_rejection(&json!({
+                "jsonrpc": "2.0", "id": [1], "method": "tools/list",
+                "params": {"_meta": {META_PROTOCOL_VERSION: "2099-01-01"}},
+            }))
+            .is_none()
+        );
     }
 
     #[test]

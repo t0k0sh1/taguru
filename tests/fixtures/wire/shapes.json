@@ -17,6 +17,7 @@
     "/contexts/{name}/evidence": ["origins"]
   },
   "enums": {
+    "response.resultType": ["complete"],
     "response.code": [
       "malformed_request",
       "invalid_argument",

@@ -271,19 +271,31 @@ enum Era {
 /// `UnsupportedProtocolVersion` (-32022), each under HTTP 400, which
 /// the caller stamps on.
 ///
-/// A legacy version in `MCP-Protocol-Version` alone selects
+/// A non-modern version in `MCP-Protocol-Version` alone selects
 /// [`Era::Legacy`]: clients have mirrored that header since 2025-06-18,
-/// so its mere presence proves nothing about the era.
+/// so its mere presence proves nothing about the era — and it may name
+/// a legacy revision this build never listed (2025-11-25 was skipped
+/// entirely), which deserves the same tolerance `initialize` extends
+/// to an unrecognized proposed version, not a refusal.
 fn modern_gate(headers: &HeaderMap, message: &Value, id: &Value) -> Result<Era, Value> {
-    let header_version = headers
-        .get("mcp-protocol-version")
-        .and_then(|value| value.to_str().ok());
+    // "Present but unreadable" must not collapse into "absent": a
+    // malformed value is exactly what the spec's server validation
+    // names for -32020, and folding it to None would let it ride the
+    // legacy path unexamined.
+    let header_version = match headers.get("mcp-protocol-version") {
+        None => None,
+        Some(value) => match value.to_str() {
+            Ok(text) => Some(text),
+            Err(_) => {
+                return Err(header_mismatch(
+                    id,
+                    "MCP-Protocol-Version header is not readable as ASCII".to_string(),
+                ));
+            }
+        },
+    };
     let meta_version = mcp::request_protocol_version(message);
     let version = match (meta_version, header_version) {
-        (None, None) => return Ok(Era::Legacy),
-        (None, Some(header)) if mcp::SUPPORTED_PROTOCOL_VERSIONS.contains(&header) => {
-            return Ok(Era::Legacy);
-        }
         (None, Some(header)) if mcp::MODERN_PROTOCOL_VERSIONS.contains(&header) => {
             return Err(header_mismatch(
                 id,
@@ -294,7 +306,9 @@ fn modern_gate(headers: &HeaderMap, message: &Value, id: &Value) -> Result<Era, 
                 ),
             ));
         }
-        (None, Some(header)) => return Err(unsupported_version(id, header)),
+        // No `_meta` and no modern header: the legacy contract, whatever
+        // (if anything) the header names — see the doc comment above.
+        (None, _) => return Ok(Era::Legacy),
         (Some(meta), Some(header)) if meta != header => {
             return Err(header_mismatch(
                 id,
@@ -1057,6 +1071,40 @@ mod tests {
         .await;
         assert_eq!(status, 200);
         assert!(reply["error"].is_null(), "{reply}");
+
+        // A legacy revision this build never listed (2025-11-25 was
+        // skipped entirely) still selects the legacy contract — before
+        // the modern gate existed this header was ignored outright, and
+        // growing a 400 here would break every client speaking it.
+        let mut unlisted_header = HeaderMap::new();
+        unlisted_header.insert("mcp-protocol-version", "2025-11-25".parse().unwrap());
+        let (status, reply) = roundtrip(
+            unlisted_header,
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" }),
+        )
+        .await;
+        assert_eq!(status, 200, "{reply}");
+        assert!(reply["error"].is_null(), "{reply}");
+    }
+
+    /// "Present but unreadable" is not "absent": a version header that
+    /// cannot even be read as ASCII is malformed per the spec's server
+    /// validation — refused with -32020, never quietly ridden into the
+    /// legacy path as if no header had been sent.
+    #[tokio::test]
+    async fn an_unreadable_version_header_is_refused_not_treated_as_absent() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "mcp-protocol-version",
+            axum::http::HeaderValue::from_bytes(&[0xFF, 0xFE]).unwrap(),
+        );
+        let (status, reply) = roundtrip(
+            headers,
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" }),
+        )
+        .await;
+        assert_eq!(status, 400, "{reply}");
+        assert_eq!(reply["error"]["code"], -32020, "{reply}");
     }
 
     /// Every shape of header/body disagreement the spec's server
@@ -1083,6 +1131,15 @@ mod tests {
                 modern_body("tools/list", json!({})),
             ),
             (
+                // Present but disagreeing with the body's method: a
+                // different arm from the missing-header case above.
+                modern_headers("tools/call", Some("list_contexts")),
+                modern_body(
+                    "tools/list",
+                    json!({ "name": "list_contexts", "arguments": {} }),
+                ),
+            ),
+            (
                 modern_headers("tools/call", Some("delete_context")),
                 modern_body(
                     "tools/call",
@@ -1104,9 +1161,13 @@ mod tests {
         }
     }
 
-    /// A version this build does not implement — declared consistently,
-    /// or via the header alone — earns 400 with
-    /// `UnsupportedProtocolVersionError` and the list to retry from.
+    /// A version this build does not implement, DECLARED in `_meta`,
+    /// earns 400 with `UnsupportedProtocolVersionError` and the list to
+    /// retry from. The header alone triggers no such refusal: without
+    /// `_meta` the request is a legacy one whatever the header names
+    /// (see `legacy_requests_are_untouched_by_the_modern_gate`) — only
+    /// a client that actually speaks the stateless era, proven by the
+    /// `_meta` field, can be asked to retry from `data.supported`.
     #[tokio::test]
     async fn an_unimplemented_version_is_refused_with_the_supported_list() {
         let mut headers = HeaderMap::new();
@@ -1131,8 +1192,8 @@ mod tests {
             json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
         )
         .await;
-        assert_eq!(status, 400);
-        assert_eq!(reply["error"]["code"], -32022, "{reply}");
+        assert_eq!(status, 200, "{reply}");
+        assert!(reply["error"].is_null(), "{reply}");
     }
 
     /// 2026-07-28 pins an unimplemented RPC to HTTP 404 (the JSON-RPC
