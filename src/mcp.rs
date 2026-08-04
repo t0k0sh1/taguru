@@ -65,6 +65,10 @@ mod tests {
             "subject": "s", "label": "l", "object": "o",
             "schema": 1, "mode": "strict", "closed_labels": false,
             "types": {}, "relations": {},
+            "document": {
+                "schema": 1, "mode": "strict", "closed_labels": false,
+                "types": {}, "relations": {},
+            },
         });
         for tool in tool_definitions() {
             let name = tool["name"].as_str().expect("definitions carry names");
@@ -269,6 +273,10 @@ mod tests {
             "subject": "s", "label": "l", "object": "o",
             "schema": 1, "mode": "strict", "closed_labels": false,
             "types": {}, "relations": {},
+            "document": {
+                "schema": 1, "mode": "strict", "closed_labels": false,
+                "types": {}, "relations": {},
+            },
         });
         let cases = [
             ("rename_context", "to"),
@@ -299,6 +307,7 @@ mod tests {
             ("put_schema", "closed_labels"),
             ("put_schema", "types"),
             ("put_schema", "relations"),
+            ("validate_schema", "document"),
         ];
         for (tool, key) in cases {
             let mut arguments = base.clone();
@@ -598,12 +607,14 @@ mod tests {
     /// the downstream Rust struct would reject anyway.
     #[test]
     fn search_and_audit_tools_advertise_after() {
-        let cases: [(&str, &[&str]); 5] = [
+        let cases: [(&str, &[&str]); 7] = [
             ("query", &["weight", "subject", "label", "object"]),
             ("recall", &["weight", "subject", "label", "object"]),
             ("explore", &["distance", "subject", "label", "object"]),
             ("audit_coverage", &["weight", "subject", "label", "object"]),
             ("audit_drift", &["weight", "subject", "label", "object"]),
+            ("audit_schema", &["weight", "subject", "label", "object"]),
+            ("validate_schema", &["weight", "subject", "label", "object"]),
         ];
         for (name, required) in cases {
             let tool = tool_definitions()

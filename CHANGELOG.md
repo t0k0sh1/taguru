@@ -8,6 +8,36 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- `POST /contexts/{name}/schema/audit` and `POST
+  /contexts/{name}/schema/validate` (#385, S7 of #218's ADR 0009 split
+  §10). `audit` judges every live association against the resident
+  document; `validate` takes a *proposed* document instead and never
+  persists it — the pre-flight §7.1 promises before a `strict` flip.
+  Both share one judgment (`schema_audit`, `src/api/schema.rs`) built
+  on the same `schema_issues`/`SchemaEnv` pure check every write
+  entrance already uses (S3, #381), so a finding here is exactly what
+  `strict` would refuse for the identical fact. Deliberately
+  mode-independent: §7.1's whole reason for this route to exist is that
+  pre-existing violations are otherwise invisible, so `audit`/`validate`
+  judge as `strict` would regardless of the document's actual `mode` —
+  an `off` or `warn` context reports the same violations a `strict` one
+  does. Four candidates-not-verdicts sections in one `DriftAudit`-shaped
+  response, framed exactly like `audit_vocabulary`'s own doc — nothing
+  is ever auto-applied: `violations` (domain/range mismatches, the only
+  section that pages, worst-magnitude-first like every other match
+  list), `untyped_concepts`, `undeclared_types` (§6.2, always reported
+  regardless of `closed_labels`), `unknown_labels` (§6.4, only under
+  `closed_labels`, never naming `schema:type` itself), and
+  `reserved_alias_conflicts` (§6.3 guard 2's install-time bullet, read
+  back — only reachable through `validate`, since `PUT /schema` itself
+  already refuses to install over such a conflict). Deprecated-relation
+  usage is explicitly **not** in scope here — §9.2 defers it until a
+  follow-up ADR gives the document a field to mark a relation
+  deprecated. Both routes are `Role::Read` and O(edges) with no cheap
+  variant, joining the unconditional heavy-ops group beside
+  `audit_vocabulary`/`compact_context` rather than `audit_drift`'s
+  conditional-extension pattern. `audit_schema`/`validate_schema` MCP
+  tools round-trip onto the same two routes.
 - The `taguru_schema` export/import stream record and its replication
   parity (#384, S6 of #218's ADR 0009 split §13). `export::render`
   emits it as the FIRST line of a context's stream, only when the

@@ -692,6 +692,20 @@ fn a_replica_serves_reads_tails_the_writer_and_refuses_writes() {
         json!({"醸造所": {"is_a": []}}),
         "{sake_schema}"
     );
+    // `schema/audit` and `schema/validate` (#385, ADR 0009 §12.5) are
+    // Role::Read too — neither writes anything, so both pass the
+    // replica gate exactly like `GET /schema` above.
+    let audit = replica.ok("POST", "/contexts/sake/schema/audit", None);
+    assert_eq!(audit["total"], json!(0), "{audit}");
+    let validated = replica.ok(
+        "POST",
+        "/contexts/sake/schema/validate",
+        Some(json!({"document": {
+            "schema": 1, "mode": "strict", "closed_labels": false,
+            "types": {}, "relations": {}
+        }})),
+    );
+    assert_eq!(validated["total"], json!(0), "{validated}");
 
     // The scrape carries the replica shape from boot; the generation
     // gauge lands with the tailer's first poll.

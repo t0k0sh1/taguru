@@ -365,23 +365,54 @@ pub(crate) struct SchemaCheck {
     pub(crate) violations: Vec<Issue>,
 }
 
+/// `Issue.path`'s grammar. A write entrance names a coordinate within
+/// its own request body (ADR 0009 §8.2's two prefixes); ADR 0009 §10's
+/// audit has no such coordinate — the offending association travels
+/// alongside its issues in `SchemaViolationOut`, so `path` there need
+/// only name which side of that one association fired.
+pub(crate) enum IssuePath<'a> {
+    /// `{prefix}associations[{index}].{side}` — `""` for
+    /// `POST /contexts/{name}/associations` (paths read
+    /// `associations[{i}]...`), `"batches[{b}]."` for
+    /// `POST /import`/`taguru import` (paths read
+    /// `batches[{b}].associations[{a}]...`).
+    Request { prefix: &'a str },
+    /// `subject` / `object` / `label` alone — §10's audit calls
+    /// [`schema_issues`] once per association (`ops.len() == 1`), so no
+    /// request-body index ever applies.
+    Edge,
+}
+
+impl IssuePath<'_> {
+    fn associations_field(&self, index: usize, side: &str) -> String {
+        match self {
+            Self::Request { prefix } => format!("{prefix}associations[{index}].{side}"),
+            Self::Edge => side.to_string(),
+        }
+    }
+
+    fn labels_field(&self, alias: &str) -> String {
+        match self {
+            Self::Request { prefix } => format!("{prefix}labels['{alias}']"),
+            Self::Edge => format!("labels['{alias}']"),
+        }
+    }
+}
+
 /// The one function every schema-checking write entrance calls — S4
 /// (#382, `predicted_schema_rejection`/`preview_batch`) and S5 (#383,
 /// the associations handler's pre-write arm) alike, so the two
-/// entrances cannot drift apart (this module's own doc). `env` must
-/// have been built from this exact `ops` slice — [`SchemaEnv`]'s maps
-/// only cover the spellings those ops mention. `path_prefix` folds ADR
-/// 0009 §8.2's two path grammars into one: `""` for
-/// `POST /contexts/{name}/associations` (paths read
-/// `associations[{i}]...`), `"batches[{b}]."` for
-/// `POST /import`/`taguru import` (paths read
-/// `batches[{b}].associations[{a}]...`).
-pub(crate) fn schema_issues(env: &SchemaEnv, ops: &[AssocOp], path_prefix: &str) -> SchemaCheck {
+/// entrances cannot drift apart (this module's own doc); S7 (#385)'s
+/// audit reuses it too, one association at a time, via
+/// [`IssuePath::Edge`]. `env` must have been built from this exact
+/// `ops` slice — [`SchemaEnv`]'s maps only cover the spellings those
+/// ops mention.
+pub(crate) fn schema_issues(env: &SchemaEnv, ops: &[AssocOp], path: IssuePath<'_>) -> SchemaCheck {
     let reserved = env
         .declared_labels
         .iter()
         .filter(|(_, canonical)| canonical.as_str() == SCHEMA_TYPE_LABEL)
-        .map(|(alias, _)| reserved_alias_issue(path_prefix, alias))
+        .map(|(alias, _)| reserved_alias_issue(&path, alias))
         .collect();
 
     let document = env.schema.document();
@@ -410,7 +441,7 @@ pub(crate) fn schema_issues(env: &SchemaEnv, ops: &[AssocOp], path_prefix: &str)
                 let subject_types = env.types_for(&op.subject);
                 if side_violates(&relation.domain, subject_types) {
                     violations.push(Issue::domain(
-                        format!("{path_prefix}associations[{index}].subject"),
+                        path.associations_field(index, "subject"),
                         expected_types(&op.subject, &relation.domain, resolved_label),
                         actual_types(subject_types),
                     ));
@@ -418,7 +449,7 @@ pub(crate) fn schema_issues(env: &SchemaEnv, ops: &[AssocOp], path_prefix: &str)
                 let object_types = env.types_for(&op.object);
                 if side_violates(&relation.range, object_types) {
                     violations.push(Issue::range_type(
-                        format!("{path_prefix}associations[{index}].object"),
+                        path.associations_field(index, "object"),
                         expected_types(&op.object, &relation.range, resolved_label),
                         actual_types(object_types),
                     ));
@@ -429,7 +460,7 @@ pub(crate) fn schema_issues(env: &SchemaEnv, ops: &[AssocOp], path_prefix: &str)
             // never mind whether `closed_labels` is set.
             None if document.closed_labels => {
                 violations.push(Issue::undeclared_label(
-                    format!("{path_prefix}associations[{index}].label"),
+                    path.associations_field(index, "label"),
                     "a label declared in this context's schema (closed_labels)",
                 ));
             }
@@ -443,9 +474,9 @@ pub(crate) fn schema_issues(env: &SchemaEnv, ops: &[AssocOp], path_prefix: &str)
     }
 }
 
-fn reserved_alias_issue(path_prefix: &str, alias: &str) -> Issue {
+fn reserved_alias_issue(path: &IssuePath<'_>, alias: &str) -> Issue {
     Issue::conflict(
-        format!("{path_prefix}labels['{alias}']"),
+        path.labels_field(alias),
         "a canonical spelling other than the one reserved for type assertions",
         format!(
             "resolves to '{SCHEMA_TYPE_LABEL}', the relation label reserved for type \
@@ -577,7 +608,7 @@ mod tests {
                 retracted_source: None,
             },
         );
-        let check = schema_issues(&env, &ops, "");
+        let check = schema_issues(&env, &ops, IssuePath::Request { prefix: "" });
         assert_eq!(check.violations.len(), 0, "off never judges");
         assert_eq!(
             check.reserved.len(),
@@ -603,7 +634,7 @@ mod tests {
                     retracted_source: None,
                 },
             );
-            let check = schema_issues(&env, &ops, "");
+            let check = schema_issues(&env, &ops, IssuePath::Request { prefix: "" });
             assert_eq!(check.reserved.len(), 1, "mode {mode:?}");
             assert!(
                 check.reserved[0].path.contains("型"),
@@ -622,7 +653,7 @@ mod tests {
         let schema = installed(doc(SchemaMode::Strict, false));
         let ops = [assoc_op("山田太郎", "杜氏", "鈴木一郎", 1.0, None)];
         let env = env(&context, schema, &ops);
-        let check = schema_issues(&env, &ops, "");
+        let check = schema_issues(&env, &ops, IssuePath::Request { prefix: "" });
         assert_eq!(
             check.violations.len(),
             1,
@@ -655,7 +686,7 @@ mod tests {
         let schema = installed(doc(SchemaMode::Strict, false));
         let ops = [assoc_op("青嶺酒造", "杜氏", "醸造所", 1.0, None)];
         let env = env(&context, schema, &ops);
-        let check = schema_issues(&env, &ops, "");
+        let check = schema_issues(&env, &ops, IssuePath::Request { prefix: "" });
         assert_eq!(check.violations.len(), 1);
         let issue = &check.violations[0];
         assert_eq!(issue.kind, "range");
@@ -672,7 +703,7 @@ mod tests {
             .unwrap();
         let ops = [assoc_op("青嶺酒造", "所在地", "広島", 1.0, None)];
         let env = env(&context, schema, &ops);
-        let check = schema_issues(&env, &ops, "");
+        let check = schema_issues(&env, &ops, IssuePath::Request { prefix: "" });
         assert_eq!(check.violations.len(), 0);
     }
 
@@ -682,7 +713,7 @@ mod tests {
         let schema = installed(doc(SchemaMode::Strict, false));
         let ops = [assoc_op("青嶺酒造", "杜氏", "山田太郎", 1.0, None)];
         let env = env(&context, schema, &ops);
-        let check = schema_issues(&env, &ops, "");
+        let check = schema_issues(&env, &ops, IssuePath::Request { prefix: "" });
         assert_eq!(
             check.violations.len(),
             0,
@@ -708,7 +739,7 @@ mod tests {
         let schema = installed(document);
         let ops = [assoc_op("青嶺酒造", "所属", "山田太郎", 1.0, None)];
         let env = env(&context, schema, &ops);
-        let check = schema_issues(&env, &ops, "");
+        let check = schema_issues(&env, &ops, IssuePath::Request { prefix: "" });
         assert_eq!(
             check.violations.len(),
             0,
@@ -741,7 +772,7 @@ mod tests {
         let schema = installed(document);
         let ops = [assoc_op("青嶺酒造", "所属", "山田太郎", 1.0, None)];
         let env = env(&context, schema, &ops);
-        let check = schema_issues(&env, &ops, "");
+        let check = schema_issues(&env, &ops, IssuePath::Request { prefix: "" });
         assert_eq!(check.violations.len(), 0);
     }
 
@@ -762,7 +793,7 @@ mod tests {
             None,
         )];
         let env = env(&context, schema, &ops);
-        let check = schema_issues(&env, &ops, "");
+        let check = schema_issues(&env, &ops, IssuePath::Request { prefix: "" });
         assert_eq!(check.violations.len(), 0);
     }
 
@@ -775,7 +806,7 @@ mod tests {
             assoc_op("青嶺酒造", SCHEMA_TYPE_LABEL, "Brewery", 1.0, None),
         ];
         let env = env(&context, schema, &ops);
-        let check = schema_issues(&env, &ops, "");
+        let check = schema_issues(&env, &ops, IssuePath::Request { prefix: "" });
         assert_eq!(check.violations.len(), 1, "{:?}", check.violations);
         assert_eq!(check.violations[0].kind, "unknown_reference");
         assert_eq!(check.violations[0].path, "associations[0].label");
@@ -792,7 +823,7 @@ mod tests {
         // The op uses the alias spelling, not the canonical one.
         let ops = [assoc_op("青嶺", "杜氏", "山田太郎", 1.0, None)];
         let env = env(&context, schema, &ops);
-        let check = schema_issues(&env, &ops, "");
+        let check = schema_issues(&env, &ops, IssuePath::Request { prefix: "" });
         assert_eq!(
             check.violations.len(),
             1,
@@ -829,7 +860,7 @@ mod tests {
             assoc_op("青嶺酒造", "所属", "山田太郎", 1.0, None),
         ];
         let env = env(&context, schema, &ops);
-        let check = schema_issues(&env, &ops, "");
+        let check = schema_issues(&env, &ops, IssuePath::Request { prefix: "" });
         assert_eq!(
             check.violations.len(),
             0,
@@ -863,7 +894,7 @@ mod tests {
                 retracted_source: Some("gone.md"),
             },
         );
-        let check = schema_issues(&env, &ops, "");
+        let check = schema_issues(&env, &ops, IssuePath::Request { prefix: "" });
         assert_eq!(
             check.violations.len(),
             0,
@@ -907,7 +938,7 @@ mod tests {
                 retracted_source: Some("gone.md"),
             },
         );
-        let check = schema_issues(&env, &ops, "");
+        let check = schema_issues(&env, &ops, IssuePath::Request { prefix: "" });
         assert_eq!(
             check.violations.len(),
             1,
@@ -924,7 +955,7 @@ mod tests {
         let schema = installed(doc(SchemaMode::Strict, false));
         let ops = [assoc_op("青嶺酒造", "杜氏", "山田太郎", 1.0, None)];
         let env = env(&context, schema, &ops);
-        let check = schema_issues(&env, &ops, "");
+        let check = schema_issues(&env, &ops, IssuePath::Request { prefix: "" });
         assert_eq!(check.violations.len(), 1);
     }
 
@@ -938,7 +969,7 @@ mod tests {
         let schema = installed(doc(SchemaMode::Strict, false));
         let ops = [assoc_op("青嶺酒造", "杜氏", "山田太郎", 1.0, None)];
         let env = env(&context, schema, &ops);
-        let check = schema_issues(&env, &ops, "");
+        let check = schema_issues(&env, &ops, IssuePath::Request { prefix: "" });
         assert_eq!(
             check.violations.len(),
             0,
@@ -955,7 +986,7 @@ mod tests {
         let schema = installed(doc(SchemaMode::Strict, false));
         let ops = [assoc_op("山田太郎", "杜氏", "鈴木一郎", -1.0, None)];
         let env = env(&context, schema, &ops);
-        let check = schema_issues(&env, &ops, "");
+        let check = schema_issues(&env, &ops, IssuePath::Request { prefix: "" });
         assert_eq!(
             check.violations.len(),
             1,
@@ -974,7 +1005,7 @@ mod tests {
             .map(|i| assoc_op("山田太郎", "杜氏", &format!("弟子{i}"), 1.0, None))
             .collect();
         let env = env(&context, schema, &ops);
-        let check = schema_issues(&env, &ops, "");
+        let check = schema_issues(&env, &ops, IssuePath::Request { prefix: "" });
         assert_eq!(
             check.violations.len(),
             25,
@@ -991,7 +1022,13 @@ mod tests {
         let schema = installed(doc(SchemaMode::Strict, false));
         let ops = [assoc_op("山田太郎", "杜氏", "鈴木一郎", 1.0, None)];
         let env = env(&context, schema, &ops);
-        let check = schema_issues(&env, &ops, "batches[3].");
+        let check = schema_issues(
+            &env,
+            &ops,
+            IssuePath::Request {
+                prefix: "batches[3].",
+            },
+        );
         assert_eq!(
             check.violations[0].path,
             "batches[3].associations[0].subject"
@@ -1026,6 +1063,11 @@ mod tests {
             vec!["青嶺酒造"],
             "only the batch half's own type_op may populate `types`"
         );
-        assert_eq!(schema_issues(&env, &ops, "").violations.len(), 0);
+        assert_eq!(
+            schema_issues(&env, &ops, IssuePath::Request { prefix: "" })
+                .violations
+                .len(),
+            0
+        );
     }
 }

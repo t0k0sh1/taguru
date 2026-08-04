@@ -445,6 +445,50 @@ fn mcp_get_and_put_schema_round_trip_through_the_http_route() {
     assert_eq!(body["result"], document, "{text}");
 }
 
+/// #385 (S7, ADR 0009 §10): `audit_schema`/`validate_schema` dispatch
+/// onto `POST .../schema/audit` and `.../schema/validate` exactly like
+/// every other MCP tool routes onto its HTTP twin.
+#[test]
+fn mcp_audit_and_validate_schema_round_trip_through_the_http_route() {
+    let server = Server::start("mcp-schema-audit-tools");
+    server.ok("PUT", "/contexts/sake", Some(json!({})));
+    server.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([
+            {"subject": "高瀬", "label": "schema:type", "object": "Person",
+             "weight": 1.0, "source": "a.md"},
+            {"subject": "高瀬", "label": "杜氏", "object": "個人A",
+             "weight": 1.0, "source": "a.md"},
+        ])),
+    );
+
+    let document = json!({
+        "schema": 1,
+        "mode": "strict",
+        "closed_labels": false,
+        "types": {"Brewery": {}, "Person": {}},
+        "relations": {"杜氏": {"domain": ["Brewery"], "range": ["Person"]}}
+    });
+
+    let validate_reply = server.call_tool(
+        1,
+        "validate_schema",
+        json!({"context": "sake", "document": document}),
+    );
+    assert!(validate_reply.get("isError").is_none(), "{validate_reply}");
+    let text = validate_reply["content"][0]["text"].as_str().unwrap();
+    let body: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(body["result"]["total"], json!(1), "{text}");
+
+    server.ok("PUT", "/contexts/sake/schema", Some(document));
+    let audit_reply = server.call_tool(2, "audit_schema", json!({"context": "sake"}));
+    assert!(audit_reply.get("isError").is_none(), "{audit_reply}");
+    let text = audit_reply["content"][0]["text"].as_str().unwrap();
+    let body: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(body["result"]["total"], json!(1), "{text}");
+}
+
 /// issue #182: the MCP `import` tool reports the same durable-prefix
 /// integrity a raw `POST /import` refusal does, over the Streamable
 /// HTTP transport.

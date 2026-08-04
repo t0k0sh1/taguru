@@ -25,6 +25,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::Path;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -38,7 +39,7 @@ use crate::storage::write_atomic;
 // `predicted_schema_rejection`/`preview_batch`, `src/ingest.rs`) and
 // S5 (#383, the associations pre-write arm, `src/api/associations.rs`).
 mod check;
-pub(crate) use check::{SchemaCheckInput, SchemaEnv, schema_issues};
+pub(crate) use check::{IssuePath, SchemaCheckInput, SchemaEnv, schema_issues};
 
 /// This binary's only readable document shape. Independent of
 /// `BATCH_VERSION`/`GROUP_VERSION`/`IMAGE_VERSION` — [`GroupRecord`]'s
@@ -258,6 +259,30 @@ impl InstalledSchema {
         let mut closure = self.ancestors.get(type_name).cloned().unwrap_or_default();
         closure.insert(type_name.to_string());
         closure
+    }
+
+    /// ADR 0009 §10: the audit judges `off`/`warn` documents by the same
+    /// domain/range predicate `strict` would apply — "pre-existing
+    /// violations are visible only through the explicitly-invoked,
+    /// read-only audit" (§7.1) only holds if the audit does not itself
+    /// defer to `mode`. `schema_issues` only branches on `mode` to
+    /// short-circuit `SchemaEnv::build`'s live read and its own violation
+    /// pass when `mode == Off` — so forcing `mode` to `Strict` here is
+    /// exactly "judge every op," nothing more, and the precomputed `is_a`
+    /// closures carry over unchanged since the hierarchy never depends on
+    /// mode. Returns `self` unchanged (no clone) when already non-`Off`.
+    pub(crate) fn enforcing(self: &Arc<Self>) -> Arc<InstalledSchema> {
+        if self.document.mode == SchemaMode::Off {
+            Arc::new(InstalledSchema {
+                document: SchemaDocument {
+                    mode: SchemaMode::Strict,
+                    ..self.document.clone()
+                },
+                ancestors: self.ancestors.clone(),
+            })
+        } else {
+            Arc::clone(self)
+        }
     }
 }
 

@@ -791,6 +791,8 @@ pub(crate) fn required_role(method: &Method, route: &str) -> Role {
         | (&Method::POST, "/contexts/{name}/unreachable_from")
         | (&Method::POST, "/contexts/{name}/vocabulary/audit")
         | (&Method::POST, "/contexts/{name}/drift/audit")
+        | (&Method::POST, "/contexts/{name}/schema/audit")
+        | (&Method::POST, "/contexts/{name}/schema/validate")
         | (&Method::GET, "/contexts/{name}/communities")
         | (&Method::POST, "/contexts/{name}/communities/search")
         | (&Method::POST, "/contexts/{name}/evidence")
@@ -1608,6 +1610,22 @@ mod tests {
         assert_eq!(
             required_role(&Method::PUT, "/contexts/{name}/schema"),
             Role::Write
+        );
+    }
+
+    /// ADR 0009 §12.5: both new §10 routes are read-only judgments over
+    /// the live graph (`audit`) or a never-persisted proposed document
+    /// (`validate`) — neither writes anything, so both classify beside
+    /// `vocabulary/audit` and `drift/audit`, not beside `PUT /schema`.
+    #[test]
+    fn schema_audit_and_validate_are_read() {
+        assert_eq!(
+            required_role(&Method::POST, "/contexts/{name}/schema/audit"),
+            Role::Read
+        );
+        assert_eq!(
+            required_role(&Method::POST, "/contexts/{name}/schema/validate"),
+            Role::Read
         );
     }
 

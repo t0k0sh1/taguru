@@ -86,6 +86,23 @@ fn key_scopes_gate_roles_contexts_the_directory_and_mcp() {
         call("POST", "/contexts/sake/drift/audit", None, "rtok").0,
         200
     );
+    // schema/validate (#385, ADR 0009 §12.5) is Role::Read too — it
+    // never persists anything, so a reader key reaches it directly.
+    // `sake` has no installed schema, which is exactly why `validate`
+    // (unlike `audit`) still answers 200 here.
+    assert_eq!(
+        call(
+            "POST",
+            "/contexts/sake/schema/validate",
+            Some(json!({"document": {
+                "schema": 1, "mode": "off", "closed_labels": false,
+                "types": {}, "relations": {}
+            }})),
+            "rtok"
+        )
+        .0,
+        200
+    );
     // #305's evidence assembly is Role::Read too — an unclassified
     // route would fail closed to Admin (auth.rs's own rule), so this
     // pins it reaches a scoped reader directly.

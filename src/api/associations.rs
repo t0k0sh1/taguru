@@ -11,7 +11,7 @@ use taguru::deadline::Deadline;
 
 use crate::metrics::ErrorKind;
 use crate::registry::{AppState, AssocOp};
-use crate::schema::{SchemaCheckInput, SchemaEnv, SchemaMode, schema_issues};
+use crate::schema::{IssuePath, SchemaCheckInput, SchemaEnv, SchemaMode, schema_issues};
 
 use super::{
     AppJson, AppPath, ErrorCode, Issue, MAX_ASSOCIATION_WEIGHT, MAX_ASSOCIATIONS_PER_REQUEST,
@@ -295,7 +295,7 @@ pub async fn add_associations(
             Ok(env) => env,
             Err(failure) => return access_error(&state, failure, &name, started_at),
         };
-        let check = schema_issues(&env, &associations, "");
+        let check = schema_issues(&env, &associations, IssuePath::Request { prefix: "" });
         // ADR 0009 §6.3 guard 2: a reserved-label conflict refuses
         // regardless of mode — this route has no inline `labels`
         // declaration today, so `reserved` is always empty in
