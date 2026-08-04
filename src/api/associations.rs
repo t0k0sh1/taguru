@@ -296,6 +296,12 @@ pub async fn add_associations(
             Err(failure) => return access_error(&state, failure, &name, started_at),
         };
         let check = schema_issues(&env, &associations, IssuePath::Request { prefix: "" });
+        let mode = installed.document().mode;
+        // #388, S10 of #218's ADR 0009 split §15: this is one of the
+        // two write entrances a schema actually gates (the other is
+        // `predicted_schema_rejection`'s `Apply` purpose), so it — and
+        // only it — feeds `taguru_schema_checks_total`.
+        state.note_schema_check(&name, check.outcome(mode), check.violations.len());
         // ADR 0009 §6.3 guard 2: a reserved-label conflict refuses
         // regardless of mode — this route has no inline `labels`
         // declaration today, so `reserved` is always empty in
@@ -303,7 +309,7 @@ pub async fn add_associations(
         if !check.reserved.is_empty() {
             return associations_refusal(check.reserved, started_at);
         }
-        if !check.violations.is_empty() && installed.document().mode == SchemaMode::Strict {
+        if !check.violations.is_empty() && mode == SchemaMode::Strict {
             return associations_refusal(check.violations, started_at);
         }
         // `warn`: ride the violations out in the success envelope

@@ -411,6 +411,28 @@ pub(crate) struct SchemaCheck {
     pub(crate) violations: Vec<Issue>,
 }
 
+impl SchemaCheck {
+    /// §7.2 step 7's dispatch, named once (#388, S10 of #218's ADR
+    /// 0009 split §15) so the two write entrances' metrics can never
+    /// describe the same check differently than the check itself
+    /// dispatched. `mode` only breaks the `Warned`/`Refused` tie for a
+    /// non-empty `violations` — `reserved` refuses regardless of mode
+    /// (guard 2's own rule), and `violations` is empty by construction
+    /// whenever `mode == off`, so that case falls straight to `Ok`.
+    pub(crate) fn outcome(&self, mode: SchemaMode) -> crate::metrics::SchemaOutcome {
+        use crate::metrics::SchemaOutcome;
+        if !self.reserved.is_empty() {
+            SchemaOutcome::Refused
+        } else if self.violations.is_empty() {
+            SchemaOutcome::Ok
+        } else if mode == SchemaMode::Strict {
+            SchemaOutcome::Refused
+        } else {
+            SchemaOutcome::Warned
+        }
+    }
+}
+
 /// `Issue.path`'s grammar. A write entrance names a coordinate within
 /// its own request body (ADR 0009 §8.2's two prefixes); ADR 0009 §10's
 /// audit has no such coordinate — the offending association travels
@@ -1133,5 +1155,65 @@ mod tests {
                 .len(),
             0
         );
+    }
+
+    /// `SchemaCheck::outcome`'s four branches (#388, S10 of #218's ADR
+    /// 0009 split §15) — reserved refuses regardless of mode, a clean
+    /// check (including every `off` check, since `violations` is empty
+    /// there) is `Ok`, and a non-empty `violations` splits on mode:
+    /// `strict` refuses, `warn` rides it out.
+    #[test]
+    fn outcome_dispatches_exactly_like_the_write_entrances_do() {
+        use crate::metrics::SchemaOutcome;
+
+        // off + reserved: guard 2 refuses even though `violations` is
+        // always empty in `off` (`mode_off_yields_reserved_but_never_
+        // violations` above).
+        let mut context = Context::default();
+        context
+            .associate_from("青嶺酒造", "杜氏", "山田太郎", 1.0, "a.md", None)
+            .unwrap();
+        let schema = installed(doc(SchemaMode::Off, false));
+        let ops = [assoc_op("青嶺酒造", "杜氏", "山田太郎", 1.0, None)];
+        let declared = BTreeMap::from([("種別".to_string(), SCHEMA_TYPE_LABEL.to_string())]);
+        let reserved_env = SchemaEnv::build(
+            &context,
+            SchemaCheckInput {
+                schema,
+                ops: &ops,
+                declared_labels: &declared,
+                retracted_source: None,
+            },
+        );
+        let check = schema_issues(&reserved_env, &ops, IssuePath::Request { prefix: "" });
+        assert_eq!(check.outcome(SchemaMode::Off), SchemaOutcome::Refused);
+
+        // A clean batch against an installed schema is Ok in every mode.
+        let mut context = Context::default();
+        context
+            .associate_from("山田太郎", SCHEMA_TYPE_LABEL, "Person", 1.0, "a.md", None)
+            .unwrap();
+        context
+            .associate_from("青嶺酒造", SCHEMA_TYPE_LABEL, "Brewery", 1.0, "a.md", None)
+            .unwrap();
+        for mode in [SchemaMode::Off, SchemaMode::Warn, SchemaMode::Strict] {
+            let schema = installed(doc(mode, false));
+            let ops = [assoc_op("青嶺酒造", "杜氏", "山田太郎", 1.0, None)];
+            let env = env(&context, schema, &ops);
+            let check = schema_issues(&env, &ops, IssuePath::Request { prefix: "" });
+            assert_eq!(check.outcome(mode), SchemaOutcome::Ok, "mode {mode:?}");
+        }
+
+        // A domain violation: warn rides it out, strict refuses.
+        let mut context = Context::default();
+        context
+            .associate_from("山田太郎", SCHEMA_TYPE_LABEL, "Person", 1.0, "a.md", None)
+            .unwrap();
+        let schema = installed(doc(SchemaMode::Warn, false));
+        let ops = [assoc_op("山田太郎", "杜氏", "鈴木一郎", 1.0, None)];
+        let env = env(&context, schema, &ops);
+        let check = schema_issues(&env, &ops, IssuePath::Request { prefix: "" });
+        assert_eq!(check.outcome(SchemaMode::Warn), SchemaOutcome::Warned);
+        assert_eq!(check.outcome(SchemaMode::Strict), SchemaOutcome::Refused);
     }
 }

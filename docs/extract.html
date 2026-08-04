@@ -34,6 +34,7 @@
     </div>
     <div class="side-group">
       <div class="side-group-label">Reference</div>
+      <a href="schema.html">Context schema</a>
       <a href="import.html">Batch import</a>
       <a href="extract.html" aria-current="page">Document extraction</a>
       <a href="connectors.html">Ingest connectors</a>
@@ -97,6 +98,7 @@ taguru import batches/               <span class="c"># offline — or POST each 
     <pre><code>TAGURU_EXTRACT_URL      OpenAI-compatible /chat/completions endpoint (required)
 TAGURU_EXTRACT_MODEL    model name (required)
 TAGURU_EXTRACT_API_KEY  Bearer credential (optional)
+TAGURU_EXTRACT_SCHEMA   default for --schema (default unset)
 TAGURU_EXTRACT_TIMEOUT_SECS  time budget per completion; 0 = unlimited (default 300)
 TAGURU_EXTRACT_PARALLEL  concurrent chunk completions per document (default 1)
 TAGURU_EXTRACT_FACT_BUDGET  default for --fact-budget (default 0, off)
@@ -142,8 +144,20 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
                     counts); off by default, ignored under --dry-run
 --context NAME      the context every batch file targets
 --description TEXT  attach a create block (used only when the context is absent)
+--schema FILE       a context schema document (see below) — the same shape
+                    {stem}.schema.json/PUT /contexts/{name}/schema persist and
+                    serve; a file that fails to parse or fails schema::install's
+                    own checks is a startup error, never a silent skip
 --config F          read KEY=VALUE environment from F (same dialect as serve)</code></pre>
     <p>Exit codes: <code>0</code> every document extracted or skipped · <code>1</code> some documents failed (details on stderr; the rest completed) · <code>2</code> usage error.</p>
+    <p class="note">
+      <code>--schema</code> is <b>this</b> pipeline's own copy of a
+      <a href="schema.html">context schema document</a> — not to be confused with
+      <code>--structured-output json-schema</code> below, which is an unrelated OpenAI wire
+      format for the model's answer shape. Extract is offline and has no running server to fetch
+      one from, so unlike the LangChain SDK ingesters (which pull it live), the operator hands it
+      the file explicitly.
+    </p>
   </section>
 
   <section id="boundary">
@@ -200,6 +214,22 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       Relation labels converge <b>across the run</b>: each document's labels are offered to every
       later document's prompt (the offline stand-in for check-before-mint), so one run doesn't
       mint synonyms per file but converges on one vocabulary. Temperature is 0.
+    </p>
+    <p>
+      When <code>--schema</code> names a document whose <code>mode</code> is not
+      <code>"off"</code>, the prompt gains one more block after the vocabulary one: the allowed
+      entity type names, one <code>label: domain → range</code> line per constrained relation
+      (budget-capped like the vocabulary block, live-vocabulary relations first), and an
+      instruction to assert types on the reserved <code>schema:type</code> label — see
+      <a href="schema.html">the context schema reference</a> for what that label means. It is
+      deliberately never rendered as a JSON Schema <code>enum</code>, so a schema-constrained
+      model can still propose a genuinely new relation rather than being forced to misuse an
+      existing one. A domain/range violation or a <code>closed_labels</code> refusal in the
+      answer earns its own targeted corrective turn (<code>schema_output_issues</code>, a sibling
+      of the contract violations below), separate from — but bounded by the same
+      <code>TAGURU_EXTRACT_MAX_ATTEMPTS</code> as — the rest of this section. Adding this block
+      bumps <code>PROMPT_VERSION</code> 2 → 3; see <a href="#manifest">the manifest</a> for what
+      that invalidates.
     </p>
     <p>Model output is treated as untrusted input, and the contract is enforced on this side of the wire:</p>
     <ul>
@@ -268,6 +298,13 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
 
   <section id="structured-output">
     <h2>Structured output and the output budget</h2>
+    <p class="note warn">
+      <b>Not to be confused with <code>--schema</code> above.</b> Everything in this section is
+      about <code>response_format</code> on the OpenAI-compatible wire — how the <i>model's
+      answer</i> is shaped. <code>--schema</code> is Taguru's own <a href="schema.html">context
+      schema document</a> — what <i>types and relations are allowed to mean</i> in the target
+      context. The two names collide; the concepts do not.
+    </p>
     <p>
       By default nothing above changes: the request stays the plain
       <code>{model, temperature, messages}</code> it has always been. Two opt-in controls put
@@ -366,6 +403,13 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       degrades <b>to re-extraction</b> — never to a false "unchanged". Keep the out directory
       between runs and a nightly extract-and-import pays model calls only for changed documents;
       import's retract-then-apply makes the re-application exact.
+    </p>
+    <p class="note">
+      <code>PROMPT_VERSION</code> is one of the compute inputs the hash covers, so it bumping
+      (2 → 3, for the <a href="#prompt">schema vocabulary block</a> above) invalidates every
+      manifest entry computed under the old prompt — the next run against an existing
+      <code>--out</code> re-extracts everything once, whether or not <code>--schema</code> is
+      even in use.
     </p>
     <p>
       The context being a compute input is deliberate: it is baked into every header written, so
@@ -472,7 +516,10 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       <code>empty</code>, <code>refusal</code>, <code>timeout</code>, <code>transport</code> —
       <code>length_limited</code>, <code>parse_error</code> (the diagnosis, present for every
       state but <code>stop_valid</code>), <code>validation_issues</code> (path-addressed, when
-      the answer parsed but failed the contract), <code>elapsed_seconds</code>, and a nested
+      the answer parsed but failed the contract — under <code>--schema</code> this includes
+      <code>"domain"</code>/<code>"range"</code> entries from <code>schema_output_issues</code>,
+      the same issue vocabulary <a href="schema.html#write-time">the server's own write-time
+      check</a> uses), <code>elapsed_seconds</code>, and a nested
       <code>provider_metadata</code> (<code>finish_reason</code> as received,
       <code>input_tokens</code>/<code>output_tokens</code>/<code>total_tokens</code> when the
       backend reports usage — <code>null</code> for <code>timeout</code>/<code>transport</code>,

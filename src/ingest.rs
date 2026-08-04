@@ -2730,6 +2730,18 @@ impl SchemaRejection {
     }
 }
 
+/// Which caller is running [`predicted_schema_rejection`] (#388, S10 of
+/// #218's ADR 0009 split §15): only [`Apply`](CheckPurpose::Apply) is a
+/// real write gate, so only it feeds `taguru_schema_checks_total` —
+/// [`Preview`](CheckPurpose::Preview) runs the identical check for
+/// `?dry_run=true`/`preview_batch`, and counting it too would let a
+/// validate-then-apply workflow double-count the same refusal.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CheckPurpose {
+    Apply,
+    Preview,
+}
+
 /// Predicts, without writing anything, whether this batch's own
 /// associations would violate a `strict` context's schema, or its own
 /// `labels` declares the reserved `schema:type` alias (ADR 0009 §6.3
@@ -2741,7 +2753,9 @@ impl SchemaRejection {
 /// declarations, which `schema::check::SchemaEnv` relies on (its own
 /// doc, `src/schema/check.rs:88-94`). Shared between [`apply_batch`]
 /// and [`preview_batch`] for the same reason `predicted_alias_rejection`
-/// is: a dry run can never disagree about this call either.
+/// is: a dry run can never disagree about this call either. `purpose`
+/// distinguishes them for metrics only — the judgment itself is
+/// identical either way.
 ///
 /// No schema installed for this context — including one that does not
 /// exist yet — returns `Ok` before a single lock is taken
@@ -2754,6 +2768,7 @@ impl SchemaRejection {
 fn predicted_schema_rejection(
     state: &AppState,
     batch: &Batch,
+    purpose: CheckPurpose,
 ) -> Result<SchemaWarnings, ApplyRefusal> {
     let schema = match state.schema_of(&batch.context) {
         None | Some(Ok(None)) => return Ok(SchemaWarnings::none()),
@@ -2798,6 +2813,11 @@ fn predicted_schema_rejection(
         })
         .map_err(ApplyRefusal::Access)?;
 
+    let mode = schema.document().mode;
+    if purpose == CheckPurpose::Apply {
+        state.note_schema_check(&batch.context, check.outcome(mode), check.violations.len());
+    }
+
     if !check.reserved.is_empty() {
         let (issues, total) = crate::api::truncate_issues(check.reserved);
         return Err(ApplyRefusal::Schema(SchemaRejection {
@@ -2808,7 +2828,7 @@ fn predicted_schema_rejection(
     }
 
     let (issues, total) = crate::api::truncate_issues(check.violations);
-    if schema.document().mode == crate::schema::SchemaMode::Strict && total > 0 {
+    if mode == crate::schema::SchemaMode::Strict && total > 0 {
         return Err(ApplyRefusal::Schema(SchemaRejection {
             issues,
             total,
@@ -2852,7 +2872,7 @@ pub(crate) fn apply_batch(state: &AppState, batch: &Batch) -> Result<Applied, Ap
     if let Some(rejection) = predicted_alias_rejection(state, batch) {
         return Err(ApplyRefusal::Rejected(rejection));
     }
-    let schema_warnings = predicted_schema_rejection(state, batch)?;
+    let schema_warnings = predicted_schema_rejection(state, batch, CheckPurpose::Apply)?;
 
     let mut created = false;
     if state.directory_entry(&batch.context).is_none() {
@@ -3069,7 +3089,7 @@ pub(crate) fn preview_batch(state: &AppState, batch: &Batch) -> Result<Applied, 
     if let Some(rejection) = predicted_alias_rejection(state, batch) {
         return Err(ApplyRefusal::Rejected(rejection));
     }
-    let schema_warnings = predicted_schema_rejection(state, batch)?;
+    let schema_warnings = predicted_schema_rejection(state, batch, CheckPurpose::Preview)?;
 
     let created = state.directory_entry(&batch.context).is_none();
     if created && batch.create.is_none() {

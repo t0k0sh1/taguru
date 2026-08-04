@@ -4,6 +4,32 @@ use serde_json::json;
 
 use crate::support::*;
 
+/// One relation (`杜氏`: domain `Brewery`, range `Person`) — the same
+/// shape `tests/http_api/schema_import.rs` uses, kept local since this
+/// file's concern is the metrics text, not the schema semantics
+/// `schema_import.rs` already covers.
+fn schema_document(mode: &str) -> serde_json::Value {
+    json!({
+        "schema": 1,
+        "mode": mode,
+        "closed_labels": false,
+        "types": {"Brewery": {"is_a": []}, "Person": {"is_a": []}},
+        "relations": {"杜氏": {"domain": ["Brewery"], "range": ["Person"]}}
+    })
+}
+
+/// A domain violation against `context` — `田中` typed `Person`,
+/// disjoint from `杜氏`'s declared `domain: [Brewery]`.
+fn domain_violation_batch(context: &str, source: &str) -> String {
+    format!(
+        "{{\"taguru_batch\": 1, \"context\": \"{context}\", \"source\": \"{source}\"}}\n\
+         {{\"subject\": \"田中\", \"label\": \"schema:type\", \"object\": \"Person\", \
+         \"weight\": 1.0}}\n\
+         {{\"subject\": \"田中\", \"label\": \"杜氏\", \"object\": \"青嶺酒造\", \"weight\": \
+         1.0}}\n"
+    )
+}
+
 #[test]
 fn metrics_expose_prometheus_text_reflecting_traffic() {
     let server = Server::start("metrics");
@@ -331,4 +357,126 @@ fn usage_counters_survive_a_graceful_restart_even_for_read_only_sessions() {
     let entry = server.ok("GET", "/contexts/sake", None);
     assert_eq!(entry["usage"]["reads"], json!(2), "{entry}");
     assert_eq!(entry["usage"]["writes"], json!(1), "{entry}");
+}
+
+/// `taguru_schema_checks_total` and its per-context violations sibling
+/// (#388, S10 of #218's ADR 0009 split §15): counted only at the write
+/// entrances a schema actually gates, never at `?dry_run=true` — a
+/// validate-then-apply workflow must not double-count the same
+/// refusal — and split correctly between a `strict` refusal and a
+/// `warn` pass-through on two different contexts.
+#[test]
+fn schema_check_outcomes_land_in_the_metrics_text_but_dry_run_does_not() {
+    let server = Server::start_with_env("schema-metrics", &[("TAGURU_METRICS_PER_CONTEXT", "1")]);
+    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "PUT",
+        "/contexts/sake/schema",
+        Some(schema_document("strict")),
+    );
+    let strict_batch = domain_violation_batch("sake", "a.md");
+
+    // The preview must not touch the counters at all.
+    let (status, body) = post_import_dry_run(&server, &strict_batch, None);
+    assert_eq!(status, 400, "{body}");
+    let (_, before) = server.call("GET", "/metrics", None);
+    let before = before.as_str().expect("metrics body is text");
+    assert!(
+        before.contains("taguru_schema_checks_total{outcome=\"refused\"} 0"),
+        "a dry-run preview must not be counted: {before}"
+    );
+
+    // The real (strict, refusing) apply: exactly one `refused`, and the
+    // context's own violation count moves too — a check is counted
+    // whether or not the write it gates ultimately lands.
+    let (status, body) = post_import(&server, &strict_batch, None);
+    assert_eq!(status, 400, "{body}");
+    let (_, after) = server.call("GET", "/metrics", None);
+    let after = after.as_str().expect("metrics body is text");
+    assert!(
+        after.contains("taguru_schema_checks_total{outcome=\"refused\"} 1"),
+        "the real apply counts once, the dry-run before it not at all: {after}"
+    );
+    assert!(
+        after.contains("taguru_schema_checks_total{outcome=\"ok\"} 0"),
+        "{after}"
+    );
+    assert!(
+        after.contains("taguru_schema_checks_total{outcome=\"warned\"} 0"),
+        "{after}"
+    );
+    assert!(
+        after.contains("taguru_context_schema_violations_total{context=\"sake\"} 1"),
+        "{after}"
+    );
+
+    // A `warn` context's applied violation rides a DIFFERENT outcome
+    // label and a DIFFERENT context row, so this also proves the two
+    // contexts' per-context rows never bleed into each other.
+    server.ok("PUT", "/contexts/nomi", Some(json!({"description": "d"})));
+    server.ok(
+        "PUT",
+        "/contexts/nomi/schema",
+        Some(schema_document("warn")),
+    );
+    let (status, body) = post_import(&server, &domain_violation_batch("nomi", "a.md"), None);
+    assert_eq!(status, 200, "{body}");
+
+    let (_, text) = server.call("GET", "/metrics", None);
+    let text = text.as_str().expect("metrics body is text");
+    assert!(
+        text.contains("taguru_schema_checks_total{outcome=\"warned\"} 1"),
+        "{text}"
+    );
+    assert!(
+        text.contains("taguru_schema_checks_total{outcome=\"refused\"} 1"),
+        "still just the one refusal from sake: {text}"
+    );
+    assert!(
+        text.contains("taguru_context_schema_violations_total{context=\"nomi\"} 1"),
+        "{text}"
+    );
+    assert!(
+        text.contains("taguru_context_schema_violations_total{context=\"sake\"} 1"),
+        "sake's row must not have moved: {text}"
+    );
+
+    // `POST /contexts/{name}/associations` is the OTHER write entrance
+    // a schema gates (S5/#383, `src/api/associations.rs`, distinct
+    // from `predicted_schema_rejection` above) — it must feed the same
+    // aggregate family.
+    server.ok("PUT", "/contexts/musubi", Some(json!({"description": "d"})));
+    server.ok(
+        "PUT",
+        "/contexts/musubi/schema",
+        Some(schema_document("strict")),
+    );
+    server.ok(
+        "POST",
+        "/contexts/musubi/associations",
+        Some(json!([{
+            "subject": "田中", "label": "schema:type", "object": "Person",
+            "weight": 1.0, "source": "a.md"
+        }])),
+    );
+    let (status, body) = server.call(
+        "POST",
+        "/contexts/musubi/associations",
+        Some(json!([{
+            "subject": "田中", "label": "杜氏", "object": "青嶺酒造",
+            "weight": 1.0, "source": "a.md"
+        }])),
+    );
+    assert_eq!(status, 400, "{body}");
+
+    let (_, text) = server.call("GET", "/metrics", None);
+    let text = text.as_str().expect("metrics body is text");
+    assert!(
+        text.contains("taguru_schema_checks_total{outcome=\"refused\"} 2"),
+        "sake's import refusal plus musubi's associations refusal: {text}"
+    );
+    assert!(
+        text.contains("taguru_context_schema_violations_total{context=\"musubi\"} 1"),
+        "{text}"
+    );
 }

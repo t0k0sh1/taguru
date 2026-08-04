@@ -23,11 +23,12 @@ playbook for clients itself: `GET /protocol` (the content of
 [src/llm-protocol.md](src/llm-protocol.md)).
 
 **Documentation: <https://t0k0sh1.github.io/taguru/>** — getting
-started, concepts, context & group modeling, the import/extract/
-evaluate/evidence-assembly references, deployment guides (Docker
-Compose, Kubernetes, AWS, Azure, Amazon Bedrock), a compatibility and local-RAG
-troubleshooting guide, the internal architecture, and a walkthrough of
-an LLM retrieving over MCP.
+started, concepts, context & group modeling, the optional [context
+schema](https://t0k0sh1.github.io/taguru/schema.html), the
+import/extract/evaluate/evidence-assembly references, deployment
+guides (Docker Compose, Kubernetes, AWS, Azure, Amazon Bedrock), a
+compatibility and local-RAG troubleshooting guide, the internal
+architecture, and a walkthrough of an LLM retrieving over MCP.
 
 ## Install
 
@@ -74,7 +75,12 @@ cosine floor. Deep dives (`activate`, `explore`) stay per-context:
 search across, then pull the thread where it answered. How to draw
 those boundaries for real documents — which parts of a paper or a
 codebase become contexts, and which become groups — is the [modeling
-guide](https://t0k0sh1.github.io/taguru/modeling.html).
+guide](https://t0k0sh1.github.io/taguru/modeling.html). A context can
+optionally declare a [schema](https://t0k0sh1.github.io/taguru/schema.html)
+— a closed set of entity types and domain/range constraints on
+relation labels — and enforce it on writes in `warn` or `strict` mode;
+`off` (the default) leaves a schema-free context byte-identical to
+before the feature existed.
 
 Sources carry **metadata**: a server-stamped `stored_at`, an optional
 user-supplied document `date`, and `tags` — accepted at store and
@@ -250,6 +256,7 @@ report = sync_references(["manuals/", "https://example.com/guide"],
 ```
 
 Full contracts:
+[context schema](https://t0k0sh1.github.io/taguru/schema.html) ·
 [batch import](https://t0k0sh1.github.io/taguru/import.html) ·
 [document extraction](https://t0k0sh1.github.io/taguru/extract.html) ·
 [ingest connectors](https://t0k0sh1.github.io/taguru/connectors.html) ·
