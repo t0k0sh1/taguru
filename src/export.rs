@@ -70,10 +70,13 @@ usage: taguru export [--config FILE] [--url URL] --out DIR [CONTEXT...]
 
 Writes each context back out as a JSONL batch stream —
 {out}/{context}.jsonl, the exact format `taguru import` and POST
-/import apply. No CONTEXT arguments means every context, plus every
-group as {out}/{group}.group.jsonl (one taguru_group record each;
-import restores groups after every batch, so the files re-apply in
-any order). Naming CONTEXTs exports just those, groups omitted.
+/import apply. A context's own schema (ADR 0009 §13) rides inside
+that same stream as one taguru_schema record — no separate file —
+when the context has one installed and its mode is not \"off\". No
+CONTEXT arguments means every context, plus every group as
+{out}/{group}.group.jsonl (one taguru_group record each; import
+restores groups after every batch and schema, so the files re-apply
+in any order). Naming CONTEXTs exports just those, groups omitted.
 Re-importing a stream is idempotent (per-source retract-then-apply;
 per-group replace); `taguru import --dry-run` validates an exported
 file without touching anything.
@@ -120,6 +123,12 @@ pub(crate) struct ExportSnapshot {
     /// (alias, canonical) pairs, label namespace.
     pub(crate) label_aliases: Vec<(String, String)>,
     pub(crate) passages: Vec<(String, Arc<PassageRecord>)>,
+    /// The installed schema, if any — `render` emits a `taguru_schema`
+    /// record for it only when `mode != off` (ADR 0009 §13): a schema
+    /// left in `off` while its types are drafted is not carried across
+    /// export/restore, the same way `mode: off` is indistinguishable
+    /// from "no schema" everywhere else in this module.
+    pub(crate) schema: Option<crate::schema::SchemaDocument>,
 }
 
 /// What [`render`] accomplished, for the CLI report and tests.
@@ -209,6 +218,46 @@ struct AliasLine<'a> {
     alias: &'a str,
     canonical: &'a str,
     kind: &'a str,
+}
+
+/// The `taguru_schema` record — [`crate::ingest`] parses the same
+/// shape. Unlike [`GroupLine`], every field is required on the wire
+/// (no `skip_serializing_if`): this mirrors [`crate::schema::
+/// SchemaDocument`]'s own at-rest posture, where a missing field is a
+/// parse refusal rather than a silently-defaulted one (ADR 0009 §13's
+/// `deny_unknown_fields` promise applies symmetrically to fields that
+/// go missing, not only ones that show up uninvited).
+#[derive(Serialize)]
+struct SchemaLine<'a> {
+    taguru_schema: u64,
+    context: &'a str,
+    mode: crate::schema::SchemaMode,
+    closed_labels: bool,
+    types: &'a BTreeMap<String, crate::schema::TypeDef>,
+    relations: &'a BTreeMap<String, crate::schema::RelationDef>,
+}
+
+/// Renders one context's schema as its import-stream record: one
+/// `taguru_schema` line, newline-terminated. [`render`] calls this
+/// only for a schema whose `mode != off` (see [`ExportSnapshot::
+/// schema`]'s doc); `import --url`'s remote chunk packer
+/// (`src/ingest.rs`) calls it directly to re-render a parsed record
+/// for the wire, the same way it re-renders group records via
+/// [`render_group`].
+pub(crate) fn render_schema(context: &str, document: &crate::schema::SchemaDocument) -> String {
+    let mut line = String::new();
+    push_line(
+        &mut line,
+        &SchemaLine {
+            taguru_schema: crate::schema::SCHEMA_VERSION,
+            context,
+            mode: document.mode,
+            closed_labels: document.closed_labels,
+            types: &document.types,
+            relations: &document.relations,
+        },
+    );
+    line
 }
 
 /// The `taguru_group` record — [`crate::ingest`] parses the same
@@ -395,6 +444,16 @@ pub(crate) fn render(
     };
 
     let mut stream = String::new();
+    // The schema, if any, rides first — a preamble ahead of every
+    // batch, so a restore always knows the context's constraints
+    // before any association line that might assert against them
+    // (ADR 0009 §13). `mode: off` is not exported — see
+    // [`ExportSnapshot::schema`]'s doc.
+    if let Some(document) = &snapshot.schema
+        && document.mode != crate::schema::SchemaMode::Off
+    {
+        stream.push_str(&render_schema(context, document));
+    }
     let mut association_lines = 0usize;
     let mut passages = 0usize;
     let batch_count = buckets.len().max(1);
@@ -747,6 +806,16 @@ fn run_remote(base: &str, out: &std::path::Path, names: Vec<String>) -> i32 {
     }
     let api = Api::new(base.to_string());
     api.warn_on_version_skew("export");
+    // ADR 0009 §13's explicit compatibility refusal — run
+    // unconditionally (a fetch cannot know in advance which context,
+    // if any, carries a schema) but only fatal when the server's
+    // `schema_formats` names a version this CLI cannot read; an
+    // absent key (a pre-schema server) is safe, since such a server
+    // cannot have emitted a `taguru_schema` line in the first place.
+    if let Some(message) = api.schema_export_refusal() {
+        eprintln!("{message}");
+        return 1;
+    }
 
     // ADR 0002 §9: printed once, before the loop, so it still reaches
     // the operator on a run that fails partway through. stdout stays
@@ -1336,6 +1405,7 @@ mod tests {
             concept_aliases: Vec::new(),
             label_aliases: Vec::new(),
             passages: Vec::new(),
+            schema: None,
         }
     }
 
@@ -1513,6 +1583,96 @@ mod tests {
         assert_eq!(bare, "{\"taguru_group\":1,\"name\":\"kid\"}\n");
         let stream = ingest::parse_stream(bare.as_bytes()).unwrap();
         assert_eq!(stream.groups[0].1, GroupRecord::default());
+    }
+
+    fn warn_schema_document() -> crate::schema::SchemaDocument {
+        crate::schema::SchemaDocument {
+            schema: crate::schema::SCHEMA_VERSION,
+            mode: crate::schema::SchemaMode::Warn,
+            closed_labels: false,
+            types: [("醸造所".to_string(), crate::schema::TypeDef::default())]
+                .into_iter()
+                .collect(),
+            relations: [(
+                "杜氏".to_string(),
+                crate::schema::RelationDef {
+                    domain: ["醸造所".to_string()].into_iter().collect(),
+                    range: BTreeSet::new(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        }
+    }
+
+    /// `render_schema`'s exact bytes, and the round trip back through
+    /// `parse_stream` — [`a_group_renders_as_one_record_and_round_trips`]'s
+    /// `taguru_schema` twin (ADR 0009 §13). Unlike a group record, no
+    /// field is ever omitted: every one of `SchemaDocument`'s fields is
+    /// required on the wire, matching its own at-rest posture.
+    #[test]
+    fn a_schema_renders_as_one_record_and_round_trips() {
+        let document = warn_schema_document();
+        let line = render_schema("sake", &document);
+        assert_eq!(
+            line,
+            "{\"taguru_schema\":1,\"context\":\"sake\",\"mode\":\"warn\",\
+             \"closed_labels\":false,\"types\":{\"醸造所\":{\"is_a\":[]}},\
+             \"relations\":{\"杜氏\":{\"domain\":[\"醸造所\"],\"range\":[]}}}\n"
+        );
+        let stream = ingest::parse_stream(line.as_bytes()).unwrap();
+        assert_eq!(stream.schemas.len(), 1);
+        assert_eq!(stream.schemas[0].0, "sake");
+        assert_eq!(stream.schemas[0].1.document(), &document);
+    }
+
+    /// `render`'s own gate (ADR 0009 §13): a `taguru_schema` record
+    /// rides first, before any batch header, but ONLY when the
+    /// context has a schema AND its mode is not `off` — the three
+    /// cases side by side so a regression in the gate shows up as an
+    /// exact diff, not a missing assertion.
+    #[test]
+    fn render_emits_a_schema_record_first_only_when_mode_is_not_off() {
+        let edge = association(
+            1,
+            vec![Attribution {
+                source: "a.md".to_string(),
+                weight: 1.0,
+                count: 1,
+                paragraph: None,
+            }],
+        );
+
+        let mut no_schema = snapshot(vec![edge.clone()]);
+        no_schema.schema = None;
+        let rendered = render("sake", &no_schema, Deadline::unbounded()).unwrap();
+        assert!(
+            !rendered.stream.contains("taguru_schema"),
+            "{}",
+            rendered.stream
+        );
+
+        let mut off_schema = snapshot(vec![edge.clone()]);
+        off_schema.schema = Some(crate::schema::SchemaDocument {
+            mode: crate::schema::SchemaMode::Off,
+            ..warn_schema_document()
+        });
+        let rendered = render("sake", &off_schema, Deadline::unbounded()).unwrap();
+        assert!(
+            !rendered.stream.contains("taguru_schema"),
+            "mode: off must not export — {}",
+            rendered.stream
+        );
+
+        let mut warn_schema = snapshot(vec![edge]);
+        warn_schema.schema = Some(warn_schema_document());
+        let rendered = render("sake", &warn_schema, Deadline::unbounded()).unwrap();
+        let first_line = rendered.stream.lines().next().unwrap();
+        assert!(
+            first_line.starts_with("{\"taguru_schema\":1,\"context\":\"sake\""),
+            "the schema record must ride first — {}",
+            rendered.stream
+        );
     }
 
     /// `stream_counts` is what a remote fetch has to report from

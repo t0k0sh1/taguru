@@ -99,6 +99,22 @@ fn shipped_bucket_restores_to_an_equivalent_directory() {
         "/contexts/sake/aliases",
         Some(json!({"concepts": {"あおみね": "青嶺酒造"}})),
     );
+    // A schema too (ADR 0009 §13, #384): the ship→restore round trip
+    // must carry {stem}.schema.json exactly like every other family
+    // member, and export must re-emit it as a taguru_schema record so
+    // the equivalence check below (source vs restored export streams)
+    // actually exercises it rather than passing vacuously.
+    server.ok(
+        "PUT",
+        "/contexts/sake/schema",
+        Some(json!({
+            "schema": 1,
+            "mode": "warn",
+            "closed_labels": false,
+            "types": {"醸造所": {}},
+            "relations": {"杜氏": {"domain": ["醸造所"], "range": []}},
+        })),
+    );
     // …a group, and a stand-in for the grant store (the shipper moves
     // every published file the same way; a live OAuth flow would only
     // change who wrote the bytes).
@@ -184,6 +200,19 @@ fn shipped_bucket_restores_to_an_equivalent_directory() {
         dir_contents(&export_restored),
         "the restored directory must export byte-identical streams"
     );
+    // Not vacuous: prove the schema actually rode along, both as the
+    // family's own file and as the export's taguru_schema record.
+    assert!(
+        restored.join("sake.schema.json").exists(),
+        "the restored directory must carry the schema file"
+    );
+    let sake_stream = String::from_utf8(
+        dir_contents(&export_restored)
+            .remove("sake.jsonl")
+            .expect("sake.jsonl must be among the restored exports"),
+    )
+    .unwrap();
+    assert!(sake_stream.contains("\"taguru_schema\":1"), "{sake_stream}");
 
     // The grant store rode along, owner-only like the server writes it.
     let grants = restored.join("oauth.json");
@@ -571,6 +600,22 @@ fn a_replica_serves_reads_tails_the_writer_and_refuses_writes() {
             "第2段落": "青嶺酒造は、仕込み水に雲居山の伏流水を使う。杜氏は高瀬である。",
         }})),
     );
+    // A schema on the writer only (ADR 0009 §13, #384) — proves the
+    // replica tails {stem}.schema.json the same way it tails every
+    // other family member, not just that ship→restore carries it
+    // (already covered by shipped_bucket_restores_to_an_equivalent_
+    // directory above).
+    writer.ok(
+        "PUT",
+        "/contexts/sake/schema",
+        Some(json!({
+            "schema": 1,
+            "mode": "warn",
+            "closed_labels": false,
+            "types": {"醸造所": {}},
+            "relations": {"杜氏": {"domain": ["醸造所"], "range": []}},
+        })),
+    );
     writer.ok(
         "PUT",
         "/contexts/glossary",
@@ -590,7 +635,9 @@ fn a_replica_serves_reads_tails_the_writer_and_refuses_writes() {
     wait_for("the writer to ship the whole spread", || {
         std::fs::read_to_string(bucket.join("gen-00000000000000000001").join("complete"))
             .map(|manifest| {
-                manifest.contains("breweries.group") && manifest.contains("glossary.ctx")
+                manifest.contains("breweries.group")
+                    && manifest.contains("glossary.ctx")
+                    && manifest.contains("sake.schema.json")
             })
             .unwrap_or(false)
     });
@@ -630,11 +677,21 @@ fn a_replica_serves_reads_tails_the_writer_and_refuses_writes() {
     let groups = replica.ok("GET", "/groups", None);
     assert_eq!(groups["groups"][0]["name"], "breweries", "{groups}");
     // `GET /schema` is a read (ADR 0009 §12.5) — it passes the replica
-    // gate like every other retrieval GET; the 404 below is the
-    // ordinary "no schema installed" answer, not a replica refusal.
-    let (status, answer) = replica.call("GET", "/contexts/sake/schema", None);
+    // gate like every other retrieval GET. `glossary` never installed
+    // one, so its 404 is the ordinary "no schema installed" answer,
+    // not a replica refusal.
+    let (status, answer) = replica.call("GET", "/contexts/glossary/schema", None);
     assert_eq!(status, 404, "{answer}");
     assert_eq!(answer["code"], "no_schema", "{answer}");
+    // `sake`'s schema installed on the writer must have tailed to the
+    // replica along with everything else (ADR 0009 §13, #384).
+    let sake_schema = replica.ok("GET", "/contexts/sake/schema", None);
+    assert_eq!(sake_schema["mode"], "warn", "{sake_schema}");
+    assert_eq!(
+        sake_schema["types"],
+        json!({"醸造所": {"is_a": []}}),
+        "{sake_schema}"
+    );
 
     // The scrape carries the replica shape from boot; the generation
     // gauge lands with the tailer's first poll.

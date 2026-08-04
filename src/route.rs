@@ -2281,6 +2281,37 @@ async fn route_import(
         }
         Bytes::from(chunk)
     };
+    // Schema records route to exactly the ONE shard owning their
+    // context — never broadcast, unlike group records below, which
+    // can span several — refused whole up front too, before anything
+    // ships, the same posture as the batch loop just above (ADR 0009
+    // §13).
+    let mut schema_shards: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for (index, (context, _)) in stream.schemas.iter().enumerate() {
+        let Some(shard) = state.map().shard_of(context) else {
+            return api::error(
+                ErrorCode::NoContext,
+                format!(
+                    "schema record: context '{context}' has no route-map entry and no '*' \
+                     fallback (TAGURU_ROUTE_MAP); nothing was applied"
+                ),
+                started_at,
+            );
+        };
+        schema_shards.entry(shard).or_default().push(index);
+    }
+    // Each owning shard's schema lines, rendered once — preflighted
+    // below beside the batch chunks, then applied after them.
+    let schema_lines_for = |shard: usize| -> String {
+        let mut lines = String::new();
+        if let Some(indices) = schema_shards.get(&shard) {
+            for &index in indices {
+                let (context, installed) = &stream.schemas[index];
+                lines.push_str(&crate::export::render_schema(context, installed.document()));
+            }
+        }
+        lines
+    };
     // Each shard's projected group-record stream, rendered once —
     // preflighted below beside the batch chunks, then applied last.
     let group_lines_for = |shard: usize| -> String {
@@ -2323,6 +2354,11 @@ async fn route_import(
         let preflights = chunks
             .iter()
             .map(|(shard, ranges)| (*shard, assemble(ranges)))
+            .chain(
+                schema_shards
+                    .keys()
+                    .map(|&shard| (shard, Bytes::from(schema_lines_for(shard)))),
+            )
             .chain(
                 group_shards
                     .iter()
@@ -2401,11 +2437,59 @@ async fn route_import(
             }
         }
     }
-    // Group records apply LAST, after every batch — the same order the
-    // stream contract promises — projected per shard and broadcast. A
-    // dry run dispatches them too (with dry_run forwarded): the shards
-    // still parse and scope-check the records exactly as a single
-    // instance's dry run does, while omitting them from the preview.
+    // Schema records install after every batch, before groups restore
+    // (ADR 0009 §13) — one request per OWNING shard (never broadcast,
+    // unlike groups below). A dry run dispatches them too (with
+    // dry_run forwarded): the owning shard still parses and
+    // scope-checks the record exactly as a single instance's dry run
+    // does, while omitting it from the preview (ADR 0009 §13; no
+    // read-only twin `put_schema` can preview through).
+    let mut schemas: Vec<Value> = Vec::new();
+    for &shard in schema_shards.keys() {
+        match state
+            .call_shard(
+                shard,
+                Method::POST,
+                real_query,
+                &headers,
+                Some(Bytes::from(schema_lines_for(shard))),
+                deadline,
+            )
+            .await
+        {
+            Ok(answer) if answer.status.is_success() => {
+                if let Ok(envelope) = serde_json::from_slice::<ShardEnvelope<Value>>(&answer.body)
+                    && let Some(outcomes) = envelope.result.get("schemas").and_then(Value::as_array)
+                {
+                    schemas.extend(outcomes.iter().cloned());
+                }
+            }
+            Ok(answer) => {
+                return rewrap_import_refusal(
+                    answer,
+                    batches.len(),
+                    !query.dry_run && !chunks.is_empty(),
+                    started_at,
+                );
+            }
+            Err(error) => {
+                return unreachable_refusal(
+                    &[Unreached {
+                        shard: state.map().url(shard).to_string(),
+                        contexts: Vec::new(),
+                        error,
+                    }],
+                    started_at,
+                );
+            }
+        }
+    }
+    // Group records apply LAST, after every batch (and every schema) —
+    // the same order the stream contract promises — projected per
+    // shard and broadcast. A dry run dispatches them too (with
+    // dry_run forwarded): the shards still parse and scope-check the
+    // records exactly as a single instance's dry run does, while
+    // omitting them from the preview.
     let mut groups: Vec<Value> = Vec::new();
     if !stream.groups.is_empty() {
         let mut per_group: BTreeMap<usize, Vec<GroupOutcomeWire>> = BTreeMap::new();
@@ -2473,6 +2557,9 @@ async fn route_import(
         }
     }
     let mut result = json!({"batches": batches});
+    if !schemas.is_empty() {
+        result["schemas"] = json!(schemas);
+    }
     if !groups.is_empty() {
         result["groups"] = json!(groups);
     }

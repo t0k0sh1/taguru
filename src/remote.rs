@@ -530,6 +530,92 @@ impl Api {
             eprintln!("{line}");
         }
     }
+
+    /// One `GET /version`, read for its `schema_formats` array only —
+    /// best-effort, same posture as [`Api::version_skew_line`] (its
+    /// own short timeout, `None` on any transport/non-200/parse
+    /// trouble so the verb's own request produces the real fault, not
+    /// a guess made here). `/version` is auth-exempt (`PROBE_EXEMPT`),
+    /// but the bearer rides along anyway — matches every other
+    /// request this module sends.
+    fn schema_formats(&self) -> Option<Vec<u64>> {
+        let url = self.url(&["version"]).ok()?;
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(HEALTH_PREFLIGHT_TIMEOUT))
+            .http_status_as_error(false)
+            .build()
+            .into();
+        let mut response = self.bearer(agent.get(&url)).call().ok()?;
+        if response.status().as_u16() != 200 {
+            return None;
+        }
+        let body = response
+            .body_mut()
+            .with_config()
+            .limit(REMOTE_RESPONSE_CAP_BYTES)
+            .read_to_string()
+            .ok()?;
+        let value: Value = serde_json::from_str(&body).ok()?;
+        let formats = value.get("schema_formats")?.as_array()?;
+        Some(
+            formats
+                .iter()
+                .filter_map(serde_json::Value::as_u64)
+                .collect(),
+        )
+    }
+
+    /// `import --url`'s ADR 0009 §13 preflight — call only when the
+    /// payload actually carries a `taguru_schema` record; a
+    /// schema-free import must behave exactly as it did before this
+    /// method existed. `Some(message)` refuses before a byte ships.
+    /// Unlike [`Api::schema_export_refusal`], an ABSENT
+    /// `schema_formats` is fatal here, not safe: it means the peer has
+    /// never heard of the key, so shipping the record would either be
+    /// silently dropped by a schema-unaware server or fall through to
+    /// `parse_stream`'s dispatch as a misleading "not a batch header"
+    /// refusal (ADR 0009 §13 bullet 2) — this preflight exists to
+    /// replace that with an honest one before the network round trip.
+    pub(crate) fn schema_import_refusal(&self) -> Option<String> {
+        let mine = crate::schema::SCHEMA_VERSION;
+        match self.schema_formats() {
+            Some(formats) if formats.contains(&mine) => None,
+            Some(formats) => Some(format!(
+                "taguru: import: this CLI writes schema format {mine} but the server at {} \
+                 reads {formats:?} — nothing was sent; upgrade the server, or import \
+                 without the taguru_schema record",
+                self.base
+            )),
+            None => Some(format!(
+                "taguru: import: this CLI writes schema format {mine} but the server at {} \
+                 does not report a schema_formats — nothing was sent; upgrade the server, \
+                 or import without the taguru_schema record",
+                self.base
+            )),
+        }
+    }
+
+    /// `export --url`'s ADR 0009 §13 preflight, run unconditionally
+    /// (unlike [`Api::schema_import_refusal`], which only runs when the
+    /// payload is known to carry a schema record) — a fetch cannot
+    /// know in advance whether the context it is about to pull carries
+    /// one, and probing each context first would cost a request per
+    /// context for no better an answer. An ABSENT `schema_formats` is
+    /// SAFE here, not fatal: a server that has never heard of the key
+    /// cannot have emitted a `taguru_schema` line, so there is nothing
+    /// for this CLI to fail to read — only a format this CLI does not
+    /// recognize refuses.
+    pub(crate) fn schema_export_refusal(&self) -> Option<String> {
+        let mine = crate::schema::SCHEMA_VERSION;
+        match self.schema_formats() {
+            Some(formats) if !formats.contains(&mine) => Some(format!(
+                "taguru: export: this CLI reads schema format {mine} but the server at {} \
+                 writes {formats:?} — nothing was fetched; upgrade this CLI",
+                self.base
+            )),
+            _ => None,
+        }
+    }
 }
 
 /// The `(major, minor)` prefix of a version string; `None` when it
@@ -758,6 +844,58 @@ mod tests {
         assert_eq!(
             skew_warning("compact", "http://h", "0.5.0", r#"{"version":"unknown"}"#),
             None
+        );
+    }
+
+    /// ADR 0009 §13's `import --url` preflight, over all four cases:
+    /// a match, a mismatch, and the two directions absence cuts —
+    /// fatal for `import` (a server that never heard of the key would
+    /// either drop the record or answer `parse_stream`'s misleading
+    /// "not a batch header" refusal), safe for `export` (such a
+    /// server cannot have emitted a `taguru_schema` line to begin
+    /// with).
+    #[test]
+    fn schema_import_refusal_covers_match_mismatch_and_absence() {
+        let base = respond_once("HTTP/1.1 200 OK", json!({"schema_formats": [1]}));
+        assert_eq!(Api::new(base).schema_import_refusal(), None);
+
+        let base = respond_once("HTTP/1.1 200 OK", json!({"schema_formats": [2]}));
+        let message = Api::new(base)
+            .schema_import_refusal()
+            .expect("a format this CLI cannot read must refuse");
+        assert!(message.contains("reads [2]"), "{message}");
+        assert!(message.contains("nothing was sent"), "{message}");
+
+        let base = respond_once("HTTP/1.1 200 OK", json!({"status": "ok"}));
+        let message = Api::new(base)
+            .schema_import_refusal()
+            .expect("an absent schema_formats is fatal for import");
+        assert!(
+            message.contains("does not report a schema_formats"),
+            "{message}"
+        );
+    }
+
+    /// [`schema_import_refusal_covers_match_mismatch_and_absence`]'s
+    /// export twin — the one case that differs is absence, which is
+    /// safe here rather than fatal.
+    #[test]
+    fn schema_export_refusal_covers_match_mismatch_and_absence() {
+        let base = respond_once("HTTP/1.1 200 OK", json!({"schema_formats": [1]}));
+        assert_eq!(Api::new(base).schema_export_refusal(), None);
+
+        let base = respond_once("HTTP/1.1 200 OK", json!({"schema_formats": [2]}));
+        let message = Api::new(base)
+            .schema_export_refusal()
+            .expect("a format this CLI cannot read must refuse");
+        assert!(message.contains("writes [2]"), "{message}");
+        assert!(message.contains("nothing was fetched"), "{message}");
+
+        let base = respond_once("HTTP/1.1 200 OK", json!({"status": "ok"}));
+        assert_eq!(
+            Api::new(base).schema_export_refusal(),
+            None,
+            "an absent schema_formats (a pre-schema server) is safe for export"
         );
     }
 

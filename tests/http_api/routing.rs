@@ -99,10 +99,22 @@ fn seed(server: &Server) {
         "{\"subject\": \"共通\", \"label\": \"例\", \"object\": \"概念\", \"weight\": 0.5}\n",
         "{\"taguru_batch\": 1, \"context\": \"breweries\", \"source\": \"doc-c\"}\n",
         "{\"subject\": \"青嶺酒造\", \"label\": \"造る\", \"object\": \"青嶺\", \"weight\": -2.5}\n",
+        // A schema record (ADR 0009 §13, #384): sake lives on shard A —
+        // this proves the router's OWN routing table for schema
+        // records (never broadcast, unlike groups) sends it to the
+        // right shard rather than reusing whatever shard a nearby
+        // batch chunk happened to land on.
+        "{\"taguru_schema\": 1, \"context\": \"sake\", \"mode\": \"warn\", \
+          \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n",
         "{\"taguru_group\": 1, \"name\": \"jp\", \"description\": \"日本酒\", \"contexts\": [\"sake\", \"glossary\"]}\n",
     );
     let (status, outcome) = post_import(server, stream, None);
     assert_eq!(status, 200, "{outcome}");
+    assert_eq!(
+        outcome["result"]["schemas"][0]["context"],
+        json!("sake"),
+        "the router's own schema-routing table must land the record and report it: {outcome}"
+    );
     // A nested group whose direct member and child live on different
     // shards: `contexts` needs projection, `groups` broadcasts whole.
     server.ok(
@@ -157,6 +169,12 @@ fn the_router_over_split_shards_answers_exactly_like_one_instance() {
 
     seed(&single);
     seed(&router);
+
+    // The schema record's own routing (ADR 0009 §13, #384): the
+    // router sent it to shard A alone (never broadcast, unlike
+    // groups) — content served back through GET must still match the
+    // single instance exactly.
+    assert_equivalent(&single, &router, "GET", "/contexts/sake/schema", None);
 
     // The seeding itself already proved the import split: now the
     // responses. Cross recall with contexts, with groups (nested),

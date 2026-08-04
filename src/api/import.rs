@@ -71,11 +71,46 @@ pub struct ImportOutcome {
 #[derive(Serialize)]
 pub struct ImportStreamOutcome {
     pub batches: Vec<ImportOutcome>,
+    /// One entry per `taguru_schema` record, stream order — absent
+    /// entirely for a stream that carried none, keeping the
+    /// pre-schema response byte-identical (ADR 0009 §13).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub schemas: Vec<SchemaImportOutcome>,
     /// One entry per `taguru_group` record, stream order — absent
     /// entirely for a stream that carried none, keeping the pre-group
     /// response byte-identical.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<GroupImportOutcome>,
+}
+
+/// What installing one `taguru_schema` record accomplished. No
+/// outcome verb (unlike [`GroupImportOutcome`]'s "created"/"replaced"/
+/// "unchanged"): `put_schema` cannot itself distinguish an install
+/// from a no-op PUT of the identical document, and a guessed verb
+/// would be worse than none (ADR 0009 §13).
+#[derive(Serialize)]
+pub struct SchemaImportOutcome {
+    pub context: String,
+    pub mode: &'static str,
+    pub types: usize,
+    pub relations: usize,
+}
+
+/// `pub(crate)`: `import --json` reuses this to build the exact same
+/// shape `POST /import`'s response carries, from the same
+/// [`crate::schema::SchemaDocument`] [`crate::ingest::
+/// apply_schema_record`] returns — one computation, not two that
+/// could drift.
+pub(crate) fn schema_import_outcome(
+    context: &str,
+    document: &crate::schema::SchemaDocument,
+) -> SchemaImportOutcome {
+    SchemaImportOutcome {
+        context: context.to_string(),
+        mode: document.mode.as_str(),
+        types: document.types.len(),
+        relations: document.relations.len(),
+    }
 }
 
 /// What restoring one group record accomplished. A restore is a
@@ -364,6 +399,84 @@ pub(super) fn restore_refusal(
     }
 }
 
+/// Maps one `taguru_schema` record's [`crate::ingest::SchemaApplyError`]
+/// onto the response — the schema twin of [`import_refusal`], simpler
+/// because `put_schema` is atomic (no partial-write "how much of this
+/// one record landed" question a batch's own refusal has to answer).
+/// Every batch of the stream already landed durably by the time a
+/// schema record is even reached; nothing past this record (later
+/// schemas, every group) applies.
+fn schema_import_refusal(
+    state: &AppState,
+    context: &str,
+    failure: crate::ingest::SchemaApplyError,
+    durable_batches: usize,
+    started_at: Instant,
+) -> Response {
+    let (integrity, durable_batches) = stream_integrity(durable_batches, false);
+    match &failure {
+        crate::ingest::SchemaApplyError::NoContext => validation_error(
+            ErrorCode::NoContext,
+            format!(
+                "schema record: context '{context}' {failure} — nothing past this point \
+                 was applied"
+            ),
+            RefusalDetail {
+                issues: vec![Issue::missing(
+                    format!("context '{context}'"),
+                    "an earlier batch of this stream (or a previous request) creating it, \
+                     since a schema record's context must already exist",
+                )],
+                integrity: Some(integrity),
+                durable_batches,
+                retryable_after_correction: Some(true),
+            },
+            started_at,
+        ),
+        crate::ingest::SchemaApplyError::ReservedAlias(_) => validation_error(
+            ErrorCode::InvalidArgument,
+            format!(
+                "schema record: context '{context}' {failure} — nothing past this point \
+                 was applied"
+            ),
+            RefusalDetail {
+                integrity: Some(integrity),
+                durable_batches,
+                retryable_after_correction: Some(true),
+                ..Default::default()
+            },
+            started_at,
+        ),
+        crate::ingest::SchemaApplyError::Load(message) => {
+            // Same posture as `put_schema`'s own Load arm
+            // (`src/api/schema.rs`): the detail can name a filesystem
+            // path, so it is logged, never returned.
+            tracing::warn!(context = %context, error = %message, "schema load failed during import");
+            state.metrics().record_error(ErrorKind::Load);
+            error(
+                ErrorCode::Internal,
+                format!(
+                    "schema record: context '{context}' could not be loaded — see server \
+                     logs; every batch before it is durable"
+                ),
+                started_at,
+            )
+        }
+        crate::ingest::SchemaApplyError::Io(io_error) => {
+            tracing::warn!(context = %context, error = %io_error, "schema write failed during import");
+            state.metrics().record_error(ErrorKind::Io);
+            error(
+                ErrorCode::Internal,
+                format!(
+                    "schema record: context '{context}' schema not persisted — see server \
+                     logs; every batch before it is durable"
+                ),
+                started_at,
+            )
+        }
+    }
+}
+
 /// The "N batches already landed" prefix a multi-batch import prepends
 /// to a mid-stream failure — shared by the deadline-exhaustion and the
 /// refused-batch cases in [`import_batch`]'s loop, which differ only in
@@ -409,6 +522,16 @@ fn import_batch_note(
 /// as on any endpoint; embeddings ride the next flush
 /// (`TAGURU_EMBED_AUTO`) exactly as live writes do.
 ///
+/// `taguru_schema` records (ADR 0009 §13) ride the same stream and
+/// install AFTER every batch, BEFORE any group — a schema record's
+/// context may exist only because a batch of this same body just
+/// created it, and a schema landing before groups restore lets a
+/// group's own member-existence check see the context as its final
+/// self. Each schema record is independent (one context each), so the
+/// first one that fails refuses the request right there; unlike
+/// groups' whole-set validation, later schema records and every group
+/// are simply never reached.
+///
 /// `taguru_group` records ride the same stream and apply LAST — after
 /// every batch, wherever they sat — so a group and the member
 /// contexts it names can travel in one body in any order. Restoring a
@@ -416,11 +539,12 @@ fn import_batch_note(
 /// refusal applies no group, with every batch already durable.
 ///
 /// The response is `{batches: [...]}` in stream order — a single-batch
-/// body answers the same shape with one entry, and a stream that
-/// carried group records adds `groups: [...]`. A refusal partway
-/// through a stream stops there — the batches before it landed
-/// durably, and because every batch is retract-then-apply,
-/// re-POSTing the whole corrected stream is exact, never
+/// body answers the same shape with one entry, a stream that carried
+/// schema records adds `schemas: [...]`, and one that carried group
+/// records adds `groups: [...]`. A refusal partway through a stream
+/// stops there — the batches before it landed durably, and because
+/// every batch is retract-then-apply, re-POSTing the whole corrected
+/// stream is exact, never
 /// double-counted.
 ///
 /// `?dry_run=true` reports the same `{batches: [...]}` shape without
@@ -428,11 +552,12 @@ fn import_batch_note(
 /// malformed or forbidden stream is refused exactly as it would be for
 /// real. Two counts per batch, `associations` and `aliases`, are
 /// optimistic (see [`crate::ingest::preview_batch`]); every other
-/// field is exact. `taguru_group` records are a known gap: they apply
-/// through a separate path (`restore_groups`) that dry-run does not
-/// preview, so a stream carrying any is parsed and scope-checked like
-/// normal but its `groups` are silently not previewed — the response
-/// omits `groups` entirely rather than report a guess.
+/// field is exact. `taguru_schema` and `taguru_group` records are both
+/// a known gap: they apply through a path (`put_schema`,
+/// `restore_groups`) that dry-run does not preview, so a stream
+/// carrying either is parsed and scope-checked like normal but not
+/// previewed — the response omits `schemas`/`groups` entirely rather
+/// than report a guess.
 pub async fn import_batch(
     State(state): State<AppState>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
@@ -479,6 +604,30 @@ pub async fn import_batch(
                 key_name(&key),
                 refused.context,
                 refused.source
+            ),
+            RefusalDetail {
+                integrity: Some("nothing_written"),
+                ..Default::default()
+            },
+            started_at,
+        );
+    }
+    // Schema records are judged by the same context grant as a batch,
+    // before anything applies — one step earlier than the group check
+    // just below, since schemas install before groups restore (ADR
+    // 0009 §13).
+    if let Some(axum::Extension(scope)) = &scope
+        && let Some((context, _)) = stream
+            .schemas
+            .iter()
+            .find(|(context, _)| !scope.allows_context(context))
+    {
+        return validation_error(
+            ErrorCode::Forbidden,
+            format!(
+                "key '{}' has no grant on context '{context}' (a schema record); nothing \
+                 was applied",
+                key_name(&key)
             ),
             RefusalDetail {
                 integrity: Some("nothing_written"),
@@ -661,6 +810,43 @@ pub async fn import_batch(
                 }
             }
         }
+        // Schemas install after every batch, before groups restore
+        // (ADR 0009 §13): a schema record's context may exist only
+        // because a batch of THIS SAME stream just created it. Like
+        // `taguru_group` records, `put_schema` has no read-only twin
+        // to preview through, so a dry run skips this entirely — the
+        // response omits `schemas` rather than report a guess. Unlike
+        // groups (one whole SET validated together), each schema
+        // record names one independent context, so the first one that
+        // fails refuses the request right there — every batch before
+        // it stays durable, nothing past it (later schemas, every
+        // group) applies.
+        let mut schema_outcomes: Vec<SchemaImportOutcome> = Vec::new();
+        if !query.dry_run {
+            for (context, installed) in &stream.schemas {
+                match crate::ingest::apply_schema_record(&state, context, installed.clone()) {
+                    Ok(document) => {
+                        tracing::info!(
+                            target: "taguru::audit",
+                            key = %key_name(&key),
+                            context = %context,
+                            mode = document.mode.as_str(),
+                            "import schema record installed",
+                        );
+                        schema_outcomes.push(schema_import_outcome(context, &document));
+                    }
+                    Err(failure) => {
+                        return Err(Box::new(schema_import_refusal(
+                            &state,
+                            context,
+                            failure,
+                            outcomes.len(),
+                            started_at,
+                        )));
+                    }
+                }
+            }
+        }
         // Groups apply LAST — after every batch — so a record and the
         // member contexts it names can ride one stream in any order.
         // `taguru_group` records apply through a separate path
@@ -699,15 +885,22 @@ pub async fn import_batch(
                 }
             }
         }
-        Ok((outcomes, group_outcomes, warn_issues, warn_total))
+        Ok((
+            outcomes,
+            schema_outcomes,
+            group_outcomes,
+            warn_issues,
+            warn_total,
+        ))
     });
-    let (outcomes, group_outcomes, warn_issues, warn_total) = match outcome {
+    let (outcomes, schema_outcomes, group_outcomes, warn_issues, warn_total) = match outcome {
         Ok(applied) => applied,
         Err(refusal) => return *refusal,
     };
     ok_with_issues_total(
         ImportStreamOutcome {
             batches: outcomes,
+            schemas: schema_outcomes,
             groups: group_outcomes,
         },
         warn_issues,
