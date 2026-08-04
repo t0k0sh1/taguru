@@ -410,10 +410,25 @@ fn schema_import_refusal(
     state: &AppState,
     context: &str,
     failure: crate::ingest::SchemaApplyError,
-    durable_batches: usize,
+    durable_batches_count: usize,
+    applied_schemas: usize,
     started_at: Instant,
 ) -> Response {
-    let (integrity, durable_batches) = stream_integrity(durable_batches, false);
+    // `integrity` must reflect everything durable so far in the
+    // stream, batches AND any schema record that installed before
+    // this one failed — `put_schema` is atomic, so an earlier schema
+    // of the same stream can already be durably persisted even when
+    // zero batches landed (a schemas-only stream). `durable_batches`
+    // itself still names only the batch count: a schema is not a
+    // batch, and folding the two into one number would mislead a
+    // client that uses this field to know how many batches to skip on
+    // a corrected resend.
+    let integrity = if durable_batches_count + applied_schemas == 0 {
+        "nothing_written"
+    } else {
+        "durable_prefix"
+    };
+    let durable_batches = (durable_batches_count > 0).then_some(durable_batches_count);
     match &failure {
         crate::ingest::SchemaApplyError::NoContext => validation_error(
             ErrorCode::NoContext,
@@ -447,11 +462,20 @@ fn schema_import_refusal(
             },
             started_at,
         ),
-        crate::ingest::SchemaApplyError::Load(message) => {
-            // Same posture as `put_schema`'s own Load arm
-            // (`src/api/schema.rs`): the detail can name a filesystem
-            // path, so it is logged, never returned.
-            tracing::warn!(context = %context, error = %message, "schema load failed during import");
+        crate::ingest::SchemaApplyError::Load(_) => {
+            // Unlike `put_schema`'s own Load arm (`src/api/schema.rs`),
+            // this event's target is not `taguru::search` — ADR 0008
+            // §8's one OTel export exclusion — so it reaches the
+            // export layer whenever OTLP is enabled. The detail can
+            // name a filesystem path (forbidden by §8) and the context
+            // name is never recorded on an event either (§8's
+            // per-item rule), so only a low-cardinality reason rides
+            // the trace; the response text below still names the
+            // context, since the CALLER already sent it.
+            tracing::warn!(
+                taguru.reason = "schema_load_failed",
+                "import schema record failed"
+            );
             state.metrics().record_error(ErrorKind::Load);
             error(
                 ErrorCode::Internal,
@@ -462,8 +486,11 @@ fn schema_import_refusal(
                 started_at,
             )
         }
-        crate::ingest::SchemaApplyError::Io(io_error) => {
-            tracing::warn!(context = %context, error = %io_error, "schema write failed during import");
+        crate::ingest::SchemaApplyError::Io(_) => {
+            tracing::warn!(
+                taguru.reason = "schema_write_failed",
+                "import schema record failed"
+            );
             state.metrics().record_error(ErrorKind::Io);
             error(
                 ErrorCode::Internal,
@@ -841,6 +868,7 @@ pub async fn import_batch(
                             context,
                             failure,
                             outcomes.len(),
+                            schema_outcomes.len(),
                             started_at,
                         )));
                     }

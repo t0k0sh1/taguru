@@ -99,12 +99,18 @@ taguru import --json batch/           <span class="c"># {dry_run, batches: [...]
       request lands there.
     </p>
     <p>
-      <code>--json</code> answers the same shape <code>POST /import</code>'s own response body
-      does — one <code>ImportOutcome</code> per batch under <code>batches</code>, one
+      <code>--json</code> answers the same <code>{batches, schemas, groups}</code> fields
+      <code>POST /import</code>'s own <code>result</code> object carries — one
+      <code>ImportOutcome</code> per batch under <code>batches</code>, one
       <code>SchemaImportOutcome</code> per <code>taguru_schema</code> record under
       <code>schemas</code>, one <code>GroupImportOutcome</code> per <code>taguru_group</code>
       record under <code>groups</code> (both omitted entirely when the stream carried none) — so a
-      script parses one schema whether it called the CLI or the HTTP endpoint directly. With
+      script parses one schema whether it called the CLI or the HTTP endpoint directly. The two
+      outer shapes differ: the CLI prints <code>{"dry_run": ..., "batches": [...], ...}</code>
+      directly, while the HTTP endpoint wraps the identical fields inside its own response
+      envelope, <code>{"status": "ok", "result": {"batches": [...], ...}, "time": ...}</code> (or
+      <code>{"status": "error", "error": "...", ...}</code> on refusal — every JSON endpoint
+      answers this same envelope). With
       <code>--url</code>, every field is exact: the server always answers from the same code path
       a real apply runs (<code>preview_batch</code> under <code>--dry-run</code>). Offline, a real
       (non-dry-run) run is exact the same way; offline <code>--dry-run</code> is the one exception
@@ -532,7 +538,7 @@ taguru import --url "$TAGURU_URL" --dry-run backups/   <span class="c"># preview
       <li><b>Sourceless weight</b> (entered via the API with <code>source</code> omitted) rides a batch under the reserved source <code>export:unsourced</code> — the numbers are preserved and the attribution tells the story. If a real source collides with this reserved id, export refuses rather than silently mixing.</li>
       <li><b>Fully retracted edges (weight 0) are not emitted</b>: an export → import round trip sheds the dead records an append-only image accumulates — doubling as offline compaction.</li>
       <li>An alias whose canonical has no live associations is dropped and the count reported (under the import contract, canonicals are minted by association lines).</li>
-      <li><code>POST /import</code> always answers <code>{"batches": [per-batch results…]}</code> (a single batch is the same shape with one element — one shape to parse), plus <code>schemas</code>/<code>groups</code> whenever the stream carried either. If the stream is refused midway, the earlier batches (and any schema record that already installed) have landed — each batch is retract-then-apply and each schema install is independent, so re-POSTing the corrected stream converges exactly.</li>
+      <li><code>POST /import</code> always answers <code>{"status": "ok", "result": {"batches": [per-batch results…]}, "time": ...}</code> (a single batch is the same shape with one element — one shape to parse), <code>result</code> gaining <code>schemas</code>/<code>groups</code> whenever the stream carried either. If the stream is refused midway, the earlier batches (and any schema record that already installed) have landed — each batch is retract-then-apply and each schema install is independent, so re-POSTing the corrected stream converges exactly.</li>
       <li>Rendering is deterministic: the same state writes the same bytes, so backups diff against each other.</li>
     </ul>
     <pre><code><span class="c"># evacuate one context from a live server and restore it elsewhere</span>

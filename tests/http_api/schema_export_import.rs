@@ -167,6 +167,38 @@ fn a_schema_records_nonexistent_context_refuses_naming_it_with_earlier_batches_d
     assert_eq!(sake["stats"]["associations"], 1, "{sake}");
 }
 
+/// A stream carrying ONLY schema records (zero batches): the first
+/// installs durably, the second (naming a nonexistent context) fails.
+/// `put_schema` is atomic and independent per record, so the first
+/// one's install already survives the second's refusal — `integrity`
+/// must say `durable_prefix`, not `nothing_written`, even though
+/// `durable_batches` (a batch count, not a schema count) stays absent.
+/// Regression for a partial-application accounting gap: computing
+/// `integrity` from the batch count alone would call this
+/// `nothing_written` despite a schema already being durably persisted.
+#[test]
+fn an_earlier_schema_records_own_durability_survives_a_later_schemas_refusal() {
+    let server = Server::start("schema-stream-partial-integrity");
+    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    let stream = format!(
+        "{first}{second}",
+        first = schema_line("sake", "warn"),
+        second = schema_line("ghost", "warn"),
+    );
+    let (status, refusal) = post_import(&server, &stream, None);
+    assert_eq!(status, 404, "{refusal}");
+    assert_eq!(refusal["integrity"], "durable_prefix", "{refusal}");
+    assert!(
+        refusal.get("durable_batches").is_none(),
+        "durable_batches names batches, not schemas — none landed: {refusal}"
+    );
+
+    // The first schema record's install is durable — proof the
+    // refusal above did not, and could not, roll it back.
+    let installed = server.ok("GET", "/contexts/sake/schema", None);
+    assert_eq!(installed["mode"], "warn", "{installed}");
+}
+
 /// `taguru export --url` / `taguru import --url`: a schema installed
 /// on the server rides the fetched stream as a `taguru_schema` record
 /// and reinstalls on the other side — the CLI round trip

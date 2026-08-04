@@ -557,12 +557,15 @@ impl Api {
             .ok()?;
         let value: Value = serde_json::from_str(&body).ok()?;
         let formats = value.get("schema_formats")?.as_array()?;
-        Some(
-            formats
-                .iter()
-                .filter_map(serde_json::Value::as_u64)
-                .collect(),
-        )
+        // All-or-nothing: `filter_map` would silently drop a malformed
+        // element (e.g. a stray string in the array), which could turn
+        // `[2, "oops"]` into a false `[2]` match this CLI reads as
+        // "the server carries only format 2" instead of "this
+        // capability array is malformed" — the latter must answer
+        // `None` (best-effort, same as every other trouble case this
+        // method already treats that way) rather than a guess built on
+        // a partial read.
+        formats.iter().map(serde_json::Value::as_u64).collect()
     }
 
     /// `import --url`'s ADR 0009 §13 preflight — call only when the
@@ -870,6 +873,25 @@ mod tests {
         let message = Api::new(base)
             .schema_import_refusal()
             .expect("an absent schema_formats is fatal for import");
+        assert!(
+            message.contains("does not report a schema_formats"),
+            "{message}"
+        );
+    }
+
+    /// A mixed-type `schema_formats` array (a malformed capability
+    /// announcement — a stray string among the versions) must refuse
+    /// as a whole, not silently drop the bad element and match on
+    /// whatever numbers happened to parse: `[1, "oops"]` naming this
+    /// CLI's own version must still be treated as "cannot trust this
+    /// array" (absent-shaped fatal), never as "the server carries
+    /// format 1."
+    #[test]
+    fn schema_formats_refuses_whole_on_a_malformed_element_rather_than_dropping_it() {
+        let base = respond_once("HTTP/1.1 200 OK", json!({"schema_formats": [1, "oops"]}));
+        let message = Api::new(base)
+            .schema_import_refusal()
+            .expect("a malformed schema_formats must refuse, not silently match");
         assert!(
             message.contains("does not report a schema_formats"),
             "{message}"

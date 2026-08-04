@@ -3620,6 +3620,17 @@ mod tests {
             .contains("must not be empty")
         );
 
+        // The context name's own byte cap — mirrors
+        // `group_records_validate_their_shape_with_line_numbers`'s
+        // `long` case for a group's `name`.
+        let long = "x".repeat(65);
+        assert!(
+            case(&format!(
+                r#"{{"taguru_schema": 1, "context": "{long}", "mode": "off", "closed_labels": false, "types": {{}}, "relations": {{}}}}"#
+            ))
+            .contains("65 bytes")
+        );
+
         // Every field is required — no struct-level default, matching
         // SchemaDocument's own at-rest posture.
         assert!(
@@ -3667,6 +3678,36 @@ mod tests {
                 && error.contains("exactly one batch was expected"),
             "{error}"
         );
+    }
+
+    /// [`apply_schema_record`]'s own failure path, not just
+    /// `parse_schema`'s validation: a schema record naming a context
+    /// neither an earlier batch of the same stream nor a previous
+    /// request ever created returns [`SchemaApplyError::NoContext`] —
+    /// the CLI-specific arm `run_local`'s Pass 2 counts into
+    /// `schema_failures` (exit 1), and the server twin
+    /// `schema_import_refusal` maps to 404 `no_context`.
+    #[test]
+    fn apply_schema_record_refuses_a_context_that_does_not_exist() {
+        let dir = std::env::temp_dir().join(format!(
+            "taguru-ingest-schema-no-context-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+
+        let installed = schema::install(schema::SchemaDocument {
+            schema: schema::SCHEMA_VERSION,
+            mode: schema::SchemaMode::Off,
+            closed_labels: false,
+            types: BTreeMap::new(),
+            relations: BTreeMap::new(),
+        })
+        .unwrap();
+        let error = apply_schema_record(&state, "ghost", installed).unwrap_err();
+        assert!(matches!(error, SchemaApplyError::NoContext), "{error:?}");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A line longer than the cap is refused at the cap, not buffered

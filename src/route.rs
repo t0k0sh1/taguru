@@ -2423,7 +2423,7 @@ async fn route_import(
                 }
             }
             Ok(answer) => {
-                return rewrap_import_refusal(answer, batches.len(), index > 0, started_at);
+                return rewrap_import_refusal(answer, batches.len(), 0, index > 0, started_at);
             }
             Err(error) => {
                 return unreachable_refusal(
@@ -2468,7 +2468,8 @@ async fn route_import(
                 return rewrap_import_refusal(
                     answer,
                     batches.len(),
-                    !query.dry_run && !chunks.is_empty(),
+                    schemas.len(),
+                    !query.dry_run && (!chunks.is_empty() || !schemas.is_empty()),
                     started_at,
                 );
             }
@@ -2518,7 +2519,8 @@ async fn route_import(
                     return rewrap_import_refusal(
                         answer,
                         batches.len(),
-                        !query.dry_run && !chunks.is_empty(),
+                        schemas.len(),
+                        !query.dry_run && (!chunks.is_empty() || !schemas.is_empty()),
                         started_at,
                     );
                 }
@@ -2581,15 +2583,20 @@ struct GroupOutcomeWire {
 }
 
 /// A shard refusal from the real (post-preflight) import run, with the
-/// cross-chunk truth prepended when earlier chunks already landed —
-/// the shard's own note counts only its chunk.
+/// cross-chunk truth prepended when earlier chunks OR schema records
+/// already landed on a different shard — the failing shard's own note
+/// counts only what reached IT, never what an earlier request to a
+/// different shard already made durable. `schemas_landed` is 0 for
+/// the batch loop's own call site (the schema loop has not started
+/// yet at that point), so its wording is unchanged.
 fn rewrap_import_refusal(
     answer: ShardAnswer,
     batches_landed: usize,
-    other_chunks_landed: bool,
+    schemas_landed: usize,
+    other_landed: bool,
     started_at: Instant,
 ) -> Response {
-    if !other_chunks_landed {
+    if !other_landed {
         return (
             answer.status,
             [(header::CONTENT_TYPE, "application/json")],
@@ -2613,13 +2620,18 @@ fn rewrap_import_refusal(
             String::from_utf8_lossy(&answer.body).into_owned(),
         ),
     };
+    let landed = match (batches_landed, schemas_landed) {
+        (batches, 0) => format!("{batches} batch(es)"),
+        (0, schemas) => format!("{schemas} schema record(s)"),
+        (batches, schemas) => format!("{batches} batch(es) and {schemas} schema record(s)"),
+    };
     let rewrapped = json!({
         "status": "error",
         "code": code,
         "error": format!(
-            "{batches_landed} batch(es) landed durably on earlier shards before this \
-             refusal (re-POSTing the whole stream is exact — each batch replaces its own \
-             source); the refusing shard says: {message}"
+            "{landed} landed durably on earlier shards before this refusal (re-POSTing the \
+             whole stream is exact — each batch replaces its own source, each schema install \
+             is independent); the refusing shard says: {message}"
         ),
         "time": started_at.elapsed().as_secs_f64(),
     });
