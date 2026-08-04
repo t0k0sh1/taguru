@@ -639,12 +639,15 @@ mod tests {
     fn concept_types_answers_empty_for_an_unknown_concept_or_type_label() {
         let mut context = Context::default();
         context
-            .associate("青嶺酒造", "schema:type", "Brewery", 1.0)
+            .associate_from("青嶺酒造", "schema:type", "Brewery", 1.0, "名簿", None)
+            .unwrap();
+        context
+            .associate("青嶺酒造", "schema:type", "Organization", 1.0)
             .unwrap();
 
         assert_eq!(
             context.concept_types("青嶺酒造", "schema:type"),
-            vec!["Brewery"]
+            vec!["Brewery", "Organization"]
         );
         assert!(
             context
@@ -655,6 +658,15 @@ mod tests {
             context
                 .concept_types("青嶺酒造", "存在しないラベル")
                 .is_empty()
+        );
+
+        // A retracted type assertion does not linger — `concept_types`
+        // runs its own walk (separate from `describe_typed`'s), so this
+        // is that loop's own dead-edge skip, not a shared assumption.
+        context.retract_source("名簿");
+        assert_eq!(
+            context.concept_types("青嶺酒造", "schema:type"),
+            vec!["Organization"]
         );
     }
     #[test]

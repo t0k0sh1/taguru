@@ -461,7 +461,7 @@ export class Taguru {
 
   /**
    * Exact-position query across several contexts at once, matches tagged;
-   * the same target contract as `recall`. `subjectTypes`/`objectTypes`
+   * the same target contract as `recall`. `subject_types`/`object_types`
    * further narrow by declared entity type (`is_a`-expanded) when a
    * target has an installed schema; a schema-free target answers empty
    * for a non-empty filter.
@@ -905,7 +905,7 @@ export class Context {
 
   /**
    * Exact-position query; each position takes one name or an OR-set.
-   * `subjectTypes`/`objectTypes` further narrow by declared entity type
+   * `subject_types`/`object_types` further narrow by declared entity type
    * (`is_a`-expanded) when this context has an installed schema; a
    * schema-free context answers empty for a non-empty filter.
    */

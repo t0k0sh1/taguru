@@ -363,6 +363,8 @@ def test_query_sends_subject_types_and_object_types() -> None:
     assert bodies[0] == (
         '{"subject":"青嶺酒造","subject_types":["Brewery","Organization"]}'.encode()
     )
+    client.context("sake").query(label="杜氏", object_types="Person")
+    assert bodies[1] == '{"label":"杜氏","object_types":"Person"}'.encode()
 
 
 def test_describe_and_resolve_decode_types() -> None:

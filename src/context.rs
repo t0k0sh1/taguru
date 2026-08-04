@@ -370,6 +370,13 @@ pub struct ConceptDescription {
     /// document (§6.3 guard 1) or a concept with no type assertion —
     /// the two are indistinguishable here on purpose, same as an
     /// undeclared type never being a violation (§6.1).
+    ///
+    /// `skip_serializing_if` on top of that: a schema-free context's
+    /// `describe` response must stay byte-identical to its pre-#387
+    /// shape (no `types` key at all), not merely an empty array — the
+    /// same additive-field discipline every other optional field on
+    /// this wire surface already follows (`resolve`'s `kind`/`gloss`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub types: Vec<String>,
 }
 

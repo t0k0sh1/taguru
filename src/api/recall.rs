@@ -409,7 +409,13 @@ fn resolve_cross_type_schemas(
                 schemas.insert(name.clone(), schema);
             }
             Some(Err(message)) => {
-                tracing::warn!(context = %name, error = %message, "schema load failed");
+                // ADR 0008 §7: no span-event field is ever named `error`
+                // — tracing-opentelemetry special-cases exactly that
+                // name into an exception event / ERROR status. The
+                // detail (which can name a filesystem path) rides the
+                // message text instead, matching the interpolated style
+                // `resolve.rs`'s own provider-failure log already uses.
+                tracing::warn!(context = %name, "schema load failed: {message}");
                 state.metrics().record_error(ErrorKind::Load);
                 return Err(Box::new(error(
                     ErrorCode::Internal,
@@ -697,7 +703,13 @@ pub async fn query(
             None => return not_found(&name, started_at),
             Some(Ok(schema)) => schema,
             Some(Err(message)) => {
-                tracing::warn!(context = %name, error = %message, "schema load failed");
+                // ADR 0008 §7: no span-event field is ever named `error`
+                // — tracing-opentelemetry special-cases exactly that
+                // name into an exception event / ERROR status. The
+                // detail (which can name a filesystem path) rides the
+                // message text instead, matching the interpolated style
+                // `resolve.rs`'s own provider-failure log already uses.
+                tracing::warn!(context = %name, "schema load failed: {message}");
                 state.metrics().record_error(ErrorKind::Load);
                 return error(
                     ErrorCode::Internal,

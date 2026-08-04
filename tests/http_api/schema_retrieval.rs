@@ -61,7 +61,10 @@ fn seed(server: &Server, context: &str) {
 /// §6.3 guard 1: `describe` reports types only once a schema document
 /// is installed, and `schema:type` itself is not excluded from the
 /// label tally (only activate/explore, the vocabulary block, and the
-/// twin sweep are — never describe).
+/// twin sweep are — never describe). A schema-free context's response
+/// omits the `types` key entirely — not an empty array — preserving
+/// the pre-#387 wire shape byte-for-byte (`skip_serializing_if`, same
+/// discipline `resolve`'s `kind`/`gloss` already follow).
 #[test]
 fn describe_reports_types_only_once_a_schema_is_installed() {
     let server = Server::start("schema-retrieval-describe");
@@ -72,7 +75,10 @@ fn describe_reports_types_only_once_a_schema_is_installed() {
         "/contexts/sake/describe",
         Some(json!({"concept": "青嶺酒造"})),
     );
-    assert_eq!(before["types"], json!([]), "{before}");
+    assert!(
+        before.get("types").is_none(),
+        "a schema-free response must preserve the pre-#387 wire shape: {before}"
+    );
     assert!(
         before["as_subject"]
             .as_array()
@@ -90,13 +96,55 @@ fn describe_reports_types_only_once_a_schema_is_installed() {
     );
     assert_eq!(after["types"], json!(["Brewery"]), "{after}");
 
-    // An untyped concept answers empty, not an error.
+    // An untyped concept (even with a schema installed) answers with
+    // the key absent too — §6.1's own "an undeclared type is never a
+    // violation" posture extended to the read side: empty and absent
+    // are the same fact here, so the wire shape treats them the same.
     let untyped = server.ok(
         "POST",
         "/contexts/sake/describe",
         Some(json!({"concept": "霧沢町"})),
     );
-    assert_eq!(untyped["types"], json!([]), "{untyped}");
+    assert!(untyped.get("types").is_none(), "{untyped}");
+}
+
+/// ADR 0009 §6.3's single gate is document EXISTENCE, never `mode` — an
+/// operator who installs a schema but leaves it `off` while drafting
+/// types has already committed to the reserved label meaning
+/// something. `describe`/`resolve`/`query` must report/filter types
+/// identically whether the installed document is `off` or `warn`, even
+/// though `off` enforces nothing on write.
+#[test]
+fn read_side_types_are_gated_by_document_existence_not_by_mode() {
+    let server = Server::start("schema-retrieval-off-mode");
+    seed(&server, "sake");
+    install_schema(&server, "sake", "off");
+
+    let described = server.ok(
+        "POST",
+        "/contexts/sake/describe",
+        Some(json!({"concept": "青嶺酒造"})),
+    );
+    assert_eq!(described["types"], json!(["Brewery"]), "{described}");
+
+    let resolved = server.ok(
+        "POST",
+        "/contexts/sake/resolve",
+        Some(json!({"cue": "青嶺酒造"})),
+    );
+    assert_eq!(resolved[0]["types"], json!(["Brewery"]), "{resolved}");
+
+    let filtered = server.ok(
+        "POST",
+        "/contexts/sake/query",
+        Some(json!({"label": ["杜氏", "所在"], "subject_types": "Brewery"})),
+    );
+    assert_eq!(filtered["total"], json!(1), "{filtered}");
+    assert_eq!(
+        filtered["matches"][0]["subject"],
+        json!("青嶺酒造"),
+        "{filtered}"
+    );
 }
 
 /// ADR 0009 §12: `resolve` attaches `types` to its top candidates only,

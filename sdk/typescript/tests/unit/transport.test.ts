@@ -144,6 +144,9 @@ describe("envelope and raw-body handling", () => {
     expect(bodies[0]).toBe(
       '{"subject":"青嶺酒造","subject_types":["Brewery","Organization"]}',
     );
+
+    await client.context("sake").query({ label: "杜氏", object_types: "Person" });
+    expect(bodies[1]).toBe('{"label":"杜氏","object_types":"Person"}');
   });
 
   it("describe and resolve decode types", async () => {
