@@ -1,0 +1,107 @@
+//! Broadcast operator verbs: `POST /flush` and
+//! `POST /maintenance/compact`, sent to every shard and merged.
+
+use super::*;
+
+pub(super) async fn broadcast_flush(
+    State(state): State<RouterState>,
+    headers: HeaderMap,
+    axum::Extension(deadline): axum::Extension<Deadline>,
+) -> Response {
+    let started_at = Instant::now();
+    let shards: Vec<usize> = state.map().all().collect();
+    let outcomes = state
+        .fan_out(
+            &shards,
+            Method::POST,
+            "/flush",
+            &headers,
+            |_| None,
+            deadline,
+        )
+        .await;
+    let mut flushed: Vec<String> = Vec::new();
+    let mut unreached = Vec::new();
+    for (shard, outcome) in outcomes {
+        match outcome {
+            Ok(answer) if answer.status.is_success() => {
+                if let Ok(envelope) =
+                    serde_json::from_slice::<ShardEnvelope<Vec<String>>>(&answer.body)
+                {
+                    flushed.extend(envelope.result);
+                }
+            }
+            Ok(answer) => {
+                return (
+                    answer.status,
+                    [(header::CONTENT_TYPE, "application/json")],
+                    answer.body,
+                )
+                    .into_response();
+            }
+            Err(error) => unreached.push(Unreached {
+                shard: state.map().url(shard).to_string(),
+                contexts: Vec::new(),
+                error,
+            }),
+        }
+    }
+    if flushed.is_empty() && unreached.len() == shards.len() && !shards.is_empty() {
+        return unreachable_refusal(&unreached, started_at);
+    }
+    router_ok(flushed, unreached, started_at)
+}
+
+pub(super) async fn broadcast_maintenance(
+    State(state): State<RouterState>,
+    headers: HeaderMap,
+    axum::Extension(deadline): axum::Extension<Deadline>,
+    request: Request,
+) -> Response {
+    let started_at = Instant::now();
+    let path = full_path(&request);
+    let shards: Vec<usize> = state.map().all().collect();
+    // Sequential on purpose: each shard's sweep drains its own
+    // traffic; running them one at a time keeps the fleet from
+    // pausing everywhere at once.
+    let mut contexts: Vec<Value> = Vec::new();
+    let mut deadline_exceeded = false;
+    let mut unreached = Vec::new();
+    for shard in shards {
+        match state
+            .call_shard(shard, Method::POST, &path, &headers, None, deadline)
+            .await
+        {
+            Ok(answer) if answer.status.is_success() => {
+                if let Ok(envelope) = serde_json::from_slice::<ShardEnvelope<Value>>(&answer.body) {
+                    if let Some(swept) = envelope.result.get("contexts").and_then(Value::as_array) {
+                        contexts.extend(swept.iter().cloned());
+                    }
+                    deadline_exceeded |= envelope
+                        .result
+                        .get("deadline_exceeded")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                }
+            }
+            Ok(answer) => {
+                return (
+                    answer.status,
+                    [(header::CONTENT_TYPE, "application/json")],
+                    answer.body,
+                )
+                    .into_response();
+            }
+            Err(error) => unreached.push(Unreached {
+                shard: state.map().url(shard).to_string(),
+                contexts: Vec::new(),
+                error,
+            }),
+        }
+    }
+    router_ok(
+        json!({"contexts": contexts, "deadline_exceeded": deadline_exceeded}),
+        unreached,
+        started_at,
+    )
+}
