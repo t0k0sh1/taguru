@@ -362,6 +362,22 @@ pub struct ConceptDescription {
     /// Labels on edges where the concept is the object (what is said
     /// about it), most frequent first.
     pub as_object: Vec<LabelUsage>,
+    /// The concept's declared types (ADR 0009 §12), name-ordered —
+    /// every live `schema:type` object on this concept's outgoing edges,
+    /// asserted only, never `is_a`-expanded (an expanded set is a
+    /// schema-authoring accident, not information a caller reading the
+    /// outline needs). Empty for a context with no installed schema
+    /// document (§6.3 guard 1) or a concept with no type assertion —
+    /// the two are indistinguishable here on purpose, same as an
+    /// undeclared type never being a violation (§6.1).
+    ///
+    /// `skip_serializing_if` on top of that: a schema-free context's
+    /// `describe` response must stay byte-identical to its pre-#387
+    /// shape (no `types` key at all), not merely an empty array — the
+    /// same additive-field discipline every other optional field on
+    /// this wire surface already follows (`resolve`'s `kind`/`gloss`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub types: Vec<String>,
 }
 
 /// A concept node in fixed-width form: where its interned name lives in the

@@ -39,7 +39,7 @@ use crate::storage::write_atomic;
 // `predicted_schema_rejection`/`preview_batch`, `src/ingest.rs`) and
 // S5 (#383, the associations pre-write arm, `src/api/associations.rs`).
 mod check;
-pub(crate) use check::{IssuePath, SchemaCheckInput, SchemaEnv, schema_issues};
+pub(crate) use check::{IssuePath, SchemaCheckInput, SchemaEnv, expanded_type_sets, schema_issues};
 
 /// This binary's only readable document shape. Independent of
 /// `BATCH_VERSION`/`GROUP_VERSION`/`IMAGE_VERSION` — [`GroupRecord`]'s

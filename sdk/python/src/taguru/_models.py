@@ -292,7 +292,9 @@ class TieredResolution:
 
     ``kind`` (lexical only) is ``"exact"``/``"alias"``/``"containment"``/
     ``"fuzzy"`` — never adopt a containment/fuzzy hit on score alone; read
-    ``gloss`` first.
+    ``gloss`` first. ``types`` (top candidates only) are the candidate's
+    declared entity types, present only when the context has an installed
+    schema and the candidate carries a type assertion.
     """
 
     name: str
@@ -300,6 +302,7 @@ class TieredResolution:
     tier: str
     kind: str | None = None
     gloss: str | None = None
+    types: list[str] | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -398,6 +401,9 @@ class ConceptDescription:
     concept: str
     as_subject: list[LabelUsage]
     as_object: list[LabelUsage]
+    #: The concept's declared types; empty for a schema-free context or an
+    #: untyped concept (the two are indistinguishable here on purpose).
+    types: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True, frozen=True)

@@ -2180,6 +2180,7 @@ mod tests {
             tier: tier.to_string(),
             kind: None,
             gloss: None,
+            types: None,
         };
 
         assert_eq!(resolve_tier_of(&[]), ResolveTier::Miss);
@@ -2212,6 +2213,7 @@ mod tests {
             tier: tier.to_string(),
             kind: None,
             gloss: None,
+            types: None,
         };
         let names = |served: &[TieredResolution]| -> Vec<String> {
             served.iter().map(|c| c.name.clone()).collect()

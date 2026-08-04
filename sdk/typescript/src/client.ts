@@ -461,7 +461,10 @@ export class Taguru {
 
   /**
    * Exact-position query across several contexts at once, matches tagged;
-   * the same target contract as `recall`.
+   * the same target contract as `recall`. `subject_types`/`object_types`
+   * further narrow by declared entity type (`is_a`-expanded) when a
+   * target has an installed schema; a schema-free target answers empty
+   * for a non-empty filter.
    */
   async query(
     options: {
@@ -470,6 +473,8 @@ export class Taguru {
       subject?: OneOrMany;
       label?: OneOrMany;
       object?: OneOrMany;
+      subject_types?: OneOrMany;
+      object_types?: OneOrMany;
       limit?: number;
       after?: CrossMatchCursor;
     } = {},
@@ -481,6 +486,8 @@ export class Taguru {
         subject: options.subject,
         label: options.label,
         object: options.object,
+        subject_types: options.subject_types,
+        object_types: options.object_types,
         limit: options.limit,
         after: options.after ? crossMatchCursor(options.after) : undefined,
       }),
@@ -896,12 +903,19 @@ export class Context {
     return result as MatchPage;
   }
 
-  /** Exact-position query; each position takes one name or an OR-set. */
+  /**
+   * Exact-position query; each position takes one name or an OR-set.
+   * `subject_types`/`object_types` further narrow by declared entity type
+   * (`is_a`-expanded) when this context has an installed schema; a
+   * schema-free context answers empty for a non-empty filter.
+   */
   async query(
     options: {
       subject?: OneOrMany;
       label?: OneOrMany;
       object?: OneOrMany;
+      subject_types?: OneOrMany;
+      object_types?: OneOrMany;
       limit?: number;
       after?: MatchCursor;
     } = {},
@@ -912,6 +926,8 @@ export class Context {
         subject: options.subject,
         label: options.label,
         object: options.object,
+        subject_types: options.subject_types,
+        object_types: options.object_types,
         limit: options.limit,
         after: options.after ? matchCursor(options.after) : undefined,
       }),

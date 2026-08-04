@@ -308,7 +308,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "resolve",
-            "Resolve free wording to stored concept names (normalized entry, absorbs typos). The retrieval entry: use the canonical names it returns as origins for explore/activate. Each candidate says how it matched (kind: exact/alias = the cue IS a stored spelling; containment/fuzzy = it merely overlaps one) and carries a gloss of its heaviest facts — read the gloss before adopting a lookalike (京都 scores 0.67 against 東京都; the glosses tell them apart). Empty → reword, or lower dice_floor (e.g. 0.2) and retry.",
+            "Resolve free wording to stored concept names (normalized entry, absorbs typos). The retrieval entry: use the canonical names it returns as origins for explore/activate. Each candidate says how it matched (kind: exact/alias = the cue IS a stored spelling; containment/fuzzy = it merely overlaps one) and carries a gloss of its heaviest facts — read the gloss before adopting a lookalike (京都 scores 0.67 against 東京都; the glosses tell them apart). Top candidates also carry their declared types when the context has an installed schema. Empty → reword, or lower dice_floor (e.g. 0.2) and retry.",
             object_schema(
                 json!({
                     "context": context,
@@ -366,7 +366,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "describe",
-            "A concept's outline: which labels carry how many facts, per role. Check a hub here first, then query just the labels you need — never pull a whole profile blind.",
+            "A concept's outline: which labels carry how many facts, per role, plus its declared types when the context has an installed schema. Check a hub here first, then query just the labels you need — never pull a whole profile blind.",
             object_schema(
                 json!({ "context": context, "concept": { "type": "string" } }),
                 &["context", "concept"],
@@ -374,13 +374,15 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "query",
-            "Position-pinned search. subject/label/object each take a string or an array (array = match any); at least one of the three must be given — leaving all three out is refused rather than matching everything. Outline with describe, then narrow by label. Targets one context (context) or several at once (contexts and/or groups) — cross-context matches carry their context, and past the limit the strongest |weight| survives (weights share one scale).",
+            "Position-pinned search. subject/label/object each take a string or an array (array = match any); at least one of the three must be given — leaving all three out is refused rather than matching everything. subject_types/object_types further narrow by declared entity type (is_a-expanded) when the context has an installed schema — a filter, never a substitute for pinning a position, and an empty result on a schema-free context. Outline with describe, then narrow by label. Targets one context (context) or several at once (contexts and/or groups) — cross-context matches carry their context, and past the limit the strongest |weight| survives (weights share one scale).",
             require_any_of(
                 search_target_schema(
                     json!({
                         "subject": { "type": ["string", "array"] },
                         "label": { "type": ["string", "array"] },
                         "object": { "type": ["string", "array"] },
+                        "subject_types": { "type": ["string", "array"], "description": "filter: subject's declared type(s), is_a-expanded" },
+                        "object_types": { "type": ["string", "array"], "description": "filter: object's declared type(s), is_a-expanded" },
                         "limit": { "type": "integer", "minimum": 0, "description": "default 100, capped at 1000" },
                         "after": match_after
                     }),

@@ -46,6 +46,7 @@ mod schema;
 mod schema_audit;
 mod schema_export_import;
 mod schema_import;
+mod schema_retrieval;
 mod schema_type_label;
 mod search_log;
 mod search_plan;

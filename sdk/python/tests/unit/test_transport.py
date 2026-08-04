@@ -349,6 +349,61 @@ def test_query_sends_one_or_many_and_drops_none() -> None:
     assert bodies[0] == '{"subject":"高瀬","label":["住所","職歴"]}'.encode()
 
 
+def test_query_sends_subject_types_and_object_types() -> None:
+    """ADR 0009 §12: the type filter rides the request body beside the
+    position pins, dropped like every other absent field when omitted."""
+    bodies: list[bytes] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        bodies.append(req.content)
+        return ok_response({"total": 0, "matches": []})
+
+    client = sync_client(handler)
+    client.context("sake").query(subject="青嶺酒造", subject_types=["Brewery", "Organization"])
+    assert bodies[0] == (
+        '{"subject":"青嶺酒造","subject_types":["Brewery","Organization"]}'.encode()
+    )
+    client.context("sake").query(label="杜氏", object_types="Person")
+    assert bodies[1] == '{"label":"杜氏","object_types":"Person"}'.encode()
+
+
+def test_describe_and_resolve_decode_types() -> None:
+    """ADR 0009 §12's read-side types decode into the existing dataclasses
+    without any special casing — tolerant decode already handles new
+    fields; this pins that ``types`` specifically round-trips."""
+    client = sync_client(
+        lambda _req: ok_response(
+            {
+                "concept": "青嶺酒造",
+                "as_subject": [],
+                "as_object": [],
+                "types": ["Brewery", "Organization"],
+            }
+        )
+    )
+    described = client.context("sake").describe("青嶺酒造")
+    assert described is not None
+    assert described.types == ["Brewery", "Organization"]
+
+    resolve_client = sync_client(
+        lambda _req: ok_response(
+            [{"name": "青嶺酒造", "score": 1.0, "tier": "lexical", "types": ["Brewery"]}]
+        )
+    )
+    resolved = resolve_client.context("sake").resolve("青嶺")
+    assert resolved[0].types == ["Brewery"]
+
+    # A schema-free context (or an old server) omits `types` entirely —
+    # the dataclass default (`ConceptDescription`) or `None`
+    # (`TieredResolution`) must still decode without error.
+    untyped_client = sync_client(
+        lambda _req: ok_response({"concept": "青嶺酒造", "as_subject": [], "as_object": []})
+    )
+    untyped = untyped_client.context("sake").describe("青嶺酒造")
+    assert untyped is not None
+    assert untyped.types == []
+
+
 def test_after_cursor_rides_the_request_body_verbatim() -> None:
     """#60: `after` is a plain dict (TypedDict) forwarded as-is — the
     client mints no cursor of its own, it only relays the last page's

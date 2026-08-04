@@ -196,11 +196,7 @@ impl SchemaEnv {
         }
 
         // Live half: only concepts fact_ops actually mention — the
-        // narrowest read that answers §7.2 step 4's question. An empty
-        // set here means zero graph reads: `query_any` with all three
-        // positions empty returns every edge in the context
-        // (`src/context/query.rs:69-73`), so this must never be called
-        // with an empty subject list.
+        // narrowest read that answers §7.2 step 4's question.
         let fact_concepts: BTreeSet<&str> = ops
             .iter()
             .filter(|op| !is_type_op(op))
@@ -213,17 +209,9 @@ impl SchemaEnv {
             })
             .collect();
 
-        if !fact_concepts.is_empty() {
-            let subjects: Vec<&str> = fact_concepts.into_iter().collect();
-            for assoc in context.query_any(&subjects, &[SCHEMA_TYPE_LABEL], &[]) {
-                if !survives_retraction(&assoc, retracted_source) {
-                    continue;
-                }
-                asserted
-                    .entry(assoc.subject.clone())
-                    .or_default()
-                    .insert(assoc.object.clone());
-            }
+        let subjects: Vec<&str> = fact_concepts.into_iter().collect();
+        for (concept, names) in live_type_assertions(context, &subjects, retracted_source) {
+            asserted.entry(concept).or_default().extend(names);
         }
 
         let types = asserted
@@ -260,6 +248,64 @@ impl SchemaEnv {
             .unwrap_or(spelling);
         self.types.get(canonical)
     }
+}
+
+/// The live half of ADR 0009 §7.2 step 4's union, factored out of
+/// [`SchemaEnv::build`] so ADR 0009 §12's read-side query filter can
+/// share it verbatim rather than re-deriving "what is this concept's
+/// asserted type" by hand: every live `schema:type` edge whose subject
+/// is one of `concepts`, minus whichever ones this write is about to
+/// retract with its own source (the exclusion clause; `None` on every
+/// read-only caller and on the associations write path, which never
+/// retracts — a plain union there). Scoped to exactly the spellings the
+/// caller cares about, never a general-purpose type index — an empty
+/// `concepts` costs one allocation, not a full scan (`Context::query_any`
+/// with all three positions empty returns every edge in the context,
+/// `src/context/query.rs:69-73`).
+pub(crate) fn live_type_assertions(
+    context: &Context,
+    concepts: &[&str],
+    retracted_source: Option<&str>,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut asserted: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    if concepts.is_empty() {
+        return asserted;
+    }
+    for assoc in context.query_any(concepts, &[SCHEMA_TYPE_LABEL], &[]) {
+        if !survives_retraction(&assoc, retracted_source) {
+            continue;
+        }
+        asserted
+            .entry(assoc.subject.clone())
+            .or_default()
+            .insert(assoc.object.clone());
+    }
+    asserted
+}
+
+/// The read-side sibling of [`SchemaEnv::build`]'s live half (ADR 0009
+/// §12): every live-asserted type on `concepts`, `is_a`-expanded through
+/// `schema`'s precomputed ancestor closures — the exact predicate §7.2
+/// step 5 already applies to `domain`/`range`, reused here so `query`'s
+/// `subject_types`/`object_types` filter can never disagree with what
+/// `strict` itself would treat as this concept's type. No retraction
+/// exclusion (a read has no pending write to exclude) and no batch half
+/// (a read has no ops of its own) — a plain live union, `is_a`-expanded.
+pub(crate) fn expanded_type_sets(
+    context: &Context,
+    schema: &InstalledSchema,
+    concepts: &[&str],
+) -> BTreeMap<String, BTreeSet<String>> {
+    live_type_assertions(context, concepts, None)
+        .into_iter()
+        .map(|(concept, names)| {
+            let mut expanded = BTreeSet::new();
+            for name in &names {
+                expanded.extend(schema.closure_of(name));
+            }
+            (concept, expanded)
+        })
+        .collect()
 }
 
 /// §7.2 step 3's label resolution: live `label_aliases` ∪ this write's

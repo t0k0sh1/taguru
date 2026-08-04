@@ -259,6 +259,7 @@ fn candidate(name: &str, tier: &str) -> TieredResolution {
         tier: tier.to_string(),
         kind: None,
         gloss: None,
+        types: None,
     }
 }
 

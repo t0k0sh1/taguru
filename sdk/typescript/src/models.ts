@@ -339,7 +339,9 @@ export interface ActivationPage {
 /**
  * One resolve candidate. `kind` (lexical tier only) is
  * "exact"/"alias"/"containment"/"fuzzy" — never adopt a containment/fuzzy hit
- * on score alone; read `gloss` first.
+ * on score alone; read `gloss` first. `types` (top candidates only) are the
+ * candidate's declared entity types, present only when the context has an
+ * installed schema and the candidate carries a type assertion.
  */
 export interface TieredResolution {
   name: string;
@@ -347,6 +349,7 @@ export interface TieredResolution {
   tier: Open<"lexical" | "semantic">;
   kind?: Open<"exact" | "alias" | "containment" | "fuzzy">;
   gloss?: string;
+  types?: string[];
 }
 
 // -- resolve explain -----------------------------------------------------------
@@ -452,6 +455,14 @@ export interface ConceptDescription {
   concept: string;
   as_subject: LabelUsage[];
   as_object: LabelUsage[];
+  /**
+   * The concept's declared types; absent for a schema-free context or an
+   * untyped concept (the two are indistinguishable here on purpose).
+   * Optional so a server one release behind — which omits the field
+   * entirely — still decodes, the same tolerance the Python dataclass
+   * gets from its own default.
+   */
+  types?: string[];
 }
 
 export interface LabelPage {
