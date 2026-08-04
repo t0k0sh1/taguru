@@ -328,6 +328,7 @@ ENVIRONMENT (every knob; unset = the shown default):
                                to each diagnostics record, capped to this
                                many bytes; unset or 0 = never attach it
                                (metadata only)
+  TAGURU_EXTRACT_SCHEMA        default for extract's --schema (unset, off)
   RUST_LOG                     log filter, EnvFilter syntax (info)
   TAGURU_LOG_FORMAT            json for JSON log lines (pretty)
   TAGURU_LOG_SEARCHES          1 = per-search event log; cues are memory
@@ -674,38 +675,7 @@ mod tests {
         // The usage text and the typo lint must agree: a variable
         // documented in --help but missing from KNOWN_KEYS would warn
         // on a perfectly valid config.
-        for line in USAGE.lines() {
-            let Some(name) = line.split_whitespace().next() else {
-                continue;
-            };
-            if name.starts_with("TAGURU_") {
-                assert!(KNOWN_KEYS.contains(&name), "{name} missing from KNOWN_KEYS");
-            }
-        }
-    }
-
-    /// Whether `name` occurs in `haystack` as a whole `TAGURU_*`
-    /// identifier — a plain substring search would let e.g.
-    /// `TAGURU_WAL` pass merely because `TAGURU_WAL_MAX_BYTES` appears
-    /// somewhere, even if `TAGURU_WAL` itself were never documented on
-    /// its own.
-    fn documented_as_whole_word(haystack: &str, name: &str) -> bool {
-        fn is_ident_byte(b: u8) -> bool {
-            b.is_ascii_alphanumeric() || b == b'_'
-        }
-        let bytes = haystack.as_bytes();
-        let mut start = 0;
-        while let Some(offset) = haystack[start..].find(name) {
-            let index = start + offset;
-            let before_ok = index == 0 || !is_ident_byte(bytes[index - 1]);
-            let after = index + name.len();
-            let after_ok = after >= bytes.len() || !is_ident_byte(bytes[after]);
-            if before_ok && after_ok {
-                return true;
-            }
-            start = index + 1;
-        }
-        false
+        crate::config::assert_usage_vars_are_known_keys(USAGE);
     }
 
     #[test]
@@ -720,7 +690,7 @@ mod tests {
         // restricting to a line's first token like the reverse test does.
         for name in KNOWN_KEYS {
             assert!(
-                documented_as_whole_word(USAGE, name),
+                crate::config::documented_as_whole_word(USAGE, name),
                 "{name} is in KNOWN_KEYS but not documented in --help"
             );
         }

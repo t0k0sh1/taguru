@@ -658,6 +658,15 @@ fn run_remote_dry_run(base: &str, names: Vec<String>, as_json: bool) -> i32 {
 mod tests {
     use super::{CompactOutcome, MaintenanceCompactionOutcome, success_line};
 
+    #[test]
+    fn every_usage_variable_is_a_known_key() {
+        // This command's own USAGE is invisible to cli.rs's
+        // consistency tests: a variable documented here but missing
+        // from KNOWN_KEYS would make --config warn "typo?" on a
+        // perfectly valid setting.
+        crate::config::assert_usage_vars_are_known_keys(super::USAGE);
+    }
+
     /// A `POST /maintenance/compact` response decodes into the exact
     /// struct the local path already reports through — proof that the
     /// `#[serde(flatten)]` on [`crate::registry::MaintenanceCompactionEntry`]

@@ -1421,3 +1421,49 @@ async fn wait_signal(stream: Option<&mut tokio::signal::unix::Signal>) {
         None => std::future::pending().await,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// Every HTTP route registered in this file must appear in
+    /// src/llm-protocol.md, the wire contract integrators read: the
+    /// rename endpoints shipped undocumented because nothing tied the
+    /// router to the doc. Scanning this file's source for route
+    /// registrations' path literals keeps the two in sync without a
+    /// hand-maintained route list that could itself drift.
+    #[test]
+    fn every_registered_route_is_documented_in_the_protocol() {
+        // Built by concatenation so this test's own source (part of
+        // the scanned file) does not contain the needle literally.
+        let needle = concat!(".route", "(");
+        let source = include_str!("main.rs");
+        let protocol = include_str!("llm-protocol.md");
+        let mut paths = Vec::new();
+        let mut rest = source;
+        while let Some(found) = rest.find(needle) {
+            rest = &rest[found + needle.len()..];
+            // The path is the first string literal after the paren —
+            // on the next line when rustfmt wrapped the call.
+            let Some(open) = rest.find('"') else { break };
+            rest = &rest[open + 1..];
+            let Some(close) = rest.find('"') else { break };
+            paths.push(&rest[..close]);
+            rest = &rest[close + 1..];
+        }
+        // An empty scan would vacuously pass; pin a floor well under
+        // the real count (~50) but far above a broken parse.
+        assert!(
+            paths.len() > 30,
+            "route scan looks broken: found only {} paths",
+            paths.len()
+        );
+        for path in paths {
+            // A closing backtick right after the path matches both a
+            // table row's bare `/contexts` and prose like
+            // `GET /protocol`, while refusing prefix-only mentions.
+            assert!(
+                protocol.contains(&format!("{path}`")),
+                "{path} is registered in main.rs but not documented in llm-protocol.md"
+            );
+        }
+    }
+}

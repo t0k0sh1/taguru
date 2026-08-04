@@ -48,7 +48,7 @@ pub(crate) fn fmt_bytes(bytes: u64) -> String {
 /// Every variable the server reads, for typo detection: a config file
 /// is where a misspelled knob silently becomes a no-op, and unlike the
 /// shell it is worth linting.
-pub(crate) const KNOWN_KEYS: [&str; 60] = [
+pub(crate) const KNOWN_KEYS: [&str; 61] = [
     "TAGURU_ADDR",
     "TAGURU_DATA_DIR",
     "TAGURU_CACHE_BYTES",
@@ -105,11 +105,56 @@ pub(crate) const KNOWN_KEYS: [&str; 60] = [
     "TAGURU_EXTRACT_LOSSY",
     "TAGURU_EXTRACT_DIAGNOSTICS",
     "TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES",
+    "TAGURU_EXTRACT_SCHEMA",
     "TAGURU_LOG_FORMAT",
     "TAGURU_LOG_SEARCHES",
     "TAGURU_METRICS_PER_CONTEXT",
     "TAGURU_CONFIG",
 ];
+
+/// Test support for the per-command usage-text consistency checks
+/// (cli.rs, extract.rs): every `TAGURU_*` variable a usage text names
+/// at the start of a line must be in [`KNOWN_KEYS`], or configuring
+/// that documented variable would earn the "typo?" warning above.
+#[cfg(test)]
+pub(crate) fn assert_usage_vars_are_known_keys(usage: &str) {
+    for line in usage.lines() {
+        let Some(token) = line.split_whitespace().next() else {
+            continue;
+        };
+        // Prose can start with a variable mid-sentence (extract.rs has
+        // "TAGURU_EMBED_PASSAGES); rides..."); trim trailing
+        // punctuation so the identifier alone is compared.
+        let name = token.trim_end_matches(|c: char| !(c.is_ascii_alphanumeric() || c == '_'));
+        if name.starts_with("TAGURU_") {
+            assert!(KNOWN_KEYS.contains(&name), "{name} missing from KNOWN_KEYS");
+        }
+    }
+}
+
+/// Whether `name` occurs in `haystack` as a whole `TAGURU_*`
+/// identifier — a plain substring search would let e.g. `TAGURU_WAL`
+/// pass merely because `TAGURU_WAL_MAX_BYTES` appears somewhere, even
+/// if `TAGURU_WAL` itself were never documented on its own.
+#[cfg(test)]
+pub(crate) fn documented_as_whole_word(haystack: &str, name: &str) -> bool {
+    fn is_ident_byte(b: u8) -> bool {
+        b.is_ascii_alphanumeric() || b == b'_'
+    }
+    let bytes = haystack.as_bytes();
+    let mut start = 0;
+    while let Some(offset) = haystack[start..].find(name) {
+        let index = start + offset;
+        let before_ok = index == 0 || !is_ident_byte(bytes[index - 1]);
+        let after = index + name.len();
+        let after_ok = after >= bytes.len() || !is_ident_byte(bytes[after]);
+        if before_ok && after_ok {
+            return true;
+        }
+        start = index + 1;
+    }
+    false
+}
 
 /// Reads a configuration file into the process environment. Exits with
 /// a usage error on an unreadable file or a malformed line — a config

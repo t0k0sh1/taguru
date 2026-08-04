@@ -482,6 +482,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_usage_variable_is_a_known_key() {
+        // This command's own USAGE is invisible to cli.rs's
+        // consistency tests: a variable documented here but missing
+        // from KNOWN_KEYS would make --config warn "typo?" on a
+        // perfectly valid setting.
+        crate::config::assert_usage_vars_are_known_keys(USAGE);
+    }
+
+    #[test]
     fn synthetic_names_hold_their_width_and_stay_unique() {
         let name = synthetic_name('c', 7, 24);
         assert_eq!(name.len(), 24);

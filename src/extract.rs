@@ -5756,6 +5756,33 @@ impl CheckpointStore {
 mod tests {
     use super::*;
 
+    #[test]
+    fn every_usage_variable_is_a_known_key() {
+        // extract has its own USAGE, separate from cli.rs's, so
+        // cli.rs's every_documented_variable_is_a_known_key cannot see
+        // it: a variable documented here but missing from KNOWN_KEYS
+        // would make `extract --config` warn "typo?" on a perfectly
+        // valid config (this happened to TAGURU_EXTRACT_SCHEMA).
+        crate::config::assert_usage_vars_are_known_keys(USAGE);
+    }
+
+    #[test]
+    fn every_extract_known_key_is_documented() {
+        // The reverse, scoped to this command's own vocabulary:
+        // cli.rs's every_known_key_is_documented only covers cli.rs's
+        // USAGE, so a TAGURU_EXTRACT_* key added to KNOWN_KEYS without
+        // a matching line here would silently go undocumented in
+        // extract's own --help.
+        for name in crate::config::KNOWN_KEYS {
+            if name.starts_with("TAGURU_EXTRACT_") {
+                assert!(
+                    crate::config::documented_as_whole_word(USAGE, name),
+                    "{name} is in KNOWN_KEYS but not documented in extract --help"
+                );
+            }
+        }
+    }
+
     /// The exact serialized key set of one `--diagnostics-out` JSONL
     /// line (issue #200) — top-level and the nested `provider_metadata`
     /// object. Ported to Python as

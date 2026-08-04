@@ -1069,6 +1069,15 @@ mod tests {
     use crate::passages::PassageSubmission;
     use crate::registry::AssocOp;
 
+    #[test]
+    fn every_usage_variable_is_a_known_key() {
+        // This command's own USAGE is invisible to cli.rs's
+        // consistency tests: a variable documented here but missing
+        // from KNOWN_KEYS would make --config warn "typo?" on a
+        // perfectly valid setting.
+        crate::config::assert_usage_vars_are_known_keys(USAGE);
+    }
+
     fn scratch_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("taguru-export-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
