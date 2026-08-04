@@ -819,7 +819,10 @@ fn evaluate_module_never_names_an_extraction_or_embedding_seam() {
     let sources = [
         production_only(include_str!("../evaluate.rs")),
         production_only(include_str!("../evaluate/compare.rs")),
+        production_only(include_str!("../evaluate/definitions.rs")),
         production_only(include_str!("../evaluate/evidence.rs")),
+        production_only(include_str!("../evaluate/lanes.rs")),
+        production_only(include_str!("../evaluate/model.rs")),
         production_only(include_str!("../evaluate/thresholds.rs")),
     ];
     // Built by concatenation so this assertion's own literals never
@@ -867,7 +870,14 @@ fn the_seam_scan_names_every_production_submodule_evaluate_rs_declares() {
         .collect();
     assert_eq!(
         declared,
-        BTreeSet::from(["compare", "evidence", "thresholds"]),
+        BTreeSet::from([
+            "compare",
+            "definitions",
+            "evidence",
+            "lanes",
+            "model",
+            "thresholds"
+        ]),
         "evaluate.rs declares a submodule the seam-scan test's `sources` array does not name — \
          add it there too"
     );

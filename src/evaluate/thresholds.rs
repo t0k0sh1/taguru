@@ -282,7 +282,7 @@ pub(super) struct Violation {
 /// §9.1's threshold identity, extended with the pass/fail verdict and
 /// the violations/skips that produced it).
 #[derive(Debug, Clone, Serialize)]
-pub(super) struct ThresholdReport {
+pub(crate) struct ThresholdReport {
     pub(super) sha256: String,
     pub(super) passed: bool,
     pub(super) allow_unstable_corpus: bool,
