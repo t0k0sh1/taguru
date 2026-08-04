@@ -86,13 +86,15 @@
   <section id="document">
     <h2>The document</h2>
     <p class="section-sub">One JSON object per context, independent of the batch/group/image format versions.</p>
-    <pre><code>{<span class="k">"schema"</span>: <span class="nu">1</span>, <span class="k">"mode"</span>: <span class="s">"off"</span>|<span class="s">"warn"</span>|<span class="s">"strict"</span>, <span class="k">"closed_labels"</span>: <span class="nu">false</span>,
+    <pre><code>{<span class="k">"schema"</span>: <span class="nu">1</span>, <span class="k">"mode"</span>: <span class="s">"strict"</span>, <span class="k">"closed_labels"</span>: <span class="nu">false</span>,
  <span class="k">"types"</span>: {<span class="s">"Brewery"</span>: {<span class="k">"is_a"</span>: []}, <span class="s">"Person"</span>: {<span class="k">"is_a"</span>: []}},
  <span class="k">"relations"</span>: {<span class="s">"杜氏"</span>: {<span class="k">"domain"</span>: [<span class="s">"Brewery"</span>], <span class="k">"range"</span>: [<span class="s">"Person"</span>]}}}</code></pre>
     <p>
       <code>schema</code> is <code>SCHEMA_VERSION</code> (currently <code>1</code>), independent
       of <code>BATCH_VERSION</code>/<code>GROUP_VERSION</code>/<code>IMAGE_VERSION</code> — the
-      document has its own version lane because it changes on its own schedule. Every top-level
+      document has its own version lane because it changes on its own schedule.
+      <code>mode</code> is one of <code>"off"</code>, <code>"warn"</code>, or
+      <code>"strict"</code> — see <a href="#modes">the three modes</a> below. Every top-level
       field is required and unknown fields are refused, both on the wire
       (<code>PUT /contexts/{name}/schema</code>) and at rest (the persisted
       <code>{stem}.schema.json</code>): unlike a batch's group record, nothing here defaults,
@@ -147,8 +149,8 @@
       strict never sweeps the graph — existing associations that would violate the new schema are
       grandfathered, untouched and unflagged. <code>PUT /contexts/{name}/schema</code> only ever
       changes what future writes are judged against; use
-      <a href="#audit"><code>POST /schema/audit</code></a> to find what already disagrees with a
-      schema you are about to tighten.
+      <a href="#audit"><code>POST /contexts/{name}/schema/audit</code></a> to find what already
+      disagrees with a schema you are about to tighten.
     </p>
   </section>
 
@@ -179,8 +181,8 @@
         just another fact, judged by nothing.</li>
       <li>No alias path may ever resolve any spelling to <code>schema:type</code> once a schema
         exists — <code>add_label_alias</code>, an import batch's own inline <code>labels</code>
-        declaration, and a <code>PUT /schema</code>-time check over already-persisted aliases all
-        enforce it. This refusal fires regardless of mode, even <code>off</code>: it is a
+        declaration, and a <code>PUT /contexts/{name}/schema</code>-time check over
+        already-persisted aliases all enforce it. This refusal fires regardless of mode, even <code>off</code>: it is a
         namespace-ownership rule, not something enforcement toggles.</li>
       <li><code>PUT /contexts/{name}/schema</code> itself refuses a document whose
         <code>relations</code> declares an entry named <code>schema:type</code>.</li>
@@ -317,7 +319,7 @@ taguru_context_schema_violations_total{context=<span class="s">"sake"</span>} <s
       <code>taguru inspect</code> only ever raises a notice for the schema <b>file's</b> own
       health — corrupt bytes, a digest mismatch, a version this build cannot read. It never
       reports graph-level violations; that is what the two families above, and
-      <a href="#audit"><code>POST /schema/audit</code></a>, are for.
+      <a href="#audit"><code>POST /contexts/{name}/schema/audit</code></a>, are for.
     </p>
     <p>
       The schema document rides in <code>context_files</code> like every other per-context file
