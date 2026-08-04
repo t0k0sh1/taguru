@@ -272,6 +272,14 @@ fn main() {
             cancel(&tracked_calls, &active_by_id, &target_id.to_string());
             continue;
         }
+        // Checked before the tool-call fast path below, so a request
+        // naming an unimplemented per-request protocol version is
+        // refused with the supported list rather than run under
+        // semantics this build never promised.
+        if let Some(rejection) = mcp::modern_version_rejection(&message) {
+            emit(&stdout, &rejection);
+            continue;
+        }
         match mcp::classify(&message) {
             mcp::Message::Request {
                 id,
@@ -635,6 +643,10 @@ fn dispatch(bridge: &Bridge, instructions: &str, classified: mcp::Message) -> Op
             mcp::initialize_result(protocol_version.as_deref(), instructions),
         ),
         mcp::Call::Ping => mcp::response(id, serde_json::json!({})),
+        // 2026-07-28's mandatory RPC, and the probe a dual-era client
+        // sends FIRST on stdio to learn which era this server speaks —
+        // so it must answer even without modern `_meta` on the request.
+        mcp::Call::Discover => mcp::response(id, mcp::discover_result(instructions)),
         mcp::Call::ToolsList => mcp::response(id, mcp::tools_result()),
         mcp::Call::Tool { name, arguments } => mcp::response(
             id,
@@ -650,11 +662,18 @@ fn dispatch(bridge: &Bridge, instructions: &str, classified: mcp::Message) -> Op
 /// — used directly by the tests below. `main`'s loop does not call
 /// this: it needs to see the classified message itself first, to queue
 /// a `tools/call` for the tool worker pool instead (see `dispatch`'s
-/// doc).
+/// doc). This is therefore a MIRROR of that loop's gate order — batch
+/// rejection, then version rejection, then dispatch — and a gate
+/// added or reordered there must be reflected here in the same move,
+/// or the tests keep passing against an order production no longer
+/// runs.
 #[cfg(test)]
 fn handle(bridge: &Bridge, instructions: &str, message: &Value) -> Option<Value> {
     if message.is_array() {
         return Some(batch_rejected());
+    }
+    if let Some(rejection) = mcp::modern_version_rejection(message) {
+        return Some(rejection);
     }
     dispatch(bridge, instructions, mcp::classify(message))
 }
@@ -852,6 +871,52 @@ mod tests {
                 &serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
             )
             .is_none()
+        );
+    }
+
+    /// The stdio backward-compatibility probe: a dual-era client's
+    /// FIRST message is `server/discover`, typically before any
+    /// version agreement — a server that -32601'd it would be
+    /// misdiagnosed as legacy-only. Answered locally, bridge untouched.
+    #[test]
+    fn server_discover_is_answered_as_the_era_probe() {
+        let reply = handle(
+            &bridge(),
+            "manual",
+            &serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "server/discover"}),
+        )
+        .expect("the era probe must be answered");
+        assert_eq!(
+            reply["result"]["supportedVersions"],
+            serde_json::json!(mcp::MODERN_PROTOCOL_VERSIONS),
+            "{reply}"
+        );
+        assert_eq!(reply["result"]["instructions"], "manual", "{reply}");
+        assert_eq!(reply["result"]["resultType"], "complete", "{reply}");
+    }
+
+    /// A request declaring a per-request protocol version this build
+    /// does not implement is refused with the list to retry from —
+    /// before dispatch, so the bridge (and the server behind it) never
+    /// runs work under semantics nobody agreed to.
+    #[test]
+    fn an_unimplemented_per_request_version_is_refused_with_the_supported_list() {
+        let reply = handle(
+            &bridge(),
+            "",
+            &serde_json::json!({
+                "jsonrpc": "2.0", "id": 3, "method": "tools/list",
+                "params": {"_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2099-01-01",
+                }},
+            }),
+        )
+        .expect("an unimplemented version must be answered");
+        assert_eq!(reply["error"]["code"], -32022, "{reply}");
+        assert_eq!(
+            reply["error"]["data"]["supported"],
+            serde_json::json!(mcp::MODERN_PROTOCOL_VERSIONS),
+            "{reply}"
         );
     }
 

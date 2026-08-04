@@ -34,9 +34,11 @@ mod schema;
 // further out.
 #[allow(unused_imports)]
 pub use protocol::{
-    Call, FALLBACK_PROTOCOL_VERSION, Message, SUPPORTED_PROTOCOL_VERSIONS, ToolError,
-    cancelled_request_id, classify, error_response, initialize_result, meta_trace_headers,
-    response, tool_response, tools_result,
+    Call, FALLBACK_PROTOCOL_VERSION, HEADER_MISMATCH, META_PROTOCOL_VERSION,
+    MODERN_PROTOCOL_VERSIONS, Message, SUPPORTED_PROTOCOL_VERSIONS, ToolError,
+    cancelled_request_id, classify, discover_result, error_response, initialize_result,
+    meta_trace_headers, modern_version_rejection, request_protocol_version, response,
+    tool_response, tools_result, unsupported_version_error,
 };
 #[allow(unused_imports)]
 pub use retrieve::{
@@ -1031,6 +1033,162 @@ mod tests {
         assert_eq!(
             Some(&FALLBACK_PROTOCOL_VERSION),
             SUPPORTED_PROTOCOL_VERSIONS.last()
+        );
+    }
+
+    /// The two version lists must stay disjoint: a version in both
+    /// would let `initialize` echo — and thereby promise — a wire
+    /// contract under which `initialize` does not exist.
+    #[test]
+    fn legacy_and_modern_version_lists_are_disjoint() {
+        for version in MODERN_PROTOCOL_VERSIONS {
+            assert!(!SUPPORTED_PROTOCOL_VERSIONS.contains(version), "{version}");
+        }
+    }
+
+    /// The regression the split guards against: a client proposing
+    /// 2026-07-28 through legacy `initialize` gets the newest
+    /// initialize-era version back, never the stateless one.
+    #[test]
+    fn initialize_never_echoes_a_modern_version() {
+        for version in MODERN_PROTOCOL_VERSIONS {
+            assert_eq!(
+                initialize_result(Some(version), "manual")["protocolVersion"],
+                FALLBACK_PROTOCOL_VERSION
+            );
+        }
+    }
+
+    #[test]
+    fn classify_routes_server_discover() {
+        assert!(matches!(
+            classify(&json!({"jsonrpc": "2.0", "id": 1, "method": "server/discover"})),
+            Message::Request {
+                call: Call::Discover,
+                ..
+            }
+        ));
+    }
+
+    /// The 2026-07-28 result envelope on the one RPC that revision
+    /// makes mandatory: versions to retry with, capabilities, cache
+    /// metadata, identity, and the manual.
+    #[test]
+    fn discover_result_carries_the_stateless_contract() {
+        let result = discover_result("manual");
+        assert_eq!(result["supportedVersions"], json!(MODERN_PROTOCOL_VERSIONS));
+        assert_eq!(result["resultType"], "complete");
+        assert!(result["capabilities"]["tools"].is_object(), "{result}");
+        assert_eq!(result["instructions"], "manual");
+        assert!(result["ttlMs"].is_u64(), "{result}");
+        assert_eq!(result["cacheScope"], "private");
+        assert_eq!(
+            result["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+            "taguru"
+        );
+    }
+
+    /// `tools/list` under 2026-07-28 is a `CacheableResult`: the
+    /// required `ttlMs`/`cacheScope` ride alongside the tools, plus the
+    /// `resultType` every result now carries — all additive, so a
+    /// legacy client still finds `tools` exactly where it always was.
+    #[test]
+    fn tools_result_is_a_cacheable_complete_result() {
+        let result = tools_result();
+        assert!(result["tools"].is_array(), "{result}");
+        assert_eq!(result["resultType"], "complete");
+        assert!(result["ttlMs"].is_u64(), "{result}");
+        assert_eq!(result["cacheScope"], "private");
+        assert_eq!(
+            result["_meta"]["io.modelcontextprotocol/serverInfo"]["version"],
+            env!("CARGO_PKG_VERSION")
+        );
+    }
+
+    /// Every tool outcome — success and failure alike — declares
+    /// `resultType: "complete"`: this server never returns an interim
+    /// `input_required`, and a modern client must not have to guess.
+    #[test]
+    fn tool_response_declares_result_type_complete() {
+        assert_eq!(tool_response(Ok("fine".into()))["resultType"], "complete");
+        assert_eq!(
+            tool_response(Err("broken".to_string().into()))["resultType"],
+            "complete"
+        );
+    }
+
+    #[test]
+    fn request_protocol_version_reads_only_the_meta_key() {
+        assert_eq!(
+            request_protocol_version(&json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/list",
+                "params": {"_meta": {META_PROTOCOL_VERSION: "2026-07-28"}},
+            })),
+            Some("2026-07-28")
+        );
+        // No params, no _meta, or a wrong-typed value: all read as "not
+        // a modern request", never an error.
+        assert_eq!(
+            request_protocol_version(&json!({"jsonrpc": "2.0", "id": 1, "method": "ping"})),
+            None
+        );
+        assert_eq!(
+            request_protocol_version(&json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/list",
+                "params": {"_meta": {META_PROTOCOL_VERSION: 2026}},
+            })),
+            None
+        );
+    }
+
+    /// The stdio-side gate: a declared-but-unimplemented per-request
+    /// version earns `UnsupportedProtocolVersionError` with the list to
+    /// retry from; a supported one, a legacy message, and a
+    /// notification (nothing is waiting) all pass untouched.
+    #[test]
+    fn modern_version_rejection_refuses_only_unsupported_declared_versions() {
+        let refused = modern_version_rejection(&json!({
+            "jsonrpc": "2.0", "id": 7, "method": "tools/list",
+            "params": {"_meta": {META_PROTOCOL_VERSION: "2099-01-01"}},
+        }))
+        .expect("an unimplemented version must be refused");
+        assert_eq!(refused["id"], 7);
+        assert_eq!(refused["error"]["code"], -32022);
+        assert_eq!(
+            refused["error"]["data"]["supported"],
+            json!(MODERN_PROTOCOL_VERSIONS)
+        );
+        assert_eq!(refused["error"]["data"]["requested"], "2099-01-01");
+
+        assert!(
+            modern_version_rejection(&json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/list",
+                "params": {"_meta": {META_PROTOCOL_VERSION: MODERN_PROTOCOL_VERSIONS[0]}},
+            }))
+            .is_none()
+        );
+        assert!(
+            modern_version_rejection(&json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/list",
+            }))
+            .is_none()
+        );
+        assert!(
+            modern_version_rejection(&json!({
+                "jsonrpc": "2.0", "method": "notifications/whatever",
+                "params": {"_meta": {META_PROTOCOL_VERSION: "2099-01-01"}},
+            }))
+            .is_none()
+        );
+        // An id of a type JSON-RPC forbids never reaches -32022 either:
+        // it falls through to the ordinary InvalidId refusal, so the
+        // malformed id is not echoed into this error's body.
+        assert!(
+            modern_version_rejection(&json!({
+                "jsonrpc": "2.0", "id": [1], "method": "tools/list",
+                "params": {"_meta": {META_PROTOCOL_VERSION: "2099-01-01"}},
+            }))
+            .is_none()
         );
     }
 
