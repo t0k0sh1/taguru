@@ -404,26 +404,28 @@ describe("batching", () => {
   });
 
   it("addAssociationsBatched aggregates the warn-mode carrier in chunk order", async () => {
-    // Each chunk answers with DISTINCT values, so a reordering or a
-    // double-count would be visible, not coincidentally equal.
-    let chunksSeen = 0;
-    const issueFor = (chunk: number) => ({
-      path: `associations[0].chunk${chunk}`,
+    // Each response is derived from the CHUNK THE REQUEST CARRIED, not
+    // from handler call order — so a reordered transmission, a dropped
+    // chunk, or a double-count would all be visible.
+    const issueFor = (subject: string) => ({
+      path: `associations[0].${subject}`,
       kind: "range",
       expected: "one of [Brewery]",
       actual: "Prefecture",
     });
-    const client = stubClient(() => {
-      chunksSeen += 1;
+    const violationsFor: Record<string, number> = { s0: 1, s1: 2 };
+    const client = stubClient((req) => {
+      const ops = JSON.parse(req.body ?? "[]") as { subject: string }[];
+      const subject = ops[0]?.subject ?? "unknown";
       return {
         status: 200,
         headers: {},
         body: JSON.stringify({
-          result: 1,
+          result: ops.length,
           status: "ok",
           time: 0.001,
-          issues: [issueFor(chunksSeen)],
-          schema_violations: chunksSeen,
+          issues: [issueFor(subject)],
+          schema_violations: violationsFor[subject] ?? 0,
         }),
       };
     });
@@ -433,7 +435,7 @@ describe("batching", () => {
     expect(result).toEqual({
       applied: 2,
       chunks: 2,
-      issues: [issueFor(1), issueFor(2)],
+      issues: [issueFor("s0"), issueFor("s1")],
       schema_violations: 1 + 2,
     });
   });

@@ -190,22 +190,23 @@ def test_add_associations_surfaces_the_warn_mode_envelope_carrier() -> None:
         (issue["path"], issue["kind"], issue["expected"], issue["actual"])
     ]
 
-    # Batched aggregation preserves chunk order and sums the true counts —
-    # each chunk answers with DISTINCT values, so a reordering or a
-    # double-count would be visible, not coincidentally equal.
-    chunks_seen = 0
+    # Batched aggregation preserves chunk order and sums the true counts.
+    # Each response is derived from the CHUNK THE REQUEST CARRIED, not
+    # from handler call order — so a reordered transmission, a dropped
+    # chunk, or a double-count would all be visible.
+    violations_for = {"s0": 1, "s1": 2}
 
     def chunked_handler(req: httpx.Request) -> httpx.Response:
-        nonlocal chunks_seen
-        chunks_seen += 1
+        ops = json.loads(req.content)
+        subject = ops[0]["subject"]
         return httpx.Response(
             200,
             json={
-                "result": 1,
+                "result": len(ops),
                 "status": "ok",
                 "time": 0.001,
-                "issues": [dict(issue, path=f"associations[0].chunk{chunks_seen}")],
-                "schema_violations": chunks_seen,
+                "issues": [dict(issue, path=f"associations[0].{subject}")],
+                "schema_violations": violations_for[subject],
             },
         )
 
@@ -216,6 +217,6 @@ def test_add_associations_surfaces_the_warn_mode_envelope_carrier() -> None:
     assert batched.applied == 2
     assert batched.schema_violations == 1 + 2
     assert [i.path for i in batched.issues] == [
-        "associations[0].chunk1",
-        "associations[0].chunk2",
+        "associations[0].s0",
+        "associations[0].s1",
     ]
