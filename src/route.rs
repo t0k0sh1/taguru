@@ -2444,8 +2444,15 @@ async fn route_import(
     // scope-checks the record exactly as a single instance's dry run
     // does, while omitting it from the preview (ADR 0009 §13; no
     // read-only twin `put_schema` can preview through).
-    let mut schemas: Vec<Value> = Vec::new();
-    for &shard in schema_shards.keys() {
+    // Keyed by the record's ORIGINAL index in `stream.schemas`, not by
+    // shard: `schema_shards` iterates in shard-number order, which is
+    // not stream order, so accumulating into a plain `Vec` here would
+    // silently reorder `result.schemas` relative to what one instance
+    // (or a different route-map split) answers for the identical
+    // stream — the same equivalence `taguru router`'s own doc promises
+    // for every other verb.
+    let mut schemas_by_index: BTreeMap<usize, Value> = BTreeMap::new();
+    for (&shard, indices) in &schema_shards {
         match state
             .call_shard(
                 shard,
@@ -2461,15 +2468,20 @@ async fn route_import(
                 if let Ok(envelope) = serde_json::from_slice::<ShardEnvelope<Value>>(&answer.body)
                     && let Some(outcomes) = envelope.result.get("schemas").and_then(Value::as_array)
                 {
-                    schemas.extend(outcomes.iter().cloned());
+                    // `schema_lines_for(shard)` rendered `indices` in
+                    // this same order, so the shard's own response
+                    // order matches it position for position.
+                    for (&index, outcome) in indices.iter().zip(outcomes.iter()) {
+                        schemas_by_index.insert(index, outcome.clone());
+                    }
                 }
             }
             Ok(answer) => {
                 return rewrap_import_refusal(
                     answer,
                     batches.len(),
-                    schemas.len(),
-                    !query.dry_run && (!chunks.is_empty() || !schemas.is_empty()),
+                    schemas_by_index.len(),
+                    !query.dry_run && (!chunks.is_empty() || !schemas_by_index.is_empty()),
                     started_at,
                 );
             }
@@ -2485,6 +2497,7 @@ async fn route_import(
             }
         }
     }
+    let schemas: Vec<Value> = schemas_by_index.into_values().collect();
     // Group records apply LAST, after every batch (and every schema) —
     // the same order the stream contract promises — projected per
     // shard and broadcast. A dry run dispatches them too (with
@@ -2589,6 +2602,16 @@ struct GroupOutcomeWire {
 /// different shard already made durable. `schemas_landed` is 0 for
 /// the batch loop's own call site (the schema loop has not started
 /// yet at that point), so its wording is unchanged.
+///
+/// `integrity`/`durable_batches` are RECOMPUTED here from the true
+/// cross-shard counts, never copied from the failing shard's own
+/// body: that shard only knows what reached IT (0, for a shard whose
+/// own request carried nothing before the refusal), which would
+/// under-report exactly the way `schema_import_refusal`'s own fix
+/// avoids for a single instance. `issues`/`retryable_after_correction`
+/// ARE copied verbatim — they describe the failing shard's own
+/// refusal (which context, which cap), a claim the cross-shard
+/// context does not change.
 fn rewrap_import_refusal(
     answer: ShardAnswer,
     batches_landed: usize,
@@ -2604,7 +2627,7 @@ fn rewrap_import_refusal(
         )
             .into_response();
     }
-    let (code, message) = match serde_json::from_slice::<Value>(&answer.body) {
+    let (code, message, issues, retryable) = match serde_json::from_slice::<Value>(&answer.body) {
         Ok(body) => (
             body.get("code")
                 .and_then(Value::as_str)
@@ -2614,10 +2637,14 @@ fn rewrap_import_refusal(
                 .and_then(Value::as_str)
                 .unwrap_or("shard refusal with an unreadable body")
                 .to_string(),
+            body.get("issues").cloned(),
+            body.get("retryable_after_correction").cloned(),
         ),
         Err(_) => (
             "internal".to_string(),
             String::from_utf8_lossy(&answer.body).into_owned(),
+            None,
+            None,
         ),
     };
     let landed = match (batches_landed, schemas_landed) {
@@ -2625,7 +2652,7 @@ fn rewrap_import_refusal(
         (0, schemas) => format!("{schemas} schema record(s)"),
         (batches, schemas) => format!("{batches} batch(es) and {schemas} schema record(s)"),
     };
-    let rewrapped = json!({
+    let mut rewrapped = json!({
         "status": "error",
         "code": code,
         "error": format!(
@@ -2633,8 +2660,22 @@ fn rewrap_import_refusal(
              whole stream is exact — each batch replaces its own source, each schema install \
              is independent); the refusing shard says: {message}"
         ),
+        // `other_landed` is true only when at least one of the two
+        // counts is nonzero, so this is always "durable_prefix" here
+        // — the `!other_landed` early return above is what answers
+        // "nothing_written" (the failing shard's own body, unedited).
+        "integrity": "durable_prefix",
         "time": started_at.elapsed().as_secs_f64(),
     });
+    if batches_landed > 0 {
+        rewrapped["durable_batches"] = json!(batches_landed);
+    }
+    if let Some(issues) = issues {
+        rewrapped["issues"] = issues;
+    }
+    if let Some(retryable) = retryable {
+        rewrapped["retryable_after_correction"] = retryable;
+    }
     (
         answer.status,
         [(header::CONTENT_TYPE, "application/json")],

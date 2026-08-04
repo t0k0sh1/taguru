@@ -46,6 +46,7 @@
       "shard_unreachable"
     ],
     "response.result.contexts[].schema_mode": ["off", "warn", "strict"],
+    "response.result.schemas[].mode": ["off", "warn", "strict"],
     "response.result.items[].kind": ["association", "passage", "community"],
     "response.result.items[].lane_ranks[].lane": [
       "graph_query",
