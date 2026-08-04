@@ -1,7 +1,14 @@
 /** Transport-independent pieces: envelope handling, error mapping, chunking. */
 
 import { TaguruError, errorForStatus } from "./errors.js";
-import type { AssocOp, GroupImportOutcome, ImportOutcome, ImportResult } from "./models.js";
+import type {
+  AssocOp,
+  GroupImportOutcome,
+  ImportOutcome,
+  ImportResult,
+  Issue,
+  SchemaImportOutcome,
+} from "./models.js";
 import { parseRetryAfter } from "./retry.js";
 
 export const DEFAULT_BASE_URL = "http://127.0.0.1:8248";
@@ -114,6 +121,20 @@ export function errorFromBody(
 
 /** Extract `result` from the `{"result", "status": "ok", "time"}` envelope. */
 export function unwrapEnvelope(status: number, bodyText: string): unknown {
+  return unwrapEnvelopeFull(status, bodyText).result;
+}
+
+/**
+ * `unwrapEnvelope` plus the envelope's warn-mode carrier: `issues` and
+ * `schema_violations` are ADR 0009 §8.3's fields, riding *beside* `result`
+ * on a `warn`-mode write whose associations violated the context's schema.
+ * Both are empty/zero on every other response (and on servers predating the
+ * fields), so result-only callers go through `unwrapEnvelope`.
+ */
+export function unwrapEnvelopeFull(
+  status: number,
+  bodyText: string,
+): { result: unknown; issues: Issue[]; schema_violations: number } {
   let parsed: unknown;
   try {
     parsed = JSON.parse(bodyText);
@@ -125,9 +146,19 @@ export function unwrapEnvelope(status: number, bodyText: string): unknown {
     });
   }
   if (typeof parsed === "object" && parsed !== null && "result" in parsed) {
-    const shaped = parsed as { result: unknown; status?: unknown };
+    const shaped = parsed as {
+      result: unknown;
+      status?: unknown;
+      issues?: unknown;
+      schema_violations?: unknown;
+    };
     if (shaped.status === "ok") {
-      return shaped.result;
+      return {
+        result: shaped.result,
+        issues: Array.isArray(shaped.issues) ? (shaped.issues as Issue[]) : [],
+        schema_violations:
+          typeof shaped.schema_violations === "number" ? shaped.schema_violations : 0,
+      };
     }
   }
   throw new TaguruError("response is not the taguru envelope shape", {
@@ -137,22 +168,44 @@ export function unwrapEnvelope(status: number, bodyText: string): unknown {
 }
 
 /**
- * Normalize /import's response to `{batches, groups}`. Current servers
- * always answer `{batches: [...], groups: [...]}` (`groups` omitted
- * entirely when the stream carried none); servers predating that change
- * answered a bare outcome for a single batch — both parse here, so callers
- * never branch on response shape.
+ * Normalize /import's response to an `ImportResult`. Current servers always
+ * answer `{batches: [...], groups: [...], schemas: [...]}`
+ * (`groups`/`schemas` omitted entirely when the stream carried none);
+ * servers predating that change answered a bare outcome for a single batch
+ * — both parse here, so callers never branch on response shape.
+ * `issues`/`schema_violations` are the response envelope's warn-mode
+ * carrier, passed through by `importBatches`.
  */
-export function normalizeImportOutcomes(result: unknown): ImportResult {
+export function normalizeImportOutcomes(
+  result: unknown,
+  issues: Issue[] = [],
+  schema_violations = 0,
+): ImportResult {
   if (
     typeof result === "object" &&
     result !== null &&
     Array.isArray((result as { batches?: unknown }).batches)
   ) {
-    const shaped = result as { batches: ImportOutcome[]; groups?: GroupImportOutcome[] };
-    return { batches: shaped.batches, groups: shaped.groups ?? [] };
+    const shaped = result as {
+      batches: ImportOutcome[];
+      groups?: GroupImportOutcome[];
+      schemas?: SchemaImportOutcome[];
+    };
+    return {
+      batches: shaped.batches,
+      groups: shaped.groups ?? [],
+      schemas: shaped.schemas ?? [],
+      issues,
+      schema_violations,
+    };
   }
-  return { batches: [result as ImportOutcome], groups: [] };
+  return {
+    batches: [result as ImportOutcome],
+    groups: [],
+    schemas: [],
+    issues,
+    schema_violations,
+  };
 }
 
 /** Percent-encode one path segment (context names may be any UTF-8). */

@@ -444,6 +444,52 @@ class SchemaDocument:
 
 
 @dataclass(slots=True, frozen=True)
+class AuditNames:
+    """One of :class:`SchemaAudit`'s name-list sections: the true count of
+    names the check surfaced, and a name-ordered prefix capped
+    server-side (at 100)."""
+
+    total: int
+    names: list[str]
+
+
+@dataclass(slots=True, frozen=True)
+class AuditAliases:
+    """:class:`AuditNames`'s sibling for ``reserved_alias_conflicts``
+    (``alias -> canonical``, not a bare name set), capped the same way."""
+
+    total: int
+    aliases: dict[str, str]
+
+
+@dataclass(slots=True, frozen=True)
+class SchemaViolation:
+    """One live association the schema audit flagged, alongside every
+    issue it raised."""
+
+    association: Association
+    issues: list[Issue]
+
+
+@dataclass(slots=True, frozen=True)
+class SchemaAudit:
+    """ADR 0009 §10's schema audit: five independent read-only checks over
+    the live graph in one response — candidates for review, not verdicts.
+
+    Only ``violations`` pages (``total`` stays constant across pages,
+    like every other match list); the other four sections each carry
+    their own true count with a capped prefix.
+    """
+
+    total: int
+    violations: list[SchemaViolation]
+    untyped_concepts: AuditNames
+    undeclared_types: AuditNames
+    unknown_labels: AuditNames
+    reserved_alias_conflicts: AuditAliases
+
+
+@dataclass(slots=True, frozen=True)
 class AliasPage:
     """One page of aliases; the cursor spans both namespaces (concepts first)."""
 
@@ -816,6 +862,55 @@ class CompactOutcome:
 
 
 @dataclass(slots=True, frozen=True)
+class Issue:
+    """One path-addressed schema violation (ADR 0009 §8.1/§8.3).
+
+    The same four fields a ``strict`` refusal's error body lists — under
+    ``warn`` they ride the success envelope instead, because the write
+    went ahead. ``path`` names the offending element of the request,
+    ``kind`` is the violation kind (e.g. ``"range"``,
+    ``"unknown_reference"``), and ``expected``/``actual`` say what the
+    schema wanted versus what the request carried.
+    """
+
+    path: str
+    kind: str
+    expected: str
+    actual: str
+
+
+@dataclass(slots=True, frozen=True)
+class SchemaImportOutcome:
+    """What installing one ``taguru_schema`` record via import accomplished.
+
+    No outcome verb (unlike :class:`GroupImportOutcome`): the install
+    cannot distinguish itself from a no-op PUT of the identical document
+    (ADR 0009 §13).
+    """
+
+    context: str
+    mode: str
+    types: int
+    relations: int
+
+
+@dataclass(slots=True, frozen=True)
+class AddAssociationsResult:
+    """What ``add_associations`` accomplished, warn-mode issues included.
+
+    ``issues`` is the (possibly truncated) violation list from the
+    response envelope; ``schema_violations`` is the true count behind it
+    (ADR 0009 §8.3). Both are empty/zero for ``off`` mode, no schema, or
+    a fully conforming write — and a ``strict`` violation raises instead,
+    so it never reaches this type.
+    """
+
+    applied: int
+    issues: list[Issue] = field(default_factory=list)
+    schema_violations: int = 0
+
+
+@dataclass(slots=True, frozen=True)
 class ImportOutcome:
     """Outcome of one applied batch (one source's retract-then-apply)."""
 
@@ -856,18 +951,34 @@ class GroupImportOutcome:
 
 @dataclass(slots=True, frozen=True)
 class ImportResult:
-    """What ``POST /import`` accomplished: per-batch outcomes plus any group restores."""
+    """What ``POST /import`` accomplished: per-batch outcomes plus any
+    group restores and ``taguru_schema`` installs.
+
+    ``issues``/``schema_violations`` are the response envelope's
+    warn-mode carrier (ADR 0009 §8.3), stream-wide; each batch's own
+    :attr:`ImportOutcome.schema_violations` breaks the count down
+    per source, surviving ``issues``' truncation.
+    """
 
     batches: list[ImportOutcome]
     groups: list[GroupImportOutcome]
+    schemas: list[SchemaImportOutcome] = field(default_factory=list)
+    issues: list[Issue] = field(default_factory=list)
+    schema_violations: int = 0
 
 
 @dataclass(slots=True, frozen=True)
 class BatchApplyResult:
-    """Outcome of ``add_associations_batched``: chunks are independent writes."""
+    """Outcome of ``add_associations_batched``: chunks are independent writes.
+
+    ``issues``/``schema_violations`` aggregate every chunk's warn-mode
+    carrier (ADR 0009 §8.3), in chunk order.
+    """
 
     applied: int
     chunks: int
+    issues: list[Issue] = field(default_factory=list)
+    schema_violations: int = 0
 
 
 @dataclass(slots=True, frozen=True)

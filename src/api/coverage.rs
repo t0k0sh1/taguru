@@ -248,12 +248,20 @@ pub async fn unreachable_from(
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }
+    // ADR 0009 §6.3's traversal exclusion, same as `explore`/`activate`:
+    // a `schema:type` edge to a shared type name is exactly the hub that
+    // would bridge otherwise-disconnected facts and under-report orphans.
+    // Resolved before `read_context` — `AppState::hidden_label`'s slow
+    // path takes this entry's write lock, which would deadlock against
+    // `read_context`'s read lock held for the whole closure.
+    let hidden = tokio::task::block_in_place(|| state.hidden_label(&name));
+    let excluded: Vec<&str> = hidden.into_iter().collect();
     let loaded = tokio::task::block_in_place(|| {
         state
             .read_context(&name, |context| {
                 let origins: Vec<&str> = request.origins.iter().map(String::as_str).collect();
                 context
-                    .unreachable_from(&origins, deadline)
+                    .unreachable_from_excluding(&origins, deadline, &excluded)
                     .map_err(|_| AccessError::DeadlineExceeded)
             })
             .and_then(std::convert::identity)

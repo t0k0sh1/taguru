@@ -42,7 +42,11 @@ describe("retry policy", () => {
   it("retries 429 even on the unsafe write route (shed before executing)", async () => {
     const { handler, calls } = flaky(1, () => errBody(429, "budget", { "retry-after": "0" }));
     const client = stubClient(handler);
-    await expect(client.context("sake").addAssociations([OP])).resolves.toBe(0);
+    await expect(client.context("sake").addAssociations([OP])).resolves.toEqual({
+      applied: 0,
+      issues: [],
+      schema_violations: 0,
+    });
     expect(calls()).toBe(2);
   });
 

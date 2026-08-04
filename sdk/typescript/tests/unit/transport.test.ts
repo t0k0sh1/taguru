@@ -377,8 +377,67 @@ describe("batching", () => {
     const result = await client
       .context("sake")
       .addAssociationsBatched([op(0), op(1), op(2), op(3), op(4)], { chunk_size: 2 });
-    expect(result).toEqual({ applied: 5, chunks: 3 });
+    expect(result).toEqual({ applied: 5, chunks: 3, issues: [], schema_violations: 0 });
     expect(batchSizes).toEqual([2, 2, 1]);
+  });
+
+  it("addAssociations surfaces the warn-mode envelope carrier", async () => {
+    const issue = {
+      path: "associations[0].object",
+      kind: "range",
+      expected: "one of [Brewery]",
+      actual: "Prefecture",
+    };
+    const client = stubClient(() => ({
+      status: 200,
+      headers: {},
+      body: JSON.stringify({
+        result: 1,
+        status: "ok",
+        time: 0.001,
+        issues: [issue],
+        schema_violations: 3,
+      }),
+    }));
+    const result = await client.context("sake").addAssociations([op(0)]);
+    expect(result).toEqual({ applied: 1, issues: [issue], schema_violations: 3 });
+  });
+
+  it("addAssociationsBatched aggregates the warn-mode carrier in chunk order", async () => {
+    // Each response is derived from the CHUNK THE REQUEST CARRIED, not
+    // from handler call order — so a reordered transmission, a dropped
+    // chunk, or a double-count would all be visible.
+    const issueFor = (subject: string) => ({
+      path: `associations[0].${subject}`,
+      kind: "range",
+      expected: "one of [Brewery]",
+      actual: "Prefecture",
+    });
+    const violationsFor: Record<string, number> = { s0: 1, s1: 2 };
+    const client = stubClient((req) => {
+      const ops = JSON.parse(req.body ?? "[]") as { subject: string }[];
+      const subject = ops[0]?.subject ?? "unknown";
+      return {
+        status: 200,
+        headers: {},
+        body: JSON.stringify({
+          result: ops.length,
+          status: "ok",
+          time: 0.001,
+          issues: [issueFor(subject)],
+          schema_violations: violationsFor[subject] ?? 0,
+        }),
+      };
+    });
+    const result = await client
+      .context("sake")
+      .addAssociationsBatched([op(0), op(1)], { chunk_size: 1 });
+    expect(result).toEqual({
+      applied: 2,
+      chunks: 2,
+      issues: [issueFor("s0"), issueFor("s1")],
+      schema_violations: 1 + 2,
+    });
   });
 });
 

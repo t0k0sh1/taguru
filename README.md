@@ -153,8 +153,10 @@ round trip, request by request, is traced in the
 [walkthrough](https://t0k0sh1.github.io/taguru/mcp-rag-walkthrough.html).
 
 `taguru-mcp` also honors `TAGURU_MCP_TIMEOUT_SECS` (per-request budget
-against the server, default 75 — raise it for a slow local model) and
-`TAGURU_MCP_MAX_LINE_BYTES` (stdio frame cap).
+against the server, default 75 — raise it for a slow local model),
+`TAGURU_MCP_MAX_LINE_BYTES` (stdio frame cap), and
+`TAGURU_MCP_MAX_CONCURRENT_TOOLS` (simultaneously in-flight tool
+calls, default 8).
 
 The same tools are also served remotely: `POST /mcp` speaks the MCP
 Streamable HTTP transport (stateless profile — plain JSON responses,
@@ -167,6 +169,11 @@ claude mcp add --transport http taguru https://your-host/mcp \
 # Claude API: mcp_servers = [{type: "url", url: "https://your-host/mcp",
 #                             name: "taguru", authorization_token: "…"}]
 ```
+
+On the server side, `TAGURU_MCP_MAX_RESULT_BYTES` (default 8 MiB) caps
+how much of one tool's result `POST /mcp` will buffer — past it the
+call fails naming the export escape hatches instead of buffering
+forever.
 
 claude.ai custom connectors (web and mobile) authenticate with OAuth
 instead of a pasted header: set `TAGURU_PUBLIC_URL`, point the
