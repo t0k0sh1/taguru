@@ -190,7 +190,32 @@ def test_add_associations_surfaces_the_warn_mode_envelope_carrier() -> None:
         (issue["path"], issue["kind"], issue["expected"], issue["actual"])
     ]
 
-    # Batched aggregation carries the same fields through, in chunk order.
-    batched = client.context("sake").add_associations_batched([_op(0), _op(1)], chunk_size=1)
-    assert batched.schema_violations == 6
-    assert len(batched.issues) == 2
+    # Batched aggregation preserves chunk order and sums the true counts —
+    # each chunk answers with DISTINCT values, so a reordering or a
+    # double-count would be visible, not coincidentally equal.
+    chunks_seen = 0
+
+    def chunked_handler(req: httpx.Request) -> httpx.Response:
+        nonlocal chunks_seen
+        chunks_seen += 1
+        return httpx.Response(
+            200,
+            json={
+                "result": 1,
+                "status": "ok",
+                "time": 0.001,
+                "issues": [dict(issue, path=f"associations[0].chunk{chunks_seen}")],
+                "schema_violations": chunks_seen,
+            },
+        )
+
+    batched_client = sync_client(chunked_handler)
+    batched = batched_client.context("sake").add_associations_batched(
+        [_op(0), _op(1)], chunk_size=1
+    )
+    assert batched.applied == 2
+    assert batched.schema_violations == 1 + 2
+    assert [i.path for i in batched.issues] == [
+        "associations[0].chunk1",
+        "associations[0].chunk2",
+    ]

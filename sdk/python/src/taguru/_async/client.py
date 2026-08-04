@@ -1007,11 +1007,11 @@ class AsyncContext:
         `POST /contexts/{name}/schema/audit`, `taguru extract
         --schema`, and both LangChain ingesters read.
 
-        Raises ``NotFoundError`` when the context has no schema
-        installed (or does not exist) — the same 404
-        ``list_labels``/friends already give, so a caller distinguishes
-        the two only by checking `list`/`get` on the context itself
-        first, if it needs to.
+        Raises ``NotFoundError`` with ``code == "no_schema"`` when the
+        context exists but has no schema installed, or ``code ==
+        "no_context"`` when the context itself does not exist — inspect
+        the error's ``code`` to tell the two apart without a second
+        request.
         """
         result = await self._client._request_json("GET", self._path + "/schema")
         return decode(SchemaDocument, result)  # type: ignore[no-any-return]

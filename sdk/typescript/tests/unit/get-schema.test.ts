@@ -98,10 +98,14 @@ describe("putSchema / auditSchema / validateSchema", () => {
       requests.push(req);
       return okBody(SCHEMA_AUDIT);
     });
+    // A non-trivial cursor must reach the wire verbatim — `violations`
+    // pages exactly like recall/query, so a dropped or reshaped `after`
+    // would silently restart every page from the top.
+    const cursor = { weight: 1.0, subject: "青嶺酒造", label: "杜氏", object: "広島" };
 
-    const audit = await client.context("aomine").auditSchema({ limit: 10 });
+    const audit = await client.context("aomine").auditSchema({ limit: 10, after: cursor });
     expect(requests[0]?.path).toBe("/contexts/aomine/schema/audit");
-    expect(JSON.parse(requests[0]?.body ?? "")).toEqual({ limit: 10 });
+    expect(JSON.parse(requests[0]?.body ?? "")).toEqual({ limit: 10, after: cursor });
     expect(audit.total).toBe(1);
     expect(audit.violations[0]?.association.object).toBe("広島");
     expect(audit.violations[0]?.issues[0]?.kind).toBe("range");
@@ -109,9 +113,13 @@ describe("putSchema / auditSchema / validateSchema", () => {
 
     const validated = await client
       .context("aomine")
-      .validateSchema(SCHEMA_DOCUMENT, { limit: 10 });
+      .validateSchema(SCHEMA_DOCUMENT, { limit: 10, after: cursor });
     expect(requests[1]?.path).toBe("/contexts/aomine/schema/validate");
-    expect(JSON.parse(requests[1]?.body ?? "")).toEqual({ document: SCHEMA_DOCUMENT, limit: 10 });
+    expect(JSON.parse(requests[1]?.body ?? "")).toEqual({
+      document: SCHEMA_DOCUMENT,
+      limit: 10,
+      after: cursor,
+    });
     expect(validated.total).toBe(1);
   });
 });

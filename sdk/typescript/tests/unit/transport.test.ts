@@ -402,6 +402,41 @@ describe("batching", () => {
     const result = await client.context("sake").addAssociations([op(0)]);
     expect(result).toEqual({ applied: 1, issues: [issue], schema_violations: 3 });
   });
+
+  it("addAssociationsBatched aggregates the warn-mode carrier in chunk order", async () => {
+    // Each chunk answers with DISTINCT values, so a reordering or a
+    // double-count would be visible, not coincidentally equal.
+    let chunksSeen = 0;
+    const issueFor = (chunk: number) => ({
+      path: `associations[0].chunk${chunk}`,
+      kind: "range",
+      expected: "one of [Brewery]",
+      actual: "Prefecture",
+    });
+    const client = stubClient(() => {
+      chunksSeen += 1;
+      return {
+        status: 200,
+        headers: {},
+        body: JSON.stringify({
+          result: 1,
+          status: "ok",
+          time: 0.001,
+          issues: [issueFor(chunksSeen)],
+          schema_violations: chunksSeen,
+        }),
+      };
+    });
+    const result = await client
+      .context("sake")
+      .addAssociationsBatched([op(0), op(1)], { chunk_size: 1 });
+    expect(result).toEqual({
+      applied: 2,
+      chunks: 2,
+      issues: [issueFor(1), issueFor(2)],
+      schema_violations: 1 + 2,
+    });
+  });
 });
 
 describe("retrieve loop", () => {

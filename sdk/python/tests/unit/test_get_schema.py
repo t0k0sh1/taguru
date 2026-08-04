@@ -122,10 +122,15 @@ def test_audit_and_validate_schema_decode_the_shared_audit_shape() -> None:
         seen["body"] = json.loads(req.content)
         return ok_response(SCHEMA_AUDIT)
 
+    # A non-trivial cursor must reach the wire verbatim — `violations`
+    # pages exactly like recall/query, so a dropped or reshaped `after`
+    # would silently restart every page from the top.
+    cursor = {"weight": 1.0, "subject": "青嶺酒造", "label": "杜氏", "object": "広島"}
+
     client = sync_client(handler)
-    audit = client.context("aomine").audit_schema(limit=10)
+    audit = client.context("aomine").audit_schema(limit=10, after=cursor)
     assert seen["path"] == "/contexts/aomine/schema/audit"
-    assert seen["body"] == {"limit": 10}
+    assert seen["body"] == {"limit": 10, "after": cursor}
     assert isinstance(audit, SchemaAudit)
     assert audit.total == 1
     violation = audit.violations[0]
@@ -134,7 +139,7 @@ def test_audit_and_validate_schema_decode_the_shared_audit_shape() -> None:
     assert audit.untyped_concepts.names == ["広島", "青嶺"]
     assert audit.reserved_alias_conflicts.aliases == {"種類": "schema:type"}
 
-    validated = client.context("aomine").validate_schema(SCHEMA_DOCUMENT, limit=10)
+    validated = client.context("aomine").validate_schema(SCHEMA_DOCUMENT, limit=10, after=cursor)
     assert seen["path"] == "/contexts/aomine/schema/validate"
-    assert seen["body"] == {"document": SCHEMA_DOCUMENT, "limit": 10}
+    assert seen["body"] == {"document": SCHEMA_DOCUMENT, "limit": 10, "after": cursor}
     assert validated.total == 1

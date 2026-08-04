@@ -276,6 +276,8 @@ fn unreachable_from_never_travels_through_schema_type_once_a_schema_exists() {
          orphan, and the hidden schema:type edges themselves are not reported: {after}"
     );
     assert_eq!(after["matches"][0]["subject"], json!("孤島"), "{after}");
+    assert_eq!(after["matches"][0]["label"], json!("l"), "{after}");
+    assert_eq!(after["matches"][0]["object"], json!("先"), "{after}");
 }
 
 /// Guard 2's refusal must fire against a fresh alias in `warn`/`strict`
