@@ -163,6 +163,12 @@ pub struct Metrics {
     /// while the tier is disabled.
     semantic_cache: [AtomicU64; SemanticCacheOutcome::ALL.len()],
     resolve_tiers: [AtomicU64; ResolveTier::ALL.len()],
+    /// `[outcome]` per [`SchemaOutcome`] — counted only at the write
+    /// entrances a schema actually gates, never at a dry-run or the
+    /// audit/validate diagnostics (see [`SchemaOutcome`]'s own doc).
+    /// Stays entirely at zero for a server with no context ever
+    /// carrying an installed schema document.
+    schema_checks: [AtomicU64; SchemaOutcome::ALL.len()],
     /// Passage-search hits by which lane(s) surfaced them — the pulse
     /// of what the vector lane actually adds. Fixed three labels.
     passage_hits_bm25_only: AtomicU64,
@@ -560,6 +566,49 @@ impl ResolveTier {
     }
 }
 
+/// How one schema pre-write check ended (#388, S10 of #218's ADR 0009
+/// split §15) — the label vocabulary of `taguru_schema_checks_total`.
+/// Counted only at the entrances that actually gate a write
+/// (`POST /contexts/{name}/associations`, `POST /import`/`taguru
+/// import`) for a context that has an installed schema document
+/// (ADR 0009 §6.3's single condition, not `mode`); a schema-free
+/// context never touches this family. `?dry_run=true`/`preview_batch`
+/// and `POST /schema/validate`/`/schema/audit` are diagnostics, not
+/// write gates, and are deliberately excluded — otherwise a
+/// validate-then-apply workflow would double-count the same refusal.
+/// Kept as a closed metrics-only enum, the same discipline
+/// [`RerankOutcomeKind`] uses, so every label renders from zero rather
+/// than only appearing once its first outcome fires.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum SchemaOutcome {
+    /// No reserved-label conflict and no domain/range/closed-label
+    /// violation (including every check against a schema-free
+    /// context, and any check while `mode == off`).
+    Ok,
+    /// `mode == warn` and the write proceeded with violations recorded
+    /// in the response instead of refusing.
+    Warned,
+    /// The write refused before anything landed — a reserved-label
+    /// conflict (any mode), or `mode == strict` with violations.
+    Refused,
+}
+
+impl SchemaOutcome {
+    const ALL: [SchemaOutcome; 3] = [
+        SchemaOutcome::Ok,
+        SchemaOutcome::Warned,
+        SchemaOutcome::Refused,
+    ];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            SchemaOutcome::Ok => "ok",
+            SchemaOutcome::Warned => "warned",
+            SchemaOutcome::Refused => "refused",
+        }
+    }
+}
+
 /// How much per-context detail the scrape carries
 /// (`TAGURU_METRICS_PER_CONTEXT`, issue #137). Off by default on
 /// purpose: per-context labels × many contexts is exactly the
@@ -607,6 +656,14 @@ pub struct ContextGaugeRow {
     pub associations: u64,
     pub labels: u64,
     pub sources: u64,
+    /// Schema violations recorded by [`AppState::note_schema_check`]
+    /// since boot (or since this entry's own creation) — a Prometheus
+    /// counter, not a live count of currently-outstanding violations
+    /// (those are never swept; ADR 0009 §7.2's write-time check is the
+    /// only judge, and it never sweeps the graph either). Zero for
+    /// every context that has never failed a schema check, including
+    /// every schema-free one.
+    pub schema_violations: u64,
 }
 
 impl ContextGaugeRow {
@@ -998,6 +1055,10 @@ impl Metrics {
 
     pub fn record_resolve_tier(&self, tier: ResolveTier) {
         self.resolve_tiers[tier as usize].fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_schema_check(&self, outcome: SchemaOutcome) {
+        self.schema_checks[outcome as usize].fetch_add(1, Ordering::Relaxed);
     }
 
     /// One served passage-search hit, by which lane(s) put it there. A
@@ -1504,6 +1565,28 @@ impl Metrics {
 
         push_header(
             &mut out,
+            "taguru_schema_checks_total",
+            "counter",
+            "Schema pre-write checks by outcome, counted only at the \
+             entrances that actually gate a write (POST \
+             /contexts/{name}/associations, POST /import/taguru import) \
+             for a context with an installed schema document — a \
+             schema-free context, ?dry_run=true/preview, and POST \
+             /schema/validate|/schema/audit never land here. warned = \
+             mode warn rode violations out in the response; refused = \
+             a reserved-label conflict, or mode strict with violations, \
+             refused before anything was written.",
+        );
+        for outcome in SchemaOutcome::ALL {
+            out.push_str(&format!(
+                "taguru_schema_checks_total{{outcome=\"{}\"}} {}\n",
+                outcome.as_str(),
+                self.schema_checks[outcome as usize].load(Ordering::Relaxed)
+            ));
+        }
+
+        push_header(
+            &mut out,
             "taguru_passage_lane_contributions_total",
             "counter",
             "Served passage-search hits by which lane surfaced them: vector_only \
@@ -1732,6 +1815,24 @@ impl Metrics {
                         pick(row)
                     ));
                 }
+            }
+            push_header(
+                &mut out,
+                "taguru_context_schema_violations_total",
+                "counter",
+                "Schema violations recorded per context since boot, the \
+                 per-context breakdown of taguru_schema_checks_total's \
+                 warned/refused rows (present only with \
+                 TAGURU_METRICS_PER_CONTEXT). A context with no installed \
+                 schema, or one that has never failed a check, renders \
+                 zero here rather than being absent.",
+            );
+            for row in &gauges.per_context {
+                out.push_str(&format!(
+                    "taguru_context_schema_violations_total{{context=\"{}\"}} {}\n",
+                    escape_label(&row.name),
+                    row.schema_violations
+                ));
             }
             // Declared ceilings only (issue #136) — an uncapped fleet
             // renders no series and no header. Usage lives in the
@@ -2288,6 +2389,7 @@ mod tests {
             associations: 9,
             labels: 3,
             sources: 2,
+            schema_violations: 5,
         });
         let with = metrics.render_prometheus(&gauges);
         let escaped = "日本\\\"酒\\\\";
@@ -2307,6 +2409,7 @@ mod tests {
             format!("taguru_context_associations{{context=\"{escaped}\"}} 9"),
             format!("taguru_context_labels{{context=\"{escaped}\"}} 3"),
             format!("taguru_context_sources{{context=\"{escaped}\"}} 2"),
+            format!("taguru_context_schema_violations_total{{context=\"{escaped}\"}} 5"),
         ] {
             assert!(with.contains(&line), "missing {line} in: {with}");
         }
@@ -2736,6 +2839,21 @@ mod tests {
     }
 
     #[test]
+    fn schema_checks_render_from_zero_for_every_outcome() {
+        let metrics = Metrics::default();
+        metrics.record_schema_check(SchemaOutcome::Ok);
+        metrics.record_schema_check(SchemaOutcome::Ok);
+        metrics.record_schema_check(SchemaOutcome::Refused);
+
+        let rendered = metrics.render_prometheus(&empty_gauges());
+        assert!(rendered.contains("taguru_schema_checks_total{outcome=\"ok\"} 2"));
+        // Untouched outcome still renders at zero — a server that has
+        // never seen a `warn`-mode write still exposes the label.
+        assert!(rendered.contains("taguru_schema_checks_total{outcome=\"warned\"} 0"));
+        assert!(rendered.contains("taguru_schema_checks_total{outcome=\"refused\"} 1"));
+    }
+
+    #[test]
     fn passage_lane_contributions_expose_all_three_labels_from_zero() {
         let metrics = Metrics::default();
         metrics.record_passage_hit(true, false);
@@ -3034,6 +3152,7 @@ mod tests {
                 associations: 6,
                 labels: 2,
                 sources: 1,
+                schema_violations: 0,
             }],
         });
 

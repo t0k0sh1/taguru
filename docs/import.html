@@ -34,6 +34,7 @@
     </div>
     <div class="side-group">
       <div class="side-group-label">Reference</div>
+      <a href="schema.html">Context schema</a>
       <a href="import.html" aria-current="page">Batch import</a>
       <a href="extract.html">Document extraction</a>
       <a href="connectors.html">Ingest connectors</a>
@@ -285,6 +286,11 @@ taguru import --json batch/           <span class="c"># {dry_run, batches: [...]
     </p>
 
     <h3>Schema records</h3>
+    <p class="note">
+      This is the record's on-the-wire shape only. For what the document means, the three modes,
+      the reserved <code>schema:type</code> label, and the write-time enforcement it turns on, see
+      <a href="schema.html">The context schema</a>.
+    </p>
     <p>
       <code>{"taguru_schema": 1, "context": "…", "mode": "off"|"warn"|"strict", "closed_labels": …, "types": {…}, "relations": {…}}</code>
       — one line states one <b>context's</b> whole schema document (ADR 0009 §13), the same shape
@@ -377,6 +383,11 @@ taguru import --json batch/           <span class="c"># {dry_run, batches: [...]
       <li>Failures only discoverable at the apply stage (capacity, disk) are reported per file, and the remaining files continue: files are structurally independent (one file, one source), and a partially applied file heals on re-import.</li>
       <li>A batch that stops between its four durable steps (retract &rarr; passage &rarr; associations &rarr; aliases) is <b>detected</b>, not just repairable: a per-source batch-open marker is written before the first step and removed only after the last, so the server's next boot and <code>taguru inspect</code> name any source whose import never completed. An alias step predicted to conflict is refused before this marker ever opens &mdash; canonical/alias resolution is simulated read-only against the batch's own fresh names and the context's current state &mdash; so a content-driven refusal leaves nothing to detect; the marker's presence now narrows to a capacity or disk fault reaching mid-batch. Either documented repair clears it &mdash; re-import the file, or retract the source. Cross-store atomicity is deliberately not attempted; retract-then-apply already makes the repair exact.</li>
       <li>Writes go through the same registry the server uses — staged on the WAL and fsynced, budgets enforced, one flush at the end. So <code>taguru inspect</code> and the next boot see exactly the state a live ingest would have produced. Imports count as writes in each context's usage stats.</li>
+      <li>If the target context has an installed <a href="schema.html">schema</a>, every batch is
+        also judged against it: <code>strict</code> refuses the whole batch alongside the checks
+        above (before anything mutates), <code>warn</code> applies it and reports the violations
+        in the response's <code>issues</code>. <code>?dry_run=true</code> runs the identical
+        schema check, so a preview can never disagree with the real apply.</li>
     </ul>
     <p>
       The operational procedure for a marker left by an interrupted bulk load — diagnosing it,

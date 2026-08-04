@@ -42,6 +42,35 @@ impl AppState {
         entry.usage_dirty.store(true, Ordering::Relaxed);
     }
 
+    /// Counts one schema pre-write check: the aggregate
+    /// `taguru_schema_checks_total{outcome}` family, plus — only when
+    /// it found something — the context's own `schema_violations` row
+    /// (#388, S10 of #218's ADR 0009 split §15). `violations` is
+    /// `check.violations.len()`, never `check.reserved`'s count: a
+    /// reserved-label conflict is a namespace collision, not a schema
+    /// violation. Call sites are exactly the two write entrances a
+    /// schema gates — `POST /contexts/{name}/associations` and
+    /// `predicted_schema_rejection`'s `Apply` purpose — never a
+    /// dry-run or the audit/validate diagnostics, so `outcome` here
+    /// can never disagree with what actually happened to the write.
+    /// Unknown names (a delete racing the response) drop the
+    /// per-context half silently, same as `note_read`.
+    pub(crate) fn note_schema_check(
+        &self,
+        name: &str,
+        outcome: crate::metrics::SchemaOutcome,
+        violations: usize,
+    ) {
+        self.0.metrics.record_schema_check(outcome);
+        if violations > 0
+            && let Some(entry) = self.lookup(name)
+        {
+            entry
+                .schema_violations
+                .fetch_add(violations as u64, Ordering::Relaxed);
+        }
+    }
+
     /// Bumps a context's write counter, same contract as
     /// [`AppState::note_read`].
     pub fn note_write(&self, name: &str) {
@@ -244,6 +273,7 @@ impl AppState {
                     associations: counts.1,
                     labels: counts.2,
                     sources: counts.3,
+                    schema_violations: entry.schema_violations.load(Ordering::Relaxed),
                 });
             }
         }

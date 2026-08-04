@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>The context schema (schema) — Taguru</title>
+  <meta name="description" content="The complete reference for the optional per-context type and relation ontology: the document shape, off/warn/strict modes, the reserved schema:type label, write-time enforcement, the HTTP and MCP surface, type-aware reads, and the metrics that show strict/warn actually working.">
+  <link rel="icon" type="image/png" href="favicon.png">
+  <link rel="stylesheet" href="style.css">
+  <script src="site.js"></script>
+</head>
+<body>
+
+<div class="topbar">
+  <button class="nav-toggle" id="nav-toggle" type="button" aria-label="Toggle menu">☰</button>
+  <a class="brand" href="index.html"><img class="brand-mark" src="logo.png" alt="">Taguru</a>
+  <button class="theme-toggle" type="button" aria-label="Toggle theme">◐</button>
+</div>
+<div class="scrim" id="scrim"></div>
+
+<div class="layout">
+<aside class="sidebar">
+  <a class="brand" href="index.html"><img class="brand-mark" src="logo.png" alt="">Taguru</a>
+  <nav class="side-nav">
+    <div class="side-group">
+      <a href="index.html">Home</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Guide</div>
+      <a href="getting-started.html">Getting started</a>
+      <a href="concepts.html">Concepts</a>
+      <a href="modeling.html">Modeling</a>
+      <a href="troubleshooting.html">Troubleshooting</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Reference</div>
+      <a href="schema.html" aria-current="page">Context schema</a>
+      <a href="import.html">Batch import</a>
+      <a href="extract.html">Document extraction</a>
+      <a href="connectors.html">Ingest connectors</a>
+      <a href="benchmark.html">Extraction benchmark</a>
+      <a href="evaluate.html">Retrieval quality gate</a>
+      <a href="evidence.html">Evidence assembly</a>
+      <a href="long-running.html">Long-running ingestion</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Deploy</div>
+      <a href="docker-compose.html">Docker Compose</a>
+      <a href="kubernetes.html">Kubernetes</a>
+      <a href="aws.html">AWS</a>
+      <a href="azure.html">Azure</a>
+      <a href="gcp.html">Google Cloud</a>
+      <a href="bedrock.html">Amazon Bedrock</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">How it works</div>
+      <a href="architecture.html">Internal architecture</a>
+      <a href="tracing.html">Tracing</a>
+      <a href="mcp-rag-walkthrough.html">MCP walkthrough</a>
+      <a href="local-rag-walkthrough.html">Local RAG walkthrough</a>
+    </div>
+  </nav>
+  <div class="sidebar-footer">
+    <a href="https://github.com/t0k0sh1/taguru">GitHub ↗</a>
+    <button class="theme-toggle" type="button" aria-label="Toggle theme">◐</button>
+  </div>
+</aside>
+
+<main class="content">
+<div class="page">
+
+  <header class="hero">
+    <div class="eyebrow">reference · context schema</div>
+    <h1>The context schema — an optional type and relation ontology</h1>
+    <p class="lede">
+      A schema is an opt-in contract layered on top of one context's ordinary associations: a
+      closed set of entity types, an <code>is_a</code> hierarchy between them, and domain/range
+      constraints on relation labels. Installing one changes nothing by itself — <code>off</code>
+      is the default and a schema-free context behaves exactly as it always has. This reference
+      covers the document, the three modes, the reserved <code>schema:type</code> label, what
+      happens at write time, the HTTP/MCP surface, type-aware reads, and the metrics that show
+      whether <code>strict</code>/<code>warn</code> are actually doing anything.
+    </p>
+  </header>
+
+  <section id="document">
+    <h2>The document</h2>
+    <p class="section-sub">One JSON object per context, independent of the batch/group/image format versions.</p>
+    <pre><code>{<span class="k">"schema"</span>: <span class="nu">1</span>, <span class="k">"mode"</span>: <span class="s">"strict"</span>, <span class="k">"closed_labels"</span>: <span class="nu">false</span>,
+ <span class="k">"types"</span>: {<span class="s">"Brewery"</span>: {<span class="k">"is_a"</span>: []}, <span class="s">"Person"</span>: {<span class="k">"is_a"</span>: []}},
+ <span class="k">"relations"</span>: {<span class="s">"杜氏"</span>: {<span class="k">"domain"</span>: [<span class="s">"Brewery"</span>], <span class="k">"range"</span>: [<span class="s">"Person"</span>]}}}</code></pre>
+    <p>
+      <code>schema</code> is <code>SCHEMA_VERSION</code> (currently <code>1</code>), independent
+      of <code>BATCH_VERSION</code>/<code>GROUP_VERSION</code>/<code>IMAGE_VERSION</code> — the
+      document has its own version lane because it changes on its own schedule.
+      <code>mode</code> is one of <code>"off"</code>, <code>"warn"</code>, or
+      <code>"strict"</code> — see <a href="#modes">the three modes</a> below. Every top-level
+      field is required and unknown fields are refused, both on the wire
+      (<code>PUT /contexts/{name}/schema</code>) and at rest (the persisted
+      <code>{stem}.schema.json</code>): unlike a batch's group record, nothing here defaults,
+      because a silently-dropped field would be indistinguishable from under-enforcing
+      <code>strict</code>. <code>types</code> maps a type name to its declared parents
+      (<code>is_a</code>, possibly empty); <code>relations</code> maps a relation label to the
+      type names allowed on its subject (<code>domain</code>) and object (<code>range</code>)
+      side.
+    </p>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Cap</th><th>Value</th></tr></thead>
+        <tbody>
+          <tr><td>Declared types</td><td>500</td></tr>
+          <tr><td>Declared relations</td><td>500</td></tr>
+          <tr><td>Domain/range type names, per side of one relation</td><td>64</td></tr>
+          <tr><td><code>is_a</code> chain depth</td><td>8</td></tr>
+          <tr><td>Type/relation/name byte length</td><td>the same <code>MAX_NAME_BYTES</code> every other name in Taguru shares</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">
+      A schema document that fails these checks — including a cycle in <code>is_a</code>, or a
+      relation named the reserved <code>schema:type</code> label — refuses at
+      <code>PUT /contexts/{name}/schema</code> before anything installs; the context's previous
+      schema (if any) is untouched. A schema recorded on disk but currently unreadable is never
+      treated as schema-free — every write entrance refuses conservatively rather than silently
+      skipping enforcement.
+    </p>
+  </section>
+
+  <section id="modes">
+    <h2>Three modes, and what changing one does not do</h2>
+    <p class="section-sub"><code>off</code> / <code>warn</code> / <code>strict</code> — stored inside the document itself, not in the context's ordinary metadata.</p>
+    <p>
+      <code>mode</code> lives <b>inside</b> the schema document, not on
+      <code>ContextMeta</code>: a mode without a document to enforce is meaningless, and
+      <code>PATCH /contexts/{name}</code> (the ordinary metadata endpoint) cannot flip it —
+      changing mode is always a full <code>PUT /contexts/{name}/schema</code>.
+    </p>
+    <ul>
+      <li><b><code>off</code></b> (the default) — the document may exist and be edited, but no
+        write is ever judged against it. Useful for drafting types and relations before turning
+        enforcement on.</li>
+      <li><b><code>warn</code></b> — every write is judged; a violation never blocks it. The
+        violating <code>Issue</code>s ride the success response instead.</li>
+      <li><b><code>strict</code></b> — a write that would violate the schema refuses before
+        anything lands.</li>
+    </ul>
+    <p class="note warn">
+      <b><code>strict</code> means "from now on," not "from the beginning."</b> Turning a context
+      strict never sweeps the graph — existing associations that would violate the new schema are
+      grandfathered, untouched and unflagged. <code>PUT /contexts/{name}/schema</code> only ever
+      changes what future writes are judged against; use
+      <a href="#audit"><code>POST /contexts/{name}/schema/audit</code></a> to find what already
+      disagrees with a schema you are about to tighten.
+    </p>
+  </section>
+
+  <section id="reserved-type-label">
+    <h2>The reserved <code>schema:type</code> label</h2>
+    <p class="section-sub">A type assertion is an ordinary association under a label the schema layer reserves for itself.</p>
+    <p>
+      There is no separate "type" store. Saying a concept has a type is just an association:
+      <code>{"subject": "青嶺酒造", "label": "schema:type", "object": "Brewery"}</code> — which
+      means it is free through compaction, the WAL, export/import, replication, and every cache
+      lane for nothing extra. A concept can carry a <b>set</b> of types (possibly empty, possibly
+      more than one), and an untyped concept is legal in every mode including <code>strict</code>
+      — <code>strict</code> only judges the relations a write actually asserts, never demands
+      that every concept be typed. Asserting a type name the document never declared is always
+      accepted, as its own singleton <code>is_a</code> closure — a schema never refuses an
+      unrecognized type, only a domain/range mismatch against a <em>declared</em> relation.
+    </p>
+    <p>
+      <code>is_a</code> forms a shallow DAG, declared only in the document (cycles refused at
+      <code>PUT</code>, depth capped at 8), with the ancestor closure precomputed once so a
+      subtype satisfies a relation's parent-type domain/range for free.
+    </p>
+    <p>
+      Three guards keep <code>schema:type</code> from colliding with an ordinary label:
+    </p>
+    <ol>
+      <li>The label is inert with no schema installed — asserting it on a schema-free context is
+        just another fact, judged by nothing.</li>
+      <li>No alias path may ever resolve any spelling to <code>schema:type</code> once a schema
+        exists — <code>add_label_alias</code>, an import batch's own inline <code>labels</code>
+        declaration, and a <code>PUT /contexts/{name}/schema</code>-time check over
+        already-persisted aliases all enforce it. This refusal fires regardless of mode, even <code>off</code>: it is a
+        namespace-ownership rule, not something enforcement toggles.</li>
+      <li><code>PUT /contexts/{name}/schema</code> itself refuses a document whose
+        <code>relations</code> declares an entry named <code>schema:type</code>.</li>
+    </ol>
+    <p>
+      And three exclusions keep it out of surfaces that were never meant to see it: it is never
+      traversed by <code>activate</code>/<code>explore</code>, it never appears in the extraction
+      vocabulary block or <code>list_labels</code>'s default page, and type-name concepts are
+      excluded from <code>audit_vocabulary</code>'s twin sweep once a schema exists. The single
+      gate for all of this is "an installed schema document exists," never "<code>mode !=
+      off</code>."
+    </p>
+    <p>
+      <code>closed_labels: true</code> (default <code>false</code>) additionally refuses a
+      <b>relation</b> label the document never declared — scoped only to ordinary fact
+      associations, never to <code>schema:type</code> itself, and reported as the existing
+      <code>unknown_reference</code> issue kind rather than a new one.
+    </p>
+  </section>
+
+  <section id="write-time">
+    <h2>What happens at write time</h2>
+    <p class="section-sub">Every write entrance shares one judgment function, so they cannot drift apart.</p>
+    <p>
+      <code>POST /contexts/{name}/associations</code>, <code>POST /import</code> /
+      <code>taguru import</code>, and <code>?dry_run=true</code>/preview all run the identical
+      check — the union of live graph state and this write's own operations, judged once. A
+      <code>strict</code> refusal happens before a single byte writes
+      (<code>integrity: "nothing_written"</code> on the response); a <code>warn</code> pass rides
+      the exact same <code>Issue</code> values out through the success envelope's
+      <code>issues</code> array plus a <code>schema_violations</code> count — the values are
+      byte-identical between the two modes, only the HTTP status differs.
+    </p>
+    <p>
+      Two new <code>Issue.kind</code> tokens carry a domain/range mismatch:
+      <code>"domain"</code> when the subject's type disagrees, <code>"range"</code> when the
+      object's does — two tokens rather than one because <code>Issue</code> has a single
+      <code>path</code>, and the caller needs to know which side failed.
+      <code>retryable_after_correction</code> is always <code>true</code>: a schema violation is
+      by definition correctable by changing the write, unlike an internal error.
+    </p>
+    <p class="note">
+      A reserved-label conflict (guard 2 above) and a domain/range violation are reported and
+      dispatched the same way regardless of which one a batch triggers, but they mean different
+      things: the former is a namespace collision (409, like an alias conflict), the latter a
+      refused value (400). Both refuse the whole write before anything lands.
+    </p>
+  </section>
+
+  <section id="http-and-mcp">
+    <h2>HTTP and MCP surface</h2>
+    <p class="section-sub">Four endpoints, four matching MCP tools.</p>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Route</th><th>Role</th><th>What it does</th></tr></thead>
+        <tbody>
+          <tr><td><code>GET /contexts/{name}/schema</code></td><td>Read</td><td>Returns the installed document, or 404 if none.</td></tr>
+          <tr><td><code>PUT /contexts/{name}/schema</code></td><td>Write</td><td>Installs (or replaces) the document — refuses on any of the caps or shape checks above.</td></tr>
+          <tr><td><code>POST /contexts/{name}/schema/validate</code></td><td>Read</td><td>Dry-runs a <b>proposed</b> document against the live graph without installing it — the way to see what tightening a schema would break before committing to it.</td></tr>
+          <tr><td><code>POST /contexts/{name}/schema/audit</code></td><td>Read</td><td>Judges the graph as it stands today against the <b>installed</b> document — reads as <code>strict</code> even when the document's own <code>mode</code> is <code>off</code>, so a draft schema's real-world fit is visible before enforcement is ever turned on.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p id="audit">
+      Both <code>/schema/validate</code> and <code>/schema/audit</code> are diagnostics, not write
+      gates — they report untyped concepts, unknown labels, undeclared types, and domain/range
+      candidates for review, never verdicts that block anything. Neither one counts toward the
+      write-time metrics in <a href="#operating">Operating a schema</a> below: only a check that
+      actually gates a write does.
+    </p>
+    <p>
+      The MCP tools <code>get_schema</code>, <code>put_schema</code>, <code>validate_schema</code>,
+      and <code>audit_schema</code> round-trip onto these same four routes; <code>add_associations</code>
+      and <code>import</code> inherit write-time enforcement for free, since MCP is a pure mapping
+      onto the HTTP surface.
+    </p>
+  </section>
+
+  <section id="reads">
+    <h2>Type-aware reads</h2>
+    <p class="section-sub">Gated by whether a document exists, never by its mode.</p>
+    <p>
+      <code>describe</code> returns every live <code>schema:type</code> object on a concept as
+      <code>types</code>. <code>resolve</code> attaches <code>types</code> to its top candidates
+      the same way it already attaches <code>gloss</code> —
+      <code>resolve_label</code> never does, since a relation label has no type. <code>query</code>
+      (and cross <code>POST /query</code>) gain optional <code>subject_types</code>/
+      <code>object_types</code>: an OR-set of declared type names, expanded through the same
+      <code>is_a</code> ancestor closure a write-time check uses, so a filter can never disagree
+      with what <code>strict</code> itself would treat as a concept's type.
+    </p>
+    <p class="note">
+      A type filter narrows results; it is not itself a valid query anchor — leaving
+      subject/label/object all unset is still refused even with types set. A schema-free target
+      answers empty for a non-empty type filter rather than erroring. Using declared types to
+      <b>score or rank</b> candidates is explicitly out of scope — this is a filter, nothing more.
+    </p>
+  </section>
+
+  <section id="operating">
+    <h2>Operating a schema</h2>
+    <p class="section-sub">Two Prometheus families, and what <code>taguru inspect</code> does and does not say.</p>
+    <pre><code><span class="c"># HELP taguru_schema_checks_total Schema pre-write checks by outcome…</span>
+<span class="c"># TYPE taguru_schema_checks_total counter</span>
+taguru_schema_checks_total{outcome=<span class="s">"ok"</span>} <span class="nu">412</span>
+taguru_schema_checks_total{outcome=<span class="s">"warned"</span>} <span class="nu">7</span>
+taguru_schema_checks_total{outcome=<span class="s">"refused"</span>} <span class="nu">2</span>
+
+<span class="c"># HELP taguru_context_schema_violations_total Schema violations recorded per context since boot…</span>
+<span class="c"># TYPE taguru_context_schema_violations_total counter</span>
+taguru_context_schema_violations_total{context=<span class="s">"sake"</span>} <span class="nu">9</span></code></pre>
+    <p>
+      <code>taguru_schema_checks_total{outcome}</code> is a fixed three-label counter
+      (<code>ok</code> / <code>warned</code> / <code>refused</code>, always rendered even at
+      zero) counted only at the entrances that actually gate a write —
+      <code>POST /contexts/{name}/associations</code> and a real (non-preview)
+      <code>POST /import</code>/<code>taguru import</code> apply — for a context that has an
+      installed schema document. A schema-free context never touches it, so <code>ok</code>
+      means "checked, no violation," not "no schema." <code>?dry_run=true</code>/preview and the
+      <code>/schema/validate</code>/<code>/schema/audit</code> diagnostics are deliberately
+      excluded: counting them too would let a validate-then-apply workflow double-count the same
+      refusal.
+    </p>
+    <p>
+      <code>taguru_context_schema_violations_total{context}</code> is the per-context breakdown,
+      behind the same <code>TAGURU_METRICS_PER_CONTEXT</code> opt-in-and-bounded knob every other
+      <code>taguru_context_*</code> family uses (<code>off</code> / <code>all</code> /
+      <code>N</code> largest by disk size) — client-minted context names never become metric
+      labels uninvited. A context with an installed schema that has never failed a check still
+      renders zero here, the same zeros-included discipline the rest of this file's fixed
+      families follow.
+    </p>
+    <p class="note">
+      <code>taguru inspect</code> only ever raises a notice for the schema <b>file's</b> own
+      health — corrupt bytes, a digest mismatch, a version this build cannot read. It never
+      reports graph-level violations; that is what the two families above, and
+      <a href="#audit"><code>POST /contexts/{name}/schema/audit</code></a>, are for.
+    </p>
+    <p>
+      The schema document rides in <code>context_files</code> like every other per-context file
+      (last in the array, so a lagging or missing schema file never blocks a rename), and travels
+      through export/import as its own <code>taguru_schema</code> stream record — see
+      <a href="import.html#format">Schema records</a> in the batch contract for the record shape,
+      and the CHANGELOG's #379/#384 entries for the downgrade hazard an older binary's shorter
+      <code>context_files</code> array creates.
+    </p>
+  </section>
+
+  <footer class="colophon">
+    <span>MIT License</span>
+    <a href="https://github.com/t0k0sh1/taguru">github.com/t0k0sh1/taguru</a>
+  </footer>
+
+</div>
+</main>
+</div>
+</body>
+</html>

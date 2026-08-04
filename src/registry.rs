@@ -534,6 +534,16 @@ pub struct Entry {
     /// per-context gauges are on or any storage ceiling is declared;
     /// with neither reader, they stay zeros, unread.
     disk: Mutex<ContextDiskUsage>,
+    /// Schema violations this context's writes have hit since this
+    /// entry was created (#388, S10 of #218's ADR 0009 split §15) —
+    /// `AppState::note_schema_check`'s per-context half of
+    /// `taguru_schema_checks_total`, read into `ContextGaugeRow` only
+    /// under `TAGURU_METRICS_PER_CONTEXT`. Deliberately not
+    /// `ContextUsage`: that struct rides the sidecar and `GET
+    /// /contexts`'s wire shape, and this is metrics-only bookkeeping —
+    /// it resets on restart (an honest Prometheus counter reset, not a
+    /// wire-format concern) and is never persisted.
+    schema_violations: AtomicU64,
 }
 
 /// On-disk bytes for the file families a scrape cannot afford to stat
@@ -597,6 +607,7 @@ impl Entry {
             passages_admission: Mutex::new(()),
             passage_revision: AtomicU64::new(revision.passages),
             disk: Mutex::new(ContextDiskUsage::default()),
+            schema_violations: AtomicU64::new(0),
         }
     }
 

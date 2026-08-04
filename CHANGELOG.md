@@ -8,6 +8,44 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- Schema metrics and a documentation reference page (#388, S10 of
+  #218's ADR 0009 split §15) — closing the split: strict/warn's actual
+  effect was previously invisible on `/metrics`, and the feature had no
+  reference page or README mention. A closed `SchemaOutcome
+  {Ok, Warned, Refused}` (`src/metrics.rs`, the same `const ALL`/
+  zeros-always-emitted discipline `RerankOutcomeKind` uses) backs
+  `taguru_schema_checks_total{outcome}`, counted only at the two write
+  entrances a schema actually gates — `POST
+  /contexts/{name}/associations` and a real (non-preview) `POST
+  /import`/`taguru import` apply — for a context with an installed
+  schema document (ADR 0009 §6.3's single condition, never `mode`); a
+  schema-free context never touches it, so `ok` means "checked, no
+  violation," not "no schema." `?dry_run=true`/`preview_batch` and
+  `POST /schema/validate`/`/schema/audit` are diagnostics, not write
+  gates, and are deliberately excluded — otherwise a validate-then-
+  apply workflow would double-count the same refusal;
+  `predicted_schema_rejection` now takes a `CheckPurpose` so its two
+  callers (`apply_batch`, `preview_batch`) cannot disagree about which
+  is which. `SchemaCheck::outcome` (`src/schema/check.rs`) is the one
+  place §7.2 step 7's dispatch is named, so the metric can never
+  describe a check differently than the check itself decided.
+  `taguru_context_schema_violations_total{context}` is the per-context
+  breakdown, riding the existing `PerContextMetrics {Off, All, Top(n)}`
+  opt-in-and-bounded pattern behind `TAGURU_METRICS_PER_CONTEXT` — no
+  new env var — backed by a plain `AtomicU64` on `Entry` (not
+  `ContextUsage`, which rides the sidecar and `GET /contexts`'s wire
+  shape; this is metrics-only and resets on restart). A new
+  `docs/schema.html` reference page (linked into the sidebar of all 22
+  existing pages plus `docs/index.html`'s card list) covers the
+  document shape, the three modes, the reserved `schema:type` label,
+  write-time enforcement, the HTTP/MCP surface, type-aware reads, and
+  these two metric families; `README.md`, `docs/import.html`, and
+  `docs/extract.html` (stale since #386 — `--schema`/
+  `TAGURU_EXTRACT_SCHEMA` were undocumented, and its existing
+  `--structured-output json-schema` text collides in name with the
+  unrelated context schema) gain cross-links and the missing coverage.
+  The file-family/downgrade hazard this feature's file family carries
+  is documented under #379/#384 above, not repeated here.
 - Types on `describe`/`resolve`, and type filters on `query` (#387, S9 of
   #218's ADR 0009 split §12) — the read-side minimum, closing the last
   gap between what a schema document declares and what retrieval can
