@@ -397,9 +397,7 @@ def test_describe_and_resolve_decode_types() -> None:
     # the dataclass default (`ConceptDescription`) or `None`
     # (`TieredResolution`) must still decode without error.
     untyped_client = sync_client(
-        lambda _req: ok_response(
-            {"concept": "青嶺酒造", "as_subject": [], "as_object": []}
-        )
+        lambda _req: ok_response({"concept": "青嶺酒造", "as_subject": [], "as_object": []})
     )
     untyped = untyped_client.context("sake").describe("青嶺酒造")
     assert untyped is not None
