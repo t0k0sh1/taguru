@@ -705,6 +705,15 @@ Entries that change an on-disk format or a response shape say so.
   `events_path`); `isinstance`/attribute access and every field #351/#352
   already published are unaffected.
 
+- The no-poisoning lock policy (Cargo.toml's parking_lot rationale)
+  now covers its last three server-state holdouts: `ship.rs`'s
+  shipped-seq tracking, `replica.rs`'s fence-holder reporting, and
+  `passages.rs`'s whole `PassageStore` move from `std::sync` to
+  `parking_lot`, so a panic mid-critical-section can no longer poison
+  a lock and brick the shipper's progress, the replica's
+  write-refusal text, or a context's passage reads for the rest of
+  the process. No wire or on-disk change.
+
 ### Fixed
 - Documentation drift, in the live protocol manual first: the document
   `GET /protocol` and every MCP `initialize.instructions` actually
@@ -726,6 +735,26 @@ Entries that change an on-disk format or a response shape say so.
   and `KNOWN_KEYS` only. One stale mirror comment
   (`sdk/python-langchain/.../_extract.py`, "PROMPT_VERSION 2" over a
   `PROMPT_VERSION = 3` constant) now matches its TypeScript twin.
+- `TAGURU_EXTRACT_SCHEMA`, documented in `taguru extract --help` and
+  read since it shipped, was missing from `config.rs`'s `KNOWN_KEYS`
+  typo lint, so an `extract --config` file setting it earned a false
+  "is not a variable taguru reads (typo?)" warning while the value was
+  applied anyway. Added — and because the gap survived the existing
+  cli.rs consistency tests (which only see cli.rs's own usage text),
+  the check is now a shared helper
+  (`config::assert_usage_vars_are_known_keys`) run against every
+  command's USAGE — cli, extract, compact, estimate, export, evaluate,
+  ingest — with extract also gaining the reverse test that every
+  `TAGURU_EXTRACT_*` key is documented in its own `--help`.
+- More protocol-manual drift, the same class as the schema rows above:
+  `POST /contexts/{name}/rename` and `POST /groups/{name}/rename`
+  (registered, MCP-exposed, auth-special-cased — but never in the
+  route table), `POST /mcp` itself (the Streamable HTTP transport the
+  manual never named), and `POST /flush` (previously only name-dropped
+  in the admin-role list) are now documented, and a new main.rs test
+  scans the router's registrations — method and path both — against
+  `llm-protocol.md` so a route can no longer ship undocumented, nor a
+  documented method drift from the registered one.
 
 ## [0.6.0] - 2026-08-01
 

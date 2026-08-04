@@ -116,12 +116,15 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
 
 use futures_util::StreamExt;
 use object_store::path::Path as StorePath;
 use object_store::{ObjectStore, ObjectStoreExt, PutMode, PutOptions, PutPayload};
+// parking_lot, not std::sync: a panic while a lock is held must not
+// poison it and brick the shipper's progress tracking for the rest of
+// the process (the same reasoning as the registry — see Cargo.toml).
+use parking_lot::Mutex;
 
 use crate::registry::AppState;
 
@@ -288,7 +291,7 @@ impl ShipProgress {
     /// Records that everything up to `seq` in `log` is durably in the
     /// bucket. Called by the shipper only, after each segment PUT.
     fn note_shipped(&self, log: &FsPath, seq: u64) {
-        self.lanes.lock().unwrap().insert(log.to_path_buf(), seq);
+        self.lanes.lock().insert(log.to_path_buf(), seq);
     }
 
     /// Forgets a lane whose local file vanished (context deleted); a
@@ -296,7 +299,7 @@ impl ShipProgress {
     /// mark or its first flush would defer forever waiting for seqs
     /// the new lane will never reach — the new lane restarts at 1.
     fn forget(&self, log: &FsPath) {
-        self.lanes.lock().unwrap().remove(log);
+        self.lanes.lock().remove(log);
     }
 
     /// Whether the housekeeping reset of `log` — about to discard every
@@ -315,7 +318,7 @@ impl ShipProgress {
         // gap either way, so unknown lanes defer only via the map:
         // absent entry = shipped nothing = defer until the first
         // segment lands or the budget runs out.
-        let lanes = self.lanes.lock().unwrap();
+        let lanes = self.lanes.lock();
         lanes.get(log).copied().unwrap_or(0) >= watermark
     }
 }
@@ -2064,7 +2067,7 @@ mod tests {
             opts: PutOptions,
         ) -> object_store::Result<object_store::PutResult> {
             {
-                let mut remaining = self.fail_puts.lock().unwrap();
+                let mut remaining = self.fail_puts.lock();
                 if *remaining > 0 {
                     *remaining -= 1;
                     return Err(injected("put"));
@@ -2102,7 +2105,7 @@ mod tests {
                     async move {
                         let location = location?;
                         {
-                            let mut remaining = fail_deletes.lock().unwrap();
+                            let mut remaining = fail_deletes.lock();
                             if *remaining > 0 {
                                 *remaining -= 1;
                                 return Err(injected("delete"));
@@ -2428,7 +2431,7 @@ mod tests {
         );
 
         std::fs::remove_file(dir.join("ctx_a.ctx")).unwrap();
-        *fail_deletes.lock().unwrap() = 1;
+        *fail_deletes.lock() = 1;
         let error = shipper.cycle().await.unwrap_err();
         assert!(matches!(error, ShipError::Io(_)), "{error}");
         assert!(
@@ -2482,7 +2485,7 @@ mod tests {
         );
 
         std::fs::remove_file(&wal_path).unwrap();
-        *fail_deletes.lock().unwrap() = 1;
+        *fail_deletes.lock() = 1;
         let error = shipper.cycle().await.unwrap_err();
         assert!(matches!(error, ShipError::Io(_)), "{error}");
         assert!(
@@ -2538,7 +2541,7 @@ mod tests {
         // and, in the same cycle, tries to republish the manifest
         // without it. Fail only that manifest PUT.
         std::fs::remove_file(dir.join("ctx_a.ctx")).unwrap();
-        *fail_puts.lock().unwrap() = 1;
+        *fail_puts.lock() = 1;
         let error = shipper.cycle().await.unwrap_err();
         assert!(matches!(error, ShipError::Io(_)), "{error}");
         assert!(

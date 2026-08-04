@@ -3216,6 +3216,15 @@ pub(crate) fn init_logging() {
 mod tests {
     use super::*;
 
+    #[test]
+    fn every_usage_variable_is_a_known_key() {
+        // This command's own USAGE is invisible to cli.rs's
+        // consistency tests: a variable documented here but missing
+        // from KNOWN_KEYS would make --config warn "typo?" on a
+        // perfectly valid setting.
+        crate::config::assert_usage_vars_are_known_keys(USAGE);
+    }
+
     fn parse(text: &str) -> Result<Batch, String> {
         parse_batch(std::io::Cursor::new(text))
     }

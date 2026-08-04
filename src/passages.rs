@@ -24,8 +24,13 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::Arc;
 
+// parking_lot, not std::sync: a panic while a lock is held must not
+// poison it and brick this context's passage reads and writes for the
+// rest of the process (the same reasoning as the registry — see
+// Cargo.toml).
+use parking_lot::{Mutex, MutexGuard, RwLock};
 use serde::{Deserialize, Serialize};
 
 use crate::paragraph::{self, ParagraphSpan};
@@ -718,7 +723,7 @@ impl PassageStore {
         if count == 0 {
             return Ok(StoreOutcome::default());
         }
-        let writer = self.writer.lock().unwrap();
+        let writer = self.writer.lock();
         // The backstop, checked under `writer` so it is exact: refuse
         // growth only when the log is past the operator ceiling AND
         // past 2× the last snapshot — the second condition keeps a big
@@ -727,7 +732,7 @@ impl PassageStore {
         // failing (each failure already warned). Retractions stay
         // allowed: they are how an operator shrinks the store.
         {
-            let inner = self.inner.read().unwrap();
+            let inner = self.inner.read();
             if self.max_log_bytes > 0
                 && inner.log_bytes >= self.max_log_bytes
                 && inner.log_bytes >= 2 * inner.snapshot_bytes
@@ -755,8 +760,8 @@ impl PassageStore {
     /// an absent source appends nothing (the check is stable: `writer`
     /// is held across check and append).
     pub(crate) fn retract(&self, source: &str) -> io::Result<bool> {
-        let writer = self.writer.lock().unwrap();
-        if !self.inner.read().unwrap().sources.contains_key(source) {
+        let writer = self.writer.lock();
+        if !self.inner.read().sources.contains_key(source) {
             return Ok(false);
         }
         let ops = [PassageOp::Retract {
@@ -768,14 +773,14 @@ impl PassageStore {
 
     fn append_and_apply_locked(
         &self,
-        writer: &std::sync::MutexGuard<'_, ()>,
+        writer: &MutexGuard<'_, ()>,
         ops: &[PassageOp],
     ) -> io::Result<AppliedCounts> {
-        let first_seq = self.inner.read().unwrap().next_seq;
+        let first_seq = self.inner.read().next_seq;
         let appended = wal::append_batch(&self.log_path, first_seq, ops)?;
         let mut counts = AppliedCounts::default();
         let over_ratio = {
-            let mut inner = self.inner.write().unwrap();
+            let mut inner = self.inner.write();
             for op in ops {
                 match op {
                     PassageOp::Store {
@@ -856,22 +861,22 @@ impl PassageStore {
     /// clearing `entry.passages` right after this call means the very
     /// next access reloads from disk and confirms the loss.
     pub(crate) fn compact(&self) -> io::Result<()> {
-        let writer = self.writer.lock().unwrap();
+        let writer = self.writer.lock();
         self.compact_locked(&writer)
     }
 
     /// [`compact`]'s body, for a caller that already holds `writer` —
     /// `append_and_apply_locked` calls this instead of `compact()` so
     /// its own ratio-triggered compaction does not try to re-lock a
-    /// `std::sync::Mutex`, which is not reentrant.
+    /// `parking_lot::Mutex`, which is not reentrant.
     ///
     /// The serialize-and-write happens with no OTHER lock held: the
     /// map is `Arc<str>` handles, so the one consistent read is a
     /// cheap clone, and megabytes of text land on disk while readers
     /// proceed (writers wait behind `writer`, same as any mutator).
-    fn compact_locked(&self, _writer: &std::sync::MutexGuard<'_, ()>) -> io::Result<()> {
+    fn compact_locked(&self, _writer: &MutexGuard<'_, ()>) -> io::Result<()> {
         let (sources, seen_seq) = {
-            let inner = self.inner.read().unwrap();
+            let inner = self.inner.read();
             (inner.sources.clone(), inner.next_seq)
         };
         #[cfg(test)]
@@ -898,7 +903,7 @@ impl PassageStore {
             );
         }
 
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self.inner.write();
         inner.snapshot_bytes = bytes.len() as u64;
         inner.compactions += 1;
         inner.snapshot_bytes_written += bytes.len() as u64;
@@ -923,7 +928,7 @@ impl PassageStore {
     /// eviction uses to decide whether a best-effort compaction would
     /// save the next load a replay.
     pub(crate) fn pending_log_bytes(&self) -> u64 {
-        self.inner.read().unwrap().log_bytes
+        self.inner.read().log_bytes
     }
 
     /// The last log sequence this store handed out (0 = nothing ever
@@ -931,18 +936,18 @@ impl PassageStore {
     /// construction: appends are log-first and compaction bakes it
     /// into the snapshot, so a reload always resumes the numbering.
     pub(crate) fn watermark(&self) -> u64 {
-        self.inner.read().unwrap().next_seq - 1
+        self.inner.read().next_seq - 1
     }
 
     pub(crate) fn get(&self, source: &str) -> Option<Arc<PassageRecord>> {
-        self.inner.read().unwrap().sources.get(source).cloned()
+        self.inner.read().sources.get(source).cloned()
     }
 
     /// The registered source ids, ASCENDING — `sources` is a
     /// `BTreeMap`, so its keys come out sorted; callers paging by id
     /// (`list_sources`) rely on this rather than re-sorting per page.
     pub(crate) fn source_ids(&self) -> Vec<String> {
-        self.inner.read().unwrap().sources.keys().cloned().collect()
+        self.inner.read().sources.keys().cloned().collect()
     }
 
     /// [`Self::source_ids`] with each source's metadata beside it, same
@@ -952,7 +957,6 @@ impl PassageStore {
     pub(crate) fn source_entries(&self) -> Vec<(String, SourceMeta)> {
         self.inner
             .read()
-            .unwrap()
             .sources
             .iter()
             .map(|(source, record)| (source.clone(), record.meta.clone()))
@@ -968,7 +972,7 @@ impl PassageStore {
         &self,
         filter: &SourceFilter,
     ) -> (std::collections::BTreeSet<String>, usize) {
-        let inner = self.inner.read().unwrap();
+        let inner = self.inner.read();
         let eligible = inner
             .sources
             .iter()
@@ -984,7 +988,6 @@ impl PassageStore {
     pub(crate) fn snapshot(&self) -> Vec<(String, Arc<PassageRecord>)> {
         self.inner
             .read()
-            .unwrap()
             .sources
             .iter()
             .map(|(source, record)| (source.clone(), Arc::clone(record)))
@@ -993,7 +996,7 @@ impl PassageStore {
 
     /// Rough resident bytes, for the cache budget and the gauges.
     pub(crate) fn footprint(&self) -> usize {
-        self.inner.read().unwrap().resident_bytes
+        self.inner.read().resident_bytes
     }
 
     /// (compactions run, snapshot bytes they wrote) over this store's
@@ -1001,7 +1004,7 @@ impl PassageStore {
     /// Test-only until a metrics counter picks it up.
     #[cfg(test)]
     pub(crate) fn compaction_totals(&self) -> (u64, u64) {
-        let inner = self.inner.read().unwrap();
+        let inner = self.inner.read();
         (inner.compactions, inner.snapshot_bytes_written)
     }
 }

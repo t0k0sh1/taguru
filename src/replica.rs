@@ -52,12 +52,17 @@
 //! replica's lag metrics before flipping.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use object_store::ObjectStore;
 use object_store::path::Path as StorePath;
+// parking_lot, not std::sync: a panic while the lock is held must not
+// poison it and brick the write-refusal's fence-holder reporting for
+// the rest of the process (the same reasoning as the registry — see
+// Cargo.toml).
+use parking_lot::Mutex;
 
 use crate::hydrate::{self, Hydrator};
 use crate::registry::AppState;
@@ -83,7 +88,7 @@ impl ReplicaInfo {
     }
 
     fn note_fence(&self, generation: u64, holder: Option<String>) {
-        *self.fence.lock().unwrap() = Some((generation, holder));
+        *self.fence.lock() = Some((generation, holder));
     }
 
     /// The refusal body every mutating verb answers with. Names the
@@ -98,7 +103,7 @@ impl ReplicaInfo {
         if let Some(url) = &self.writer_url {
             message.push_str(&format!(" at {url}"));
         }
-        match &*self.fence.lock().unwrap() {
+        match &*self.fence.lock() {
             Some((generation, Some(holder))) => {
                 message.push_str(&format!(
                     " (replication generation {generation}, claimed by {holder})"

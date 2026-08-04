@@ -3,6 +3,14 @@ use axum::http::Method;
 use super::*;
 use crate::api::evidence::select::REASON_BUDGET_EXCEEDED;
 
+#[test]
+fn every_usage_variable_is_a_known_key() {
+    // This command's own USAGE is invisible to cli.rs's consistency
+    // tests: a variable documented here but missing from KNOWN_KEYS
+    // would make --config warn "typo?" on a perfectly valid setting.
+    crate::config::assert_usage_vars_are_known_keys(USAGE);
+}
+
 // ============================ Argument parsing ============================
 
 fn args(words: &[&str]) -> Result<EvaluateArgs, i32> {
