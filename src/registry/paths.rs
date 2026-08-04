@@ -6,7 +6,55 @@ use serde::{Deserialize, Serialize};
 
 use crate::storage::write_atomic;
 
-use super::{file_stem, fnv64};
+/// Encodes a context name as a file stem: bytes outside [A-Za-z0-9_-]
+/// become %XX. Context names arrive from URL paths and may contain path
+/// separators or dots; encoding them keeps every name inside the data
+/// directory (no traversal) and reversible.
+pub(crate) fn file_stem(name: &str) -> String {
+    let mut stem = String::new();
+    for byte in name.bytes() {
+        match byte {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' => stem.push(byte as char),
+            _ => stem.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    stem
+}
+
+/// Decodes [`file_stem`]'s encoding back into a context name.
+pub(crate) fn name_from_stem(stem: &str) -> Option<String> {
+    let mut bytes = Vec::with_capacity(stem.len());
+    let mut cursor = stem.bytes();
+    while let Some(byte) = cursor.next() {
+        if byte == b'%' {
+            let high = cursor.next()?;
+            let low = cursor.next()?;
+            let hex = [high, low];
+            let hex = std::str::from_utf8(&hex).ok()?;
+            bytes.push(u8::from_str_radix(hex, 16).ok()?);
+        } else {
+            bytes.push(byte);
+        }
+    }
+    String::from_utf8(bytes).ok()
+}
+
+/// FNV-1a over raw bytes — the same primitive the search terms build
+/// on, kept here for the one non-search need (import marker file
+/// names, below).
+fn fnv64(bytes: &[u8]) -> u64 {
+    let mut hash = FNV_OFFSET;
+    for &byte in bytes {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
+
+// `pub(super)` for terms.rs, which runs the same FNV-1a inline over
+// its word stream rather than calling `fnv64` on a slice.
+pub(super) const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+pub(super) const FNV_PRIME: u64 = 0x1_0000_01b3;
 
 pub(crate) fn image_path(dir: &Path, stem: &str) -> PathBuf {
     dir.join(format!("{stem}.ctx"))

@@ -76,6 +76,7 @@ mod engine;
 mod gauges;
 mod group_ops;
 mod lifecycle;
+mod meta_io;
 mod passages;
 mod paths;
 mod replication;
@@ -85,20 +86,26 @@ mod semantic_cache;
 mod terms;
 #[cfg(test)]
 mod test_support;
+mod wal_replay;
 
 pub use passages::PassagesWriteError;
 
 pub(crate) use concurrency::{Semaphore, dispatch_chunks_concurrently, parallel_map};
+use meta_io::{MetaFile, move_context_files, read_meta_file, save_files, write_meta};
+pub(crate) use meta_io::{context_files, schema_digest_of};
+use paths::{FNV_OFFSET, FNV_PRIME, rename_markers_targeting, write_rename_marker};
 pub(crate) use paths::{
     IMPORT_MARKER_EXTENSION, ImportMarker, ResumedRenames, bm25_path, deleted_marker_path,
-    image_path, import_marker_path, import_marker_paths, meta_path, passages_path,
-    passages_wal_path, pvectors_path, renaming_marker_path, resume_rename_markers,
+    file_stem, image_path, import_marker_path, import_marker_paths, meta_path, name_from_stem,
+    passages_path, passages_wal_path, pvectors_path, renaming_marker_path, resume_rename_markers,
     schema_corrupt_path, schema_path, sources_path, vectors_path, wal_path,
 };
-use paths::{rename_markers_targeting, write_rename_marker};
 pub(crate) use retrieval_cache::{CachedRetrieval, RetrievalKey};
 pub(crate) use semantic_cache::SemanticFill;
 pub(crate) use terms::{passage_terms, spelled_passage_terms};
+use wal_replay::{applied_count, apply_in_order, replay_ops_guarded};
+#[cfg(test)]
+use wal_replay::{apply_op, replay_op};
 
 /// Server-side metadata for one context: the prose half of the routing
 /// directory plus the cache policy flag. `PartialEq` backs
@@ -329,38 +336,6 @@ fn unix_now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|since| since.as_secs())
         .unwrap_or(0)
-}
-
-/// What `{name}.meta.json` holds: the meta inline plus the stats
-/// snapshot as of the last save, so a directory listing can describe a
-/// cold context without touching its image. `usage` rides along under
-/// `#[serde(default)]`, so sidecars from before it existed load with
-/// zeroed counters.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
-struct MetaFile {
-    #[serde(flatten)]
-    meta: ContextMeta,
-    stats: ContextStats,
-    usage: ContextUsage,
-    /// The revision counters as of this save — what a cold entry (and
-    /// a replica's tailed refresh) seeds from. Defaulted for sidecars
-    /// from before the field existed: those report zeros until their
-    /// first load or flush catches them up.
-    revision: ContextRevision,
-    /// `sha256_hex` of `{stem}.schema.json`'s bytes as of this save,
-    /// `None` for a schema-free context — ADR 0009 §5.2's boot-time
-    /// consistency check. Written in the SAME `write_meta` call that
-    /// bumps `config_revision` (never separately), so a crash between
-    /// this field landing and the schema file's own `write_atomic`
-    /// leaves a detectable disagreement rather than a silently stale
-    /// enforcement: [`crate::schema::load_schema`] refuses to load
-    /// whenever the file on disk and this recorded value disagree, in
-    /// either direction. Defaulted for sidecars from before the field
-    /// existed, exactly like `revision` above — a pre-#379 context has
-    /// no schema file either, so `None` is also the correct fact, not
-    /// just a safe default.
-    schema_digest: Option<String>,
 }
 
 /// One row of `GET /contexts` — the routing directory an LLM client
@@ -2721,322 +2696,6 @@ fn ensure_hot(
         .map(|meta| meta.len())
         .unwrap_or(0);
     Ok(())
-}
-
-/// Applies ops front to back, stopping at the first rejection — the
-/// batch endpoints' historic partial semantics: everything before the
-/// failing item stays applied.
-fn apply_in_order(context: &mut Context, ops: &[WalOp]) -> Result<usize, PartialWrite> {
-    let mut applied = 0usize;
-    for op in ops {
-        if let Err((message, full)) = apply_op(context, op) {
-            return Err(PartialWrite {
-                applied,
-                message,
-                full,
-            });
-        }
-        applied += 1;
-    }
-    Ok(applied)
-}
-
-/// How many ops an `apply_in_order` result actually landed — the full
-/// count on success, the prefix on a partial write. Feeds
-/// `logged_write`'s WAL trim: it never inspects `T` itself, only how
-/// far the batch got.
-fn applied_count(result: &Result<usize, PartialWrite>) -> usize {
-    match result {
-        Ok(applied) => *applied,
-        Err(partial) => partial.applied,
-    }
-}
-
-/// Re-applies one replayed op. A deterministic library rejection here
-/// is the same rejection the original write already reported to its
-/// client — replay reruns the op on the exact state the original saw
-/// — so it is logged, never fatal.
-fn replay_op(context: &mut Context, op: &WalOp) {
-    if let Err((message, _)) = apply_op(context, op) {
-        tracing::warn!("WAL replay skipped an op (same rejection as the original): {message}");
-    }
-}
-
-/// Runs the whole replay loop behind `catch_unwind`, turning a panic
-/// (an actual bug tripped by some op's content, not a library
-/// rejection — `replay_op` already turns those into a log line) into
-/// the same `Err` shape a corrupt image or unreadable WAL produces.
-/// Without this, a poisoned op would panic `ensure_hot` itself on
-/// every subsequent access — this context can never come back Hot, so
-/// every caller touching it crash-loops forever instead of hitting
-/// the existing quarantine-and-retry path ([`LOAD_FAILURE_RETRY`]).
-fn replay_ops_guarded(context: &mut Context, ops: &[WalOp]) -> Result<(), String> {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        for op in ops {
-            replay_op(context, op);
-        }
-    }))
-    .map_err(|_| "an op panicked reapplying against a fresh load".to_string())
-}
-
-/// Applies one op to the graph; `Err` carries the human message each
-/// op family has always reported through the API, plus whether it was
-/// a capacity error.
-fn apply_op(context: &mut Context, op: &WalOp) -> Result<(), (String, bool)> {
-    match op {
-        WalOp::Associate(op) => {
-            let result = match &op.source {
-                Some(source) => context.associate_from(
-                    op.subject.as_str(),
-                    op.label.as_str(),
-                    op.object.as_str(),
-                    op.weight,
-                    source.as_str(),
-                    op.paragraph,
-                ),
-                None => context.associate(
-                    op.subject.as_str(),
-                    op.label.as_str(),
-                    op.object.as_str(),
-                    op.weight,
-                ),
-            };
-            result.map_err(|full| (full.to_string(), true))
-        }
-        WalOp::AliasConcept { alias, canonical } => context
-            .add_concept_alias(alias.as_str(), canonical)
-            .map_err(|error| {
-                (
-                    format!("concept alias '{alias}' → '{canonical}': {error}"),
-                    matches!(error, AliasError::Full(_)),
-                )
-            }),
-        WalOp::AliasLabel { alias, canonical } => context
-            .add_label_alias(alias.as_str(), canonical)
-            .map_err(|error| {
-                (
-                    format!("label alias '{alias}' → '{canonical}': {error}"),
-                    matches!(error, AliasError::Full(_)),
-                )
-            }),
-        // A withdrawal of an absent spelling is a client mistake on
-        // the live path (409, like every conflict), and on replay the
-        // usual logged skip. Never a capacity error: removal frees.
-        WalOp::UnaliasConcept { alias } => match context.remove_concept_alias(alias) {
-            Some(_) => Ok(()),
-            None => Err((
-                format!(
-                    "'{alias}' is not a concept alias (canonical names cannot be \
-                     removed this way)"
-                ),
-                false,
-            )),
-        },
-        WalOp::UnaliasLabel { alias } => match context.remove_label_alias(alias) {
-            Some(_) => Ok(()),
-            None => Err((
-                format!(
-                    "'{alias}' is not a label alias (canonical names cannot be \
-                     removed this way)"
-                ),
-                false,
-            )),
-        },
-        WalOp::RetractSource { source } => {
-            context.retract_source(source);
-            Ok(())
-        }
-        WalOp::RetractAssociation {
-            subject,
-            label,
-            object,
-        } => {
-            // A triple that names no live edge is a no-op on replay,
-            // exactly like an unknown source above.
-            context.retract_association(subject, label, object);
-            Ok(())
-        }
-    }
-}
-
-/// FNV-1a over raw bytes — the same primitive the search terms build
-/// on, exposed for the one non-search need (import marker file names).
-fn fnv64(bytes: &[u8]) -> u64 {
-    let mut hash = FNV_OFFSET;
-    for &byte in bytes {
-        hash ^= byte as u64;
-        hash = hash.wrapping_mul(FNV_PRIME);
-    }
-    hash
-}
-
-const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-const FNV_PRIME: u64 = 0x1_0000_01b3;
-
-#[allow(clippy::too_many_arguments)] // every whole-family save call site, not an API
-fn save_files(
-    dir: &Path,
-    name: &str,
-    meta: &ContextMeta,
-    stats: &ContextStats,
-    usage: &ContextUsage,
-    revision: ContextRevision,
-    schema_digest: Option<&str>,
-    context: &Context,
-) -> io::Result<()> {
-    let stem = file_stem(name);
-    // The image is what `scan_data_dir` keys a context's existence on, so
-    // it lands LAST: each `write_atomic` fully commits (fsync + rename +
-    // parent-dir fsync) before returning, so by the time the `.ctx` is
-    // durably in the directory its `.meta.json` companion already is too.
-    // A crash between the two therefore leaves at worst an orphan sidecar
-    // with no image — invisible to the scan and overwritten by the next
-    // same-name create — never a durable image with a defaulted sidecar,
-    // which would resurrect a context `create` told the client had failed.
-    // (Image-then-meta would do exactly that; see `create`'s doc.)
-    write_meta(dir, &stem, meta, stats, usage, revision, schema_digest)?;
-    write_atomic(&image_path(dir, &stem), &context.to_bytes())
-}
-
-fn write_meta(
-    dir: &Path,
-    stem: &str,
-    meta: &ContextMeta,
-    stats: &ContextStats,
-    usage: &ContextUsage,
-    revision: ContextRevision,
-    schema_digest: Option<&str>,
-) -> io::Result<()> {
-    let file = MetaFile {
-        meta: meta.clone(),
-        stats: stats.clone(),
-        usage: usage.clone(),
-        revision,
-        schema_digest: schema_digest.map(str::to_string),
-    };
-    write_atomic(&meta_path(dir, stem), &serde_json::to_vec_pretty(&file)?)
-}
-
-/// Reads the sidecar, falling back to defaults on any problem — a
-/// missing or corrupt sidecar must not make the image unreachable.
-fn read_meta_file(dir: &Path, stem: &str) -> MetaFile {
-    match fs::read(meta_path(dir, stem)) {
-        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|error| {
-            tracing::warn!("ignoring corrupt sidecar for '{stem}': {error}");
-            MetaFile::default()
-        }),
-        Err(_) => MetaFile::default(),
-    }
-}
-
-/// The recorded schema digest alone, for a caller (`taguru inspect`)
-/// that has no use for the rest of the sidecar and must not import
-/// `MetaFile` (private to this module). Same lenient fallback as
-/// [`read_meta_file`]: an unreadable or corrupt sidecar reports `None`
-/// here exactly as it would seed a fresh [`MetaFile::default`] at boot,
-/// so inspect's schema check judges a context by the same recorded
-/// value boot itself would.
-pub(crate) fn schema_digest_of(dir: &Path, stem: &str) -> Option<String> {
-    read_meta_file(dir, stem).schema_digest
-}
-
-/// One context's whole file family, by stem — the delete loop and the
-/// boot-time deletion sweep must never disagree about what "the whole
-/// family" means, so both read this one list. Built from the same ten
-/// path builders every other caller uses, so a file kind added there
-/// cannot silently miss this list.
-pub(crate) fn context_files(stem: &str) -> [String; 10] {
-    let unrooted = Path::new("");
-    [
-        image_path(unrooted, stem),
-        meta_path(unrooted, stem),
-        sources_path(unrooted, stem),
-        passages_path(unrooted, stem),
-        passages_wal_path(unrooted, stem),
-        pvectors_path(unrooted, stem),
-        bm25_path(unrooted, stem),
-        vectors_path(unrooted, stem),
-        wal_path(unrooted, stem),
-        // Last on purpose: a missing or lagging schema file must never
-        // block the pivot rename below, so it sits where a straggler is
-        // already tolerated as best-effort (ADR 0009 §5.1).
-        schema_path(unrooted, stem),
-    ]
-    .map(|path| path.to_string_lossy().into_owned())
-}
-
-/// Moves one context's whole file family from `from_stem` to
-/// `to_stem`, file by file, in the fixed order [`context_files`]
-/// defines — a missing source is skipped (an earlier, interrupted
-/// attempt already moved it; safe to retry at boot or from a fresh
-/// call). `.ctx` is index 0 and the pivot the boot scan registers a
-/// context by: if IT will not move, nothing else does either (the
-/// family stays wholly under `from_stem`, cleanly retried), and the
-/// call fails before touching a sidecar. Once the pivot has moved, a
-/// sidecar that still sticks is best-effort — the rest are moved anyway
-/// so the retry has fewer orphans to chase — but the first such error
-/// is returned so the caller knows the move is incomplete and keeps the
-/// rename marker. All ten share `data_dir` as their parent, so one
-/// fsync after every rename covers the whole family durably instead of
-/// paying for it (via `commit_staged`) up to ten times.
-fn move_context_files(data_dir: &Path, from_stem: &str, to_stem: &str) -> io::Result<()> {
-    let mut moved_any = false;
-    let mut first_error: Option<io::Error> = None;
-    for (position, (from_file, to_file)) in context_files(from_stem)
-        .into_iter()
-        .zip(context_files(to_stem))
-        .enumerate()
-    {
-        match fs::rename(data_dir.join(from_file), data_dir.join(to_file)) {
-            Ok(()) => moved_any = true,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            // The pivot: fail outright so nothing else moves.
-            Err(error) if position == 0 => return Err(error),
-            // A post-pivot straggler: keep going, remember the first.
-            Err(error) => {
-                if first_error.is_none() {
-                    first_error = Some(error);
-                }
-            }
-        }
-    }
-    if moved_any {
-        fsync_dir(data_dir)?;
-    }
-    first_error.map_or(Ok(()), Err)
-}
-
-/// Encodes a context name as a file stem: bytes outside [A-Za-z0-9_-]
-/// become %XX. Context names arrive from URL paths and may contain path
-/// separators or dots; encoding them keeps every name inside the data
-/// directory (no traversal) and reversible.
-pub(crate) fn file_stem(name: &str) -> String {
-    let mut stem = String::new();
-    for byte in name.bytes() {
-        match byte {
-            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' => stem.push(byte as char),
-            _ => stem.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    stem
-}
-
-/// Decodes [`file_stem`]'s encoding back into a context name.
-pub(crate) fn name_from_stem(stem: &str) -> Option<String> {
-    let mut bytes = Vec::with_capacity(stem.len());
-    let mut cursor = stem.bytes();
-    while let Some(byte) = cursor.next() {
-        if byte == b'%' {
-            let high = cursor.next()?;
-            let low = cursor.next()?;
-            let hex = [high, low];
-            let hex = std::str::from_utf8(&hex).ok()?;
-            bytes.push(u8::from_str_radix(hex, 16).ok()?);
-        } else {
-            bytes.push(byte);
-        }
-    }
-    String::from_utf8(bytes).ok()
 }
 
 #[cfg(test)]
