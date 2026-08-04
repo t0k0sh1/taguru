@@ -212,6 +212,20 @@ impl Keyring {
                 if keys.iter().any(|(existing, _)| existing.as_ref() == name) {
                     return Err(format!("key name '{name}' is configured twice"));
                 }
+                // A duplicated token VALUE is refused too: `authenticate`
+                // scans every key and keeps the last match, so two names
+                // sharing one token would silently resolve to whichever
+                // was listed last — its scope, its audit name — and
+                // rotating the other name would revoke nothing. The
+                // `default` key from TAGURU_API_TOKEN sits in `keys`
+                // already, so a collision across the two variables is
+                // caught by the same scan. Plain `==` is fine: this is
+                // boot-time config validation, not a guess from a caller.
+                if let Some((existing, _)) = keys.iter().find(|(_, existing)| existing == token) {
+                    return Err(format!(
+                        "key name '{name}' reuses the token of key name '{existing}'"
+                    ));
+                }
                 keys.push((Arc::from(name), token.to_string()));
             }
             if keys.is_empty() {
@@ -1023,6 +1037,14 @@ mod tests {
                 Some("sekrit-x".to_string()),
                 Some("default:sekrit-y".to_string()),
             ),
+            (
+                None,
+                Some("ci:sekrit-shared,laptop:sekrit-shared".to_string()),
+            ),
+            (
+                Some("sekrit-shared".to_string()),
+                Some("ci:sekrit-shared".to_string()),
+            ),
         ];
         for (single, named) in cases {
             let error = Keyring::parse(single.clone(), named.clone())
@@ -1047,6 +1069,37 @@ mod tests {
             .err()
             .expect("an '@' key name must be refused");
         assert!(error.contains('@') && !error.contains("sekrit"), "{error}");
+    }
+
+    /// Two names sharing one token value would make `authenticate`'s
+    /// last-match-wins scan resolve the token to whichever name was
+    /// listed last — its scope, its audit-log name — while rotating
+    /// the first name revoked nothing. Refused at boot, and the error
+    /// names both keys without echoing the token itself.
+    #[test]
+    fn a_reused_token_value_is_refused_naming_both_keys() {
+        let error = Keyring::parse(
+            None,
+            Some("ci:sekrit-shared,laptop:sekrit-shared".to_string()),
+        )
+        .err()
+        .expect("a reused token value must be refused");
+        assert!(
+            error.contains("'laptop'") && error.contains("'ci'") && !error.contains("sekrit"),
+            "{error}"
+        );
+        // The single-token variable arms the `default` key, so a value
+        // collision across the two variables is the same refusal.
+        let error = Keyring::parse(
+            Some("sekrit-shared".to_string()),
+            Some("ci:sekrit-shared".to_string()),
+        )
+        .err()
+        .expect("a value collision across both variables must be refused");
+        assert!(
+            error.contains("'ci'") && error.contains("'default'") && !error.contains("sekrit"),
+            "{error}"
+        );
     }
 
     /// The colon separator may carry operator formatting whitespace on
