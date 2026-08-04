@@ -486,8 +486,7 @@ fn extraction_turns_documents_into_batches_import_applies_and_the_server_serves(
 
     // Import applies what extract wrote; the server serves the facts,
     // the alias entry, the negative weight, and the original passage.
-    let data_dir = std::env::temp_dir().join(format!("taguru-http-extract-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&data_dir);
+    let data_dir = common::scratch_dir("http-extract");
     let (code, stdout, stderr) = run_import(&data_dir, &[out.to_str().unwrap()]);
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     let server = Server::start_on("extract-serve", data_dir);

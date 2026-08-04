@@ -51,6 +51,18 @@ pub fn scrub_taguru_env(command: &mut Command) -> &mut Command {
     command
 }
 
+/// A fresh scratch directory under the OS temp dir, named
+/// `taguru-<prefix>-<pid>`: any previous run's leftovers under this
+/// exact name are removed first. Does not create the directory —
+/// callers that need it to exist call `std::fs::create_dir_all`
+/// themselves (some want the bare directory, some a subdirectory,
+/// some let the spawned server create it on first write).
+pub fn scratch_dir(prefix: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("taguru-{prefix}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    dir
+}
+
 /// Reads `stdout` until a `"listening on <addr>"` line appears,
 /// returning the address plus the still-open line iterator so the
 /// caller can decide whether to keep draining it. `label` names the

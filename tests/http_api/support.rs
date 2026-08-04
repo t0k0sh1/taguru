@@ -36,9 +36,7 @@ impl Server {
     }
 
     pub fn start_with_env(tag: &str, extra_env: &[(&str, &str)]) -> Self {
-        let data_dir =
-            std::env::temp_dir().join(format!("taguru-http-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&data_dir);
+        let data_dir = common::scratch_dir(&format!("http-{tag}"));
         Self::spawn(tag, data_dir, extra_env)
     }
 
@@ -63,9 +61,7 @@ impl Server {
         stderr_to: &std::path::Path,
         extra_env: &[(&str, &str)],
     ) -> Self {
-        let data_dir =
-            std::env::temp_dir().join(format!("taguru-http-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&data_dir);
+        let data_dir = common::scratch_dir(&format!("http-{tag}"));
         let mut command = Command::new(env!("CARGO_BIN_EXE_taguru"));
         command.arg("--config").arg(config);
         common::scrub_taguru_env(&mut command)
@@ -120,8 +116,7 @@ impl Server {
         extra_env: &[(&str, &str)],
         subcommand: &str,
     ) -> Self {
-        let dir = std::env::temp_dir().join(format!("taguru-router-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = common::scratch_dir(&format!("router-{tag}"));
         std::fs::create_dir_all(&dir).expect("router scratch dir must be creatable");
         let map_path = dir.join("route-map");
         std::fs::write(&map_path, map_contents).expect("route map must be writable");
@@ -331,20 +326,11 @@ impl Drop for Server {
 /// Runs `taguru import` against `data_dir`, hermetic the same way the
 /// server spawns are: nothing from the developer shell reaches it.
 pub fn run_import(data_dir: &std::path::Path, args: &[&str]) -> (i32, String, String) {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_taguru"));
-    common::scrub_taguru_env(&mut command)
-        .arg("import")
-        .env("TAGURU_DATA_DIR", data_dir)
-        // import-only vars scrub_taguru_env doesn't know about.
-        .env_remove("TAGURU_WAL")
-        .env_remove("TAGURU_WAL_MAX_BYTES")
-        .env_remove("TAGURU_CACHE_BYTES")
-        .args(args);
-    let output = command.output().expect("import must run");
-    (
-        output.status.code().unwrap_or(-1),
-        String::from_utf8_lossy(&output.stdout).into_owned(),
-        String::from_utf8_lossy(&output.stderr).into_owned(),
+    let mut full_args = vec!["import"];
+    full_args.extend_from_slice(args);
+    run_cli(
+        &full_args,
+        &[("TAGURU_DATA_DIR", &data_dir.to_string_lossy())],
     )
 }
 
@@ -356,8 +342,7 @@ pub fn run_import(data_dir: &std::path::Path, args: &[&str]) -> (i32, String, St
 pub fn run_cli(args: &[&str], extra_env: &[(&str, &str)]) -> (i32, String, String) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_taguru"));
     common::scrub_taguru_env(&mut command)
-        // import-only vars scrub_taguru_env doesn't know about — see
-        // run_import's own copy of this list.
+        // import-only vars scrub_taguru_env doesn't know about.
         .env_remove("TAGURU_WAL")
         .env_remove("TAGURU_WAL_MAX_BYTES")
         .env_remove("TAGURU_CACHE_BYTES")
@@ -421,6 +406,30 @@ fn read_http_request(
     Some((headers, body))
 }
 
+/// Spawns a thread accepting connections on `listener`: each
+/// successfully-parsed request goes through `respond`, whose returned
+/// bytes are written back verbatim. The one accept loop behind
+/// [`FakeCollector`] and [`FakeShard`] — the fakes differ only in what
+/// they record and what they answer.
+fn spawn_fake_server(
+    listener: std::net::TcpListener,
+    mut respond: impl FnMut(std::collections::HashMap<String, String>, Vec<u8>) -> Vec<u8>
+    + Send
+    + 'static,
+) {
+    use std::io::Write;
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let Some((headers, body)) = read_http_request(&mut stream) else {
+                continue;
+            };
+            let response = respond(headers, body);
+            let _ = stream.write_all(&response);
+        }
+    });
+}
+
 /// A single-purpose OTLP/HTTP sink: accepts POSTs, stores every body,
 /// answers 200. Runs until the test process exits. Shared by every
 /// tracing test that needs a real OTLP wire target — `FakeCollector`
@@ -435,25 +444,17 @@ pub struct FakeCollector {
 
 impl FakeCollector {
     pub fn start() -> Self {
-        use std::io::Write;
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("collector must bind");
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = bodies.clone();
-        std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(mut stream) = stream else { continue };
-                let Some((_headers, body)) = read_http_request(&mut stream) else {
-                    continue;
-                };
-                sink.lock()
-                    .unwrap()
-                    .push(String::from_utf8_lossy(&body).to_string());
-                let _ = stream.write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
-                      Content-Length: 2\r\nConnection: close\r\n\r\n{}",
-                );
-            }
+        spawn_fake_server(listener, move |_headers, body| {
+            sink.lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(&body).to_string());
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+              Content-Length: 2\r\nConnection: close\r\n\r\n{}"
+                .to_vec()
         });
         Self { endpoint, bodies }
     }
@@ -591,27 +592,20 @@ impl FakeShard {
     /// shard that answers with an HTTP error status (a router-side
     /// `"http_error"` shard outcome, not a transport failure).
     pub fn start_with_status(status: u16, body: Value) -> Self {
-        use std::io::Write;
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("shard must bind");
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = requests.clone();
         let body_text = body.to_string();
-        std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(mut stream) = stream else { continue };
-                let Some((headers, _body)) = read_http_request(&mut stream) else {
-                    continue;
-                };
-                sink.lock().unwrap().push(headers);
-                let response = format!(
-                    "HTTP/1.1 {status} Status\r\nContent-Type: application/json\r\n\
-                     Content-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body_text.len(),
-                    body_text
-                );
-                let _ = stream.write_all(response.as_bytes());
-            }
+        spawn_fake_server(listener, move |headers, _body| {
+            sink.lock().unwrap().push(headers);
+            format!(
+                "HTTP/1.1 {status} Status\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body_text.len(),
+                body_text
+            )
+            .into_bytes()
         });
         Self { endpoint, requests }
     }
@@ -624,8 +618,7 @@ impl FakeShard {
 
 /// A scratch directory for batch files, separate from any data dir.
 pub fn batch_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("taguru-batches-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = common::scratch_dir(&format!("batches-{tag}"));
     std::fs::create_dir_all(&dir).expect("batch dir must be creatable");
     dir
 }

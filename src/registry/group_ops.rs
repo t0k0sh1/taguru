@@ -88,14 +88,16 @@ impl AppState {
         // first and unwind on refusal — nothing escapes the write lock
         // half-done.
         groups.insert(name.to_string(), record);
-        if let Err(violation) = groups::validate_nesting(&groups) {
-            groups.remove(name);
-            return Err(CreateGroupError::Nesting(violation));
-        }
-        if let Err(error) = groups::write_group(&self.0.data_dir, &file_stem(name), &groups[name]) {
-            groups.remove(name);
-            return Err(CreateGroupError::Io(error));
-        }
+        commit_group_mutation(
+            &self.0.data_dir,
+            &mut groups,
+            name,
+            |groups| {
+                groups.remove(name);
+            },
+            CreateGroupError::Nesting,
+            CreateGroupError::Io,
+        )?;
         Ok(())
     }
 
@@ -174,14 +176,16 @@ impl AppState {
         if let Some(description) = description {
             record.description = description;
         }
-        if let Err(violation) = groups::validate_nesting(&groups) {
-            *groups.get_mut(name).unwrap() = previous;
-            return Err(UpdateGroupError::Nesting(violation));
-        }
-        if let Err(error) = groups::write_group(&self.0.data_dir, &file_stem(name), &groups[name]) {
-            *groups.get_mut(name).unwrap() = previous;
-            return Err(UpdateGroupError::Io(error));
-        }
+        commit_group_mutation(
+            &self.0.data_dir,
+            &mut groups,
+            name,
+            |groups| {
+                *groups.get_mut(name).unwrap() = previous;
+            },
+            UpdateGroupError::Nesting,
+            UpdateGroupError::Io,
+        )?;
         Ok(groups[name].clone())
     }
 
@@ -566,6 +570,34 @@ fn check_member_caps(
         if set.len() > groups::MAX_GROUP_MEMBERS {
             return Err(field);
         }
+    }
+    Ok(())
+}
+
+/// The shared validate→persist→rollback tail of [`AppState::create_group`]
+/// and [`AppState::update_group`]: validates the nesting the
+/// already-mutated `groups` map implies, then persists `name`'s record —
+/// unwinding the mutation through `rollback` on either refusal, so
+/// nothing escapes the caller's write lock half-done. The two callers
+/// differ only in what "previous" means (create removes the fresh
+/// entry, update restores the cloned record) and in their error enums.
+/// `restore_groups` does not share this shape: it validates its whole
+/// prospective SET before the first write.
+fn commit_group_mutation<E>(
+    data_dir: &Path,
+    groups: &mut BTreeMap<String, GroupRecord>,
+    name: &str,
+    rollback: impl FnOnce(&mut BTreeMap<String, GroupRecord>),
+    on_nesting: impl FnOnce(groups::NestingViolation) -> E,
+    on_io: impl FnOnce(io::Error) -> E,
+) -> Result<(), E> {
+    if let Err(violation) = groups::validate_nesting(groups) {
+        rollback(groups);
+        return Err(on_nesting(violation));
+    }
+    if let Err(error) = groups::write_group(data_dir, &file_stem(name), &groups[name]) {
+        rollback(groups);
+        return Err(on_io(error));
     }
     Ok(())
 }

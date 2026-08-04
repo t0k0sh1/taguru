@@ -12,8 +12,7 @@ use crate::support::*;
 
 #[test]
 fn log_output_is_structured_when_json_format_is_requested() {
-    let data_dir = std::env::temp_dir().join(format!("taguru-jsonlog-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&data_dir);
+    let data_dir = common::scratch_dir("jsonlog");
     let mut command = Command::new(env!("CARGO_BIN_EXE_taguru"));
     common::scrub_taguru_env(&mut command)
         .env("TAGURU_ADDR", "127.0.0.1:0")
@@ -154,8 +153,7 @@ where
 
 #[test]
 fn the_access_log_carries_the_trace_id_when_export_is_configured() {
-    let data_dir = std::env::temp_dir().join(format!("taguru-tracelog-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&data_dir);
+    let data_dir = common::scratch_dir("tracelog");
     // The endpoint only needs to be configured, not alive: spans are
     // created (and the log correlated) regardless of delivery.
     let mut command = Command::new(env!("CARGO_BIN_EXE_taguru"));
