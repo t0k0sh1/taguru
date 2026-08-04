@@ -14,8 +14,7 @@ use serde_json::json;
 use crate::support::Server;
 
 fn scratch(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("taguru-repl-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = crate::support::common::scratch_dir(&format!("repl-{tag}"));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }

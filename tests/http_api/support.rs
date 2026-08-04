@@ -36,9 +36,7 @@ impl Server {
     }
 
     pub fn start_with_env(tag: &str, extra_env: &[(&str, &str)]) -> Self {
-        let data_dir =
-            std::env::temp_dir().join(format!("taguru-http-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&data_dir);
+        let data_dir = common::scratch_dir(&format!("http-{tag}"));
         Self::spawn(tag, data_dir, extra_env)
     }
 
@@ -63,9 +61,7 @@ impl Server {
         stderr_to: &std::path::Path,
         extra_env: &[(&str, &str)],
     ) -> Self {
-        let data_dir =
-            std::env::temp_dir().join(format!("taguru-http-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&data_dir);
+        let data_dir = common::scratch_dir(&format!("http-{tag}"));
         let mut command = Command::new(env!("CARGO_BIN_EXE_taguru"));
         command.arg("--config").arg(config);
         common::scrub_taguru_env(&mut command)
@@ -120,8 +116,7 @@ impl Server {
         extra_env: &[(&str, &str)],
         subcommand: &str,
     ) -> Self {
-        let dir = std::env::temp_dir().join(format!("taguru-router-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = common::scratch_dir(&format!("router-{tag}"));
         std::fs::create_dir_all(&dir).expect("router scratch dir must be creatable");
         let map_path = dir.join("route-map");
         std::fs::write(&map_path, map_contents).expect("route map must be writable");
@@ -624,8 +619,7 @@ impl FakeShard {
 
 /// A scratch directory for batch files, separate from any data dir.
 pub fn batch_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("taguru-batches-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = common::scratch_dir(&format!("batches-{tag}"));
     std::fs::create_dir_all(&dir).expect("batch dir must be creatable");
     dir
 }

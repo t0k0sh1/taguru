@@ -19,9 +19,7 @@ fn an_offline_import_lands_facts_passage_and_aliases_the_server_serves() {
     )
     .unwrap();
 
-    let data_dir =
-        std::env::temp_dir().join(format!("taguru-http-import-serve-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&data_dir);
+    let data_dir = common::scratch_dir("http-import-serve");
     let (code, stdout, stderr) = run_import(&data_dir, &[file.to_str().unwrap()]);
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(stdout.contains("+2 association(s)"), "{stdout}");
@@ -63,9 +61,7 @@ fn an_offline_import_json_matches_the_http_endpoints_own_shape() {
                 {\"passage\": \"蔵の杜氏は高瀬。\"}\n";
     std::fs::write(&file, body).unwrap();
 
-    let data_dir =
-        std::env::temp_dir().join(format!("taguru-http-import-json-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&data_dir);
+    let data_dir = common::scratch_dir("http-import-json");
     let (code, stdout, stderr) = run_import(&data_dir, &["--json", file.to_str().unwrap()]);
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     let local: Value = serde_json::from_str(&stdout)
@@ -648,9 +644,7 @@ fn reimporting_a_source_replaces_it_instead_of_doubling() {
     )
     .unwrap();
 
-    let data_dir =
-        std::env::temp_dir().join(format!("taguru-http-import-idem-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&data_dir);
+    let data_dir = common::scratch_dir("http-import-idem");
     // Twice: the weight must not accumulate across identical imports.
     for _ in 0..2 {
         let (code, stdout, stderr) = run_import(&data_dir, &[file.to_str().unwrap()]);
@@ -830,9 +824,7 @@ fn a_malformed_file_refuses_the_whole_import_before_any_write() {
     )
     .unwrap();
 
-    let data_dir =
-        std::env::temp_dir().join(format!("taguru-http-import-refuse-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&data_dir);
+    let data_dir = common::scratch_dir("http-import-refuse");
     let (code, _, stderr) = run_import(&data_dir, &[good.to_str().unwrap(), bad.to_str().unwrap()]);
     assert_eq!(code, 1, "{stderr}");
     assert!(stderr.contains("line 3"), "{stderr}");

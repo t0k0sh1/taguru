@@ -32,8 +32,7 @@ fn run_with_env(args: &[&str], env: &[(&str, &str)]) -> Output {
 /// A scratch directory holding a config file (and doubling as the data
 /// directory the file points at). Removed by the caller.
 fn write_config(tag: &str, lines: &str) -> (PathBuf, PathBuf) {
-    let dir = std::env::temp_dir().join(format!("taguru-cli-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = common::scratch_dir(&format!("cli-{tag}"));
     std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
     let config = dir.join("taguru.env");
     let data_dir = dir.join("data");
@@ -74,8 +73,7 @@ fn serve_with_config(config: &std::path::Path, extra_env: &[(&str, &str)]) -> St
 /// Spawns a live server on a free port with a scratch data dir. The
 /// caller kills the child and removes the directory.
 fn spawn_server(tag: &str) -> (std::process::Child, String, PathBuf) {
-    let dir = std::env::temp_dir().join(format!("taguru-cli-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = common::scratch_dir(&format!("cli-{tag}"));
     std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
     let mut command = Command::new(env!("CARGO_BIN_EXE_taguru"));
     common::scrub_taguru_env(&mut command)
@@ -405,9 +403,7 @@ fn communities_url_flag_does_not_swallow_a_following_flag() {
 
 #[test]
 fn calibrate_refuses_both_url_flag_and_positional() {
-    let dir =
-        std::env::temp_dir().join(format!("taguru-cli-calibrate-both-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = common::scratch_dir("cli-calibrate-both");
     std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
     let probes = dir.join("probes.tsv");
     std::fs::write(&probes, "a paraphrase\texpected\n").expect("probes file must be writable");
@@ -476,8 +472,7 @@ fn communities_url_flag_reaches_the_named_server() {
 
 #[test]
 fn inspect_verifies_a_directory_and_a_single_image() {
-    let dir = std::env::temp_dir().join(format!("taguru-cli-inspect-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = common::scratch_dir("cli-inspect");
     std::fs::create_dir_all(&dir).unwrap();
     let mut context = taguru::context::Context::default();
     context
@@ -521,8 +516,7 @@ fn inspect_verifies_a_directory_and_a_single_image() {
 /// nothing printed alongside it.
 #[test]
 fn inspect_json_reports_directory_and_image_stats_as_one_document() {
-    let dir = std::env::temp_dir().join(format!("taguru-cli-inspect-json-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = common::scratch_dir("cli-inspect-json");
     std::fs::create_dir_all(&dir).unwrap();
     let mut context = taguru::context::Context::default();
     context
@@ -578,8 +572,7 @@ fn inspect_fails_an_image_whose_bytes_rotted_in_place() {
     // perfect — every id in range, every chain intact — so before the
     // footer this passed inspection and loaded as truth. Now it must
     // fail, loudly, BEFORE a restore spends it.
-    let dir = std::env::temp_dir().join(format!("taguru-cli-bitrot-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = common::scratch_dir("cli-bitrot");
     std::fs::create_dir_all(&dir).unwrap();
     let mut context = taguru::context::Context::default();
     context.associate("i", "likes", "apple", 1.0).unwrap();
@@ -599,8 +592,7 @@ fn inspect_fails_an_image_whose_bytes_rotted_in_place() {
 
 #[test]
 fn inspect_flags_a_corrupt_image_and_a_corrupt_wal() {
-    let dir = std::env::temp_dir().join(format!("taguru-cli-corrupt-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = common::scratch_dir("cli-corrupt");
     std::fs::create_dir_all(&dir).unwrap();
 
     // A truncated/garbage image must fail the whole inspection.
@@ -649,8 +641,7 @@ fn inspect_flags_a_corrupt_image_and_a_corrupt_wal() {
 /// the human-readable path.
 #[test]
 fn inspect_json_reports_the_three_corrupt_statuses() {
-    let dir = std::env::temp_dir().join(format!("taguru-cli-corrupt-json-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = common::scratch_dir("cli-corrupt-json");
     std::fs::create_dir_all(&dir).unwrap();
 
     std::fs::write(dir.join("bad.ctx"), b"not an image").unwrap();
@@ -692,8 +683,7 @@ fn inspect_reports_a_torn_wal_tail_without_healing_it() {
     // reports it as a NOTE, still exits 0, and (the decisive part)
     // leaves the torn bytes on disk untouched. This is the read-only
     // guarantee that separates `inspect` from a boot-time replay.
-    let dir = std::env::temp_dir().join(format!("taguru-cli-torn-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = common::scratch_dir("cli-torn");
     std::fs::create_dir_all(&dir).unwrap();
 
     // A healthy image at watermark 0 — the WAL below carries the writes.
@@ -749,8 +739,7 @@ fn inspect_reports_a_torn_import_marker_without_failing() {
     // the marker is the only witness. inspect must SAY so (with the
     // repair) yet exit 0 — the bytes are intact; the tear has a
     // documented fix.
-    let dir = std::env::temp_dir().join(format!("taguru-cli-import-marker-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = common::scratch_dir("cli-import-marker");
     std::fs::create_dir_all(&dir).unwrap();
     let context = taguru::context::Context::default();
     std::fs::write(dir.join("sake.ctx"), context.to_bytes()).unwrap();
@@ -920,8 +909,7 @@ fn inspect_refuses_the_wrong_number_of_arguments() {
 
 #[test]
 fn inspect_reports_no_images_under_an_empty_directory() {
-    let dir = std::env::temp_dir().join(format!("taguru-cli-inspect-empty-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = common::scratch_dir("cli-inspect-empty");
     std::fs::create_dir_all(&dir).unwrap();
 
     let output = run(&["inspect", &dir.display().to_string()]);
@@ -937,9 +925,7 @@ fn inspect_reports_no_images_under_an_empty_directory() {
 
 #[test]
 fn inspect_warns_on_an_undecodable_stem_but_does_not_fail() {
-    let dir =
-        std::env::temp_dir().join(format!("taguru-cli-inspect-badstem-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = common::scratch_dir("cli-inspect-badstem");
     std::fs::create_dir_all(&dir).unwrap();
 
     // "%zz" is not valid hex — file_stem's own encoding can never
@@ -962,9 +948,7 @@ fn inspect_warns_on_an_undecodable_stem_but_does_not_fail() {
 
 #[test]
 fn inspect_warns_on_unparseable_meta_json_but_does_not_fail() {
-    let dir =
-        std::env::temp_dir().join(format!("taguru-cli-inspect-badmeta-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = common::scratch_dir("cli-inspect-badmeta");
     std::fs::create_dir_all(&dir).unwrap();
 
     let context = taguru::context::Context::default();
@@ -986,9 +970,7 @@ fn inspect_warns_on_unparseable_meta_json_but_does_not_fail() {
 
 #[test]
 fn inspect_refuses_a_single_corrupt_image_file() {
-    let dir =
-        std::env::temp_dir().join(format!("taguru-cli-inspect-badfile-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = common::scratch_dir("cli-inspect-badfile");
     std::fs::create_dir_all(&dir).unwrap();
 
     let file = dir.join("sake.ctx");
@@ -1897,8 +1879,7 @@ fn estimate_prints_usage_for_help_in_any_position() {
 /// byte — the format is deterministic, so backups diff cleanly.
 #[test]
 fn export_round_trips_a_data_directory_through_batch_streams() {
-    let dir = std::env::temp_dir().join(format!("taguru-cli-export-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = common::scratch_dir("cli-export");
     std::fs::create_dir_all(dir.join("batches")).expect("scratch dir must be creatable");
     std::fs::write(
         dir.join("batches/a.jsonl"),
@@ -2091,9 +2072,7 @@ fn a_multi_batch_stream_restating_earlier_sources_counts_as_one_refused_file() {
 /// accepts the directory and heals it.
 #[test]
 fn inspect_flags_group_trouble_and_previews_boot_repairs() {
-    let dir =
-        std::env::temp_dir().join(format!("taguru-cli-inspect-groups-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = common::scratch_dir("cli-inspect-groups");
     std::fs::create_dir_all(&dir).unwrap();
     let context = taguru::context::Context::default();
     std::fs::write(dir.join("sake.ctx"), context.to_bytes()).unwrap();
@@ -2363,8 +2342,7 @@ fn inspect_does_not_flag_a_corrupt_child_group_as_a_dangling_reference() {
 /// vouches for the rewritten family.
 #[test]
 fn compact_rewrites_a_data_directory_offline() {
-    let dir = std::env::temp_dir().join(format!("taguru-cli-compact-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = common::scratch_dir("cli-compact");
     std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
     std::fs::write(
         dir.join("a.jsonl"),
@@ -2414,8 +2392,7 @@ fn compact_rewrites_a_data_directory_offline() {
 /// would report.
 #[test]
 fn compact_dry_run_reports_dead_weight_without_rewriting() {
-    let dir = std::env::temp_dir().join(format!("taguru-cli-compact-dry-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = common::scratch_dir("cli-compact-dry");
     std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
     std::fs::write(
         dir.join("a.jsonl"),
@@ -2484,8 +2461,7 @@ fn compact_dry_run_reports_dead_weight_without_rewriting() {
 /// mixed in — with the fields the plan promises.
 #[test]
 fn compact_json_emits_a_single_parseable_document_dry_run_and_real() {
-    let dir = std::env::temp_dir().join(format!("taguru-cli-compact-json-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = common::scratch_dir("cli-compact-json");
     std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
     std::fs::write(
         dir.join("a.jsonl"),
@@ -2659,9 +2635,7 @@ fn compact_rejects_a_non_positive_parallel_value() {
 /// declaring no expectations, ready for a `--thresholds FILE` next to
 /// it. Removed by the caller.
 fn eval_scratch_dir(tag: &str) -> PathBuf {
-    let dir =
-        std::env::temp_dir().join(format!("taguru-cli-evaluate-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = common::scratch_dir(&format!("cli-evaluate-{tag}"));
     std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
     let eval_path = dir.join("eval.jsonl");
     std::fs::write(
@@ -3256,8 +3230,7 @@ fn the_stdio_bridge_forwards_tracestate_from_meta() {
 
 #[test]
 fn calibrate_rejects_a_url_that_does_not_parse() {
-    let dir = std::env::temp_dir().join(format!("taguru-cli-calibrate-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = common::scratch_dir("cli-calibrate");
     std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
     let probes = dir.join("probes.tsv");
     std::fs::write(&probes, "a paraphrase\texpected\n").expect("probes file must be writable");

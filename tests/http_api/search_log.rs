@@ -46,8 +46,7 @@ fn json_log_session_with_inherited_rust_log(
     extra_env: &[(&str, &str)],
     drive: impl FnOnce(&str),
 ) -> Vec<Value> {
-    let data_dir = std::env::temp_dir().join(format!("taguru-log-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&data_dir);
+    let data_dir = common::scratch_dir(&format!("log-{tag}"));
     let mut command = Command::new(env!("CARGO_BIN_EXE_taguru"));
     if let Some(value) = inherited_rust_log {
         command.env("RUST_LOG", value);

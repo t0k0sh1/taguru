@@ -11,8 +11,7 @@ use serde_json::{Value, json};
 use crate::support::*;
 
 fn eval_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("taguru-evaluate-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = common::scratch_dir(&format!("evaluate-{tag}"));
     std::fs::create_dir_all(&dir).expect("eval scratch dir must be creatable");
     dir
 }

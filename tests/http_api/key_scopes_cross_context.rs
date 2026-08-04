@@ -957,8 +957,7 @@ fn cross_context_search_respects_grants_without_an_existence_oracle() {
 /// "which context did this key delete" after the fact.
 #[test]
 fn the_access_log_names_the_context_and_destructive_ops_leave_audit_lines() {
-    let data_dir = std::env::temp_dir().join(format!("taguru-auditlog-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&data_dir);
+    let data_dir = common::scratch_dir("auditlog");
     let mut command = Command::new(env!("CARGO_BIN_EXE_taguru"));
     common::scrub_taguru_env(&mut command)
         .env("TAGURU_ADDR", "127.0.0.1:0")

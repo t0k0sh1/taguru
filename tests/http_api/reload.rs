@@ -18,8 +18,7 @@ use std::time::{Duration, Instant};
 use crate::support::Server;
 
 fn scratch(tag: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("taguru-reload-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = crate::support::common::scratch_dir(&format!("reload-{tag}"));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }

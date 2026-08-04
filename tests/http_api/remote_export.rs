@@ -65,9 +65,7 @@ fn a_full_remote_export_matches_the_local_export_of_the_same_directory() {
     )
     .expect("fixture must be writable");
 
-    let data_dir =
-        std::env::temp_dir().join(format!("taguru-remote-export-full-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&data_dir);
+    let data_dir = crate::support::common::scratch_dir("remote-export-full");
     let (code, stdout, stderr) = run_import(&data_dir, &[file.to_str().unwrap()]);
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
 
@@ -186,9 +184,7 @@ fn the_environment_token_authenticates_and_its_absence_is_the_servers_401() {
     );
     assert_eq!(status, 200);
 
-    let out =
-        std::env::temp_dir().join(format!("taguru-remote-export-auth-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&out);
+    let out = crate::support::common::scratch_dir("remote-export-auth");
 
     let (code, stdout, stderr) = run_cli(
         &[
@@ -259,9 +255,7 @@ fn an_unknown_context_counts_as_a_failure_and_the_rest_still_lands() {
 #[test]
 fn an_empty_server_refuses_the_full_export() {
     let server = Server::start("remote-export-empty");
-    let out =
-        std::env::temp_dir().join(format!("taguru-remote-export-empty-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&out);
+    let out = crate::support::common::scratch_dir("remote-export-empty");
     let (code, _stdout, stderr) = run_cli(
         &[
             "export",
@@ -345,9 +339,7 @@ fn spawn_mismatched_health_stub() -> String {
 #[test]
 fn a_mismatched_server_version_prints_the_skew_warning_once() {
     let base = spawn_mismatched_health_stub();
-    let out =
-        std::env::temp_dir().join(format!("taguru-remote-export-skew-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&out);
+    let out = crate::support::common::scratch_dir("remote-export-skew");
     let (_code, _stdout, stderr) = run_cli(
         &["export", "--url", &base, "--out", out.to_str().unwrap()],
         &[],

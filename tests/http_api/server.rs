@@ -80,9 +80,7 @@ fn a_bind_failure_exits_with_a_diagnosis_not_a_panic() {
     // Occupy a port, then ask the server to bind it.
     let holder = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = holder.local_addr().unwrap().to_string();
-    let data_dir =
-        std::env::temp_dir().join(format!("taguru-http-bindfail-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&data_dir);
+    let data_dir = common::scratch_dir("http-bindfail");
 
     let mut command = Command::new(env!("CARGO_BIN_EXE_taguru"));
     common::scrub_taguru_env(&mut command)
