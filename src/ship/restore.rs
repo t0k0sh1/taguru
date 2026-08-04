@@ -389,7 +389,11 @@ pub(crate) async fn fetch_lane(
     lane: ManifestLane,
 ) -> io::Result<Vec<u8>> {
     let lane_prefix = generation_root.clone().join("wal").join(name);
-    let mut assembled = Vec::with_capacity(lane.len as usize);
+    // `lane.len` comes from the bucket-held manifest, unverified until
+    // the CRC check below — a tampered manifest declaring a huge `len`
+    // must not be able to abort the restore via allocation failure
+    // before a single byte is fetched.
+    let mut assembled = Vec::with_capacity((lane.len as usize).min(8 * 1024 * 1024));
     for seg in 0..lane.segments {
         let key = lane_prefix.clone().join(segment_name(lane.series, seg));
         // Segments hold acknowledged writes; one the bucket cannot

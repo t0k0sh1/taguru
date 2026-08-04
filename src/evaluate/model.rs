@@ -364,25 +364,6 @@ impl From<PassageHit> for HitLocator {
     }
 }
 
-/// #308: flattens an assembled package's admitted `items[]` into the
-/// same `HitLocator` shape the baseline passage lane produces, in
-/// `fused_rank` order — one `HitLocator` per `citation_refs` entry, so
-/// an item with several independent attributions (ADR 0006 §9's
-/// corroboration) contributes one locator per source, and an item with
-/// none (a zero-attribution association — `EvidenceCandidate`'s own
-/// documented case) contributes none. This is what lets
-/// `score_recall`/`served_locators`/`build_missed` — every scoring
-/// function the baseline passage lane already feeds — run unchanged
-/// against an assembled package: they only ever compare
-/// `(source, paragraph)` pairs and rank order, never a lane's own
-/// score, and RRF's `fused_score` is deliberately never serialized at
-/// all (ADR 0006 §7) — `score: 0.0` below is a placeholder, not a
-/// discarded real value.
-/// #308: the diagnostic-locator projection of an assembled package's
-/// admitted `items[]` — [`EvidenceLocator`], stripped of
-/// `association`/`passage`/`community` (which can carry passage body
-/// text) the same way [`hits_from_evidence_items`] strips it from the
-/// scoring-facing `HitLocator` projection.
 /// One [`EvidenceItem`]'s own `(source, paragraph)` locator — `None`
 /// for an association item, whose locator instead lives entirely in
 /// `citation_refs` ([`EvidenceCandidate::citation_refs`],

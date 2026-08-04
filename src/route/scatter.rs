@@ -95,6 +95,7 @@ pub(super) fn gather(
     state: &RouterState,
     scatter: &Scatter,
     outcomes: Vec<(usize, Result<ShardAnswer, String>)>,
+    started_at: Instant,
 ) -> Result<Gathered, Box<Response>> {
     let mut answers = Vec::new();
     let mut unreached = Vec::new();
@@ -137,7 +138,7 @@ pub(super) fn gather(
         ));
     }
     if answers.is_empty() && !unreached.is_empty() {
-        return Err(Box::new(unreachable_refusal(&unreached, Instant::now())));
+        return Err(Box::new(unreachable_refusal(&unreached, started_at)));
     }
     Ok(Gathered { answers, unreached })
 }

@@ -1181,6 +1181,13 @@ fn ops_written_counts_only_the_partial_refusal() {
         .ops_written(),
         0
     );
+    let schema_refusal = ApplyRefusal::Schema(super::rejection::SchemaRejection {
+        issues: Vec::new(),
+        total: 0,
+        reserved: false,
+    });
+    assert_eq!(schema_refusal.ops_written(), 0);
+    assert!(!schema_refusal.wrote_anything());
 }
 
 /// Move one deterministic filesystem failure through the complete

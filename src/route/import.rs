@@ -191,7 +191,13 @@ pub(super) async fn route_import(
                 }
             }
             Ok(answer) => {
-                return rewrap_import_refusal(answer, batches.len(), 0, index > 0, started_at);
+                return rewrap_import_refusal(
+                    answer,
+                    batches.len(),
+                    0,
+                    !query.dry_run && index > 0,
+                    started_at,
+                );
             }
             Err(error) => {
                 return unreachable_refusal(

@@ -86,7 +86,7 @@ async fn merge_matches(
             deadline,
         )
         .await;
-    let gathered = match gather(&state, &scatter, outcomes) {
+    let gathered = match gather(&state, &scatter, outcomes, started_at) {
         Ok(gathered) => gathered,
         Err(refusal) => return *refusal,
     };
@@ -192,7 +192,7 @@ pub(super) async fn cross_search_passages(
             deadline,
         )
         .await;
-    let gathered = match gather(&state, &scatter, outcomes) {
+    let gathered = match gather(&state, &scatter, outcomes, started_at) {
         Ok(gathered) => gathered,
         Err(refusal) => return *refusal,
     };
