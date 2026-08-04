@@ -1246,6 +1246,99 @@ fn extract_schema_flag_fails_the_run_at_startup_when_the_file_does_not_parse() {
     let _ = std::fs::remove_dir_all(&out);
 }
 
+#[test]
+fn extract_schema_flag_fails_the_run_at_startup_when_the_file_does_not_exist() {
+    let docs = batch_dir("extract-schema-missing-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let missing_path = docs.join("missing.schema.json");
+    let out = batch_dir("extract-schema-missing-out");
+
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[],
+        &[
+            "--dry-run",
+            "--context",
+            "c",
+            "--schema",
+            missing_path.to_str().unwrap(),
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stderr.contains("missing.schema.json"), "{stderr}");
+    assert!(!stdout.contains("would extract"), "{stdout}");
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+#[test]
+fn extract_schema_flag_fails_the_run_at_startup_when_schema_install_refuses_the_document() {
+    let docs = batch_dir("extract-schema-refused-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let schema_path = docs.join("future.schema.json");
+    // Valid JSON — the parse itself succeeds — but an unknown `schema`
+    // version, which only schema::install's own check refuses, distinct
+    // from the JSON-parse-failure case above.
+    std::fs::write(
+        &schema_path,
+        json!({
+            "schema": 999,
+            "mode": "off",
+            "closed_labels": false,
+            "types": {},
+            "relations": {}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let out = batch_dir("extract-schema-refused-out");
+
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[],
+        &[
+            "--dry-run",
+            "--context",
+            "c",
+            "--schema",
+            schema_path.to_str().unwrap(),
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stderr.contains("future.schema.json"), "{stderr}");
+    assert!(!stdout.contains("would extract"), "{stdout}");
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+#[test]
+fn extract_schema_env_var_fails_the_run_at_startup_the_same_as_the_flag() {
+    let docs = batch_dir("extract-schema-env-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let schema_path = docs.join("broken.schema.json");
+    std::fs::write(&schema_path, "not json").unwrap();
+    let out = batch_dir("extract-schema-env-out");
+
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[("TAGURU_EXTRACT_SCHEMA", schema_path.to_str().unwrap())],
+        &["--dry-run", "--context", "c", doc.to_str().unwrap()],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stderr.contains("broken.schema.json"), "{stderr}");
+    assert!(!stdout.contains("would extract"), "{stdout}");
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
 /// `TAGURU_EXTRACT_MAX_ATTEMPTS` raised past the default lets a chunk
 /// survive more than one corrective turn — two bad answers followed by
 /// a good one, which the default policy (2 total attempts) would never

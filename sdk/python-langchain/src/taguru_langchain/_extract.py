@@ -1241,10 +1241,15 @@ def schema_output_issues(
                 asserted.setdefault(subject, set()).add(object_)
 
     ancestors = _schema_ancestors(schema.types)
-    types: dict[str, set[str]] = {
-        concept: {
-            name for asserted_name in names for name in _schema_closure(asserted_name, ancestors)
-        }
+    types: dict[str, _SchemaTypeAssertions] = {
+        concept: _SchemaTypeAssertions(
+            asserted=names,
+            expanded={
+                name
+                for asserted_name in names
+                for name in _schema_closure(asserted_name, ancestors)
+            },
+        )
         for concept, names in asserted.items()
     }
 
@@ -1299,16 +1304,30 @@ def schema_output_issues(
 MAX_ISSUE_TYPE_NAMES = 8
 
 
-def _schema_side_violates(declared: list[str], types: set[str] | None) -> bool:
+@dataclass
+class _SchemaTypeAssertions:
+    """One concept's asserted type population within one answer set: what
+    was actually asserted (`asserted`) and its `is_a` closure (`expanded`)
+    — `_schema_side_violates` only ever tests the closure, but the
+    corrective message names what was asserted, never the expansion.
+    Mirrors src/extract.rs's own `SchemaTypeAssertions`/`actual_types`
+    split and its stated reason: "the expanded set's size is a
+    schema-authoring accident, not information the corrector needs."."""
+
+    asserted: set[str]
+    expanded: set[str]
+
+
+def _schema_side_violates(declared: list[str], types: _SchemaTypeAssertions | None) -> bool:
     """A domain/range violation is `declared` non-empty (an unconstrained
     side never violates), the concept's expanded type set non-empty
     (untyped never violates, §6.1), and the two disjoint — the
     producer-side mirror of src/schema/check.rs's `side_violates`."""
     if not declared:
         return False
-    if not types:
+    if types is None or not types.expanded:
         return False
-    return set(declared).isdisjoint(types)
+    return set(declared).isdisjoint(types.expanded)
 
 
 def _join_capped_names(names: Sequence[str]) -> str:
@@ -1320,7 +1339,7 @@ def _join_capped_names(names: Sequence[str]) -> str:
 
 
 def _schema_violation_text(
-    name: str, declared: list[str], relation: str, types: set[str] | None
+    name: str, declared: list[str], relation: str, types: _SchemaTypeAssertions | None
 ) -> str:
     """One violation's corrective text: what was expected (the declared
     set as written, never the `is_a` closure) and what the concept was
@@ -1329,7 +1348,7 @@ def _schema_violation_text(
     as one sentence for a corrective LLM turn instead of two structured
     fields."""
     expected = _join_capped_names(declared)
-    actual = _join_capped_names(sorted(types)) if types else ""
+    actual = _join_capped_names(sorted(types.asserted)) if types is not None else ""
     return (
         f"'{name}' must be typed as one of [{expected}] (or a subtype, via a schema:type "
         f"assertion) for relation '{relation}', but is typed as [{actual}]"

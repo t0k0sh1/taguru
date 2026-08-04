@@ -41,6 +41,11 @@ describe("getSchema", () => {
     const client = stubClient(() =>
       errBody(404, "context 'aomine' has no schema document", undefined, "no_schema"),
     );
-    await expect(client.context("aomine").getSchema()).rejects.toBeInstanceOf(NotFoundError);
+    const notFound = await client
+      .context("aomine")
+      .getSchema()
+      .catch((caught: unknown) => caught);
+    expect(notFound).toBeInstanceOf(NotFoundError);
+    expect((notFound as NotFoundError).code).toBe("no_schema");
   });
 });

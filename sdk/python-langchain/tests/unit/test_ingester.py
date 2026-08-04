@@ -982,7 +982,7 @@ def test_a_cross_chunk_correction_that_does_not_fix_the_issue_fails_without_impo
         [CHUNK1_ANSWER, CHUNK2_SHADOWING_ANSWER, CHUNK2_SHADOWING_ANSWER],
         chunk_bytes=CROSS_CHUNK_BYTES,
     )
-    with pytest.raises(ValueError, match="still has 1 cross-chunk alias issue.s. after correction"):
+    with pytest.raises(ValueError, match="still has 1 cross-chunk issue.s. after correction"):
         ingester.ingest_text(DOC_TEXT, source="docs/aomine.md")
     assert fake_server.imported == []
 
@@ -1008,7 +1008,7 @@ def test_a_structurally_invalid_cross_chunk_correction_fails_without_import(
         [CHUNK1_ANSWER, CHUNK2_SHADOWING_ANSWER, chunk2_invalid_correction],
         chunk_bytes=CROSS_CHUNK_BYTES,
     )
-    with pytest.raises(ValueError, match="cross-chunk alias correction still left"):
+    with pytest.raises(ValueError, match="cross-chunk correction still left"):
         ingester.ingest_text(DOC_TEXT, source="docs/aomine.md")
     assert fake_server.imported == []
 

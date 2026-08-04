@@ -37,13 +37,7 @@ Entries that change an on-disk format or a response shape say so.
   full answer set the same way `schema_issues`/`SchemaEnv`
   (`src/schema/check.rs`) already does server-side, and feeds the
   existing corrective-retry machinery unchanged: one targeted corrective
-  turn per offending output, never a second round. Swapping in a
-  different schema document re-extracts even when the source text is
-  byte-identical: `ManifestEntry`/`CheckpointFingerprint` (Rust) and
-  their SDK checkpoint-fingerprint twins gain a `schema_digest` field
-  (on-disk format change — an entry from before this field existed
-  defaults to `""` and still matches a schema-less rerun, the same
-  precedent `structured_output`/`lossy` already set). The core Python
+  turn per offending output, never a second round. The core Python
   and TypeScript SDKs gain `Context.get_schema()`/`Context.getSchema()`
   (`GET /contexts/{name}/schema`, `sdk/spec/surface.yaml`) as the
   client method both LangChain ingesters' `_fetch_schema`/`fetchSchema`
@@ -557,6 +551,14 @@ Entries that change an on-disk format or a response shape say so.
   host application's call.
 
 ### Changed
+- `ManifestEntry`/`CheckpointFingerprint` (Rust) and their SDK
+  checkpoint-fingerprint twins gain a `schema_digest` field (#386, S8 of
+  #218's ADR 0009 split §11), so that swapping in a different schema
+  document for `taguru extract`/both LangChain ingesters re-extracts
+  even when the source text is byte-identical. On-disk format change:
+  an entry from before this field existed defaults to `""` and still
+  matches a schema-less rerun, the same precedent `structured_output`/
+  `lossy` already set.
 - `sync_object_storage` (#351) is rewritten onto the shared `RunRecorder`
   (#353) and gains an `events_out=` parameter: a path (truncated on open,
   like `taguru extract`'s own `--diagnostics-out`) or an already-open text

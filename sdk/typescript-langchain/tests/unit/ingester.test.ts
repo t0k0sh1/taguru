@@ -629,7 +629,7 @@ describe("TaguruIngester (issue #181: lossless JSON repair and path-specific cor
         ],
         { chunk_bytes: CROSS_CHUNK_BYTES },
       ).ingester.ingestText(DOC_TEXT, { source: "docs/aomine.md" }),
-    ).rejects.toThrow(/still has 1 cross-chunk alias issue\(s\) after correction/);
+    ).rejects.toThrow(/still has 1 cross-chunk issue\(s\) after correction/);
     expect(server.imported).toEqual([]);
   });
 
@@ -649,7 +649,7 @@ describe("TaguruIngester (issue #181: lossless JSON repair and path-specific cor
         ],
         { chunk_bytes: CROSS_CHUNK_BYTES },
       ).ingester.ingestText(DOC_TEXT, { source: "docs/aomine.md" }),
-    ).rejects.toThrow(/cross-chunk alias correction still left/);
+    ).rejects.toThrow(/cross-chunk correction still left/);
     expect(server.imported).toEqual([]);
   });
 

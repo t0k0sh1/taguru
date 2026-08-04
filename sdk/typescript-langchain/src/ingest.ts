@@ -94,7 +94,7 @@ export interface IngestOutcome {
   llm_calls: number;
   chunks: number;
   /** How many corrective turns (Stage 1 syntax/validity retries plus any
-   * Stage 2 cross-chunk alias correction) this ingest needed — 0 means
+   * Stage 2 cross-chunk correction) this ingest needed — 0 means
    * every chunk's first answer was accepted as-is. */
   correction_attempts: number;
   /** Labels of automatic, information-preserving JSON repairs applied
@@ -162,7 +162,7 @@ function stableStringify(value: unknown): string {
   }
   if (value !== null && typeof value === "object") {
     const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) =>
-      a.localeCompare(b),
+      a < b ? -1 : a > b ? 1 : 0,
     );
     return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${stableStringify(item)}`).join(",")}}`;
   }
@@ -451,19 +451,19 @@ function correctiveAskFor(result: AttemptResult, factBudget: number): string {
 }
 
 /**
- * The Stage 2 (cross-chunk alias correction) terminal message for one
+ * The Stage 2 (cross-chunk correction) terminal message for one
  * offending chunk's non-valid reply — mirrors extract.rs's
  * correct_cross_output_issues per-kind texts verbatim.
  */
 function crossChunkFailureMessage(label: string, result: AttemptResult): string {
   if (result.kind === "length_limited") {
     return (
-      `${label}: the cross-chunk alias correction was cut off at the output limit — ` +
+      `${label}: the cross-chunk correction was cut off at the output limit — ` +
       "failing the source rather than importing a truncated correction"
     );
   }
   if (result.kind === "refusal") {
-    return `${label}: the provider refused the cross-chunk alias correction (finish_reason ${result.error})`;
+    return `${label}: the provider refused the cross-chunk correction (finish_reason ${result.error})`;
   }
   if (result.kind === "empty") {
     return `${label}: ${result.error}`;
@@ -471,11 +471,11 @@ function crossChunkFailureMessage(label: string, result: AttemptResult): string 
   if (result.kind === "invalid") {
     const issues = result.issues!;
     return (
-      `${label}: the cross-chunk alias correction still left ${issues.length} invalid item(s) ` +
+      `${label}: the cross-chunk correction still left ${issues.length} invalid item(s) ` +
       `uncorrected: ${issues.join("; ")}`
     );
   }
-  return `${label}: the cross-chunk alias correction was not the JSON object asked for (${result.error})`;
+  return `${label}: the cross-chunk correction was not the JSON object asked for (${result.error})`;
 }
 
 /**
@@ -729,7 +729,7 @@ export class TaguruIngester {
       const [recordIndex, issues] = recheck[0]!;
       const chunkIndex = records[recordIndex]!.chunkIndex;
       throw new Error(
-        `chunk ${chunkIndex + 1}/${chunkTotal}: still has ${issues.length} cross-chunk alias ` +
+        `chunk ${chunkIndex + 1}/${chunkTotal}: still has ${issues.length} cross-chunk ` +
           `issue(s) after correction: ${issues.join("; ")}`,
       );
     }
@@ -1101,7 +1101,7 @@ export class TaguruIngester {
    */
   private async checkpointFingerprint(
     text: string,
-    schemaDigest: string,
+    digest: string,
   ): Promise<CheckpointFingerprint> {
     return {
       sha256: await sha256Hex(text),
@@ -1114,7 +1114,7 @@ export class TaguruIngester {
       fact_budget: this.fact_budget,
       structured_output: this.structured_output ? "langchain" : "",
       lossy: this.lossy,
-      schema_digest: schemaDigest,
+      schema_digest: digest,
     };
   }
 
@@ -1126,12 +1126,12 @@ export class TaguruIngester {
   private async loadCheckpoints(
     source: string,
     text: string,
-    schemaDigest: string,
+    digest: string,
   ): Promise<DocumentCheckpoints | null> {
     if (this.checkpoint_store === undefined) {
       return null;
     }
-    const fingerprint = await this.checkpointFingerprint(text, schemaDigest);
+    const fingerprint = await this.checkpointFingerprint(text, digest);
     let data: Uint8Array | null;
     try {
       data = await this.checkpoint_store.load(source);

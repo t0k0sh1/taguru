@@ -497,7 +497,7 @@ function schemaBlock(document: SchemaDocument, vocabulary: string[]): string {
   constrained.sort(([a], [b]) => {
     const aFirst = liveVocabulary.has(a) ? 0 : 1;
     const bFirst = liveVocabulary.has(b) ? 0 : 1;
-    return aFirst !== bFirst ? aFirst - bFirst : a.localeCompare(b);
+    return aFirst !== bFirst ? aFirst - bFirst : a < b ? -1 : a > b ? 1 : 0;
   });
   const lines = constrained
     .slice(0, VOCABULARY_CAP)
@@ -1392,7 +1392,9 @@ export function schemaOutputIssues(
         if (!label || label === SCHEMA_TYPE_LABEL) {
           return; // type ops are never judged, §7.2 step 6
         }
-        const relation = schema.relations[label];
+        const relation = Object.hasOwn(schema.relations, label)
+          ? schema.relations[label]
+          : undefined;
         if (relation !== undefined) {
           const subjectTypes = types.get(subject);
           if (schemaSideViolates(relation.domain, subjectTypes)) {

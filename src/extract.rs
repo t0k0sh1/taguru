@@ -43,7 +43,7 @@ const USAGE: &str = "\
 usage: taguru extract [--dry-run] [--force] [--no-passage] [--questions N]
                       [--fact-budget N] [--config FILE] [--parallel N]
                       [--structured-output MODE] [--max-output-tokens N]
-                      [--lossy] [--diagnostics-out FILE]
+                      [--lossy] [--diagnostics-out FILE] [--schema FILE]
                       --context NAME [--description TEXT] --out DIR FILE|DIR...
 
 Reads documents (.md/.txt; a directory expands to its files, sorted by
@@ -1766,8 +1766,7 @@ impl Run {
             if indicates_length_limit(response.finish_reason.as_deref()) {
                 if let Some(sink) = sink {
                     let message =
-                        "the cross-chunk alias correction was cut off at the output limit"
-                            .to_string();
+                        "the cross-chunk correction was cut off at the output limit".to_string();
                     sink.emit(DiagnosticsAttempt {
                         source,
                         stage: "cross_chunk",
@@ -1785,7 +1784,7 @@ impl Run {
                     });
                 }
                 return Err(format!(
-                    "{label}: the cross-chunk alias correction was cut off at the output \
+                    "{label}: the cross-chunk correction was cut off at the output \
                      limit — failing the source rather than importing a truncated correction"
                 ));
             }
@@ -1794,7 +1793,7 @@ impl Run {
             {
                 if let Some(sink) = sink {
                     let message = format!(
-                        "the provider refused the cross-chunk alias correction \
+                        "the provider refused the cross-chunk correction \
                          (finish_reason {reason})"
                     );
                     sink.emit(DiagnosticsAttempt {
@@ -1814,7 +1813,7 @@ impl Run {
                     });
                 }
                 return Err(format!(
-                    "{label}: the provider refused the cross-chunk alias correction \
+                    "{label}: the provider refused the cross-chunk correction \
                      (finish_reason {reason})"
                 ));
             }
@@ -1884,14 +1883,14 @@ impl Run {
                         });
                     }
                     return Err(format!(
-                        "{label}: the cross-chunk alias correction was not the JSON object \
+                        "{label}: the cross-chunk correction was not the JSON object \
                          asked for ({error})"
                     ));
                 }
                 Err(AnswerFault::Invalid(issues)) => {
                     if let Some(sink) = sink {
                         let message = format!(
-                            "the cross-chunk alias correction still left {} invalid item(s) \
+                            "the cross-chunk correction still left {} invalid item(s) \
                              uncorrected: {}",
                             issues.len(),
                             issues.join("; ")
@@ -1913,7 +1912,7 @@ impl Run {
                         });
                     }
                     return Err(format!(
-                        "{label}: the cross-chunk alias correction still left {} invalid \
+                        "{label}: the cross-chunk correction still left {} invalid \
                          item(s) uncorrected: {}",
                         issues.len(),
                         issues.join("; ")
@@ -1933,7 +1932,7 @@ impl Run {
         {
             let chunk_index = outputs[output_index].chunk_index;
             return Err(format!(
-                "chunk {}/{chunk_total}: still has {} cross-chunk alias issue(s) after \
+                "chunk {}/{chunk_total}: still has {} cross-chunk issue(s) after \
                  correction: {}",
                 chunk_index + 1,
                 issues.len(),
@@ -6690,6 +6689,31 @@ mod tests {
                 .collect(),
         };
         crate::schema::install(document).expect("test schema installs")
+    }
+
+    #[test]
+    fn schema_digests_are_stable_across_key_order_and_whitespace() {
+        // The invariant `--schema`'s startup path relies on (documented at
+        // the `document_bytes` canonicalization call in `run`): two files
+        // naming the identical document must fingerprint identically, so a
+        // hand-edited or re-serialized schema file never spuriously
+        // re-extracts every document in the corpus.
+        let ordered = r#"{
+            "schema": 1,
+            "mode": "warn",
+            "closed_labels": false,
+            "types": {"Brewery": {"is_a": ["Organization"]}, "Organization": {"is_a": []}},
+            "relations": {"杜氏": {"domain": ["Brewery"], "range": ["Organization"]}}
+        }"#;
+        let reordered_and_compact = r#"{"relations":{"杜氏":{"range":["Organization"],"domain":["Brewery"]}},"types":{"Organization":{"is_a":[]},"Brewery":{"is_a":["Organization"]}},"mode":"warn","closed_labels":false,"schema":1}"#;
+
+        let a: crate::schema::SchemaDocument = serde_json::from_str(ordered).unwrap();
+        let b: crate::schema::SchemaDocument = serde_json::from_str(reordered_and_compact).unwrap();
+        let installed_a = crate::schema::install(a).expect("schema installs");
+        let installed_b = crate::schema::install(b).expect("schema installs");
+        let bytes_a = crate::schema::document_bytes(installed_a.document()).unwrap();
+        let bytes_b = crate::schema::document_bytes(installed_b.document()).unwrap();
+        assert_eq!(sha256_hex(&bytes_a), sha256_hex(&bytes_b));
     }
 
     #[test]

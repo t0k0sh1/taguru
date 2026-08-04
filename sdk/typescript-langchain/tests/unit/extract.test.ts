@@ -715,6 +715,16 @@ describe("schemaOutputIssues (extract.rs/Python golden ports)", () => {
     expect(issues[0]![1][0]).toContain("closed_labels");
   });
 
+  it("treats a prototype-named label as undeclared under closed_labels", () => {
+    const schema = testSchema({}, { 杜氏: [[], []] }, "strict", true);
+    const outputs = [
+      output({ associations: [association("青嶺酒造", "constructor", "1907", 1.0)] }),
+    ];
+    const issues = schemaOutputIssues(outputs, schema);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]![1][0]).toContain("closed_labels");
+  });
+
   it("flags an alias naming the reserved type label as canonical", () => {
     // Guard 2 (ADR 0009 §6.3) fires regardless of mode — "off" here proves
     // it is not gated on enforcement the way domain/range judgment is.

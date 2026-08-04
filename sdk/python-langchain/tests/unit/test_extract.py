@@ -855,6 +855,31 @@ def test_schema_output_issues_lets_an_is_a_subtype_satisfy_the_declared_type() -
     assert schema_output_issues(outputs, schema) == []
 
 
+def test_schema_output_issues_names_only_the_asserted_type_in_a_violation_message() -> None:
+    """The "actual" half of a violation message must name what was
+    asserted (`Brewery`), never its `is_a` closure (`Organization`) —
+    otherwise the model is told to fix a type name it never asserted."""
+    schema = _test_schema(
+        {"Organization": [], "Brewery": ["Organization"], "Person": []},
+        {"杜氏": (["Person"], ["Person"])},
+        "strict",
+    )
+    outputs = [
+        ModelOutput(
+            associations=[
+                association("青嶺酒造", SCHEMA_TYPE_LABEL, "Brewery", 1.0),
+                association("青嶺酒造", "杜氏", "高瀬", 1.0),
+            ]
+        )
+    ]
+    issues = schema_output_issues(outputs, schema)
+    assert len(issues) == 1
+    message = issues[0][1][0]
+    assert "typed as one of [Person]" in message
+    assert "typed as [Brewery]" in message
+    assert "Organization" not in message
+
+
 def test_schema_output_issues_flags_an_undeclared_label_under_closed_labels() -> None:
     """Port of extract.rs schema_output_issues_flags_an_undeclared_label_under_closed_labels."""
     schema = _test_schema({}, {"杜氏": ([], [])}, "strict", closed_labels=True)

@@ -142,7 +142,7 @@ class IngestOutcome:
     chunks: int = 0
     correction_attempts: int = 0
     """How many corrective turns (Stage 1 syntax/validity retries plus any
-    Stage 2 cross-chunk alias correction) this ingest needed — 0 means
+    Stage 2 cross-chunk correction) this ingest needed — 0 means
     every chunk's first answer was accepted as-is."""
     lossless_repairs: list[str] = field(default_factory=list)
     """Labels of automatic, information-preserving JSON repairs applied
@@ -292,17 +292,18 @@ def _corrective_ask(result: _Attempt, fact_budget: int) -> str:
 
 
 def _cross_chunk_failure_message(label: str, result: _Attempt) -> str:
-    """The Stage 2 (cross-chunk alias correction) terminal message for one
-    offending chunk's non-valid reply — mirrors extract.rs's
+    """The Stage 2 (cross-chunk correction, ADR 0009 §11.2 widening it to
+    schema domain/range judgment) terminal message for one offending
+    chunk's non-valid reply — mirrors extract.rs's
     ``correct_cross_output_issues`` per-kind texts verbatim."""
     if result.kind == "length_limited":
         return (
-            f"{label}: the cross-chunk alias correction was cut off at the output limit — "
+            f"{label}: the cross-chunk correction was cut off at the output limit — "
             "failing the source rather than importing a truncated correction"
         )
     if result.kind == "refusal":
         return (
-            f"{label}: the provider refused the cross-chunk alias correction "
+            f"{label}: the provider refused the cross-chunk correction "
             f"(finish_reason {result.error})"
         )
     if result.kind == "empty":
@@ -310,13 +311,10 @@ def _cross_chunk_failure_message(label: str, result: _Attempt) -> str:
     if result.kind == "invalid":
         assert result.issues is not None
         return (
-            f"{label}: the cross-chunk alias correction still left {len(result.issues)} "
+            f"{label}: the cross-chunk correction still left {len(result.issues)} "
             f"invalid item(s) uncorrected: {'; '.join(result.issues)}"
         )
-    return (
-        f"{label}: the cross-chunk alias correction was not the JSON object asked for "
-        f"({result.error})"
-    )
+    return f"{label}: the cross-chunk correction was not the JSON object asked for ({result.error})"
 
 
 def _schema_digest(schema: SchemaDocument | None) -> str:
@@ -549,7 +547,7 @@ class TaguruIngester:
         policy, with a normal (non-length-limited, syntactically bad)
         answer, this reproduces the previous fixed implementation's
         request bodies exactly. Shared by the Stage 1 per-chunk loop and
-        Stage 2's cross-chunk alias correction."""
+        Stage 2's cross-chunk correction."""
         return [
             *base_messages,
             AIMessage(
@@ -1182,7 +1180,7 @@ class TaguruIngester:
             chunk_index = records[record_index].chunk_index
             raise ValueError(
                 f"chunk {chunk_index + 1}/{chunk_total}: still has {len(issues)} cross-chunk "
-                f"alias issue(s) after correction: {'; '.join(issues)}"
+                f"issue(s) after correction: {'; '.join(issues)}"
             )
 
     # -- async ------------------------------------------------------------------
@@ -1609,7 +1607,7 @@ class TaguruIngester:
             chunk_index = records[record_index].chunk_index
             raise ValueError(
                 f"chunk {chunk_index + 1}/{chunk_total}: still has {len(issues)} cross-chunk "
-                f"alias issue(s) after correction: {'; '.join(issues)}"
+                f"issue(s) after correction: {'; '.join(issues)}"
             )
 
     # -- lifecycle -------------------------------------------------------------
