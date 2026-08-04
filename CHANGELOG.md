@@ -7,6 +7,8 @@ Entries that change an on-disk format or a response shape say so.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-05
+
 ### Added
 - Both core SDKs gain the rest of the schema surface:
   `put_schema`/`putSchema`, `audit_schema`/`auditSchema`, and
