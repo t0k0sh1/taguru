@@ -99,10 +99,22 @@ fn seed(server: &Server) {
         "{\"subject\": \"共通\", \"label\": \"例\", \"object\": \"概念\", \"weight\": 0.5}\n",
         "{\"taguru_batch\": 1, \"context\": \"breweries\", \"source\": \"doc-c\"}\n",
         "{\"subject\": \"青嶺酒造\", \"label\": \"造る\", \"object\": \"青嶺\", \"weight\": -2.5}\n",
+        // A schema record (ADR 0009 §13, #384): sake lives on shard A —
+        // this proves the router's OWN routing table for schema
+        // records (never broadcast, unlike groups) sends it to the
+        // right shard rather than reusing whatever shard a nearby
+        // batch chunk happened to land on.
+        "{\"taguru_schema\": 1, \"context\": \"sake\", \"mode\": \"warn\", \
+          \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n",
         "{\"taguru_group\": 1, \"name\": \"jp\", \"description\": \"日本酒\", \"contexts\": [\"sake\", \"glossary\"]}\n",
     );
     let (status, outcome) = post_import(server, stream, None);
     assert_eq!(status, 200, "{outcome}");
+    assert_eq!(
+        outcome["result"]["schemas"][0]["context"],
+        json!("sake"),
+        "the router's own schema-routing table must land the record and report it: {outcome}"
+    );
     // A nested group whose direct member and child live on different
     // shards: `contexts` needs projection, `groups` broadcasts whole.
     server.ok(
@@ -157,6 +169,12 @@ fn the_router_over_split_shards_answers_exactly_like_one_instance() {
 
     seed(&single);
     seed(&router);
+
+    // The schema record's own routing (ADR 0009 §13, #384): the
+    // router sent it to shard A alone (never broadcast, unlike
+    // groups) — content served back through GET must still match the
+    // single instance exactly.
+    assert_equivalent(&single, &router, "GET", "/contexts/sake/schema", None);
 
     // The seeding itself already proved the import split: now the
     // responses. Cross recall with contexts, with groups (nested),
@@ -602,4 +620,96 @@ fn the_route_alias_dispatches_into_a_real_router_identically_to_router() {
     assert_eq!(body["status"], json!("ok"), "{body}");
     assert_eq!(body["router"], json!(true), "{body}");
     assert_eq!(body["shards"], json!(1), "{body}");
+}
+
+/// `result.schemas` must answer in STREAM order, not shard-number
+/// order — `RouteMap` numbers shards by first appearance in the map
+/// file, which is independent of a stream's own record order. The
+/// map here deliberately lists shard B's URL first (so it becomes
+/// shard 0), then sends a stream whose FIRST `taguru_schema` record
+/// names a shard-A context and whose SECOND names a shard-B one — the
+/// two orders disagree, so a router that iterated by shard number
+/// instead of original stream index would answer `[ctx_b, ctx_a]`
+/// instead of the correct `[ctx_a, ctx_b]`.
+#[test]
+fn schema_outcomes_answer_in_stream_order_not_shard_number_order() {
+    let shard_a = Server::start("router-schema-order-a");
+    let shard_b = Server::start("router-schema-order-b");
+    let router = Server::start_router(
+        "router-schema-order",
+        &format!("ctx_b = {}\nctx_a = {}\n", shard_b.base, shard_a.base),
+        &[],
+    );
+
+    router.ok("PUT", "/contexts/ctx_a", Some(json!({})));
+    router.ok("PUT", "/contexts/ctx_b", Some(json!({})));
+
+    let stream = concat!(
+        "{\"taguru_schema\": 1, \"context\": \"ctx_a\", \"mode\": \"warn\", \
+         \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n",
+        "{\"taguru_schema\": 1, \"context\": \"ctx_b\", \"mode\": \"warn\", \
+         \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n",
+    );
+    let (status, body) = post_import(&router, stream, None);
+    assert_eq!(status, 200, "{body}");
+    let schemas = body["result"]["schemas"].as_array().expect("schemas array");
+    assert_eq!(
+        schemas
+            .iter()
+            .map(|s| s["context"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!("ctx_a"), json!("ctx_b")],
+        "{body}"
+    );
+}
+
+/// A router rewrap (a schema record already landed on one shard, then
+/// a later one refuses on another) must keep the refusal's
+/// STRUCTURED detail, not collapse it into prose the failing shard's
+/// own note already carried: `integrity`/`durable_batches` are
+/// recomputed from the true cross-shard counts (the failing shard's
+/// own view of "0 landed" would otherwise under-report), and `issues`
+/// rides through unedited.
+#[test]
+fn a_router_rewrap_keeps_structured_refusal_detail() {
+    let shard_a = Server::start("router-schema-rewrap-a");
+    let shard_b = Server::start("router-schema-rewrap-b");
+    let router = Server::start_router(
+        "router-schema-rewrap",
+        &format!("ctx_ok = {}\nghost = {}\n", shard_a.base, shard_b.base),
+        &[],
+    );
+    router.ok("PUT", "/contexts/ctx_ok", Some(json!({})));
+    // `ghost` is intentionally never created — the second schema
+    // record's context does not exist on its own shard.
+
+    let stream = concat!(
+        "{\"taguru_schema\": 1, \"context\": \"ctx_ok\", \"mode\": \"warn\", \
+         \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n",
+        "{\"taguru_schema\": 1, \"context\": \"ghost\", \"mode\": \"warn\", \
+         \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n",
+    );
+    let (status, body) = post_import(&router, stream, None);
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(
+        body["integrity"],
+        json!("durable_prefix"),
+        "ctx_ok's schema landed on shard_a before ghost refused on shard_b: {body}"
+    );
+    assert!(
+        body.get("durable_batches").is_none(),
+        "durable_batches names batches — this stream carried none: {body}"
+    );
+    assert!(
+        body["issues"]
+            .as_array()
+            .is_some_and(|issues| !issues.is_empty()),
+        "the failing shard's own issue (ghost's missing context) must ride through: {body}"
+    );
+    assert_eq!(body["code"], json!("no_context"), "{body}");
+
+    // The shard_a install really did land — proof the rewrap's
+    // "durable_prefix" claim is true, not just structurally present.
+    let installed = router.ok("GET", "/contexts/ctx_ok/schema", None);
+    assert_eq!(installed["mode"], "warn", "{installed}");
 }

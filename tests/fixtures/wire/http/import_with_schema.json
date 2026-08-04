@@ -1,0 +1,42 @@
+{
+  "contract": "http_contract",
+  "method": "POST",
+  "operation": "import_with_schema",
+  "request": "{\"taguru_batch\": 1, \"context\": \"corpus-g\", \"source\": \"doc.md\", \"create\": {\"description\": \"wire-contract schema-carrying import\"}}\n{\"subject\": \"alpha\", \"label\": \"connects_to\", \"object\": \"beta\", \"weight\": 1.0}\n{\"taguru_schema\": 1, \"context\": \"corpus-g\", \"mode\": \"warn\", \"closed_labels\": false, \"types\": {\"Concept\": {\"is_a\": []}}, \"relations\": {\"connects_to\": {\"domain\": [\"Concept\"], \"range\": [\"Concept\"]}}}\n",
+  "response": {
+    "result": {
+      "batches": [
+        {
+          "aliases": 0,
+          "association_paragraphs_dropped": 0,
+          "associations": 1,
+          "context": "corpus-g",
+          "created": true,
+          "locators_dropped": 0,
+          "locators_stored": 0,
+          "passage_dropped": false,
+          "passage_stored": false,
+          "questions_dropped": 0,
+          "questions_stored": 0,
+          "retracted": 0,
+          "schema_violations": 0,
+          "sections_dropped": 0,
+          "sections_stored": 0,
+          "source": "doc.md"
+        }
+      ],
+      "schemas": [
+        {
+          "context": "corpus-g",
+          "mode": "warn",
+          "relations": 1,
+          "types": 1
+        }
+      ]
+    },
+    "status": "ok",
+    "time": 0.0
+  },
+  "route": "/import",
+  "status": 200
+}

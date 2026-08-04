@@ -64,6 +64,7 @@ use crate::env::DEFAULT_MAX_BODY_BYTES;
 use crate::groups::{GroupRecord, MAX_GROUP_MEMBERS};
 use crate::registry::{AccessError, AppState, AssocOp, ContextMeta, CreateError};
 use crate::remote::{Api, ImportFailure};
+use crate::schema;
 
 const USAGE: &str = "\
 usage: taguru import [--dry-run] [--no-embed] [--json] [--config FILE]
@@ -75,11 +76,14 @@ server with --url. One batch = one source's complete truth: import
 retracts the source, then applies the batch, so re-importing is
 idempotent. A file carries one batch or a whole stream of them (each
 `taguru_batch` header line starts the next) — `taguru export` writes
-such streams. A `taguru_group` line states one group's complete truth
-the same way; groups restore AFTER every batch of the run
-(create-or-replace of the whole record), so group files re-apply in
-any order. A directory expands to its *.jsonl files, sorted by name.
-Format: docs/import.html.
+such streams. A `taguru_schema` line states one context's whole
+schema document (ADR 0009 §13); it installs AFTER every batch, BEFORE
+any group, so a schema record can name a context a batch of the same
+stream just created. A `taguru_group` line states one group's complete
+truth the same way; groups restore AFTER every batch and schema of
+the run (create-or-replace of the whole record), so group files
+re-apply in any order. A directory expands to its *.jsonl files,
+sorted by name. Format: docs/import.html.
 
   --dry-run    validate every file and report; touch nothing (with
                --url, POSTs every chunk as ?dry_run=true instead)
@@ -108,18 +112,19 @@ Format: docs/import.html.
                requires. In CI, name the target per invocation:
                  taguru import --url \"$TAGURU_URL\" backups/
   --json       one JSON document instead of per-file lines: {dry_run,
-               batches: [...], groups: [...]} — the same shape POST
-               /import answers with (groups omitted when empty).
-               With --url, every field is exact (the server previews
-               with the same code path a real apply runs). Offline,
-               a real (non-dry-run) run is exact the same way; offline
-               --dry-run cannot open the data directory without the
-               lock a running import would need, so its batch counts
-               are read straight from each file (created/retracted and
-               the *_dropped fields all report 0/false) and its groups
-               array is always empty — a preview, not the server's
-               exact one. Every exit path prints exactly one document,
-               failures included: validation refusing every file, the
+               batches: [...], schemas: [...], groups: [...]} — the
+               same shape POST /import answers with (schemas/groups
+               omitted when empty). With --url, every field is exact
+               (the server previews with the same code path a real
+               apply runs). Offline, a real (non-dry-run) run is exact
+               the same way; offline --dry-run cannot open the data
+               directory without the lock a running import would need,
+               so its batch counts are read straight from each file
+               (created/retracted and the *_dropped fields all report
+               0/false) and its schemas/groups arrays are always empty
+               — a preview, not the server's exact one. Every exit path
+               prints exactly one document, failures included: validation
+               refusing every file, the
                registry refusing to boot, and a remote transport error
                or a server-refused chunk each add a top-level 'error'
                string beside whatever batches/groups already landed; a
@@ -260,17 +265,20 @@ fn run_local(files: &[PathBuf], dry_run: bool, no_embed: bool, as_json: bool) ->
     // carry one batch or a whole stream (`taguru export` output);
     // either way each batch stands alone from here on.
     let mut batches = Vec::new();
+    let mut schemas: Vec<(&PathBuf, String, schema::InstalledSchema)> = Vec::new();
     let mut groups: Vec<(&PathBuf, String, GroupRecord)> = Vec::new();
     let mut broken = 0;
     let mut owners: HashSet<(String, String)> = HashSet::new();
+    let mut schema_owners: HashSet<String> = HashSet::new();
     let mut group_owners: HashSet<String> = HashSet::new();
     for path in files {
         let parsed = fs::File::open(path)
             .map_err(|error| error.to_string())
             .and_then(|file| parse_stream(std::io::BufReader::new(file)));
-        // A stream file can carry several batches or groups, so it can
-        // trip several of the checks below; `broken` counts files, not
-        // events, so one file's several conflicts must still add only 1.
+        // A stream file can carry several batches, schemas, or groups,
+        // so it can trip several of the checks below; `broken` counts
+        // files, not events, so one file's several conflicts must
+        // still add only 1.
         let mut file_broken = false;
         match parsed {
             Ok(stream) => {
@@ -285,6 +293,18 @@ fn run_local(files: &[PathBuf], dry_run: bool, no_embed: bool, as_json: bool) ->
                         continue;
                     }
                     batches.push((path, batch));
+                }
+                for (context, installed) in stream.schemas {
+                    if !schema_owners.insert(context.clone()) {
+                        eprintln!(
+                            "taguru: import: {}: {}",
+                            path.display(),
+                            duplicate_schema_message(&context)
+                        );
+                        file_broken = true;
+                        continue;
+                    }
+                    schemas.push((path, context, installed));
                 }
                 for (name, record) in stream.groups {
                     if !group_owners.insert(name.clone()) {
@@ -315,7 +335,14 @@ fn run_local(files: &[PathBuf], dry_run: bool, no_embed: bool, as_json: bool) ->
         );
         eprintln!("taguru: import: {message}");
         if as_json {
-            print_import_json(dry_run, Vec::new(), Vec::new(), Vec::new(), Some(message));
+            print_import_json(
+                dry_run,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Some(message),
+            );
         }
         return 1;
     }
@@ -335,23 +362,35 @@ fn run_local(files: &[PathBuf], dry_run: bool, no_embed: bool, as_json: bool) ->
                 .iter()
                 .map(|(_, batch)| dry_run_outcome_of(batch))
                 .collect();
-            print_import_json(true, batches, Vec::new(), Vec::new(), None);
+            print_import_json(true, batches, Vec::new(), Vec::new(), Vec::new(), None);
             return 0;
         }
         for (path, batch) in &batches {
             println!("{}: {}", path.display(), batch.describe());
         }
+        // Schema records, like group records, have no read-only twin
+        // to preview through (installing one can depend on a batch of
+        // this same run having just created its context) — described
+        // structurally from the parse alone, same as `describe_group`.
+        for (path, context, installed) in &schemas {
+            println!(
+                "{}: {}",
+                path.display(),
+                describe_schema(context, installed)
+            );
+        }
         for (path, name, record) in &groups {
             println!("{}: {}", path.display(), describe_group(name, record));
         }
-        println!(
-            "dry run: {} batch(es){} valid, nothing applied",
-            batches.len(),
-            match groups.len() {
-                0 => String::new(),
-                count => format!(" and {count} group record(s)"),
-            }
-        );
+        let mut summary = format!("dry run: {} batch(es)", batches.len());
+        if !schemas.is_empty() {
+            summary.push_str(&format!(", {} schema record(s)", schemas.len()));
+        }
+        if !groups.is_empty() {
+            summary.push_str(&format!(" and {} group record(s)", groups.len()));
+        }
+        summary.push_str(" valid, nothing applied");
+        println!("{summary}");
         return 0;
     }
 
@@ -387,6 +426,7 @@ fn run_local(files: &[PathBuf], dry_run: bool, no_embed: bool, as_json: bool) ->
             if as_json {
                 print_import_json(
                     dry_run,
+                    Vec::new(),
                     Vec::new(),
                     Vec::new(),
                     Vec::new(),
@@ -443,6 +483,37 @@ fn run_local(files: &[PathBuf], dry_run: bool, no_embed: bool, as_json: bool) ->
         if ops_since_flush >= FLUSH_EVERY_OPS {
             state.flush_dirty();
             ops_since_flush = 0;
+        }
+    }
+
+    // Schemas install after every batch, before groups restore (ADR
+    // 0009 §13): a schema record's context may exist only because a
+    // batch of THIS SAME run just created it. Unlike group restore,
+    // each record is independent — one context's schema installing
+    // does not gate another's — so failures are tallied per record
+    // rather than judged as one whole set.
+    let mut schema_failures = 0usize;
+    let mut json_schemas: Vec<crate::api::SchemaImportOutcome> = Vec::new();
+    for (path, context, installed) in &schemas {
+        match apply_schema_record(&state, context, installed.clone()) {
+            Ok(document) => {
+                if as_json {
+                    json_schemas.push(crate::api::schema_import_outcome(context, &document));
+                } else {
+                    println!(
+                        "{}: context '{context}' schema installed (mode: {})",
+                        path.display(),
+                        document.mode.as_str()
+                    );
+                }
+            }
+            Err(error) => {
+                eprintln!(
+                    "taguru: import: {}: context '{context}': {error}",
+                    path.display()
+                );
+                schema_failures += 1;
+            }
         }
     }
 
@@ -526,6 +597,7 @@ fn run_local(files: &[PathBuf], dry_run: bool, no_embed: bool, as_json: bool) ->
         print_import_json(
             false,
             json_batches,
+            json_schemas,
             json_groups,
             failed_batches,
             group_restore_error,
@@ -537,6 +609,13 @@ fn run_local(files: &[PathBuf], dry_run: bool, no_embed: bool, as_json: bool) ->
             batches.len(),
             touched.len()
         );
+        if !schemas.is_empty() {
+            println!(
+                "import: {} of {} schema record(s) installed",
+                schemas.len() - schema_failures,
+                schemas.len()
+            );
+        }
         if !groups.is_empty() {
             println!(
                 "import: {restored} of {} group record(s) restored",
@@ -544,7 +623,7 @@ fn run_local(files: &[PathBuf], dry_run: bool, no_embed: bool, as_json: bool) ->
             );
         }
     }
-    if failures > 0 || embed_failures > 0 || group_failures > 0 {
+    if failures > 0 || embed_failures > 0 || schema_failures > 0 || group_failures > 0 {
         1
     } else {
         0
@@ -597,16 +676,18 @@ struct FailedBatch {
 }
 
 /// `import --json`'s single shared print path for the local, typed
-/// entrance: `{dry_run, error, failed_batches, batches, groups}` — the
-/// last two the same shape [`crate::api::ImportStreamOutcome`]
-/// answers with. `error` is a whole-run failure (validation refused
-/// every file, the registry wouldn't boot, group restoration refused);
-/// `failed_batches` is the per-batch failures the run continued past.
-/// Every `--json` exit path calls this — including failure ones — so
-/// stdout is always exactly one parseable document, never silence.
+/// entrance: `{dry_run, error, failed_batches, batches, schemas,
+/// groups}` — the last three the same shape [`crate::api::
+/// ImportStreamOutcome`] answers with. `error` is a whole-run failure
+/// (validation refused every file, the registry wouldn't boot, group
+/// restoration refused); `failed_batches` is the per-batch failures
+/// the run continued past. Every `--json` exit path calls this —
+/// including failure ones — so stdout is always exactly one
+/// parseable document, never silence.
 fn print_import_json(
     dry_run: bool,
     batches: Vec<crate::api::ImportOutcome>,
+    schemas: Vec<crate::api::SchemaImportOutcome>,
     groups: Vec<crate::api::GroupImportOutcome>,
     failed_batches: Vec<FailedBatch>,
     error: Option<String>,
@@ -625,12 +706,30 @@ fn print_import_json(
         dry_run,
         error,
         failed_batches,
-        stream: crate::api::ImportStreamOutcome { batches, groups },
+        stream: crate::api::ImportStreamOutcome {
+            batches,
+            schemas,
+            groups,
+        },
     };
     match serde_json::to_string_pretty(&report) {
         Ok(text) => println!("{text}"),
         Err(error) => eprintln!("taguru: import: report did not serialize: {error}"),
     }
+}
+
+/// The dry-run report line for one schema record — what the batch's
+/// `describe` is to a batch. No outcome verb, unlike the applied
+/// (non-dry-run) report line: whether install/replace/no-op applies
+/// needs live state a dry run never loads.
+fn describe_schema(context: &str, installed: &schema::InstalledSchema) -> String {
+    let document = installed.document();
+    format!(
+        "context '{context}' schema (mode: {}): {} type(s), {} relation(s)",
+        document.mode.as_str(),
+        document.types.len(),
+        document.relations.len()
+    )
 }
 
 /// The dry-run and report line for one group record — what the batch's
@@ -653,6 +752,14 @@ fn duplicate_source_message(context: &str, source: &str) -> String {
     )
 }
 
+/// [`duplicate_source_message`]'s schema-record twin.
+fn duplicate_schema_message(context: &str) -> String {
+    format!(
+        "context '{context}' schema is already stated by an earlier file — one record \
+         owns one context's schema"
+    )
+}
+
 /// [`duplicate_source_message`]'s group-record twin.
 fn duplicate_group_message(name: &str) -> String {
     format!(
@@ -661,15 +768,87 @@ fn duplicate_group_message(name: &str) -> String {
     )
 }
 
-/// One batch's or group's rendered bytes, packed into a [`Chunk`] for
-/// `import --url`'s wire chunking (ADR 0002 §9) — `label` names the
-/// source (or group) for the hard-error and progress messages, `is_group`
-/// tells [`run_remote`]'s "batches not yet sent" tally apart from group
-/// records, which restore separately and are never counted as a batch.
+/// Why a `taguru_schema` record's install failed after it already
+/// parsed and validated — [`crate::registry::PutSchemaError`]'s
+/// entrance-agnostic twin, so both the offline CLI (this module) and
+/// `POST /import` (`src/api/import.rs`) can format or map each case
+/// without matching on the registry error directly.
+#[derive(Debug)]
+pub(crate) enum SchemaApplyError {
+    /// The record's context does not exist — not yet created by an
+    /// earlier batch of the same stream, nor previously.
+    NoContext,
+    ReservedAlias(String),
+    Load(String),
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for SchemaApplyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoContext => write!(
+                f,
+                "does not exist — a schema record's context must already exist (created \
+                 by an earlier batch of the same stream, or previously) before its schema \
+                 can install"
+            ),
+            Self::ReservedAlias(alias) => write!(
+                f,
+                "label alias '{alias}' resolves to '{}', the relation label reserved for \
+                 type assertions (ADR 0009 §6.3) — rename the alias before installing this \
+                 schema",
+                schema::SCHEMA_TYPE_LABEL
+            ),
+            Self::Load(message) => write!(f, "schema could not be loaded: {message}"),
+            Self::Io(error) => write!(f, "schema not persisted: {error}"),
+        }
+    }
+}
+
+/// Installs one parsed schema record via [`AppState::put_schema`] —
+/// shared by the offline CLI's pass 2 (here) and `POST /import`'s
+/// apply stage (`src/api/import.rs`) so both entrances judge the same
+/// failure the same way. `Ok` carries the installed document back so
+/// each caller builds its own report/outcome shape from one source of
+/// truth, the way [`apply_batch`]'s `Applied` feeds both `report()`
+/// and [`crate::api::import_outcome`].
+pub(crate) fn apply_schema_record(
+    state: &AppState,
+    context: &str,
+    installed: schema::InstalledSchema,
+) -> Result<schema::SchemaDocument, SchemaApplyError> {
+    match state.put_schema(context, installed) {
+        None => Err(SchemaApplyError::NoContext),
+        Some(Ok(document)) => Ok(document),
+        Some(Err(crate::registry::PutSchemaError::ReservedAlias(alias))) => {
+            Err(SchemaApplyError::ReservedAlias(alias))
+        }
+        Some(Err(crate::registry::PutSchemaError::Load(message))) => {
+            Err(SchemaApplyError::Load(message))
+        }
+        Some(Err(crate::registry::PutSchemaError::Io(error))) => Err(SchemaApplyError::Io(error)),
+    }
+}
+
+/// Which record kind a [`Unit`] carries — [`run_remote`]'s "batches
+/// not yet sent" tally (and its schema-record twin) reads this apart
+/// from group records, which restore through a separate path and are
+/// never counted as either.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UnitKind {
+    Batch,
+    Schema,
+    Group,
+}
+
+/// One batch's, schema's, or group's rendered bytes, packed into a
+/// [`Chunk`] for `import --url`'s wire chunking (ADR 0002 §9) —
+/// `label` names the source (or context, or group) for the hard-error
+/// and progress messages.
 struct Unit {
     text: String,
     label: String,
-    is_group: bool,
+    kind: UnitKind,
 }
 
 impl Unit {
@@ -893,11 +1072,14 @@ fn run_remote(base: &str, files: &[PathBuf], dry_run: bool, as_json: bool) -> i3
     // needs them: the chunk packer below slices each batch straight
     // out of its source file rather than re-serializing it.
     let mut units: Vec<Unit> = Vec::new();
+    let mut schema_units: Vec<Unit> = Vec::new();
     let mut group_units: Vec<Unit> = Vec::new();
     let mut batch_count = 0usize;
+    let mut schema_count = 0usize;
     let mut group_count = 0usize;
     let mut broken = 0usize;
     let mut owners: HashSet<(String, String)> = HashSet::new();
+    let mut schema_owners: HashSet<String> = HashSet::new();
     let mut group_owners: HashSet<String> = HashSet::new();
     for path in files {
         let mut bytes = match fs::read(path) {
@@ -964,9 +1146,26 @@ fn run_remote(base: &str, files: &[PathBuf], dry_run: bool, as_json: bool) -> i3
                             batch.context,
                             batch.source
                         ),
-                        is_group: false,
+                        kind: UnitKind::Batch,
                     });
                     batch_count += 1;
+                }
+                for (context, installed) in &stream.schemas {
+                    if !schema_owners.insert(context.clone()) {
+                        eprintln!(
+                            "taguru: import: {}: {}",
+                            path.display(),
+                            duplicate_schema_message(context)
+                        );
+                        file_broken = true;
+                        continue;
+                    }
+                    schema_units.push(Unit {
+                        text: crate::export::render_schema(context, installed.document()),
+                        label: format!("{}: context '{context}' schema", path.display()),
+                        kind: UnitKind::Schema,
+                    });
+                    schema_count += 1;
                 }
                 for (name, record) in &stream.groups {
                     if !group_owners.insert(name.clone()) {
@@ -981,7 +1180,7 @@ fn run_remote(base: &str, files: &[PathBuf], dry_run: bool, as_json: bool) -> i3
                     group_units.push(Unit {
                         text: crate::export::render_group(name, record),
                         label: format!("{}: group '{name}'", path.display()),
-                        is_group: true,
+                        kind: UnitKind::Group,
                     });
                     group_count += 1;
                 }
@@ -1002,14 +1201,18 @@ fn run_remote(base: &str, files: &[PathBuf], dry_run: bool, as_json: bool) -> i3
         );
         eprintln!("taguru: import: {message}");
         if as_json {
-            print_import_json_values(dry_run, Vec::new(), Vec::new(), Some(message));
+            print_import_json_values(dry_run, Vec::new(), Vec::new(), Vec::new(), Some(message));
         }
         return 1;
     }
 
-    // Groups restore only after every batch of the run — the same
-    // rule run_local's Pass 2 keeps — so a group naming a context an
-    // earlier chunk's batch creates must always be sent after it.
+    // Schemas install after every batch, before groups restore — the
+    // same order run_local's Pass 2 keeps (ADR 0009 §13) — so a
+    // schema record naming a context an earlier chunk's batch creates
+    // must always be sent after it, and a group naming a context an
+    // earlier chunk's schema installs onto must always be sent after
+    // that.
+    units.append(&mut schema_units);
     units.append(&mut group_units);
 
     // A single unit that alone exceeds the byte budget cannot be
@@ -1031,6 +1234,19 @@ fn run_remote(base: &str, files: &[PathBuf], dry_run: bool, as_json: bool) -> i3
     // before sending anything.
     eprintln!("import → {base}");
     api.warn_on_version_skew("import");
+    // ADR 0009 §13's explicit compatibility refusal, checked only when
+    // the stream actually carries a schema record — a schema-free
+    // import must behave exactly as it did before this preflight
+    // existed, skew warning included, whatever the peer reports.
+    if schema_count > 0
+        && let Some(message) = api.schema_import_refusal()
+    {
+        eprintln!("{message}");
+        if as_json {
+            print_import_json_values(dry_run, Vec::new(), Vec::new(), Vec::new(), Some(message));
+        }
+        return 1;
+    }
 
     let mut queue = pack_chunks(units, REMOTE_IMPORT_BUDGET_BYTES);
 
@@ -1045,9 +1261,11 @@ fn run_remote(base: &str, files: &[PathBuf], dry_run: bool, as_json: bool) -> i3
     let mut landed_chunks = 0usize;
     let mut budget = REMOTE_IMPORT_BUDGET_BYTES;
     let mut batches_landed = 0usize;
+    let mut schema_records_landed = 0usize;
     let mut group_records_landed = 0usize;
     let mut contexts: BTreeSet<String> = BTreeSet::new();
     let mut json_batches: Vec<Value> = Vec::new();
+    let mut json_schemas: Vec<Value> = Vec::new();
     let mut json_groups: Vec<Value> = Vec::new();
 
     while let Some(chunk) = queue.pop_front() {
@@ -1072,6 +1290,12 @@ fn run_remote(base: &str, files: &[PathBuf], dry_run: bool, as_json: bool) -> i3
                     }
                 }
                 batches_landed += outcomes.len();
+                let schemas = result
+                    .get("schemas")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                schema_records_landed += schemas.len();
                 let groups = result
                     .get("groups")
                     .and_then(Value::as_array)
@@ -1085,6 +1309,7 @@ fn run_remote(base: &str, files: &[PathBuf], dry_run: bool, as_json: bool) -> i3
                     // reparsed into a different type that could drift
                     // from what the server actually said.
                     json_batches.extend(outcomes);
+                    json_schemas.extend(schemas);
                     json_groups.extend(groups);
                 } else {
                     // One line per LANDED chunk, always — every group unit
@@ -1098,11 +1323,22 @@ fn run_remote(base: &str, files: &[PathBuf], dry_run: bool, as_json: bool) -> i3
                     println!(
                         "chunk {landed_chunks}/{total}: {}",
                         if outcomes.is_empty() {
-                            "group record(s) only".to_string()
+                            "schema/group record(s) only".to_string()
                         } else {
                             summarize_chunk_outcomes(&outcomes)
                         }
                     );
+                    for schema in &schemas {
+                        let context = schema.get("context").and_then(Value::as_str).unwrap_or("?");
+                        let mode = schema.get("mode").and_then(Value::as_str).unwrap_or("?");
+                        let types = schema.get("types").and_then(Value::as_u64).unwrap_or(0);
+                        let relations =
+                            schema.get("relations").and_then(Value::as_u64).unwrap_or(0);
+                        println!(
+                            "context '{context}' schema (mode: {mode}): {types} type(s), \
+                             {relations} relation(s) — installed"
+                        );
+                    }
                     for group in &groups {
                         let name = group.get("name").and_then(Value::as_str).unwrap_or("?");
                         let outcome = group.get("outcome").and_then(Value::as_str).unwrap_or("?");
@@ -1120,7 +1356,13 @@ fn run_remote(base: &str, files: &[PathBuf], dry_run: bool, as_json: bool) -> i3
                 if chunk.units.len() == 1 {
                     eprintln!("taguru: import: {message}");
                     if as_json {
-                        print_import_json_values(dry_run, json_batches, json_groups, Some(message));
+                        print_import_json_values(
+                            dry_run,
+                            json_batches,
+                            json_schemas,
+                            json_groups,
+                            Some(message),
+                        );
                     }
                     return server_refused_single_unit_error(
                         &chunk.units[0].label,
@@ -1162,7 +1404,13 @@ fn run_remote(base: &str, files: &[PathBuf], dry_run: bool, as_json: bool) -> i3
                     );
                 }
                 if as_json {
-                    print_import_json_values(dry_run, json_batches, json_groups, Some(message));
+                    print_import_json_values(
+                        dry_run,
+                        json_batches,
+                        json_schemas,
+                        json_groups,
+                        Some(message),
+                    );
                 }
                 return 1;
             }
@@ -1187,12 +1435,23 @@ fn run_remote(base: &str, files: &[PathBuf], dry_run: bool, as_json: bool) -> i3
                 let unsent_batches: usize = queue
                     .iter()
                     .flat_map(|chunk| &chunk.units)
-                    .filter(|unit| !unit.is_group)
+                    .filter(|unit| unit.kind == UnitKind::Batch)
                     .count();
                 if unsent_batches > 0 {
                     eprintln!(
                         "taguru: import: {unsent_batches} batch(es) after this chunk were \
                          never sent"
+                    );
+                }
+                let unsent_schemas: usize = queue
+                    .iter()
+                    .flat_map(|chunk| &chunk.units)
+                    .filter(|unit| unit.kind == UnitKind::Schema)
+                    .count();
+                if unsent_schemas > 0 {
+                    eprintln!(
+                        "taguru: import: {unsent_schemas} schema record(s) after this chunk \
+                         were never sent"
                     );
                 }
                 if dry_run {
@@ -1208,7 +1467,13 @@ fn run_remote(base: &str, files: &[PathBuf], dry_run: bool, as_json: bool) -> i3
                     );
                 }
                 if as_json {
-                    print_import_json_values(dry_run, json_batches, json_groups, Some(message));
+                    print_import_json_values(
+                        dry_run,
+                        json_batches,
+                        json_schemas,
+                        json_groups,
+                        Some(message),
+                    );
                 }
                 return 1;
             }
@@ -1216,21 +1481,28 @@ fn run_remote(base: &str, files: &[PathBuf], dry_run: bool, as_json: bool) -> i3
     }
 
     if as_json {
-        print_import_json_values(dry_run, json_batches, json_groups, None);
+        print_import_json_values(dry_run, json_batches, json_schemas, json_groups, None);
     } else if dry_run {
-        println!(
-            "dry run: {batch_count} batch(es){} valid, nothing applied",
-            match group_count {
-                0 => String::new(),
-                count => format!(" and {count} group record(s)"),
-            }
-        );
+        let mut summary = format!("dry run: {batch_count} batch(es)");
+        if schema_count > 0 {
+            summary.push_str(&format!(", {schema_count} schema record(s)"));
+        }
+        if group_count > 0 {
+            summary.push_str(&format!(" and {group_count} group record(s)"));
+        }
+        summary.push_str(" valid, nothing applied");
+        println!("{summary}");
     } else {
         println!(
             "import: {batches_landed} batch(es) applied across {} context(s) in {total} \
              chunk(s)",
             contexts.len()
         );
+        if schema_count > 0 {
+            println!(
+                "import: {schema_records_landed} of {schema_count} schema record(s) installed"
+            );
+        }
         if group_count > 0 {
             println!("import: {group_records_landed} of {group_count} group record(s) restored");
         }
@@ -1240,20 +1512,21 @@ fn run_remote(base: &str, files: &[PathBuf], dry_run: bool, as_json: bool) -> i3
 
 /// [`print_import_json`]'s remote twin: the server already answers
 /// each chunk in exactly the shape `ImportStreamOutcome` describes, so
-/// this builds the same `{dry_run, batches, groups}` envelope directly
-/// from the accumulated `Value`s instead of round-tripping them
-/// through the typed structs (which would risk silently dropping a
-/// field the server sent that this build's types don't know about).
-/// [`print_import_json`]'s remote twin — same `{dry_run, error,
-/// batches, groups}` envelope (no `failed_batches`: a remote refusal
-/// fails its whole chunk, never one batch within it, so there is
-/// nothing per-batch to name — the chunk's `error` text already says
-/// what happened). Called on every remote `--json` exit path,
-/// including failures, with whatever `batches`/`groups` landed before
-/// the failure — never silence.
+/// this builds the same `{dry_run, batches, schemas, groups}` envelope
+/// directly from the accumulated `Value`s instead of round-tripping
+/// them through the typed structs (which would risk silently dropping
+/// a field the server sent that this build's types don't know about).
+/// Same `{dry_run, error, batches, schemas, groups}` envelope (no
+/// `failed_batches`: a remote refusal fails its whole chunk, never one
+/// batch within it, so there is nothing per-batch to name — the
+/// chunk's `error` text already says what happened). Called on every
+/// remote `--json` exit path, including failures, with whatever
+/// `batches`/`schemas`/`groups` landed before the failure — never
+/// silence.
 fn print_import_json_values(
     dry_run: bool,
     batches: Vec<Value>,
+    schemas: Vec<Value>,
     groups: Vec<Value>,
     error: Option<String>,
 ) {
@@ -1264,8 +1537,12 @@ fn print_import_json_values(
     }
     report.insert("batches".to_string(), Value::Array(batches));
     // Matches ImportStreamOutcome's own `skip_serializing_if` on
-    // `groups` — omitted entirely when empty, not printed as `[]`, so
-    // local and remote --json agree byte for byte on a groupless run.
+    // `schemas`/`groups` — omitted entirely when empty, not printed as
+    // `[]`, so local and remote --json agree byte for byte on a
+    // schema-/group-less run.
+    if !schemas.is_empty() {
+        report.insert("schemas".to_string(), Value::Array(schemas));
+    }
     if !groups.is_empty() {
         report.insert("groups".to_string(), Value::Array(groups));
     }
@@ -1305,13 +1582,16 @@ fn expand(paths: &[String]) -> Result<Vec<PathBuf>, String> {
     Ok(files)
 }
 
-/// One parsed stream: the batches, then the group records it carried,
-/// each in stream order. The split IS the apply order — batches
-/// first, all of them, then the groups — so a group and the member
-/// contexts it names can ride one stream in any arrangement.
+/// One parsed stream: the batches, then the schema records, then the
+/// group records it carried, each in stream order within its own
+/// vector. The split IS the apply order — batches first, all of them,
+/// then schemas, then groups (ADR 0009 §13) — so a schema record can
+/// name a context a batch of the SAME stream just created, and a
+/// group record can name a context whose schema just landed.
 #[cfg_attr(test, derive(Debug))]
 pub(crate) struct Stream {
     pub(crate) batches: Vec<Batch>,
+    pub(crate) schemas: Vec<(String, schema::InstalledSchema)>,
     pub(crate) groups: Vec<(String, GroupRecord)>,
 }
 
@@ -1492,6 +1772,58 @@ fn parse_group(value: serde_json::Value, number: usize) -> Result<(String, Group
     Ok((line.name, record))
 }
 
+/// The `taguru_schema` record line: one context's whole schema
+/// document, plus the `context` it installs onto. Unlike
+/// [`GroupLine`], NO field defaults — every field required mirrors
+/// [`schema::SchemaDocument`]'s own at-rest posture (a missing field
+/// is a parse refusal, never a silent default, per ADR 0009 §13).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SchemaLine {
+    taguru_schema: u64,
+    context: String,
+    mode: schema::SchemaMode,
+    closed_labels: bool,
+    types: BTreeMap<String, schema::TypeDef>,
+    relations: BTreeMap<String, schema::RelationDef>,
+}
+
+/// Validates one schema record line into the installed document its
+/// context restores to. Follows [`parse_group`]'s exact wording shape
+/// for the version refusal (ADR 0009 §13 bullet 4) — a
+/// `taguru_schema` this build cannot read refuses by line number,
+/// never a silent skip. Every other structural rule (type/relation
+/// caps, name lengths, `is_a` cycles and depth, the reserved relation)
+/// runs through [`schema::install`], the same gate a hand-edited
+/// `{stem}.schema.json` passes through at boot.
+fn parse_schema(
+    value: serde_json::Value,
+    number: usize,
+) -> Result<(String, schema::InstalledSchema), String> {
+    let line: SchemaLine = serde_json::from_value(value)
+        .map_err(|error| format!("line {number}: not a schema record: {error}"))?;
+    if line.taguru_schema != schema::SCHEMA_VERSION {
+        return Err(format!(
+            "line {number}: taguru_schema {} is not a version this taguru reads (it reads \
+             {})",
+            line.taguru_schema,
+            schema::SCHEMA_VERSION
+        ));
+    }
+    check_size(number, "context", &line.context, MAX_CONTEXT_NAME_BYTES)?;
+    check_nonempty(number, "context", &line.context)?;
+    let document = schema::SchemaDocument {
+        schema: line.taguru_schema,
+        mode: line.mode,
+        closed_labels: line.closed_labels,
+        types: line.types,
+        relations: line.relations,
+    };
+    let installed =
+        schema::install(document).map_err(|violation| format!("line {number}: {violation}"))?;
+    Ok((line.context, installed))
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AssociationLine {
@@ -1560,6 +1892,12 @@ struct LocatorLine {
 /// [`parse_stream`].
 pub(crate) fn parse_batch(reader: impl BufRead) -> Result<Batch, String> {
     let mut stream = parse_stream(reader)?;
+    if let Some((context, _)) = stream.schemas.first() {
+        return Err(format!(
+            "schema record for context '{context}' in a file where exactly one batch was \
+             expected"
+        ));
+    }
     if let Some((name, _)) = stream.groups.first() {
         return Err(format!(
             "group record '{name}' in a file where exactly one batch was expected"
@@ -1589,9 +1927,11 @@ pub(crate) fn parse_batch(reader: impl BufRead) -> Result<Batch, String> {
 /// truth, one record one group's.
 pub(crate) fn parse_stream(mut reader: impl BufRead) -> Result<Stream, String> {
     let mut batches: Vec<Batch> = Vec::new();
+    let mut schemas: Vec<(String, schema::InstalledSchema)> = Vec::new();
     let mut groups: Vec<(String, GroupRecord)> = Vec::new();
     let mut current: Option<Batch> = None;
     let mut owners: HashSet<(String, String)> = HashSet::new();
+    let mut schema_owners: HashSet<String> = HashSet::new();
     let mut group_owners: HashSet<String> = HashSet::new();
     // Per-paragraph question tally, carried as we parse so the per-line
     // cap check is a map lookup instead of a rescan of every question
@@ -1651,10 +1991,11 @@ pub(crate) fn parse_stream(mut reader: impl BufRead) -> Result<Stream, String> {
                 .is_some_and(|object| object.contains_key(key))
         };
         let is_header = has_key("taguru_batch");
+        let is_schema = has_key("taguru_schema");
         let is_group = has_key("taguru_group");
-        if is_header || is_group {
-            // Either stream-level record closes the batch before it —
-            // one boundary step, however many marker kinds exist.
+        if is_header || is_schema || is_group {
+            // Any stream-level record closes the batch before it — one
+            // boundary step, however many marker kinds exist.
             if let Some(finished) = current.take() {
                 batches.push(finish_batch(finished)?);
                 question_counts.clear();
@@ -1671,6 +2012,15 @@ pub(crate) fn parse_stream(mut reader: impl BufRead) -> Result<Stream, String> {
                 ));
             }
             current = Some(batch);
+        } else if is_schema {
+            let (context, installed) = parse_schema(value, number)?;
+            if !schema_owners.insert(context.clone()) {
+                return Err(format!(
+                    "line {number}: context '{context}' schema is already stated by an \
+                     earlier record of this stream — one record owns one context's schema"
+                ));
+            }
+            schemas.push((context, installed));
         } else if is_group {
             let (name, record) = parse_group(value, number)?;
             if !group_owners.insert(name.clone()) {
@@ -1700,25 +2050,33 @@ pub(crate) fn parse_stream(mut reader: impl BufRead) -> Result<Stream, String> {
     }
     match current.take() {
         Some(finished) => batches.push(finish_batch(finished)?),
-        // A stream of group records alone is a legitimate restore; a
-        // stream of nothing is a mistake.
-        None if batches.is_empty() && groups.is_empty() => {
-            return Err("empty file: expected a batch header or group record line".to_string());
+        // A stream of schema or group records alone is a legitimate
+        // restore; a stream of nothing is a mistake.
+        None if batches.is_empty() && schemas.is_empty() && groups.is_empty() => {
+            return Err(
+                "empty file: expected a batch header, schema record, or group record line"
+                    .to_string(),
+            );
         }
         None => {}
     }
-    Ok(Stream { batches, groups })
+    Ok(Stream {
+        batches,
+        schemas,
+        groups,
+    })
 }
 
 /// Byte ranges of each batch in a stream [`parse_stream`] already
 /// validated: a batch runs from its `taguru_batch` header line to the
-/// next stream-level record (header or `taguru_group` line) or EOF.
-/// Group-record bytes belong to no batch — they are re-rendered from
-/// the parsed records instead of sliced. Lives beside the parser
-/// because the boundary rule is a property of the stream FORMAT, not
-/// of either caller: `router`'s cross-shard import scatter-gather and
-/// `import --url`'s chunk packer both need the same ranges and must
-/// never compute them two different ways.
+/// next stream-level record (header, `taguru_schema`, or
+/// `taguru_group` line) or EOF. Schema- and group-record bytes belong
+/// to no batch — they are re-rendered from the parsed records instead
+/// of sliced. Lives beside the parser because the boundary rule is a
+/// property of the stream FORMAT, not of either caller: `router`'s
+/// cross-shard import scatter-gather and `import --url`'s chunk packer
+/// both need the same ranges and must never compute them two different
+/// ways.
 pub(crate) fn split_batches(body: &[u8]) -> Vec<std::ops::Range<usize>> {
     let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
     let mut current_start: Option<usize> = None;
@@ -1743,7 +2101,10 @@ pub(crate) fn split_batches(body: &[u8]) -> Vec<std::ops::Range<usize>> {
         let Some(object) = value.as_object() else {
             continue;
         };
-        if object.contains_key("taguru_batch") || object.contains_key("taguru_group") {
+        if object.contains_key("taguru_batch")
+            || object.contains_key("taguru_schema")
+            || object.contains_key("taguru_group")
+        {
             if let Some(batch_start) = current_start.take() {
                 ranges.push(batch_start..start);
             }
@@ -2861,6 +3222,28 @@ mod tests {
         assert!(second.ends_with("\"d\"]}"), "EOF closes the last batch");
     }
 
+    /// [`split_batches_slices_exactly_the_bytes_between_stream_level_records`]'s
+    /// `taguru_schema` case: a schema record between two batches
+    /// belongs to neither, the same as a group record.
+    #[test]
+    fn split_batches_excludes_a_schema_record_from_either_adjacent_batch() {
+        let body = format!(
+            "{{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"s1\"}}\n\
+             {{\"assoc\": [\"a\", \"likes\", \"b\"]}}\n\
+             {SCHEMA_LINE}\n\
+             {{\"taguru_batch\": 1, \"context\": \"beer\", \"source\": \"s2\"}}\n\
+             {{\"assoc\": [\"c\", \"likes\", \"d\"]}}"
+        );
+        let body = body.as_bytes();
+        let ranges = split_batches(body);
+        assert_eq!(ranges.len(), 2);
+        let first = std::str::from_utf8(&body[ranges[0].clone()]).unwrap();
+        assert!(first.contains("likes"));
+        assert!(!first.contains("taguru_schema"));
+        let second = std::str::from_utf8(&body[ranges[1].clone()]).unwrap();
+        assert!(second.starts_with("{\"taguru_batch\": 1, \"context\": \"beer\""));
+    }
+
     #[test]
     fn a_batch_parses_and_the_header_source_stamps_every_association() {
         let batch = parse(&format!(
@@ -3163,6 +3546,168 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("exactly one batch was expected"), "{error}");
+    }
+
+    const SCHEMA_LINE: &str = r#"{"taguru_schema": 1, "context": "sake", "mode": "warn", "closed_labels": false, "types": {}, "relations": {}}"#;
+
+    /// `taguru_schema` records ride a stream and stand alone — the
+    /// schema twin of [`group_records_ride_a_stream_and_stand_alone`]
+    /// (ADR 0009 §13). A schema record closes the batch before it, an
+    /// op line after one has no batch to join, a schema-only stream is
+    /// a legitimate restore, and the empty-stream message now names
+    /// all three record kinds.
+    #[test]
+    fn schema_records_ride_a_stream_and_stand_alone() {
+        let stream = parse_stream(std::io::Cursor::new(format!(
+            "{HEADER}\n\
+             {{\"subject\": \"a\", \"label\": \"l\", \"object\": \"b\", \"weight\": 1.0}}\n\
+             {SCHEMA_LINE}\n\
+             {{\"taguru_group\": 1, \"name\": \"kid\"}}\n"
+        )))
+        .unwrap();
+        assert_eq!(stream.batches.len(), 1);
+        assert_eq!(stream.schemas.len(), 1);
+        assert_eq!(stream.groups.len(), 1);
+        let (context, installed) = &stream.schemas[0];
+        assert_eq!(context, "sake");
+        assert_eq!(installed.document().mode, crate::schema::SchemaMode::Warn);
+
+        // A schema record closes the batch before it: an op line after
+        // one has no batch to join.
+        let error = parse_stream(std::io::Cursor::new(format!(
+            "{HEADER}\n\
+             {SCHEMA_LINE}\n\
+             {{\"subject\": \"a\", \"label\": \"l\", \"object\": \"b\", \"weight\": 1.0}}\n"
+        )))
+        .unwrap_err();
+        assert!(
+            error.contains("line 3") && error.contains("not a batch header"),
+            "{error}"
+        );
+
+        // A schemas-only stream is a legitimate restore.
+        let alone = parse_stream(std::io::Cursor::new(format!("{SCHEMA_LINE}\n"))).unwrap();
+        assert!(alone.batches.is_empty());
+        assert_eq!(alone.schemas.len(), 1);
+
+        // The empty-stream message now names every record kind.
+        let error = parse_stream(std::io::Cursor::new("\n")).unwrap_err();
+        assert!(error.contains("schema record"), "{error}");
+        assert!(error.contains("group record"), "{error}");
+    }
+
+    /// The version-refusal wording, `deny_unknown_fields`, a missing
+    /// field, an empty context, a cross-record duplicate, and a
+    /// `schema::install`-level violation — the schema twin of
+    /// [`group_records_validate_their_shape_with_line_numbers`].
+    #[test]
+    fn schema_records_validate_their_shape_with_line_numbers() {
+        let case =
+            |line: &str| parse_stream(std::io::Cursor::new(format!("{line}\n"))).unwrap_err();
+
+        // parse_group's exact wording shape (ADR 0009 §13 bullet 4).
+        assert!(
+            case(
+                r#"{"taguru_schema": 2, "context": "sake", "mode": "off", "closed_labels": false, "types": {}, "relations": {}}"#
+            )
+            .contains("taguru_schema 2 is not a version this taguru reads (it reads 1)")
+        );
+
+        assert!(
+            case(
+                r#"{"taguru_schema": 1, "context": "", "mode": "off", "closed_labels": false, "types": {}, "relations": {}}"#
+            )
+            .contains("must not be empty")
+        );
+
+        // The context name's own byte cap — mirrors
+        // `group_records_validate_their_shape_with_line_numbers`'s
+        // `long` case for a group's `name`.
+        let long = "x".repeat(65);
+        assert!(
+            case(&format!(
+                r#"{{"taguru_schema": 1, "context": "{long}", "mode": "off", "closed_labels": false, "types": {{}}, "relations": {{}}}}"#
+            ))
+            .contains("65 bytes")
+        );
+
+        // Every field is required — no struct-level default, matching
+        // SchemaDocument's own at-rest posture.
+        assert!(
+            case(r#"{"taguru_schema": 1, "context": "sake", "mode": "off"}"#)
+                .contains("missing field")
+        );
+
+        assert!(
+            case(
+                r#"{"taguru_schema": 1, "context": "sake", "mode": "off", "closed_labels": false, "types": {}, "relations": {}, "nope": 1}"#
+            )
+            .contains("unknown field")
+        );
+
+        // A structural violation `schema::install` itself catches
+        // (here: the relation named the reserved type label) surfaces
+        // with the line number, not just the bare violation text.
+        let error = case(
+            r#"{"taguru_schema": 1, "context": "sake", "mode": "off", "closed_labels": false, "types": {}, "relations": {"schema:type": {}}}"#,
+        );
+        assert!(
+            error.contains("line 1") && error.contains("reserved"),
+            "{error}"
+        );
+
+        // Restating one context's schema refuses the whole stream, by
+        // line — mirrors a group record's own duplicate refusal.
+        let error = parse_stream(std::io::Cursor::new(format!(
+            "{SCHEMA_LINE}\n{SCHEMA_LINE}\n"
+        )))
+        .unwrap_err();
+        assert!(
+            error.contains("line 2") && error.contains("one record owns one context's schema"),
+            "{error}"
+        );
+    }
+
+    /// The single-batch entrance (`taguru extract` re-validating its
+    /// own output) never carries schema records either.
+    #[test]
+    fn parse_batch_refuses_schema_records() {
+        let error = parse(&format!("{HEADER}\n{SCHEMA_LINE}\n")).unwrap_err();
+        assert!(
+            error.contains("schema record for context 'sake'")
+                && error.contains("exactly one batch was expected"),
+            "{error}"
+        );
+    }
+
+    /// [`apply_schema_record`]'s own failure path, not just
+    /// `parse_schema`'s validation: a schema record naming a context
+    /// neither an earlier batch of the same stream nor a previous
+    /// request ever created returns [`SchemaApplyError::NoContext`] —
+    /// the CLI-specific arm `run_local`'s Pass 2 counts into
+    /// `schema_failures` (exit 1), and the server twin
+    /// `schema_import_refusal` maps to 404 `no_context`.
+    #[test]
+    fn apply_schema_record_refuses_a_context_that_does_not_exist() {
+        let dir = std::env::temp_dir().join(format!(
+            "taguru-ingest-schema-no-context-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+
+        let installed = schema::install(schema::SchemaDocument {
+            schema: schema::SCHEMA_VERSION,
+            mode: schema::SchemaMode::Off,
+            closed_labels: false,
+            types: BTreeMap::new(),
+            relations: BTreeMap::new(),
+        })
+        .unwrap();
+        let error = apply_schema_record(&state, "ghost", installed).unwrap_err();
+        assert!(matches!(error, SchemaApplyError::NoContext), "{error:?}");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A line longer than the cap is refused at the cap, not buffered
@@ -3955,7 +4500,7 @@ mod tests {
         Unit {
             text: "x".repeat(bytes),
             label: label.to_string(),
-            is_group: false,
+            kind: UnitKind::Batch,
         }
     }
 
@@ -4027,12 +4572,12 @@ mod tests {
                 Unit {
                     text: "{\"a\":1}".to_string(),
                     label: "no-newline".to_string(),
-                    is_group: false,
+                    kind: UnitKind::Batch,
                 },
                 Unit {
                     text: "{\"b\":2}\n".to_string(),
                     label: "has-newline".to_string(),
-                    is_group: false,
+                    kind: UnitKind::Batch,
                 },
             ],
         };

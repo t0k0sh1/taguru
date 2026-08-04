@@ -474,6 +474,37 @@ fn import_reports_locator_bookkeeping() {
     );
 }
 
+/// The `taguru_schema` record's own wire shape (#384, ADR 0009 §13) —
+/// `import.json` above never carries one, so this pins
+/// `response.result.schemas[]`'s exact fields (`context`/`mode`/
+/// `types`/`relations`, no outcome verb) separately.
+#[test]
+fn import_with_schema_reports_the_schema_outcome() {
+    let server = Server::start("contract-import-schema");
+    let stream = "{\"taguru_batch\": 1, \"context\": \"corpus-g\", \"source\": \"doc.md\", \
+                  \"create\": {\"description\": \"wire-contract schema-carrying import\"}}\n\
+                  {\"subject\": \"alpha\", \"label\": \"connects_to\", \"object\": \"beta\", \
+                  \"weight\": 1.0}\n\
+                  {\"taguru_schema\": 1, \"context\": \"corpus-g\", \"mode\": \"warn\", \
+                  \"closed_labels\": false, \"types\": {\"Concept\": {\"is_a\": []}}, \
+                  \"relations\": {\"connects_to\": {\"domain\": [\"Concept\"], \
+                  \"range\": [\"Concept\"]}}}\n";
+    let (status, body) = post_import(&server, stream, None);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body["result"]["schemas"][0]["context"], "corpus-g",
+        "{body}"
+    );
+    http_fixture(
+        "import_with_schema",
+        "POST",
+        "/import",
+        Some(json!(stream)),
+        status,
+        body,
+    );
+}
+
 // --- HTTP: evidence assembly (#216, #305, ADR 0006 §10) — the public
 // shape #301's own issue names as the thing it must cover. ---
 

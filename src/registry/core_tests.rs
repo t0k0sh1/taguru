@@ -36,6 +36,32 @@ mod tests {
         assert_eq!(name_from_stem("%FF%FE"), None);
     }
 
+    /// [`context_files`]'s own doc claims it is "built from the same
+    /// ten path builders every other caller uses, so a file kind added
+    /// there cannot silently miss this list" — a claim, not an
+    /// enforced invariant, until this test. Pins the count AND that
+    /// the schema file (`{stem}.schema.json`, added by #379/ADR 0009)
+    /// is a member — the delete loop, the rename pivot walk, and
+    /// `FamilySig` (`src/hydrate.rs`) all read this one list, so a
+    /// family member silently missing here would silently miss all
+    /// three.
+    #[test]
+    fn context_files_names_every_family_member_including_the_schema_file() {
+        let files = context_files("sake");
+        assert_eq!(files.len(), 10, "{files:?}");
+        assert!(
+            files.iter().any(|path| path.ends_with("sake.schema.json")),
+            "{files:?}"
+        );
+        // Last on purpose (the array's own doc): a missing/lagging
+        // schema file must never block the pivot rename, so it sits
+        // where a straggler is already tolerated as best-effort.
+        assert!(
+            files.last().unwrap().ends_with("sake.schema.json"),
+            "{files:?}"
+        );
+    }
+
     #[test]
     fn meta_sidecar_without_usage_field_loads_with_zeroed_counters() {
         // A sidecar written before usage counters existed.

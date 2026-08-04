@@ -120,8 +120,14 @@ impl AppState {
             match &inner.slot {
                 Slot::Hot(context) => {
                     self.0.metrics.record_cache_hit();
-                    let snapshot =
-                        self.export_snapshot(&entry, &stem, &inner.meta, context, deadline);
+                    let snapshot = self.export_snapshot(
+                        &entry,
+                        &stem,
+                        &inner.meta,
+                        context,
+                        inner.schema.as_deref(),
+                        deadline,
+                    );
                     drop(inner);
                     self.touch(&entry);
                     self.enforce_budget(name);
@@ -149,7 +155,14 @@ impl AppState {
             let Slot::Hot(context) = &inner.slot else {
                 unreachable!("ensure_hot leaves the slot hot");
             };
-            self.export_snapshot(&entry, &stem, &inner.meta, context, deadline)
+            self.export_snapshot(
+                &entry,
+                &stem,
+                &inner.meta,
+                context,
+                inner.schema.as_deref(),
+                deadline,
+            )
         })?;
         self.touch(&entry);
         self.enforce_budget(name);
@@ -172,6 +185,7 @@ impl AppState {
         stem: &str,
         meta: &ContextMeta,
         context: &Context,
+        schema: Option<&crate::schema::InstalledSchema>,
         deadline: Deadline,
     ) -> Result<crate::export::ExportSnapshot, AccessError> {
         if deadline.expired() {
@@ -192,6 +206,7 @@ impl AppState {
             associations: context.query_any(&[], &[], &[]),
             concept_aliases: owned(context.concept_aliases()),
             label_aliases: owned(context.label_aliases()),
+            schema: schema.map(|installed| installed.document().clone()),
             passages,
         })
     }

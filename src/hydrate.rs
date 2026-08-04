@@ -1361,6 +1361,45 @@ mod tests {
         std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(path).unwrap())
     }
 
+    /// [`FamilySig::of`] reads [`crate::registry::context_files`] to
+    /// decide what belongs to one context's family — this pins that
+    /// the schema file (`{stem}.schema.json`, ADR 0009's #379) is
+    /// picked up the same way every other family member is, so a
+    /// context whose schema changed on the writer is recognized as
+    /// stale by a replica's retarget diff. No ship/hydrate machinery
+    /// needed: a hand-built [`Manifest`] is enough to exercise the
+    /// pure comparison.
+    #[test]
+    fn family_sig_picks_up_the_schema_file_from_the_manifest() {
+        let mut manifest = Manifest::default();
+        let schema_name = crate::registry::context_files("sake")
+            .into_iter()
+            .find(|name| name.ends_with("sake.schema.json"))
+            .unwrap();
+        manifest
+            .files
+            .insert(schema_name.clone(), ManifestFile { len: 42, crc: 7 });
+        // A file this context's family does NOT own must not leak in —
+        // proves the loop filters by `context_files`, not "everything
+        // the manifest happens to carry."
+        manifest.files.insert(
+            "other.schema.json".to_string(),
+            ManifestFile { len: 1, crc: 1 },
+        );
+
+        let sig = FamilySig::of(&manifest, "sake");
+        assert_eq!(
+            sig.files.get(&schema_name),
+            Some(&ManifestFile { len: 42, crc: 7 })
+        );
+        assert_eq!(
+            sig.files.len(),
+            1,
+            "{:?}",
+            sig.files.keys().collect::<Vec<_>>()
+        );
+    }
+
     /// Rewinds a bucket object's `last_modified` (LocalFileSystem
     /// reads the file's mtime), to age a claim past the guard's grace.
     fn age(path: &FsPath, secs: u64) {

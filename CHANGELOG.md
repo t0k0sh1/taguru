@@ -8,6 +8,41 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- The `taguru_schema` export/import stream record and its replication
+  parity (#384, S6 of #218's ADR 0009 split §13). `export::render`
+  emits it as the FIRST line of a context's stream, only when the
+  context has a schema and `mode != off` — a schema-free export, or
+  one left in `off`, is byte-identical to before. `parse_stream` gains
+  the record kind (`Stream.schemas`), `deny_unknown_fields` on every
+  field (unlike a group record, none defaults — matching
+  `SchemaDocument`'s own at-rest posture), and refuses an unread
+  `taguru_schema` version in `parse_group`'s exact wording shape
+  (`"taguru_schema N is not a version this taguru reads (it reads
+  1)"`). Schema records install AFTER every batch of a stream, BEFORE
+  any group — a record can name a context a batch of the SAME stream
+  just created, and a group can rely on the schema already having
+  landed — each installing independently through the same
+  `AppState::put_schema` `PUT /schema` uses, so the first one that
+  fails refuses the request right there with every batch before it
+  already durable (unlike a group record set, which validates whole
+  before any of it applies). `POST /import`'s response gains an
+  additive `schemas: [{context, mode, types, relations}]` (omitted
+  when the stream carried none — every existing response byte-
+  identical); `taguru import --json` matches. `taguru router` gives a
+  schema record its own routing: unlike a group record it is never
+  broadcast, only sent to the one shard owning its context.
+  `version_facts()`'s existing `schema_formats` gains its first real
+  consumer: `export --url` and `import --url` (the latter only when
+  the stream actually carries a schema record) read the peer's `GET
+  /version` and refuse before a byte ships — naming both sides — when
+  the peer cannot carry this build's schema format, replacing what
+  used to be a schema-carrying stream falling through an old server's
+  `parse_stream` to a misleading "not a batch header" refusal. A
+  schema-free export/import is unaffected. **Downgrade hazard**, named
+  per ADR 0009 §5.1: an older binary's `context_files` is a shorter
+  array with no `{stem}.schema.json` entry, so downgrading past this
+  change requires deleting any stray `.schema.json` files by hand —
+  the older binary will not delete, move, or hydrate them itself.
 - `strict`/`warn` schema enforcement on `POST /import` and `taguru
   import` (#382, S4 of #218's ADR 0009 split — the first write entrance
   to call S3/#381's `schema::schema_issues`; `POST

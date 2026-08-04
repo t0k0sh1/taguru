@@ -91,7 +91,7 @@
 taguru import --dry-run batch/        <span class="c"># validate and report; touches nothing</span>
 taguru import --config prod.env a.jsonl b.jsonl
 taguru import --url http://127.0.0.1:8248 batch/   <span class="c"># send to a running server instead</span>
-taguru import --json batch/           <span class="c"># {dry_run, batches: [...], groups: [...]} instead of text</span></code></pre>
+taguru import --json batch/           <span class="c"># {dry_run, batches: [...], schemas: [...], groups: [...]} instead of text</span></code></pre>
     <p>Exit codes: <code>0</code> everything applied · <code>1</code> something was refused or failed (details on stderr) · <code>2</code> usage error.</p>
     <p>
       <code>--no-embed</code> is offline-only — combined with <code>--url</code> it is a usage
@@ -99,35 +99,44 @@ taguru import --json batch/           <span class="c"># {dry_run, batches: [...]
       request lands there.
     </p>
     <p>
-      <code>--json</code> answers the same shape <code>POST /import</code>'s own response body
-      does — one <code>ImportOutcome</code> per batch under <code>batches</code>, one
-      <code>GroupImportOutcome</code> per <code>taguru_group</code> record under
-      <code>groups</code> (omitted entirely when the stream carried none) — so a script parses
-      one schema whether it called the CLI or the HTTP endpoint directly. With <code>--url</code>,
-      every field is exact: the server always answers from the same code path a real apply runs
-      (<code>preview_batch</code> under <code>--dry-run</code>). Offline, a real (non-dry-run) run
-      is exact the same way; offline <code>--dry-run</code> is the one exception — it never boots
-      the registry (so it needs no directory lock to validate files), and without a boot it cannot
-      know <code>created</code>/<code>retracted</code> or any <code>*_dropped</code> count the
-      way a real apply can. Those fields read <code>0</code>/<code>false</code> rather than a
-      guess, and <code>groups</code> is always absent for the same reason the HTTP endpoint's own
-      <code>?dry_run=true</code> omits it: restoring a group has no read-only twin to preview
-      through.
+      <code>--json</code> answers the same <code>{batches, schemas, groups}</code> fields
+      <code>POST /import</code>'s own <code>result</code> object carries — one
+      <code>ImportOutcome</code> per batch under <code>batches</code>, one
+      <code>SchemaImportOutcome</code> per <code>taguru_schema</code> record under
+      <code>schemas</code>, one <code>GroupImportOutcome</code> per <code>taguru_group</code>
+      record under <code>groups</code> (both omitted entirely when the stream carried none) — so a
+      script parses one schema whether it called the CLI or the HTTP endpoint directly. The two
+      outer shapes differ: the CLI prints <code>{"dry_run": ..., "batches": [...], ...}</code>
+      directly, while the HTTP endpoint wraps the identical fields inside its own response
+      envelope, <code>{"status": "ok", "result": {"batches": [...], ...}, "time": ...}</code> (or
+      <code>{"status": "error", "error": "...", ...}</code> on refusal — every JSON endpoint
+      answers this same envelope). With
+      <code>--url</code>, every field is exact: the server always answers from the same code path
+      a real apply runs (<code>preview_batch</code> under <code>--dry-run</code>). Offline, a real
+      (non-dry-run) run is exact the same way; offline <code>--dry-run</code> is the one exception
+      — it never boots the registry (so it needs no directory lock to validate files), and without
+      a boot it cannot know <code>created</code>/<code>retracted</code> or any
+      <code>*_dropped</code> count the way a real apply can. Those fields read
+      <code>0</code>/<code>false</code> rather than a guess, and <code>schemas</code>/
+      <code>groups</code> are always absent for the same reason the HTTP endpoint's own
+      <code>?dry_run=true</code> omits them: neither installing a schema nor restoring a group has
+      a read-only twin to preview through.
     </p>
     <p>
       Every <code>--json</code> exit path prints exactly one JSON document, failures included —
       never silent stdout on a non-zero exit. Validation refusing every file, the registry
       refusing to boot, and a remote transport error or a server-refused chunk each add a
-      top-level <code>error</code> string beside <code>batches</code>/<code>groups</code>, unchanged
-      from the success case's own rule: <code>batches</code> is always an array (<code>[]</code>
-      when nothing landed before the failure), <code>groups</code> is omitted whenever it would be
-      empty — a failure that landed zero batches and zero groups still answers
-      <code>{"dry_run": ..., "error": "...", "batches": []}</code>, no <code>groups</code> key at
-      all. A local batch refused mid-run (offline only — a remote refusal fails its whole chunk,
-      never one batch within it) is named under a <code>failed_batches</code> array instead of
-      appearing in <code>batches</code>, since there is no <code>ImportOutcome</code> to build for a
-      batch that was never applied; the human-readable stderr line for the same failure is
-      unchanged.
+      top-level <code>error</code> string beside <code>batches</code>/<code>schemas</code>/
+      <code>groups</code>, unchanged from the success case's own rule: <code>batches</code> is
+      always an array (<code>[]</code> when nothing landed before the failure),
+      <code>schemas</code>/<code>groups</code> are each omitted whenever they would be empty — a
+      failure that landed zero batches, zero schemas, and zero groups still answers
+      <code>{"dry_run": ..., "error": "...", "batches": []}</code>, no <code>schemas</code> or
+      <code>groups</code> key at all. A local batch refused mid-run (offline only — a remote
+      refusal fails its whole chunk, never one batch within it) is named under a
+      <code>failed_batches</code> array instead of appearing in <code>batches</code>, since there
+      is no <code>ImportOutcome</code> to build for a batch that was never applied; the
+      human-readable stderr line for the same failure is unchanged.
     </p>
   </section>
 
@@ -166,7 +175,7 @@ taguru import --json batch/           <span class="c"># {dry_run, batches: [...]
 
   <section id="format">
     <h2>The file format</h2>
-    <p class="section-sub">JSON Lines, UTF-8. Blank lines are ignored. The first non-blank line is the header; every following line is one operation. (A stream may also carry <code>taguru_group</code> records — see below.)</p>
+    <p class="section-sub">JSON Lines, UTF-8. Blank lines are ignored. The first non-blank line is the header; every following line is one operation. (A stream may also carry <code>taguru_schema</code> and <code>taguru_group</code> records — see below.)</p>
     <pre><code>{<span class="k">"taguru_batch"</span>: <span class="nu">1</span>, <span class="k">"context"</span>: <span class="s">"sake"</span>, <span class="k">"source"</span>: <span class="s">"docs/aomine.md"</span>, <span class="k">"create"</span>: {<span class="k">"description"</span>: <span class="s">"酒蔵の知識"</span>}}
 {<span class="k">"passage"</span>: <span class="s">"青嶺酒造は1907年創業。杜氏は高瀬。"</span>, <span class="k">"date"</span>: <span class="nu">1700000000</span>, <span class="k">"tags"</span>: [<span class="s">"会社概要"</span>]}
 {<span class="k">"paragraph"</span>: <span class="nu">0</span>, <span class="k">"section"</span>: <span class="s">"沿革"</span>}
@@ -275,6 +284,40 @@ taguru import --json batch/           <span class="c"># {dry_run, batches: [...]
       <code>section</code>.
     </p>
 
+    <h3>Schema records</h3>
+    <p>
+      <code>{"taguru_schema": 1, "context": "…", "mode": "off"|"warn"|"strict", "closed_labels": …, "types": {…}, "relations": {…}}</code>
+      — one line states one <b>context's</b> whole schema document (ADR 0009 §13), the same shape
+      <code>PUT /contexts/{name}/schema</code> installs. Unlike a group record, every field is
+      required — there is no default for an absent one, matching the document's own at-rest
+      shape: a missing field is a parse refusal, never a silently-defaulted one. A schema record
+      stands alone between batches (it closes the batch before it, the same as a group record —
+      operation lines after one need a fresh header), and <code>taguru export</code> emits one as
+      the <b>first</b> line of a context's own stream whenever that context has a schema installed
+      and its <code>mode</code> is not <code>"off"</code> — a schema left in <code>off</code> while
+      its types are drafted is not carried across export/restore.
+    </p>
+    <p>
+      Schema records install <b>after every batch of the run, before any group record</b> — so a
+      schema can name a context a batch of the <b>same</b> stream just created, and a group record
+      can in turn rely on that schema having already landed. Each record is independent (one
+      record, one context): unlike group records, which validate as one whole set before any of
+      them applies, the first schema record that fails to install refuses the request right there
+      — every batch before it stays durable, and later schema records or group records in the same
+      stream are simply never reached. Restating one context's schema twice in a run is refused —
+      one record owns one context's schema. The response's <code>SchemaImportOutcome</code> carries
+      no outcome verb (unlike a group's <code>"created"</code>/<code>"replaced"</code>/
+      <code>"unchanged"</code>): installing a schema cannot itself tell an install apart from a
+      no-op re-install of the identical document, and a guessed verb would be worse than none.
+    </p>
+    <p class="note">
+      <code>--url</code> carries one more preflight for this record kind: before a byte ships,
+      the CLI reads the peer's <code>GET /version</code> <code>schema_formats</code> and refuses
+      up front — naming both sides — when the peer cannot read this build's schema format. A
+      schema-free stream never triggers the check and behaves exactly as it did before this
+      preflight existed.
+    </p>
+
     <h3>Group records</h3>
     <p>
       <code>{"taguru_group": 1, "name": "…", "description": "…", "contexts": […], "groups": […]}</code>
@@ -286,14 +329,14 @@ taguru import --json batch/           <span class="c"># {dry_run, batches: [...]
       <code>{group}.group.jsonl</code> beside the context streams.
     </p>
     <p>
-      Groups apply <b>after every batch of the run</b> — one CLI invocation, one
-      <code>POST /import</code> body — wherever the records sat, so a group and the member
-      contexts it names can travel together in any order. Referential integrity holds at that
-      point exactly as over the API: every member context must exist, every child group must
-      exist or ride the same run, the nesting must stay at most 3 groups tall and acyclic, and a
-      violation refuses <b>all</b> group records (the batches are already durably applied;
-      fixing the stream and re-importing it whole is exact). Restating one group twice in a run
-      is refused — one record owns one group's truth.
+      Groups apply <b>after every batch and every schema record of the run</b> — one CLI
+      invocation, one <code>POST /import</code> body — wherever the records sat, so a group and
+      the member contexts it names can travel together in any order. Referential integrity holds
+      at that point exactly as over the API: every member context must exist, every child group
+      must exist or ride the same run, the nesting must stay at most 3 groups tall and acyclic,
+      and a violation refuses <b>all</b> group records (the batches and schemas are already
+      durably applied; fixing the stream and re-importing it whole is exact). Restating one group
+      twice in a run is refused — one record owns one group's truth.
     </p>
 
     <p class="note">Unknown fields and unrecognizable line shapes are refused, with the line number.</p>
@@ -406,11 +449,12 @@ taguru import --url "$TAGURU_URL" --dry-run backups/   <span class="c"># preview
     <ul>
       <li>
         The input is split on <b>batch boundaries only</b>, never mid-batch: a batch runs from its
-        <code>taguru_batch</code> header line to the next <code>taguru_batch</code>/<code>taguru_group</code>
-        line or EOF, the exact rule <code>taguru router</code>'s own cross-shard import splitting
-        already uses. Whole batches are packed into each request up to a byte budget starting at
-        4&nbsp;MiB (half the 8&nbsp;MiB default <code>TAGURU_MAX_BODY_BYTES</code>, leaving headroom
-        for a server configured lower).
+        <code>taguru_batch</code> header line to the next <code>taguru_batch</code>/
+        <code>taguru_schema</code>/<code>taguru_group</code> line or EOF, the exact rule
+        <code>taguru router</code>'s own cross-shard import splitting already uses. Whole batches
+        are packed into each request up to a byte budget starting at 4&nbsp;MiB (half the
+        8&nbsp;MiB default <code>TAGURU_MAX_BODY_BYTES</code>, leaving headroom for a server
+        configured lower).
       </li>
       <li>
         A single batch that alone exceeds this <b>fixed, client-side</b> budget is a
@@ -428,9 +472,17 @@ taguru import --url "$TAGURU_URL" --dry-run backups/   <span class="c"># preview
         automate since the server refuses a <code>413</code> before applying anything.
       </li>
       <li>
-        <code>taguru_group</code> records ride after every batch chunk of the run, the same order
-        the local path already applies them in, so a group naming a context an earlier chunk's
-        batch creates always arrives after it.
+        <code>taguru_schema</code> records ride after every batch chunk, and
+        <code>taguru_group</code> records after every schema chunk in turn — the same order the
+        local path already applies them in, so a schema naming a context an earlier chunk's batch
+        creates, or a group naming a context an earlier chunk's schema installs onto, always
+        arrives after it.
+      </li>
+      <li>
+        A stream that actually carries a <code>taguru_schema</code> record gets one more preflight
+        first: the CLI reads the server's <code>GET /version</code> <code>schema_formats</code>
+        and refuses up front, naming both sides, if the server cannot read this build's schema
+        format — nothing is sent. A schema-free stream never triggers this check.
       </li>
       <li>
         A lost connection reports which chunk landed and points at <code>--dry-run</code> to
@@ -460,8 +512,12 @@ taguru import --url "$TAGURU_URL" --dry-run backups/   <span class="c"># preview
       <code>GET /contexts/{name}/export</code> (the body is the JSON Lines stream itself).
       One context = one stream: one batch per source id, in order, with a <code>create</code>
       block (description, pinning, floors) on the first batch and the alias table riding the last.
-      Restore is a normal import — per-source replacement makes it idempotent; to match a snapshot
-      exactly, delete the context first, then stream it in.
+      A context whose schema is installed and not in <code>off</code> mode carries one more line —
+      a <code>taguru_schema</code> record, first in the stream (ADR 0009 §13) — so its constraints
+      travel with the data rather than being a separate, easy-to-forget backup step; a schema left
+      in <code>off</code> while its types are drafted is not exported. Restore is a normal import —
+      per-source replacement makes it idempotent; to match a snapshot exactly, delete the context
+      first, then stream it in.
     </p>
     <p>
       <code>taguru export --url URL --out DIR [CONTEXT...]</code> automates the same walk against a
@@ -482,7 +538,7 @@ taguru import --url "$TAGURU_URL" --dry-run backups/   <span class="c"># preview
       <li><b>Sourceless weight</b> (entered via the API with <code>source</code> omitted) rides a batch under the reserved source <code>export:unsourced</code> — the numbers are preserved and the attribution tells the story. If a real source collides with this reserved id, export refuses rather than silently mixing.</li>
       <li><b>Fully retracted edges (weight 0) are not emitted</b>: an export → import round trip sheds the dead records an append-only image accumulates — doubling as offline compaction.</li>
       <li>An alias whose canonical has no live associations is dropped and the count reported (under the import contract, canonicals are minted by association lines).</li>
-      <li><code>POST /import</code> always answers <code>{"batches": [per-batch results…]}</code> (a single batch is the same shape with one element — one shape to parse). If the stream is refused midway, the earlier batches have landed — each batch is retract-then-apply, so re-POSTing the corrected stream converges exactly.</li>
+      <li><code>POST /import</code> always answers <code>{"status": "ok", "result": {"batches": [per-batch results…]}, "time": ...}</code> (a single batch is the same shape with one element — one shape to parse), <code>result</code> gaining <code>schemas</code>/<code>groups</code> whenever the stream carried either. If the stream is refused midway, the earlier batches (and any schema record that already installed) have landed — each batch is retract-then-apply and each schema install is independent, so re-POSTing the corrected stream converges exactly.</li>
       <li>Rendering is deterministic: the same state writes the same bytes, so backups diff against each other.</li>
     </ul>
     <pre><code><span class="c"># evacuate one context from a live server and restore it elsewhere</span>
