@@ -104,6 +104,7 @@ from .ingest_connectors import (
     sub_source_id,
     sync_object_storage,
     sync_references,
+    watch_directory,
 )
 from .retrievers import TaguruRetriever
 
@@ -191,5 +192,6 @@ __all__ = [
     "sub_source_id",
     "sync_object_storage",
     "sync_references",
+    "watch_directory",
     "__version__",
 ]

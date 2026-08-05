@@ -134,6 +134,7 @@ from .sources import (
     sub_source_id,
 )
 from .text import TextFileConnector
+from .watch import watch_directory
 
 __all__ = [
     "CONNECTOR_DOCUMENT_VERSION",
@@ -198,4 +199,5 @@ __all__ = [
     "sub_source_id",
     "sync_object_storage",
     "sync_references",
+    "watch_directory",
 ]

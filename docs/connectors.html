@@ -136,6 +136,7 @@ print(report.to_dict())  <span class="c"># one JSON object: counts, duration_ms,
           <tr><td><code>S3Connector</code></td><td><code>s3://</code> objects (dispatches to the rows above by extension, then content-type)</td><td>the delegate's own</td><td><code>pip install "langchain-taguru[s3]"</code></td></tr>
           <tr><td><code>GCSObjectStore</code></td><td><code>gs://</code> objects (the same dispatch, through <code>sync_object_storage</code>)</td><td>the delegate's own</td><td><code>pip install "langchain-taguru[gcs]"</code></td></tr>
           <tr><td><code>AzureBlobObjectStore</code></td><td><code>az://</code> objects (the same dispatch, through <code>sync_object_storage</code>)</td><td>the delegate's own</td><td><code>pip install "langchain-taguru[azure]"</code></td></tr>
+          <tr><td><code>watch_directory</code></td><td>a local directory, polled (the same dispatch, one <code>sync_object_storage</code> pass per poll)</td><td>the delegate's own</td><td>always available (stdlib only)</td></tr>
         </tbody>
       </table>
     </div>
@@ -195,6 +196,16 @@ print(report.to_dict())  <span class="c"># one JSON object: counts, duration_ms,
         map onto object tags exactly as S3's do, and GCS stands its custom metadata in for them.
         See <a href="#boundary">the credential boundary</a> and <a href="#checkpoints">checkpoints</a>
         below for what makes a rerun cheap.</li>
+      <li><b><code>watch_directory</code>.</b> The continuous form of the same sync, for a local
+        tree: run one <code>sync_object_storage</code> pass over the directory, yield its
+        <code>RunReport</code>, wait the interval, repeat — a generator, so the caller owns the
+        loop and <code>break</code> (or a <code>should_stop</code> event, honored before, during,
+        and between passes) ends the watch. Polling by design, not inotify/FSEvents: the
+        checkpoint already skips an unchanged file on its <code>(size, mtime)</code> listing
+        fingerprint without opening it, so a pass over a quiet tree costs one directory walk, and
+        no platform-specific event API (which network mounts and bind mounts break anyway) enters
+        the dependency tree. Deletion stays report-only by default, exactly as every sync
+        pass.</li>
     </ul>
   </section>
 

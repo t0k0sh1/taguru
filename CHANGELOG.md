@@ -25,6 +25,17 @@ Entries that change an on-disk format or a response shape say so.
   `VersionId` is) and stands custom metadata in for object tags;
   Azure's blob index tags map onto object tags directly, with the same
   tags-only permission degrade.
+- `watch_directory` (#414, the third and last connector ADR 0007 §13
+  deferred): the continuous form of the local-tree sync — one
+  `sync_object_storage` pass over a `file://` directory per poll,
+  yielded as a `RunReport` from a generator the caller owns, with a
+  cooperative `should_stop` honored before, during, and between
+  passes. Polling over the existing two-layer checkpoint by design
+  (an unchanged file is skipped on its `(size, mtime)` listing
+  fingerprint without being opened), rather than a platform
+  filesystem-event API that would add this package's first non-parser
+  runtime dependency and still miss events on network and bind
+  mounts. Stdlib-only; deletion stays report-only by default.
 - `POST /contexts/{name}/paths` (#418) — the 手繰り between two
   concepts: every simple path from an origin to a target, shortest
   first, each trail carrying the whole concept `path` plus its
