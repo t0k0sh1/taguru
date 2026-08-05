@@ -428,7 +428,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
                     "context": context,
                     "origins": { "type": "array", "items": { "type": "string" } },
                     "targets": { "type": "array", "items": { "type": "string" } },
-                    "max_depth": { "type": "integer", "description": "hop ceiling per trail; default and max 10" },
+                    "max_depth": { "type": "integer", "minimum": 0, "description": "hop ceiling per trail; default and max 10 (larger values are clamped, not refused)" },
                     "limit": { "type": "integer", "minimum": 0, "description": "max trails (default 10, capped at 100)" }
                 }),
                 &["context", "origins", "targets"],
@@ -441,7 +441,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
                 json!({
                     "context": context,
                     "origins": { "type": "array", "items": { "type": "string" } },
-                    "max_depth": { "type": "integer", "description": "hop ceiling; default and max 10" },
+                    "max_depth": { "type": "integer", "minimum": 0, "description": "hop ceiling; default and max 10 (larger values are clamped, not refused)" },
                     "limit": { "type": "integer", "minimum": 0, "description": "default 100, capped at 1000" },
                     "after": {
                         "type": "object",
