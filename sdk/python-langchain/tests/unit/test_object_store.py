@@ -160,8 +160,10 @@ def test_open_object_store_rejects_an_s3_url_with_no_bucket() -> None:
 
 
 def test_open_object_store_rejects_an_unsupported_scheme() -> None:
-    with pytest.raises(ValueError, match="s3://|file://"):
-        open_object_store("gs://bucket/prefix")
+    # gs:// and az:// stopped being this test's example the day #414
+    # made them real schemes; ftp:// is nobody's object store.
+    with pytest.raises(ValueError, match="s3://, gs://, az://, or file://"):
+        open_object_store("ftp://bucket/prefix")
 
 
 def test_open_object_store_returns_the_urls_own_path_as_prefix() -> None:

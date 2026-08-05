@@ -8,6 +8,25 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- `langchain-taguru` grows GCS and Azure Blob object-storage backends
+  (#414, the connectors ADR 0007 §13 deferred): `GCSObjectStore` (the
+  `gcs` extra) and `AzureBlobObjectStore` (the `azure` extra) implement
+  the same `ObjectStore` protocol `S3ObjectStore` does, so
+  `sync_object_storage` ingests a GCS bucket or an Azure container with
+  the identical dispatch, two-layer checkpoint, and deletion policy —
+  and `open_object_store` now speaks the exact scheme set the server's
+  own replication path (`src/ship.rs`) does: `s3://`, `gs://`, `az://`,
+  `file://`. Each backend reads only its cloud's standard credential
+  chain (ADC, `DefaultAzureCredential`) with no parameter that could
+  carry a key or SAS token, and classifies failures into the same
+  transient/permanent split ADR 0007 §9 fixed for S3. GCS maps its
+  always-present `generation` onto the checkpoint's strongest
+  fingerprint tier (not gated on bucket versioning the way S3's
+  `VersionId` is) and stands custom metadata in for object tags;
+  Azure's blob index tags map onto object tags directly, with the same
+  tags-only permission degrade.
+
+### Added
 - `POST /contexts/{name}/paths` (#418) — the 手繰り between two
   concepts: every simple path from an origin to a target, shortest
   first, each trail carrying the whole concept `path` plus its

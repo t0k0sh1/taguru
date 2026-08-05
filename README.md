@@ -250,7 +250,7 @@ the offline producer's environment only, and local or bridged models
 (Ollama, LiteLLM in front of Bedrock) work the same way.
 
 `taguru extract` reads `.md`/`.txt` only. For PDF, HTML, DOCX, PPTX, or
-objects in S3-compatible storage, the Python SDK's
+objects in cloud storage (S3-compatible, GCS, Azure Blob), the Python SDK's
 `taguru_langchain.ingest_connectors` module is the producer instead —
 same normalized document shape, same batch contract, and its own
 checkpoint discipline (no separate manifest file — see

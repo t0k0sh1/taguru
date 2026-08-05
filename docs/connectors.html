@@ -133,7 +133,9 @@ print(report.to_dict())  <span class="c"># one JSON object: counts, duration_ms,
           <tr><td><code>HtmlConnector</code></td><td><code>.html</code>/<code>.htm</code>/<code>.xhtml</code>, <code>http(s)://</code></td><td><code>fragment</code></td><td>always available (stdlib <code>html.parser</code>)</td></tr>
           <tr><td><code>DocxConnector</code></td><td><code>.docx</code></td><td><code>table</code></td><td><code>pip install "langchain-taguru[docx]"</code></td></tr>
           <tr><td><code>PptxConnector</code></td><td><code>.pptx</code></td><td><code>slide</code> / <code>speaker_notes</code></td><td><code>pip install "langchain-taguru[pptx]"</code></td></tr>
-          <tr><td><code>S3Connector</code></td><td><code>s3://</code> objects (dispatches to the row above by extension, then content-type)</td><td>the delegate's own</td><td><code>pip install "langchain-taguru[s3]"</code></td></tr>
+          <tr><td><code>S3Connector</code></td><td><code>s3://</code> objects (dispatches to the rows above by extension, then content-type)</td><td>the delegate's own</td><td><code>pip install "langchain-taguru[s3]"</code></td></tr>
+          <tr><td><code>GCSObjectStore</code></td><td><code>gs://</code> objects (the same dispatch, through <code>sync_object_storage</code>)</td><td>the delegate's own</td><td><code>pip install "langchain-taguru[gcs]"</code></td></tr>
+          <tr><td><code>AzureBlobObjectStore</code></td><td><code>az://</code> objects (the same dispatch, through <code>sync_object_storage</code>)</td><td>the delegate's own</td><td><code>pip install "langchain-taguru[azure]"</code></td></tr>
         </tbody>
       </table>
     </div>
@@ -183,7 +185,14 @@ print(report.to_dict())  <span class="c"># one JSON object: counts, duration_ms,
       <li><b><code>S3Connector</code>/<code>sync_object_storage</code>.</b> Lists a bucket/prefix and
         dispatches each object to whichever connector above its extension (or, failing that, its
         content-type) names, then re-stamps the delegate's <code>source</code>/
-        <code>metadata.origin_uri</code>/<code>display_name</code> to the object's own S3 identity.
+        <code>metadata.origin_uri</code>/<code>display_name</code> to the object's own identity.
+        The store behind it is pluggable: <code>open_object_store</code> speaks the same scheme set
+        the server's replication path does — <code>s3://</code>, <code>gs://</code>
+        (<code>GCSObjectStore</code>), <code>az://</code> (<code>AzureBlobObjectStore</code>), and
+        <code>file://</code> (stdlib-only, the test/air-gapped backend). GCS lists a
+        <code>generation</code> for every object whether or not the bucket has versioning enabled,
+        so its checkpoint fingerprint always sits on the strongest tier; Azure's blob index tags
+        map onto object tags exactly as S3's do, and GCS stands its custom metadata in for them.
         See <a href="#boundary">the credential boundary</a> and <a href="#checkpoints">checkpoints</a>
         below for what makes a rerun cheap.</li>
     </ul>
@@ -196,13 +205,17 @@ print(report.to_dict())  <span class="c"># one JSON object: counts, duration_ms,
       model credentials applies here to storage credentials.
     </p>
     <ul>
-      <li><b>S3: the standard AWS credential chain only.</b> <code>S3ObjectStore</code>'s only
-        construction knobs are <code>endpoint_url</code>, <code>region_name</code>, and
-        <code>profile_name</code> — none of them is credential material, and there is deliberately
-        no parameter this class could accept an access key or secret through. Credentials always
-        come from <code>boto3</code>'s own chain (environment, shared config/credentials file, an
-        EC2/ECS/Lambda role, …). An <code>endpoint_url</code> with userinfo embedded
-        (<code>https://user:pass@host</code>) is rejected outright.</li>
+      <li><b>Object storage: each cloud's standard credential chain only.</b>
+        <code>S3ObjectStore</code>'s only construction knobs are <code>endpoint_url</code>,
+        <code>region_name</code>, and <code>profile_name</code>; <code>GCSObjectStore</code>'s is
+        <code>project</code>; <code>AzureBlobObjectStore</code>'s are <code>account</code> (the
+        account <i>name</i>) and <code>endpoint_url</code>. None of these is credential material,
+        and there is deliberately no parameter any of the three could accept an access key, a
+        service-account key, or a SAS token through. Credentials always come from the cloud's own
+        chain — <code>boto3</code>'s (environment, shared config, an EC2/ECS/Lambda role, …),
+        Application Default Credentials, or <code>DefaultAzureCredential</code> (environment,
+        workload/managed identity, Azure CLI, …). An <code>endpoint_url</code> with userinfo
+        embedded (<code>https://user:pass@host</code>) is rejected outright.</li>
       <li><b>URLs: canonicalization is the only representation.</b> <code>HtmlConnector</code>
         fetches always strip userinfo and a deny-listed set of query parameters
         (<code>signature</code>, <code>sig</code>, <code>token</code>, <code>access_token</code>,
@@ -214,8 +227,11 @@ print(report.to_dict())  <span class="c"># one JSON object: counts, duration_ms,
       <li><b>Auth failures are permanent, never retried.</b> Object-storage errors classify into two
         buckets: access-denied/invalid-credential/expired-token/no-such-bucket style codes are
         permanent (raised immediately, no retry), everything else is transient. Status codes are
-        not trusted alone for this — S3 returns 404 for a missing bucket too — the error
-        <i>code</i> decides.</li>
+        not trusted alone for this — every store answers 404 for a missing bucket/container too —
+        so the error <i>code</i> decides where the cloud names one (S3, Azure's
+        <code>ContainerNotFound</code> vs <code>BlobNotFound</code>), and the call site decides
+        where it doesn't (GCS: a 404 from a listing is the bucket, from a fetch it's the
+        object).</li>
     </ul>
   </section>
 
