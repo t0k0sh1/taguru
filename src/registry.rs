@@ -1046,6 +1046,15 @@ pub struct CompactOutcome {
     pub bytes_after: usize,
     pub dead_edges: usize,
     pub aliases_dropped: usize,
+    /// Whether the passage log was rewritten too (#437) — dropping
+    /// retracted sources' text bytes, which otherwise linger behind
+    /// tombstones until the log's own size-triggered compaction.
+    /// `false` when the context has no passage history to rewrite or
+    /// the rewrite failed (warned, never fatal — the graph compaction
+    /// above it already succeeded). `#[serde(default)]` so `compact
+    /// --url` still reads an older server's response.
+    #[serde(default)]
+    pub passages_compacted: bool,
 }
 
 /// One context's [`CompactOutcome`] inside a

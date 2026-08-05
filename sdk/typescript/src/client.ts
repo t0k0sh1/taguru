@@ -1379,8 +1379,20 @@ export class Context {
   }
 
   /** Withdraw one source's contributions (diff sync before re-ingest). */
-  async retractSource(source: string): Promise<RetractOutcome> {
-    const result = await this.post("/sources/retract", { source });
+  /**
+   * Withdraw one source's contributions (diff sync before re-ingest).
+   * `dry_run: true` previews the same `{associations_touched,
+   * passage_removed}` with nothing written. Full erasure — the withdrawn
+   * bytes physically off disk — is retract, then `compact`.
+   */
+  async retractSource(
+    source: string,
+    options: { dry_run?: boolean } = {},
+  ): Promise<RetractOutcome> {
+    const result = await this.client.requestJson("POST", `${this.path}/sources/retract`, {
+      params: { dry_run: options.dry_run ? true : undefined },
+      jsonBody: { source },
+    });
     return result as RetractOutcome;
   }
 

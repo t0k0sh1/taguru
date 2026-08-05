@@ -1326,9 +1326,20 @@ class AsyncContext:
         result = await self._post("/sources/search/explain", body)
         return decode(SearchExplanation, result)  # type: ignore[no-any-return]
 
-    async def retract_source(self, source: str) -> RetractOutcome:
-        """Withdraw one source's contributions (diff sync before re-ingest)."""
-        result = await self._post("/sources/retract", {"source": source})
+    async def retract_source(self, source: str, *, dry_run: bool = False) -> RetractOutcome:
+        """Withdraw one source's contributions (diff sync before re-ingest).
+
+        ``dry_run=True`` previews the same ``{associations_touched,
+        passage_removed}`` with nothing written. Full erasure — the
+        withdrawn bytes physically off disk — is retract, then
+        :meth:`compact`.
+        """
+        result = await self._client._request_json(
+            "POST",
+            self._path + "/sources/retract",
+            params=drop_none({"dry_run": True if dry_run else None}),
+            json_body={"source": source},
+        )
         return decode(RetractOutcome, result)  # type: ignore[no-any-return]
 
     async def list_sources(

@@ -88,6 +88,38 @@ impl AppState {
         Ok((touched, passage_removed))
     }
 
+    /// The read-only twin of [`Self::retract_source`] (#437): the same
+    /// `(associations_touched, passage_removed)` the real call would
+    /// report, with nothing written — no import marker, no WAL op, no
+    /// graph mutation, no passage removal. The graph count is
+    /// [`crate::context::Context::count_source_edges`], the exact
+    /// preview `/import?dry_run=true` already trusts; the passage half
+    /// is a presence check. Advisory in the way every preview is: a
+    /// write landing between this and the real retraction can change
+    /// the numbers.
+    pub fn retract_source_preview(
+        &self,
+        name: &str,
+        source: &str,
+    ) -> Result<(usize, bool), AccessError> {
+        let touched = self.read_context(name, |context| context.count_source_edges(source))?;
+        let Some(entry) = self.lookup(name) else {
+            return Ok((touched, false));
+        };
+        let Some(_fence) = entry.read_unless_deleted() else {
+            return Ok((touched, false));
+        };
+        // A passage-store load failure degrades to "no passage" rather
+        // than failing the preview: the graph half is the load-bearing
+        // number, and the real retraction reports its own passage
+        // failure honestly when it happens.
+        let passage_present = match self.entry_passages(&entry, &file_stem(name)) {
+            Ok(store) => store.get(source).is_some(),
+            Err(_) => false,
+        };
+        Ok((touched, passage_present))
+    }
+
     /// The marker-less core of [`Self::retract_source`] — see there for
     /// behavior and for why only `apply_batch` should call this
     /// directly. The third element of the returned tuple is `true`

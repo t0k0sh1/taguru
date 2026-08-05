@@ -360,7 +360,11 @@ pub fn route_tool(
             )
         }
         "retract_source" => {
-            let path = format!("{}/sources/retract", context_path("context")?);
+            let path = format!(
+                "{}/sources/retract{}",
+                context_path("context")?,
+                query_string(arguments, &["dry_run"])?
+            );
             need(arguments, "source")?;
             ("POST", path, Some(pick(arguments, &["source"])))
         }
