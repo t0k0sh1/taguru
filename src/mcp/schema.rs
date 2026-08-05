@@ -459,6 +459,18 @@ pub(super) fn tool_definitions() -> Vec<Value> {
             ),
         ),
         (
+            "changes",
+            "What changed in this context since a cursor? Content-change events (associations_added, source_stored/retracted, aliases, schema_updated), one event per write call. Omit since to start tailing (empty page + the cursor to poll from, right after a full sync). more=true means poll again immediately. A 410 stale_cursor means the position is gone (restart, recreate, or too far behind) — full resync, then tail from a fresh cursor.",
+            object_schema(
+                json!({
+                    "context": context,
+                    "since": { "type": "string", "description": "the opaque cursor a previous page's next handed back" },
+                    "limit": { "type": "integer", "minimum": 0, "description": "default 100, capped at 1000" }
+                }),
+                &["context"],
+            ),
+        ),
+        (
             "list_labels",
             "The relation vocabulary (canonical only). Read it before extracting to avoid spelling forks. Keyset-paged by label; total above the returned count means more pages.",
             object_schema(

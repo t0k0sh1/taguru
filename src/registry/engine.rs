@@ -475,6 +475,16 @@ impl AppState {
             // applied prefix stands in memory regardless.
             let landed = applied(&result);
             inner.graph_revision += landed as u64;
+            // The change feed records the same applied prefix the
+            // revision just counted — never the refused tail (#422).
+            // Inside `inner` so a concurrent reader can never observe
+            // the revision moved but the feed silent.
+            entry
+                .changes
+                .lock()
+                .extend(crate::registry::changes::events_of_ops(
+                    &ops[..landed.min(ops.len())],
+                ));
 
             if let Some((path, len_before)) = staged
                 && landed < ops.len()

@@ -848,6 +848,7 @@ fn routes(
         .route("/contexts/{name}/explore", post(api::explore))
         .route("/contexts/{name}/activate", post(api::activate))
         .route("/contexts/{name}/paths", post(api::paths))
+        .route("/contexts/{name}/changes", get(api::changes))
         .route("/contexts/{name}/resolve", post(api::resolve))
         .route(
             "/contexts/{name}/resolve/explain",

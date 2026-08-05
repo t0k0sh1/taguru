@@ -45,7 +45,17 @@
       "storage_full",
       "maintenance",
       "read_only_replica",
-      "shard_unreachable"
+      "shard_unreachable",
+      "stale_cursor"
+    ],
+    "response.result.events[].kind": [
+      "associations_added",
+      "association_retracted",
+      "aliases_added",
+      "aliases_removed",
+      "source_stored",
+      "source_retracted",
+      "schema_updated"
     ],
     "response.result.contexts[].schema_mode": ["off", "warn", "strict"],
     "response.result.schemas[].mode": ["off", "warn", "strict"],

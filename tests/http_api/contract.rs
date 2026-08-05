@@ -74,7 +74,12 @@ fn normalize_volatile(value: &mut Value) {
             }
         }
         Value::String(text) => {
-            if let Ok(mut inner) = serde_json::from_str::<Value>(text)
+            // A change-feed cursor (#422) carries a per-boot ring epoch —
+            // volatile by design, wherever it rides (a response's `next`,
+            // or re-encoded inside an MCP pass-through body).
+            if text.starts_with("cf1-") {
+                *text = "cf1-0000000000000000-0".to_string();
+            } else if let Ok(mut inner) = serde_json::from_str::<Value>(text)
                 && (inner.is_object() || inner.is_array())
             {
                 normalize_volatile(&mut inner);
@@ -285,6 +290,63 @@ fn explore_and_activate_pages() {
         "POST",
         "/contexts/{name}/paths",
         Some(request),
+        status,
+        body,
+    );
+}
+
+/// The change feed's page shape (#422): tail for a cursor, write, read
+/// the events past it. The cursor itself is volatile (a per-boot ring
+/// epoch) and normalized by `normalize_volatile`; the query string, like
+/// every GET fixture's, is not part of the recorded request.
+#[test]
+fn changes_feed_page() {
+    let server = Server::start("contract-changes");
+    seed_basic_corpus(&server, "corpus-cf");
+
+    let tail = server.ok("GET", "/contexts/corpus-cf/changes", None);
+    let cursor = tail["next"].as_str().expect("a tail always has a cursor");
+
+    server.ok(
+        "POST",
+        "/contexts/corpus-cf/associations",
+        Some(json!([
+            {"subject": "beta", "label": "connects_to", "object": "gamma", "weight": 1.0},
+        ])),
+    );
+
+    let (status, body) = server.call(
+        "GET",
+        &format!("/contexts/corpus-cf/changes?since={cursor}"),
+        None,
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body["result"]["events"][0]["kind"],
+        json!("associations_added"),
+        "{body}"
+    );
+    http_fixture(
+        "changes",
+        "GET",
+        "/contexts/{name}/changes",
+        None,
+        status,
+        body,
+    );
+
+    let (status, body) = server.call(
+        "GET",
+        "/contexts/corpus-cf/changes?since=cf1-0000000000000000-999",
+        None,
+    );
+    assert_eq!(status, 410, "{body}");
+    assert_eq!(body["code"], json!("stale_cursor"), "{body}");
+    http_fixture(
+        "changes_stale_cursor",
+        "GET",
+        "/contexts/{name}/changes",
+        None,
         status,
         body,
     );

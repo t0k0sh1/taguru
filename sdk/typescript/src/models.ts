@@ -360,6 +360,36 @@ export interface PathsPage {
 }
 
 /**
+ * One recorded content change. `kind` decides which optional fields ride
+ * along: `associations_added`/`aliases_added`/`aliases_removed` carry
+ * `count`; `source_stored`/`source_retracted` carry `source`;
+ * `association_retracted` carries `subject`/`label`/`object`;
+ * `schema_updated` carries `mode`. Unknown future kinds decode too —
+ * treat them as "something changed".
+ */
+export interface ChangeEvent {
+  seq: number;
+  kind: string;
+  count?: number;
+  subject?: string;
+  label?: string;
+  object?: string;
+  source?: string;
+  mode?: string;
+}
+
+/**
+ * One page of the change feed. `next` is the cursor to pass as the next
+ * call's `since`; `more` means events past `limit` are already waiting
+ * (poll again immediately).
+ */
+export interface ChangesPage {
+  events: ChangeEvent[];
+  next: string;
+  more: boolean;
+}
+
+/**
  * One resolve candidate. `kind` (lexical tier only) is
  * "exact"/"alias"/"containment"/"fuzzy" — never adopt a containment/fuzzy hit
  * on score alone; read `gloss` first. `types` (top candidates only) are the

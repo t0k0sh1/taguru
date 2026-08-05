@@ -33,6 +33,7 @@ import pytest
 from taguru._decode import decode
 from taguru._models import (
     ActivationPage,
+    ChangesPage,
     CommunityPage,
     ContextPage,
     EvidencePackage,
@@ -76,6 +77,7 @@ TYPED_OPERATIONS = {
     "explore": ExplorePage,
     "activate": ActivationPage,
     "paths": PathsPage,
+    "changes": ChangesPage,
     "communities_search": CommunityPage,
     "evidence_mixed_lanes": EvidencePackage,
     "evidence_budget_constrained": EvidencePackage,

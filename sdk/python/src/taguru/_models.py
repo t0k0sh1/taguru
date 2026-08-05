@@ -310,6 +310,37 @@ class PathsPage:
 
 
 @dataclass(slots=True, frozen=True)
+class ChangeEvent:
+    """One recorded content change. ``kind`` decides which optional
+    fields ride along: ``associations_added``/``aliases_added``/
+    ``aliases_removed`` carry ``count``; ``source_stored``/
+    ``source_retracted`` carry ``source``; ``association_retracted``
+    carries ``subject``/``label``/``object``; ``schema_updated``
+    carries ``mode``. Unknown future kinds decode too — treat them as
+    "something changed"."""
+
+    seq: int
+    kind: str
+    count: int | None = None
+    subject: str | None = None
+    label: str | None = None
+    object: str | None = None
+    source: str | None = None
+    mode: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class ChangesPage:
+    """One page of the change feed. ``next`` is the cursor to pass as
+    the next call's ``since``; ``more`` means events past ``limit`` are
+    already waiting (poll again immediately)."""
+
+    events: list[ChangeEvent]
+    next: str
+    more: bool
+
+
+@dataclass(slots=True, frozen=True)
 class TieredResolution:
     """One resolve candidate. ``tier`` is ``"lexical"`` or ``"semantic"``.
 

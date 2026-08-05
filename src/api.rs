@@ -23,6 +23,7 @@ use crate::registry::{
 
 mod aliases;
 mod associations;
+mod changes;
 // pub(crate): `taguru communities` (the CLI) shares the manifest
 // shape and the artifact naming/label constants with the verbs.
 pub(crate) mod communities;
@@ -50,6 +51,7 @@ mod vocabulary;
 
 pub use aliases::{add_aliases, list_aliases, remove_aliases};
 pub use associations::{add_associations, retract_association};
+pub use changes::changes;
 pub use communities::{analyze_communities, search_communities};
 pub use contexts::{
     create_context, delete_context, flush_all, get_context, list_contexts, maintenance_compact,
@@ -265,6 +267,14 @@ pub(crate) enum ErrorCode {
     /// shard that answered an error, which passes through with the
     /// shard's own code. Retryable once the shard (or its LB) answers.
     ShardUnreachable,
+    /// 410 from the change feed (#422): the `since` cursor names
+    /// another ring epoch (a restart, a delete-and-recreate) or
+    /// history already evicted from the bounded ring. Deliberately not
+    /// `InvalidArgument` — the cursor was once perfectly valid, and
+    /// the client's correct move is specific: full resync, then tail
+    /// from a fresh cursor. Retrying unchanged can never succeed, so
+    /// 4xx keeps every retry loop away, like `ReadOnlyReplica`.
+    StaleCursor,
 }
 
 impl ErrorCode {
@@ -296,6 +306,7 @@ impl ErrorCode {
             Self::Maintenance => "maintenance",
             Self::ReadOnlyReplica => "read_only_replica",
             Self::ShardUnreachable => "shard_unreachable",
+            Self::StaleCursor => "stale_cursor",
         }
     }
 
@@ -331,6 +342,7 @@ impl ErrorCode {
                 StatusCode::SERVICE_UNAVAILABLE
             }
             Self::StorageFull => StatusCode::INSUFFICIENT_STORAGE,
+            Self::StaleCursor => StatusCode::GONE,
         }
     }
 

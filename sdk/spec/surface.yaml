@@ -105,6 +105,9 @@ classes:
       route: "POST /contexts/{name}/paths"
       args: [origins, targets]
       options: [max_depth, limit]
+    changes:
+      route: "GET /contexts/{name}/changes"
+      options: [since, limit]
     unreachable_from:
       route: "POST /contexts/{name}/unreachable_from"
       args: [origins]

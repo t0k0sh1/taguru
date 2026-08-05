@@ -17,6 +17,7 @@ import type {
   Association,
   BatchApplyResult,
   BudgetRequest,
+  ChangesPage,
   Citation,
   CommunityPage,
   CompactOutcome,
@@ -1014,6 +1015,22 @@ export class Context {
       }),
     );
     return result as PathsPage;
+  }
+
+  /**
+   * One page of the change feed: content-change events after the opaque
+   * cursor `since`. Omit `since` to start tailing — an empty page whose
+   * `next` is the position to poll from, the bootstrap right after a full
+   * sync. A lost position (server restart, delete-and-recreate, or falling
+   * further behind than the feed retains) surfaces the server's 410
+   * `stale_cursor` refusal: run a full resync, then tail again from a
+   * fresh cursor.
+   */
+  async changes(options: { since?: string; limit?: number } = {}): Promise<ChangesPage> {
+    const result = await this.client.requestJson("GET", `${this.path}/changes`, {
+      params: { since: options.since, limit: options.limit },
+    });
+    return result as ChangesPage;
   }
 
   /** Spreading activation from origins, strongest first. */

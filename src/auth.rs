@@ -795,6 +795,7 @@ pub(crate) fn required_role(method: &Method, route: &str) -> Role {
         | (&Method::POST, "/contexts/{name}/explore")
         | (&Method::POST, "/contexts/{name}/activate")
         | (&Method::POST, "/contexts/{name}/paths")
+        | (&Method::GET, "/contexts/{name}/changes")
         | (&Method::POST, "/contexts/{name}/resolve")
         | (&Method::POST, "/contexts/{name}/resolve/explain")
         | (&Method::POST, "/contexts/{name}/resolve_label")
