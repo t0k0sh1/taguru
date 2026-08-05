@@ -458,14 +458,22 @@ def open_object_store(
     profile_name: str | None = None,
 ) -> tuple[ObjectStore, str]:
     """Opens the store ``url`` names, mirroring `src/ship.rs:176`'s own
-    ``open_store`` in shape: parse the URL, dispatch on scheme, return
+    ``open_store`` in shape AND scheme set (``s3://``, ``gs://``,
+    ``az://``, ``file://``): parse the URL, dispatch on scheme, return
     ``(store, prefix)`` — a caller lists ``store.list(prefix)`` to
-    enumerate exactly what the URL named. For ``s3://`` the prefix is the
-    URL's own path (the bucket is the netloc); for ``file://`` the whole
-    path IS the bucket directory, so the prefix is always ``""``.
-    ``endpoint_url``/``region_name``/``profile_name`` apply to ``s3://``
-    only (an S3-compatible endpoint, or a non-default region/profile) and
-    are rejected for ``file://``, which has no such concept."""
+    enumerate exactly what the URL named. For the cloud schemes the
+    prefix is the URL's own path (the bucket/container is the netloc);
+    for ``file://`` the whole path IS the bucket directory, so the
+    prefix is always ``""``. ``endpoint_url``/``region_name``/
+    ``profile_name`` apply to ``s3://`` only (an S3-compatible endpoint,
+    or a non-default region/profile) and are rejected everywhere else —
+    ``gs://``/``az://`` read their standard credential chains, and a
+    caller needing an emulator endpoint or a preconfigured client
+    constructs :class:`~taguru_langchain.ingest_connectors.
+    objectstore_gcs.GCSObjectStore`/:class:`~taguru_langchain.
+    ingest_connectors.objectstore_azure.AzureBlobObjectStore` directly.
+    The two cloud imports are lazy, so neither optional extra has to be
+    installed to open a URL of the other's scheme."""
     parsed = urlsplit(url)
     scheme = parsed.scheme.lower()
     if scheme == "s3":
@@ -477,9 +485,30 @@ def open_object_store(
             bucket, endpoint_url=endpoint_url, region_name=region_name, profile_name=profile_name
         )
         return store, prefix
+    if endpoint_url is not None or region_name is not None or profile_name is not None:
+        raise ValueError(
+            f"{scheme}:// does not accept endpoint_url/region_name/profile_name — "
+            "construct the store class directly for a custom endpoint or client"
+        )
+    if scheme == "gs":
+        bucket = parsed.netloc
+        if not bucket:
+            raise ValueError(f"{url}: gs:// URL must name a bucket, e.g. gs://my-bucket/prefix")
+        from .objectstore_gcs import GCSObjectStore
+
+        return GCSObjectStore(bucket), unquote(parsed.path).lstrip("/")
+    if scheme == "az":
+        container = parsed.netloc
+        if not container:
+            raise ValueError(
+                f"{url}: az:// URL must name a container, e.g. az://my-container/prefix"
+            )
+        from .objectstore_azure import AzureBlobObjectStore
+
+        return AzureBlobObjectStore(container), unquote(parsed.path).lstrip("/")
     if scheme == "file":
-        if endpoint_url is not None or region_name is not None or profile_name is not None:
-            raise ValueError("file:// does not accept endpoint_url/region_name/profile_name")
         directory = Path(unquote(parsed.path))
         return FileObjectStore(directory), ""
-    raise ValueError(f"{url}: unsupported object-storage scheme — use s3:// or file://")
+    raise ValueError(
+        f"{url}: unsupported object-storage scheme — use s3://, gs://, az://, or file://"
+    )

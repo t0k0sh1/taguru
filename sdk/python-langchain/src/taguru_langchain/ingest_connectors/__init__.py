@@ -39,7 +39,10 @@ Eleven pieces:
   extra) and ``file://`` (:class:`FileObjectStore`, stdlib-only, the
   test/air-gapped backend) implementations, and
   :func:`object_fingerprint` (ADR 0007 §9's checkpoint-fingerprint
-  priority).
+  priority). Issue #414 completes `src/ship.rs`'s scheme set with
+  ``gs://`` (:class:`GCSObjectStore`, the ``gcs`` extra) and ``az://``
+  (:class:`AzureBlobObjectStore`, the ``azure`` extra), each in its own
+  module, each reading only its cloud's standard credential chain.
 - :class:`S3Connector`/:func:`sync_object_storage` (``s3.py``, issue #351)
   — dispatches one object-storage object to whichever format connector
   above handles it, and syncs a whole bucket/prefix into a
@@ -99,6 +102,8 @@ from .objectstore import (
     object_fingerprint,
     open_object_store,
 )
+from .objectstore_azure import AzureBlobObjectStore
+from .objectstore_gcs import GCSObjectStore
 from .observability import (
     PHASES,
     RUN_SUMMARY_VERSION,
@@ -137,6 +142,7 @@ __all__ = [
     "RUN_SUMMARY_VERSION",
     "Connector",
     "ConnectorCheckpoint",
+    "AzureBlobObjectStore",
     "ConnectorDocument",
     "ConnectorMetadata",
     "DeletionPolicy",
@@ -149,6 +155,7 @@ __all__ = [
     "FileProbeCheckpoint",
     "FingerprintInputs",
     "FingerprintTier",
+    "GCSObjectStore",
     "HtmlConnector",
     "LocatorEntry",
     "ObjectMeta",

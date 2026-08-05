@@ -64,6 +64,17 @@ pptx = [
 s3 = [
     "boto3>=1.35",
 ]
+# Same decision again for the two backends issue #414 adds to the same
+# object-storage boundary: each cloud's SDK rides its own extra, so a
+# GCS-only (or Azure-only, or file://-only) caller never installs the
+# other clouds' client libraries.
+gcs = [
+    "google-cloud-storage>=2.14",
+]
+azure = [
+    "azure-storage-blob>=12.19",
+    "azure-identity>=1.17",
+]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
@@ -92,6 +103,12 @@ dev = [
     # This package's own mypy is `strict`; boto3 ships no inline types, so
     # its stub package is what lets `S3ObjectStore` type-check at all.
     "boto3-stubs[s3]>=1.35",
+    # GCSObjectStore / AzureBlobObjectStore tests (issue #414) exercise the
+    # real client libraries' types and exceptions — never a mock exception
+    # hierarchy of our own making.
+    "google-cloud-storage>=2.14",
+    "azure-storage-blob>=12.19",
+    "azure-identity>=1.17",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -111,3 +128,10 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.mypy]
 strict = true
 files = ["src"]
+
+# google-cloud-storage ships no py.typed marker (google-api-core and
+# google-auth do) and has no maintained stub package the way boto3-stubs
+# covers boto3 — its objects type as Any inside objectstore_gcs.py only.
+[[tool.mypy.overrides]]
+module = ["google.cloud", "google.cloud.storage"]
+ignore_missing_imports = true
