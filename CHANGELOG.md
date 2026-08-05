@@ -25,8 +25,6 @@ Entries that change an on-disk format or a response shape say so.
   `VersionId` is) and stands custom metadata in for object tags;
   Azure's blob index tags map onto object tags directly, with the same
   tags-only permission degrade.
-
-### Added
 - `POST /contexts/{name}/paths` (#418) — the 手繰り between two
   concepts: every simple path from an origin to a target, shortest
   first, each trail carrying the whole concept `path` plus its
