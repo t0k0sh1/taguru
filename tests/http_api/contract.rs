@@ -48,6 +48,18 @@ fn should_update() -> bool {
 fn normalize_volatile(value: &mut Value) {
     match value {
         Value::Object(map) => {
+            // A change-feed cursor (#422) carries a per-boot ring epoch —
+            // volatile by design. Keyed to the `next` field specifically,
+            // not to any string that happens to start with "cf1-": a
+            // source id like "cf1-report.md" must keep recording its
+            // real value. The MCP pass-through case (the whole body
+            // re-encoded as JSON text) is covered by the String arm
+            // below re-parsing and landing back in this arm.
+            if let Some(Value::String(cursor)) = map.get_mut("next")
+                && cursor.starts_with("cf1-")
+            {
+                *cursor = "cf1-0000000000000000-0".to_string();
+            }
             if matches!(map.get("time"), Some(Value::Number(_))) {
                 map.insert("time".to_string(), json!(0.0));
             }
@@ -74,12 +86,7 @@ fn normalize_volatile(value: &mut Value) {
             }
         }
         Value::String(text) => {
-            // A change-feed cursor (#422) carries a per-boot ring epoch —
-            // volatile by design, wherever it rides (a response's `next`,
-            // or re-encoded inside an MCP pass-through body).
-            if text.starts_with("cf1-") {
-                *text = "cf1-0000000000000000-0".to_string();
-            } else if let Ok(mut inner) = serde_json::from_str::<Value>(text)
+            if let Ok(mut inner) = serde_json::from_str::<Value>(text)
                 && (inner.is_object() || inner.is_array())
             {
                 normalize_volatile(&mut inner);

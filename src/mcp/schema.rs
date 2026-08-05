@@ -460,7 +460,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "changes",
-            "What changed in this context since a cursor? Content-change events (associations_added, source_stored/retracted, aliases, schema_updated), one event per write call. Omit since to start tailing (empty page + the cursor to poll from, right after a full sync). more=true means poll again immediately. A 410 stale_cursor means the position is gone (restart, recreate, or too far behind) — full resync, then tail from a fresh cursor.",
+            "What changed in this context since a cursor? Content-change events (associations_added, source_stored/retracted, aliases, schema_updated), aggregated per write call — a bulk import is one associations_added, never one event per line, though one call can emit several kinds. Omit since to start tailing (empty page + the cursor to poll from, right after a full sync). more=true means poll again immediately. A 410 stale_cursor means the position is gone (restart, recreate, or too far behind) — full resync, then tail from a fresh cursor.",
             object_schema(
                 json!({
                     "context": context,

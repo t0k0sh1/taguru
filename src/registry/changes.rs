@@ -53,6 +53,12 @@ impl AppState {
 /// hours of ordinary ingestion; a client that falls further behind gets
 /// `stale_cursor` and resyncs, which is also exactly what it would have
 /// to do against any retention bound.
+///
+/// Invariant: strictly larger than `api::MAX_PASSAGES_PER_REQUEST` —
+/// `store_passages` is the one entrance that emits one event PER ITEM
+/// (per source) rather than per call, so a single maximal store call
+/// must fit the ring with room to spare, or it would evict its own
+/// caller's pre-write cursor in one step. Pinned by a test below.
 const CHANGE_RING_CAP: usize = 1024;
 
 /// Ring identities are process-unique: seeded from the wall clock once,
@@ -288,6 +294,22 @@ mod tests {
 
     fn added(count: usize) -> ChangeKind {
         ChangeKind::AssociationsAdded { count }
+    }
+
+    /// The one per-item (not per-call) emitter is `store_passages`, and
+    /// its HTTP entrance caps a call at `MAX_PASSAGES_PER_REQUEST`
+    /// sources — so a single maximal call can never evict its own
+    /// pre-write cursor. A future cap raise past the ring's size would
+    /// silently break that; this pins the two together.
+    #[test]
+    fn the_ring_outlasts_the_largest_single_store_call() {
+        assert!(
+            CHANGE_RING_CAP > crate::api::MAX_PASSAGES_PER_REQUEST,
+            "a maximal store_passages call ({} sources) must fit the ring ({}) — \
+             raise CHANGE_RING_CAP alongside MAX_PASSAGES_PER_REQUEST",
+            crate::api::MAX_PASSAGES_PER_REQUEST,
+            CHANGE_RING_CAP,
+        );
     }
 
     #[test]

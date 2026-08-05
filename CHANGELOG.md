@@ -11,8 +11,8 @@ Entries that change an on-disk format or a response shape say so.
 - `GET /contexts/{name}/changes` (#422) — the polling change feed: one
   page of content-change events after an opaque cursor, so a client
   cache, an external index, or a recomputation trigger can ask "what
-  changed since I looked" instead of re-listing everything. Events are
-  per write call, never per line (`associations_added{count}`,
+  changed since I looked" instead of re-listing everything. Events
+  aggregate per write call, never per line (`associations_added{count}`,
   `association_retracted`, `aliases_added`/`removed`,
   `source_stored`/`source_retracted`, `schema_updated`), emitted
   inside the same lock that advances the revision counters so the two
