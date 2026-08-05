@@ -7,6 +7,8 @@ Entries that change an on-disk format or a response shape say so.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-05
+
 ### Added
 - The document-erasure lifecycle is now complete (#437). `POST
   /contexts/{name}/sources/retract?dry_run=true` previews the same
@@ -2759,7 +2761,9 @@ OTLP tracing, OAuth for remote MCP), the MCP stdio bridge, and the
 offline tooling (`import`, `extract`, `inspect`, `estimate`).
 Published to crates.io and GHCR.
 
-[Unreleased]: https://github.com/t0k0sh1/taguru/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/t0k0sh1/taguru/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/t0k0sh1/taguru/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/t0k0sh1/taguru/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/t0k0sh1/taguru/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/t0k0sh1/taguru/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/t0k0sh1/taguru/compare/v0.3.0...v0.4.0
