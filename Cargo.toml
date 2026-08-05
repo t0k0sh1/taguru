@@ -1,6 +1,6 @@
 [package]
 name = "taguru"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 # `cargo clippy`'s own `incompatible_msrv` lint is the source of
 # truth here, not a guess: 1.88 (edition 2024's let-chains, already
