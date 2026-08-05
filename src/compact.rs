@@ -702,6 +702,7 @@ mod tests {
                     bytes_after: 400,
                     dead_edges: 3,
                     aliases_dropped: 1,
+                    passages_compacted: false,
                 }
             ),
         );

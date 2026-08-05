@@ -566,9 +566,13 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "retract_source",
-            "Withdraw one source's (document's) contributions from graph and passage store. Diff sync for updated documents: retract the old version, then re-ingest the new. Concepts and edges remain; only weights come down.",
+            "Withdraw one source's (document's) contributions from graph and passage store. Diff sync for updated documents: retract the old version, then re-ingest the new. Concepts and edges remain; only weights come down. dry_run=true previews the same {associations_touched, passage_removed} with nothing written. Full erasure (the withdrawn bytes physically off disk) is retract, then compact.",
             object_schema(
-                json!({ "context": context, "source": { "type": "string" } }),
+                json!({
+                    "context": context,
+                    "source": { "type": "string" },
+                    "dry_run": { "type": "boolean", "description": "preview only — report what would be withdrawn, write nothing" }
+                }),
                 &["context", "source"],
             ),
         ),

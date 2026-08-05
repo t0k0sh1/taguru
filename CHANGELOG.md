@@ -8,6 +8,24 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- The document-erasure lifecycle is now complete (#437). `POST
+  /contexts/{name}/sources/retract?dry_run=true` previews the same
+  `{associations_touched, passage_removed}` the real call reports,
+  with nothing written — no WAL op, no import marker, no audit line —
+  exposing the exact read-only footprint check `/import?dry_run=true`
+  already ran internally. And `POST /contexts/{name}/compact` (the
+  maintenance sweep included) now also rewrites the passage log
+  without retracted sources' text: previously the graph image dropped
+  its dead records but a withdrawn passage's bytes lingered behind a
+  tombstone until the log's own size-triggered compaction happened to
+  run, so "retract, then compact" did not yet mean "erased." The
+  compact response gains `passages_compacted` (additive,
+  `#[serde(default)]` so `compact --url` reads older servers). The
+  runbook — retraction withdraws truth, compaction removes bytes, both
+  are needed for a deletion request, names survive, replicas compact
+  separately — is documented in troubleshooting and the `/protocol`
+  manual. `dry_run` rides the `retract_source` MCP tool and both SDKs
+  (`sdk/spec/surface.yaml`).
 - `GET /contexts/{name}/changes` (#422) — the polling change feed: one
   page of content-change events after an opaque cursor, so a client
   cache, an external index, or a recomputation trigger can ask "what

@@ -277,12 +277,55 @@ impl AppState {
                 bytes_after,
                 dead_edges: stats.dead_edges,
                 aliases_dropped: stats.aliases_dropped,
+                passages_compacted: false,
             })
         })?;
         // Persist the shrunken image now (flush_entry takes its own
         // locks); a failure leaves the entry dirty for the next tick,
         // which is the flusher's ordinary retry story.
         self.flush_entry(name, &entry);
+        // The passage log's own dead weight (#437): a retracted
+        // source's text lives on in the log as bytes behind a
+        // tombstone until the log's size-triggered compaction happens
+        // to run. This endpoint is the operator's explicit "drop what
+        // was withdrawn," so the passage log joins the graph image in
+        // it — "retract, then compact" erases a document from both
+        // stores. Outside the entry's write lock (the store takes its
+        // own writer mutex under the shared fence); guarded on the
+        // watermark so a context with no passage history ever doesn't
+        // get store files minted just to compact nothing. A failure
+        // warns rather than failing the call: the graph compaction
+        // above already succeeded, and the log's own cap-triggered
+        // compaction remains the backstop.
+        let passages_compacted = entry
+            .read_unless_deleted()
+            .map(
+                |_fence| match self.entry_passages(&entry, &file_stem(name)) {
+                    Ok(store) if store.watermark() > 0 => match store.compact() {
+                        Ok(()) => true,
+                        Err(error) => {
+                            tracing::warn!(
+                                context = %name, %error,
+                                "passage log not compacted (the size cap remains the backstop)"
+                            );
+                            false
+                        }
+                    },
+                    Ok(_) => false,
+                    Err(error) => {
+                        tracing::warn!(
+                            context = %name, %error,
+                            "passage store unavailable during compact; log left as is"
+                        );
+                        false
+                    }
+                },
+            )
+            .unwrap_or(false);
+        let outcome = CompactOutcome {
+            passages_compacted,
+            ..outcome
+        };
         self.touch(&entry);
         self.enforce_budget(name);
         Ok(outcome)

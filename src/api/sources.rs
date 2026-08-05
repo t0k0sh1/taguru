@@ -269,6 +269,18 @@ pub struct RetractSourceRequest {
     pub source: String,
 }
 
+/// `?dry_run=true` (#437): report what the retraction WOULD do —
+/// the same `{associations_touched, passage_removed}` shape — with
+/// nothing written: no WAL op, no import marker, no audit line, no
+/// usage bump. The same preview `/import?dry_run=true` already runs
+/// before its own per-source replace, exposed on the standalone
+/// entrance.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct RetractSourceQuery {
+    pub dry_run: bool,
+}
+
 /// What one retraction accomplished: how many associations lost this
 /// source's contribution, and whether its passage went with it.
 #[derive(Serialize)]
@@ -282,6 +294,7 @@ pub async fn retract_source(
     AppPath(name): AppPath<String>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
+    AppQuery(query): AppQuery<RetractSourceQuery>,
     AppJson(request): AppJson<RetractSourceRequest>,
 ) -> Response {
     let started_at = Instant::now();
@@ -294,6 +307,22 @@ pub async fn retract_source(
     }
     if deadline.expired() {
         return deadline_exceeded(started_at);
+    }
+    if query.dry_run {
+        // Reads only — off the async worker like every store-loading
+        // read, but with none of the write path's marker/WAL/audit.
+        return match tokio::task::block_in_place(|| {
+            state.retract_source_preview(&name, &request.source)
+        }) {
+            Err(failure) => access_error(&state, failure, &name, started_at),
+            Ok((associations_touched, passage_removed)) => ok(
+                RetractOutcome {
+                    associations_touched,
+                    passage_removed,
+                },
+                started_at,
+            ),
+        };
     }
     // Retraction stages a WAL op and fsyncs before returning; keep that
     // synchronous write off the async worker like every other write path.

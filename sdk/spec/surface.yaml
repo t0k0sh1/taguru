@@ -152,7 +152,10 @@ classes:
       route: "POST /contexts/{name}/sources/search/explain"
       args: [query, source]
       options: [paragraph, limit, semantic_floor, tags, since, until]
-    retract_source: { route: "POST /contexts/{name}/sources/retract", args: [source] }
+    retract_source:
+      route: "POST /contexts/{name}/sources/retract"
+      args: [source]
+      options: [dry_run]
     list_sources: { route: "GET /contexts/{name}/sources", options: [limit, after, prefix] }
     iter_sources: { route: "GET /contexts/{name}/sources", options: [limit, prefix] }
     cite_passage: { route: "POST /contexts/{name}/citations", args: [source, paragraph] }

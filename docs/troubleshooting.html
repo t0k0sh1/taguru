@@ -274,6 +274,44 @@ taguru compact --dry-run --json | jq '.[] | select(.dead_ratio &gt; 0.2)'</code>
     </p>
   </section>
 
+  <section id="erasing-a-document">
+    <h2>Erasing a document completely (mis-ingest recovery, deletion requests)</h2>
+    <p class="section-sub">
+      Retraction withdraws a document's <i>truth</i>; compaction is what removes its
+      <i>bytes</i>. For a deletion request (GDPR-style right to be forgotten) or a bad ingest
+      you want gone entirely, you need both.
+    </p>
+    <pre><code><span class="c"># 1. preview what the retraction would touch — writes nothing</span>
+curl -X POST 'localhost:8248/contexts/sake/sources/retract?dry_run=true' \
+  -H 'Content-Type: application/json' -d '{"source": "docs/old.md"}'
+
+<span class="c"># 2. retract: withdraw the source's associations and remove its passage</span>
+curl -X POST localhost:8248/contexts/sake/sources/retract \
+  -H 'Content-Type: application/json' -d '{"source": "docs/old.md"}'
+
+<span class="c"># 3. compact: physically drop the withdrawn records and the passage text's bytes</span>
+curl -X POST localhost:8248/contexts/sake/compact</code></pre>
+    <p>
+      Why the second step isn't enough by itself: storage is append-only on both sides.
+      Retraction unlinks the source's attribution records from the graph but leaves them as
+      dead space in the image, and removes its passage from serving while the text's bytes
+      stay in the passage log behind a tombstone. <code>POST /contexts/{name}/compact</code>
+      rebuilds the image without the dead records <b>and</b> rewrites the passage log without
+      the retracted text (<code>passages_compacted: true</code> in its response confirms the
+      log rewrite ran). Until a compaction runs — yours, or the automatic ratio/size-triggered
+      ones — the withdrawn content is unreachable through every API but still present on disk.
+    </p>
+    <p>
+      Two boundaries to know. <b>Names survive</b>: concepts and relation labels the document
+      minted stay interned in the image (they are shared vocabulary, not document content) —
+      if a concept name is itself the sensitive datum, that name needs its own remediation
+      beyond this runbook. <b>Replicas replay the same history</b>: the retraction replicates
+      like any write, but each replica's own on-disk files hold their own dead bytes until a
+      compaction runs there too — for a strict erasure deadline, compact the writer, then
+      each replica (or restore replicas from a post-compaction snapshot).
+    </p>
+  </section>
+
   <section id="latency">
     <h2>Whose seconds are they: Taguru's or the model's?</h2>
     <p class="section-sub">

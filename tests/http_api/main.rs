@@ -40,6 +40,7 @@ mod remote_export;
 mod remote_import;
 mod replication;
 mod resolve_match;
+mod retract_erasure;
 mod retrieval_cache;
 mod retrieval_core;
 mod routing;
