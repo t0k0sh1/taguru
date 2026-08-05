@@ -56,6 +56,8 @@ export {
   type BudgetLimits,
   type BudgetRequest,
   type BudgetUsage,
+  type ChangeEvent,
+  type ChangesPage,
   type Citation,
   type CitationEntry,
   type CitationRef,

@@ -70,6 +70,16 @@ impl AppState {
                     entry
                         .passage_revision
                         .fetch_max(store.watermark(), Ordering::Relaxed);
+                    // The change feed's passage-side entrance (#422):
+                    // one event per source, the unit a syncing client
+                    // re-pulls. Under the shared fence like the store
+                    // itself; the ring's own mutex orders concurrent
+                    // batches.
+                    entry.changes.lock().extend(sources.iter().map(|source| {
+                        crate::registry::ChangeKind::SourceStored {
+                            source: source.clone(),
+                        }
+                    }));
                 }
                 stored.map_err(PassagesWriteError::Io)
             }

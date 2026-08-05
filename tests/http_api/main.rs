@@ -13,6 +13,7 @@ mod auth;
 mod benchmark;
 mod benchmark_search;
 mod calibrate;
+mod changes;
 mod communities;
 mod contract;
 mod directory;

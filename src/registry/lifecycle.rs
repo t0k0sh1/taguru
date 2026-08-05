@@ -953,6 +953,16 @@ impl AppState {
                             let document = installed.document().clone();
                             inner.schema = Some(Arc::new(installed));
                             inner.invalidate_cache_identity();
+                            // The change feed's config-side entrance
+                            // (#422): only a PUT that actually changed
+                            // the document reaches here — the idempotent
+                            // early return above never feeds an event.
+                            entry
+                                .changes
+                                .lock()
+                                .push(crate::registry::ChangeKind::SchemaUpdated {
+                                    mode: document.mode.as_str().to_string(),
+                                });
                             Ok(document)
                         }
                         Err(error) => {

@@ -302,6 +302,15 @@ pub fn route_tool(
                 )),
             )
         }
+        "changes" => (
+            "GET",
+            format!(
+                "{}/changes{}",
+                context_path("context")?,
+                query_string(arguments, &["since", "limit"])?
+            ),
+            None,
+        ),
         "list_labels" => (
             "GET",
             format!(

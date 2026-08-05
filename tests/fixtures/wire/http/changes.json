@@ -1,0 +1,23 @@
+{
+  "contract": "http_contract",
+  "method": "GET",
+  "operation": "changes",
+  "request": null,
+  "response": {
+    "result": {
+      "events": [
+        {
+          "count": 1,
+          "kind": "associations_added",
+          "seq": 3
+        }
+      ],
+      "more": false,
+      "next": "cf1-0000000000000000-0"
+    },
+    "status": "ok",
+    "time": 0.0
+  },
+  "route": "/contexts/{name}/changes",
+  "status": 200
+}

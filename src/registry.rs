@@ -67,6 +67,7 @@ use crate::wal::{self, WalOp};
 
 mod associations;
 mod boot;
+mod changes;
 mod concurrency;
 mod context_io;
 #[cfg(test)]
@@ -88,6 +89,7 @@ mod terms;
 mod test_support;
 mod wal_replay;
 
+pub use changes::{ChangeEvent, ChangeKind, ChangesOutcome};
 pub use passages::PassagesWriteError;
 
 pub(crate) use concurrency::{Semaphore, dispatch_chunks_concurrently, parallel_map};
@@ -519,6 +521,14 @@ pub struct Entry {
     /// it resets on restart (an honest Prometheus counter reset, not a
     /// wire-format concern) and is never persisted.
     schema_violations: AtomicU64,
+    /// The change feed's bounded event ring (#422) — runtime state
+    /// like `schema_violations`, never persisted: a restart (or this
+    /// entry being dropped by a delete) mints a fresh ring epoch, and
+    /// old cursors answer `stale_cursor` honestly instead of
+    /// pretending continuity. Lock order: writers take this INSIDE
+    /// `inner` (write for graph ops, the shared tombstone fence for
+    /// passage ops); nothing takes `inner` while holding it.
+    changes: Mutex<changes::ChangeRing>,
 }
 
 /// On-disk bytes for the file families a scrape cannot afford to stat
@@ -583,6 +593,7 @@ impl Entry {
             passage_revision: AtomicU64::new(revision.passages),
             disk: Mutex::new(ContextDiskUsage::default()),
             schema_violations: AtomicU64::new(0),
+            changes: Mutex::new(changes::ChangeRing::default()),
         }
     }
 

@@ -1,0 +1,14 @@
+{
+  "contract": "http_contract",
+  "method": "GET",
+  "operation": "changes_stale_cursor",
+  "request": null,
+  "response": {
+    "code": "stale_cursor",
+    "error": "the cursor's history is no longer held (a restart, a recreate, or more changes than the feed retains) — run a full resync, then tail again from a fresh cursor (GET /changes without since)",
+    "status": "error",
+    "time": 0.0
+  },
+  "route": "/contexts/{name}/changes",
+  "status": 410
+}

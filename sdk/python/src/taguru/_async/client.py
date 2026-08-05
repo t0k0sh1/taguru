@@ -34,6 +34,7 @@ from .._models import (
     AliasPage,
     Association,
     BatchApplyResult,
+    ChangesPage,
     Citation,
     CommunityPage,
     CompactOutcome,
@@ -993,6 +994,29 @@ class AsyncContext:
         )
         result = await self._post("/unreachable_from", body)
         return decode(MatchPage, result)  # type: ignore[no-any-return]
+
+    async def changes(
+        self,
+        *,
+        since: str | None = None,
+        limit: int | None = None,
+    ) -> ChangesPage:
+        """One page of the change feed: content-change events after the
+        opaque cursor ``since``.
+
+        Omit ``since`` to start tailing — an empty page whose ``next``
+        is the position to poll from, the bootstrap right after a full
+        sync. A lost position (server restart, delete-and-recreate, or
+        falling further behind than the feed retains) raises the
+        server's 410 ``stale_cursor`` refusal: run a full resync, then
+        tail again from a fresh cursor.
+        """
+        result = await self._client._request_json(
+            "GET",
+            self._path + "/changes",
+            params=drop_none({"since": since, "limit": limit}),
+        )
+        return decode(ChangesPage, result)  # type: ignore[no-any-return]
 
     async def list_labels(
         self,

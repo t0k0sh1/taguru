@@ -107,6 +107,7 @@ const TYPED_OPERATIONS = [
   "explore",
   "activate",
   "paths",
+  "changes",
   "communities_search",
   "evidence_mixed_lanes",
   "evidence_budget_constrained",

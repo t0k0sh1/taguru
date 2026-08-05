@@ -84,6 +84,14 @@ relation labels — and enforce it on writes in `warn` or `strict` mode;
 `off` (the default) leaves a schema-free context byte-identical to
 before the feature existed.
 
+For clients that mirror or index a context — a local cache, an
+external search index, a recomputation trigger — `GET
+/contexts/{name}/changes` is a polling **change feed**: content-change
+events after an opaque cursor (one event per write call, a bulk import
+is one event), with an honest `410 stale_cursor` when the position is
+gone (restart, or further behind than the bounded feed retains) —
+resync fully, then tail again.
+
 Sources carry **metadata**: a server-stamped `stored_at`, an optional
 user-supplied document `date`, and `tags` — accepted at store and
 import time, listed back by `GET /contexts/{name}/sources`, and

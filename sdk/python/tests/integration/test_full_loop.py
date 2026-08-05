@@ -171,6 +171,17 @@ def test_graph_reads(client: Taguru, fresh_name: str) -> None:
     labels = ctx.list_labels()
     assert "杜氏" in labels.labels
     assert list(ctx.iter_labels()) == labels.labels
+
+    tail = ctx.changes()
+    assert tail.events == []
+    ctx.add_associations(
+        [{"subject": "青嶺酒造", "label": "所在地", "object": "霧沢町", "weight": 1.0}]
+    )
+    page = ctx.changes(since=tail.next)
+    assert [(event.kind, event.count) for event in page.events] == [("associations_added", 1)]
+    assert not page.more
+    assert ctx.changes(since=page.next).events == []
+
     client.contexts.delete(fresh_name)
 
 

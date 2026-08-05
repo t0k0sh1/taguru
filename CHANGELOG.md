@@ -8,6 +8,28 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- `GET /contexts/{name}/changes` (#422) — the polling change feed: one
+  page of content-change events after an opaque cursor, so a client
+  cache, an external index, or a recomputation trigger can ask "what
+  changed since I looked" instead of re-listing everything. Events
+  aggregate per write call, never per line (`associations_added{count}`,
+  `association_retracted`, `aliases_added`/`removed`,
+  `source_stored`/`source_retracted`, `schema_updated`), emitted
+  inside the same lock that advances the revision counters so the two
+  can never disagree, across every entrance — HTTP, MCP, and `/import`
+  alike. Omitting `since` starts tailing (an empty page whose `next`
+  is the position to poll from, the bootstrap after a full sync);
+  `more: true` says events past `limit` are already waiting. The feed
+  is a bounded in-memory ring per context, deliberately not persisted
+  history — the per-context WAL truncates on every image flush, so
+  there is nothing durable to serve — and a lost position (restart,
+  delete-and-recreate, or falling further behind than the ring
+  retains) answers the new 410 `stale_cursor` (additive to the error
+  vocabulary) rather than a silently incomplete page: full resync,
+  then tail again. Cursors are opaque and node-local. Exposed as the
+  `changes` MCP tool and in both core SDKs (`changes`/`changes()`,
+  `sdk/spec/surface.yaml`), pinned as wire-contract fixtures, and
+  documented in the `/protocol` manual.
 - `langchain-taguru` grows GCS and Azure Blob object-storage backends
   (#414, the connectors ADR 0007 §13 deferred): `GCSObjectStore` (the
   `gcs` extra) and `AzureBlobObjectStore` (the `azure` extra) implement
