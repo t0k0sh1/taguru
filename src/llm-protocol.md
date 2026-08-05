@@ -62,7 +62,12 @@ answers back into prose are your job.
 4. **Expand and rank**: `activate` spreads from origins (strongest
    first, `path` shows the route; strength is an ordering within one
    call — never compare across calls). `explore` walks structure
-   exhaustively with hop-distance annotations.
+   exhaustively with hop-distance annotations. When the question is
+   "how are these two concepts related?", use `paths` instead of
+   eyeballing either: it returns the concrete trails between origins
+   and targets, shortest first, each hop carrying its association and
+   citations — recompose the connection from the trail, and treat a
+   trail as a chain of stored assertions, never as one asserted fact.
 5. **Answer from the originals**: attributions from `recall`, `query`,
    `explore`, `activate`, and `unreachable_from` already carry a
    resolved `section` label and typed citation `locator` (a
@@ -314,6 +319,7 @@ Source code takes the same discipline; only the naming changes.
 | POST | `/contexts/{name}/describe` | `{concept}` → label outline (counts per role) plus declared types (`types?`, absent both without an installed schema and for an untyped concept — the two are indistinguishable on purpose) / null |
 | POST | `/contexts/{name}/explore` | `{origins, max_depth?, limit?, after?}` → `{total, matches:[{distance, path, association}]}` (hop cap 10, applied when omitted; truncation keeps the nearest) |
 | POST | `/contexts/{name}/activate` | `{origins, decay?=0.5, limit?=20}` → `{total, matches:[{strength, path, association}]}` |
+| POST | `/contexts/{name}/paths` | `{origins, targets, max_depth?, limit?=10}` → `{total, capped, matches:[{distance, path, strength, associations}]}` every simple path from an origin to a target, shortest first (hop cap 10, applied when omitted; limit capped at 100); within one length the largest weakest-link \|sum\| ranks first; `capped: true` means enumeration hit the server budget, so `total` is a lower bound |
 | POST | `/contexts/{name}/resolve` | `{cue, dice_floor?, semantic_floor?, limit?}` → `[{name, score, tier, kind?, gloss?, types?}]` concept candidates (limit default/ceiling 1000; `types` rides the top 8 candidates only, and is absent both without an installed schema and for a candidate with no type assertion) |
 | POST | `/contexts/{name}/resolve_label` | `{cue, dice_floor?, semantic_floor?, limit?}` → `[{name, score, tier, kind?, gloss?}]` relation candidates (limit default/ceiling 1000) |
 | POST | `/contexts/{name}/resolve/explain` | `{cue, expected, dice_floor?, semantic_floor?, limit?}` → one verdict for "why didn't (or did) `expected` come back for `cue`", first that applies: `not_in_vocabulary` (nearest stored spellings attached — register an alias?) / `cue_resolved_exactly` (the cue IS another stored spelling; the exact tier answers alone) / `below_floor` (its actual score vs the floor in effect) / `below_cutoff` (rank, plus a `limit_to_reach` verified by rerunning the serve) / `semantic_not_run` / `semantic_below_floor` (gloss cosine vs the semantic floor, or which precondition failed) / `served` — same floors and limit as the resolve call being explained |

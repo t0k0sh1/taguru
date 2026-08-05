@@ -277,6 +277,28 @@ fn full_retrieval_loop_over_http() {
             .iter()
             .any(|r| r["distance"] == json!(2) && r["path"] == json!(["青嶺酒造", "高瀬"]))
     );
+    // paths pulls the thread end to end: the whole concept trail plus
+    // every association along it, in walk order.
+    let threads = server.ok(
+        "POST",
+        "/contexts/sake/paths",
+        Some(json!({"origins": ["青嶺酒造"], "targets": ["南部杜氏"]})),
+    );
+    assert_eq!(threads["total"], json!(1));
+    assert_eq!(threads["capped"], json!(false));
+    assert_eq!(threads["matches"][0]["distance"], json!(2));
+    assert_eq!(
+        threads["matches"][0]["path"],
+        json!(["青嶺酒造", "高瀬", "南部杜氏"])
+    );
+    assert_eq!(
+        threads["matches"][0]["associations"][0]["label"],
+        json!("杜氏")
+    );
+    assert_eq!(
+        threads["matches"][0]["associations"][1]["label"],
+        json!("出身")
+    );
 
     // Aliases resolve at entry, answer with canonical spellings, and
     // refuse to shadow existing spellings.

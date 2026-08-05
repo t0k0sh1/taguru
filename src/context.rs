@@ -290,6 +290,49 @@ pub struct Activation {
     pub association: Association,
 }
 
+/// One path returned by [`Context::paths`]: a concrete chain of
+/// associations connecting an origin concept to a target concept — the
+/// thread itself, pulled end to end, with every fact along it carrying
+/// its full citation data.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Trail {
+    /// How many associations the trail walks — `path.len() - 1`, never 0:
+    /// zero hops of association-following connects nothing, so a concept
+    /// is never "connected to itself" by an empty trail.
+    pub distance: usize,
+    /// Concept names from the origin to the target, origin first — the
+    /// same connective tissue [`Recollection::path`] carries, but here it
+    /// spans the whole trail rather than stopping at the reached endpoint.
+    pub path: Vec<String>,
+    /// The weakest link: the smallest raw cumulative |sum| among the
+    /// associations walked. A chain of knowledge is only as reliable as
+    /// its least-supported hop, so trails of equal length rank by this,
+    /// descending. Like [`Activation::strength`] it ranks on the raw
+    /// cumulative total — NOT the averaged [`Association::weight`] — so
+    /// corroboration keeps outranking a single assertion of the same
+    /// average intensity; magnitude ranks, sign is content. Ordinal:
+    /// compare within one call's results, not across calls or corpus
+    /// versions.
+    pub strength: f64,
+    /// The associations walked, in trail order. Each step's endpoints
+    /// appear in `path` at the same index and the next one — though the
+    /// association's own `subject`/`object` may sit in either order,
+    /// since traversal follows meaning-directional edges both ways.
+    pub associations: Vec<Association>,
+}
+
+/// What [`Context::paths`] returns: the pre-truncation trail count (so a
+/// caller can tell a complete result from a truncated one, mirroring
+/// [`Context::activate`]), whether enumeration hit the server's expansion
+/// budget — `capped == true` means `total` is a lower bound, not a count
+/// of everything that exists — and the `limit` best trails.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PathsResult {
+    pub total: usize,
+    pub capped: bool,
+    pub trails: Vec<Trail>,
+}
+
 /// One candidate name produced by [`Context::resolve`] (concept names) or
 /// [`Context::resolve_label`] (relation labels), scored by how much of the
 /// longer string the lexical overlap covers (1.0 = exact match).

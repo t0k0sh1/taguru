@@ -39,6 +39,7 @@ from taguru._models import (
     ExplorePage,
     MatchPage,
     PassagePage,
+    PathsPage,
 )
 
 # sdk/python/tests/unit/test_wire_contract.py -> repo root: same depth
@@ -74,6 +75,7 @@ TYPED_OPERATIONS = {
     "sources_search": PassagePage,
     "explore": ExplorePage,
     "activate": ActivationPage,
+    "paths": PathsPage,
     "communities_search": CommunityPage,
     "evidence_mixed_lanes": EvidencePackage,
     "evidence_budget_constrained": EvidencePackage,

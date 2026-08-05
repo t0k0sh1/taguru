@@ -49,10 +49,11 @@ pub enum SearchOp {
     SearchPassages,
     SearchCommunities,
     Explore,
+    Paths,
 }
 
 impl SearchOp {
-    pub(super) const ALL: [SearchOp; 8] = [
+    pub(super) const ALL: [SearchOp; 9] = [
         SearchOp::Resolve,
         SearchOp::ResolveLabel,
         SearchOp::Recall,
@@ -61,6 +62,7 @@ impl SearchOp {
         SearchOp::SearchPassages,
         SearchOp::SearchCommunities,
         SearchOp::Explore,
+        SearchOp::Paths,
     ];
 
     /// `pub(crate)`: also `taguru.op`'s source of truth on the spans
@@ -83,6 +85,7 @@ impl SearchOp {
             SearchOp::SearchPassages => "search_passages",
             SearchOp::SearchCommunities => "search_communities",
             SearchOp::Explore => "explore",
+            SearchOp::Paths => "paths",
         }
     }
 }

@@ -101,6 +101,10 @@ classes:
       route: "POST /contexts/{name}/explore"
       args: [origins]
       options: [max_depth, limit, after]
+    paths:
+      route: "POST /contexts/{name}/paths"
+      args: [origins, targets]
+      options: [max_depth, limit]
     unreachable_from:
       route: "POST /contexts/{name}/unreachable_from"
       args: [origins]

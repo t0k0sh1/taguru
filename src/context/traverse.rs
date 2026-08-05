@@ -5,8 +5,8 @@ use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use crate::deadline::{Deadline, DeadlineExceeded};
 
 use super::{
-    Activation, Association, ConceptId, Context, EdgeId, EdgeRecord, LabelId, Recollection,
-    accumulate_saturating, clamp_unit_or,
+    Activation, Association, ConceptId, Context, EdgeId, EdgeRecord, LabelId, PathsResult,
+    Recollection, Trail, accumulate_saturating, clamp_unit_or,
 };
 
 impl Context {
@@ -397,6 +397,261 @@ impl Context {
         (total, matches)
     }
 
+    /// Edge-expansion budget for one [`Context::paths`] call. Simple-path
+    /// enumeration is combinatorial in the worst case (a dense clique
+    /// holds factorially many simple paths between any two members), so
+    /// unlike `explore` — whose work is bounded by the component's edge
+    /// count — `paths` needs an explicit ceiling on how many edges the
+    /// forward walk may examine. 100k expansions is far beyond any trail
+    /// set a caller could digest while keeping the worst case bounded;
+    /// hitting it is reported honestly as `capped` rather than silently
+    /// returning a result that looks exhaustive.
+    const PATHS_EXPANSION_BUDGET: usize = 100_000;
+
+    /// Walks the network from `origins` to `targets` and returns up to
+    /// `limit` simple paths connecting them — the 手繰り itself: not what
+    /// lies near one concept, but through which concrete chain of
+    /// associations two concepts relate, each hop carrying its full
+    /// citation data.
+    ///
+    /// Traversal is structural, with exactly [`Context::explore`]'s
+    /// discipline: edges are followed in both directions (an association
+    /// is directional in meaning, not in reachability), shared relation
+    /// labels never bridge, retracted edges never bridge, and origins or
+    /// targets naming unknown concepts contribute nothing. Only simple
+    /// paths are enumerated — no concept repeats within one trail — so a
+    /// concept that is both origin and target yields no trail to itself
+    /// (`distance` is never 0), while a trail may legitimately pass
+    /// through one target on its way to another, and both prefixes are
+    /// reported.
+    ///
+    /// Ranking is deterministic: distance ascending (the shortest thread
+    /// is the strongest claim of relatedness), then weakest-link strength
+    /// descending — see [`Trail::strength`] — then insertion order, the
+    /// same final tie-break `explore` uses. `max_depth` bounds the hops
+    /// per trail and `limit` bounds the trails returned; the
+    /// pre-truncation count comes back as [`PathsResult::total`].
+    /// Enumeration that would exceed [`Context::PATHS_EXPANSION_BUDGET`]
+    /// stops early and says so via [`PathsResult::capped`].
+    pub fn paths(
+        &self,
+        origins: &[&str],
+        targets: &[&str],
+        max_depth: usize,
+        limit: usize,
+    ) -> PathsResult {
+        self.paths_impl(origins, targets, max_depth, limit, |_| true)
+    }
+
+    /// [`Context::paths`] with a set of relation labels hidden from the
+    /// walk entirely — never a hop in a trail, never a bridge. ADR 0009
+    /// §6.3's traversal exclusion for the reserved `schema:type` label,
+    /// on the same reasoning as [`Context::explore_excluding`]: a hub
+    /// label would put every typed instance a couple of hops from every
+    /// other, and "A relates to B because both are typed 会社" is exactly
+    /// the non-answer a paths query exists to avoid. Additive alongside
+    /// [`Context::paths`] for the same published-API reason the other
+    /// `_excluding` variants document, sharing [`Context::paths_impl`]
+    /// monomorphized per call site on the `visible` closure (see
+    /// [`Context::explore_excluding`] for why that is not cosmetic).
+    pub fn paths_excluding(
+        &self,
+        origins: &[&str],
+        targets: &[&str],
+        max_depth: usize,
+        limit: usize,
+        excluded: &[&str],
+    ) -> PathsResult {
+        let excluded_ids: HashSet<LabelId> = excluded
+            .iter()
+            .filter_map(|name| self.label_ids.get(*name).copied())
+            .collect();
+        self.paths_impl(origins, targets, max_depth, limit, move |label: LabelId| {
+            !excluded_ids.contains(&label)
+        })
+    }
+
+    fn paths_impl(
+        &self,
+        origins: &[&str],
+        targets: &[&str],
+        max_depth: usize,
+        limit: usize,
+        visible: impl Fn(LabelId) -> bool,
+    ) -> PathsResult {
+        let empty = PathsResult {
+            total: 0,
+            capped: false,
+            trails: Vec::new(),
+        };
+        let target_ids: HashSet<ConceptId> = targets
+            .iter()
+            .filter_map(|name| self.concept_ids.get(*name).copied())
+            .collect();
+        // Origins keep caller order (deduplicated) so enumeration order —
+        // which decides WHAT gets found when the budget bites — is a
+        // function of the request, not of hash iteration.
+        let mut seen_origins: HashSet<ConceptId> = HashSet::new();
+        let origin_ids: Vec<ConceptId> = origins
+            .iter()
+            .filter_map(|name| self.concept_ids.get(*name).copied())
+            .filter(|&id| seen_origins.insert(id))
+            .collect();
+        if origin_ids.is_empty() || target_ids.is_empty() || max_depth == 0 || limit == 0 {
+            return empty;
+        }
+
+        // Reverse breadth-first sweep from every target: each node's
+        // distance to its NEAREST target, the admissible bound that lets
+        // the forward walk prune any branch that can no longer reach a
+        // target within `max_depth`. Without this the walk would wander
+        // the whole component before discovering a branch is hopeless.
+        let mut to_target: HashMap<ConceptId, usize> = HashMap::new();
+        let mut frontier: VecDeque<ConceptId> = VecDeque::new();
+        for &id in &target_ids {
+            to_target.insert(id, 0);
+            frontier.push_back(id);
+        }
+        while let Some(concept) = frontier.pop_front() {
+            let hop = to_target[&concept] + 1;
+            if hop > max_depth {
+                continue;
+            }
+            for edge_id in self.outgoing(concept).chain(self.incoming(concept)) {
+                let edge = &self.edges[edge_id as usize];
+                if edge.count == 0 || !visible(edge.label) {
+                    continue;
+                }
+                for neighbor in [edge.subject, edge.object] {
+                    if let Entry::Vacant(entry) = to_target.entry(neighbor) {
+                        entry.insert(hop);
+                        frontier.push_back(neighbor);
+                    }
+                }
+            }
+        }
+
+        // Depth-first enumeration of simple paths, pruned by the reverse
+        // distances. Iterative — with the budget rather than `max_depth`
+        // as the real recursion bound, a deep chain could otherwise grow
+        // the call stack past its limit.
+        let mut found: Vec<(Vec<ConceptId>, Vec<EdgeId>)> = Vec::new();
+        let mut capped = false;
+        let mut budget = Self::PATHS_EXPANSION_BUDGET;
+        let mut node_stack: Vec<ConceptId> = Vec::new();
+        let mut edge_stack: Vec<EdgeId> = Vec::new();
+        let mut on_path: HashSet<ConceptId> = HashSet::new();
+        'origins: for &origin in &origin_ids {
+            if !to_target.contains_key(&origin) {
+                continue;
+            }
+            node_stack.clear();
+            edge_stack.clear();
+            on_path.clear();
+            node_stack.push(origin);
+            on_path.insert(origin);
+            let mut frames = Vec::new();
+            frames.push(self.outgoing(origin).chain(self.incoming(origin)));
+            while let Some(frame) = frames.last_mut() {
+                let Some(edge_id) = frame.next() else {
+                    frames.pop();
+                    if let Some(done) = node_stack.pop() {
+                        on_path.remove(&done);
+                    }
+                    edge_stack.pop();
+                    continue;
+                };
+                if budget == 0 {
+                    capped = true;
+                    break 'origins;
+                }
+                budget -= 1;
+                let edge = &self.edges[edge_id as usize];
+                // Same dead-edge and hidden-label discipline as `explore`:
+                // a retracted association is not a fact, a hidden label is
+                // invisible — neither may be a hop, and skipping here (not
+                // post-filtering) means neither can bridge either.
+                if edge.count == 0 || !visible(edge.label) {
+                    continue;
+                }
+                let here = *node_stack.last().expect("stack tracks frames");
+                let next = if edge.subject == here {
+                    edge.object
+                } else {
+                    edge.subject
+                };
+                // A self-loop leads nowhere new, and revisiting a concept
+                // already on the trail would make the path non-simple.
+                if next == here || on_path.contains(&next) {
+                    continue;
+                }
+                let depth = edge_stack.len() + 1;
+                let Some(&remaining) = to_target.get(&next) else {
+                    continue;
+                };
+                if depth + remaining > max_depth {
+                    continue;
+                }
+                if target_ids.contains(&next) {
+                    let mut nodes = node_stack.clone();
+                    nodes.push(next);
+                    let mut edges = edge_stack.clone();
+                    edges.push(edge_id);
+                    found.push((nodes, edges));
+                }
+                if depth < max_depth {
+                    node_stack.push(next);
+                    on_path.insert(next);
+                    edge_stack.push(edge_id);
+                    frames.push(self.outgoing(next).chain(self.incoming(next)));
+                }
+            }
+        }
+
+        // Rank: distance, then weakest link descending, then ids — which
+        // are insertion order, `explore`'s own same-distance tie-break —
+        // so the order is deterministic for a given `Context` history.
+        let mut ranked: Vec<(usize, f64, Vec<ConceptId>, Vec<EdgeId>)> = found
+            .into_iter()
+            .map(|(nodes, edges)| {
+                let strength = edges
+                    .iter()
+                    .map(|&edge_id| self.edges[edge_id as usize].sum.abs())
+                    .fold(f64::INFINITY, f64::min);
+                (edges.len(), strength, nodes, edges)
+            })
+            .collect();
+        ranked.sort_unstable_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then_with(|| b.1.total_cmp(&a.1))
+                .then_with(|| a.2.cmp(&b.2))
+                .then_with(|| a.3.cmp(&b.3))
+        });
+        let total = ranked.len();
+        ranked.truncate(limit);
+
+        let trails = ranked
+            .into_iter()
+            .map(|(distance, strength, nodes, edges)| Trail {
+                distance,
+                path: nodes
+                    .into_iter()
+                    .map(|id| self.concept_name(id).to_string())
+                    .collect(),
+                strength,
+                associations: edges
+                    .into_iter()
+                    .map(|edge_id| self.association(edge_id))
+                    .collect(),
+            })
+            .collect();
+        PathsResult {
+            total,
+            capped,
+            trails,
+        }
+    }
+
     /// Whether any single association directly connects the two
     /// concepts, in either direction under any label. Unknown names are
     /// simply not adjacent. Audits use this to tell RELATED apart from
@@ -735,6 +990,205 @@ mod tests {
             "the retracted edge must not surface, nor bridge to 果物's facts"
         );
         assert_eq!(reached[0].association, assoc("私", "好き", "りんご", 1.0));
+    }
+
+    #[test]
+    fn paths_pulls_the_thread_end_to_end() {
+        let mut context = Context::default();
+        // A chain: 私 → りんご → 果物 → ビタミン
+        context.associate("私", "好き", "りんご", 1.0).unwrap();
+        context.associate("りんご", "分類", "果物", 1.0).unwrap();
+        context.associate("果物", "含む", "ビタミン", 1.0).unwrap();
+
+        let direct = context.paths(&["私"], &["りんご"], 10, 10);
+        assert!(!direct.capped);
+        assert_eq!(direct.total, 1);
+        assert_eq!(direct.trails.len(), 1);
+        assert_eq!(direct.trails[0].distance, 1);
+        assert_eq!(direct.trails[0].path, vec!["私", "りんご"]);
+        assert_eq!(
+            direct.trails[0].associations,
+            vec![assoc("私", "好き", "りんご", 1.0)]
+        );
+
+        let far = context.paths(&["私"], &["ビタミン"], 10, 10);
+        assert_eq!(far.total, 1);
+        assert_eq!(far.trails[0].distance, 3);
+        assert_eq!(far.trails[0].path, vec!["私", "りんご", "果物", "ビタミン"]);
+        assert_eq!(far.trails[0].associations.len(), 3);
+        // The trail's associations come back in walk order.
+        assert_eq!(far.trails[0].associations[0].subject, "私");
+        assert_eq!(far.trails[0].associations[2].object, "ビタミン");
+
+        // A depth ceiling below the shortest connection finds nothing.
+        assert_eq!(context.paths(&["私"], &["ビタミン"], 2, 10).total, 0);
+    }
+
+    #[test]
+    fn paths_walks_against_edge_direction_too() {
+        let mut context = Context::default();
+        // りんご is the *object* of both edges; connecting 私 to 農家 runs
+        // against 育てる's direction on the second hop.
+        context.associate("私", "好き", "りんご", 1.0).unwrap();
+        context.associate("農家", "育てる", "りんご", 1.0).unwrap();
+
+        let result = context.paths(&["私"], &["農家"], 10, 10);
+        assert_eq!(result.total, 1);
+        assert_eq!(result.trails[0].path, vec!["私", "りんご", "農家"]);
+    }
+
+    #[test]
+    fn paths_orders_shorter_trails_before_stronger_long_ones() {
+        let mut context = Context::default();
+        // A weak direct edge and a heavyweight detour: the direct thread
+        // still comes first — distance ranks before strength.
+        context.associate("起点", "弱い関係", "目標", 0.5).unwrap();
+        context.associate("起点", "強い関係", "中継", 5.0).unwrap();
+        context.associate("中継", "強い関係", "目標", 5.0).unwrap();
+
+        let result = context.paths(&["起点"], &["目標"], 10, 10);
+        assert_eq!(result.total, 2);
+        assert_eq!(result.trails[0].distance, 1);
+        assert_eq!(result.trails[0].strength, 0.5);
+        assert_eq!(result.trails[1].distance, 2);
+        assert_eq!(result.trails[1].strength, 5.0);
+    }
+
+    #[test]
+    fn paths_ranks_equal_length_trails_by_their_weakest_link() {
+        let mut context = Context::default();
+        // Two 2-hop routes; the first is weaker overall despite one strong
+        // hop, because a chain is only as reliable as its weakest link.
+        context.associate("起点", "r", "弱い中継", 1.0).unwrap();
+        context.associate("弱い中継", "r", "目標", 5.0).unwrap();
+        context.associate("起点", "r", "強い中継", 3.0).unwrap();
+        context.associate("強い中継", "r", "目標", 5.0).unwrap();
+
+        let result = context.paths(&["起点"], &["目標"], 10, 10);
+        assert_eq!(result.total, 2);
+        assert_eq!(result.trails[0].path[1], "強い中継");
+        assert_eq!(result.trails[0].strength, 3.0);
+        assert_eq!(result.trails[1].path[1], "弱い中継");
+        assert_eq!(result.trails[1].strength, 1.0);
+    }
+
+    #[test]
+    fn paths_strength_rewards_corroboration_over_average_weight() {
+        let mut context = Context::default();
+        // The corroborated hop sums to 2.0 (two assertions of 1.0) while
+        // its averaged weight stays 1.0; the single emphatic 1.5 has the
+        // higher average. Ranking on the raw sum keeps corroboration
+        // ahead — the same discipline activate documents.
+        context.associate("起点", "r", "裏取り", 1.0).unwrap();
+        context.associate("起点", "r", "裏取り", 1.0).unwrap();
+        context.associate("裏取り", "r", "目標", 5.0).unwrap();
+        context.associate("起点", "r", "単発", 1.5).unwrap();
+        context.associate("単発", "r", "目標", 5.0).unwrap();
+
+        let result = context.paths(&["起点"], &["目標"], 10, 10);
+        assert_eq!(result.total, 2);
+        assert_eq!(result.trails[0].path[1], "裏取り");
+        assert_eq!(result.trails[0].strength, 2.0);
+        assert_eq!(result.trails[1].strength, 1.5);
+    }
+
+    #[test]
+    fn paths_does_not_bridge_through_a_retracted_edge() {
+        let mut context = Context::default();
+        context.associate("私", "好き", "りんご", 1.0).unwrap();
+        context.associate("りんご", "分類", "果物", 1.0).unwrap();
+        context
+            .retract_association("りんご", "分類", "果物")
+            .unwrap();
+
+        assert_eq!(context.paths(&["私"], &["果物"], 10, 10).total, 0);
+    }
+
+    #[test]
+    fn paths_enumerates_simple_paths_and_reports_total_past_the_limit() {
+        let mut context = Context::default();
+        // A diamond: exactly two simple paths, never an a↔b zigzag.
+        context.associate("o", "r", "a", 1.0).unwrap();
+        context.associate("o", "r", "b", 1.0).unwrap();
+        context.associate("a", "r", "t", 1.0).unwrap();
+        context.associate("b", "r", "t", 1.0).unwrap();
+
+        let all = context.paths(&["o"], &["t"], 10, 10);
+        assert_eq!(all.total, 2);
+        assert_eq!(all.trails.len(), 2);
+
+        let cut = context.paths(&["o"], &["t"], 10, 1);
+        assert_eq!(cut.total, 2, "total still counts what the limit cut");
+        assert_eq!(cut.trails.len(), 1);
+    }
+
+    #[test]
+    fn paths_records_the_prefix_when_a_trail_passes_through_a_target() {
+        let mut context = Context::default();
+        context.associate("o", "r", "t1", 1.0).unwrap();
+        context.associate("t1", "r", "t2", 1.0).unwrap();
+
+        let result = context.paths(&["o"], &["t1", "t2"], 10, 10);
+        assert_eq!(result.total, 2);
+        assert_eq!(result.trails[0].path, vec!["o", "t1"]);
+        assert_eq!(result.trails[1].path, vec!["o", "t1", "t2"]);
+    }
+
+    #[test]
+    fn paths_returns_nothing_for_unknowns_zero_depth_or_self() {
+        let mut context = Context::default();
+        context.associate("a", "r", "b", 1.0).unwrap();
+
+        assert_eq!(context.paths(&["未知"], &["b"], 10, 10).total, 0);
+        assert_eq!(context.paths(&["a"], &["未知"], 10, 10).total, 0);
+        assert_eq!(context.paths(&["a"], &["b"], 0, 10).total, 0);
+        assert_eq!(context.paths(&["a"], &["b"], 10, 0).trails.len(), 0);
+        // A concept is never connected to itself by an empty trail, and a
+        // cycle back to the start is not a simple path.
+        assert_eq!(context.paths(&["a"], &["a"], 10, 10).total, 0);
+    }
+
+    #[test]
+    fn paths_excluding_hides_the_label_as_hop_and_bridge() {
+        let mut context = Context::default();
+        // The only connection runs over the hidden label — once as the
+        // sole hop, once as the middle of a longer thread.
+        context.associate("a", "schema:type", "会社", 1.0).unwrap();
+        context.associate("b", "schema:type", "会社", 1.0).unwrap();
+
+        assert_eq!(context.paths(&["a"], &["b"], 10, 10).total, 1);
+        let excluded = context.paths_excluding(&["a"], &["b"], 10, 10, &["schema:type"]);
+        assert_eq!(
+            excluded.total, 0,
+            "a hidden label must be neither a hop nor a bridge"
+        );
+    }
+
+    #[test]
+    fn paths_reports_capped_when_enumeration_exhausts_the_budget() {
+        // A 12-clique holds millions of simple paths between any two
+        // members; enumeration must stop at the budget and say so instead
+        // of pretending the answer is complete.
+        let mut context = Context::default();
+        let names: Vec<String> = (0..12).map(|i| format!("n{i}")).collect();
+        for i in 0..names.len() {
+            for j in (i + 1)..names.len() {
+                context.associate(&names[i], "r", &names[j], 1.0).unwrap();
+            }
+        }
+
+        let result = context.paths(&["n0"], &["n11"], Context::UNBOUNDED, 5);
+        assert!(result.capped, "a clique walk must hit the budget");
+        assert_eq!(result.trails.len(), 5);
+        assert!(result.total >= 5);
+        // Whatever was found before the budget bit still ranks shortest
+        // first.
+        assert!(
+            result
+                .trails
+                .windows(2)
+                .all(|w| w[0].distance <= w[1].distance)
+        );
     }
 
     #[test]

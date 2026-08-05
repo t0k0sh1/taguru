@@ -156,6 +156,12 @@ describe("graph writes and reads", () => {
     const strengths = activated.matches.map((m) => m.strength);
     expect(strengths).toEqual([...strengths].sort((a, b) => b - a));
 
+    const threads = await ctx.paths("青嶺酒造", "寒仕込み");
+    expect(threads.total).toBe(1);
+    expect(threads.capped).toBe(false);
+    expect(threads.matches[0]!.path).toEqual(["青嶺酒造", "高瀬", "寒仕込み"]);
+    expect(threads.matches[0]!.associations.map((a) => a.label)).toEqual(["杜氏", "重視する"]);
+
     expect((await ctx.unreachableFrom(["青嶺酒造"])).total).toBe(0);
 
     const labels = await ctx.listLabels();

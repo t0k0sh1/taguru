@@ -13,7 +13,7 @@ use axum::extract::{FromRequest, Request};
 use axum::http::{Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
-use taguru::context::{Activation, Association, Attribution, Recollection};
+use taguru::context::{Activation, Association, Attribution, Recollection, Trail};
 
 use crate::groups::{MAX_GROUP_DEPTH, MAX_GROUP_MEMBERS, NestingViolation};
 use crate::metrics::ErrorKind;
@@ -57,7 +57,7 @@ pub use contexts::{
 };
 pub use coverage::{embeddings_status, labels, refresh_embeddings, unreachable_from};
 pub use evidence::assemble::assemble_evidence;
-pub use explore::{activate, describe, explore};
+pub use explore::{activate, describe, explore, paths};
 pub use groups::{create_group, delete_group, get_group, list_groups, rename_group, update_group};
 pub use import::{
     GroupImportOutcome, ImportOutcome, ImportStreamOutcome, SchemaImportOutcome, compact_context,
@@ -1233,6 +1233,12 @@ pub(crate) const MAX_MATCH_LIMIT: usize = 1000;
 /// unreachable_from.
 const MAX_EXPLORE_DEPTH: usize = 10;
 
+/// Result cap for paths, tighter than [`MAX_MATCH_LIMIT`]: each trail
+/// is a whole chain of associations with full attributions — up to
+/// [`MAX_EXPLORE_DEPTH`] of them — so a page of trails weighs an order
+/// of magnitude more than a page of single matches.
+const MAX_PATHS_LIMIT: usize = 100;
+
 /// Per-request association batch cap — one document's facts arrive as
 /// one request; anything past this is asked to split. (`pub(crate)`:
 /// the offline import chunks its applies at the same size.)
@@ -1856,6 +1862,39 @@ fn cross_associations_out(
         .map(|(context, association)| {
             let inner = association_out(association, &markers[&context]);
             CrossMatch { context, inner }
+        })
+        .collect()
+}
+
+/// `Trail`'s wire shape: identical, with each association reshaped to
+/// carry resolved section/locator markers (see [`AssociationOut`]).
+#[derive(Serialize)]
+pub struct TrailOut {
+    pub distance: usize,
+    pub path: Vec<String>,
+    pub strength: f64,
+    pub associations: Vec<AssociationOut>,
+}
+
+/// Same as [`associations_out`], for trails (paths' results) — one
+/// `resolve_markers` call across every association of every trail on
+/// the page, not one per trail.
+fn trails_out(state: &AppState, name: &str, matches: Vec<Trail>) -> Vec<TrailOut> {
+    let markers = state.resolve_markers(
+        name,
+        locator_keys(matches.iter().flat_map(|trail| trail.associations.iter())),
+    );
+    matches
+        .into_iter()
+        .map(|trail| TrailOut {
+            distance: trail.distance,
+            path: trail.path,
+            strength: trail.strength,
+            associations: trail
+                .associations
+                .into_iter()
+                .map(|association| association_out(association, &markers))
+                .collect(),
         })
         .collect()
 }

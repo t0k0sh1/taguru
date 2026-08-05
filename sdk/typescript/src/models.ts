@@ -337,6 +337,29 @@ export interface ActivationPage {
 }
 
 /**
+ * One path from an origin to a target: the concept trail plus every
+ * association walked, in order. `strength` is the weakest link (smallest raw
+ * cumulative |sum| along the trail) — an ordering within one call, never
+ * comparable across calls.
+ */
+export interface Trail {
+  distance: number;
+  path: string[];
+  strength: number;
+  associations: Association[];
+}
+
+/**
+ * Trails, shortest first. `capped` means enumeration hit the server's
+ * budget, so `total` is a lower bound.
+ */
+export interface PathsPage {
+  total: number;
+  capped: boolean;
+  matches: Trail[];
+}
+
+/**
  * One resolve candidate. `kind` (lexical tier only) is
  * "exact"/"alias"/"containment"/"fuzzy" — never adopt a containment/fuzzy hit
  * on score alone; read `gloss` first. `types` (top candidates only) are the
