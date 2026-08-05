@@ -113,6 +113,54 @@ fn mcp_over_http_serves_initialize_tools_and_calls() {
     assert_eq!(status, 405);
 }
 
+/// The paths tool dispatches onto POST /contexts/{name}/paths and the
+/// pass-through body carries the trail — concept path plus each hop's
+/// association — like every other tool result (ADR 0005 §2.4).
+#[test]
+fn paths_tool_executes_end_to_end_through_mcp() {
+    let server = Server::start("mcp-paths");
+    server.ok("PUT", "/contexts/sake", None);
+    server.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([
+            {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0},
+            {"subject": "高瀬", "label": "出身", "object": "南部杜氏", "weight": 1.0},
+        ])),
+    );
+
+    let (status, reply) = server.call(
+        "POST",
+        "/mcp",
+        Some(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                    "params": {"name": "paths",
+                               "arguments": {"context": "sake",
+                                             "origins": ["青嶺酒造"],
+                                             "targets": ["南部杜氏"]}}})),
+    );
+    assert_eq!(status, 200);
+    assert!(reply["result"].get("isError").is_none(), "{reply}");
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    let body: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(body["result"]["total"], json!(1), "{body}");
+    assert_eq!(
+        body["result"]["matches"][0]["path"],
+        json!(["青嶺酒造", "高瀬", "南部杜氏"]),
+        "{body}"
+    );
+
+    // Omitting targets is a tool-level error, never a JSON-RPC abort.
+    let (status, refused) = server.call(
+        "POST",
+        "/mcp",
+        Some(json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                    "params": {"name": "paths",
+                               "arguments": {"context": "sake", "origins": ["青嶺酒造"]}}})),
+    );
+    assert_eq!(status, 200);
+    assert_eq!(refused["result"]["isError"], json!(true), "{refused}");
+}
+
 /// /mcp sits behind the bearer token like every route — and a tool
 /// dispatched through it is NOT re-authenticated inside; the /mcp
 /// entry is the auth point.

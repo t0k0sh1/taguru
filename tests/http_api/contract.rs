@@ -272,6 +272,22 @@ fn explore_and_activate_pages() {
         status,
         body,
     );
+
+    let request = json!({"origins": ["alpha"], "targets": ["beta"]});
+    let (status, body) = server.call("POST", "/contexts/corpus-b/paths", Some(request.clone()));
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        !body["result"]["matches"].as_array().unwrap().is_empty(),
+        "{body}"
+    );
+    http_fixture(
+        "paths",
+        "POST",
+        "/contexts/{name}/paths",
+        Some(request),
+        status,
+        body,
+    );
 }
 
 // --- HTTP: passage and community search — PassagePage is the 0.4.0

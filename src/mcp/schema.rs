@@ -421,13 +421,27 @@ pub(super) fn tool_definitions() -> Vec<Value> {
             ),
         ),
         (
+            "paths",
+            "How are two concepts related? Every simple path from an origin to a target, shortest first — the whole concept trail plus each hop's association with its citations. Within one length, the reliablest chain (largest weakest-link |sum|) ranks first. capped=true means enumeration hit the server budget, so total is a lower bound.",
+            object_schema(
+                json!({
+                    "context": context,
+                    "origins": { "type": "array", "items": { "type": "string" } },
+                    "targets": { "type": "array", "items": { "type": "string" } },
+                    "max_depth": { "type": "integer", "minimum": 0, "description": "hop ceiling per trail; default and max 10 (larger values are clamped, not refused)" },
+                    "limit": { "type": "integer", "minimum": 0, "description": "max trails (default 10, capped at 100)" }
+                }),
+                &["context", "origins", "targets"],
+            ),
+        ),
+        (
             "explore",
             "Exhaustive structural walk with hop distances, for unranked neighborhood views. Truncation keeps the nearest hops (watch total).",
             object_schema(
                 json!({
                     "context": context,
                     "origins": { "type": "array", "items": { "type": "string" } },
-                    "max_depth": { "type": "integer", "description": "hop ceiling; default and max 10" },
+                    "max_depth": { "type": "integer", "minimum": 0, "description": "hop ceiling; default and max 10 (larger values are clamped, not refused)" },
                     "limit": { "type": "integer", "minimum": 0, "description": "default 100, capped at 1000" },
                     "after": {
                         "type": "object",

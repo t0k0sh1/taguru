@@ -13,8 +13,9 @@ use crate::registry::AppState;
 
 use super::{
     ActivationOut, AppJson, AppPath, ExploreCursor, MAX_EXPLORE_DEPTH, MAX_MATCH_LIMIT,
-    RecollectionOut, access_error, activations_out, clamp, deadline_exceeded, explore_page, ok,
-    overlong, recollections_out, search_log_enabled,
+    MAX_PATHS_LIMIT, RecollectionOut, TrailOut, access_error, activations_out, clamp,
+    deadline_exceeded, explore_page, ok, overlong, recollections_out, search_log_enabled,
+    trails_out,
 };
 
 #[derive(Debug, Deserialize)]
@@ -127,6 +128,89 @@ pub async fn explore(
             }
             let matches = recollections_out(&state, &name, matches);
             ok(ExplorePage { total, matches }, started_at)
+        }
+        Err(failure) => access_error(&state, failure, &name, started_at),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PathsRequest {
+    pub origins: Vec<String>,
+    pub targets: Vec<String>,
+    /// Hop ceiling per trail. Omitted — and everything above it — means
+    /// the server maximum ([`MAX_EXPLORE_DEPTH`]), the same ceiling
+    /// explore applies.
+    pub max_depth: Option<usize>,
+    /// Trail cap. Omitted means 10, ceiling [`MAX_PATHS_LIMIT`] — each
+    /// trail is a whole chain of associations, so the page is bounded
+    /// tighter than single-match endpoints.
+    pub limit: Option<usize>,
+}
+
+/// A bounded paths result: `{total, matches}` like [`ExplorePage`],
+/// plus `capped` — `Context::paths` bounds its own enumeration, and
+/// `capped == true` says that budget bit, so `total` is a lower bound
+/// rather than a count of every trail that exists.
+#[derive(Serialize)]
+pub struct PathsPage {
+    pub total: usize,
+    pub capped: bool,
+    pub matches: Vec<TrailOut>,
+}
+
+pub async fn paths(
+    State(state): State<AppState>,
+    AppPath(name): AppPath<String>,
+    axum::Extension(deadline): axum::Extension<Deadline>,
+    AppJson(request): AppJson<PathsRequest>,
+) -> Response {
+    let started_at = Instant::now();
+    if let Some(refusal) = overlong("origins", request.origins.len(), started_at) {
+        return refusal;
+    }
+    if let Some(refusal) = overlong("targets", request.targets.len(), started_at) {
+        return refusal;
+    }
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
+    }
+    // ADR 0009 §6.3 exclusion 1: `schema:type` never bridges a walk —
+    // same reason and same `block_in_place` rationale as `explore`.
+    let hidden = tokio::task::block_in_place(|| state.hidden_label(&name));
+    let excluded: Vec<&str> = hidden.into_iter().collect();
+    match state.read_context(&name, |context| {
+        let origins: Vec<&str> = request.origins.iter().map(String::as_str).collect();
+        let targets: Vec<&str> = request.targets.iter().map(String::as_str).collect();
+        context.paths_excluding(
+            &origins,
+            &targets,
+            clamp(request.max_depth, Context::UNBOUNDED, MAX_EXPLORE_DEPTH),
+            clamp(request.limit, 10, MAX_PATHS_LIMIT),
+            &excluded,
+        )
+    }) {
+        Ok(result) => {
+            state.note_search(SearchOp::Paths, &name, result.total == 0);
+            if search_log_enabled() {
+                tracing::info!(
+                    target: "taguru::search",
+                    context = %name,
+                    op = "paths",
+                    origins = %request.origins.join(","),
+                    targets = %request.targets.join(","),
+                    hits = result.total,
+                    "search",
+                );
+            }
+            let matches = trails_out(&state, &name, result.trails);
+            ok(
+                PathsPage {
+                    total: result.total,
+                    capped: result.capped,
+                    matches,
+                },
+                started_at,
+            )
         }
         Err(failure) => access_error(&state, failure, &name, started_at),
     }

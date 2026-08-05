@@ -289,6 +289,19 @@ pub fn route_tool(
                 Some(pick(arguments, &["origins", "max_depth", "limit", "after"])),
             )
         }
+        "paths" => {
+            let path = format!("{}/paths", context_path("context")?);
+            need_present(arguments, "origins")?;
+            need_present(arguments, "targets")?;
+            (
+                "POST",
+                path,
+                Some(pick(
+                    arguments,
+                    &["origins", "targets", "max_depth", "limit"],
+                )),
+            )
+        }
         "list_labels" => (
             "GET",
             format!(

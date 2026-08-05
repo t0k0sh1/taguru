@@ -150,8 +150,8 @@
       <code>context</code> it came from. Graph matches merge on |weight| (weights share one
       scale — evidence mass); passage hits interleave by per-context rank, because passage
       scores are corpus-local. Deep dives (<code>activate</code>, <code>explore</code>,
-      <code>resolve</code>) stay per-context by design: search across, then pull the thread
-      inside the context that answered.
+      <code>paths</code>, <code>resolve</code>) stay per-context by design: search across, then
+      pull the thread inside the context that answered.
     </p>
     <p class="note">
       Worked mappings — a paper split into section contexts and chapter groups, parts as
@@ -185,7 +185,7 @@
       <div class="loop-step"><span class="n">01</span><span class="t">Select</span><span class="d">pick the context with list_contexts</span></div>
       <div class="loop-step"><span class="n">02</span><span class="t">Resolve</span><span class="d">resolve / resolve_label turn the cue into canonical names</span></div>
       <div class="loop-step"><span class="n">03</span><span class="t">Survey</span><span class="d">describe → query to narrow down</span></div>
-      <div class="loop-step"><span class="n">04</span><span class="t">Expand</span><span class="d">activate / explore gather related knowledge</span></div>
+      <div class="loop-step"><span class="n">04</span><span class="t">Expand</span><span class="d">activate / explore gather related knowledge; paths threads two concepts together</span></div>
       <div class="loop-step"><span class="n">05</span><span class="t">Verify</span><span class="d">cite_passage checks the original text</span></div>
       <div class="loop-step" style="border-bottom-color: var(--thread-soft);"><span class="n" style="color:var(--thread)">06</span><span class="t">Cast the net</span><span class="d">search_passages when the graph can't reach</span></div>
     </div>

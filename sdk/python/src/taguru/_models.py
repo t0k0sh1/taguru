@@ -287,6 +287,29 @@ class ActivationPage:
 
 
 @dataclass(slots=True, frozen=True)
+class Trail:
+    """One path from an origin to a target: the concept trail plus every
+    association walked, in order. ``strength`` is the weakest link
+    (smallest raw cumulative ``|sum|`` along the trail) — an ordering
+    within one call, never comparable across calls."""
+
+    distance: int
+    path: list[str]
+    strength: float
+    associations: list[Association] = field(default_factory=list)
+
+
+@dataclass(slots=True, frozen=True)
+class PathsPage:
+    """Trails, shortest first. ``capped`` means enumeration hit the
+    server's budget, so ``total`` is a lower bound."""
+
+    total: int
+    capped: bool
+    matches: list[Trail]
+
+
+@dataclass(slots=True, frozen=True)
 class TieredResolution:
     """One resolve candidate. ``tier`` is ``"lexical"`` or ``"semantic"``.
 

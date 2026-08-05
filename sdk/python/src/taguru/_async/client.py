@@ -55,6 +55,7 @@ from .._models import (
     PassageHit,
     PassageLookup,
     PassagePage,
+    PathsPage,
     RefreshOutcome,
     ResolveExplanation,
     RetractAssociationOutcome,
@@ -927,6 +928,31 @@ class AsyncContext:
         )
         result = await self._post("/explore", body)
         return decode(ExplorePage, result)  # type: ignore[no-any-return]
+
+    async def paths(
+        self,
+        origins: str | Sequence[str],
+        targets: str | Sequence[str],
+        *,
+        max_depth: int | None = None,
+        limit: int | None = None,
+    ) -> PathsPage:
+        """Every simple path from an origin to a target, shortest first.
+
+        Each trail carries the whole concept ``path`` plus its
+        associations in walk order; ``capped`` means enumeration hit the
+        server's budget, so ``total`` is a lower bound.
+        """
+        body = drop_none(
+            {
+                "origins": [origins] if isinstance(origins, str) else list(origins),
+                "targets": [targets] if isinstance(targets, str) else list(targets),
+                "max_depth": max_depth,
+                "limit": limit,
+            }
+        )
+        result = await self._post("/paths", body)
+        return decode(PathsPage, result)  # type: ignore[no-any-return]
 
     async def activate(
         self,

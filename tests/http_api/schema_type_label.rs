@@ -132,6 +132,44 @@ fn schema_type_is_ordinary_until_a_schema_exists_then_hidden_from_labels_and_tra
     assert!(body["error"].as_str().unwrap().contains("rename"), "{body}");
 }
 
+/// `paths`' own copy of the same exclusion: before a schema exists,
+/// two concepts sharing a type object are two hops apart through it;
+/// once one installs (mode `off` included), that thread must vanish —
+/// "A relates to B because both are typed Brewery" is exactly the
+/// non-answer the exclusion exists to prevent.
+#[test]
+fn paths_never_threads_through_schema_type_once_a_schema_exists() {
+    let server = Server::start("schema-type-label-paths");
+    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([
+            {"subject": "青嶺酒造", "label": "schema:type", "object": "Brewery",
+             "weight": 1.0, "source": "a.md"},
+            {"subject": "旧銘酒造", "label": "schema:type", "object": "Brewery",
+             "weight": 1.0, "source": "a.md"},
+        ])),
+    );
+
+    let request = json!({"origins": ["青嶺酒造"], "targets": ["旧銘酒造"]});
+    let before = server.ok("POST", "/contexts/sake/paths", Some(request.clone()));
+    assert_eq!(
+        before["total"],
+        json!(1),
+        "before a schema exists, schema:type threads like any label: {before}"
+    );
+
+    server.ok("PUT", "/contexts/sake/schema", Some(off_document()));
+
+    let after = server.ok("POST", "/contexts/sake/paths", Some(request));
+    assert_eq!(
+        after["total"],
+        json!(0),
+        "once a schema exists, schema:type must never be a hop in a trail: {after}"
+    );
+}
+
 /// `activate`'s ranked sibling of the same exclusion — the fan
 /// normalization and the propagation walk must both drop `schema:type`
 /// edges, or a heavily-typed concept's real facts would be diluted by

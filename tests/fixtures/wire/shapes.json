@@ -12,6 +12,7 @@
     "/contexts/{name}/recall": ["cue"],
     "/contexts/{name}/explore": ["origins"],
     "/contexts/{name}/activate": ["origins"],
+    "/contexts/{name}/paths": ["origins", "targets"],
     "/contexts/{name}/sources/search": ["query"],
     "/contexts/{name}/communities/search": ["query"],
     "/contexts/{name}/evidence": ["origins"]

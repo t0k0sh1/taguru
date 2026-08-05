@@ -71,7 +71,9 @@ search across several contexts at once, every match tagged with the
 context it came from. Every search response also carries a `plan`:
 which contexts were actually searched and — for passage search — which
 lanes ran there and why not when one was skipped, with the effective
-cosine floor. Deep dives (`activate`, `explore`) stay per-context:
+cosine floor. Deep dives (`activate`, `explore`, and `paths` — every
+simple path between two concepts, shortest first, each hop carrying
+its citations, for "how are these two related?") stay per-context:
 search across, then pull the thread where it answered. How to draw
 those boundaries for real documents — which parts of a paper or a
 codebase become contexts, and which become groups — is the [modeling

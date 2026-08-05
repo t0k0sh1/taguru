@@ -61,7 +61,7 @@ mod tests {
     fn every_advertised_tool_routes_to_a_request() {
         let arguments = json!({
             "name": "ctx", "context": "ctx", "cue": "x", "concept": "x",
-            "origins": ["x"], "associations": [], "passages": {},
+            "origins": ["x"], "targets": ["y"], "associations": [], "passages": {},
             "sources": ["s"], "source": "s", "query": "q", "paragraph": 0,
             "stream": "{}", "to": "ctx2", "expected": "x",
             "subject": "s", "label": "l", "object": "o",
@@ -270,7 +270,7 @@ mod tests {
     fn schema_required_body_arguments_are_refused_when_omitted() {
         let base = json!({
             "name": "ctx", "context": "ctx", "cue": "x", "concept": "x",
-            "origins": ["x"], "passages": {}, "sources": ["s"], "source": "s",
+            "origins": ["x"], "targets": ["y"], "passages": {}, "sources": ["s"], "source": "s",
             "query": "q", "paragraph": 0, "to": "ctx2", "expected": "x",
             "subject": "s", "label": "l", "object": "o",
             "schema": 1, "mode": "strict", "closed_labels": false,
@@ -295,6 +295,8 @@ mod tests {
             ("recall", "cue"),
             ("activate", "origins"),
             ("explore", "origins"),
+            ("paths", "origins"),
+            ("paths", "targets"),
             ("retract_source", "source"),
             ("retract_association", "subject"),
             ("retract_association", "label"),

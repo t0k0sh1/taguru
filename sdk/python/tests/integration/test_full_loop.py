@@ -159,6 +159,12 @@ def test_graph_reads(client: Taguru, fresh_name: str) -> None:
     strengths = [a.strength for a in activated.matches]
     assert strengths == sorted(strengths, reverse=True)
 
+    threads = ctx.paths("青嶺酒造", "寒仕込み")
+    assert threads.total == 1
+    assert not threads.capped
+    assert threads.matches[0].path == ["青嶺酒造", "高瀬", "寒仕込み"]
+    assert [a.label for a in threads.matches[0].associations] == ["杜氏", "重視する"]
+
     audit = ctx.unreachable_from(["青嶺酒造"])
     assert audit.total == 0
 

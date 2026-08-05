@@ -7,6 +7,33 @@ Entries that change an on-disk format or a response shape say so.
 
 ## [Unreleased]
 
+### Added
+- `POST /contexts/{name}/paths` (#418) — the 手繰り between two
+  concepts: every simple path from an origin to a target, shortest
+  first, each trail carrying the whole concept `path` plus its
+  associations in walk order with full attributions. `activate`
+  spreads outward and `explore` sweeps a neighborhood; neither could
+  answer "how are these two related?" without the client re-walking
+  the graph by hand. Traversal follows `explore`'s exact discipline —
+  bidirectional, labels never bridge, retracted edges never bridge,
+  ADR 0009 §6.3's `schema:type` exclusion applies once a schema
+  document exists — and ranking is deterministic: distance ascending,
+  then weakest-link strength descending (the smallest raw cumulative
+  |sum| along the trail — corroboration outranks a single emphatic
+  assertion, the same discipline `activate` ranks by), then insertion
+  order. Simple-path enumeration is combinatorial in the worst case,
+  so one call examines at most a fixed edge budget and reports
+  `capped: true` when it bites — `total` is then a lower bound, never
+  a silently complete-looking count. `max_depth` shares explore's
+  ceiling (10); `limit` defaults to 10, capped at 100 (each trail is a
+  whole chain of associations, so pages weigh more than single-match
+  endpoints). Exposed as the `paths` MCP tool, in both core SDKs
+  (`paths`/`paths()`, `sdk/spec/surface.yaml` like every other
+  cross-language method), pinned as a wire-contract fixture
+  (additive: `HTTP_CONTRACT` unchanged), counted on `/metrics` as
+  `taguru_searches_total{op="paths"}`, and documented in the
+  `/protocol` manual's endpoint table and retrieval discipline.
+
 ## [0.7.0] - 2026-08-05
 
 ### Added

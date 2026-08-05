@@ -43,6 +43,7 @@ import type {
   PassageHit,
   PassageLookup,
   PassagePage,
+  PathsPage,
   QuestionSpec,
   RefreshOutcome,
   RerankRequest,
@@ -990,6 +991,29 @@ export class Context {
       }),
     );
     return result as ExplorePage;
+  }
+
+  /**
+   * Every simple path from an origin to a target, shortest first. Each trail
+   * carries the whole concept `path` plus its associations in walk order;
+   * `capped` means enumeration hit the server's budget, so `total` is a
+   * lower bound.
+   */
+  async paths(
+    origins: string | string[],
+    targets: string | string[],
+    options: { max_depth?: number; limit?: number } = {},
+  ): Promise<PathsPage> {
+    const result = await this.post(
+      "/paths",
+      dropUndefined({
+        origins: typeof origins === "string" ? [origins] : origins,
+        targets: typeof targets === "string" ? [targets] : targets,
+        max_depth: options.max_depth,
+        limit: options.limit,
+      }),
+    );
+    return result as PathsPage;
   }
 
   /** Spreading activation from origins, strongest first. */
