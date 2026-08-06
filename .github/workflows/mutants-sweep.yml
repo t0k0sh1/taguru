@@ -111,16 +111,19 @@ jobs:
           read -r -a globs <<< "$GLOBS"
           args=()
           for glob in "${globs[@]}"; do args+=(-f "$glob"); done
-          # Exit 2 is "missed mutants found" — the sweep's normal
-          # yield, recorded in the artifact, never a red job. Anything
-          # else (baseline failure, internal error) is a real failure.
+          # Exit 2 is "missed mutants found" and 3 is "timeouts
+          # found" — both are the sweep's normal yield, recorded in
+          # the artifact, never a red job (the registry sweep proved
+          # 3 in the field: shards 2/11/12 finished all 105 mutants
+          # and went red over a handful of timeouts). Anything else
+          # (baseline failure, internal error) is a real failure.
           set +e
           cargo mutants --profile=mutants --shard "$SHARD/$SHARD_TOTAL" \
             --jobs "$JOBS" "${args[@]}"
           code=$?
           set -e
           case "$code" in
-            0|2) ;;
+            0|2|3) ;;
             *) echo "cargo mutants failed with exit code $code" >&2; exit "$code" ;;
           esac
       - name: Disk after
