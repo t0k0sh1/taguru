@@ -13,7 +13,6 @@ use std::path::PathBuf;
 
 use crate::code::repo_walk::RepoWalk;
 use crate::code::sync::DEFAULT_CONTEXT;
-use crate::registry::{AppState, CitationLookup};
 
 /// Hits printed per `find` unless `--limit` says otherwise.
 const DEFAULT_LIMIT: usize = 10;
@@ -79,10 +78,70 @@ fn parse_args(verb: &str, args: &[String]) -> Result<QueryArgs, String> {
     Ok(parsed)
 }
 
-/// Opens the data directory the same way sync writes it: default
-/// `$PROJECT_ROOT/.taguru`, no per-op WAL, embeddings not needed for
-/// graph reads.
-fn open(args: &QueryArgs) -> Result<AppState, String> {
+/// The lockless read handle: one context image plus its passage store,
+/// loaded straight from disk the way `inspect` reads — no registry, no
+/// directory lock, so any number of finds can run beside a `watch`
+/// sync or each other. Writes land via atomic renames and both loads
+/// verify checksums, so the worst a concurrent sync can cause is a
+/// clean refusal to retry, never a torn answer.
+pub(crate) struct CodeMap {
+    context: taguru::context::Context,
+    passages: crate::passages::PassageStore,
+}
+
+impl CodeMap {
+    /// Loads the named context read-only from `data_dir`. Every
+    /// failure maps to one stable sentence — the raw load errors
+    /// carry paths and format internals that belong in server logs,
+    /// not in a CLI answer an agent may echo (same posture the
+    /// AccessError mapping took when reads still went through the
+    /// registry).
+    pub(crate) fn open(data_dir: &std::path::Path, name: &str) -> Result<CodeMap, String> {
+        let stem = crate::registry::file_stem(name);
+        let image_path = crate::registry::image_path(data_dir, &stem);
+        let bytes = std::fs::read(&image_path)
+            .map_err(|_| format!("context '{name}' not found — run `taguru-code sync` first"))?;
+        let context = taguru::context::Context::from_bytes(&bytes).map_err(|_| damaged(name))?;
+        // heal=false keeps this strictly read-only, the same load
+        // `taguru inspect` runs; 0 = no log ceiling on a read.
+        let (passages, _, _) = crate::passages::PassageStore::load(
+            crate::registry::passages_path(data_dir, &stem),
+            &crate::registry::sources_path(data_dir, &stem),
+            crate::registry::passages_wal_path(data_dir, &stem),
+            0,
+            false,
+        )
+        .map_err(|_| damaged(name))?;
+        Ok(CodeMap { context, passages })
+    }
+
+    /// (section heading, locator) governing one `(source, paragraph)`
+    /// attribution, if the stored passage still covers it.
+    fn citation(
+        &self,
+        source: &str,
+        paragraph: u32,
+    ) -> (Option<String>, Option<crate::passages::Locator>) {
+        match self.passages.get(source) {
+            Some(record) => (
+                record.section_for(paragraph as usize).map(str::to_string),
+                record.locator_for(paragraph as usize).cloned(),
+            ),
+            None => (None, None),
+        }
+    }
+}
+
+fn damaged(name: &str) -> String {
+    format!(
+        "context '{name}' could not be read — re-run `taguru-code sync` \
+         (a full re-sync rebuilds a damaged data directory)"
+    )
+}
+
+/// Opens the map the same place sync writes it: default
+/// `$PROJECT_ROOT/.taguru`.
+fn open_map(args: &QueryArgs) -> Result<CodeMap, String> {
     let data_dir = match &args.data_dir {
         Some(dir) => dir.clone(),
         None => RepoWalk::discover(std::path::Path::new("."))?
@@ -95,12 +154,7 @@ fn open(args: &QueryArgs) -> Result<AppState, String> {
             data_dir.display()
         ));
     }
-    let mut config = crate::registry::BootConfig::from_env();
-    config.data_dir = data_dir;
-    config.wal_enabled = false;
-    config
-        .boot(None, None, None, None, None)
-        .map_err(|error| error.to_string())
+    CodeMap::open(&data_dir, &args.context)
 }
 
 /// Dice coefficient over character bigrams, case-insensitive — the
@@ -130,19 +184,21 @@ fn bigram_dice(a: &str, b: &str) -> f64 {
 /// (qualified name, tier, score, [(source file, paragraph)]).
 type Matched = (String, &'static str, f64, Vec<(String, Option<u32>)>);
 
-/// One stable sentence per failure kind — `AccessError`'s `Debug`
-/// form carries hydration/schema/IO internals (paths included) that
-/// belong in server logs, not in a CLI answer an agent may echo.
-fn context_read_error(context: &str, error: &crate::registry::AccessError) -> String {
-    match error {
-        crate::registry::AccessError::NotFound => {
-            format!("context '{context}' not found — run `taguru-code sync` first")
-        }
-        _ => format!(
-            "context '{context}' could not be read — re-run `taguru-code sync` \
-             (a full re-sync rebuilds a damaged data directory)"
-        ),
-    }
+/// Sort key for symbols sharing a tier: production code before test
+/// code, then by name — a bare `new` or `run` cue matches dozens of
+/// symbols, and insertion order (whatever the graph happened to store
+/// first) made the useful hit's position luck. Heuristic on purpose:
+/// a `tests` module path segment or a test_-prefixed tail marks test
+/// code; nothing here needs to be perfect, only stable and sensible.
+fn test_rank(qualified: &str) -> u8 {
+    let in_test_module = qualified.contains("::tests::")
+        || qualified.ends_with("::tests")
+        || qualified.contains("/tests/")
+        || qualified.contains("/tests.rs")
+        || qualified.contains("_test.rs")
+        || qualified.contains("_tests.rs");
+    let tail = qualified.rsplit("::").next().unwrap_or(qualified);
+    u8::from(in_test_module || tail.starts_with("test_"))
 }
 
 /// One `find` hit, fully dereferenced.
@@ -182,21 +238,14 @@ pub(crate) fn find(args: &[String]) -> i32 {
         }
     };
     let cue = args.cue.clone().expect("checked in parse_args");
-    let state = match open(&args) {
-        Ok(state) => state,
+    let map = match open_map(&args) {
+        Ok(map) => map,
         Err(message) => {
             eprintln!("taguru-code: find: {message}");
             return 1;
         }
     };
-
-    let hits = match find_hits(&state, &args.context, &cue, args.limit) {
-        Ok(hits) => hits,
-        Err(message) => {
-            eprintln!("taguru-code: find: {message}");
-            return 1;
-        }
-    };
+    let hits = find_hits(&map, &cue, args.limit);
 
     if hits.is_empty() {
         eprintln!("taguru-code: find: no match for '{cue}' — fall back to grep");
@@ -239,13 +288,9 @@ pub(crate) fn find(args: &[String]) -> i32 {
 /// it is one in-memory scan of the defined_in edges — the short-name
 /// index the alias table deliberately does not hold (aliases are
 /// permanent and first-claimant-wins; a read-time scan is neither).
-pub(crate) fn find_hits(
-    state: &AppState,
-    context_name: &str,
-    cue: &str,
-    limit: usize,
-) -> Result<Vec<Hit>, String> {
-    let matched: Result<Vec<Matched>, _> = state.read_context(context_name, |context| {
+pub(crate) fn find_hits(map: &CodeMap, cue: &str, limit: usize) -> Vec<Hit> {
+    let context = &map.context;
+    let matched: Vec<Matched> = {
         // The graph is append-only: retracting a source empties an
         // edge's attributions but the edge record stays. An edge no
         // source attests anymore is a ghost — a renamed file's old
@@ -280,10 +325,13 @@ pub(crate) fn find_hits(
             }
         }
         let mut picked: Vec<Matched> = Vec::new();
-        for (tier_name, tier) in ["exact", "qualified", "prefix", "contains"]
+        for (tier_name, mut tier) in ["exact", "qualified", "prefix", "contains"]
             .into_iter()
             .zip(tiers)
         {
+            // Within a tier: production code first, then by name —
+            // stable and sensible where insertion order was luck.
+            tier.sort_by_key(|assoc| (test_rank(&assoc.subject), assoc.subject.clone()));
             for assoc in tier {
                 if picked.len() >= limit {
                     break;
@@ -334,7 +382,14 @@ pub(crate) fn find_hits(
                 })
                 .filter(|(score, _)| *score >= FUZZY_FLOOR)
                 .collect();
-            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            scored.sort_by(|a, b| {
+                b.0.partial_cmp(&a.0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| {
+                        (test_rank(&a.1.subject), &a.1.subject)
+                            .cmp(&(test_rank(&b.1.subject), &b.1.subject))
+                    })
+            });
             for (score, assoc) in scored.into_iter().take(limit) {
                 let location = assoc
                     .attributions
@@ -346,8 +401,7 @@ pub(crate) fn find_hits(
             }
         }
         picked
-    });
-    let matched = matched.map_err(|error| context_read_error(context_name, &error))?;
+    };
 
     // Citation dereference: (source file, paragraph) → section + lines.
     let mut hits = Vec::new();
@@ -366,15 +420,10 @@ pub(crate) fn find_hits(
             continue;
         }
         for (file, paragraph) in locations {
-            let citation = paragraph.and_then(|paragraph| {
-                match state.citation(context_name, &file, paragraph) {
-                    Some(Ok(CitationLookup::Found {
-                        section, locator, ..
-                    })) => Some((section, locator)),
-                    _ => None,
-                }
-            });
-            let (section, locator) = citation.unwrap_or((None, None));
+            let (section, locator) = match paragraph {
+                Some(paragraph) => map.citation(&file, paragraph),
+                None => (None, None),
+            };
             hits.push(Hit {
                 name: name.clone(),
                 tier,
@@ -389,7 +438,7 @@ pub(crate) fn find_hits(
         }
     }
 
-    Ok(hits)
+    hits
 }
 
 /// The `tree` verb: one level of `contains`. Without an argument,
@@ -402,14 +451,15 @@ pub(crate) fn tree(args: &[String]) -> i32 {
             return 2;
         }
     };
-    let state = match open(&args) {
-        Ok(state) => state,
+    let map = match open_map(&args) {
+        Ok(map) => map,
         Err(message) => {
             eprintln!("taguru-code: tree: {message}");
             return 1;
         }
     };
-    let listing: Result<Vec<String>, _> = state.read_context(&args.context, |context| {
+    let context = &map.context;
+    let listing: Vec<String> = {
         match &args.cue {
             Some(target) => {
                 let mut children: Vec<String> = context
@@ -445,31 +495,48 @@ pub(crate) fn tree(args: &[String]) -> i32 {
                 roots
             }
         }
-    });
-    match listing {
-        Ok(children) if children.is_empty() => {
-            match &args.cue {
-                Some(target) => eprintln!("taguru-code: tree: nothing under '{target}'"),
-                None => eprintln!("taguru-code: tree: context is empty — run `taguru-code sync`"),
-            }
-            1
+    };
+    if listing.is_empty() {
+        match &args.cue {
+            Some(target) => eprintln!("taguru-code: tree: nothing under '{target}'"),
+            None => eprintln!("taguru-code: tree: context is empty — run `taguru-code sync`"),
         }
-        Ok(children) => {
-            if args.json {
-                println!("{}", serde_json::json!(children));
-            } else {
-                for child in children {
-                    println!("{child}");
-                }
-            }
-            0
+        return 1;
+    }
+    if args.json {
+        println!("{}", serde_json::json!(listing));
+    } else {
+        for child in listing {
+            println!("{child}");
         }
-        Err(error) => {
-            eprintln!(
-                "taguru-code: tree: {}",
-                context_read_error(&args.context, &error)
-            );
-            1
-        }
+    }
+    0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_rank_puts_production_code_before_test_code() {
+        assert_eq!(test_rank("src/api.rs::ApiError::new"), 0);
+        assert_eq!(test_rank("src/ingest/model.rs::parse_batch"), 0);
+        assert_eq!(test_rank("src/ingest/tests.rs::parse_batch_case"), 1);
+        assert_eq!(test_rank("src/facts.rs::tests::symbol"), 1);
+        assert_eq!(test_rank("tests/http_api.rs::round_trip"), 0); // top-level dir is fine
+        assert_eq!(test_rank("src/wal.rs::tests"), 1);
+        assert_eq!(test_rank("src/x.rs::test_helper"), 1);
+        assert_eq!(test_rank("src/x_test.rs::helper"), 1);
+    }
+
+    #[test]
+    fn bigram_dice_is_symmetric_and_bounded() {
+        assert_eq!(bigram_dice("parse_batch", "parse_batch"), 1.0);
+        assert!(bigram_dice("parse_bacth", "parse_batch") > 0.6);
+        assert_eq!(bigram_dice("a", "b"), 0.0);
+        assert_eq!(bigram_dice("a", "a"), 1.0);
+        let ab = bigram_dice("alpha", "alphabet");
+        let ba = bigram_dice("alphabet", "alpha");
+        assert!((ab - ba).abs() < f64::EPSILON);
     }
 }

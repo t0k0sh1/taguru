@@ -251,13 +251,12 @@ pub(crate) fn eval(args: &[String]) -> i32 {
         );
         return 1;
     }
-    let mut config = crate::registry::BootConfig::from_env();
-    config.data_dir = data_dir;
-    config.wal_enabled = false;
-    let state = match config.boot(None, None, None, None, None) {
-        Ok(state) => state,
-        Err(error) => {
-            eprintln!("taguru-code: eval: {error}");
+    // Lockless like find itself: the gate measures the exact read
+    // path the agent uses, and never contends with a running watch.
+    let map = match crate::code::query::CodeMap::open(&data_dir, &args.context) {
+        Ok(map) => map,
+        Err(message) => {
+            eprintln!("taguru-code: eval: {message}");
             return 1;
         }
     };
@@ -286,13 +285,7 @@ pub(crate) fn eval(args: &[String]) -> i32 {
             return 1;
         };
         total += 1;
-        let hits = match find_hits(&state, &args.context, cue, EVAL_LIMIT) {
-            Ok(hits) => hits,
-            Err(message) => {
-                eprintln!("taguru-code: eval: {message}");
-                return 1;
-            }
-        };
+        let hits = find_hits(&map, cue, EVAL_LIMIT);
         let position = hits.iter().position(|hit| hit.name == expect);
         match position {
             Some(0) => {
