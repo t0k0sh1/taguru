@@ -17,6 +17,8 @@
 // file is itself loaded via `#[path = "../code.rs"]` from the binary,
 // and a `#[path]`-loaded file's own unpathed child mods would resolve
 // beside the loader instead of under `src/code/`.
+#[path = "code/eval.rs"]
+pub(crate) mod eval;
 #[path = "code/facts.rs"]
 pub(crate) mod facts;
 #[path = "code/grammar.rs"]
@@ -53,10 +55,8 @@ pub(crate) fn run(args: &[String]) -> i32 {
         Some("status") => sync::status(&args[1..]),
         Some("find") => query::find(&args[1..]),
         Some("tree") => query::tree(&args[1..]),
-        Some(verb @ ("evalset" | "eval")) => {
-            eprintln!("taguru-code: '{verb}' is not implemented yet (spike in progress)");
-            2
-        }
+        Some("evalset") => eval::evalset(&args[1..]),
+        Some("eval") => eval::eval(&args[1..]),
         Some(other) => {
             eprintln!("taguru-code: unknown argument '{other}' — try 'taguru-code --help'");
             2

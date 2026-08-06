@@ -131,16 +131,30 @@ fn bigram_dice(a: &str, b: &str) -> f64 {
 type Matched = (String, &'static str, f64, Vec<(String, Option<u32>)>);
 
 /// One `find` hit, fully dereferenced.
-struct Hit {
-    name: String,
-    tier: &'static str,
-    score: f64,
-    section: Option<String>,
-    file: Option<String>,
-    lines: Option<String>,
+pub(crate) struct Hit {
+    pub(crate) name: String,
+    pub(crate) tier: &'static str,
+    pub(crate) score: f64,
+    pub(crate) section: Option<String>,
+    pub(crate) file: Option<String>,
+    pub(crate) lines: Option<String>,
     /// True when the hit is a file/directory node (its name IS the
     /// location) rather than a symbol with a `defined_in` edge.
-    is_path_node: bool,
+    pub(crate) is_path_node: bool,
+}
+
+impl Hit {
+    pub(crate) fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "name": self.name,
+            "tier": self.tier,
+            "score": self.score,
+            "section": self.section,
+            "file": self.file,
+            "lines": self.lines,
+            "is_path_node": self.is_path_node,
+        })
+    }
 }
 
 /// The `find` verb.
@@ -161,18 +175,62 @@ pub(crate) fn find(args: &[String]) -> i32 {
         }
     };
 
-    // Graph read. A cue like `parse_batch` names a symbol's LAST
-    // segment, but concept names are whole qualified names
-    // (`src/ingest/model.rs::parse_batch`) — the generic resolve()
-    // tiers score against the whole string and drown the tail match,
-    // so `find` ranks by code-shaped rules first: exact tail segment,
-    // then qualified-suffix (`Context::resolve`), then tail
-    // prefix/substring, then a file-basename tier for path cues, with
-    // resolve()'s fuzzy tier only as the typo fallback. All of it is
-    // one in-memory scan of the defined_in edges — the short-name
-    // index the alias table deliberately does not hold (aliases are
-    // permanent and first-claimant-wins; a read-time scan is neither).
-    let matched: Result<Vec<Matched>, _> = state.read_context(&args.context, |context| {
+    let hits = match find_hits(&state, &args.context, &cue, args.limit) {
+        Ok(hits) => hits,
+        Err(message) => {
+            eprintln!("taguru-code: find: {message}");
+            return 1;
+        }
+    };
+
+    if hits.is_empty() {
+        eprintln!("taguru-code: find: no match for '{cue}' — fall back to grep");
+        return 1;
+    }
+    if args.json {
+        let rendered: Vec<serde_json::Value> = hits.iter().map(Hit::to_json).collect();
+        println!("{}", serde_json::json!(rendered));
+        return 0;
+    }
+    for hit in &hits {
+        let kind = hit
+            .section
+            .as_deref()
+            .and_then(|section| section.split(' ').next())
+            .unwrap_or(if hit.is_path_node { "path" } else { "?" });
+        let location = match (&hit.file, &hit.lines) {
+            (Some(file), Some(lines)) => format!("{file}:{lines}"),
+            (Some(file), None) => file.clone(),
+            (None, _) if hit.is_path_node => hit.name.clone(),
+            (None, _) => "?".to_string(),
+        };
+        println!(
+            "{kind:<9} {:<60} {location}  [{} {:.2}]",
+            hit.name, hit.tier, hit.score
+        );
+    }
+    0
+}
+
+/// The shared core of `find` and `eval`: code-shaped tier matching
+/// over the graph, then citation dereference. A cue like
+/// `parse_batch` names a symbol's LAST segment, but concept names are
+/// whole qualified names (`src/ingest/model.rs::parse_batch`) — the
+/// generic resolve() tiers score against the whole string and drown
+/// the tail match, so this ranks by code-shaped rules first: exact
+/// tail segment, then qualified suffix (`Context::resolve`), then
+/// tail prefix/substring, then a file-basename tier for path cues,
+/// with a tail-segment bigram-Dice pass as the typo fallback. All of
+/// it is one in-memory scan of the defined_in edges — the short-name
+/// index the alias table deliberately does not hold (aliases are
+/// permanent and first-claimant-wins; a read-time scan is neither).
+pub(crate) fn find_hits(
+    state: &AppState,
+    context_name: &str,
+    cue: &str,
+    limit: usize,
+) -> Result<Vec<Hit>, String> {
+    let matched: Result<Vec<Matched>, _> = state.read_context(context_name, |context| {
         let symbols = context.query(None, Some("defined_in"), None);
         let mut tiers: [Vec<&taguru::context::Association>; 4] =
             [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
@@ -196,7 +254,7 @@ pub(crate) fn find(args: &[String]) -> i32 {
             .zip(tiers)
         {
             for assoc in tier {
-                if picked.len() >= args.limit {
+                if picked.len() >= limit {
                     break;
                 }
                 let location = assoc
@@ -210,7 +268,7 @@ pub(crate) fn find(args: &[String]) -> i32 {
         }
         // A path-shaped cue (`model.rs`, `src/ingest`) matches
         // file/directory nodes by basename or whole path.
-        if picked.len() < args.limit {
+        if picked.len() < limit {
             let files = context.query(None, Some("contains"), None);
             let mut seen = std::collections::HashSet::new();
             for assoc in &files {
@@ -219,9 +277,9 @@ pub(crate) fn find(args: &[String]) -> i32 {
                     continue;
                 }
                 let basename = node.rsplit('/').next().unwrap_or(node);
-                if basename == cue || node == &cue {
+                if basename == cue || node.as_str() == cue {
                     picked.push((node.clone(), "path", 1.0, Vec::new()));
-                    if picked.len() >= args.limit {
+                    if picked.len() >= limit {
                         break;
                     }
                 }
@@ -238,12 +296,12 @@ pub(crate) fn find(args: &[String]) -> i32 {
                 .iter()
                 .map(|assoc| {
                     let tail = assoc.subject.rsplit("::").next().unwrap_or(&assoc.subject);
-                    (bigram_dice(&cue, tail), assoc)
+                    (bigram_dice(cue, tail), assoc)
                 })
                 .filter(|(score, _)| *score >= FUZZY_FLOOR)
                 .collect();
             scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-            for (score, assoc) in scored.into_iter().take(args.limit) {
+            for (score, assoc) in scored.into_iter().take(limit) {
                 let location = assoc
                     .attributions
                     .first()
@@ -255,16 +313,9 @@ pub(crate) fn find(args: &[String]) -> i32 {
         }
         picked
     });
-    let matched = match matched {
-        Ok(matched) => matched,
-        Err(error) => {
-            eprintln!(
-                "taguru-code: find: context '{}': {error:?} — run `taguru-code sync` first",
-                args.context
-            );
-            return 1;
-        }
-    };
+    let matched = matched.map_err(|error| {
+        format!("context '{context_name}': {error:?} — run `taguru-code sync` first")
+    })?;
 
     // Citation dereference: (source file, paragraph) → section + lines.
     let mut hits = Vec::new();
@@ -284,7 +335,7 @@ pub(crate) fn find(args: &[String]) -> i32 {
         }
         for (file, paragraph) in locations {
             let citation = paragraph.and_then(|paragraph| {
-                match state.citation(&args.context, &file, paragraph) {
+                match state.citation(context_name, &file, paragraph) {
                     Some(Ok(CitationLookup::Found {
                         section, locator, ..
                     })) => Some((section, locator)),
@@ -306,46 +357,7 @@ pub(crate) fn find(args: &[String]) -> i32 {
         }
     }
 
-    if hits.is_empty() {
-        eprintln!("taguru-code: find: no match for '{cue}' — fall back to grep");
-        return 1;
-    }
-    if args.json {
-        let rendered: Vec<serde_json::Value> = hits
-            .iter()
-            .map(|hit| {
-                serde_json::json!({
-                    "name": hit.name,
-                    "tier": hit.tier,
-                    "score": hit.score,
-                    "section": hit.section,
-                    "file": hit.file,
-                    "lines": hit.lines,
-                    "is_path_node": hit.is_path_node,
-                })
-            })
-            .collect();
-        println!("{}", serde_json::json!(rendered));
-        return 0;
-    }
-    for hit in &hits {
-        let kind = hit
-            .section
-            .as_deref()
-            .and_then(|section| section.split(' ').next())
-            .unwrap_or(if hit.is_path_node { "path" } else { "?" });
-        let location = match (&hit.file, &hit.lines) {
-            (Some(file), Some(lines)) => format!("{file}:{lines}"),
-            (Some(file), None) => file.clone(),
-            (None, _) if hit.is_path_node => hit.name.clone(),
-            (None, _) => "?".to_string(),
-        };
-        println!(
-            "{kind:<9} {:<60} {location}  [{} {:.2}]",
-            hit.name, hit.tier, hit.score
-        );
-    }
-    0
+    Ok(hits)
 }
 
 /// The `tree` verb: one level of `contains`. Without an argument,
