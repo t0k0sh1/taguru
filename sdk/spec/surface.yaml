@@ -88,19 +88,19 @@ classes:
     describe: { route: "POST /contexts/{name}/describe", args: [concept] }
     query:
       route: "POST /contexts/{name}/query"
-      options: [subject, label, object, subject_types, object_types, limit, after]
+      options: [subject, label, object, subject_types, object_types, limit, after, since, until]
     recall:
       route: "POST /contexts/{name}/recall"
       args: [cue]
-      options: [limit, after]
+      options: [limit, after, since, until]
     activate:
       route: "POST /contexts/{name}/activate"
       args: [origins]
-      options: [decay, limit]
+      options: [decay, limit, since, until]
     explore:
       route: "POST /contexts/{name}/explore"
       args: [origins]
-      options: [max_depth, limit, after]
+      options: [max_depth, limit, after, since, until]
     paths:
       route: "POST /contexts/{name}/paths"
       args: [origins, targets]

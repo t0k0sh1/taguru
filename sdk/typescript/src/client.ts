@@ -922,7 +922,7 @@ export class Context {
    */
   async recall(
     cue: string,
-    options: { limit?: number; after?: MatchCursor } = {},
+    options: { limit?: number; after?: MatchCursor; since?: number; until?: number } = {},
   ): Promise<MatchPage> {
     const result = await this.post(
       "/recall",
@@ -930,6 +930,8 @@ export class Context {
         cue,
         limit: options.limit,
         after: options.after ? matchCursor(options.after) : undefined,
+        since: options.since,
+        until: options.until,
       }),
     );
     return result as MatchPage;
@@ -950,6 +952,8 @@ export class Context {
       object_types?: OneOrMany;
       limit?: number;
       after?: MatchCursor;
+      since?: number;
+      until?: number;
     } = {},
   ): Promise<MatchPage> {
     const result = await this.post(
@@ -962,6 +966,8 @@ export class Context {
         object_types: options.object_types,
         limit: options.limit,
         after: options.after ? matchCursor(options.after) : undefined,
+        since: options.since,
+        until: options.until,
       }),
     );
     return result as MatchPage;
@@ -980,7 +986,13 @@ export class Context {
    */
   async explore(
     origins: string | string[],
-    options: { max_depth?: number; limit?: number; after?: ExploreCursor } = {},
+    options: {
+      max_depth?: number;
+      limit?: number;
+      after?: ExploreCursor;
+      since?: number;
+      until?: number;
+    } = {},
   ): Promise<ExplorePage> {
     const result = await this.post(
       "/explore",
@@ -989,6 +1001,8 @@ export class Context {
         max_depth: options.max_depth,
         limit: options.limit,
         after: options.after,
+        since: options.since,
+        until: options.until,
       }),
     );
     return result as ExplorePage;
@@ -1036,7 +1050,7 @@ export class Context {
   /** Spreading activation from origins, strongest first. */
   async activate(
     origins: string | string[],
-    options: { decay?: number; limit?: number } = {},
+    options: { decay?: number; limit?: number; since?: number; until?: number } = {},
   ): Promise<ActivationPage> {
     const result = await this.post(
       "/activate",
@@ -1044,6 +1058,8 @@ export class Context {
         origins: typeof origins === "string" ? [origins] : origins,
         decay: options.decay,
         limit: options.limit,
+        since: options.since,
+        until: options.until,
       }),
     );
     return result as ActivationPage;

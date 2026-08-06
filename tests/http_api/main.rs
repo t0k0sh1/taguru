@@ -56,6 +56,7 @@ mod semantic_cache;
 mod server;
 mod server_ops;
 mod source_metadata;
+mod temporal_window;
 mod tracing_pipeline;
 mod tracing_router;
 mod width_probe;
