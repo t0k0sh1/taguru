@@ -488,6 +488,13 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
     // on success, re-importing is the recovery), so the flush-interval
     // window is the right trade — an order of magnitude less fsync.
     config.wal_enabled = false;
+    // Same idempotency argument for the batch-open tear markers
+    // (issue #443 item 2): a crash mid-batch is repaired by the re-run
+    // the unadvanced sync point already forces, so detection buys
+    // nothing here — and the marker's durable open was 2 of the ~3
+    // fsyncs each imported file cost, the bulk of a full sync's wall
+    // clock.
+    config.import_markers_enabled = false;
     let state = config
         .boot(embedder, None, None, None, None)
         .map_err(|error| error.to_string())?;
