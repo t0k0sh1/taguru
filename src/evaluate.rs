@@ -52,11 +52,11 @@ use crate::api::evidence::rerank::{REASON_EMPTY_POOL, RerankerPlan};
 use crate::api::evidence::select::{CitationRef, EvidenceItem, SelectionPlan, budget_only_omitted};
 use crate::api::resolve::TieredResolution;
 use crate::api::sources::{Citation, PassageHit, PassageLanes, PassagePage, SearchContextPlan};
-use crate::cli::default_base_url;
 use crate::config::{load_config, subcommand_usage_error};
 use crate::evalset::{self, EvalCase, ExpectedAssociation, ExpectedCitation, ExpectedSource};
 use crate::measure::{Distribution, MetricDef, MetricValue, MetricsMap, def, ratio_metric};
 use crate::registry::{ContextRevision, DirectoryEntry};
+use crate::remote::default_base_url;
 use crate::remote::{self, Api, ApiFailure};
 use thresholds::{ThresholdReport, load_thresholds};
 

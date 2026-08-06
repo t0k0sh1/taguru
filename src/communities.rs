@@ -35,9 +35,9 @@ use crate::api::communities::{
     COMMUNITIES_FORMAT, COMMUNITY_SOURCE_PREFIX, CONTAINS_LABEL, CommunitiesManifest,
     INCLUDES_LABEL, MANIFEST_SOURCE, ManifestCommunity, derived_context_name,
 };
-use crate::cli::default_base_url;
 use crate::config::{load_config, subcommand_usage_error};
 use crate::registry::ContextRevision;
+use crate::remote::default_base_url;
 use crate::remote::{Api, ApiFailure};
 
 const COMMUNITIES_USAGE: &str = "usage: taguru communities --context NAME [--into NAME] [--dry-run]

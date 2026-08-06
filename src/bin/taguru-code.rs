@@ -10,37 +10,27 @@
 //! `ingest`'s batch parse/apply) — the same `#[path]` shape
 //! `taguru-mcp` uses, scaled to the import web's closure.
 
-// The included server modules are used only through the narrow
-// surface `code::sync`/`code::query` call; everything else they
-// export is dead weight in THIS binary by design (spike posture —
-// trimming the inclusion set is follow-up work if the prototype
-// graduates).
+// The inclusion set below is the import web's actual closure (#443
+// item 3): reference-error-minimal, so a module here is one some
+// retained module names, not a leftover. What keeps these two allows:
+// the retained modules are used only through the narrow surface
+// `code::sync`/`code::query` call, so most of what they export —
+// `registry`'s full pub surface, `api.rs`'s handler shapes — is dead
+// weight in THIS binary, by the nature of dual inclusion rather than
+// by oversight.
 #![allow(dead_code)]
-// Same spike posture for the hub re-exports (`api.rs`'s handler
-// surface exists for main.rs's router, which this binary never
-// builds).
 #![allow(unused_imports)]
 
 #[path = "../api.rs"]
 mod api;
 #[path = "../auth.rs"]
 mod auth;
-#[path = "../benchmark.rs"]
-mod benchmark;
 #[path = "../bm25.rs"]
 mod bm25;
 #[path = "../breaker.rs"]
 mod breaker;
-#[path = "../calibrate.rs"]
-mod calibrate;
-#[path = "../cli.rs"]
-mod cli;
 #[path = "../clock.rs"]
 mod clock;
-#[path = "../communities.rs"]
-mod communities;
-#[path = "../compact.rs"]
-mod compact;
 #[path = "../config.rs"]
 mod config;
 #[path = "../context_proptest.rs"]
@@ -52,16 +42,8 @@ mod crc32c;
 mod embedding;
 #[path = "../env.rs"]
 mod env;
-#[path = "../estimate.rs"]
-mod estimate;
-#[path = "../evalset.rs"]
-mod evalset;
-#[path = "../evaluate.rs"]
-mod evaluate;
 #[path = "../export.rs"]
 mod export;
-#[path = "../extract.rs"]
-mod extract;
 #[path = "../groups.rs"]
 mod groups;
 #[path = "../hash.rs"]
@@ -70,20 +52,25 @@ mod hash;
 mod hydrate;
 #[path = "../ingest.rs"]
 mod ingest;
-#[path = "../inspect.rs"]
-mod inspect;
 #[path = "../limits.rs"]
 mod limits;
-#[path = "../mcp.rs"]
-mod mcp;
-#[path = "../measure.rs"]
-mod measure;
+// Narrow on purpose: `api.rs`'s /version facts quote the MCP protocol
+// constants, so `crate::mcp::SUPPORTED_PROTOCOL_VERSIONS` must resolve
+// — but including the full `mcp.rs` would drag the whole tool-routing
+// surface into a binary that never speaks MCP. In THIS crate,
+// `crate::mcp` is just the protocol constants and the tool schemas
+// they lean on (the outer `#[path]` re-bases the inner declarations
+// onto the real `src/mcp/`).
+#[path = "../mcp"]
+mod mcp {
+    pub(crate) mod protocol;
+    pub(crate) mod schema;
+    pub(crate) use protocol::SUPPORTED_PROTOCOL_VERSIONS;
+}
 #[path = "../metrics.rs"]
 mod metrics;
 #[path = "../oauth.rs"]
 mod oauth;
-#[path = "../oauth_http.rs"]
-mod oauth_http;
 #[path = "../paragraph.rs"]
 mod paragraph;
 #[path = "../passages.rs"]
@@ -92,8 +79,6 @@ mod passages;
 mod registry;
 #[path = "../remote.rs"]
 mod remote;
-#[path = "../remote_mcp.rs"]
-mod remote_mcp;
 #[path = "../replica.rs"]
 mod replica;
 #[path = "../schema.rs"]
