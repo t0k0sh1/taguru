@@ -247,8 +247,13 @@ pub(crate) fn find_hits(
             if tail == cue {
                 tiers[0].push(assoc);
             } else if cue.contains("::")
-                && (assoc.subject.ends_with(&format!("::{cue}")) || assoc.subject == cue)
+                && (assoc.subject.ends_with(&format!("::{cue}"))
+                    || assoc.subject.ends_with(&format!("/{cue}"))
+                    || assoc.subject == cue)
             {
+                // `::` suffix is `Type::method`; `/` suffix lets a
+                // file-qualified cue (`extract.rs::run`) pin a
+                // top-level symbol the same way.
                 tiers[1].push(assoc);
             } else if tail.starts_with(cue) {
                 tiers[2].push(assoc);

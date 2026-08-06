@@ -142,6 +142,15 @@ fn generate(args: &EvalArgs) -> Result<Vec<serde_json::Value>, String> {
     if symbols.is_empty() {
         return Err("no symbols found — is this the right repository?".to_string());
     }
+    // Tails shared by many symbols (`tests`, `new`, `run`) cannot be
+    // answered from the bare name by ANY tool, and an agent would not
+    // ask that way either — those sample as qualified cues instead,
+    // so the tail metric measures answerable questions while the
+    // ambiguous names still exercise the disambiguation path.
+    let mut tail_counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for (_, symbol) in &symbols {
+        *tail_counts.entry(symbol.name.as_str()).or_default() += 1;
+    }
     let step = (symbols.len() / args.sample.max(1)).max(1);
     let mut cases = Vec::new();
     for (index, (path, symbol)) in symbols.iter().step_by(step).enumerate() {
@@ -149,23 +158,29 @@ fn generate(args: &EvalArgs) -> Result<Vec<serde_json::Value>, String> {
             break;
         }
         let lines = format!("{}-{}", symbol.start_line, symbol.end_line);
+        let ambiguous = tail_counts.get(symbol.name.as_str()).copied().unwrap_or(0) > 3;
         let case = match index % 6 {
             // The dominant shape: the bare symbol name.
-            0..=3 => serde_json::json!({
+            0..=3 if !ambiguous => serde_json::json!({
                 "kind": "tail",
                 "cue": symbol.name,
                 "expect": symbol.qualified_name,
                 "file": path,
                 "lines": lines,
             }),
-            // A qualified cue: `Parent::name` when nested, else tail.
-            4 => {
+            // A qualified cue: `Parent::name` when nested, else the
+            // file's basename as the qualifier — also where the
+            // ambiguous-tail cases from above land.
+            0..=4 => {
                 let cue = symbol
                     .parent
                     .as_deref()
                     .and_then(|parent| parent.rsplit("::").next())
                     .map(|parent_tail| format!("{parent_tail}::{}", symbol.name))
-                    .unwrap_or_else(|| symbol.name.clone());
+                    .unwrap_or_else(|| {
+                        let basename = path.rsplit('/').next().unwrap_or(path);
+                        format!("{basename}::{}", symbol.name)
+                    });
                 serde_json::json!({
                     "kind": "qualified",
                     "cue": cue,
