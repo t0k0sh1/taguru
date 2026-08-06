@@ -1001,6 +1001,56 @@ fn apply_batch_brackets_its_steps_with_the_import_marker() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// The idempotent-importer opt-out (issue #443 item 2): with
+/// `import_markers_enabled: false` the durable batch-open marker is
+/// never written — its fsyncs were the point of opting out — while
+/// `clear_import_marker` stays active, so a completed batch still
+/// heals a stale marker left behind by a marker-enabled run that
+/// crashed mid-batch (re-importing the source IS that marker's
+/// documented repair).
+#[test]
+fn disabled_import_markers_write_nothing_but_still_heal_stale_ones() {
+    let dir = std::env::temp_dir().join(format!(
+        "taguru-ingest-marker-optout-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    let state = AppState::boot_with(
+        dir.clone(),
+        usize::MAX,
+        None,
+        crate::registry::BootOptions {
+            import_markers_enabled: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    // The open is the gated half: an explicit call lands no file.
+    state.open_import_marker("sake", "doc-1").unwrap();
+    assert!(
+        crate::registry::import_marker_paths(&dir, "sake").is_empty(),
+        "a disabled marker must not touch the disk"
+    );
+
+    // A stale marker from an earlier marker-enabled run: the batch
+    // that re-imports its source must still clear it.
+    let stale = crate::registry::import_marker_path(&dir, "sake", "doc-1");
+    fs::write(&stale, "{\"context\": \"sake\", \"source\": \"doc-1\"}").unwrap();
+    let batch = parse(
+        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-1\", \"create\": {}}\n\
+         {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n",
+    )
+    .unwrap();
+    apply_batch(&state, &batch).unwrap();
+    assert!(
+        !stale.exists(),
+        "a completed batch still heals a stale marker"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /// An associations-only re-import (no passage line in this batch)
 /// for a source that already has one on disk: the differential
 /// sync still retracts that old passage first, same as any other

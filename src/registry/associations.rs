@@ -204,6 +204,15 @@ impl AppState {
     /// to land the writes either). `write_atomic` makes it durable,
     /// directory entry included, before any tracked write can need it.
     pub fn open_import_marker(&self, context: &str, source: &str) -> io::Result<()> {
+        // The opt-out for an idempotent offline importer (issue #443
+        // item 2): with re-run-the-sync as the documented recovery,
+        // tear detection buys nothing, and this `write_atomic` is 2 of
+        // the ~3 fsyncs each imported file costs. Only the open is
+        // gated — `clear_import_marker` stays active so a completed
+        // batch still heals a stale marker from a marker-enabled run.
+        if !self.0.import_markers_enabled {
+            return Ok(());
+        }
         let marker = ImportMarker {
             context: context.to_string(),
             source: source.to_string(),

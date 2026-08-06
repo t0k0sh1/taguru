@@ -178,6 +178,7 @@ impl AppState {
             ))),
             metrics: Metrics::default(),
             wal_enabled: options.wal_enabled,
+            import_markers_enabled: options.import_markers_enabled,
             wal_max_bytes: options.wal_max_bytes,
             passages_wal_max_bytes: options.passages_wal_max_bytes,
             embed_passages: options.embed_passages,

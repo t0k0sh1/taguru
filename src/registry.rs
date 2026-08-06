@@ -1259,6 +1259,16 @@ pub struct BootConfig {
     pub data_dir: PathBuf,
     pub cache_bytes: usize,
     pub wal_enabled: bool,
+    /// Whether import batches bracket their mutations with the durable
+    /// batch-open marker. Always true from [`BootConfig::from_env`]
+    /// (no environment variable — this is a property of the host's
+    /// recovery story, not a deployment knob): only an idempotent
+    /// offline importer whose sync point advances on success alone
+    /// (taguru-code, issue #443 item 2) may opt out, because there
+    /// "re-run the sync" already repairs any tear the marker would
+    /// have detected — and the marker's `write_atomic` is 2 of the
+    /// ~3 fsyncs each imported file costs.
+    pub import_markers_enabled: bool,
     pub wal_max_bytes: usize,
     pub passages_wal_max_bytes: usize,
     pub embed_passages: bool,
@@ -1651,6 +1661,11 @@ pub struct PassageSidecarStatus {
 /// should not have to name seven.
 pub struct BootOptions {
     pub wal_enabled: bool,
+    /// Whether import batches open/clear the durable batch-open marker
+    /// — see the field on [`BootConfig`] for who may turn this off and
+    /// why. Opening is what this gates; a completed batch still clears
+    /// any stale marker a previous marker-enabled run left behind.
+    pub import_markers_enabled: bool,
     pub wal_max_bytes: usize,
     pub passages_wal_max_bytes: usize,
     /// Whether paragraphs get embedded at all (`TAGURU_EMBED_PASSAGES`,
@@ -1705,6 +1720,7 @@ impl Default for BootOptions {
     fn default() -> Self {
         Self {
             wal_enabled: true,
+            import_markers_enabled: true,
             wal_max_bytes: DEFAULT_WAL_MAX_BYTES,
             passages_wal_max_bytes: DEFAULT_PASSAGES_WAL_MAX_BYTES,
             embed_passages: false,
@@ -1733,6 +1749,11 @@ impl BootConfig {
             // (TAGURU_WAL=0) restores the old posture for benchmarks or
             // explicit risk acceptance.
             wal_enabled: crate::env::env_bool("TAGURU_WAL", true),
+            // Deliberately not environment-driven (see the field doc):
+            // opting out is only sound for a host whose recovery is
+            // "re-run the import", which is a property of the calling
+            // code, not of a deployment.
+            import_markers_enabled: true,
             // Backstop for a persistently failing flush: past this,
             // writes are refused rather than growing the log without
             // bound (0 = no cap).
@@ -1793,6 +1814,7 @@ impl BootConfig {
             embedder,
             BootOptions {
                 wal_enabled: self.wal_enabled,
+                import_markers_enabled: self.import_markers_enabled,
                 wal_max_bytes: self.wal_max_bytes,
                 passages_wal_max_bytes: self.passages_wal_max_bytes,
                 embed_passages: self.embed_passages,
@@ -1965,6 +1987,13 @@ struct StateInner {
     /// regardless — a log left behind by an earlier WAL-enabled run
     /// must never be ignored.
     wal_enabled: bool,
+    /// Whether import batches open the durable batch-open marker
+    /// before their first mutation. Off only for an idempotent offline
+    /// importer (see [`BootConfig::import_markers_enabled`]);
+    /// [`AppState::clear_import_marker`] stays active either way, so a
+    /// completed batch still heals a stale marker a marker-enabled run
+    /// left behind.
+    import_markers_enabled: bool,
     /// Per-context ceiling on the log (`TAGURU_WAL_MAX_BYTES`, 0 =
     /// unlimited). The log only truncates after a successful image
     /// save, so a persistently failing flush would otherwise grow it
