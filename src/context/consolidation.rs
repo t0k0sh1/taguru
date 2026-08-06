@@ -11,8 +11,18 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use serde::Serialize;
 
 use crate::deadline::{Deadline, DeadlineExceeded};
+use crate::hash::{FNV1A_OFFSET, fnv1a_fold};
 
 use super::{ConceptId, Context, LabelId};
+
+/// One string folded into a candidate fingerprint, NUL-terminated so
+/// field boundaries cannot alias ("ab"+"c" ≠ "a"+"bc"). Fingerprints
+/// are the judgment artifact's identity (ADR 0012 §5), so they fold
+/// NAMES, never dense ids — ids are reassigned by compaction, names
+/// are the stable evidence.
+fn fold_field(digest: u64, field: &str) -> u64 {
+    fnv1a_fold(fnv1a_fold(digest, field.bytes()), [0u8])
+}
 
 /// One fact of a concept's neighborhood, as merge evidence reports it:
 /// `out` means the concept is the subject of `(label, other)`, `in`
@@ -42,6 +52,12 @@ pub struct MergeEvidence {
     pub shared: Vec<NeighborFact>,
     pub only_a: Vec<NeighborFact>,
     pub only_b: Vec<NeighborFact>,
+    /// FNV-1a over the pair's names and its FULL evidence sets
+    /// (never the capped lists), pair-order canonicalized — the
+    /// judgment artifact's identity (ADR 0012 §5). Serialized by the
+    /// audit's own wire shape, not here.
+    #[serde(skip)]
+    pub fingerprint: u64,
 }
 
 /// One object's standing in a contradiction group: its windowless
@@ -69,6 +85,10 @@ pub struct ContradictionGroup {
     /// cardinality is still ADR 0009 §9.2's deferral).
     pub functional_tendency: f64,
     pub objects: Vec<ObjectRow>,
+    /// FNV-1a over subject, label, and every object row (name, count,
+    /// sum bits, sorted sources) — see [`MergeEvidence::fingerprint`].
+    #[serde(skip)]
+    pub fingerprint: u64,
 }
 
 /// One edge whose per-source attributions disagree in sign (ADR 0012
@@ -86,6 +106,10 @@ pub struct SignConflict {
     pub count: u64,
     pub supporting_sources: Vec<String>,
     pub disputing_sources: Vec<String>,
+    /// FNV-1a over the edge's names, net, and both sides' sorted
+    /// sources — see [`MergeEvidence::fingerprint`].
+    #[serde(skip)]
+    pub fingerprint: u64,
 }
 
 impl Context {
@@ -147,6 +171,40 @@ impl Context {
         let only_a: Vec<_> = a_set.difference(&b_set).collect();
         let only_b: Vec<_> = b_set.difference(&a_set).collect();
         let union = shared.len() + only_a.len() + only_b.len();
+
+        // The fingerprint folds NAMES over the FULL evidence, pair-order
+        // canonicalized: swapping (a, b) must not mint a new identity,
+        // and dense ids — reassigned by compaction — must never enter.
+        let fact_strings = |facts: &[&(u8, LabelId, ConceptId)]| -> Vec<String> {
+            let mut strings: Vec<String> = facts
+                .iter()
+                .map(|&&(direction, label, other)| {
+                    format!(
+                        "{}|{}|{}",
+                        direction,
+                        self.label_name(label),
+                        self.concept_name(other)
+                    )
+                })
+                .collect();
+            strings.sort_unstable();
+            strings
+        };
+        let (first, second, first_only, second_only) = if a <= b {
+            (a, b, &only_a, &only_b)
+        } else {
+            (b, a, &only_b, &only_a)
+        };
+        let mut digest = fold_field(FNV1A_OFFSET, "merge");
+        digest = fold_field(digest, first);
+        digest = fold_field(digest, second);
+        for (tag, facts) in [("s", &shared), ("f", first_only), ("g", second_only)] {
+            digest = fold_field(digest, tag);
+            for fact in fact_strings(facts) {
+                digest = fold_field(digest, &fact);
+            }
+        }
+
         Some(MergeEvidence {
             overlap: if union == 0 {
                 0.0
@@ -159,6 +217,7 @@ impl Context {
             shared: shared.into_iter().take(cap).map(materialize).collect(),
             only_a: only_a.into_iter().take(cap).map(materialize).collect(),
             only_b: only_b.into_iter().take(cap).map(materialize).collect(),
+            fingerprint: digest,
         })
     }
 
@@ -207,25 +266,42 @@ impl Context {
             .into_iter()
             .map(|(&(subject, label), edges)| {
                 let (single, total) = label_subjects[&label];
+                let objects: Vec<ObjectRow> = edges
+                    .iter()
+                    .map(|&edge_id| {
+                        let edge = &self.edges[edge_id as usize];
+                        ObjectRow {
+                            object: self.concept_name(edge.object).to_string(),
+                            weight: edge.sum / edge.count as f64,
+                            count: edge.count,
+                            sources: self
+                                .attribution_chain(edge.first_attribution)
+                                .map(|(_, record)| self.source_name(record.source).to_string())
+                                .collect(),
+                        }
+                    })
+                    .collect();
+                let mut digest = fold_field(FNV1A_OFFSET, "objects");
+                digest = fold_field(digest, self.concept_name(subject));
+                digest = fold_field(digest, self.label_name(label));
+                let mut rows: Vec<&ObjectRow> = objects.iter().collect();
+                rows.sort_unstable_by(|a, b| a.object.cmp(&b.object));
+                for row in rows {
+                    digest = fold_field(digest, &row.object);
+                    digest = fnv1a_fold(digest, row.count.to_le_bytes());
+                    digest = fnv1a_fold(digest, row.weight.to_bits().to_le_bytes());
+                    let mut sources: Vec<&String> = row.sources.iter().collect();
+                    sources.sort_unstable();
+                    for source in sources {
+                        digest = fold_field(digest, source);
+                    }
+                }
                 ContradictionGroup {
                     subject: self.concept_name(subject).to_string(),
                     label: self.label_name(label).to_string(),
                     functional_tendency: single as f64 / total as f64,
-                    objects: edges
-                        .iter()
-                        .map(|&edge_id| {
-                            let edge = &self.edges[edge_id as usize];
-                            ObjectRow {
-                                object: self.concept_name(edge.object).to_string(),
-                                weight: edge.sum / edge.count as f64,
-                                count: edge.count,
-                                sources: self
-                                    .attribution_chain(edge.first_attribution)
-                                    .map(|(_, record)| self.source_name(record.source).to_string())
-                                    .collect(),
-                            }
-                        })
-                        .collect(),
+                    objects,
+                    fingerprint: digest,
                 }
             })
             .collect())
@@ -258,6 +334,20 @@ impl Context {
                 }
             }
             if !supporting.is_empty() && !disputing.is_empty() {
+                let mut digest = fold_field(FNV1A_OFFSET, "contested");
+                digest = fold_field(digest, self.concept_name(edge.subject));
+                digest = fold_field(digest, self.label_name(edge.label));
+                digest = fold_field(digest, self.concept_name(edge.object));
+                digest = fnv1a_fold(digest, edge.count.to_le_bytes());
+                digest = fnv1a_fold(digest, edge.sum.to_bits().to_le_bytes());
+                for (tag, side) in [("+", &supporting), ("-", &disputing)] {
+                    digest = fold_field(digest, tag);
+                    let mut sorted: Vec<&String> = side.iter().collect();
+                    sorted.sort_unstable();
+                    for source in sorted {
+                        digest = fold_field(digest, source);
+                    }
+                }
                 conflicts.push(SignConflict {
                     subject: self.concept_name(edge.subject).to_string(),
                     label: self.label_name(edge.label).to_string(),
@@ -266,6 +356,7 @@ impl Context {
                     count: edge.count,
                     supporting_sources: supporting,
                     disputing_sources: disputing,
+                    fingerprint: digest,
                 });
             }
         }

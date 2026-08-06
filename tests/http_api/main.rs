@@ -15,6 +15,7 @@ mod benchmark_search;
 mod calibrate;
 mod changes;
 mod communities;
+mod consolidation;
 mod contract;
 mod directory;
 mod directory_labels_compact;

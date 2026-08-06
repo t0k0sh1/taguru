@@ -80,7 +80,7 @@ fn type_name_concepts(context: &Context, declared: &BTreeSet<String>) -> BTreeSe
 /// inside `block_in_place` — it does its own CPU-bound pairwise sweeps
 /// and must never run on an async worker (see the comment this carried
 /// forward from `audit_vocabulary`, below).
-fn vocabulary_audit(
+pub(super) fn vocabulary_audit(
     state: &AppState,
     name: &str,
     dice_floor: f64,

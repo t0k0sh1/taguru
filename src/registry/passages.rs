@@ -118,6 +118,30 @@ impl AppState {
         )
     }
 
+    /// Every source's effective time (`date.or(stored_at)`, the
+    /// `SourceFilter` rule) as one map — the consolidation audit's
+    /// join input (ADR 0012 §4 `staleness`, the ADR 0011 §4 layering:
+    /// dates never enter the library, so the caller joins by name).
+    /// Sources with neither field — and sources with no stored passage
+    /// at all — are simply absent. `None` when the context does not
+    /// exist. Runs before `read_context`, like `window_source_names`.
+    pub fn source_effective_times(
+        &self,
+        name: &str,
+    ) -> Option<io::Result<std::collections::HashMap<String, u64>>> {
+        let entry = self.lookup(name)?;
+        let _fence = entry.read_unless_deleted()?;
+        Some(self.entry_passages(&entry, &file_stem(name)).map(|store| {
+            store
+                .source_entries()
+                .into_iter()
+                .filter_map(|(source, meta)| {
+                    meta.date.or(meta.stored_at).map(|time| (source, time))
+                })
+                .collect()
+        }))
+    }
+
     /// Dereferences source ids (as found on attributions) back to their
     /// registered passages, reporting the ids that have none.
     #[allow(clippy::type_complexity)]

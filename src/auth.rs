@@ -807,6 +807,7 @@ pub(crate) fn required_role(method: &Method, route: &str) -> Role {
         | (&Method::POST, "/contexts/{name}/unreachable_from")
         | (&Method::POST, "/contexts/{name}/vocabulary/audit")
         | (&Method::POST, "/contexts/{name}/drift/audit")
+        | (&Method::POST, "/contexts/{name}/consolidation/audit")
         | (&Method::POST, "/contexts/{name}/schema/audit")
         | (&Method::POST, "/contexts/{name}/schema/validate")
         | (&Method::GET, "/contexts/{name}/communities")
