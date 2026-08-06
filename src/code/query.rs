@@ -231,7 +231,15 @@ pub(crate) fn find_hits(
     limit: usize,
 ) -> Result<Vec<Hit>, String> {
     let matched: Result<Vec<Matched>, _> = state.read_context(context_name, |context| {
-        let symbols = context.query(None, Some("defined_in"), None);
+        // The graph is append-only: retracting a source empties an
+        // edge's attributions but the edge record stays. An edge no
+        // source attests anymore is a ghost — a renamed file's old
+        // symbols — and must not surface.
+        let symbols: Vec<taguru::context::Association> = context
+            .query(None, Some("defined_in"), None)
+            .into_iter()
+            .filter(|assoc| !assoc.attributions.is_empty())
+            .collect();
         let mut tiers: [Vec<&taguru::context::Association>; 4] =
             [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
         for assoc in &symbols {
@@ -272,6 +280,9 @@ pub(crate) fn find_hits(
             let files = context.query(None, Some("contains"), None);
             let mut seen = std::collections::HashSet::new();
             for assoc in &files {
+                if assoc.attributions.is_empty() {
+                    continue; // retracted ghost, same as above
+                }
                 let node = &assoc.object;
                 if node.contains("::") || !seen.insert(node.clone()) {
                     continue;
@@ -382,11 +393,18 @@ pub(crate) fn tree(args: &[String]) -> i32 {
             Some(target) => context
                 .query(Some(target), Some("contains"), None)
                 .into_iter()
+                // Retracted ghosts (attribution-less edges) stay out,
+                // same as find.
+                .filter(|assoc| !assoc.attributions.is_empty())
                 .map(|assoc| assoc.object)
                 .collect(),
             None => {
                 // Roots: contains-subjects that are nobody's object.
-                let all = context.query(None, Some("contains"), None);
+                let all: Vec<taguru::context::Association> = context
+                    .query(None, Some("contains"), None)
+                    .into_iter()
+                    .filter(|assoc| !assoc.attributions.is_empty())
+                    .collect();
                 let contained: std::collections::HashSet<String> =
                     all.iter().map(|assoc| assoc.object.clone()).collect();
                 let mut roots: Vec<String> = all
