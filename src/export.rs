@@ -1569,6 +1569,38 @@ mod tests {
         assert!(!rendered.stream.contains("orphan"));
     }
 
+    /// The label-alias half of the drop rule: a label alias whose
+    /// canonical LABEL carries no live association drops exactly like
+    /// an edgeless concept canonical (the test above only exercises
+    /// the concept loop). And the unpinned create line omits `pinned`
+    /// entirely — `skip_serializing_if` — so old consumers keep
+    /// reading a create object without the key.
+    #[test]
+    fn a_label_alias_to_a_dead_label_drops_and_unpinned_stays_unserialized() {
+        let mut snapshot = snapshot(vec![association(
+            1,
+            vec![Attribution {
+                source: "a.md".to_string(),
+                weight: 1.0,
+                count: 1,
+                paragraph: None,
+            }],
+        )]);
+        snapshot.label_aliases = vec![
+            ("toji".to_string(), "杜氏".to_string()),
+            ("orphan-label".to_string(), "廃止銘柄".to_string()),
+        ];
+        let rendered = render("sake", &snapshot, Deadline::unbounded()).unwrap();
+        assert_eq!(rendered.aliases, 1, "the live 杜氏 alias");
+        assert_eq!(rendered.aliases_dropped, 1, "the dead-label alias");
+        assert!(!rendered.stream.contains("orphan-label"));
+        assert!(
+            !rendered.stream.contains("\"pinned\""),
+            "an unpinned create line must omit the field: {}",
+            rendered.stream
+        );
+    }
+
     /// One group renders as one `taguru_group` line, empties omitted,
     /// and the parser reads it back exactly — the group half of the
     /// stream's fixed point.
