@@ -257,19 +257,30 @@ fn shipped_bucket_restores_to_an_equivalent_directory() {
 /// lane's replay can carry the write into the restored directory.
 #[test]
 fn a_hard_killed_writers_bucket_restores_the_shipped_wal_tail() {
-    /// Any regular file anywhere under `dir` carrying `needle`? Wal
-    /// segments are uncompressed JSON lines and land whole (staged,
-    /// then renamed), so finding the bytes proves the RECORD shipped —
-    /// waiting for a segment file alone races the shipper: the first
-    /// segment to appear can predate the write this test must restore.
-    fn any_file_under_contains(dir: &Path, needle: &str) -> bool {
+    /// Any PUBLISHED segment anywhere under `dir` carrying `needle`?
+    /// Wal segments are uncompressed JSON lines and land whole (a
+    /// `LocalFileSystem` put stages a `name#N` temp file, then
+    /// renames), so finding the bytes in a `*.jsonl` object proves the
+    /// RECORD shipped. Both halves of the filter matter: waiting for a
+    /// segment file alone races the shipper (the first segment to
+    /// appear can predate the write this test must restore), and
+    /// matching a still-staged `#N` temp file would kill the writer
+    /// before the rename publishes the segment restore reads.
+    fn any_segment_under_contains(dir: &Path, needle: &str) -> bool {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return false;
         };
         entries.flatten().any(|entry| {
             let path = entry.path();
             if path.is_dir() {
-                return any_file_under_contains(&path, needle);
+                return any_segment_under_contains(&path, needle);
+            }
+            if !entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.ends_with(".jsonl") && !name.contains('#'))
+            {
+                return false;
             }
             std::fs::read(&path).is_ok_and(|bytes| {
                 bytes
@@ -307,7 +318,7 @@ fn a_hard_killed_writers_bucket_restores_the_shipped_wal_tail() {
     );
     let wal = generation.join("wal");
     wait_for("the tail write to ship", || {
-        any_file_under_contains(&wal, "代表銘柄")
+        any_segment_under_contains(&wal, "代表銘柄")
     });
 
     // …and a SIGKILL leaves it in the bucket: no drain, no fold-away.

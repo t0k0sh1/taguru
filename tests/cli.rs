@@ -2098,6 +2098,10 @@ fn export_counts_an_unwritable_group_file_as_a_failure() {
         String::from_utf8_lossy(&output.stderr).contains("group 'kura'"),
         "{output:?}"
     );
+    assert!(
+        out.join("sake.jsonl").exists(),
+        "the context stream the summary counts as written must actually remain"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
