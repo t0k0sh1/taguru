@@ -59,11 +59,12 @@ correction — treat as a suggestion, verify before relying on it).
    non-Rust files are not in the map.
 3. **The map covers what ripgrep covers.** Tracked plus untracked
    files, .gitignore excluded, read from disk — staged and unstaged
-   edits included. It is a snapshot as of the last sync: if
-   `taguru-code watch` is running (check with `taguru-code status` —
-   it reports pending changes), the map follows edits by itself;
+   edits included. It is a snapshot as of the last sync: with
+   `taguru-code watch` running the map follows edits by itself;
    otherwise run `taguru-code sync` after substantial edits, commits,
-   or a pull — incremental, sub-second either way.
+   or a pull — incremental, sub-second either way. When in doubt,
+   `taguru-code status` shows what is pending, and running `sync` is
+   always safe.
 4. **Disambiguate with a qualified cue.** A bare `new` or `tests`
    matches many symbols; qualify it (`Api::new`,
    `deadline.rs`-then-tree) instead of paging through hits.

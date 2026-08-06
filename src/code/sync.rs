@@ -275,18 +275,25 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
         ));
     }
     // Facts recorded under an older fact model are stale whatever
-    // their fingerprints say — void the whole state and rebuild.
-    let previous = previous.filter(|state| {
-        let current = state.facts_version == facts::FACTS_VERSION;
-        if !current {
-            eprintln!(
-                "taguru-code: sync: fact model changed (v{} → v{}) — full re-sync",
-                state.facts_version,
-                facts::FACTS_VERSION
-            );
-        }
-        current
-    });
+    // their fingerprints say. The previous state is still KEPT — its
+    // commit anchor and dirty set are how deletions since the last
+    // sync get retracted, and a rebuild that dropped them would leave
+    // the old model's facts of since-deleted files in the map forever.
+    // Only the fingerprints are voided (below), and the candidate set
+    // widens to the full listing so every survivor re-imports.
+    let rebuild = previous
+        .as_ref()
+        .is_some_and(|state| state.facts_version != facts::FACTS_VERSION);
+    if rebuild {
+        let recorded = previous
+            .as_ref()
+            .map(|state| state.facts_version)
+            .unwrap_or(0);
+        eprintln!(
+            "taguru-code: sync: fact model changed (v{recorded} → v{}) — full re-sync",
+            facts::FACTS_VERSION
+        );
+    }
     let first_run = previous.is_none();
     let current_dirty: Vec<String> = walk
         .dirty_files()?
@@ -300,12 +307,20 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
     match &previous {
         None => candidates.extend(walk.full_listing()?),
         Some(state)
-            if state.commit == head && current_dirty.is_empty() && state.dirty.is_empty() =>
+            if !rebuild
+                && state.commit == head
+                && current_dirty.is_empty()
+                && state.dirty.is_empty() =>
         {
             println!("up to date with HEAD ({head}) and a clean working tree");
             return Ok(0);
         }
         Some(state) => {
+            if rebuild {
+                // Every survivor re-imports under the new model; the
+                // diff and dirty sets below still add the deletions.
+                candidates.extend(walk.full_listing()?);
+            }
             let committed = if state.commit == head {
                 Vec::new()
             } else {
@@ -388,10 +403,14 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
     // already holds is skipped outright — dirty files re-enter the
     // candidate set every run, and without this each editor-session
     // sync (and every `watch` poll) would re-import them unchanged.
-    let mut fingerprints = previous
-        .as_ref()
-        .map(|state| state.fingerprints.clone())
-        .unwrap_or_default();
+    let mut fingerprints = if rebuild {
+        Default::default() // an old model's fingerprints prove nothing
+    } else {
+        previous
+            .as_ref()
+            .map(|state| state.fingerprints.clone())
+            .unwrap_or_default()
+    };
     let paths: Vec<String> = supported.iter().map(|(path, _)| path.clone()).collect();
     let contents = walk.read_worktree(&paths);
     let mut batches = Vec::new();
@@ -423,6 +442,11 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
     // no boot, no write — just move the anchor. This is the branch a
     // `watch` poll over a stable-but-dirty tree lands in.
     if batches.is_empty() && retractions.is_empty() {
+        // A first sync of a repo with nothing to import still lands
+        // here — the boot below (which normally creates the data dir)
+        // never runs, so the state file needs its directory made.
+        std::fs::create_dir_all(&data_dir)
+            .map_err(|error| format!("creating {}: {error}", data_dir.display()))?;
         save_state(
             &data_dir,
             &SyncState {

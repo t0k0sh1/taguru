@@ -191,6 +191,53 @@ fn sync_find_edit_rename_delete_round_trip() {
     assert!(!out.contains("src/beta.rs"), "{out}");
 }
 
+/// A fact-model bump voids fingerprints but must NOT void deletion
+/// tracking: files deleted since the last sync are absent from the
+/// full listing, and only the old anchor's diff can retract them.
+#[test]
+fn fact_model_rebuild_still_retracts_deleted_sources() {
+    let repo = Repo::new();
+    repo.write("src/alpha.rs", "pub fn locate_me() {}\n");
+    repo.write("src/beta.rs", "pub fn doomed() {}\n");
+    repo.commit("base");
+    let (code, out) = repo.run(&["sync", "."]);
+    assert_eq!(code, 0, "{out}");
+
+    fs::remove_file(repo.dir.join("src/beta.rs")).unwrap();
+    repo.commit("delete beta");
+
+    // Simulate a binary upgrade: the recorded facts version is older.
+    let state_path = repo.dir.join(".taguru/code-sync.json");
+    let doctored = fs::read_to_string(&state_path)
+        .unwrap()
+        .replace("\"facts_version\":1", "\"facts_version\":0");
+    fs::write(&state_path, doctored).unwrap();
+
+    let (code, out) = repo.run(&["sync", "."]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("full re-sync"), "{out}");
+    let (code, _) = repo.run(&["find", "doomed"]);
+    assert_eq!(code, 1, "deleted source must retract across a rebuild");
+    let (code, out) = repo.run(&["find", "locate_me"]);
+    assert_eq!(code, 0, "survivors must re-import: {out}");
+}
+
+/// A repo with nothing to import must still complete its first sync
+/// (the state file needs its directory created without the boot).
+#[test]
+fn first_sync_of_a_repo_with_no_supported_files_succeeds() {
+    let repo = Repo::new();
+    repo.write("README.md", "prose only\n");
+    repo.commit("base");
+    let (code, out) = repo.run(&["sync", "."]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("nothing to apply"), "{out}");
+    assert!(repo.dir.join(".taguru/code-sync.json").is_file());
+    let (code, out) = repo.run(&["sync", "."]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("up to date"), "{out}");
+}
+
 /// Kills the watch process even when an assertion panics first.
 struct WatchGuard(std::process::Child);
 
@@ -199,6 +246,47 @@ impl Drop for WatchGuard {
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
+}
+
+/// An edit racing the INITIAL sync must not vanish: watch records its
+/// baseline snapshot before that sync, so anything landing during it
+/// still reads as a change on a later poll. The repo is padded so the
+/// initial sync takes long enough for the immediate write to land
+/// inside it (and the test stays valid — just race-free — when it
+/// doesn't).
+#[test]
+fn watch_catches_an_edit_racing_the_initial_sync() {
+    let repo = Repo::new();
+    for index in 0..150 {
+        repo.write(
+            &format!("src/pad_{index}.rs"),
+            &format!("pub fn pad_{index}() {{}}\n"),
+        );
+    }
+    repo.commit("base");
+
+    let child = Command::new(env!("CARGO_BIN_EXE_taguru-code"))
+        .current_dir(&repo.dir)
+        .args(["watch", ".", "--interval-ms", "100"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let _guard = WatchGuard(child);
+    // No waiting: this write races the initial sync on purpose.
+    repo.write("src/raced.rs", "pub fn wrote_during_initial_sync() {}\n");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut seen = false;
+    while std::time::Instant::now() < deadline {
+        let (code, out) = repo.run(&["find", "wrote_during_initial_sync"]);
+        if code == 0 && out.contains("src/raced.rs:1-1") {
+            seen = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    assert!(seen, "an edit during the initial sync must not be lost");
 }
 
 #[test]

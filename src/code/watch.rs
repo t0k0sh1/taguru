@@ -101,6 +101,13 @@ pub(crate) fn run(args: &[String]) -> i32 {
         sync_argv.extend(["--data-dir".to_string(), dir.display().to_string()]);
     }
 
+    // The snapshot is taken BEFORE the sync it stands for — here and
+    // in the loop below alike. Taken after, an edit that lands while
+    // the sync runs would be baked into `last_synced` without being
+    // in the map, and no later poll would ever see a difference until
+    // some unrelated edit came along.
+    let pre_sync = snapshot(&walk, &data_dir).unwrap_or_default();
+
     // A watch that cannot complete its first sync is misconfigured
     // (no commits, locked dir, broken repo) — say so and exit rather
     // than retrying a hopeless loop forever.
@@ -115,7 +122,7 @@ pub(crate) fn run(args: &[String]) -> i32 {
         walk.root().display(),
         args.interval_ms
     );
-    let mut last_synced = snapshot(&walk, &data_dir).unwrap_or_default();
+    let mut last_synced = pre_sync;
     let mut previous_poll = last_synced.clone();
     loop {
         std::thread::sleep(std::time::Duration::from_millis(args.interval_ms));
