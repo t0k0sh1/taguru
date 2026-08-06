@@ -37,8 +37,8 @@ taguru-code sync                  # refresh after commits
 
 `find` output, one hit per line:
 
-```
-fn        src/ingest/model.rs::parse_batch   src/ingest/model.rs:323-346  [exact 1.00]
+```text
+fn        src/ingest/model.rs::parse_batch                             src/ingest/model.rs:323-346  [exact 1.00]
 ```
 
 The bracketed tier tells you how the cue matched: `exact` (tail name
@@ -72,6 +72,6 @@ correction — treat as a suggestion, verify before relying on it).
 ## Setup (once per clone)
 
 ```bash
-taguru-code sync          # builds .taguru/ from committed state
+taguru-code sync          # builds .taguru/ from the worktree (tracked + untracked, .gitignore excluded)
 echo '.taguru/' >> .gitignore   # if not already ignored
 ```

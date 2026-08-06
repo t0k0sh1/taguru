@@ -1,11 +1,14 @@
 //! `taguru-code`: offline codebase ingestion and lookup. `sync` walks
-//! a git repository (committed state only — `git ls-files` is the
-//! .gitignore authority), parses source files into location/structure
-//! facts deterministically (tree-sitter, no LLM anywhere), and applies
-//! them to a data directory at `$PROJECT_ROOT/.taguru` through the
-//! same batch/import contract every other write uses. `find`/`tree`
-//! answer "where is X" in-process from that directory — no server, no
-//! network, nothing to configure.
+//! a git repository's worktree — exactly ripgrep's universe: tracked
+//! plus untracked files, .gitignore excluded, bytes as they are on
+//! disk (staged and unstaged edits included), with HEAD serving only
+//! as the incremental anchor — parses source files into
+//! location/structure facts deterministically (tree-sitter, no LLM
+//! anywhere), and applies them to a data directory at
+//! `$PROJECT_ROOT/.taguru` through the same batch/import contract
+//! every other write uses. `find`/`tree` answer "where is X"
+//! in-process from that directory — no server, no network, nothing
+//! to configure.
 //!
 //! This is a spike (plan: prototype → evaluate against graphify →
 //! decide); module split follows the plan: `grammar` is the

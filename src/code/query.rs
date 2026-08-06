@@ -130,6 +130,21 @@ fn bigram_dice(a: &str, b: &str) -> f64 {
 /// (qualified name, tier, score, [(source file, paragraph)]).
 type Matched = (String, &'static str, f64, Vec<(String, Option<u32>)>);
 
+/// One stable sentence per failure kind — `AccessError`'s `Debug`
+/// form carries hydration/schema/IO internals (paths included) that
+/// belong in server logs, not in a CLI answer an agent may echo.
+fn context_read_error(context: &str, error: &crate::registry::AccessError) -> String {
+    match error {
+        crate::registry::AccessError::NotFound => {
+            format!("context '{context}' not found — run `taguru-code sync` first")
+        }
+        _ => format!(
+            "context '{context}' could not be read — re-run `taguru-code sync` \
+             (a full re-sync rebuilds a damaged data directory)"
+        ),
+    }
+}
+
 /// One `find` hit, fully dereferenced.
 pub(crate) struct Hit {
     pub(crate) name: String,
@@ -253,7 +268,10 @@ pub(crate) fn find_hits(
             {
                 // `::` suffix is `Type::method`; `/` suffix lets a
                 // file-qualified cue (`extract.rs::run`) pin a
-                // top-level symbol the same way.
+                // top-level symbol the same way. Both are gated on
+                // the cue containing `::` on purpose: a bare path
+                // fragment (`src/ingest/model.rs`) is not a symbol
+                // lookup and belongs to the path tier below.
                 tiers[1].push(assoc);
             } else if tail.starts_with(cue) {
                 tiers[2].push(assoc);
@@ -329,9 +347,7 @@ pub(crate) fn find_hits(
         }
         picked
     });
-    let matched = matched.map_err(|error| {
-        format!("context '{context_name}': {error:?} — run `taguru-code sync` first")
-    })?;
+    let matched = matched.map_err(|error| context_read_error(context_name, &error))?;
 
     // Citation dereference: (source file, paragraph) → section + lines.
     let mut hits = Vec::new();
@@ -395,14 +411,21 @@ pub(crate) fn tree(args: &[String]) -> i32 {
     };
     let listing: Result<Vec<String>, _> = state.read_context(&args.context, |context| {
         match &args.cue {
-            Some(target) => context
-                .query(Some(target), Some("contains"), None)
-                .into_iter()
-                // Retracted ghosts (attribution-less edges) stay out,
-                // same as find.
-                .filter(|assoc| !assoc.attributions.is_empty())
-                .map(|assoc| assoc.object)
-                .collect(),
+            Some(target) => {
+                let mut children: Vec<String> = context
+                    .query(Some(target), Some("contains"), None)
+                    .into_iter()
+                    // Retracted ghosts (attribution-less edges) stay
+                    // out, same as find.
+                    .filter(|assoc| !assoc.attributions.is_empty())
+                    .map(|assoc| assoc.object)
+                    .collect();
+                // Deterministic like the root listing: duplicate
+                // edges collapse, order never depends on insertion.
+                children.sort();
+                children.dedup();
+                children
+            }
             None => {
                 // Roots: contains-subjects that are nobody's object.
                 let all: Vec<taguru::context::Association> = context
@@ -443,8 +466,8 @@ pub(crate) fn tree(args: &[String]) -> i32 {
         }
         Err(error) => {
             eprintln!(
-                "taguru-code: tree: context '{}': {error:?} — run `taguru-code sync` first",
-                args.context
+                "taguru-code: tree: {}",
+                context_read_error(&args.context, &error)
             );
             1
         }

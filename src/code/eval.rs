@@ -230,11 +230,27 @@ pub(crate) fn eval(args: &[String]) -> i32 {
             return 1;
         }
     };
-    let data_dir = args.data_dir.clone().unwrap_or_else(|| {
-        RepoWalk::discover(&args.start)
-            .map(|walk| walk.root().join(".taguru"))
-            .unwrap_or_else(|_| PathBuf::from(".taguru"))
-    });
+    // Same guard as `find`'s open(): a missing data dir must be "run
+    // sync first", never an empty context scored as hit1_rate 0.0 —
+    // this command is a CI gate, and a misdiagnosed exit 3 reads as
+    // an accuracy regression.
+    let data_dir = match &args.data_dir {
+        Some(dir) => dir.clone(),
+        None => match RepoWalk::discover(&args.start) {
+            Ok(walk) => walk.root().join(".taguru"),
+            Err(message) => {
+                eprintln!("taguru-code: eval: {message}");
+                return 1;
+            }
+        },
+    };
+    if !data_dir.is_dir() {
+        eprintln!(
+            "taguru-code: eval: {} does not exist — run `taguru-code sync` first",
+            data_dir.display()
+        );
+        return 1;
+    }
     let mut config = crate::registry::BootConfig::from_env();
     config.data_dir = data_dir;
     config.wal_enabled = false;
@@ -328,23 +344,71 @@ pub(crate) fn eval(args: &[String]) -> i32 {
                 return 1;
             }
         };
+        // A gate that silently skips a threshold is worse than none:
+        // a typo'd key or a stringly-typed value must refuse the run,
+        // not pass it, and the applied count makes a hollow gate
+        // visible in the log.
+        let known = ["hit1_rate", "hit10_rate", "line_drift"];
+        let Some(entries) = thresholds.as_object() else {
+            eprintln!(
+                "taguru-code: eval: thresholds {}: expected a JSON object",
+                thresholds_path.display()
+            );
+            return 1;
+        };
+        if let Some(unknown) = entries.keys().find(|key| !known.contains(&key.as_str())) {
+            eprintln!(
+                "taguru-code: eval: thresholds {}: unknown key '{unknown}' (known: {})",
+                thresholds_path.display(),
+                known.join(", ")
+            );
+            return 1;
+        }
         let mut violated = false;
+        let mut applied = 0usize;
         for (key, actual) in [("hit1_rate", hit1_rate), ("hit10_rate", hit10_rate)] {
-            if let Some(floor) = thresholds.get(key).and_then(|value| value.as_f64())
-                && actual < floor
-            {
-                eprintln!("taguru-code: eval: {key} {actual:.3} is below the {floor:.3} floor");
-                violated = true;
+            match entries.get(key) {
+                None => {}
+                Some(value) => match value.as_f64() {
+                    Some(floor) => {
+                        applied += 1;
+                        if actual < floor {
+                            eprintln!(
+                                "taguru-code: eval: {key} {actual:.3} is below the {floor:.3} floor"
+                            );
+                            violated = true;
+                        }
+                    }
+                    None => {
+                        eprintln!(
+                            "taguru-code: eval: thresholds: {key} must be a number, got {value}"
+                        );
+                        return 1;
+                    }
+                },
             }
         }
-        if let Some(ceiling) = thresholds
-            .get("line_drift")
-            .and_then(|value| value.as_u64())
-            && line_drift as u64 > ceiling
-        {
-            eprintln!("taguru-code: eval: line_drift {line_drift} exceeds the {ceiling} ceiling");
-            violated = true;
+        match entries.get("line_drift") {
+            None => {}
+            Some(value) => match value.as_u64() {
+                Some(ceiling) => {
+                    applied += 1;
+                    if line_drift as u64 > ceiling {
+                        eprintln!(
+                            "taguru-code: eval: line_drift {line_drift} exceeds the {ceiling} ceiling"
+                        );
+                        violated = true;
+                    }
+                }
+                None => {
+                    eprintln!(
+                        "taguru-code: eval: thresholds: line_drift must be a non-negative integer, got {value}"
+                    );
+                    return 1;
+                }
+            },
         }
+        eprintln!("note: {applied} threshold(s) applied");
         if violated {
             return 3;
         }

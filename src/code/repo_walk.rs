@@ -74,7 +74,7 @@ impl RepoWalk {
             "--others",
             "--exclude-standard",
         ])?;
-        Ok(split_nul(&out).map(str::to_string).collect())
+        split_nul(&out)
     }
 
     /// Every path the working tree currently differs on — staged,
@@ -84,7 +84,8 @@ impl RepoWalk {
     /// individually instead of collapsing new directories.
     pub(crate) fn dirty_files(&self) -> Result<Vec<String>, String> {
         let out = self.git(&["status", "--porcelain", "-z", "-uall", "--no-renames"])?;
-        Ok(split_nul(&out)
+        Ok(split_nul(&out)?
+            .into_iter()
             .filter_map(|entry| entry.get(3..).map(str::to_string))
             .collect())
     }
@@ -93,7 +94,7 @@ impl RepoWalk {
     /// delete+add pair back into the rename it was.
     pub(crate) fn changes_since(&self, commit: &str) -> Result<Vec<Change>, String> {
         let out = self.git(&["diff", "--name-status", "-z", "-M", commit, "HEAD"])?;
-        let mut fields = split_nul(&out);
+        let mut fields = split_nul(&out)?.into_iter();
         let mut changes = Vec::new();
         while let Some(status) = fields.next() {
             let path = fields
@@ -157,12 +158,21 @@ fn git_in(dir: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     Ok(output.stdout)
 }
 
-fn split_nul(bytes: &[u8]) -> impl Iterator<Item = &str> {
+/// NUL-separated git output as owned strings. A non-UTF-8 field is a
+/// hard refusal, never a silent drop: `changes_since` pairs status
+/// and path fields by position, and a vanished field would shift
+/// every later pair — a real file's facts could get retracted off a
+/// misread status string.
+fn split_nul(bytes: &[u8]) -> Result<Vec<String>, String> {
     bytes
         .split(|byte| *byte == 0)
         .filter(|field| !field.is_empty())
-        .map(|field| std::str::from_utf8(field).unwrap_or(""))
-        .filter(|field| !field.is_empty())
+        .map(|field| {
+            std::str::from_utf8(field).map(str::to_string).map_err(|_| {
+                "git reported a non-UTF-8 path — taguru-code requires UTF-8 paths".to_string()
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -346,6 +356,21 @@ mod tests {
                 .unwrap()
                 .is_empty(),
             "HEAD to HEAD is an empty work list"
+        );
+    }
+
+    /// The Err this produces is what sync's full-re-sync fallback
+    /// keys on — the anchor commit can genuinely vanish (rebase then
+    /// gc), so the refusal is a real code path, not a formality.
+    #[test]
+    fn changes_since_refuses_a_commit_the_repository_does_not_have() {
+        let repo = TestRepo::new("unknown-anchor");
+        repo.write("src/a.rs", "fn a() {}\n");
+        repo.commit("base");
+        let walk = RepoWalk::discover(&repo.dir).unwrap();
+        assert!(
+            walk.changes_since("0000000000000000000000000000000000000000")
+                .is_err()
         );
     }
 }

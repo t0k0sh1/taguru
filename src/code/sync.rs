@@ -162,9 +162,16 @@ pub(crate) fn status(args: &[String]) -> i32 {
 }
 
 fn data_dir_of(args: &SyncArgs, walk: &RepoWalk) -> PathBuf {
-    args.data_dir
-        .clone()
-        .unwrap_or_else(|| walk.root().join(".taguru"))
+    // `under_data_dir` compares against absolute worktree paths, so a
+    // relative `--data-dir` must be absolutized first or the
+    // self-storage exclusion below could never match it.
+    match args.data_dir.clone() {
+        None => walk.root().join(".taguru"),
+        Some(dir) if dir.is_absolute() => dir,
+        Some(dir) => std::env::current_dir()
+            .map(|cwd| cwd.join(&dir))
+            .unwrap_or(dir),
+    }
 }
 
 /// Whether a repo-relative path lives inside the data directory. The

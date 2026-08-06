@@ -1,10 +1,12 @@
 //! taguru-code: offline codebase ingestion and lookup for coding
-//! agents — `sync` turns a git repository's committed state into
-//! location/structure facts in `$PROJECT_ROOT/.taguru`, `find`/`tree`
-//! answer "where is X" from that directory in-process. No server, no
-//! LLM, no configuration: the substance lives in the shared [`code`]
-//! module; this file is the process entry plus the dual-inclusion of
-//! the server modules the offline apply path reuses (`registry` boot,
+//! agents — `sync` turns a git repository's worktree (ripgrep's
+//! universe: tracked + untracked, .gitignore excluded, disk bytes;
+//! HEAD is only the incremental anchor) into location/structure
+//! facts in `$PROJECT_ROOT/.taguru`, `find`/`tree` answer "where is
+//! X" from that directory in-process. No server, no LLM, no
+//! configuration: the substance lives in the shared [`code`] module;
+//! this file is the process entry plus the dual-inclusion of the
+//! server modules the offline apply path reuses (`registry` boot,
 //! `ingest`'s batch parse/apply) — the same `#[path]` shape
 //! `taguru-mcp` uses, scaled to the import web's closure.
 

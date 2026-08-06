@@ -122,6 +122,26 @@ fn sync_find_edit_rename_delete_round_trip() {
     assert_eq!(code, 0);
     assert!(out.contains("up to date"), "{out}");
 
+    // A tracked file edited but NOT committed must sync too, and
+    // reverting it must heal the locator back — this is the
+    // current-dirty ∪ previous-dirty bookkeeping's core path.
+    repo.write(
+        "src/alpha.rs",
+        "// a comment pushes everything down\n\n\npub fn locate_me() {\n    // body\n}\npub struct Anchor;\n",
+    );
+    let (code, out) = repo.run(&["sync", "."]);
+    assert_eq!(code, 0, "dirty sync: {out}");
+    let (_, out) = repo.run(&["find", "locate_me"]);
+    assert!(
+        out.contains("src/alpha.rs:4-6"),
+        "dirty edit must sync: {out}"
+    );
+    repo.git(&["checkout", "--", "src/alpha.rs"]);
+    let (code, out) = repo.run(&["sync", "."]);
+    assert_eq!(code, 0, "{out}");
+    let (_, out) = repo.run(&["find", "locate_me"]);
+    assert!(out.contains("src/alpha.rs:3-5"), "revert must heal: {out}");
+
     // ...but the working tree IS the universe: an untracked file's
     // symbol becomes findable on sync, no commit required.
     repo.write("src/delta.rs", "pub fn quokka_untracked() {}\n");

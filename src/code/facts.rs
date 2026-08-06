@@ -140,8 +140,16 @@ pub(crate) fn build(path: &str, symbols: &[SymbolNode]) -> FileFacts {
 
         // The container is the enclosing symbol when nested, the file
         // otherwise; `defined_in` always points straight at the file —
-        // that direct edge is the "where is X" product.
-        let container = symbol.parent.as_deref().unwrap_or(path);
+        // that direct edge is the "where is X" product. A parent over
+        // the wire cap can never be a legal subject (its own symbol
+        // was already skipped with a warning above); the file is the
+        // honest fallback container, or one pathological name would
+        // refuse the whole file's batch.
+        let container = symbol
+            .parent
+            .as_deref()
+            .filter(|parent| parent.len() <= MAX_NAME_BYTES)
+            .unwrap_or(path);
         facts.associations.push(Assoc {
             subject: container.to_string(),
             label: "contains".to_string(),
@@ -437,6 +445,37 @@ mod tests {
         // The kept symbol renumbers cleanly onto paragraph 0.
         assert_eq!(facts.sections, vec![(0, "fn ok".to_string())]);
         assert_eq!(facts.locators, vec![(0, "3-4".to_string())]);
+    }
+
+    /// One pathological parent name must cost only its own symbols,
+    /// never the file's whole batch: an over-cap subject would be
+    /// refused at the wire and sync aborts on a refused batch.
+    #[test]
+    fn an_oversized_parent_falls_back_to_the_file_container() {
+        let long_parent = format!("f.rs::{}", "x".repeat(1100));
+        let symbols = [symbol(
+            SymbolKind::Method,
+            "child",
+            "f.rs::child",
+            Some(&long_parent),
+            "fn child()",
+            (5, 6),
+        )];
+        let facts = build("f.rs", &symbols);
+        let contains: Vec<_> = facts
+            .associations
+            .iter()
+            .filter(|assoc| assoc.label == "contains")
+            .map(|assoc| (assoc.subject.as_str(), assoc.object.as_str()))
+            .collect();
+        assert_eq!(contains, vec![("f.rs", "f.rs::child")]);
+        assert!(
+            facts
+                .associations
+                .iter()
+                .all(|assoc| assoc.subject.len() <= 1024 && assoc.object.len() <= 1024),
+            "no association may carry an over-cap name"
+        );
     }
 
     #[test]

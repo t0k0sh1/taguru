@@ -151,8 +151,10 @@ impl Walker<'_> {
                         scope.pop();
                     }
                 }
-                // Containers that hide items one level down.
-                "foreign_mod_item" => self.walk(child, scope, false),
+                // `extern "C" { ... }`: the declarations live in the
+                // `body` field's declaration_list, not among the
+                // block's own named children.
+                "foreign_mod_item" => self.walk_field(child, "body", scope, false),
                 _ => {}
             }
         }
@@ -387,6 +389,19 @@ mod tests {
                 .starts_with("pub(crate) fn parse_batch(")
         );
         assert!(symbols[0].signature.ends_with("-> Result<Batch, String>"));
+    }
+
+    #[test]
+    fn extern_block_declarations_are_extracted() {
+        let symbols = parse(
+            "unsafe extern \"C\" {\n    fn c_api(input: u32) -> u32;\n    static C_LIMIT: u32;\n}\n",
+        );
+        assert_eq!(
+            names(&symbols),
+            vec!["src/x.rs::c_api", "src/x.rs::C_LIMIT"]
+        );
+        assert_eq!(symbols[0].kind, SymbolKind::Function);
+        assert_eq!(symbols[1].kind, SymbolKind::Static);
     }
 
     #[test]

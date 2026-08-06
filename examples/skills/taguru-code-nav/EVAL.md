@@ -10,6 +10,7 @@ recorded manual protocol. The comparison baseline is **graphify**
 Ground truth is derivable because facts are deterministic AST output:
 
 ```bash
+taguru-code sync                                                 # build .taguru/ first
 taguru-code evalset --out eval.jsonl --sample 200
 taguru-code eval --eval eval.jsonl --thresholds thresholds.json  # exit 3 on regression
 ```
