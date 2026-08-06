@@ -135,6 +135,11 @@ debug = true
 # Mutation runs relink the test binaries for every candidate. Backtraces from
 # expected failures are not useful there, so omit debug info to keep that
 # repeated work smaller without changing the normal test profile.
+# Incremental compilation is off for the same reason disk is the scarce
+# resource on sweep runners: its cache was 60% of the scratch tree
+# (1.5 GiB of 2.5 GiB measured), and every parallel cargo-mutants job
+# carries its own copy of the tree.
 [profile.mutants]
 inherits = "test"
 debug = "none"
+incremental = false
