@@ -77,8 +77,14 @@ jobs:
           SHARD_TOTAL: ${{ inputs.shard_total }}
           JOBS: ${{ inputs.jobs }}
         run: |
+          # set -f: the globs must reach cargo-mutants verbatim —
+          # unquoted word-splitting would otherwise let bash expand
+          # 'src/registry/**' into a flat (and one-level-only) file
+          # list before cargo-mutants ever sees it.
+          set -f
           args=()
           for glob in $GLOBS; do args+=(-f "$glob"); done
+          set +f
           # Exit 2 is "missed mutants found" — the sweep's normal
           # yield, recorded in the artifact, never a red job. Anything
           # else (baseline failure, internal error) is a real failure.
