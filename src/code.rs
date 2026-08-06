@@ -23,6 +23,8 @@ pub(crate) mod facts;
 pub(crate) mod grammar;
 #[path = "code/grammars.rs"]
 pub(crate) mod grammars;
+#[path = "code/query.rs"]
+pub(crate) mod query;
 #[path = "code/repo_walk.rs"]
 pub(crate) mod repo_walk;
 #[path = "code/sync.rs"]
@@ -49,7 +51,9 @@ pub(crate) fn run(args: &[String]) -> i32 {
         }
         Some("sync") => sync::run(&args[1..]),
         Some("status") => sync::status(&args[1..]),
-        Some(verb @ ("find" | "tree" | "evalset" | "eval")) => {
+        Some("find") => query::find(&args[1..]),
+        Some("tree") => query::tree(&args[1..]),
+        Some(verb @ ("evalset" | "eval")) => {
             eprintln!("taguru-code: '{verb}' is not implemented yet (spike in progress)");
             2
         }

@@ -84,6 +84,31 @@ pub(crate) fn build(path: &str, symbols: &[SymbolNode]) -> FileFacts {
     }
     facts.associations.reverse(); // root-first reads better in batches
 
+    // An `impl OtherFilesType` scope names a parent this file never
+    // defines (`src/context/alias.rs::Context`): without an anchor the
+    // methods' container floats free of the tree. The file honestly
+    // contains that impl surface, so anchor every such parent once.
+    let defined: std::collections::HashSet<&str> = symbols
+        .iter()
+        .map(|symbol| symbol.qualified_name.as_str())
+        .collect();
+    let mut anchored = std::collections::HashSet::new();
+    for symbol in symbols {
+        if let Some(parent) = symbol.parent.as_deref()
+            && !defined.contains(parent)
+            && parent.len() <= MAX_NAME_BYTES
+            && anchored.insert(parent)
+        {
+            facts.associations.push(Assoc {
+                subject: path.to_string(),
+                label: "contains".to_string(),
+                object: parent.to_string(),
+                weight: 1.0,
+                paragraph: None,
+            });
+        }
+    }
+
     let mut paragraphs = Vec::new();
     for symbol in symbols {
         if symbol.qualified_name.len() > MAX_NAME_BYTES {
