@@ -16,15 +16,19 @@ on:
       shard_total:
         description: "Total shard count (cargo mutants --shard k/N)"
         required: true
-        default: "16"
+        default: "32"
       shards:
         description: "Which shards to run this dispatch: 'all', or a space-separated subset like '0 1' for calibration"
         required: true
         default: "all"
       jobs:
-        description: "cargo mutants --jobs per runner"
+        # Each parallel job carries its own copy of the source tree
+        # and a full scratch target dir, so jobs is the disk
+        # multiplier; 1 job + more shards buys the same throughput
+        # from runner-level parallelism at half the per-runner disk.
+        description: "cargo mutants --jobs per runner (disk scales with this)"
         required: true
-        default: "2"
+        default: "1"
 
 permissions:
   contents: read
