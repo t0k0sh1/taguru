@@ -136,6 +136,15 @@ fn sync_find_edit_rename_delete_round_trip() {
         out.contains("src/alpha.rs:4-6"),
         "dirty edit must sync: {out}"
     );
+    // Re-syncing the same dirty-but-stable tree is fingerprint-
+    // skipped: no re-import, no registry boot, just the anchor move.
+    let (code, out) = repo.run(&["sync", "."]);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("nothing to apply (1 unchanged"),
+        "stable dirty file must be fingerprint-skipped: {out}"
+    );
+
     repo.git(&["checkout", "--", "src/alpha.rs"]);
     let (code, out) = repo.run(&["sync", "."]);
     assert_eq!(code, 0, "{out}");
@@ -180,6 +189,63 @@ fn sync_find_edit_rename_delete_round_trip() {
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("src/gamma.rs"), "{out}");
     assert!(!out.contains("src/beta.rs"), "{out}");
+}
+
+/// Kills the watch process even when an assertion panics first.
+struct WatchGuard(std::process::Child);
+
+impl Drop for WatchGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[test]
+fn watch_follows_edits_without_manual_syncs() {
+    let repo = Repo::new();
+    repo.write("src/lib.rs", "pub fn already_here() {}\n");
+    repo.commit("base");
+
+    let child = Command::new(env!("CARGO_BIN_EXE_taguru-code"))
+        .current_dir(&repo.dir)
+        .args(["watch", ".", "--interval-ms", "100"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let _guard = WatchGuard(child);
+
+    // The initial sync lands first; then an untracked file appears
+    // and must become findable with no manual sync. Polling stays at
+    // a HUMANE cadence: each find boots the registry and takes the
+    // data-dir lock, and hammering it every 100 ms can starve watch's
+    // own sync out of the lock for the whole deadline — the agent
+    // asks occasionally; so does this test.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut seen = false;
+    let mut wrote = false;
+    while std::time::Instant::now() < deadline {
+        if !wrote {
+            let (code, _) = repo.run(&["find", "already_here"]);
+            if code == 0 {
+                // Initial sync done — now change the tree.
+                repo.write("src/fresh.rs", "pub fn appeared_by_watch() {}\n");
+                wrote = true;
+            }
+        } else {
+            let (code, out) = repo.run(&["find", "appeared_by_watch"]);
+            if code == 0 && out.contains("src/fresh.rs:1-1") {
+                seen = true;
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    assert!(
+        seen,
+        "watch must pick up the new file without a manual sync"
+    );
 }
 
 #[test]

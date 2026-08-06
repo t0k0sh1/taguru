@@ -162,11 +162,16 @@ pub(crate) fn status(args: &[String]) -> i32 {
 }
 
 fn data_dir_of(args: &SyncArgs, walk: &RepoWalk) -> PathBuf {
-    // `under_data_dir` compares against absolute worktree paths, so a
-    // relative `--data-dir` must be absolutized first or the
-    // self-storage exclusion below could never match it.
-    match args.data_dir.clone() {
-        None => walk.root().join(".taguru"),
+    resolve_data_dir(args.data_dir.clone(), walk.root())
+}
+
+/// The one data-dir resolution `sync`, `status`, and `watch` share.
+/// `under_data_dir` compares against absolute worktree paths, so a
+/// relative `--data-dir` must be absolutized first or the
+/// self-storage exclusion could never match it.
+pub(crate) fn resolve_data_dir(data_dir: Option<PathBuf>, root: &Path) -> PathBuf {
+    match data_dir {
+        None => root.join(".taguru"),
         Some(dir) if dir.is_absolute() => dir,
         Some(dir) => std::env::current_dir()
             .map(|cwd| cwd.join(&dir))
@@ -178,8 +183,9 @@ fn data_dir_of(args: &SyncArgs, walk: &RepoWalk) -> PathBuf {
 /// map must never index its own storage: `.taguru/` is untracked, so
 /// without this the dirty set would grow by its own files every run
 /// and "up to date" could never hold (gitignoring it is advised, but
-/// correctness cannot depend on advice).
-fn under_data_dir(path: &str, root: &Path, data_dir: &Path) -> bool {
+/// correctness cannot depend on advice). `watch` needs the same
+/// exclusion or its own writes would look like fresh work forever.
+pub(crate) fn under_data_dir(path: &str, root: &Path, data_dir: &Path) -> bool {
     root.join(path).starts_with(data_dir)
 }
 
@@ -190,6 +196,16 @@ struct SyncState {
     /// the next run, so a file that got reverted (or committed, or
     /// deleted) since heals to its current truth.
     dirty: Vec<String>,
+    /// Content fingerprints (sha256 of the imported bytes) per synced
+    /// file: a candidate whose bytes still match skips the
+    /// retract-then-reimport entirely. This is what makes repeated
+    /// syncs over a dirty-but-stable tree (an editor session, `watch`
+    /// polling) nearly free.
+    fingerprints: std::collections::BTreeMap<String, String>,
+    /// [`facts::FACTS_VERSION`] the fingerprints were recorded under —
+    /// a mismatch means the stored facts predate the current fact
+    /// model, and every fingerprint is void.
+    facts_version: u32,
 }
 
 fn load_state(data_dir: &Path) -> Option<SyncState> {
@@ -208,6 +224,26 @@ fn load_state(data_dir: &Path) -> Option<SyncState> {
                     .collect()
             })
             .unwrap_or_default(),
+        fingerprints: value
+            .get("fingerprints")
+            .and_then(|fingerprints| fingerprints.as_object())
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|(path, fingerprint)| {
+                        fingerprint
+                            .as_str()
+                            .map(|fingerprint| (path.clone(), fingerprint.to_string()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        // Absent in pre-fingerprint state files: 0 never matches, so
+        // the one-time cost is a full re-sync, never a stale skip.
+        facts_version: value
+            .get("facts_version")
+            .and_then(|version| version.as_u64())
+            .unwrap_or(0) as u32,
     })
 }
 
@@ -216,6 +252,8 @@ fn save_state(data_dir: &Path, state: &SyncState) -> Result<(), String> {
         "commit": state.commit,
         "context": state.context,
         "dirty": state.dirty,
+        "fingerprints": state.fingerprints,
+        "facts_version": state.facts_version,
     });
     std::fs::write(data_dir.join(STATE_FILE), format!("{value}\n"))
         .map_err(|error| format!("writing {STATE_FILE}: {error}"))
@@ -236,6 +274,19 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
             previous.context, previous.context
         ));
     }
+    // Facts recorded under an older fact model are stale whatever
+    // their fingerprints say — void the whole state and rebuild.
+    let previous = previous.filter(|state| {
+        let current = state.facts_version == facts::FACTS_VERSION;
+        if !current {
+            eprintln!(
+                "taguru-code: sync: fact model changed (v{} → v{}) — full re-sync",
+                state.facts_version,
+                facts::FACTS_VERSION
+            );
+        }
+        current
+    });
     let first_run = previous.is_none();
     let current_dirty: Vec<String> = walk
         .dirty_files()?
@@ -332,18 +383,32 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
     }
 
     // Parse and build every batch before booting the registry: a file
-    // that refuses must never cost a directory lock or a write.
+    // that refuses must never cost a directory lock or a write. A
+    // candidate whose bytes fingerprint the same as what the map
+    // already holds is skipped outright — dirty files re-enter the
+    // candidate set every run, and without this each editor-session
+    // sync (and every `watch` poll) would re-import them unchanged.
+    let mut fingerprints = previous
+        .as_ref()
+        .map(|state| state.fingerprints.clone())
+        .unwrap_or_default();
     let paths: Vec<String> = supported.iter().map(|(path, _)| path.clone()).collect();
     let contents = walk.read_worktree(&paths);
     let mut batches = Vec::new();
     let mut warnings = Vec::new();
     let mut binaries = 0usize;
+    let mut unchanged = 0usize;
     let mut symbol_count = 0usize;
     for ((path, grammar), (_, content)) in supported.iter().zip(contents) {
         let Some(content) = content else {
             binaries += 1;
             continue;
         };
+        let fingerprint = crate::sha256::sha256_hex(content.as_bytes());
+        if fingerprints.get(path) == Some(&fingerprint) {
+            unchanged += 1;
+            continue;
+        }
         let symbols = grammar.symbols(&content, path);
         symbol_count += symbols.len();
         let facts = facts::build(path, &symbols);
@@ -351,10 +416,35 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
         let rendered = facts::render_batch(&args.context, &facts, Some(CREATE_DESCRIPTION));
         let batch = crate::ingest::parse_batch(rendered.as_bytes())
             .map_err(|message| format!("{path}: rendered batch refused: {message}"))?;
-        batches.push((path.clone(), batch));
+        batches.push((path.clone(), batch, fingerprint));
     }
 
-    crate::ingest::init_logging();
+    // Nothing survived the fingerprints and nothing is gone: no lock,
+    // no boot, no write — just move the anchor. This is the branch a
+    // `watch` poll over a stable-but-dirty tree lands in.
+    if batches.is_empty() && retractions.is_empty() {
+        save_state(
+            &data_dir,
+            &SyncState {
+                commit: head.clone(),
+                context: args.context.clone(),
+                dirty: current_dirty,
+                fingerprints,
+                facts_version: facts::FACTS_VERSION,
+            },
+        )?;
+        println!(
+            "nothing to apply ({unchanged} unchanged, {skipped} unsupported) at {head} in {:.1}s",
+            started.elapsed().as_secs_f64()
+        );
+        return Ok(0);
+    }
+
+    // Once per process, not per sync: `watch` re-enters this path
+    // every time the tree changes, and the tracing subscriber can
+    // only be installed once.
+    static INIT_LOGGING: std::sync::Once = std::sync::Once::new();
+    INIT_LOGGING.call_once(crate::ingest::init_logging);
     let embedder: Option<std::sync::Arc<dyn crate::embedding::EmbeddingProvider>> =
         crate::embedding::HttpEmbeddings::from_env(crate::embedding::ShutdownFlag::default())
             .map(|provider| std::sync::Arc::new(provider) as _);
@@ -373,11 +463,15 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
     let mut retracted = 0usize;
     for source in &retractions {
         match state.retract_source(&args.context, source) {
-            Ok(_) => retracted += 1,
+            Ok(_) => {
+                retracted += 1;
+                fingerprints.remove(source);
+            }
             Err(crate::registry::AccessError::NotFound) => {
                 // Nothing imported yet under this context — the
                 // deletion's truth (source absent) already holds.
                 retracted += 1;
+                fingerprints.remove(source);
             }
             Err(error) => {
                 eprintln!("taguru-code: sync: retracting {source}: {error:?}");
@@ -387,9 +481,14 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
     }
     let mut imported = 0usize;
     let mut ops_since_flush = 0usize;
-    for (path, batch) in &batches {
+    for (path, batch, fingerprint) in &batches {
         match crate::ingest::apply_batch(&state, batch) {
-            Ok(_) => imported += 1,
+            Ok(_) => {
+                imported += 1;
+                // Recorded only on success: a refused batch must stay
+                // re-importable, never fingerprint-skipped.
+                fingerprints.insert(path.clone(), fingerprint.clone());
+            }
             Err(refusal) => {
                 eprintln!("taguru-code: sync: {path}: {}", refusal.text());
                 failures += 1;
@@ -421,6 +520,8 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
                 commit: head.clone(),
                 context: args.context.clone(),
                 dirty: current_dirty,
+                fingerprints,
+                facts_version: facts::FACTS_VERSION,
             },
         )?;
     } else {
@@ -431,7 +532,7 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
     }
     println!(
         "synced {imported} file(s) ({symbol_count} symbols), retracted {retracted}, \
-         skipped {skipped} unsupported{} at {head} in {:.1}s",
+         {unchanged} unchanged, skipped {skipped} unsupported{} at {head} in {:.1}s",
         if binaries > 0 {
             format!(" and {binaries} non-text")
         } else {
