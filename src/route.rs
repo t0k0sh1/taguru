@@ -113,15 +113,25 @@ use crate::env::{
     resolve_mcp_max_result_bytes, resolve_timeout_secs,
 };
 
+#[path = "route/config.rs"]
 mod config;
+#[path = "route/cross.rs"]
 mod cross;
+#[path = "route/endpoints.rs"]
 mod endpoints;
+#[path = "route/groups.rs"]
 mod groups;
+#[path = "route/import.rs"]
 mod import;
+#[path = "route/maintenance.rs"]
 mod maintenance;
+#[path = "route/proxy.rs"]
 mod proxy;
+#[path = "route/scatter.rs"]
 mod scatter;
+#[path = "route/server.rs"]
 mod server;
+#[path = "route/state.rs"]
 mod state;
 
 use config::RouteMap;

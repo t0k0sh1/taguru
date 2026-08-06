@@ -58,7 +58,7 @@ pub(crate) struct Batch {
 }
 
 impl Batch {
-    pub(super) fn op_count(&self) -> usize {
+    pub(crate) fn op_count(&self) -> usize {
         self.associations.len() + self.concepts.len() + self.labels.len()
     }
 

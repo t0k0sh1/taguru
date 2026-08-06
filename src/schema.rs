@@ -38,6 +38,7 @@ use crate::storage::write_atomic;
 // checking write entrance shares — both now wired: S4 (#382,
 // `predicted_schema_rejection`/`preview_batch`, `src/ingest.rs`) and
 // S5 (#383, the associations pre-write arm, `src/api/associations.rs`).
+#[path = "schema/check.rs"]
 mod check;
 pub(crate) use check::{IssuePath, SchemaCheckInput, SchemaEnv, expanded_type_sets, schema_issues};
 

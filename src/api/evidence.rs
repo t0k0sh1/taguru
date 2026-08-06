@@ -20,9 +20,13 @@
 //! [`fuse`] and `select::select`, and serializes the result as ADR
 //! 0006 §10's `EvidencePackage`.
 
+#[path = "evidence/assemble.rs"]
 pub(crate) mod assemble;
+#[path = "evidence/budget.rs"]
 pub(crate) mod budget;
+#[path = "evidence/rerank.rs"]
 pub(crate) mod rerank;
+#[path = "evidence/select.rs"]
 pub(crate) mod select;
 
 use std::collections::{BTreeSet, HashMap, HashSet};

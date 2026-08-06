@@ -1655,4 +1655,5 @@ enum PairOutcome {
 }
 
 #[cfg(test)]
+#[path = "search/tests.rs"]
 mod tests;

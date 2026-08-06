@@ -30,6 +30,7 @@ use crate::measure::{
 
 use super::identity;
 
+#[path = "compare/differences.rs"]
 mod differences;
 
 const BENCHMARK_MEASUREMENTS_VERSION: u64 = 1;
@@ -2230,5 +2231,6 @@ fn write_artifacts(
     Ok(())
 }
 
+#[path = "compare/tests.rs"]
 #[cfg(test)]
 mod tests;

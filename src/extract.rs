@@ -62,20 +62,35 @@ use crate::api::{
 use crate::ingest::MAX_PASSAGE_BYTES;
 use crate::sha256::sha256_hex;
 
+#[path = "extract/aggregate.rs"]
 mod aggregate;
+#[path = "extract/args.rs"]
 mod args;
+#[path = "extract/chat_client.rs"]
 mod chat_client;
+#[path = "extract/checkpoint.rs"]
 mod checkpoint;
+#[path = "extract/chunking.rs"]
 mod chunking;
+#[path = "extract/diagnostics.rs"]
 mod diagnostics;
+#[path = "extract/documents.rs"]
 mod documents;
+#[path = "extract/manifest.rs"]
 mod manifest;
+#[path = "extract/parse.rs"]
 mod parse;
+#[path = "extract/prompt.rs"]
 mod prompt;
+#[path = "extract/render.rs"]
 mod render;
+#[path = "extract/run.rs"]
 mod run;
+#[path = "extract/signals.rs"]
 mod signals;
+#[path = "extract/structured_output.rs"]
 mod structured_output;
+#[path = "extract/tests.rs"]
 #[cfg(test)]
 mod tests;
 

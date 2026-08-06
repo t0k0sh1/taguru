@@ -65,28 +65,49 @@ use crate::storage::{
 };
 use crate::wal::{self, WalOp};
 
+#[path = "registry/associations.rs"]
 mod associations;
+#[path = "registry/boot.rs"]
 mod boot;
+#[path = "registry/changes.rs"]
 mod changes;
+#[path = "registry/concurrency.rs"]
 mod concurrency;
+#[path = "registry/context_io.rs"]
 mod context_io;
+#[path = "registry/core_tests.rs"]
 #[cfg(test)]
 mod core_tests;
+#[path = "registry/embeddings.rs"]
 mod embeddings;
+#[path = "registry/engine.rs"]
 mod engine;
+#[path = "registry/gauges.rs"]
 mod gauges;
+#[path = "registry/group_ops.rs"]
 mod group_ops;
+#[path = "registry/lifecycle.rs"]
 mod lifecycle;
+#[path = "registry/meta_io.rs"]
 mod meta_io;
+#[path = "registry/passages.rs"]
 mod passages;
+#[path = "registry/paths.rs"]
 mod paths;
+#[path = "registry/replication.rs"]
 mod replication;
+#[path = "registry/retrieval_cache.rs"]
 mod retrieval_cache;
+#[path = "registry/search.rs"]
 mod search;
+#[path = "registry/semantic_cache.rs"]
 mod semantic_cache;
+#[path = "registry/terms.rs"]
 mod terms;
+#[path = "registry/test_support.rs"]
 #[cfg(test)]
 mod test_support;
+#[path = "registry/wal_replay.rs"]
 mod wal_replay;
 
 pub use changes::{ChangeEvent, ChangeKind, ChangesOutcome};

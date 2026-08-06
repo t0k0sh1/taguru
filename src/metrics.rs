@@ -24,10 +24,15 @@ use parking_lot::{Mutex, RwLock};
 
 use crate::registry::AppState;
 
+#[path = "metrics/histogram.rs"]
 mod histogram;
+#[path = "metrics/http.rs"]
 mod http;
+#[path = "metrics/prometheus.rs"]
 mod prometheus;
+#[path = "metrics/record.rs"]
 mod record;
+#[path = "metrics/taxonomy.rs"]
 mod taxonomy;
 
 use histogram::{Histogram, HistogramSnapshot, LATENCY_BUCKETS, RouteStat};

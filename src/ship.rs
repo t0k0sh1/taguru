@@ -128,12 +128,19 @@ use parking_lot::Mutex;
 
 use crate::registry::AppState;
 
+#[path = "ship/config.rs"]
 mod config;
+#[path = "ship/error.rs"]
 mod error;
+#[path = "ship/handle.rs"]
 mod handle;
+#[path = "ship/naming.rs"]
 mod naming;
+#[path = "ship/progress.rs"]
 mod progress;
+#[path = "ship/restore.rs"]
 mod restore;
+#[path = "ship/shipper.rs"]
 mod shipper;
 
 pub(crate) use config::{ReplicateConfig, open_store};
@@ -162,5 +169,6 @@ use progress::DEFAULT_DEFER_CAP_BYTES;
 #[cfg(test)]
 use restore::{parse_segment_name, restore_into};
 
+#[path = "ship/tests.rs"]
 #[cfg(test)]
 mod tests;
