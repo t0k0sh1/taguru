@@ -1010,6 +1010,8 @@ impl AppState {
 }
 
 #[cfg(test)]
+#[path = "embeddings/gloss_tests.rs"]
 mod gloss_tests;
+#[path = "embeddings/passage_tests.rs"]
 #[cfg(test)]
 mod passage_tests;

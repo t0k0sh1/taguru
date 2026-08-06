@@ -1449,13 +1449,20 @@ fn print_threshold_summary(report: &ThresholdReport) {
     }
 }
 
+#[path = "evaluate/compare.rs"]
 mod compare;
+#[path = "evaluate/definitions.rs"]
 mod definitions;
+#[path = "evaluate/evidence.rs"]
 mod evidence;
+#[path = "evaluate/lanes.rs"]
 mod lanes;
+#[path = "evaluate/model.rs"]
 mod model;
+#[path = "evaluate/thresholds.rs"]
 mod thresholds;
 
+#[path = "evaluate/tests.rs"]
 #[cfg(test)]
 mod tests;
 

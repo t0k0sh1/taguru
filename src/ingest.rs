@@ -77,12 +77,19 @@ use crate::registry::{AccessError, AppState, AssocOp, ContextMeta, CreateError};
 use crate::remote::{Api, ImportFailure};
 use crate::schema;
 
+#[path = "ingest/local.rs"]
 mod local;
+#[path = "ingest/model.rs"]
 mod model;
+#[path = "ingest/rejection.rs"]
 mod rejection;
+#[path = "ingest/remote.rs"]
 mod remote;
+#[path = "ingest/report.rs"]
 mod report;
+#[path = "ingest/schema_apply.rs"]
 mod schema_apply;
+#[path = "ingest/tests.rs"]
 #[cfg(test)]
 mod tests;
 

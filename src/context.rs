@@ -4,18 +4,23 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+#[path = "context/alias.rs"]
 mod alias;
 mod community;
 mod entry_index;
+#[path = "context/gloss.rs"]
 mod gloss;
 mod image;
 #[cfg(test)]
+#[path = "context/proptests.rs"]
 mod proptests;
 mod query;
 mod resolve;
+#[path = "context/sources.rs"]
 mod sources;
 mod stats;
 #[cfg(test)]
+#[path = "context/test_support.rs"]
 mod test_support;
 mod traverse;
 mod write;

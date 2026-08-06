@@ -25,3 +25,4 @@ examples/langchain/**/node_modules/
 examples/langchain/package-lock.json
 examples/langchain/.venv/
 examples/langchain/**/__pycache__/
+.taguru/

@@ -30,8 +30,11 @@ use crate::api::{MAX_CONTEXT_NAME_BYTES, MAX_DESCRIPTION_BYTES, MAX_QUESTIONS_PE
 use crate::clock::{iso8601_utc, now_unix_secs};
 use crate::config::subcommand_usage_error;
 
+#[path = "benchmark/compare.rs"]
 mod compare;
+#[path = "benchmark/identity.rs"]
 mod identity;
+#[path = "benchmark/search.rs"]
 mod search;
 
 const TOP_USAGE: &str = "\

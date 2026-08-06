@@ -21,32 +21,47 @@ use crate::registry::{
     AccessError, AppState, CachedRetrieval, PartialWrite, RetrievalKey, SemanticFill,
 };
 
+#[path = "api/aliases.rs"]
 mod aliases;
+#[path = "api/associations.rs"]
 mod associations;
+#[path = "api/changes.rs"]
 mod changes;
 // pub(crate): `taguru communities` (the CLI) shares the manifest
 // shape and the artifact naming/label constants with the verbs.
+#[path = "api/communities.rs"]
 pub(crate) mod communities;
+#[path = "api/contexts.rs"]
 mod contexts;
+#[path = "api/coverage.rs"]
 mod coverage;
 // pub(crate): #304 (budgeted selection) and #305 (the `evidence`
 // endpoint handler) are this module's first real callers — see
 // src/api/evidence.rs's own module doc for what it does and does not
 // cover yet.
+#[path = "api/evidence.rs"]
 pub(crate) mod evidence;
+#[path = "api/explore.rs"]
 mod explore;
+#[path = "api/groups.rs"]
 mod groups;
+#[path = "api/import.rs"]
 mod import;
+#[path = "api/recall.rs"]
 mod recall;
+#[path = "api/schema.rs"]
 mod schema;
 // pub(crate): `taguru evaluate` (the CLI) deserializes resolve
 // responses into the real `TieredResolution` instead of a hand-copied
 // mirror that would drift silently.
+#[path = "api/resolve.rs"]
 pub(crate) mod resolve;
 // pub(crate): `taguru benchmark search` (the CLI) deserializes search
 // responses into the real `SearchPlan`/`PassageLanes`/`LaneEvidence`
 // types instead of hand-copied mirrors that would drift silently.
+#[path = "api/sources.rs"]
 pub(crate) mod sources;
+#[path = "api/vocabulary.rs"]
 mod vocabulary;
 
 pub use aliases::{add_aliases, list_aliases, remove_aliases};

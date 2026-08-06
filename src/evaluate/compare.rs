@@ -872,4 +872,5 @@ fn print_summary(report: &ChangesReport, out: &Path) {
 }
 
 #[cfg(test)]
+#[path = "compare/tests.rs"]
 mod tests;
