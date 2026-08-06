@@ -351,3 +351,65 @@ fn a_mismatched_server_version_prints_the_skew_warning_once() {
     );
     assert!(stderr.contains("0.1.0"), "{stderr}");
 }
+
+/// When the groups enumeration itself fails on a full export, the run
+/// must end nonzero and the summary must say the enumeration failed —
+/// not read like a subset export that never touched groups. Only a
+/// stub can force this: the real server always answers `GET /groups`.
+/// A failed context fetch rides along, pinning the combined exit rule
+/// (either failure kind alone must be enough).
+#[test]
+fn a_failed_group_enumeration_is_a_failure_the_summary_names() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let responses = [
+            // /health: no version key, no skew warning.
+            ("HTTP/1.1 200 OK", r#"{"status":"ok"}"#),
+            // /version: no schema_formats, which export treats as safe.
+            ("HTTP/1.1 200 OK", r#"{}"#),
+            // GET /contexts, first page then the terminating empty one.
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"result":{"total":1,"contexts":[{"name":"sake"}]}}"#,
+            ),
+            ("HTTP/1.1 200 OK", r#"{"result":{"total":1,"contexts":[]}}"#),
+            // GET /contexts/sake/export: a per-context failure.
+            (
+                "HTTP/1.1 500 Internal Server Error",
+                r#"{"status":"error","code":"internal","error":"stub"}"#,
+            ),
+            // GET /groups: the enumeration failure under test.
+            (
+                "HTTP/1.1 500 Internal Server Error",
+                r#"{"status":"error","code":"internal","error":"stub"}"#,
+            ),
+        ];
+        for (status_line, body) in responses {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut buffer = [0u8; 2048];
+            let _ = stream.read(&mut buffer);
+            let response = format!(
+                "{status_line}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    let base = format!("http://{addr}");
+
+    let out = crate::support::common::scratch_dir("remote-export-groups-fail");
+    let (code, stdout, stderr) = run_cli(
+        &["export", "--url", &base, "--out", out.to_str().unwrap()],
+        &[],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains("export: 0 of 1 context(s) and groups: enumeration failed"),
+        "{stdout}"
+    );
+    assert!(stderr.contains("taguru: export: groups:"), "{stderr}");
+    let _ = std::fs::remove_dir_all(&out);
+}

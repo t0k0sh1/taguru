@@ -2001,6 +2001,110 @@ fn export_round_trips_a_data_directory_through_batch_streams() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// An unknown context in an explicit `export` list is a per-item
+/// failure: the named survivors still land, the summary counts them,
+/// and the exit code is nonzero — the offline twin of
+/// `remote_export::an_unknown_context_counts_as_a_failure_and_the_rest_still_lands`.
+#[test]
+fn export_counts_an_unknown_context_as_a_failure() {
+    let dir = common::scratch_dir("cli-export-unknown");
+    std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
+    std::fs::write(
+        dir.join("a.jsonl"),
+        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \
+         \"create\": {\"description\": \"d\"}}\n\
+         {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n",
+    )
+    .expect("fixture must be writable");
+    let data = dir.join("data");
+    let run_in = |args: &[&str]| -> Output {
+        Command::new(env!("CARGO_BIN_EXE_taguru"))
+            .args(args)
+            .env("TAGURU_DATA_DIR", &data)
+            .env_remove("TAGURU_CONFIG")
+            .env_remove("TAGURU_EMBED_URL")
+            .output()
+            .expect("binary must run")
+    };
+    let seeded = run_in(&["import", &dir.join("a.jsonl").display().to_string()]);
+    assert_eq!(seeded.status.code(), Some(0), "{seeded:?}");
+
+    let out = dir.join("out");
+    let output = run_in(&[
+        "export",
+        "--out",
+        &out.display().to_string(),
+        "sake",
+        "nope",
+    ]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("export: 1 of 2 context(s) written"),
+        "{output:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("context 'nope': no such context"),
+        "{output:?}"
+    );
+    assert!(out.join("sake.jsonl").exists(), "the survivor must land");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A group record that cannot be written is a failure the summary and
+/// the exit code must both carry — forced by pre-creating a DIRECTORY
+/// where the group file would land, so `write_atomic`'s rename cannot.
+#[test]
+fn export_counts_an_unwritable_group_file_as_a_failure() {
+    let dir = common::scratch_dir("cli-export-group-unwritable");
+    std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
+    std::fs::write(
+        dir.join("a.jsonl"),
+        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \
+         \"create\": {\"description\": \"d\"}}\n\
+         {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n",
+    )
+    .expect("fixture must be writable");
+    std::fs::write(
+        dir.join("kura.jsonl"),
+        "{\"taguru_group\": 1, \"name\": \"kura\", \"description\": \"蔵まとめ\", \
+          \"contexts\": [\"sake\"]}\n",
+    )
+    .expect("fixture must be writable");
+    let data = dir.join("data");
+    let run_in = |args: &[&str]| -> Output {
+        Command::new(env!("CARGO_BIN_EXE_taguru"))
+            .args(args)
+            .env("TAGURU_DATA_DIR", &data)
+            .env_remove("TAGURU_CONFIG")
+            .env_remove("TAGURU_EMBED_URL")
+            .output()
+            .expect("binary must run")
+    };
+    for file in ["a.jsonl", "kura.jsonl"] {
+        let seeded = run_in(&["import", &dir.join(file).display().to_string()]);
+        assert_eq!(seeded.status.code(), Some(0), "{seeded:?}");
+    }
+
+    let out = dir.join("out");
+    std::fs::create_dir_all(out.join("kura.group.jsonl")).expect("the decoy must be creatable");
+    let output = run_in(&["export", "--out", &out.display().to_string()]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("export: 1 of 1 context(s) and 0 of 1 group(s)"),
+        "{stdout}"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("group 'kura'"),
+        "{output:?}"
+    );
+    assert!(
+        out.join("sake.jsonl").exists(),
+        "the context stream the summary counts as written must actually remain"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Pass 1's summary counts refused FILES, not refused batches: a
 /// stream file (`taguru export` output, or any hand-built one) can
 /// carry several batches, and each one that restates a source an
@@ -2622,6 +2726,112 @@ fn compact_rejects_a_non_positive_parallel_value() {
         String::from_utf8_lossy(&output.stderr).contains("--parallel needs an integer"),
         "{output:?}"
     );
+}
+
+/// An unknown context is a per-item failure on every local path —
+/// sequential, `--parallel`, and `--dry-run` — while the known
+/// context's work still lands: the summary counts the failure and the
+/// exit code is nonzero. The remote twin
+/// (`remote_compact::an_unknown_context_counts_as_a_failure_and_the_rest_still_lands`)
+/// already pins this contract for `--url`; these are the offline
+/// halves.
+#[test]
+fn compact_counts_an_unknown_context_as_a_failure_on_every_local_path() {
+    let dir = common::scratch_dir("cli-compact-unknown");
+    std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
+    std::fs::write(
+        dir.join("a.jsonl"),
+        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \
+         \"create\": {\"description\": \"d\"}}\n\
+         {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n",
+    )
+    .expect("fixture must be writable");
+    let data = dir.join("data");
+    let run_in = |args: &[&str]| -> Output {
+        Command::new(env!("CARGO_BIN_EXE_taguru"))
+            .args(args)
+            .env("TAGURU_DATA_DIR", &data)
+            .env_remove("TAGURU_CONFIG")
+            .env_remove("TAGURU_EMBED_URL")
+            .output()
+            .expect("binary must run")
+    };
+    let seeded = run_in(&["import", &dir.join("a.jsonl").display().to_string()]);
+    assert_eq!(seeded.status.code(), Some(0), "{seeded:?}");
+
+    for args in [
+        &["compact", "sake", "nope"][..],
+        &["compact", "--parallel", "2", "sake", "nope"][..],
+    ] {
+        let output = run_in(args);
+        assert_eq!(output.status.code(), Some(1), "{args:?}: {output:?}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("1 of 2 context(s) rewritten"),
+            "{args:?}: {stdout}"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("context 'nope': no such context"),
+            "{args:?}: {output:?}"
+        );
+    }
+
+    let dry = run_in(&["compact", "--dry-run", "sake", "nope"]);
+    assert_eq!(dry.status.code(), Some(1), "{dry:?}");
+    assert!(
+        String::from_utf8_lossy(&dry.stdout).contains("of 2 context(s) carry dead weight"),
+        "{dry:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&dry.stderr).contains("context 'nope': no such context"),
+        "{dry:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `--config` given ONCE loads the file — the given-twice guard
+/// rejects the second flag, never the first.
+#[test]
+fn compact_accepts_a_single_config_flag() {
+    let dir = common::scratch_dir("cli-compact-config-once");
+    std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
+    std::fs::write(
+        dir.join("a.jsonl"),
+        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \
+         \"create\": {\"description\": \"d\"}}\n\
+         {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n",
+    )
+    .expect("fixture must be writable");
+    let data = dir.join("data");
+    let seeded = Command::new(env!("CARGO_BIN_EXE_taguru"))
+        .args(["import", &dir.join("a.jsonl").display().to_string()])
+        .env("TAGURU_DATA_DIR", &data)
+        .env_remove("TAGURU_CONFIG")
+        .env_remove("TAGURU_EMBED_URL")
+        .output()
+        .expect("binary must run");
+    assert_eq!(seeded.status.code(), Some(0), "{seeded:?}");
+
+    let config = dir.join("taguru.env");
+    std::fs::write(&config, format!("TAGURU_DATA_DIR={}\n", data.display()))
+        .expect("config must be writable");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_taguru"));
+    common::scrub_taguru_env(&mut command);
+    let output = command
+        .args([
+            "compact",
+            "--dry-run",
+            "--config",
+            &config.display().to_string(),
+        ])
+        .output()
+        .expect("binary must run");
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("of 1 context(s) carry dead weight"),
+        "{output:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ============================== evaluate --thresholds (issue #276) ==============================

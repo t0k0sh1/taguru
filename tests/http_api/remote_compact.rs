@@ -505,6 +505,51 @@ fn a_mismatched_server_version_prints_the_skew_warning_once() {
     assert!(stderr.contains("0.1.0"), "{stderr}");
 }
 
+/// A 200 whose result is not a directory entry is still a per-item
+/// failure on the named `--dry-run` path — the "unrecognized
+/// response" arm, distinct from the transport/404 arm
+/// `dry_run_json_url_reports_an_unknown_context_as_a_failure` pins.
+/// Only a stub can force it: the real server never answers
+/// `GET /contexts/{name}` with a well-formed envelope of the wrong
+/// shape.
+#[test]
+fn dry_run_url_counts_an_unrecognized_directory_response_as_a_failure() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let responses = [
+            // The skew preflight's /health: no version key, no warning.
+            ("HTTP/1.1 200 OK", r#"{"status":"ok"}"#),
+            // GET /contexts/nope: a valid envelope, not a DirectoryEntry.
+            ("HTTP/1.1 200 OK", r#"{"result":[]}"#),
+        ];
+        for (status_line, body) in responses {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut buffer = [0u8; 2048];
+            let _ = stream.read(&mut buffer);
+            let response = format!(
+                "{status_line}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    let base = format!("http://{addr}");
+
+    let (code, stdout, stderr) = run_cli(&["compact", "--dry-run", "--url", &base, "nope"], &[]);
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("context 'nope': unrecognized response"),
+        "{stderr}"
+    );
+    assert!(
+        stdout.contains("0 of 1 context(s) carry dead weight"),
+        "{stdout}"
+    );
+}
+
 /// A sweep against a server with no dead weight to shed is a success,
 /// not a refusal — unlike the local path's (and the remote per-context
 /// path's) "holds no contexts" rejection, the sweep never enumerates a

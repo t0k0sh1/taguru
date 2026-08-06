@@ -245,6 +245,128 @@ fn shipped_bucket_restores_to_an_equivalent_directory() {
     }
 }
 
+/// A pre-manifest bucket (an EMPTY `complete` marker) whose
+/// generation still carries wal segments must restore the tail they
+/// hold, through the listing-driven compatibility path. No other test
+/// reaches that path's wal-lane loop: the graceful-stop round trip
+/// above drains the tail into the baseline files before restore runs,
+/// and today's writer always ships a manifest, which routes restore
+/// through the manifest branch instead. Here the writer is SIGKILLed
+/// after a post-baseline write provably ships, then the marker is
+/// emptied to the pre-manifest shape — from there only the listed
+/// lane's replay can carry the write into the restored directory.
+#[test]
+fn a_hard_killed_writers_bucket_restores_the_shipped_wal_tail() {
+    /// Any PUBLISHED segment anywhere under `dir` carrying `needle`?
+    /// Wal segments are uncompressed JSON lines and land whole (a
+    /// `LocalFileSystem` put stages a `name#N` temp file, then
+    /// renames), so finding the bytes in a `*.jsonl` object proves the
+    /// RECORD shipped. Both halves of the filter matter: waiting for a
+    /// segment file alone races the shipper (the first segment to
+    /// appear can predate the write this test must restore), and
+    /// matching a still-staged `#N` temp file would kill the writer
+    /// before the rename publishes the segment restore reads.
+    fn any_segment_under_contains(dir: &Path, needle: &str) -> bool {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return false;
+        };
+        entries.flatten().any(|entry| {
+            let path = entry.path();
+            if path.is_dir() {
+                return any_segment_under_contains(&path, needle);
+            }
+            if !entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.ends_with(".jsonl") && !name.contains('#'))
+            {
+                return false;
+            }
+            std::fs::read(&path).is_ok_and(|bytes| {
+                bytes
+                    .windows(needle.len())
+                    .any(|window| window == needle.as_bytes())
+            })
+        })
+    }
+
+    let bucket = scratch("wal-tail-bucket");
+    let server = Server::start_with_env(
+        "repl-wal-tail",
+        &[
+            ("TAGURU_REPLICATE_URL", &bucket_url(&bucket)),
+            ("TAGURU_REPLICATE_INTERVAL_MS", "100"),
+        ],
+    );
+    server.ok(
+        "PUT",
+        "/contexts/sake",
+        Some(json!({"description": "酒蔵の知識"})),
+    );
+    let generation = bucket.join("gen-00000000000000000001");
+    wait_for("the baseline to complete", || {
+        generation.join("complete").exists()
+    });
+
+    // A write AFTER the baseline rides the wal tail…
+    server.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([
+            {"subject": "青嶺酒造", "label": "代表銘柄", "object": "青嶺", "weight": 1.0, "source": "第1段落"},
+        ])),
+    );
+    let wal = generation.join("wal");
+    wait_for("the tail write to ship", || {
+        any_segment_under_contains(&wal, "代表銘柄")
+    });
+
+    // …and a SIGKILL leaves it in the bucket: no drain, no fold-away.
+    let data_dir = server.stop_hard();
+
+    // Rewind the marker to the pre-manifest shape (an empty
+    // `complete`). This both pins the compatibility path and makes the
+    // test deterministic: with the manifest branch, whether the lane is
+    // restored depends on whether the writer's manifest UPDATE beat the
+    // SIGKILL — a race this test must not encode.
+    std::fs::write(generation.join("complete"), b"").unwrap();
+
+    let restored = scratch("wal-tail-restored");
+    let restore = run_cli(
+        &[
+            "restore",
+            "--out",
+            &restored.display().to_string(),
+            &bucket_url(&bucket),
+        ],
+        &[],
+    );
+    assert!(
+        restore.status.success(),
+        "restore failed: {}",
+        String::from_utf8_lossy(&restore.stderr)
+    );
+
+    // The tail write is present — provable only via the wal replay.
+    let exports = scratch("wal-tail-exports");
+    let exported = run_cli(
+        &["export", "--out", &exports.display().to_string()],
+        &[("TAGURU_DATA_DIR", &restored.display().to_string())],
+    );
+    assert!(
+        exported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&exported.stderr)
+    );
+    let stream = std::fs::read_to_string(exports.join("sake.jsonl"))
+        .expect("the restored export must carry sake.jsonl");
+    assert!(stream.contains("代表銘柄"), "{stream}");
+
+    for dir in [bucket, data_dir, restored, exports] {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
 #[test]
 fn a_second_writer_fences_the_first_which_fail_stops_but_keeps_serving() {
     let bucket = scratch("fence-bucket");
