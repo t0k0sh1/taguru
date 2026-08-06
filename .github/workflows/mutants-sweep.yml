@@ -77,6 +77,19 @@ jobs:
           tool: cargo-mutants@27.1.0
       - name: Disk before
         run: df -h /
+      # cargo-mutants removes its scratch trees on exit, so an
+      # after-the-fact df never sees the real high-water mark — a
+      # 5-second sampler records it while the sweep runs.
+      - name: Start peak-disk sampler
+        run: |
+          df --output=used -k / | tail -1 | tr -d ' ' > /tmp/disk-baseline-kb
+          nohup bash -c '
+            peak=0
+            while true; do
+              used=$(df --output=used -k / | tail -1 | tr -d " ")
+              if [ "$used" -gt "$peak" ]; then peak=$used; echo "$peak" > /tmp/disk-peak-kb; fi
+              sleep 5
+            done' >/dev/null 2>&1 &
       - name: Sweep shard ${{ matrix.shard }}/${{ inputs.shard_total }}
         env:
           GLOBS: ${{ inputs.globs }}
@@ -105,7 +118,13 @@ jobs:
           esac
       - name: Disk after
         if: always()
-        run: df -h /
+        run: |
+          df -h /
+          if [ -f /tmp/disk-peak-kb ] && [ -f /tmp/disk-baseline-kb ]; then
+            baseline=$(cat /tmp/disk-baseline-kb)
+            peak=$(cat /tmp/disk-peak-kb)
+            echo "peak sweep disk above baseline: $(( (peak - baseline) / 1024 )) MiB"
+          fi
       - name: Shard summary
         if: always()
         env:
