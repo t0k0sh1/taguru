@@ -871,4 +871,207 @@ mod tests {
 
         let _ = fs::remove_dir_all(dir);
     }
+
+    /// A pass that buys nothing, prunes nothing, and owes no retry
+    /// must neither rewrite the sidecar nor move the config revision —
+    /// the no-op refresh is what the auto-ticker hits forever.
+    #[test]
+    fn a_no_op_passage_refresh_neither_rewrites_the_sidecar_nor_bumps_config() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = scratch_dir("pvec-no-op");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let state =
+            boot_for_passage_embedding(&dir, Arc::new(MockEmbeddings::fruity(&calls)), 20_000);
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert("doc-a".to_string(), "最初の段落。".to_string());
+        state
+            .store_passages("sake", plain(passages))
+            .unwrap()
+            .unwrap();
+        state
+            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        let path = pvectors_path(&dir, &file_stem("sake"));
+        let inode = fs::metadata(&path).unwrap().ino();
+        let config = state.context_revision("sake").unwrap().config;
+
+        let outcome = state
+            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        assert_eq!(outcome.embedded, 0);
+        assert_eq!(
+            fs::metadata(&path).unwrap().ino(),
+            inode,
+            "a no-op refresh rewrote the sidecar (write_atomic mints a new inode)"
+        );
+        assert_eq!(
+            state.context_revision("sake").unwrap().config,
+            config,
+            "nothing served changed; the revision must hold"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A lowered row limit prunes on disk without buying anything —
+    /// the ONLY row-set change is `fresh` being shorter than
+    /// `existing`, with the dirty flag long since claimed (the reboot
+    /// cleared it), so this is the length clause's own test: the save
+    /// must happen and the revision must move on its say-so alone.
+    #[test]
+    fn a_lowered_passage_limit_prunes_on_disk_without_buying_anything() {
+        let dir = scratch_dir("pvec-limit-lowered");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        {
+            let state =
+                boot_for_passage_embedding(&dir, Arc::new(MockEmbeddings::fruity(&calls)), 20_000);
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            let mut passages = BTreeMap::new();
+            passages.insert(
+                "doc-a".to_string(),
+                "最初の段落。\n\n二番目の段落。\n\n三番目の段落。".to_string(),
+            );
+            state
+                .store_passages("sake", plain(passages))
+                .unwrap()
+                .unwrap();
+            state
+                .refresh_passage_embeddings("sake", Deadline::unbounded())
+                .unwrap()
+                .unwrap();
+            state.flush_dirty();
+        }
+
+        let state = boot_for_passage_embedding(&dir, Arc::new(MockEmbeddings::fruity(&calls)), 2);
+        let config = state.context_revision("sake").unwrap().config;
+        let outcome = state
+            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (outcome.embedded, outcome.total, outcome.skipped_over_limit),
+            (0, 2, 1),
+            "the third row falls to the limit; nothing re-embeds"
+        );
+        let sidecar = PassageVectorStore::load(&pvectors_path(&dir, &file_stem("sake")));
+        assert_eq!(sidecar.len(), 2, "the shrink must reach the disk");
+        assert_eq!(
+            state.context_revision("sake").unwrap().config,
+            config + 1,
+            "served rows changed; the revision must move"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A model change over a context that has no passages at all must
+    /// write nothing: `fresh_model` alone — with an EMPTY fresh table —
+    /// is not a change, and minting a sidecar (or bumping config) for
+    /// it would churn every passage-less context on every model swap.
+    #[test]
+    fn a_model_change_over_an_empty_passage_store_writes_no_sidecar() {
+        let dir = scratch_dir("pvec-model-empty");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let state =
+            boot_for_passage_embedding(&dir, Arc::new(MockEmbeddings::fruity(&calls)), 20_000);
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let config = state.context_revision("sake").unwrap().config;
+
+        let outcome = state
+            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        assert_eq!((outcome.embedded, outcome.total), (0, 0));
+        assert!(
+            !pvectors_path(&dir, &file_stem("sake")).exists(),
+            "a passage-less refresh must not mint a sidecar"
+        );
+        assert_eq!(state.context_revision("sake").unwrap().config, config);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// An edited paragraph re-embeds under the same row COUNT, and —
+    /// with the dirty flag cleared by a reboot — `embedded > 0` is the
+    /// only clause left standing: the rewrite must still reach the
+    /// disk, or the restored-from-disk store would serve the old
+    /// paragraph's vector forever.
+    #[test]
+    fn an_edit_alone_still_reaches_the_disk_after_a_reboot() {
+        let dir = scratch_dir("pvec-edit-reboot");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        {
+            let state =
+                boot_for_passage_embedding(&dir, Arc::new(MockEmbeddings::fruity(&calls)), 20_000);
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            let mut passages = BTreeMap::new();
+            passages.insert(
+                "doc-a".to_string(),
+                "変わらない段落。\n\n古い版の段落。".to_string(),
+            );
+            state
+                .store_passages("sake", plain(passages))
+                .unwrap()
+                .unwrap();
+            state
+                .refresh_passage_embeddings("sake", Deadline::unbounded())
+                .unwrap()
+                .unwrap();
+            // The edit lands, the refresh does NOT run — the reboot
+            // below clears the in-memory dirty flag it left behind.
+            let mut updated = BTreeMap::new();
+            updated.insert(
+                "doc-a".to_string(),
+                "変わらない段落。\n\n新しい版の段落。".to_string(),
+            );
+            state
+                .store_passages("sake", plain(updated))
+                .unwrap()
+                .unwrap();
+            state.flush_dirty();
+        }
+
+        let path = pvectors_path(&dir, &file_stem("sake"));
+        let before = fs::read(&path).unwrap();
+        let state =
+            boot_for_passage_embedding(&dir, Arc::new(MockEmbeddings::fruity(&calls)), 20_000);
+        let config = state.context_revision("sake").unwrap().config;
+        let outcome = state
+            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (outcome.embedded, outcome.total),
+            (1, 2),
+            "only the edited paragraph re-embeds"
+        );
+        assert_ne!(
+            fs::read(&path).unwrap(),
+            before,
+            "the edited row's rewrite must reach the disk"
+        );
+        assert_eq!(
+            state.context_revision("sake").unwrap().config,
+            config + 1,
+            "a re-embedded row is served content; the revision must move"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
 }

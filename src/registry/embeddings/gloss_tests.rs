@@ -1485,4 +1485,440 @@ mod tests {
 
         let _ = fs::remove_dir_all(dir);
     }
+
+    /// `semantic_twins` works off the stored sidecar alone, so a store
+    /// whose LABEL table is empty must still sweep the populated
+    /// concept table — only both-empty means "nothing embedded yet".
+    /// And the pairwise sweep starts at the NEXT entry: a name must
+    /// never come back paired with itself (a self-pair scores a
+    /// perfect 1.0 and would drown every real twin).
+    #[test]
+    fn semantic_twins_sweeps_a_concepts_only_store_without_self_pairs() {
+        let dir = scratch_dir("twins-concepts-only");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("fruit", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut store = VectorStore {
+            model: "mock".to_string(),
+            ..Default::default()
+        };
+        store
+            .concepts
+            .insert("りんご".to_string(), (1, vec![1.0, 0.0]));
+        store
+            .concepts
+            .insert("アップル".to_string(), (2, vec![0.96, 0.28]));
+        store
+            .concepts
+            .insert("直交".to_string(), (3, vec![0.0, 1.0]));
+        store
+            .save(&vectors_path(&dir, &file_stem("fruit")))
+            .unwrap();
+
+        let (concepts, labels, note) = state
+            .semantic_twins("fruit", 0.9, Deadline::unbounded())
+            .unwrap();
+        assert!(note.is_none(), "{note:?}");
+        assert!(labels.is_empty());
+        assert_eq!(
+            concepts.len(),
+            1,
+            "only りんご×アップル clears 0.9: {concepts:?}"
+        );
+        let (a, b, score) = &concepts[0];
+        assert!(a != b, "a name paired with itself: {concepts:?}");
+        assert_eq!((a.as_str(), b.as_str()), ("りんご", "アップル"));
+        assert!(*score > 0.9 && *score < 1.0, "{score}");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The O(N²) sweep cap turns away a namespace just PAST the cap,
+    /// not at it — 2000 names sweep, 2001 skip with the note.
+    #[test]
+    fn semantic_twins_sweep_cap_skips_past_the_cap_not_at_it() {
+        let dir = scratch_dir("twins-sweep-cap");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("fruit", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        // Only the skip NOTE is asserted on — near-parallel f32
+        // vectors round their cosines to (even past) 1.0, so which
+        // pairs clear a floor is fp noise this test must not ride on.
+        let mut store = VectorStore {
+            model: "mock".to_string(),
+            ..Default::default()
+        };
+        for i in 0..2000u32 {
+            let angle = i as f32 * 1.0e-4;
+            store.concepts.insert(
+                format!("c{i:04}"),
+                (u64::from(i), vec![angle.cos(), angle.sin()]),
+            );
+        }
+        let path = vectors_path(&dir, &file_stem("fruit"));
+        store.save(&path).unwrap();
+
+        let (_, _, note) = state
+            .semantic_twins("fruit", 1.0, Deadline::unbounded())
+            .unwrap();
+        assert!(note.is_none(), "2000 names must still sweep: {note:?}");
+
+        // One more name crosses the cap. The cached store is bypassed
+        // by rewriting the sidecar and re-booting: entry_vectors holds
+        // the first read for the state's lifetime (and the re-boot
+        // needs the first state's data-dir lock released).
+        store
+            .concepts
+            .insert("c2000".to_string(), (2000, vec![0.0, 1.0]));
+        store.save(&path).unwrap();
+        drop(state);
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let (pairs, _, note) = state
+            .semantic_twins("fruit", 1.0, Deadline::unbounded())
+            .unwrap();
+        assert!(
+            note.as_deref().is_some_and(|note| note.contains("2000")),
+            "2001 names must skip with the cap note: {note:?}"
+        );
+        assert!(
+            pairs.is_empty(),
+            "a skipped namespace returns no pairs: {pairs:?}"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The explain lane must run whenever the QUERIED table has rows —
+    /// an empty sibling table is not "nothing embedded". And its rank
+    /// reproduces `semantic_resolve`'s exact ordering, cosine ties
+    /// broken by name ascending.
+    #[test]
+    fn explain_runs_on_a_concepts_only_store_and_breaks_cosine_ties_by_name() {
+        /// Every text — cue and gloss alike — lands on the same unit
+        /// vector, forcing a perfect cosine tie between candidates.
+        struct ConstantEmbeddings;
+        impl EmbeddingProvider for ConstantEmbeddings {
+            fn model(&self) -> &str {
+                "mock"
+            }
+            fn embed(
+                &self,
+                texts: &[&str],
+                _purpose: EmbedPurpose,
+                _deadline: Deadline,
+            ) -> Result<Vec<Vec<f32>>, String> {
+                Ok(texts.iter().map(|_| vec![1.0, 0.0]).collect())
+            }
+        }
+
+        let dir = scratch_dir("explain-tie");
+        let embedder = Some(Arc::new(ConstantEmbeddings) as Arc<dyn EmbeddingProvider>);
+        let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
+        state
+            .create("fruit", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut store = VectorStore {
+            model: "mock".to_string(),
+            ..Default::default()
+        };
+        store
+            .concepts
+            .insert("aaa".to_string(), (1, vec![1.0, 0.0]));
+        store
+            .concepts
+            .insert("bbb".to_string(), (2, vec![1.0, 0.0]));
+        store
+            .save(&vectors_path(&dir, &file_stem("fruit")))
+            .unwrap();
+
+        let explain = |expected: &str| {
+            state
+                .explain_semantic_resolve(
+                    "fruit",
+                    "cue",
+                    expected,
+                    false,
+                    Some(0.5),
+                    Deadline::unbounded(),
+                )
+                .unwrap()
+        };
+        let GlossLaneReport::Ran { rank, passing, .. } = explain("aaa") else {
+            panic!("an empty label table must not read as EmptyTable");
+        };
+        assert_eq!(passing, 2);
+        assert_eq!(rank, Some(1), "aaa wins its tie with bbb by name");
+        let GlossLaneReport::Ran { rank, .. } = explain("bbb") else {
+            panic!("an empty label table must not read as EmptyTable");
+        };
+        assert_eq!(rank, Some(2), "bbb sits behind aaa on the same cosine");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// Every text lands on the same vector at a fixed width — the
+    /// knob the width-reconciliation tests below turn.
+    struct FixedWidth(usize);
+    impl EmbeddingProvider for FixedWidth {
+        fn model(&self) -> &str {
+            "mock"
+        }
+        fn embed(
+            &self,
+            texts: &[&str],
+            _purpose: EmbedPurpose,
+            _deadline: Deadline,
+        ) -> Result<Vec<Vec<f32>>, String> {
+            Ok(texts.iter().map(|_| vec![1.0; self.0]).collect())
+        }
+    }
+
+    /// Fails call number `fail_nth` (0-based), answers every other
+    /// call at `width` — the knob that manufactures single-table
+    /// stores and mid-redo failures.
+    struct FailsNth {
+        calls: AtomicUsize,
+        fail_nth: usize,
+        width: usize,
+    }
+    impl EmbeddingProvider for FailsNth {
+        fn model(&self) -> &str {
+            "mock"
+        }
+        fn embed(
+            &self,
+            texts: &[&str],
+            _purpose: EmbedPurpose,
+            _deadline: Deadline,
+        ) -> Result<Vec<Vec<f32>>, String> {
+            if self.calls.fetch_add(1, Ordering::Relaxed) == self.fail_nth {
+                return Err("provider down".to_string());
+            }
+            Ok(texts.iter().map(|_| vec![1.0; self.width]).collect())
+        }
+    }
+
+    /// A width drift visible only through the LABEL table must still
+    /// stale the whole store — the mismatch check is either-table, not
+    /// both. (A mixed-width sidecar cannot exist — the loader refuses
+    /// one outright (#133) — so a one-sided drift arises from a
+    /// SINGLE-table store: here, a first pass whose concept call
+    /// failed, leaving labels alone carried at width 2.) And the
+    /// redo's wipe must be a real wipe even though the model NAME
+    /// never changed: a table whose redo failed stays absent (stale,
+    /// for the next refresh), never carried at the dead width — which
+    /// would persist exactly the mixed file the loader refuses.
+    #[test]
+    fn a_label_only_width_drift_rebuilds_and_a_failed_redo_carries_nothing_stale() {
+        let dir = scratch_dir("width-label-drift");
+        {
+            // Pass 1: the concept call (first) fails, labels land at
+            // width 2 → a labels-only store under model "mock".
+            let embedder = Some(Arc::new(FailsNth {
+                calls: AtomicUsize::new(0),
+                fail_nth: 0,
+                width: 2,
+            }) as Arc<dyn EmbeddingProvider>);
+            let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
+            state
+                .create("fruit", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .write_context("fruit", |context| {
+                    context.associate("りんご", "分類", "果物", 1.0).unwrap();
+                })
+                .map_err(|_| "write")
+                .unwrap();
+            assert!(
+                state
+                    .refresh_embeddings("fruit", Deadline::unbounded())
+                    .unwrap()
+                    .is_err(),
+                "the concept call's failure must be reported"
+            );
+            state.flush_dirty();
+        }
+        let path = vectors_path(&dir, &file_stem("fruit"));
+        let carried = VectorStore::load(&path);
+        assert!(carried.concepts.is_empty(), "{:?}", carried.concepts.keys());
+        assert_eq!(carried.labels.len(), 1, "{:?}", carried.labels.keys());
+
+        // Pass 2, same model at width 4: the (all-stale) concept call
+        // lands first and settles the fresh width; 分類 is carried at
+        // width 2, so the label-side clause alone declares the drift.
+        // The redo then re-embeds concepts (call 1) and fails on
+        // labels (call 2).
+        let embedder = Some(Arc::new(FailsNth {
+            calls: AtomicUsize::new(0),
+            fail_nth: 2,
+            width: 4,
+        }) as Arc<dyn EmbeddingProvider>);
+        let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
+        assert!(
+            state
+                .refresh_embeddings("fruit", Deadline::unbounded())
+                .unwrap()
+                .is_err(),
+            "the redo's label failure must be reported"
+        );
+
+        let store = VectorStore::load(&path);
+        assert_eq!(
+            store.concepts.len(),
+            2,
+            "the redo's concepts must land at the fresh width (a mixed file \
+             would load back as empty): {:?}",
+            store.concepts.keys()
+        );
+        assert!(
+            store.concepts.values().all(|(_, vector)| vector.len() == 4),
+            "a concept landed at the dead width"
+        );
+        assert!(
+            store.labels.is_empty(),
+            "the failed label redo must stay stale, not linger at width 2: {:?}",
+            store.labels.keys()
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A pass that buys nothing, prunes nothing, and owes no retry
+    /// must not rewrite the sidecar — the no-op refresh is the hot
+    /// path the auto-ticker hits forever.
+    #[test]
+    fn a_no_op_gloss_refresh_leaves_the_sidecar_file_untouched() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = scratch_dir("no-op-no-save");
+        let embedder = Some(Arc::new(FixedWidth(2)) as Arc<dyn EmbeddingProvider>);
+        let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
+        state
+            .create("fruit", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .write_context("fruit", |context| {
+                context.associate("りんご", "分類", "果物", 1.0).unwrap();
+            })
+            .map_err(|_| "write")
+            .unwrap();
+        state
+            .refresh_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        let path = vectors_path(&dir, &file_stem("fruit"));
+        let before = fs::metadata(&path).unwrap().ino();
+
+        assert_eq!(
+            state
+                .refresh_embeddings("fruit", Deadline::unbounded())
+                .unwrap()
+                .unwrap()
+                .0,
+            0
+        );
+        assert_eq!(
+            fs::metadata(&path).unwrap().ino(),
+            before,
+            "a no-op refresh rewrote the sidecar (write_atomic mints a new inode)"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A refresh whose only work is pruning retracted names must still
+    /// hit the disk AND bump the config revision: the ghost rows are
+    /// gone from what the semantic lane serves, and a reboot must not
+    /// resurrect them from a stale sidecar.
+    #[test]
+    fn a_prune_only_refresh_rewrites_the_sidecar_and_bumps_config() {
+        let dir = scratch_dir("prune-only");
+        let embedder = Some(Arc::new(FixedWidth(2)) as Arc<dyn EmbeddingProvider>);
+        let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
+        state
+            .create("fruit", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        // Two DISCONNECTED edges: retracting s2 (and compacting the
+        // dead edge away — a retracted edge lingers with its gloss
+        // merely changed until compaction removes the names) leaves
+        // every surviving gloss byte-identical, so the second refresh
+        // embeds nothing and prunes c/d/l2 — the prune-only pass.
+        state
+            .add_associations(
+                "fruit",
+                vec![
+                    assoc_op("a", "l1", "b", 1.0, Some("s1")),
+                    assoc_op("c", "l2", "d", 1.0, Some("s2")),
+                ],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        state
+            .refresh_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        state.retract_source("fruit", "s2").unwrap();
+        state
+            .compact_context("fruit", Deadline::unbounded())
+            .unwrap();
+        let config = state.context_revision("fruit").unwrap().config;
+
+        let (newly, total) = state
+            .refresh_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (newly, total),
+            (0, 3),
+            "a, b and l1 survive; nothing re-embeds"
+        );
+        let store = VectorStore::load(&vectors_path(&dir, &file_stem("fruit")));
+        assert!(
+            !store.concepts.contains_key("c") && !store.concepts.contains_key("d"),
+            "retracted concepts survived on disk: {:?}",
+            store.concepts.keys()
+        );
+        assert!(
+            !store.labels.contains_key("l2"),
+            "{:?}",
+            store.labels.keys()
+        );
+        assert_eq!(store.concepts.len(), 2);
+        assert_eq!(
+            state.context_revision("fruit").unwrap().config,
+            config + 1,
+            "served vectors changed; the revision must move"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The accessor hands back the CONFIGURED slot count — main's
+    /// auto-refresh pool is sized by this, so a constant here would
+    /// silently serialize (or over-parallelize) every deployment.
+    #[test]
+    fn embed_parallel_reports_the_configured_slot_count() {
+        let dir = scratch_dir("embed-parallel");
+        let state = AppState::boot_with(
+            dir.clone(),
+            usize::MAX,
+            None,
+            BootOptions {
+                embed_parallel: 3,
+                ..BootOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(state.embed_parallel(), 3);
+        let _ = fs::remove_dir_all(dir);
+    }
 }
