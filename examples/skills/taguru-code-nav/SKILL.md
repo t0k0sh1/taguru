@@ -51,8 +51,12 @@ correction — treat as a suggestion, verify before relying on it).
 
 1. **Trust, then verify at the site.** An `exact` hit's `file:lines`
    is where the definition was at the last sync — open the file at
-   that line. If the code has drifted (see rule 3), the name is still
-   correct; re-locate with Grep in that one file.
+   that line. If the lines have merely shifted, re-locate with Grep
+   in that one file. If the path or the definition itself is missing
+   (the symbol moved to another file, or the file is gone), run
+   `taguru-code sync` and retry; when sync is not possible, fall back
+   to repository-wide Grep/Glob — a stale single-file search cannot
+   find a moved definition.
 2. **Fall back honestly.** Exit code 1 with "no match" means the map
    does not know the name — fall back to Grep/Glob immediately; do
    not retry variations more than once. Symbols in generated code or

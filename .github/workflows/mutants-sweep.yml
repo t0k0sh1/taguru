@@ -79,17 +79,24 @@ jobs:
         run: df -h /
       # cargo-mutants removes its scratch trees on exit, so an
       # after-the-fact df never sees the real high-water mark — a
-      # 5-second sampler records it while the sweep runs.
+      # 5-second sampler records it while the sweep runs. The peak
+      # starts AT the baseline (never 0): the delta can then never go
+      # negative, and the report exists even if the sampler dies
+      # before its first tick. The PID is kept so Disk after can stop
+      # the sampler before reading — otherwise it could overwrite the
+      # peak file mid-read and would idle on for the rest of the job.
       - name: Start peak-disk sampler
         run: |
           df --output=used -k / | tail -1 | tr -d ' ' > /tmp/disk-baseline-kb
+          cp /tmp/disk-baseline-kb /tmp/disk-peak-kb
           nohup bash -c '
-            peak=0
+            peak=$(cat /tmp/disk-peak-kb)
             while true; do
               used=$(df --output=used -k / | tail -1 | tr -d " ")
               if [ "$used" -gt "$peak" ]; then peak=$used; echo "$peak" > /tmp/disk-peak-kb; fi
               sleep 5
             done' >/dev/null 2>&1 &
+          echo $! > /tmp/disk-sampler.pid
       - name: Sweep shard ${{ matrix.shard }}/${{ inputs.shard_total }}
         env:
           GLOBS: ${{ inputs.globs }}
@@ -119,6 +126,13 @@ jobs:
       - name: Disk after
         if: always()
         run: |
+          if [ -f /tmp/disk-sampler.pid ]; then
+            kill "$(cat /tmp/disk-sampler.pid)" 2>/dev/null || true
+            # Not our child (the sampler outlived its step's shell),
+            # so wait(1) cannot reap it — a short sleep lets any
+            # in-flight write finish before the file is read.
+            sleep 1
+          fi
           df -h /
           if [ -f /tmp/disk-peak-kb ] && [ -f /tmp/disk-baseline-kb ]; then
             baseline=$(cat /tmp/disk-baseline-kb)
