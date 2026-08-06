@@ -31,6 +31,15 @@ const CREATE_DESCRIPTION: &str =
 /// Mirrors `taguru import`'s flush cadence (`src/ingest/local.rs`).
 const FLUSH_EVERY_OPS: usize = 100_000;
 
+/// Below this much pending passage log, sync leaves compaction alone
+/// even when the log outgrew the snapshot: a small repo's trickle
+/// should not rewrite the snapshot every few syncs for kilobytes of
+/// reclaim. Deliberately far under the store's own 4 MiB write-path
+/// floor — that one is tuned for a long-lived server that compacts on
+/// eviction anyway, while this process exits before either trigger
+/// can ever run (issue #452).
+const PASSAGE_COMPACT_FLOOR_BYTES: u64 = 64 * 1024;
+
 /// The state file name inside the data directory.
 const STATE_FILE: &str = "code-sync.json";
 
@@ -533,6 +542,15 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
     {
         eprintln!("taguru-code: sync: embeddings refresh: {error}");
     }
+    // Retract-then-reimport appends to the passage log on every sync,
+    // and this process exits before the store's own compaction
+    // triggers (write-path floor, eviction) can ever run — left
+    // alone, the log ratchets toward the server-tuned 4 MiB floor and
+    // dwarfs the content it shadows (39% of the data directory on
+    // taguru's own map, issue #452). Fold it into the snapshot once
+    // it outgrows the snapshot itself; housekeeping, so the sync's
+    // outcome above never depends on it.
+    state.compact_passages_if_worthwhile(&args.context, PASSAGE_COMPACT_FLOOR_BYTES);
 
     for warning in &warnings {
         eprintln!("taguru-code: sync: note: {warning}");

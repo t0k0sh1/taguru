@@ -404,6 +404,48 @@ fn evalset_and_eval_gate_round_trip() {
     assert_eq!(code, 3, "violated gate must exit 3");
 }
 
+/// Offline syncs exit before the passage store's own compaction
+/// triggers (server write-path floor, eviction) can ever run, so the
+/// append log used to ratchet toward 4 MiB across runs (issue #452).
+/// The end of sync must fold a log that outgrew the snapshot into
+/// `<context>.passages.bin` — and must NOT rewrite the snapshot for a
+/// trickle under the floor.
+#[test]
+fn sync_compacts_the_passage_log_once_it_outgrows_the_snapshot() {
+    let repo = Repo::new();
+    // Enough symbols that the first sync's passage appends clear the
+    // 64 KiB sync floor by a wide margin.
+    let body: String = (0..2000)
+        .map(|i| format!("pub fn pad_{i}() {{}}\n"))
+        .collect();
+    repo.write("src/lib.rs", &body);
+    repo.commit("base");
+    let (code, out) = repo.run(&["sync", "."]);
+    assert_eq!(code, 0, "{out}");
+
+    let wal = repo.dir.join(".taguru/code.passages.wal.jsonl");
+    let snapshot = repo.dir.join(".taguru/code.passages.bin");
+    assert!(
+        snapshot.exists(),
+        "sync must fold the outgrown log into a snapshot"
+    );
+    assert_eq!(
+        fs::metadata(&wal).unwrap().len(),
+        0,
+        "the covered log must be truncated"
+    );
+
+    // One small file is well under the floor: the log keeps it and
+    // the snapshot is not rewritten over a trickle.
+    repo.write("src/extra.rs", "pub fn one_more() {}\n");
+    let (code, out) = repo.run(&["sync", "."]);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        fs::metadata(&wal).unwrap().len() > 0,
+        "a trickle under the floor must stay in the log"
+    );
+}
+
 /// Agents pipe find/tree/status through `head`/`grep -m`, which close
 /// the pipe as soon as they have enough — the binary must die quietly
 /// on SIGPIPE like grep does, not panic in println! (issue #453).

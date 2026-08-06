@@ -331,6 +331,58 @@ impl AppState {
         Ok(outcome)
     }
 
+    /// The passage-log half of [`Self::compact_context`] alone,
+    /// threshold-gated: folds the context's passage log into its
+    /// snapshot when the pending log outgrew both `floor_bytes` and
+    /// the snapshot itself, and touches nothing else — no graph
+    /// rebuild, no image rewrite. For short-lived offline hosts
+    /// (taguru-code's sync, issue #452) that exit before the store's
+    /// own write-path trigger (4 MiB floor, server-tuned) or an
+    /// eviction would ever compact, so the log cannot ratchet toward
+    /// that floor across runs. Returns whether a compaction ran;
+    /// failures warn and report false, same posture as
+    /// [`Self::compact_context`]'s passage half — the caller's write
+    /// already succeeded, and the write path's cap trigger remains
+    /// the backstop. A replica never compacts (the snapshot and log
+    /// are manifest-owned files, same rule eviction follows).
+    #[allow(dead_code)] // consumed by taguru-code's sync; the server's own triggers (write path, eviction) never need it
+    pub fn compact_passages_if_worthwhile(&self, name: &str, floor_bytes: u64) -> bool {
+        if self.is_replica() {
+            return false;
+        }
+        let Some(entry) = self.lookup(name) else {
+            return false;
+        };
+        let Some(_fence) = entry.read_unless_deleted() else {
+            return false;
+        };
+        // The watermark guard, same as compact_context's passage half:
+        // a context with no passage history ever must not get store
+        // files minted just to compact nothing.
+        match self.entry_passages(&entry, &file_stem(name)) {
+            Ok(store) if store.watermark() > 0 => {
+                match store.compact_if_log_outgrew_snapshot(floor_bytes) {
+                    Ok(ran) => ran,
+                    Err(error) => {
+                        tracing::warn!(
+                            context = %name, %error,
+                            "passage log not compacted (the size cap remains the backstop)"
+                        );
+                        false
+                    }
+                }
+            }
+            Ok(_) => false,
+            Err(error) => {
+                tracing::warn!(
+                    context = %name, %error,
+                    "passage store unavailable during compact; log left as is"
+                );
+                false
+            }
+        }
+    }
+
     /// Every context whose dead ratio strictly exceeds
     /// `min_dead_ratio`, worst first — read from each entry's existing
     /// bookkeeping ([`Context::dead_ratio`] while hot, the cached

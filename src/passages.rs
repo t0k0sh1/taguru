@@ -865,6 +865,33 @@ impl PassageStore {
         self.compact_locked(&writer)
     }
 
+    /// [`Self::compact`] behind the write path's own worthwhile-test —
+    /// pending log over `COMPACT_RATIO` × snapshot — but with a
+    /// caller-supplied floor in place of [`COMPACT_FLOOR_BYTES`].
+    /// That constant is tuned for a long-lived server, where eviction
+    /// compacts anyway and 4 MiB of pending log is a trickle; a
+    /// short-lived process (taguru-code's sync, issue #452) exits
+    /// before either trigger can ever run, so across many runs the
+    /// log ratchets toward the server floor unchecked. Returns
+    /// whether a compaction ran.
+    #[allow(dead_code)] // consumed by taguru-code's sync; the server's own triggers (write path, eviction) never need it
+    pub(crate) fn compact_if_log_outgrew_snapshot(&self, floor_bytes: u64) -> io::Result<bool> {
+        let writer = self.writer.lock();
+        // Same lock order as the append path: `writer` first, then a
+        // read of `inner` — holding `writer` pins both numbers (only
+        // writers move them), so the test and the compaction it gates
+        // cannot interleave with a concurrent store/retract.
+        let worthwhile = {
+            let inner = self.inner.read();
+            inner.log_bytes > floor_bytes.max(COMPACT_RATIO * inner.snapshot_bytes)
+        };
+        if !worthwhile {
+            return Ok(false);
+        }
+        self.compact_locked(&writer)?;
+        Ok(true)
+    }
+
     /// [`compact`]'s body, for a caller that already holds `writer` —
     /// `append_and_apply_locked` calls this instead of `compact()` so
     /// its own ratio-triggered compaction does not try to re-lock a
@@ -1395,6 +1422,49 @@ mod tests {
         assert_eq!(text(&reborn, "a").as_deref(), Some("本文A"));
         assert_eq!(text(&reborn, "b").as_deref(), Some("本文B"));
         assert_eq!(text(&reborn, "c").as_deref(), Some("本文C"));
+    }
+
+    /// The short-lived-host trigger (issue #452): under the floor
+    /// nothing runs, over the floor the log folds and truncates, and
+    /// once a snapshot exists the log must also outgrow it — the same
+    /// ratio the write path's own trigger uses.
+    #[test]
+    fn threshold_compaction_runs_only_past_the_floor_and_the_snapshot() {
+        let dir = scratch_dir("threshold");
+        let store = open(&dir);
+        // Big enough that the snapshot it folds into dwarfs the one
+        // trickle line appended at the end — the ratio assertion
+        // below compares the two.
+        let body = "本文".repeat(500);
+        store.store(batch(&[("a", &body)])).unwrap();
+        let pending = store.pending_log_bytes();
+        assert!(pending > 0);
+        assert!(
+            !store.compact_if_log_outgrew_snapshot(pending).unwrap(),
+            "at or under the floor is not worthwhile"
+        );
+        assert!(
+            !dir.join("t.passages.bin").exists(),
+            "a declined compaction must write nothing"
+        );
+
+        assert!(store.compact_if_log_outgrew_snapshot(pending - 1).unwrap());
+        assert_eq!(
+            fs::metadata(dir.join("t.passages.wal.jsonl"))
+                .unwrap()
+                .len(),
+            0,
+            "the covered log truncates"
+        );
+
+        // A fresh trickle is over this tiny floor but far under the
+        // snapshot: the ratio half of the test must hold it back.
+        store.store(batch(&[("b", "x")])).unwrap();
+        assert!(store.pending_log_bytes() > 0);
+        assert!(
+            !store.compact_if_log_outgrew_snapshot(0).unwrap(),
+            "the log must outgrow the snapshot, not just the floor"
+        );
     }
 
     /// A regression for a stale-snapshot race in `compact`. Before the
