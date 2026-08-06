@@ -1,0 +1,168 @@
+# Module-scoped mutation sweeps (#417), sharded across runners so a
+# multi-hour local run becomes an hour of parallel, disposable-disk CI
+# time. Manually dispatched per module — this is NOT the retired
+# per-PR diff check (see ci.yml's tail note): nothing gates a merge,
+# the module globs bound the mutant count up front, and `--shard`
+# bounds each job's share of it.
+name: Mutants sweep
+
+on:
+  workflow_dispatch:
+    inputs:
+      globs:
+        description: "Space-separated file globs (cargo mutants -f), e.g. 'src/registry.rs src/registry/**'"
+        required: true
+        default: "src/registry.rs src/registry/**"
+      shard_total:
+        description: "Total shard count (cargo mutants --shard k/N)"
+        required: true
+        default: "16"
+      shards:
+        description: "Which shards to run this dispatch: 'all', or a space-separated subset like '0 1' for calibration"
+        required: true
+        default: "all"
+      jobs:
+        description: "cargo mutants --jobs per runner"
+        required: true
+        default: "2"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      shards: ${{ steps.expand.outputs.shards }}
+    steps:
+      - name: Expand the shard list into a matrix
+        id: expand
+        env:
+          SHARD_TOTAL: ${{ inputs.shard_total }}
+          SHARDS: ${{ inputs.shards }}
+        run: |
+          if [ "$SHARDS" = "all" ]; then
+            SHARDS=$(seq 0 $((SHARD_TOTAL - 1)) | tr '\n' ' ')
+          fi
+          echo "shards=$(printf '%s\n' $SHARDS | jq -R . | jq -cs .)" >> "$GITHUB_OUTPUT"
+
+  sweep:
+    needs: plan
+    runs-on: ubuntu-latest
+    # Just under the 6h hard ceiling: a shard that cannot finish in
+    # time is a sign to raise shard_total, not the timeout.
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      # Pinned: the sweep leans on this exact version's --shard
+      # semantics and exit-code contract (2 = missed found), validated
+      # locally before this workflow landed.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants@27.1.0
+      - name: Disk before
+        run: df -h /
+      - name: Sweep shard ${{ matrix.shard }}/${{ inputs.shard_total }}
+        env:
+          GLOBS: ${{ inputs.globs }}
+          SHARD: ${{ matrix.shard }}
+          SHARD_TOTAL: ${{ inputs.shard_total }}
+          JOBS: ${{ inputs.jobs }}
+        run: |
+          # read + quoted expansion: the globs must reach cargo-mutants
+          # verbatim — an unquoted $GLOBS would let bash expand
+          # 'src/registry/**' into a flat (and one-level-only) file
+          # list before cargo-mutants ever sees it.
+          read -r -a globs <<< "$GLOBS"
+          args=()
+          for glob in "${globs[@]}"; do args+=(-f "$glob"); done
+          # Exit 2 is "missed mutants found" — the sweep's normal
+          # yield, recorded in the artifact, never a red job. Anything
+          # else (baseline failure, internal error) is a real failure.
+          set +e
+          cargo mutants --profile=mutants --shard "$SHARD/$SHARD_TOTAL" \
+            --jobs "$JOBS" "${args[@]}"
+          code=$?
+          set -e
+          case "$code" in
+            0|2) ;;
+            *) echo "cargo mutants failed with exit code $code" >&2; exit "$code" ;;
+          esac
+      - name: Disk after
+        if: always()
+        run: df -h /
+      - name: Shard summary
+        if: always()
+        env:
+          SHARD: ${{ matrix.shard }}
+          SHARD_TOTAL: ${{ inputs.shard_total }}
+        run: |
+          {
+            echo "### Shard $SHARD/$SHARD_TOTAL"
+            for kind in caught missed unviable timeout; do
+              count=$(wc -l < "mutants.out/$kind.txt" 2>/dev/null || echo 0)
+              echo "- $kind: $count"
+            done
+            if [ -s mutants.out/missed.txt ]; then
+              echo '```'
+              cat mutants.out/missed.txt
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutants-shard-${{ matrix.shard }}
+          path: |
+            mutants.out/caught.txt
+            mutants.out/missed.txt
+            mutants.out/unviable.txt
+            mutants.out/timeout.txt
+            mutants.out/outcomes.json
+          if-no-files-found: warn
+
+  # One place to read the whole sweep: per-kind totals and the merged
+  # missed list, in the run summary and as a single artifact.
+  summarize:
+    needs: sweep
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: mutants-shard-*
+          path: shards
+      - name: Aggregate
+        env:
+          GLOBS: ${{ inputs.globs }}
+        run: |
+          mkdir -p merged
+          {
+            echo "## Sweep total — $GLOBS"
+            for kind in caught missed unviable timeout; do
+              cat shards/*/"$kind.txt" 2>/dev/null | sort -u > "merged/$kind.txt" || true
+              echo "- $kind: $(wc -l < "merged/$kind.txt")"
+            done
+            if [ -s merged/missed.txt ]; then
+              echo '### Missed'
+              echo '```'
+              cat merged/missed.txt
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mutants-merged
+          path: merged/
