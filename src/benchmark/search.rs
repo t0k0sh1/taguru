@@ -65,10 +65,10 @@ use serde_json::Value;
 
 use crate::api::MAX_CONTEXT_NAME_BYTES;
 use crate::api::sources::{PassageHit, PassageLanes, PassagePage, SearchContextPlan};
-use crate::cli::default_base_url;
 use crate::config::{load_config, subcommand_usage_error};
 use crate::evalset::{self, EvalCase, ExpectedSource};
 use crate::measure::{Distribution, MetricDef, MetricValue, MetricsMap, def, ratio_metric};
+use crate::remote::default_base_url;
 use crate::remote::{Api, ApiFailure};
 
 use super::identity;

@@ -15,13 +15,16 @@ struct Repo {
 
 impl Repo {
     fn new() -> Repo {
+        // Not a timestamp: two tests constructing Repos concurrently
+        // have collided inside the clock's real resolution ("could not
+        // lock config file … File exists" from the raced `git init`),
+        // and the process id deduplicates nothing within one test
+        // binary. A counter is unique by construction.
+        static NEXT_REPO: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let dir = std::env::temp_dir().join(format!(
             "taguru-code-e2e-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            NEXT_REPO.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();

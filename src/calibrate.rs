@@ -34,9 +34,9 @@ use std::path::PathBuf;
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::cli::default_base_url;
 use crate::config::{load_config, subcommand_usage_error};
 use crate::remote::Api;
+use crate::remote::default_base_url;
 
 const CALIBRATE_USAGE: &str =
     "usage: taguru calibrate --context NAME --probes FILE [--json] [--config FILE]
