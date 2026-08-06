@@ -1,11 +1,14 @@
 //! The git boundary: every fact about which files exist, changed, or
 //! vanished comes from `git` subprocess calls, never from a
-//! hand-rolled directory walk. `git ls-files` IS the .gitignore
-//! authority (tracked, non-ignored, committed-or-staged); `git diff
-//! --name-status` between the last synced commit and HEAD IS the
-//! incremental work list, deletions and renames included. A directory
-//! that is not a git work tree is a refusal, not a fallback — a
-//! bespoke walker would re-implement ignore semantics wrong.
+//! hand-rolled directory walk. The universe is exactly ripgrep's:
+//! tracked plus untracked files, minus everything .gitignore excludes
+//! — `git ls-files --cached --others --exclude-standard` IS that
+//! authority. Incrementally, `git diff --name-status` between the
+//! last synced commit and HEAD covers the committed churn and
+//! `git status --porcelain` covers the working tree's (staged,
+//! unstaged, untracked). A directory that is not a git work tree is
+//! a refusal, not a fallback — a bespoke walker would re-implement
+//! ignore semantics wrong.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -49,21 +52,41 @@ impl RepoWalk {
         &self.root
     }
 
-    /// The commit the work list is read at: HEAD's sha. A repository
-    /// with no commits yet refuses here — the sync contract is
-    /// committed state only.
+    /// The commit anchor incremental syncs diff against: HEAD's sha.
+    /// A repository with no commits yet refuses here — the anchor is
+    /// what makes the next sync cheap.
     pub(crate) fn head(&self) -> Result<String, String> {
-        let out = self.git(&["rev-parse", "HEAD"]).map_err(|error| {
-            format!("{error} — taguru-code syncs committed state; commit first")
-        })?;
+        let out = self
+            .git(&["rev-parse", "HEAD"])
+            .map_err(|error| format!("{error} — make at least one commit first"))?;
         Ok(String::from_utf8_lossy(&out).trim().to_string())
     }
 
-    /// Every tracked file, repo-relative, NUL-separated — the full
-    /// first-run listing.
+    /// Every file ripgrep would search — tracked plus untracked,
+    /// .gitignore excluded — repo-relative: the full first-run
+    /// listing. `--cached` and `--others` are disjoint, so no path
+    /// repeats.
     pub(crate) fn full_listing(&self) -> Result<Vec<String>, String> {
-        let out = self.git(&["ls-files", "-z"])?;
+        let out = self.git(&[
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ])?;
         Ok(split_nul(&out).map(str::to_string).collect())
+    }
+
+    /// Every path the working tree currently differs on — staged,
+    /// unstaged, and untracked, .gitignore excluded. `--no-renames`
+    /// keeps every entry a plain `XY PATH` pair (a rename shows as
+    /// its delete and add), `-uall` lists untracked files
+    /// individually instead of collapsing new directories.
+    pub(crate) fn dirty_files(&self) -> Result<Vec<String>, String> {
+        let out = self.git(&["status", "--porcelain", "-z", "-uall", "--no-renames"])?;
+        Ok(split_nul(&out)
+            .filter_map(|entry| entry.get(3..).map(str::to_string))
+            .collect())
     }
 
     /// The work list between `commit` and HEAD. `-M` turns a
@@ -95,73 +118,20 @@ impl RepoWalk {
         Ok(changes)
     }
 
-    /// Reads files as committed at HEAD — never the working tree, so
-    /// a dirty checkout cannot leak uncommitted lines into the facts.
-    /// One `git cat-file --batch` subprocess serves every path;
-    /// requests stream from a writer thread so a large repo cannot
-    /// deadlock both pipes. A path that is missing at HEAD or not
-    /// UTF-8 (a binary) comes back `None`.
-    pub(crate) fn read_at_head(
-        &self,
-        paths: &[String],
-    ) -> Result<Vec<(String, Option<String>)>, String> {
-        use std::io::{BufRead, BufReader, Read, Write};
-
-        if paths.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut child = Command::new("git")
-            .arg("-C")
-            .arg(&self.root)
-            .args(["cat-file", "--batch"])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map_err(|error| format!("running git cat-file: {error}"))?;
-
-        let mut stdin = child.stdin.take().expect("piped stdin");
-        let requests: Vec<String> = paths.iter().map(|path| format!("HEAD:{path}\n")).collect();
-        let writer = std::thread::spawn(move || {
-            for request in requests {
-                if stdin.write_all(request.as_bytes()).is_err() {
-                    break;
-                }
-            }
-            // Dropping stdin closes the pipe; cat-file exits after
-            // answering what it was asked.
-        });
-
-        let mut reader = BufReader::new(child.stdout.take().expect("piped stdout"));
-        let mut contents = Vec::with_capacity(paths.len());
-        for path in paths {
-            let mut header = String::new();
-            if reader
-                .read_line(&mut header)
-                .map_err(|error| format!("git cat-file: {error}"))?
-                == 0
-            {
-                return Err("git cat-file: output ended early".to_string());
-            }
-            let fields: Vec<&str> = header.trim_end().split(' ').collect();
-            match fields.as_slice() {
-                [_, _, size] => {
-                    let size: usize = size
-                        .parse()
-                        .map_err(|_| format!("git cat-file: bad size in '{header}'"))?;
-                    let mut blob = vec![0u8; size + 1]; // content + trailing \n
-                    reader
-                        .read_exact(&mut blob)
-                        .map_err(|error| format!("git cat-file: {error}"))?;
-                    blob.pop();
-                    contents.push((path.clone(), String::from_utf8(blob).ok()));
-                }
-                _ => contents.push((path.clone(), None)), // "<spec> missing"
-            }
-        }
-        let _ = writer.join();
-        let _ = child.wait();
-        Ok(contents)
+    /// Reads files as they are on disk — the same bytes ripgrep (and
+    /// the agent's editor) sees, so staged, unstaged, and untracked
+    /// content all land in the facts. A path that is missing (a
+    /// deletion) or not UTF-8 (a binary) comes back `None`.
+    pub(crate) fn read_worktree(&self, paths: &[String]) -> Vec<(String, Option<String>)> {
+        paths
+            .iter()
+            .map(|path| {
+                (
+                    path.clone(),
+                    std::fs::read_to_string(self.root.join(path)).ok(),
+                )
+            })
+            .collect()
     }
 
     fn git(&self, args: &[&str]) -> Result<Vec<u8>, String> {
@@ -270,7 +240,7 @@ mod tests {
     }
 
     #[test]
-    fn full_listing_respects_gitignore_and_head_requires_a_commit() {
+    fn full_listing_is_the_ripgrep_universe_and_head_requires_a_commit() {
         let repo = TestRepo::new("listing");
         repo.write(".gitignore", "target/\n.taguru/\n");
         repo.write("src/lib.rs", "fn a() {}\n");
@@ -280,27 +250,56 @@ mod tests {
         assert!(walk.head().is_err(), "no commits yet must refuse");
         repo.commit("init");
         assert_eq!(walk.head().unwrap().len(), 40);
-        let listing = walk.full_listing().unwrap();
-        assert_eq!(listing, vec![".gitignore", "src/lib.rs"]);
+        // An untracked (but not ignored) file joins the listing; the
+        // ignored ones never do — exactly what ripgrep would search.
+        repo.write("src/untracked.rs", "fn scratch() {}\n");
+        let mut listing = walk.full_listing().unwrap();
+        listing.sort();
+        assert_eq!(
+            listing,
+            vec![".gitignore", "src/lib.rs", "src/untracked.rs"]
+        );
     }
 
     #[test]
-    fn read_at_head_serves_committed_bytes_not_the_working_tree() {
+    fn dirty_files_reports_staged_unstaged_and_untracked_never_ignored() {
+        let repo = TestRepo::new("dirty");
+        repo.write(".gitignore", "secret.env\n");
+        repo.write("src/clean.rs", "fn clean() {}\n");
+        repo.write("src/edited.rs", "fn old() {}\n");
+        repo.commit("base");
+        assert!(walk_of(&repo).dirty_files().unwrap().is_empty());
+
+        repo.write("src/edited.rs", "fn new_version() {}\n"); // unstaged
+        repo.write("src/staged.rs", "fn staged() {}\n");
+        repo.git(&["add", "src/staged.rs"]); // staged
+        repo.write("newdir/untracked.rs", "fn fresh() {}\n"); // untracked, new dir
+        repo.write("secret.env", "TOKEN=x\n"); // ignored
+        let mut dirty = walk_of(&repo).dirty_files().unwrap();
+        dirty.sort();
+        assert_eq!(
+            dirty,
+            vec!["newdir/untracked.rs", "src/edited.rs", "src/staged.rs"]
+        );
+    }
+
+    fn walk_of(repo: &TestRepo) -> RepoWalk {
+        RepoWalk::discover(&repo.dir).unwrap()
+    }
+
+    #[test]
+    fn read_worktree_serves_disk_bytes_and_none_for_missing() {
         let repo = TestRepo::new("cat");
         repo.write("src/a.rs", "fn committed() {}\n");
         repo.commit("base");
-        // Dirty the working tree AFTER the commit: sync must not see it.
-        repo.write("src/a.rs", "fn uncommitted_edit() {}\n");
+        // The working tree wins over HEAD: the edit is what an agent
+        // (and ripgrep) sees, so it is what the facts must carry.
+        repo.write("src/a.rs", "fn edited() {}\n");
         let walk = RepoWalk::discover(&repo.dir).unwrap();
-        let contents = walk
-            .read_at_head(&["src/a.rs".to_string(), "src/nope.rs".to_string()])
-            .unwrap();
+        let contents = walk.read_worktree(&["src/a.rs".to_string(), "src/nope.rs".to_string()]);
         assert_eq!(
             contents[0],
-            (
-                "src/a.rs".to_string(),
-                Some("fn committed() {}\n".to_string())
-            )
+            ("src/a.rs".to_string(), Some("fn edited() {}\n".to_string()))
         );
         assert_eq!(contents[1], ("src/nope.rs".to_string(), None));
     }

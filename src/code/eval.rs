@@ -111,7 +111,6 @@ pub(crate) fn evalset(args: &[String]) -> i32 {
 /// cue — the three shapes an agent actually types.
 fn generate(args: &EvalArgs) -> Result<Vec<serde_json::Value>, String> {
     let walk = RepoWalk::discover(&args.start)?;
-    walk.head()?; // committed-state contract, same refusal as sync
     let paths: Vec<String> = walk
         .full_listing()?
         .into_iter()
@@ -123,7 +122,9 @@ fn generate(args: &EvalArgs) -> Result<Vec<serde_json::Value>, String> {
                 .is_some_and(|extension| grammars::for_extension(&extension).is_some())
         })
         .collect();
-    let contents = walk.read_at_head(&paths)?;
+    // Worktree bytes, matching what sync imports — the ground truth
+    // and the map must describe the same universe.
+    let contents = walk.read_worktree(&paths);
     let mut symbols = Vec::new();
     for (path, content) in contents {
         let Some(content) = content else { continue };

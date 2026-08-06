@@ -1,15 +1,19 @@
-//! `taguru-code sync`: the write path. Committed state in, facts out —
-//! first run imports every tracked file `git ls-files` names, later
-//! runs replay only `git diff --name-status <last synced commit>..HEAD`
-//! (deletions retract, renames retract-then-import). Batches go through
-//! the same parse/apply the server's own import uses, into a data
-//! directory that defaults to `$PROJECT_ROOT/.taguru` — a normal taguru
-//! data dir, so `taguru serve` can serve it later unchanged. The one
-//! piece of state this verb owns is `code-sync.json` in that directory
-//! (last synced commit); the registry's boot scan ignores non-`.ctx`
-//! files, and a lost or corrupt state file just degrades to a full
-//! re-sync, which the retract-then-apply batch contract makes
-//! idempotent.
+//! `taguru-code sync`: the write path. The ripgrep universe in, facts
+//! out — tracked plus untracked files, .gitignore excluded, read as
+//! they are on disk, so staged, unstaged, and untracked code is all
+//! findable the moment it is synced. Incrementally a run touches only
+//! `git diff <last synced commit>..HEAD` (the committed churn) plus
+//! the working tree's dirty set — current AND the one recorded last
+//! run, so a revert or a since-committed file heals back to its real
+//! content. A candidate that is gone from disk retracts its source
+//! (deletions and renames included). Batches go through the same
+//! parse/apply the server's own import uses, into a data directory
+//! that defaults to `$PROJECT_ROOT/.taguru` — a normal taguru data
+//! dir, so `taguru serve` can serve it later unchanged. The one piece
+//! of state this verb owns is `code-sync.json` in that directory
+//! (last synced commit + last dirty set); a lost, corrupt, or
+//! gc-orphaned anchor degrades to a full re-sync, which the
+//! retract-then-apply batch contract makes idempotent.
 
 use std::path::{Path, PathBuf};
 
@@ -117,15 +121,38 @@ pub(crate) fn status(args: &[String]) -> i32 {
         Some(state) => {
             println!("context:  {}", state.context);
             println!("synced:   {}", state.commit);
+            let dirty_now: Vec<String> = walk
+                .dirty_files()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|path| !under_data_dir(path, walk.root(), &data_dir))
+                .collect();
+            let dirty_pending = dirty_now.len()
+                + state
+                    .dirty
+                    .iter()
+                    .filter(|path| !dirty_now.contains(path))
+                    .count();
             match walk.head() {
-                Ok(head) if head == state.commit => println!("up to date with HEAD"),
-                Ok(head) => match walk.changes_since(&state.commit) {
-                    Ok(changes) => println!(
-                        "behind HEAD {head}: {} change(s) pending — run `taguru-code sync`",
-                        changes.len()
-                    ),
-                    Err(message) => println!("pending changes unknown: {message}"),
-                },
+                Ok(head) if head == state.commit && dirty_pending == 0 => {
+                    println!("up to date with HEAD and a clean working tree")
+                }
+                Ok(head) => {
+                    let committed = if head == state.commit {
+                        Ok(Vec::new())
+                    } else {
+                        walk.changes_since(&state.commit)
+                    };
+                    match committed {
+                        Ok(changes) => println!(
+                            "pending: {} committed change(s), {} working-tree file(s) — \
+                             run `taguru-code sync`",
+                            changes.len(),
+                            dirty_pending
+                        ),
+                        Err(message) => println!("pending changes unknown: {message}"),
+                    }
+                }
                 Err(message) => println!("HEAD unknown: {message}"),
             }
         }
@@ -140,9 +167,22 @@ fn data_dir_of(args: &SyncArgs, walk: &RepoWalk) -> PathBuf {
         .unwrap_or_else(|| walk.root().join(".taguru"))
 }
 
+/// Whether a repo-relative path lives inside the data directory. The
+/// map must never index its own storage: `.taguru/` is untracked, so
+/// without this the dirty set would grow by its own files every run
+/// and "up to date" could never hold (gitignoring it is advised, but
+/// correctness cannot depend on advice).
+fn under_data_dir(path: &str, root: &Path, data_dir: &Path) -> bool {
+    root.join(path).starts_with(data_dir)
+}
+
 struct SyncState {
     commit: String,
     context: String,
+    /// The working tree's dirty set as of that sync — re-examined on
+    /// the next run, so a file that got reverted (or committed, or
+    /// deleted) since heals to its current truth.
+    dirty: Vec<String>,
 }
 
 fn load_state(data_dir: &Path) -> Option<SyncState> {
@@ -151,11 +191,25 @@ fn load_state(data_dir: &Path) -> Option<SyncState> {
     Some(SyncState {
         commit: value.get("commit")?.as_str()?.to_string(),
         context: value.get("context")?.as_str()?.to_string(),
+        dirty: value
+            .get("dirty")
+            .and_then(|dirty| dirty.as_array())
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|entry| entry.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
     })
 }
 
 fn save_state(data_dir: &Path, state: &SyncState) -> Result<(), String> {
-    let value = serde_json::json!({ "commit": state.commit, "context": state.context });
+    let value = serde_json::json!({
+        "commit": state.commit,
+        "context": state.context,
+        "dirty": state.dirty,
+    });
     std::fs::write(data_dir.join(STATE_FILE), format!("{value}\n"))
         .map_err(|error| format!("writing {STATE_FILE}: {error}"))
 }
@@ -176,32 +230,73 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
         ));
     }
     let first_run = previous.is_none();
-    let (mut imports, mut retractions) = (Vec::new(), Vec::new());
+    let current_dirty: Vec<String> = walk
+        .dirty_files()?
+        .into_iter()
+        .filter(|path| !under_data_dir(path, walk.root(), &data_dir))
+        .collect();
+    // Candidates: every path whose truth may have moved since the
+    // last sync. What each one becomes — re-import or retraction —
+    // is decided by the disk below, not by which list found it.
+    let mut candidates: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     match &previous {
-        None => imports = walk.full_listing()?,
-        Some(state) if state.commit == head => {
-            println!("up to date with HEAD ({head})");
+        None => candidates.extend(walk.full_listing()?),
+        Some(state)
+            if state.commit == head && current_dirty.is_empty() && state.dirty.is_empty() =>
+        {
+            println!("up to date with HEAD ({head}) and a clean working tree");
             return Ok(0);
         }
         Some(state) => {
-            for change in walk.changes_since(&state.commit)? {
+            let committed = if state.commit == head {
+                Vec::new()
+            } else {
+                match walk.changes_since(&state.commit) {
+                    Ok(changes) => changes,
+                    Err(message) => {
+                        // The anchor is gone (rebase + gc, a rewritten
+                        // history) — degrade to a full re-sync, which
+                        // idempotency makes safe, and say so.
+                        eprintln!(
+                            "taguru-code: sync: {message} — sync anchor unusable, \
+                             falling back to a full re-sync"
+                        );
+                        candidates.extend(walk.full_listing()?);
+                        Vec::new()
+                    }
+                }
+            };
+            for change in committed {
                 match change {
-                    Change::Added(path) | Change::Modified(path) => imports.push(path),
-                    Change::Deleted(path) => retractions.push(path),
+                    Change::Added(path) | Change::Modified(path) | Change::Deleted(path) => {
+                        candidates.insert(path);
+                    }
                     Change::Renamed { from, to } => {
-                        retractions.push(from);
-                        imports.push(to);
+                        candidates.insert(from);
+                        candidates.insert(to);
                     }
                 }
             }
+            candidates.extend(current_dirty.iter().cloned());
+            candidates.extend(state.dirty.iter().cloned());
         }
     }
 
-    // Only files a grammar claims are parsed; the rest are skipped and
-    // counted (never silently — the summary names the count).
+    // The disk decides each candidate's fate: present and claimed by
+    // a grammar → re-import; present but unclaimed → skipped (counted,
+    // never silently); gone → retract its source, whatever its
+    // extension once was.
     let mut supported = Vec::new();
+    let mut retractions = Vec::new();
     let mut skipped = 0usize;
-    for path in imports {
+    for path in candidates {
+        if under_data_dir(&path, walk.root(), &data_dir) {
+            continue; // never index the map's own storage
+        }
+        if !walk.root().join(&path).exists() {
+            retractions.push(path);
+            continue;
+        }
         let claimed = Path::new(&path)
             .extension()
             .and_then(|extension| extension.to_str())
@@ -212,9 +307,6 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
             None => skipped += 1,
         }
     }
-    // A deleted file's source must retract whether or not this build
-    // still parses its extension — it was imported when it was
-    // supported, or the retraction is a no-op.
 
     if args.dry_run {
         for (path, _) in &supported {
@@ -235,7 +327,7 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
     // Parse and build every batch before booting the registry: a file
     // that refuses must never cost a directory lock or a write.
     let paths: Vec<String> = supported.iter().map(|(path, _)| path.clone()).collect();
-    let contents = walk.read_at_head(&paths)?;
+    let contents = walk.read_worktree(&paths);
     let mut batches = Vec::new();
     let mut warnings = Vec::new();
     let mut binaries = 0usize;
@@ -321,6 +413,7 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
             &SyncState {
                 commit: head.clone(),
                 context: args.context.clone(),
+                dirty: current_dirty,
             },
         )?;
     } else {

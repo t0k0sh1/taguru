@@ -117,17 +117,27 @@ fn sync_find_edit_rename_delete_round_trip() {
     let (_, out) = repo.run(&["find", "locate_me"]);
     assert!(out.contains("src/alpha.rs:3-5"), "locator must move: {out}");
 
-    // Uncommitted edits stay invisible — committed state only.
-    repo.write("src/alpha.rs", "pub fn zebra_quokka() {}\n");
+    // A clean tree at the anchor is a no-op...
     let (code, out) = repo.run(&["sync", "."]);
     assert_eq!(code, 0);
-    assert!(
-        out.contains("up to date"),
-        "dirty tree is not new work: {out}"
-    );
-    let (code, _) = repo.run(&["find", "zebra_quokka"]);
-    assert_eq!(code, 1, "uncommitted symbol must not be findable");
-    repo.git(&["checkout", "--", "."]);
+    assert!(out.contains("up to date"), "{out}");
+
+    // ...but the working tree IS the universe: an untracked file's
+    // symbol becomes findable on sync, no commit required.
+    repo.write("src/delta.rs", "pub fn quokka_untracked() {}\n");
+    let (code, out) = repo.run(&["sync", "."]);
+    assert_eq!(code, 0, "{out}");
+    let (code, out) = repo.run(&["find", "quokka_untracked"]);
+    assert_eq!(code, 0, "untracked symbol must be findable: {out}");
+    assert!(out.contains("src/delta.rs:1-1"), "{out}");
+
+    // Deleting that untracked file heals on the next sync — it is in
+    // no git diff, only the recorded dirty set can catch it.
+    fs::remove_file(repo.dir.join("src/delta.rs")).unwrap();
+    let (code, _) = repo.run(&["sync", "."]);
+    assert_eq!(code, 0);
+    let (code, _) = repo.run(&["find", "quokka_untracked"]);
+    assert_eq!(code, 1, "removed untracked symbol must be gone");
 
     // Rename + delete + commit: old names retire, new ones appear.
     repo.git(&["mv", "src/alpha.rs", "src/gamma.rs"]);

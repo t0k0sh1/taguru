@@ -56,10 +56,12 @@ correction — treat as a suggestion, verify before relying on it).
    does not know the name — fall back to Grep/Glob immediately; do
    not retry variations more than once. Symbols in generated code or
    non-Rust files are not in the map.
-3. **The map is committed-state only.** Uncommitted edits are
-   invisible to it. After commits (yours or a pull), run
-   `taguru-code sync` — it is incremental and takes seconds. If
-   `taguru-code status` says "behind HEAD", sync before trusting line
+3. **The map covers what ripgrep covers.** Tracked plus untracked
+   files, .gitignore excluded, read from disk — staged and unstaged
+   edits included. It is a snapshot as of the last `taguru-code
+   sync`: after substantial edits, commits, or a pull, run
+   `taguru-code sync` — incremental, sub-second. If `taguru-code
+   status` reports pending changes, sync before trusting line
    numbers.
 4. **Disambiguate with a qualified cue.** A bare `new` or `tests`
    matches many symbols; qualify it (`Api::new`,
