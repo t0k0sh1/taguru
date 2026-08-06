@@ -101,6 +101,19 @@ stored_at`), applied *before* the retrieval lanes run, so "only
 documents tagged X from the last year" is a server-side eligibility
 set, not client-side post-filtering that silently starves `limit`.
 
+The same `since`/`until` window works on the **graph lanes** —
+`recall`, `query`, `explore`, and `activate`, one context at a time
+(ADR 0011): an association is visible iff at least one in-window
+source attests it, with its weight and citations re-derived from the
+in-window attributions alone, and the walks neither report nor bridge
+through out-of-window edges. `until` alone reads *as-of* — "the
+knowledge available by then" — so a fact superseded later still
+answers for the year it was asserted. An association's temporal
+position is its sources' assertion time; there is no stored end time,
+and a source that never stored a passage has no metadata, so no
+window can see its facts — date your sources and the graph gains a
+time axis with no migration at all.
+
 For corpus-overview questions ("what are the main themes here?") there
 is a third lane: `taguru communities` detects communities on the
 association graph server-side and derives an artifact of LLM summaries

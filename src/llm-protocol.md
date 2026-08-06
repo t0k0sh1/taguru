@@ -68,6 +68,16 @@ answers back into prose are your job.
    and targets, shortest first, each hop carrying its association and
    citations — recompose the connection from the trail, and treat a
    trail as a chain of stored assertions, never as one asserted fact.
+   - Time-scoped questions ("as of 2023", "what changed since"):
+     `recall`/`query`/`explore`/`activate` take the same `since`/
+     `until` window passage search does (epoch seconds, half-open,
+     over each source's `date ?? stored_at`), one context at a time.
+     A windowed read serves only facts an in-window source attests,
+     with weight and citations re-derived from those attributions —
+     `until` alone reads *as-of*. This is assertion time, not a
+     validity interval: a superseded fact still answers unwindowed,
+     dated; judging which of two dated answers still holds is your
+     job, from the dates on their citations.
 5. **Answer from the originals**: attributions from `recall`, `query`,
    `explore`, `activate`, and `unreachable_from` already carry a
    resolved `section` label and typed citation `locator` (a
@@ -169,7 +179,11 @@ answers back into prose are your job.
    into paragraphs internally (blank-line boundaries) and searches at
    paragraph granularity, so a long document does not bury its best
    paragraph. Blank lines between logical units are what make that
-   split work — keep them. Optionally attach doc2query `questions` —
+   split work — keep them. Declare `dates` whenever the document has
+   one: a source's `date ?? stored_at` is what time-windowed search —
+   passage AND graph lanes alike — filters on, so a dated corpus
+   answers "as of 2023" for free, and a source with no stored passage
+   has no metadata and is invisible to every window. Optionally attach doc2query `questions` —
    per paragraph, the questions a user would type whose answer is that
    paragraph, phrased AWAY from its wording. They index INTO the
    paragraph on every server: their terms join its BM25 postings (so a
