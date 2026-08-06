@@ -113,6 +113,15 @@ mod wal;
 mod code;
 
 fn main() {
+    // Rust's startup ignores SIGPIPE, so `taguru-code status | head -3`
+    // ends in a println! panic when the downstream closes the pipe.
+    // This binary's stdout exists to be piped (agents post-process
+    // find/tree/status), so restore the default disposition: die
+    // quietly on a closed pipe, like grep does (issue #453).
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     std::process::exit(code::run(&args));
 }

@@ -403,3 +403,48 @@ fn evalset_and_eval_gate_round_trip() {
     ]);
     assert_eq!(code, 3, "violated gate must exit 3");
 }
+
+/// Agents pipe find/tree/status through `head`/`grep -m`, which close
+/// the pipe as soon as they have enough — the binary must die quietly
+/// on SIGPIPE like grep does, not panic in println! (issue #453).
+#[cfg(unix)]
+#[test]
+fn closed_downstream_pipe_kills_quietly_instead_of_panicking() {
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::Stdio;
+
+    let repo = Repo::new();
+    // Enough symbols that tree's output overflows a pipe buffer
+    // (64 KiB on Linux/macOS): the child can never exit cleanly
+    // without a reader, so the SIGPIPE path is exercised even if it
+    // starts writing before our read end is closed below.
+    let body: String = (0..4000)
+        .map(|i| format!("pub fn pad_{i}() {{}}\n"))
+        .collect();
+    repo.write("src/lib.rs", &body);
+    repo.commit("base");
+    let (code, out) = repo.run(&["sync", "."]);
+    assert_eq!(code, 0, "{out}");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_taguru-code"))
+        .current_dir(&repo.dir)
+        .args(["tree", "src/lib.rs"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Drop the only read end: every stdout write now raises SIGPIPE.
+    drop(child.stdout.take());
+    let output = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("panicked"),
+        "broken pipe must not panic: {stderr}"
+    );
+    assert_eq!(
+        output.status.signal(),
+        Some(13), // SIGPIPE
+        "expected death by SIGPIPE, got {:?}: {stderr}",
+        output.status
+    );
+}
