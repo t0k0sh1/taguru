@@ -34,12 +34,15 @@ pub(crate) mod query;
 pub(crate) mod repo_walk;
 #[path = "code/sync.rs"]
 pub(crate) mod sync;
+#[path = "code/watch.rs"]
+pub(crate) mod watch;
 
 const USAGE: &str = "\
 taguru-code: offline codebase map for coding agents
 
 USAGE:
   taguru-code sync [PATH] [--dry-run]   ingest the repo at PATH (default .)
+  taguru-code watch [PATH] [--interval-ms N]  keep syncing as the tree changes
   taguru-code find <cue> [--json]       locate a symbol: kind, name, file:line
   taguru-code tree [PATH]               list what a directory/file/symbol contains
   taguru-code status                    show sync state
@@ -55,6 +58,7 @@ pub(crate) fn run(args: &[String]) -> i32 {
             0
         }
         Some("sync") => sync::run(&args[1..]),
+        Some("watch") => watch::run(&args[1..]),
         Some("status") => sync::status(&args[1..]),
         Some("find") => query::find(&args[1..]),
         Some("tree") => query::tree(&args[1..]),

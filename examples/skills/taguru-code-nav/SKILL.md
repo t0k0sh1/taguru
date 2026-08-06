@@ -32,7 +32,8 @@ taguru-code tree                  # top-level directories
 taguru-code tree src/ingest       # one level: what a directory/file/symbol contains
 taguru-code tree src/api.rs       # symbols a file defines
 taguru-code status                # is the map in sync with HEAD?
-taguru-code sync                  # refresh after commits
+taguru-code sync                  # refresh after commits/edits
+taguru-code watch                 # keep the map fresh automatically (foreground)
 ```
 
 `find` output, one hit per line:
@@ -58,11 +59,12 @@ correction — treat as a suggestion, verify before relying on it).
    non-Rust files are not in the map.
 3. **The map covers what ripgrep covers.** Tracked plus untracked
    files, .gitignore excluded, read from disk — staged and unstaged
-   edits included. It is a snapshot as of the last `taguru-code
-   sync`: after substantial edits, commits, or a pull, run
-   `taguru-code sync` — incremental, sub-second. If `taguru-code
-   status` reports pending changes, sync before trusting line
-   numbers.
+   edits included. It is a snapshot as of the last sync: with
+   `taguru-code watch` running the map follows edits by itself;
+   otherwise run `taguru-code sync` after substantial edits, commits,
+   or a pull — incremental, sub-second either way. When in doubt,
+   `taguru-code status` shows what is pending, and running `sync` is
+   always safe.
 4. **Disambiguate with a qualified cue.** A bare `new` or `tests`
    matches many symbols; qualify it (`Api::new`,
    `deadline.rs`-then-tree) instead of paging through hits.
