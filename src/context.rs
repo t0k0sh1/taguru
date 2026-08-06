@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 #[path = "context/alias.rs"]
 mod alias;
 mod community;
+mod consolidation;
 mod entry_index;
 #[path = "context/gloss.rs"]
 mod gloss;
@@ -26,6 +27,7 @@ mod traverse;
 mod window;
 mod write;
 
+pub use consolidation::{ContradictionGroup, MergeEvidence, NeighborFact, ObjectRow, SignConflict};
 pub use window::SourceWindow;
 
 pub use community::{
