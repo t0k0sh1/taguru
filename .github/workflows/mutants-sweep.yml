@@ -65,9 +65,12 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
+      # Pinned: the sweep leans on this exact version's --shard
+      # semantics and exit-code contract (2 = missed found), validated
+      # locally before this workflow landed.
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-mutants
+          tool: cargo-mutants@27.1.0
       - name: Disk before
         run: df -h /
       - name: Sweep shard ${{ matrix.shard }}/${{ inputs.shard_total }}
@@ -77,14 +80,13 @@ jobs:
           SHARD_TOTAL: ${{ inputs.shard_total }}
           JOBS: ${{ inputs.jobs }}
         run: |
-          # set -f: the globs must reach cargo-mutants verbatim —
-          # unquoted word-splitting would otherwise let bash expand
+          # read + quoted expansion: the globs must reach cargo-mutants
+          # verbatim — an unquoted $GLOBS would let bash expand
           # 'src/registry/**' into a flat (and one-level-only) file
           # list before cargo-mutants ever sees it.
-          set -f
+          read -r -a globs <<< "$GLOBS"
           args=()
-          for glob in $GLOBS; do args+=(-f "$glob"); done
-          set +f
+          for glob in "${globs[@]}"; do args+=(-f "$glob"); done
           # Exit 2 is "missed mutants found" — the sweep's normal
           # yield, recorded in the artifact, never a red job. Anything
           # else (baseline failure, internal error) is a real failure.
@@ -102,9 +104,12 @@ jobs:
         run: df -h /
       - name: Shard summary
         if: always()
+        env:
+          SHARD: ${{ matrix.shard }}
+          SHARD_TOTAL: ${{ inputs.shard_total }}
         run: |
           {
-            echo "### Shard ${{ matrix.shard }}/${{ inputs.shard_total }}"
+            echo "### Shard $SHARD/$SHARD_TOTAL"
             for kind in caught missed unviable timeout; do
               count=$(wc -l < "mutants.out/$kind.txt" 2>/dev/null || echo 0)
               echo "- $kind: $count"
@@ -140,10 +145,12 @@ jobs:
           pattern: mutants-shard-*
           path: shards
       - name: Aggregate
+        env:
+          GLOBS: ${{ inputs.globs }}
         run: |
           mkdir -p merged
           {
-            echo "## Sweep total — ${{ inputs.globs }}"
+            echo "## Sweep total — $GLOBS"
             for kind in caught missed unviable timeout; do
               cat shards/*/"$kind.txt" 2>/dev/null | sort -u > "merged/$kind.txt" || true
               echo "- $kind: $(wc -l < "merged/$kind.txt")"
