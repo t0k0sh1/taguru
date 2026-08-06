@@ -151,7 +151,7 @@ fn generate(args: &EvalArgs) -> Result<Vec<serde_json::Value>, String> {
         let lines = format!("{}-{}", symbol.start_line, symbol.end_line);
         let case = match index % 6 {
             // The dominant shape: the bare symbol name.
-            0 | 1 | 2 | 3 => serde_json::json!({
+            0..=3 => serde_json::json!({
                 "kind": "tail",
                 "cue": symbol.name,
                 "expect": symbol.qualified_name,

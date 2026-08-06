@@ -242,9 +242,9 @@ pub(crate) fn find_hits(
                 && (assoc.subject.ends_with(&format!("::{cue}")) || assoc.subject == cue)
             {
                 tiers[1].push(assoc);
-            } else if tail.starts_with(&cue) {
+            } else if tail.starts_with(cue) {
                 tiers[2].push(assoc);
-            } else if tail.contains(&cue) {
+            } else if tail.contains(cue) {
                 tiers[3].push(assoc);
             }
         }
