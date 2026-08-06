@@ -23,7 +23,10 @@ mod stats;
 #[path = "context/test_support.rs"]
 mod test_support;
 mod traverse;
+mod window;
 mod write;
+
+pub use window::SourceWindow;
 
 pub use community::{
     COMMUNITY_ALGORITHM, Community, CommunityAnalysis, CommunityAssociation, CommunityMember,

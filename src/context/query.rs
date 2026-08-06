@@ -2,6 +2,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::deadline::{Deadline, DeadlineExceeded};
 
+use super::window::{EdgeLens, FullLens};
 use super::{
     Association, ConceptDescription, Context, EdgeFollow, EdgeId, LabelId, LabelUsage,
     keep_narrowest_anchor,
@@ -39,6 +40,10 @@ impl Context {
     /// when the role of the cue matters (e.g. "私が好きなもの" vs "私を好き
     /// な人"). Results come back in insertion order.
     pub fn recall(&self, cue: &str) -> Vec<Association> {
+        self.recall_impl(cue, &FullLens { context: self })
+    }
+
+    pub(super) fn recall_impl(&self, cue: &str, lens: &impl EdgeLens) -> Vec<Association> {
         let concept_edges = self
             .concept_ids
             .get(cue)
@@ -55,7 +60,8 @@ impl Context {
 
         edge_ids
             .into_iter()
-            .map(|edge_id| self.association(edge_id))
+            .filter(|&edge_id| lens.alive(edge_id, &self.edges[edge_id as usize]))
+            .map(|edge_id| lens.association(edge_id))
             .collect()
     }
 
@@ -92,9 +98,20 @@ impl Context {
         labels: &[&str],
         objects: &[&str],
     ) -> Vec<Association> {
+        self.query_any_impl(subjects, labels, objects, &FullLens { context: self })
+    }
+
+    pub(super) fn query_any_impl(
+        &self,
+        subjects: &[&str],
+        labels: &[&str],
+        objects: &[&str],
+        lens: &impl EdgeLens,
+    ) -> Vec<Association> {
         if subjects.is_empty() && labels.is_empty() && objects.is_empty() {
             return (0..self.edges.len() as u32)
-                .map(|edge_id| self.association(edge_id))
+                .filter(|&edge_id| lens.alive(edge_id, &self.edges[edge_id as usize]))
+                .map(|edge_id| lens.association(edge_id))
                 .collect();
         }
 
@@ -186,8 +203,9 @@ impl Context {
                     && object_ids
                         .as_ref()
                         .is_none_or(|ids| ids.contains(&edge.object))
+                    && lens.alive(edge_id, edge)
             })
-            .map(|edge_id| self.association(edge_id))
+            .map(|edge_id| lens.association(edge_id))
             .collect()
     }
 
