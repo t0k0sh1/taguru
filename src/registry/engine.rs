@@ -3372,4 +3372,120 @@ mod tests {
 
         let _ = fs::remove_dir_all(dir);
     }
+
+    /// The documented defaults and small helpers, pinned by value: a
+    /// silently drifted constant (a WAL cap in kilobytes, an epoch
+    /// clock answering 1) corrupts behavior far from its definition.
+    #[test]
+    fn documented_defaults_and_helpers_hold_their_values() {
+        assert_eq!(DEFAULT_WAL_MAX_BYTES, 256 * 1024 * 1024);
+        assert_eq!(DEFAULT_PASSAGES_WAL_MAX_BYTES, 1024 * 1024 * 1024);
+        // No test in this binary sets TAGURU_CACHE_BYTES, so from_env
+        // answers the documented 512 MiB default.
+        assert_eq!(BootConfig::from_env().cache_bytes, 512 * 1024 * 1024);
+        assert!(
+            unix_now() > 1_700_000_000,
+            "the epoch clock must answer real seconds"
+        );
+        let stats = ContextStats {
+            associations: 4,
+            dead_edges: 1,
+            ..ContextStats::default()
+        };
+        assert!(
+            (stats.dead_ratio() - 0.25).abs() < 1e-9,
+            "{}",
+            stats.dead_ratio()
+        );
+        let clean = ContextStats {
+            associations: 4,
+            ..ContextStats::default()
+        };
+        assert_eq!(clean.dead_ratio(), 0.0);
+    }
+
+    /// Every cue-cache read advances the recency clock — a stalled
+    /// clock stamps every refresh with the same tick and LRU decays
+    /// into insertion order (with ties left to hash order).
+    #[test]
+    fn a_cue_cache_read_advances_the_recency_clock() {
+        let mut cache = CueCache::default();
+        cache.insert("a".to_string(), Arc::new(vec![1.0]));
+        assert_eq!(cache.tick, 1);
+        assert!(cache.get("a").is_some());
+        assert_eq!(cache.tick, 2, "a read is a recency event");
+        assert!(cache.get("missing").is_none());
+        assert_eq!(cache.tick, 3, "even a miss advances the clock");
+    }
+
+    /// Every operation stamps the LRU clock onto the entry — and the
+    /// stamp is the clock's NEW value, so a fresh boot's first touch
+    /// is 1, never the pre-increment 0 that reads as never-touched.
+    #[test]
+    fn every_operation_stamps_the_advanced_lru_clock() {
+        let dir = scratch_dir("touch-clock");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let entry = state.lookup("sake").unwrap();
+        let clock_before = state.0.clock.load(Ordering::Relaxed);
+        state
+            .read_context("sake", |context| context.association_count())
+            .map_err(|_| "read")
+            .unwrap();
+        let clock_after = state.0.clock.load(Ordering::Relaxed);
+        assert_eq!(clock_after, clock_before + 1, "one operation, one tick");
+        assert_eq!(
+            entry.last_touch.load(Ordering::Relaxed),
+            clock_after,
+            "the stamp is the advanced value, not the pre-increment one"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// An in-place index update (a store landing on a resident,
+    /// just-persisted index) must mark the sidecar dirty again — the
+    /// disk copy no longer matches, and a clean flag would let the
+    /// next eviction drop the update on the floor.
+    #[test]
+    fn an_in_place_bm25_update_re_dirties_the_sidecar() {
+        let dir = scratch_dir("bm25-inplace-dirty");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert("doc-a".to_string(), "杜氏は高瀬である。".to_string());
+        state
+            .store_passages("sake", plain(passages))
+            .unwrap()
+            .unwrap();
+        state
+            .search_passages("sake", "杜氏", 3, None, None, Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        let entry = state.lookup("sake").unwrap();
+        state.flush_bm25("sake", &entry);
+        assert!(
+            !entry.bm25_dirty.load(Ordering::Relaxed),
+            "the flush persisted the fresh index"
+        );
+
+        let mut update = BTreeMap::new();
+        update.insert("doc-b".to_string(), "仕込み水は伏流水。".to_string());
+        state
+            .store_passages("sake", plain(update))
+            .unwrap()
+            .unwrap();
+        assert!(
+            entry.bm25_dirty.load(Ordering::Relaxed),
+            "an in-place update must re-dirty the sidecar"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
 }
