@@ -859,7 +859,8 @@ class AsyncContext:
     # -- graph reads ---------------------------------------------------------
 
     async def recall(
-        self, cue: str,
+        self,
+        cue: str,
         *,
         limit: int | None = None,
         after: MatchCursor | None = None,

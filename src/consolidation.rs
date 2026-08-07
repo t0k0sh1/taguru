@@ -168,9 +168,7 @@ fn drive(
     checks: &str,
     dry_run: bool,
 ) -> Result<String, String> {
-    if let Err(message) = crate::remote::reject_userinfo(base) {
-        return Err(message);
-    }
+    crate::remote::reject_userinfo(base)?;
     let api = Api::new(base.to_string());
     eprintln!("consolidation → {base}");
     api.warn_on_version_skew("consolidation");
