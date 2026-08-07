@@ -192,6 +192,17 @@ fn windows_filter_reweigh_and_refuse_across_the_graph_lanes() {
         serde_json::from_str(via_mcp["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(text["result"]["total"], json!(1), "{text}");
     assert_eq!(text["result"]["matches"][0]["object"], json!("高瀬"));
+    // …and both bounds: a closed window through MCP proves `since`
+    // forwards too, not just `until`.
+    let via_mcp = server.call_tool(
+        2,
+        "query",
+        json!({"context": "sake", "subject": "蔵", "label": "杜氏", "since": 1500, "until": 2500}),
+    );
+    let text: Value =
+        serde_json::from_str(via_mcp["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(text["result"]["total"], json!(1), "{text}");
+    assert_eq!(text["result"]["matches"][0]["object"], json!("青山"));
 
     // Windowed and unwindowed calls never share a cache entry: the
     // replay of one must not answer the other (both directions).

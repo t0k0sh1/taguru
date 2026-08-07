@@ -760,7 +760,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
             object_schema(
                 json!({
                     "context": context,
-                    "checks": { "type": "array", "items": { "type": "string", "enum": ["merge", "contradiction", "staleness"] }, "description": "required, non-empty: each section is a full-graph pass" },
+                    "checks": { "type": "array", "minItems": 1, "items": { "type": "string", "enum": ["merge", "contradiction", "staleness"] }, "description": "required, non-empty: each section is a full-graph pass" },
                     "limit": { "type": "integer", "minimum": 0, "description": "per-section candidate ceiling (default 100, capped at 1000); totals stay exact" },
                     "evidence_cap": { "type": "integer", "minimum": 0, "description": "per-list merge evidence ceiling (default 20)" },
                     "dice_floor": { "type": "number", "description": "merge: lexical floor (default 0.6)" },
