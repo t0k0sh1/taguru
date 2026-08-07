@@ -2223,4 +2223,168 @@ mod tests {
 
         let _ = fs::remove_dir_all(&dir);
     }
+
+    /// A stale import marker that cannot be removed (here: a DIRECTORY
+    /// wearing the marker name) fails the stem sweep — and with it the
+    /// create — rather than silently leaving a marker boot will keep
+    /// reporting as a torn import.
+    #[test]
+    fn a_marker_that_cannot_be_removed_fails_the_stem_sweep() {
+        let dir = scratch_dir("sweep-stuck-marker");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let marker = dir.join(format!(
+            "{}.batch.{}",
+            file_stem("sake"),
+            crate::registry::paths::IMPORT_MARKER_EXTENSION
+        ));
+        fs::create_dir_all(&marker).unwrap();
+        assert!(
+            state.create("sake", ContextMeta::default()).is_err(),
+            "an unremovable marker must fail the create"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A delete that cannot clear the context's import marker reports
+    /// the failure — the marker survives beside the tombstone and boot
+    /// must get the chance to finish the job.
+    #[test]
+    fn a_delete_that_cannot_clear_its_import_marker_reports_it() {
+        let dir = scratch_dir("delete-stuck-marker");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let marker = dir.join(format!(
+            "{}.batch.{}",
+            file_stem("sake"),
+            crate::registry::paths::IMPORT_MARKER_EXTENSION
+        ));
+        fs::create_dir_all(&marker).unwrap();
+        assert!(
+            matches!(state.delete("sake"), Some(Err(_))),
+            "an unremovable marker must surface through the delete"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// EVERY pending-operation membership makes a rename Busy on its
+    /// own — either name, any of the three sets.
+    #[test]
+    fn any_pending_membership_alone_makes_a_rename_busy() {
+        let dir = scratch_dir("rename-busy-guards");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("from", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+
+        type Pick = fn(&mut PendingNames) -> &mut std::collections::HashSet<String>;
+        let deletes: Pick = |pending| &mut pending.deletes;
+        let creates: Pick = |pending| &mut pending.creates;
+        let renames: Pick = |pending| &mut pending.renames;
+        let scenarios: [(&str, Pick); 5] = [
+            ("from", deletes),
+            ("to", deletes),
+            ("to", creates),
+            ("from", renames),
+            ("to", renames),
+        ];
+        for (name, pick) in scenarios {
+            pick(&mut state.0.pending.lock()).insert(name.to_string());
+            assert!(
+                matches!(
+                    state.rename_context("from", "to"),
+                    Err(RenameContextError::Busy)
+                ),
+                "a pending {name} entry alone must refuse the rename"
+            );
+            pick(&mut state.0.pending.lock()).remove(name);
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A meta or schema save that fails must roll the config revision
+    /// back to exactly where it stood — the served content never
+    /// changed, so neither may the revision.
+    #[test]
+    #[cfg(unix)]
+    fn a_failed_meta_or_schema_save_rolls_the_config_revision_back() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = scratch_dir("config-rollback");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state.flush_dirty();
+        let config = state.context_revision("sake").unwrap().config;
+
+        let lock_down = || {
+            let mut perms = fs::metadata(&dir).unwrap().permissions();
+            perms.set_mode(0o555);
+            fs::set_permissions(&dir, perms).unwrap();
+        };
+        let restore = || {
+            let mut perms = fs::metadata(&dir).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&dir, perms).unwrap();
+        };
+
+        lock_down();
+        let outcome = state.update_meta("sake", None, None, None, Some(0.9));
+        restore();
+        assert!(matches!(outcome, Some(Err(_))));
+        assert_eq!(
+            state.context_revision("sake").unwrap().config,
+            config,
+            "a failed meta save must leave the revision untouched"
+        );
+
+        let installed = schema::install(valid_schema_document()).unwrap();
+        lock_down();
+        let outcome = state.put_schema("sake", installed);
+        restore();
+        assert!(matches!(outcome, Some(Err(_))));
+        assert_eq!(
+            state.context_revision("sake").unwrap().config,
+            config,
+            "a failed schema save must leave the revision untouched"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A rename whose PIVOT move fails moves NOTHING: the image is
+    /// renamed first exactly so a failure there aborts before any
+    /// sibling file leaves the old stem.
+    #[test]
+    fn a_failed_pivot_rename_moves_nothing() {
+        let dir = scratch_dir("rename-pivot-fail");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state.flush_dirty();
+        assert!(meta_path(&dir, &file_stem("sake")).exists());
+        // A directory where the target image belongs makes the pivot
+        // rename fail deterministically.
+        fs::create_dir_all(image_path(&dir, &file_stem("shochu"))).unwrap();
+
+        assert!(state.rename_context("sake", "shochu").is_err());
+        assert!(
+            meta_path(&dir, &file_stem("sake")).exists(),
+            "a failed pivot must leave every sibling under the old stem"
+        );
+        assert!(
+            !meta_path(&dir, &file_stem("shochu")).exists(),
+            "no sibling may land under the new stem"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

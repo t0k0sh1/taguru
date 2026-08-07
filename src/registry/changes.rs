@@ -449,4 +449,25 @@ mod tests {
             ]
         );
     }
+
+    /// The batch summary counts each op kind exactly — two removed
+    /// aliases are AliasesRemoved{2}, never a stalled counter or a
+    /// missing event.
+    #[test]
+    fn events_of_ops_counts_removed_aliases_exactly() {
+        let ops = vec![
+            crate::wal::WalOp::UnaliasConcept {
+                alias: "Aomine".to_string(),
+            },
+            crate::wal::WalOp::UnaliasConcept {
+                alias: "AomineShuzo".to_string(),
+            },
+        ];
+        let events = events_of_ops(&ops);
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert!(
+            matches!(events[0], ChangeKind::AliasesRemoved { count: 2 }),
+            "{events:?}"
+        );
+    }
 }

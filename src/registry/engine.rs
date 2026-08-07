@@ -3488,4 +3488,64 @@ mod tests {
 
         let _ = fs::remove_dir_all(dir);
     }
+
+    /// count_source_edges answers the REAL per-source count — the
+    /// number retract previews and quota decisions ride on.
+    #[test]
+    fn count_source_edges_counts_the_real_edges() {
+        let dir = scratch_dir("count-source-edges");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .add_associations(
+                "sake",
+                vec![
+                    assoc_op("a", "l1", "b", 1.0, Some("s1")),
+                    assoc_op("c", "l2", "d", 1.0, Some("s1")),
+                    assoc_op("e", "l3", "f", 1.0, Some("s2")),
+                ],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.count_source_edges("sake", "s1").unwrap(), 2);
+        assert_eq!(state.count_source_edges("sake", "s2").unwrap(), 1);
+        assert_eq!(state.count_source_edges("sake", "absent").unwrap(), 0);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A compaction bumps the image generation by exactly one — the
+    /// fence a staged-but-unpublished flush uses to notice the slot it
+    /// captured was rewritten under it.
+    #[test]
+    fn compaction_bumps_the_image_generation() {
+        let dir = scratch_dir("compact-generation");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .add_associations(
+                "sake",
+                vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("s1"))],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        let entry = state.lookup("sake").unwrap();
+        let generation = entry.inner.read().image_generation;
+        state
+            .compact_context("sake", Deadline::unbounded())
+            .unwrap();
+        assert_eq!(
+            entry.inner.read().image_generation,
+            generation + 1,
+            "one compaction, one generation"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
 }

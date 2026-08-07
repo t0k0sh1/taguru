@@ -1940,4 +1940,20 @@ mod tests {
 
         let _ = fs::remove_dir_all(dir);
     }
+
+    /// The member cap admits EXACTLY the cap and refuses one past it —
+    /// at-the-line is legal, the refusal names growth only.
+    #[test]
+    fn the_member_cap_admits_exactly_the_cap() {
+        let at_cap: BTreeSet<String> = (0..crate::groups::MAX_GROUP_MEMBERS)
+            .map(|at| format!("c{at:05}"))
+            .collect();
+        assert!(check_member_caps(&at_cap, &BTreeSet::new()).is_ok());
+        let mut over = at_cap;
+        over.insert("one-more".to_string());
+        assert_eq!(
+            check_member_caps(&over, &BTreeSet::new()),
+            Err("member contexts")
+        );
+    }
 }

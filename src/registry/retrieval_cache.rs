@@ -420,4 +420,36 @@ mod tests {
         cache.insert("cue".to_string(), Arc::new(vec![2.0]));
         assert_eq!(*cache.get("cue").unwrap(), vec![1.0]);
     }
+
+    /// The documented default budget and the slot-cost formula, by
+    /// value: the payload dominates, keys add their length plus 24
+    /// per target, and the fixed overhead is 64.
+    #[test]
+    fn the_default_budget_and_slot_cost_formula_hold() {
+        assert_eq!(DEFAULT_RETRIEVAL_CACHE_BYTES, 32 * 1024 * 1024);
+        let key = key("params!");
+        let value = value(400);
+        // "x".repeat(400) serializes with two quote bytes.
+        let expected = 402 + ("c".len() + 24) + "params!".len() + 64;
+        assert_eq!(slot_cost(&key, &value), expected);
+    }
+
+    /// Both budget boundaries admit AT the line: a slot costing
+    /// exactly a quarter of the budget is cached, and a population
+    /// summing exactly to the budget evicts nothing.
+    #[test]
+    fn the_budget_boundaries_admit_at_the_line() {
+        let cost = slot_cost(&key("a"), &value(400));
+        // Exactly a quarter: cached (only strictly-over is served
+        // uncached).
+        let mut cache = RetrievalCache::new(cost * 4);
+        cache.insert(key("a"), value(400));
+        assert_eq!(cache.len(), 1, "at a quarter of the budget is cached");
+        // Exactly full: the fourth insert lands with zero evictions.
+        for params in ["b", "c", "d"] {
+            cache.insert(key(params), value(400));
+        }
+        assert_eq!(cache.len(), 4, "an exactly-full cache evicts nothing");
+        assert_eq!(cache.bytes(), cost * 4);
+    }
 }
