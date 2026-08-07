@@ -167,7 +167,8 @@ impl HttpEmbeddings {
 /// The one provider selection every entrance (serve, import,
 /// taguru-code sync) shares. `TAGURU_EMBED_URL` unset = lane off, as
 /// ever; the special value `local` (spike #474) picks the in-process
-/// provider when the binary carries `--features local-embed`, and
+/// provider when the binary carries the (default) `local-embed`
+/// feature, and
 /// warns-then-disables when it does not — a URL scheme was ruled out
 /// because `local` is not an endpoint, and silently treating it as
 /// one would hand ureq a nonsense URL to fail on later; anything
@@ -180,7 +181,12 @@ pub fn provider_from_env(shutdown: ShutdownFlag) -> Option<Arc<dyn EmbeddingProv
             return match LocalEmbeddings::from_env(shutdown) {
                 Ok(provider) => Some(Arc::new(provider) as Arc<dyn EmbeddingProvider>),
                 Err(error) => {
+                    // Operator guidance in the warn, plus ADR 0008
+                    // §6.2's structured event beside it — the same
+                    // human-line + `taguru.degrade` pairing the stdio
+                    // bridge uses for `bridge_unreachable`.
                     tracing::warn!("TAGURU_EMBED_URL=local: {error}; the embedding lane stays off");
+                    tracing::info!(taguru.reason = "vector_off", "taguru.degrade");
                     None
                 }
             };
@@ -188,9 +194,10 @@ pub fn provider_from_env(shutdown: ShutdownFlag) -> Option<Arc<dyn EmbeddingProv
         #[cfg(not(feature = "local-embed"))]
         {
             tracing::warn!(
-                "TAGURU_EMBED_URL=local needs a binary built with --features local-embed; \
-                 the embedding lane stays off"
+                "TAGURU_EMBED_URL=local: this binary was built without the local-embed \
+                 feature (--no-default-features); the embedding lane stays off"
             );
+            tracing::info!(taguru.reason = "vector_off", "taguru.degrade");
             return None;
         }
     }
@@ -491,7 +498,7 @@ mod local {
 
         /// The spike's feasibility probe — downloads a real model
         /// (~30 MB, network) so it never runs in the default suite:
-        /// `cargo test --features local-embed -- --ignored local_model`
+        /// `cargo test -- --ignored local_model`
         #[test]
         #[ignore = "downloads a model from Hugging Face; needs network"]
         fn local_model_embeds_with_sane_geometry() {

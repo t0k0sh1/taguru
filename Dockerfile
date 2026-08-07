@@ -15,7 +15,12 @@ COPY benches ./benches
 # scratch has no package database, so that section is the only thing
 # the release SBOM scan — and `cargo audit bin`, outside any
 # container — can read.
-RUN cargo auditable build --release --locked --bin taguru \
+# --no-default-features drops the local-embed feature (on by default
+# elsewhere): ONNX Runtime publishes no musl binaries and `scratch`
+# could not dlopen one anyway, so the image ships the slim server —
+# TAGURU_EMBED_URL=local warns and keeps the lane off; point it at an
+# HTTP /embeddings endpoint here instead.
+RUN cargo auditable build --release --locked --no-default-features --bin taguru \
     && mkdir /data-skeleton
 
 # Runtime stage: the binary is the image — no shell, no libc, no

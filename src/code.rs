@@ -57,8 +57,9 @@ ENVIRONMENT:
   TAGURU_USAGE_LOG_DIR        where usage records go (default $HOME/.taguru/logs)
   TAGURU_USAGE_LOG_MAX_BYTES  total cap across usage-*.jsonl, oldest days deleted
                               first (default 52428800 = 50 MiB, 0 = uncapped)
-  TAGURU_EMBED_URL            'local' embeds in-process during sync (needs a
-                              build with --features local-embed); any other
+  TAGURU_EMBED_URL            'local' embeds in-process during sync (default
+                              builds carry it; slim --no-default-features
+                              builds warn and keep the lane off); any other
                               value is an OpenAI-compatible /embeddings endpoint
   TAGURU_EMBED_MODEL          which model — see `taguru-code models`
 ";
@@ -153,7 +154,10 @@ fn models(args: &[String]) -> i32 {
         .unwrap_or_else(|| "(no home directory found)".to_string());
     println!("\ndownloaded once into {cache}; offline afterwards");
     if !runnable {
-        println!("note: this build lacks --features local-embed — rebuild with it to run these");
+        println!(
+            "note: this slim build lacks the local-embed feature — a default `cargo build` \
+             carries it"
+        );
     }
     0
 }
