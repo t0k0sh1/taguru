@@ -440,10 +440,10 @@ mod tests {
         let mut context = Context::default();
         for n in 0..5 {
             context
-                .associate("a", "shares", &format!("x{n}"), 1.0)
+                .associate("a", "shares", format!("x{n}"), 1.0)
                 .unwrap();
             context
-                .associate("b", "shares", &format!("x{n}"), 1.0)
+                .associate("b", "shares", format!("x{n}"), 1.0)
                 .unwrap();
         }
         context.associate("a", "own", "only-a", 1.0).unwrap();
