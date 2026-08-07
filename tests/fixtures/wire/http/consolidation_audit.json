@@ -1,0 +1,124 @@
+{
+  "contract": "http_contract",
+  "method": "POST",
+  "operation": "consolidation_audit",
+  "request": {
+    "checks": [
+      "merge",
+      "contradiction",
+      "staleness"
+    ]
+  },
+  "response": {
+    "result": {
+      "contradiction": {
+        "candidates": [
+          {
+            "fingerprint": "3f483a6c555bef85",
+            "functional_tendency": 0.0,
+            "kind": "objects",
+            "label": "杜氏",
+            "objects": [
+              {
+                "count": 1,
+                "latest": 1000,
+                "object": "高瀬",
+                "sources": [
+                  "doc-a"
+                ],
+                "weight": 1.0
+              },
+              {
+                "count": 1,
+                "latest": 2000,
+                "object": "青山",
+                "sources": [
+                  "doc-b"
+                ],
+                "weight": 1.0
+              }
+            ],
+            "subject": "蔵"
+          },
+          {
+            "count": 2,
+            "disputing_sources": [
+              "doc-b"
+            ],
+            "fingerprint": "a00ec2a4d393e2dd",
+            "kind": "contested",
+            "label": "行う",
+            "object": "大量生産",
+            "subject": "蔵",
+            "supporting_sources": [
+              "doc-a"
+            ],
+            "weight": -0.5
+          }
+        ],
+        "total": 2
+      },
+      "detector": "consolidation/1",
+      "merge": {
+        "candidates": [
+          {
+            "a": "青嶺酒造",
+            "b": "青嶺酒蔵",
+            "fingerprint": "007bfc502e69af48",
+            "name_score": 0.6666666666666666,
+            "only_a": [],
+            "only_a_total": 0,
+            "only_b": [],
+            "only_b_total": 0,
+            "overlap": 1.0,
+            "shared": [
+              {
+                "direction": "out",
+                "label": "銘柄",
+                "other": "青嶺"
+              }
+            ],
+            "shared_total": 1,
+            "tier": "lexical"
+          }
+        ],
+        "semantic_note": "ベクトル未生成のため意味的検出はスキップ (POST embeddings/refresh を実行)",
+        "total": 1
+      },
+      "staleness": {
+        "candidates": [
+          {
+            "fingerprint": "22e6b7bc33f69626",
+            "gap": 1000,
+            "label": "杜氏",
+            "latest": 1000,
+            "neighborhood_latest": 2000,
+            "object": "高瀬",
+            "sources": [
+              "doc-a"
+            ],
+            "subject": "蔵"
+          },
+          {
+            "fingerprint": "4bb51d448ccef630",
+            "gap": 1000,
+            "label": "銘柄",
+            "latest": 1000,
+            "neighborhood_latest": 2000,
+            "object": "初霜",
+            "sources": [
+              "doc-a"
+            ],
+            "subject": "蔵"
+          }
+        ],
+        "total": 2,
+        "undatable": 1
+      }
+    },
+    "status": "ok",
+    "time": 0.0
+  },
+  "route": "/contexts/{name}/consolidation/audit",
+  "status": 200
+}

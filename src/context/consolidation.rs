@@ -222,10 +222,12 @@ impl Context {
     }
 
     /// Every `(subject, label)` holding at least two live distinct
-    /// objects, in (label, subject) insertion order, each label
-    /// carrying its measured functional tendency — one O(edges)
-    /// grouped pass (ADR 0012 §4). Deadline-checked like every other
-    /// full-graph audit.
+    /// objects, sorted by (label id, subject id) — the grouping map's
+    /// own iteration order is nondeterministic, so this sort is what
+    /// makes the output deterministic — each label carrying its
+    /// measured functional tendency; one O(edges) grouped pass
+    /// (ADR 0012 §4). Deadline-checked like every other full-graph
+    /// audit.
     pub fn contradiction_groups(
         &self,
         deadline: Deadline,
@@ -431,6 +433,44 @@ mod tests {
         assert_eq!(bare.shared_total, 0);
         let unhidden = context.merge_evidence("a", "b", 10, &[]).unwrap();
         assert_eq!(unhidden.overlap, 1.0);
+    }
+
+    #[test]
+    fn merge_evidence_caps_lists_never_totals_and_fingerprints_ignore_pair_order_and_cap() {
+        let mut context = Context::default();
+        for n in 0..5 {
+            context
+                .associate("a", "shares", &format!("x{n}"), 1.0)
+                .unwrap();
+            context
+                .associate("b", "shares", &format!("x{n}"), 1.0)
+                .unwrap();
+        }
+        context.associate("a", "own", "only-a", 1.0).unwrap();
+
+        let capped = context.merge_evidence("a", "b", 2, &[]).unwrap();
+        assert_eq!(capped.shared_total, 5, "totals stay exact past the cap");
+        assert_eq!(capped.shared.len(), 2, "lists cap");
+        assert_eq!(capped.only_a_total, 1);
+
+        // The fingerprint covers the FULL evidence, so neither the cap
+        // nor the pair order may move it — it is the judgment
+        // artifact's identity (ADR 0012 §5).
+        let uncapped = context.merge_evidence("a", "b", 100, &[]).unwrap();
+        assert_eq!(capped.fingerprint, uncapped.fingerprint);
+        let swapped = context.merge_evidence("b", "a", 2, &[]).unwrap();
+        assert_eq!(capped.fingerprint, swapped.fingerprint);
+        assert_eq!(swapped.only_a_total, 0, "sides follow the arguments");
+        assert_eq!(swapped.only_b_total, 1);
+    }
+
+    #[test]
+    fn full_graph_passes_honor_an_expired_deadline() {
+        let mut context = Context::default();
+        context.associate("a", "r", "b", 1.0).unwrap();
+        let expired = Deadline::after(std::time::Duration::ZERO);
+        assert!(context.contradiction_groups(expired).is_err());
+        assert!(context.sign_conflicts(expired).is_err());
     }
 
     #[test]

@@ -1130,3 +1130,92 @@ fn shapes_required_request_fields_are_present_in_every_matching_fixture() {
         );
     }
 }
+
+// --- HTTP + MCP: consolidation audit (ADR 0012) ---
+
+/// A fully-dated seed — every effective time explicit, so the pinned
+/// response carries no wall-clock value anywhere.
+fn seed_consolidation_corpus(server: &Server, name: &str) {
+    server.ok(
+        "PUT",
+        &format!("/contexts/{name}"),
+        Some(json!({"description": "consolidation contract corpus"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{name}/associations"),
+        Some(json!([
+            {"subject": "青嶺酒造", "label": "銘柄", "object": "青嶺", "weight": 1.0, "source": "doc-a"},
+            {"subject": "青嶺酒蔵", "label": "銘柄", "object": "青嶺", "weight": 1.0, "source": "doc-b"},
+            {"subject": "蔵", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source": "doc-a"},
+            {"subject": "蔵", "label": "杜氏", "object": "青山", "weight": 1.0, "source": "doc-b"},
+            {"subject": "蔵", "label": "行う", "object": "大量生産", "weight": 1.0, "source": "doc-a"},
+            {"subject": "蔵", "label": "行う", "object": "大量生産", "weight": -2.0, "source": "doc-b"},
+            {"subject": "蔵", "label": "銘柄", "object": "初霜", "weight": 1.0, "source": "doc-a"},
+            {"subject": "幽霊蔵", "label": "銘柄", "object": "幻", "weight": 1.0, "source": "doc-undated"},
+        ])),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{name}/sources"),
+        Some(json!({
+            "passages": {"doc-a": "旧情報。", "doc-b": "新情報。"},
+            "dates": {"doc-a": 1000, "doc-b": 2000}
+        })),
+    );
+}
+
+#[test]
+fn consolidation_audit_shape() {
+    let server = Server::start("contract-consolidation");
+    seed_consolidation_corpus(&server, "fix");
+    let request = json!({"checks": ["merge", "contradiction", "staleness"]});
+    let (status, body) = server.call(
+        "POST",
+        "/contexts/fix/consolidation/audit",
+        Some(request.clone()),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body["result"]["detector"],
+        json!("consolidation/1"),
+        "{body}"
+    );
+    http_fixture(
+        "consolidation_audit",
+        "POST",
+        "/contexts/{name}/consolidation/audit",
+        Some(request),
+        status,
+        body,
+    );
+}
+
+#[test]
+fn mcp_tools_list_audit_consolidation_schema() {
+    let server = Server::start("contract-mcp-consolidation");
+    let (status, body) = server.call(
+        "POST",
+        "/mcp",
+        Some(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})),
+    );
+    assert_eq!(status, 200, "{body}");
+    let tools = body["result"]["tools"].as_array().expect("tools array");
+    let tool = tools
+        .iter()
+        .find(|tool| tool["name"] == "audit_consolidation")
+        .expect("audit_consolidation tool present")
+        .clone();
+    assert_eq!(
+        tool["inputSchema"]["required"],
+        json!(["context", "checks"]),
+        "{tool}"
+    );
+    mcp_fixture(
+        "audit_consolidation_tool_schema",
+        "tools/list",
+        json!({}),
+        status,
+        json!({"tools": [tool]}),
+    );
+}

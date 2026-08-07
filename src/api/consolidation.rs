@@ -206,7 +206,7 @@ pub async fn audit_consolidation(
         );
     }
     let limit = clamp(request.limit, 100, MAX_MATCH_LIMIT);
-    let evidence_cap = request.evidence_cap.unwrap_or(DEFAULT_EVIDENCE_CAP);
+    let evidence_cap = clamp(request.evidence_cap, DEFAULT_EVIDENCE_CAP, MAX_MATCH_LIMIT);
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }

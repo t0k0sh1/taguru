@@ -425,7 +425,11 @@ fn judge(chat: &crate::extract::ChatClient, candidate: &Candidate) -> Result<Val
 fn parse_judgment(content: &str) -> Option<Value> {
     let start = content.find('{')?;
     let end = content.rfind('}')?;
-    let parsed: Value = serde_json::from_str(&content[start..=end]).ok()?;
+    // A reply like "} judged {" finds both delimiters in the wrong
+    // order; the LLM is outside the trust boundary, so this input is
+    // real, and slicing it would panic.
+    let body = content.get(start..=end)?;
+    let parsed: Value = serde_json::from_str(body).ok()?;
     match parsed["verdict"].as_str() {
         Some("apply") | Some("dismiss") => Some(json!({
             "verdict": parsed["verdict"],
@@ -524,6 +528,10 @@ mod tests {
         assert_eq!(dismissed.unwrap()["verdict"], "dismiss");
 
         assert!(parse_judgment("no json here").is_none());
+        assert!(
+            parse_judgment("} 判定できません {").is_none(),
+            "reversed delimiters must answer None, never panic"
+        );
         assert!(
             parse_judgment("{\"verdict\": \"maybe\"}").is_none(),
             "an unknown verdict is junk, not a judgment"

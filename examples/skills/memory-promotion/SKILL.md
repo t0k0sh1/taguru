@@ -16,10 +16,15 @@ the procedure (issue #465; design: issues #423, ADR 0011, ADR 0012).
   agent, long-lived) or `scratch-{agent}-{topic}` when sessions must
   not mix. No TTL exists and none is coming: forgetting is an explicit
   operation in this store, always.
-- **Source ids name the session**: `session:{id}` for the session's
-  running note, `session:{id}/{doc}` when one session produces several
-  documents. The id keeps meaning after promotion — a promoted fact's
-  citation still points at the session that produced it.
+- **Source ids name the session, globally uniquely**:
+  `session:{agent}:{id}` (the id a UUID or an equally unique token)
+  for the session's running note, with `/{doc}` appended when one
+  session produces several documents. Global uniqueness is
+  load-bearing, not cosmetic: import is retract-then-apply **per
+  source id**, so two agents sharing a bare `session:{id}` in one
+  permanent context would silently replace each other's assertions.
+  The id keeps meaning after promotion — a promoted fact's citation
+  still points at the session that produced it.
 - **Always declare `date`** (epoch seconds, the session's day is fine)
   when storing passages. `date ?? stored_at` is the assertion time
   every time-windowed read and the staleness audit runs on (ADR 0011);
@@ -42,7 +47,7 @@ re-asserting within one note inflates weight — don't.
    overview when the scratch has grown.
 2. **Extract the keepers**: `taguru extract` over the session passages
    (or hand-write the batch) into import batches targeting the
-   PERMANENT context — keep the `session:{id}` source ids and the
+   PERMANENT context — keep the `session:{agent}:{id}` source ids and the
    `date`s. Check spellings against the permanent context first
    (`resolve` / `resolve_label`); reuse its vocabulary, never fork it.
 3. **Import**: `POST /import` / `taguru import` — retract-then-apply

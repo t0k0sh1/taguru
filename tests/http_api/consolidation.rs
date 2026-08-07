@@ -141,6 +141,14 @@ fn sections_detect_join_and_fingerprint_their_candidates() {
         grouped["fingerprint"]
     );
 
+    // Truncation is honest: limit cuts the page, never the total.
+    let cut = audit(&server, json!({"checks": ["contradiction"], "limit": 1}));
+    assert_eq!(cut["contradiction"]["total"], json!(2), "{cut}");
+    assert_eq!(
+        cut["contradiction"]["candidates"].as_array().unwrap().len(),
+        1
+    );
+
     // The selector is honest: unrequested sections are absent, an
     // empty or unknown selector refuses.
     let only_merge = audit(&server, json!({"checks": ["merge"]}));
@@ -291,4 +299,62 @@ fn the_cli_judges_incrementally_by_fingerprint() {
         "{stdout}"
     );
     assert_eq!(*calls.lock().unwrap(), 6);
+}
+
+/// A chat stub that never answers the required JSON shape.
+fn stub_junk() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut content_length = 0usize;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).is_err() || line.trim().is_empty() {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    content_length = value.trim().parse().unwrap_or(0);
+                }
+            }
+            let mut body = vec![0u8; content_length];
+            if reader.read_exact(&mut body).is_err() {
+                continue;
+            }
+            let payload = json!({"choices": [{"message": {"role": "assistant",
+                "content": "判定できませんでした。"}}]})
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                payload.len(),
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    url
+}
+
+/// A model that never answers the JSON shape fails the run loudly —
+/// exit 1, no artifact written — instead of storing junk judgments.
+#[test]
+fn a_shapeless_judgment_fails_the_run_and_writes_nothing() {
+    let server = Server::start("consolidation-cli-junk");
+    seed(&server);
+    let chat_url = stub_junk();
+    let (code, stdout, stderr) = run_consolidation(
+        &["--context", "sake", &server.base],
+        &[
+            ("TAGURU_EXTRACT_URL", chat_url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stderr.contains("not the required JSON shape"), "{stderr}");
+    let (status, _) = server.call("GET", "/contexts/sake::consolidation", None);
+    assert_eq!(
+        status, 404,
+        "a failed run must not have created the artifact"
+    );
 }

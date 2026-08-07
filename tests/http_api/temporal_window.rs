@@ -7,7 +7,7 @@
 //! ignoring it; and the retrieval cache keys windowed and unwindowed
 //! calls apart.
 
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::support::*;
 
@@ -118,6 +118,43 @@ fn windows_filter_reweigh_and_refuse_across_the_graph_lanes() {
     );
     assert_eq!(explored["total"], json!(2));
 
+    // The half-open boundary, at the boundary: until == the effective
+    // time excludes (upper bound exclusive), since == it includes.
+    let at_until = server.ok(
+        "POST",
+        "/contexts/sake/query",
+        Some(json!({"subject": "蔵", "label": "杜氏", "until": 1000})),
+    );
+    assert_eq!(at_until["total"], json!(0), "{at_until}");
+    let closed = server.ok(
+        "POST",
+        "/contexts/sake/query",
+        Some(json!({"subject": "蔵", "label": "杜氏", "since": 1000, "until": 1500})),
+    );
+    assert_eq!(closed["total"], json!(1), "{closed}");
+    assert_eq!(closed["matches"][0]["object"], json!("高瀬"));
+
+    // A dateless-but-stored source falls back to stored_at (≈ now):
+    // its fact is windowed IN by a since in the past.
+    server.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([
+            {"subject": "蔵D", "label": "銘柄", "object": "残雪", "weight": 1.0, "source": "doc-memo"}
+        ])),
+    );
+    server.ok(
+        "POST",
+        "/contexts/sake/sources",
+        Some(json!({"passages": {"doc-memo": "日付なしのメモ。"}})),
+    );
+    let by_stored_at = server.ok(
+        "POST",
+        "/contexts/sake/query",
+        Some(json!({"subject": "蔵D", "since": 2001})),
+    );
+    assert_eq!(by_stored_at["total"], json!(1), "{by_stored_at}");
+
     // The shared window contract holds on the graph lanes too.
     let (status, body) = server.call(
         "POST",
@@ -142,6 +179,19 @@ fn windows_filter_reweigh_and_refuse_across_the_graph_lanes() {
         Some(json!({"contexts": ["sake"], "cue": "蔵", "since": 1})),
     );
     assert_eq!(status, 400);
+
+    // The MCP lane forwards the window — an advertised parameter the
+    // router dropped would serve silently unwindowed results, the
+    // exact failure the cross refusal exists to prevent.
+    let via_mcp = server.call_tool(
+        1,
+        "query",
+        json!({"context": "sake", "subject": "蔵", "label": "杜氏", "until": 1500}),
+    );
+    let text: Value =
+        serde_json::from_str(via_mcp["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(text["result"]["total"], json!(1), "{text}");
+    assert_eq!(text["result"]["matches"][0]["object"], json!("高瀬"));
 
     // Windowed and unwindowed calls never share a cache entry: the
     // replay of one must not answer the other (both directions).

@@ -89,10 +89,14 @@
       <li><b>Scratch is an ordinary context</b> — <code>scratch-{agent}</code>, or
         <code>scratch-{agent}-{topic}</code> when sessions must not mix. There is no TTL and
         none is planned: nothing in this store expires silently.</li>
-      <li><b>Source ids name the session</b>: <code>session:{id}</code> for the running note,
-        <code>session:{id}/{doc}</code> when one session produces several documents. The id
-        survives promotion, so a promoted fact's citation still names the session that
-        produced it — provenance rides the existing source/citation machinery.</li>
+      <li><b>Source ids name the session, globally uniquely</b>:
+        <code>session:{agent}:{id}</code> (the id a UUID or an equally unique token) for the
+        running note, with <code>/{doc}</code> appended when one session produces several
+        documents. Uniqueness is load-bearing: import is retract-then-apply <b>per source
+        id</b>, so two agents sharing a bare <code>session:{id}</code> in one permanent
+        context would silently replace each other's assertions. The id survives promotion,
+        so a promoted fact's citation still names the session that produced it — provenance
+        rides the existing source/citation machinery.</li>
       <li><b>Always declare <code>date</code></b> when storing passages.
         <code>date ?? stored_at</code> is the assertion time every windowed graph read
         (<code>since</code>/<code>until</code>, ADR 0011) and the staleness audit run on. An
@@ -111,7 +115,7 @@
         scratch has grown.</li>
       <li><b>Extract the keepers</b> with <code>taguru extract</code> over the session
         passages (or hand-write the batch), targeting the <b>permanent</b> context — keeping
-        the <code>session:{id}</code> source ids and the <code>date</code>s. Resolve
+        the <code>session:{agent}:{id}</code> source ids and the <code>date</code>s. Resolve
         spellings against the permanent context first (<code>resolve</code> /
         <code>resolve_label</code>): reuse its vocabulary, never fork it.</li>
       <li><b>Import</b> via <code>POST /import</code> / <code>taguru import</code> —
