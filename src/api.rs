@@ -31,8 +31,12 @@ mod changes;
 // shape and the artifact naming/label constants with the verbs.
 #[path = "api/communities.rs"]
 pub(crate) mod communities;
+// pub(crate): `taguru consolidation` (the CLI judge) deserializes
+// audit responses into the real response types instead of hand-copied
+// mirrors that would drift silently — the same rule resolve/evaluate
+// follow.
 #[path = "api/consolidation.rs"]
-mod consolidation;
+pub(crate) mod consolidation;
 #[path = "api/contexts.rs"]
 mod contexts;
 #[path = "api/coverage.rs"]

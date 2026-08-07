@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::deadline::{Deadline, DeadlineExceeded};
 use crate::hash::{FNV1A_OFFSET, fnv1a_fold};
@@ -28,10 +28,10 @@ fn fold_field(digest: u64, field: &str) -> u64 {
 /// `out` means the concept is the subject of `(label, other)`, `in`
 /// means it is the object of `(other, label)`. Ordered so evidence
 /// lists are deterministic.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct NeighborFact {
     /// `"out"` or `"in"` — which chain the fact sits on.
-    pub direction: &'static str,
+    pub direction: String,
     pub label: String,
     pub other: String,
 }
@@ -41,7 +41,7 @@ pub struct NeighborFact {
 /// evidence itself — the judge's question ("same thing, differently
 /// spelled?") is answered by exactly these lists, so they ride along,
 /// capped with honest totals rather than silently truncated.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MergeEvidence {
     /// Jaccard over the two live neighbor sets (0.0 when both are
     /// empty — no structure is no corroboration, not perfect overlap).
@@ -63,7 +63,7 @@ pub struct MergeEvidence {
 /// One object's standing in a contradiction group: its windowless
 /// weight/count and the sources that attest it — names, not dates,
 /// because dates live in the registry's passage store and join there.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObjectRow {
     pub object: String,
     pub weight: f64,
@@ -163,7 +163,7 @@ impl Context {
         let b_set = self.neighbor_set(b_id, &hidden);
 
         let materialize = |(direction, label, other): &(u8, LabelId, ConceptId)| NeighborFact {
-            direction: if *direction == 0 { "out" } else { "in" },
+            direction: if *direction == 0 { "out" } else { "in" }.to_string(),
             label: self.label_name(*label).to_string(),
             other: self.concept_name(*other).to_string(),
         };

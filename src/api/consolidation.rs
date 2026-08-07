@@ -59,48 +59,48 @@ pub struct ConsolidationAuditRequest {
     pub floor_secs: Option<u64>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct ConsolidationAudit {
-    pub detector: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detector: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge: Option<MergeSection>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contradiction: Option<ContradictionSection>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub staleness: Option<StalenessSection>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct MergeSection {
     /// Candidates found — exact, however many the page below carries.
     pub total: usize,
     pub candidates: Vec<MergeCandidate>,
     /// Why the semantic tier contributed nothing, when it didn't.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub semantic_note: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct MergeCandidate {
     pub a: String,
     pub b: String,
     /// Which sweep surfaced the pair: `lexical` (bigram Dice) or
     /// `semantic` (gloss-embedding cosine).
-    pub tier: &'static str,
+    pub tier: String,
     pub name_score: f64,
     /// Each side's declared types (live `schema:type` objects), when a
     /// schema is installed — a cross-type pair is a strong dismissal
     /// signal the judge should see (ADR 0012 §7).
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub types_a: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub types_b: Vec<String>,
     #[serde(flatten)]
     pub evidence: MergeEvidence,
     pub fingerprint: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct ContradictionSection {
     pub total: usize,
     pub candidates: Vec<ContradictionCandidate>,
@@ -108,7 +108,7 @@ pub struct ContradictionSection {
 
 /// One contradiction candidate — the two kinds the issue names, kept
 /// as one ranked list with a discriminator (ADR 0012 §4).
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ContradictionCandidate {
     /// ≥ 2 live objects under one `(subject, label)`.
@@ -136,17 +136,17 @@ pub enum ContradictionCandidate {
 /// time (`date ?? stored_at`, max over its sources), absent when none
 /// of them is datable — ordered rows are what make "supersession or
 /// conflict" askable at a glance (ADR 0011 §7).
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct ObjectOut {
     pub object: String,
     pub weight: f64,
     pub count: u64,
     pub sources: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest: Option<u64>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct StalenessSection {
     pub total: usize,
     /// Live edges whose sources carry no effective time at all —
@@ -156,7 +156,7 @@ pub struct StalenessSection {
     pub candidates: Vec<StaleCandidate>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct StaleCandidate {
     pub subject: String,
     pub label: String,
@@ -286,7 +286,7 @@ pub async fn audit_consolidation(
 
     ok(
         ConsolidationAudit {
-            detector: CONSOLIDATION_DETECTOR,
+            detector: CONSOLIDATION_DETECTOR.to_string(),
             merge,
             contradiction,
             staleness,
@@ -353,7 +353,7 @@ fn merge_section(
                     fingerprint: fingerprint_hex(evidence.fingerprint),
                     a,
                     b,
-                    tier,
+                    tier: tier.to_string(),
                     name_score,
                     types_a,
                     types_b,

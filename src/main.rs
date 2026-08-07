@@ -9,6 +9,7 @@ mod clock;
 mod communities;
 mod compact;
 mod config;
+mod consolidation;
 #[cfg(test)]
 mod context_proptest;
 // The same file lib.rs includes — see src/crc32c.rs for why the

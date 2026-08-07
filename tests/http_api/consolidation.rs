@@ -5,6 +5,10 @@
 //! sides named, staleness gaps with an honest undatable count — and
 //! fingerprints that hold still until the evidence moves.
 
+use std::io::{BufRead, BufReader, Read, Write};
+use std::process::Command;
+use std::sync::{Arc, Mutex};
+
 use serde_json::{Value, json};
 
 use crate::support::*;
@@ -160,4 +164,131 @@ fn sections_detect_join_and_fingerprint_their_candidates() {
         Some(json!({"checks": ["staleness"]})),
     );
     assert_eq!(status, 404);
+}
+
+/// A chat stub answering every completion with a valid judgment —
+/// fenced, because real models decorate — and counting the calls.
+fn stub_judge(calls: Arc<Mutex<usize>>) -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut content_length = 0usize;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).is_err() || line.trim().is_empty() {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    content_length = value.trim().parse().unwrap_or(0);
+                }
+            }
+            let mut body = vec![0u8; content_length];
+            if reader.read_exact(&mut body).is_err() {
+                continue;
+            }
+            *calls.lock().unwrap() += 1;
+            let content = "```json\n{\"verdict\": \"apply\", \"action\": \"alias\", \
+                           \"rationale\": \"同一の蔵\"}\n```";
+            let payload =
+                json!({"choices": [{"message": {"role": "assistant", "content": content}}]})
+                    .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                payload.len(),
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    url
+}
+
+fn run_consolidation(args: &[&str], env: &[(&str, &str)]) -> (i32, String, String) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_taguru"));
+    common::scrub_taguru_env(&mut command)
+        .arg("consolidation")
+        .args(args);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let output = command.output().expect("consolidation must run");
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// The judge verb end to end (ADR 0012 §5): judgments are keyed by
+/// fingerprint, dismissals and re-runs reuse them with zero LLM
+/// calls, and only moved evidence re-judges.
+#[test]
+fn the_cli_judges_incrementally_by_fingerprint() {
+    let server = Server::start("consolidation-cli");
+    seed(&server);
+    let calls = Arc::new(Mutex::new(0usize));
+    let chat_url = stub_judge(Arc::clone(&calls));
+    let extract_env = [
+        ("TAGURU_EXTRACT_URL", chat_url.as_str()),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+
+    // Dry-run first: names the work, calls nothing, writes nothing.
+    let (code, stdout, stderr) = run_consolidation(
+        &["--context", "sake", "--dry-run", &server.base],
+        &extract_env,
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("5 to judge, 0 reused"), "{stdout}");
+    assert_eq!(*calls.lock().unwrap(), 0);
+
+    // First real run: every candidate judged once, artifact written.
+    let (code, stdout, stderr) =
+        run_consolidation(&["--context", "sake", &server.base], &extract_env);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains("judged 5 (5 apply, 0 dismiss), 0 reused"),
+        "{stdout}"
+    );
+    assert_eq!(*calls.lock().unwrap(), 5);
+    let stored = server.ok(
+        "POST",
+        "/contexts/sake::consolidation/sources/lookup",
+        Some(json!({"sources": ["consolidation:manifest"]})),
+    );
+    let manifest: Value = serde_json::from_str(
+        stored["passages"]["consolidation:manifest"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(manifest["taguru_consolidation"], json!(1));
+    assert_eq!(manifest["detector"], json!("consolidation/1"));
+
+    // Second run over the unchanged graph: zero LLM calls.
+    let (code, stdout, _) = run_consolidation(&["--context", "sake", &server.base], &extract_env);
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("judgments up to date (5 reused, no LLM calls)"),
+        "{stdout}"
+    );
+    assert_eq!(*calls.lock().unwrap(), 5);
+
+    // Moved evidence re-judges exactly the moved candidate.
+    server.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([
+            {"subject": "蔵A", "label": "杜氏", "object": "青山", "weight": 1.0, "source": "doc-2024b"}
+        ])),
+    );
+    let (code, stdout, _) = run_consolidation(&["--context", "sake", &server.base], &extract_env);
+    assert_eq!(code, 0, "{stdout}");
+    assert!(
+        stdout.contains("judged 1 (1 apply, 0 dismiss), 4 reused"),
+        "{stdout}"
+    );
+    assert_eq!(*calls.lock().unwrap(), 6);
 }
