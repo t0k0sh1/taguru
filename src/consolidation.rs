@@ -100,28 +100,44 @@ pub fn run(args: &[String]) -> i32 {
                 return 0;
             }
             "--context" => match rest.next() {
-                Some(name) if context.is_none() => context = Some(name.clone()),
+                Some(name) if context.is_none() && !name.starts_with('-') => {
+                    context = Some(name.clone());
+                }
+                Some(name) if name.starts_with('-') => {
+                    return usage("--context needs a name");
+                }
                 Some(_) => return usage("--context given twice"),
                 None => return usage("--context needs a name"),
             },
             "--into" => match rest.next() {
-                Some(name) if into.is_none() => into = Some(name.clone()),
+                Some(name) if into.is_none() && !name.starts_with('-') => {
+                    into = Some(name.clone());
+                }
+                Some(name) if name.starts_with('-') => return usage("--into needs a name"),
                 Some(_) => return usage("--into given twice"),
                 None => return usage("--into needs a name"),
             },
             "--checks" => match rest.next() {
-                Some(list) => checks = list.clone(),
-                None => return usage("--checks needs a comma-separated list"),
+                Some(list) if !list.starts_with('-') => checks = list.clone(),
+                _ => return usage("--checks needs a comma-separated list"),
             },
             "--config" => match rest.next() {
-                Some(path) if config.is_none() => config = Some(PathBuf::from(path)),
+                Some(path) if config.is_none() && !path.starts_with('-') => {
+                    config = Some(PathBuf::from(path));
+                }
+                Some(path) if path.starts_with('-') => {
+                    return usage("--config needs a file path");
+                }
                 Some(_) => return usage("--config given twice"),
                 None => return usage("--config needs a file path"),
             },
             "--dry-run" => dry_run = true,
             "--url" => match rest.next() {
-                Some(value) if explicit_url.is_none() => {
+                Some(value) if explicit_url.is_none() && !value.starts_with('-') => {
                     explicit_url = Some(value.trim_end_matches('/').to_string());
+                }
+                Some(value) if value.starts_with('-') => {
+                    return usage("--url needs a server URL");
                 }
                 Some(_) => return usage("--url given twice"),
                 None => return usage("--url needs a server URL"),

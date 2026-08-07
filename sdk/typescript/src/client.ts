@@ -919,6 +919,11 @@ export class Context {
    * Associations whose subject/object entry-matches the cue. `after`
    * resumes past the previous page's last match; `total` stays constant
    * across pages.
+   *
+   * `since`/`until` (epoch seconds, half-open `[since, until)`) window
+   * the graph by assertion time: only facts an in-window-dated source
+   * attests, weights re-derived from those attributions alone
+   * (ADR 0011). `until` alone reads as-of.
    */
   async recall(
     cue: string,
@@ -942,6 +947,11 @@ export class Context {
    * `subject_types`/`object_types` further narrow by declared entity type
    * (`is_a`-expanded) when this context has an installed schema; a
    * schema-free context answers empty for a non-empty filter.
+   *
+   * `since`/`until` (epoch seconds, half-open `[since, until)`) window
+   * the graph by assertion time: only facts an in-window-dated source
+   * attests, weights re-derived from those attributions alone
+   * (ADR 0011). `until` alone reads as-of.
    */
   async query(
     options: {
@@ -983,6 +993,11 @@ export class Context {
    * Exhaustive hop-annotated walk (truncation keeps the nearest). `after`
    * resumes past the previous page's last recollection; `total` stays
    * constant across pages.
+   *
+   * `since`/`until` (epoch seconds, half-open `[since, until)`) window
+   * the graph by assertion time: only facts an in-window-dated source
+   * attests, weights re-derived from those attributions alone
+   * (ADR 0011). `until` alone reads as-of.
    */
   async explore(
     origins: string | string[],
@@ -1047,7 +1062,14 @@ export class Context {
     return result as ChangesPage;
   }
 
-  /** Spreading activation from origins, strongest first. */
+  /**
+   * Spreading activation from origins, strongest first.
+   *
+   * `since`/`until` (epoch seconds, half-open `[since, until)`) window
+   * the graph by assertion time: only facts an in-window-dated source
+   * attests, weights re-derived from those attributions alone
+   * (ADR 0011). `until` alone reads as-of.
+   */
   async activate(
     origins: string | string[],
     options: { decay?: number; limit?: number; since?: number; until?: number } = {},

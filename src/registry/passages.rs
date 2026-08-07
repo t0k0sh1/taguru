@@ -569,6 +569,31 @@ mod tests {
             "an unknown context is None, matching lookup_passages"
         );
 
+        // The upper bound AT the boundary: [since, until) is half-open,
+        // so until == doc-new's own date (200) excludes it — the
+        // operator-confusion (< vs <=) this value is the only witness
+        // for at this layer.
+        let window_before = SourceFilter {
+            tags: Vec::new(),
+            since: None,
+            until: Some(200),
+        };
+        let eligible = state
+            .window_source_names("sake", &window_before)
+            .unwrap()
+            .unwrap();
+        assert_eq!(eligible.iter().collect::<Vec<_>>(), vec!["doc-old"]);
+
+        // source_effective_times, the consolidation audit's join input:
+        // dated sources map to their date, the undated
+        // associations-only source is absent, an unknown context is
+        // None.
+        let times = state.source_effective_times("sake").unwrap().unwrap();
+        assert_eq!(times.get("doc-old"), Some(&100));
+        assert_eq!(times.get("doc-new"), Some(&200));
+        assert!(!times.contains_key("doc-undated"));
+        assert!(state.source_effective_times("nope").is_none());
+
         let _ = fs::remove_dir_all(dir);
     }
 }

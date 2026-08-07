@@ -389,6 +389,26 @@ mod tests {
     }
 
     #[test]
+    fn unknown_source_names_drop_out_of_the_window() {
+        let context = corpus();
+        let window = context.source_window(["doc-old", "存在しないソース"]);
+        let hits = context.query_any_within(&["蔵"], &["杜氏"], &[], &window);
+        assert_eq!(hits.len(), 1, "an unknown name must not widen the window");
+        assert_eq!(hits[0].object, "高瀬");
+    }
+
+    #[test]
+    fn a_window_holding_every_source_matches_the_unwindowed_read() {
+        let context = corpus();
+        let window = context.source_window(["doc-old", "doc-new"]);
+        assert_eq!(
+            context.query_any_within(&["蔵"], &[], &[], &window),
+            context.query_any(&["蔵"], &[], &[]),
+            "all sources eligible must reproduce the plain read exactly"
+        );
+    }
+
+    #[test]
     fn an_empty_window_answers_empty_everywhere() {
         let context = corpus();
         let window = context.source_window([]);
