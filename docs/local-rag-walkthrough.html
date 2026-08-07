@@ -164,6 +164,18 @@ services:
     <pre><code>TAGURU_API_TOKENS=<span class="s">'ops:CHANGE-ME'</span> docker compose \
   -f deploy/docker-compose.yml -f docker-compose.override.yml up -d</code></pre>
     <p class="note">
+      Running the server binary directly instead of the container? Then Ollama is not
+      needed for this step at all: a default build carries an in-process provider —
+      <code>TAGURU_EMBED_URL=local</code> plus <code>TAGURU_EMBED_MODEL</code> naming one
+      of <code>taguru-code models</code> (e.g.
+      <code>paraphrase-multilingual-minilm-l12-v2-q</code>, or
+      <code>multilingual-e5-small</code> for stronger recall) downloads the ONNX model
+      once into <code>HF_HOME</code> when set, or <code>~/.taguru/models</code> otherwise,
+      and embeds on the CPU, offline afterwards.
+      The Docker image ships without it (ONNX Runtime publishes no musl binaries), which
+      is why the container path above points at Ollama instead.
+    </p>
+    <p class="note">
       Skipping this section is fine — search still works on BM25 and the graph lane alone,
       <code>TAGURU_EMBED_PASSAGES</code> is opt-in for a reason. What changes is paraphrase
       recall on the text lane, and <code>TAGURU_SEMANTIC_FLOOR</code>'s default (0.35) is
