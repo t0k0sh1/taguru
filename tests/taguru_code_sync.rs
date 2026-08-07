@@ -11,6 +11,12 @@ use std::process::Command;
 
 struct Repo {
     dir: PathBuf,
+    /// Where this test's usage log lands. Every spawn of the binary
+    /// must point `TAGURU_USAGE_LOG_DIR` here (outside the repo, so
+    /// log writes never read as working-tree changes) — without it
+    /// the binary would append to the developer's real
+    /// `$HOME/.taguru/logs`.
+    logs_dir: PathBuf,
 }
 
 impl Repo {
@@ -21,14 +27,17 @@ impl Repo {
         // and the process id deduplicates nothing within one test
         // binary. A counter is unique by construction.
         static NEXT_REPO: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let dir = std::env::temp_dir().join(format!(
+        let name = format!(
             "taguru-code-e2e-{}-{}",
             std::process::id(),
             NEXT_REPO.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
+        );
+        let dir = std::env::temp_dir().join(&name);
+        let logs_dir = std::env::temp_dir().join(format!("{name}-logs"));
         let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&logs_dir);
         fs::create_dir_all(&dir).unwrap();
-        let repo = Repo { dir };
+        let repo = Repo { dir, logs_dir };
         repo.git(&["init", "-q", "-b", "main"]);
         repo.git(&["config", "user.email", "e2e@example.com"]);
         repo.git(&["config", "user.name", "e2e"]);
@@ -62,11 +71,19 @@ impl Repo {
 
     /// Runs taguru-code in the repo; returns (exit code, stdout).
     fn run(&self, args: &[&str]) -> (i32, String) {
-        let output = Command::new(env!("CARGO_BIN_EXE_taguru-code"))
+        self.run_with_env(args, &[])
+    }
+
+    fn run_with_env(&self, args: &[&str], envs: &[(&str, &str)]) -> (i32, String) {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_taguru-code"));
+        command
             .current_dir(&self.dir)
-            .args(args)
-            .output()
-            .unwrap();
+            .env("TAGURU_USAGE_LOG_DIR", &self.logs_dir)
+            .args(args);
+        for (key, value) in envs {
+            command.env(key, value);
+        }
+        let output = command.output().unwrap();
         (
             output.status.code().unwrap_or(-1),
             format!(
@@ -76,11 +93,31 @@ impl Repo {
             ),
         )
     }
+
+    /// Every usage record written so far, in append order per file.
+    fn usage_records(&self) -> Vec<serde_json::Value> {
+        let Ok(entries) = fs::read_dir(&self.logs_dir) else {
+            return Vec::new();
+        };
+        let mut paths: Vec<PathBuf> = entries.filter_map(|e| Some(e.ok()?.path())).collect();
+        paths.sort();
+        paths
+            .iter()
+            .flat_map(|path| {
+                fs::read_to_string(path)
+                    .unwrap()
+                    .lines()
+                    .map(|line| serde_json::from_str(line).expect("valid JSONL"))
+                    .collect::<Vec<serde_json::Value>>()
+            })
+            .collect()
+    }
 }
 
 impl Drop for Repo {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.dir);
+        let _ = fs::remove_dir_all(&self.logs_dir);
     }
 }
 
@@ -270,6 +307,7 @@ fn watch_catches_an_edit_racing_the_initial_sync() {
 
     let child = Command::new(env!("CARGO_BIN_EXE_taguru-code"))
         .current_dir(&repo.dir)
+        .env("TAGURU_USAGE_LOG_DIR", &repo.logs_dir)
         .args(["watch", ".", "--interval-ms", "100"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -300,6 +338,7 @@ fn watch_follows_edits_without_manual_syncs() {
 
     let child = Command::new(env!("CARGO_BIN_EXE_taguru-code"))
         .current_dir(&repo.dir)
+        .env("TAGURU_USAGE_LOG_DIR", &repo.logs_dir)
         .args(["watch", ".", "--interval-ms", "100"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -337,6 +376,28 @@ fn watch_follows_edits_without_manual_syncs() {
         seen,
         "watch must pick up the new file without a manual sync"
     );
+
+    // The watch's re-syncs land in the usage log as "watch-sync"
+    // (the initial sync plus the one that picked up src/fresh.rs).
+    // Each record is appended just AFTER its sync returns, so the
+    // second one may trail the find that proved the sync happened —
+    // poll briefly instead of asserting the instant `seen` flips.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let watch_syncs = repo
+            .usage_records()
+            .iter()
+            .filter(|record| record["command"] == "watch-sync")
+            .count();
+        if watch_syncs >= 2 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "expected at least 2 watch-sync usage records, got {watch_syncs}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
 }
 
 #[test]
@@ -344,8 +405,10 @@ fn sync_refuses_outside_a_git_repository() {
     let dir = std::env::temp_dir().join(format!("taguru-code-nonrepo-e2e-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
+    let logs_dir = dir.join("logs"); // hermetic: never the real $HOME
     let output = Command::new(env!("CARGO_BIN_EXE_taguru-code"))
         .current_dir(&dir)
+        .env("TAGURU_USAGE_LOG_DIR", &logs_dir)
         .args(["sync", "."])
         .output()
         .unwrap();
@@ -473,6 +536,7 @@ fn closed_downstream_pipe_kills_quietly_instead_of_panicking() {
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_taguru-code"))
         .current_dir(&repo.dir)
+        .env("TAGURU_USAGE_LOG_DIR", &repo.logs_dir)
         .args(["tree", "src/lib.rs"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -492,4 +556,109 @@ fn closed_downstream_pipe_kills_quietly_instead_of_panicking() {
         "expected death by SIGPIPE, got {:?}: {stderr}",
         output.status
     );
+}
+
+/// The usage log (this feature's whole point): every verb appends one
+/// JSONL record — command, args, timing, exit code, and for the read
+/// verbs the hit count (0 included — the improvement signal) and the
+/// bytes printed.
+#[test]
+fn usage_log_records_each_invocation_with_hits_and_bytes() {
+    let repo = Repo::new();
+    repo.write("src/lib.rs", "pub fn locate_me() {}\n");
+    repo.commit("base");
+    let (code, out) = repo.run(&["sync", "."]);
+    assert_eq!(code, 0, "{out}");
+    let (code, _) = repo.run(&["find", "locate_me"]);
+    assert_eq!(code, 0);
+    let (code, _) = repo.run(&["find", "no_such_symbol_anywhere"]);
+    assert_eq!(code, 1);
+    let (code, _) = repo.run(&["tree", "src"]);
+    assert_eq!(code, 0);
+
+    let records = repo.usage_records();
+    let commands: Vec<&str> = records
+        .iter()
+        .map(|record| record["command"].as_str().unwrap())
+        .collect();
+    assert_eq!(commands, ["sync", "find", "find", "tree"], "{records:?}");
+    for record in &records {
+        assert!(record["ts"].as_str().unwrap().ends_with('Z'), "{record}");
+        assert!(record["duration_ms"].is_u64(), "{record}");
+        // The recorded root is the discovered worktree (possibly a
+        // canonicalized spelling of repo.dir, e.g. /private/tmp on
+        // macOS) — pin the unique tail, not the prefix.
+        let root = record["project_root"].as_str().unwrap();
+        assert!(
+            root.ends_with(repo.dir.file_name().unwrap().to_str().unwrap()),
+            "{record}"
+        );
+    }
+    assert_eq!(records[0]["args"], serde_json::json!(["."]));
+    assert_eq!(records[0]["exit_code"], 0);
+    // The hit: 1 result, some bytes printed.
+    assert_eq!(records[1]["hits"], 1, "{}", records[1]);
+    assert!(records[1]["output_bytes"].as_u64().unwrap() > 0);
+    // The miss: hits: 0 recorded, exit 1, nothing printed to stdout.
+    assert_eq!(
+        records[2]["args"],
+        serde_json::json!(["no_such_symbol_anywhere"])
+    );
+    assert_eq!(records[2]["hits"], 0, "{}", records[2]);
+    assert_eq!(records[2]["exit_code"], 1);
+    assert!(records[2]["output_bytes"].is_null());
+    // tree src lists one entry (src/lib.rs).
+    assert_eq!(records[3]["hits"], 1, "{}", records[3]);
+    assert!(records[3]["output_bytes"].as_u64().unwrap() > 0);
+}
+
+#[test]
+fn usage_log_off_writes_nothing() {
+    let repo = Repo::new();
+    repo.write("src/lib.rs", "pub fn here() {}\n");
+    repo.commit("base");
+    for value in ["off", "0", "false"] {
+        let (code, out) = repo.run_with_env(&["sync", "."], &[("TAGURU_USAGE_LOG", value)]);
+        assert_eq!(code, 0, "{out}");
+    }
+    assert!(
+        repo.usage_records().is_empty(),
+        "disabled log must write nothing"
+    );
+}
+
+/// The cap: oldest days go first, today's file survives even when the
+/// cap is tiny — the record just written must outlive its own
+/// enforcement pass.
+#[test]
+fn usage_log_cap_deletes_oldest_days_but_keeps_today() {
+    let repo = Repo::new();
+    repo.write("src/lib.rs", "pub fn here() {}\n");
+    repo.commit("base");
+    fs::create_dir_all(&repo.logs_dir).unwrap();
+    fs::write(repo.logs_dir.join("usage-20200101.jsonl"), vec![b'x'; 4096]).unwrap();
+    fs::write(repo.logs_dir.join("usage-20200102.jsonl"), vec![b'x'; 64]).unwrap();
+
+    let (code, out) = repo.run_with_env(&["sync", "."], &[("TAGURU_USAGE_LOG_MAX_BYTES", "600")]);
+    assert_eq!(code, 0, "{out}");
+
+    assert!(
+        !repo.logs_dir.join("usage-20200101.jsonl").exists(),
+        "the oldest day must be deleted to fit the cap"
+    );
+    assert!(
+        repo.logs_dir.join("usage-20200102.jsonl").exists(),
+        "a day that fits once the oldest is gone must survive"
+    );
+    // Today's file is the one that is neither planted dummy (the
+    // dummies hold 'x' padding, not JSONL, so parse it alone).
+    let todays: Vec<PathBuf> = fs::read_dir(&repo.logs_dir)
+        .unwrap()
+        .filter_map(|entry| Some(entry.ok()?.path()))
+        .filter(|path| !path.ends_with("usage-20200102.jsonl"))
+        .collect();
+    assert_eq!(todays.len(), 1, "{todays:?}");
+    let content = fs::read_to_string(&todays[0]).unwrap();
+    let record: serde_json::Value = serde_json::from_str(content.lines().next().unwrap()).unwrap();
+    assert_eq!(record["command"], "sync", "today's record survives");
 }

@@ -34,6 +34,8 @@ pub(crate) mod query;
 pub(crate) mod repo_walk;
 #[path = "code/sync.rs"]
 pub(crate) mod sync;
+#[path = "code/usage_log.rs"]
+pub(crate) mod usage_log;
 #[path = "code/watch.rs"]
 pub(crate) mod watch;
 
@@ -48,6 +50,12 @@ USAGE:
   taguru-code status                    show sync state
   taguru-code evalset --out FILE        generate an eval set from the synced repo
   taguru-code eval --eval FILE          measure find accuracy (exit 3 on regression)
+
+ENVIRONMENT:
+  TAGURU_USAGE_LOG            0/false/off disables the per-invocation usage log
+  TAGURU_USAGE_LOG_DIR        where usage records go (default $HOME/.taguru/logs)
+  TAGURU_USAGE_LOG_MAX_BYTES  total cap across usage-*.jsonl, oldest days deleted
+                              first (default 52428800 = 50 MiB, 0 = uncapped)
 ";
 
 /// Dispatches one invocation; returns the process exit code.
@@ -57,13 +65,13 @@ pub(crate) fn run(args: &[String]) -> i32 {
             print!("{USAGE}");
             0
         }
-        Some("sync") => sync::run(&args[1..]),
-        Some("watch") => watch::run(&args[1..]),
-        Some("status") => sync::status(&args[1..]),
-        Some("find") => query::find(&args[1..]),
-        Some("tree") => query::tree(&args[1..]),
-        Some("evalset") => eval::evalset(&args[1..]),
-        Some("eval") => eval::eval(&args[1..]),
+        Some("sync") => usage_log::record("sync", &args[1..], || sync::run(&args[1..])),
+        Some("watch") => usage_log::record("watch", &args[1..], || watch::run(&args[1..])),
+        Some("status") => usage_log::record("status", &args[1..], || sync::status(&args[1..])),
+        Some("find") => usage_log::record("find", &args[1..], || query::find(&args[1..])),
+        Some("tree") => usage_log::record("tree", &args[1..], || query::tree(&args[1..])),
+        Some("evalset") => usage_log::record("evalset", &args[1..], || eval::evalset(&args[1..])),
+        Some("eval") => usage_log::record("eval", &args[1..], || eval::eval(&args[1..])),
         Some(other) => {
             eprintln!("taguru-code: unknown argument '{other}' — try 'taguru-code --help'");
             2
@@ -71,6 +79,25 @@ pub(crate) fn run(args: &[String]) -> i32 {
         None => {
             print!("{USAGE}");
             2
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::USAGE;
+
+    /// The usage-log knobs live outside `config::KNOWN_KEYS` (that
+    /// list feeds the server's typo detection and help-text test), so
+    /// this USAGE text is their only documentation — keep it honest.
+    #[test]
+    fn usage_documents_every_usage_log_knob() {
+        for knob in [
+            "TAGURU_USAGE_LOG",
+            "TAGURU_USAGE_LOG_DIR",
+            "TAGURU_USAGE_LOG_MAX_BYTES",
+        ] {
+            assert!(USAGE.contains(knob), "USAGE must document {knob}");
         }
     }
 }

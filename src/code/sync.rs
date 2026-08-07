@@ -123,6 +123,7 @@ pub(crate) fn status(args: &[String]) -> i32 {
             return 1;
         }
     };
+    crate::code::usage_log::note_project_root(walk.root());
     let data_dir = data_dir_of(&args, &walk);
     println!("repo:     {}", walk.root().display());
     println!("data dir: {}", data_dir.display());
@@ -271,6 +272,7 @@ fn save_state(data_dir: &Path, state: &SyncState) -> Result<(), String> {
 fn sync(args: &SyncArgs) -> Result<i32, String> {
     let started = std::time::Instant::now();
     let walk = RepoWalk::discover(&args.start)?;
+    crate::code::usage_log::note_project_root(walk.root());
     let data_dir = data_dir_of(args, &walk);
     let head = walk.head()?;
 

@@ -13,6 +13,7 @@ use std::path::PathBuf;
 
 use crate::code::repo_walk::RepoWalk;
 use crate::code::sync::DEFAULT_CONTEXT;
+use crate::code::usage_log;
 
 /// Hits printed per `find` unless `--limit` says otherwise.
 const DEFAULT_LIMIT: usize = 10;
@@ -143,10 +144,17 @@ fn damaged(name: &str) -> String {
 /// `$PROJECT_ROOT/.taguru`.
 fn open_map(args: &QueryArgs) -> Result<CodeMap, String> {
     let data_dir = match &args.data_dir {
-        Some(dir) => dir.clone(),
-        None => RepoWalk::discover(std::path::Path::new("."))?
-            .root()
-            .join(".taguru"),
+        Some(dir) => {
+            usage_log::note_project_root(dir);
+            dir.clone()
+        }
+        None => {
+            let root = RepoWalk::discover(std::path::Path::new("."))?
+                .root()
+                .to_path_buf();
+            usage_log::note_project_root(&root);
+            root.join(".taguru")
+        }
     };
     if !data_dir.is_dir() {
         return Err(format!(
@@ -246,6 +254,7 @@ pub(crate) fn find(args: &[String]) -> i32 {
         }
     };
     let hits = find_hits(&map, &cue, args.limit);
+    usage_log::note_hits(hits.len());
 
     if hits.is_empty() {
         eprintln!("taguru-code: find: no match for '{cue}' — fall back to grep");
@@ -253,9 +262,12 @@ pub(crate) fn find(args: &[String]) -> i32 {
     }
     if args.json {
         let rendered: Vec<serde_json::Value> = hits.iter().map(Hit::to_json).collect();
-        println!("{}", serde_json::json!(rendered));
+        let text = serde_json::json!(rendered).to_string();
+        usage_log::note_output_bytes(text.len() + 1);
+        println!("{text}");
         return 0;
     }
+    let mut printed = 0usize;
     for hit in &hits {
         let kind = hit
             .section
@@ -268,11 +280,14 @@ pub(crate) fn find(args: &[String]) -> i32 {
             (None, _) if hit.is_path_node => hit.name.clone(),
             (None, _) => "?".to_string(),
         };
-        println!(
+        let line = format!(
             "{kind:<9} {:<60} {location}  [{} {:.2}]",
             hit.name, hit.tier, hit.score
         );
+        printed += line.len() + 1;
+        println!("{line}");
     }
+    usage_log::note_output_bytes(printed);
     0
 }
 
@@ -496,6 +511,7 @@ pub(crate) fn tree(args: &[String]) -> i32 {
             }
         }
     };
+    usage_log::note_hits(listing.len());
     if listing.is_empty() {
         match &args.cue {
             Some(target) => eprintln!("taguru-code: tree: nothing under '{target}'"),
@@ -504,11 +520,16 @@ pub(crate) fn tree(args: &[String]) -> i32 {
         return 1;
     }
     if args.json {
-        println!("{}", serde_json::json!(listing));
+        let text = serde_json::json!(listing).to_string();
+        usage_log::note_output_bytes(text.len() + 1);
+        println!("{text}");
     } else {
+        let mut printed = 0usize;
         for child in listing {
+            printed += child.len() + 1;
             println!("{child}");
         }
+        usage_log::note_output_bytes(printed);
     }
     0
 }
