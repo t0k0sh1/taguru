@@ -87,6 +87,8 @@ jobs:
   # produced a report nobody's decision hung on, and diff-scoped
   # mutants stopped fitting a CI budget the moment a PR carried a new
   # module (a ~1.5k-line diff is hundreds of mutants, each its own
-  # build+test — see #140, which timed out the hour ceiling). Mutation
-  # runs remain a local, module-scoped tool: `cargo mutants` with the
-  # `[profile.mutants]` in Cargo.toml.
+  # build+test — see #140, which timed out the hour ceiling).
+  # Diff-scoped mutants later returned as its own non-blocking,
+  # budgeted workflow (mutants-diff.yml, #436); module-scoped sweeps
+  # are dispatched from mutants-sweep.yml (#417). Neither gates a
+  # merge, so neither belongs in this file.

@@ -1,9 +1,9 @@
 # Module-scoped mutation sweeps (#417), sharded across runners so a
 # multi-hour local run becomes an hour of parallel, disposable-disk CI
-# time. Manually dispatched per module — this is NOT the retired
-# per-PR diff check (see ci.yml's tail note): nothing gates a merge,
-# the module globs bound the mutant count up front, and `--shard`
-# bounds each job's share of it.
+# time. Manually dispatched per module — the per-PR diff check is the
+# separate mutants-diff.yml (#436): nothing here gates a merge, the
+# module globs bound the mutant count up front, and `--shard` bounds
+# each job's share of it.
 name: Mutants sweep
 
 on:

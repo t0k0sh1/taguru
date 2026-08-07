@@ -1,0 +1,132 @@
+# Per-PR diff-scoped mutation check (#436): the second half of the
+# review-time mutation model (Petrović & Ivanković 2018). The module
+# sweeps (#417, mutants-sweep.yml) patch the baseline's holes; this
+# job guards everything merged after them.
+#
+# A first incarnation of this check gated merges and was retired when
+# PR #140's new-module diff (~1.5k lines = hundreds of mutants, each
+# its own build+test) timed out the ceiling — see ci.yml's tail note.
+# This one differs on exactly the points that killed that job:
+#   - budgeted: `--list` counts the diff's mutants for free before
+#     anything builds; an over-budget diff is a reported skip (that
+#     ground belongs to a module sweep), never a timed-out runner
+#   - non-blocking: missed mutants and timeouts are the job's yield,
+#     reported in the run summary — only infrastructure failures
+#     (baseline breakage, internal errors) turn the job red. Gating
+#     is a later decision, after this has a flakiness record (#436).
+name: Mutants diff
+
+on:
+  pull_request:
+    # The paths filter skips runner spin-up for doc-only PRs; diffs
+    # that pass it but mutate nothing (Cargo.toml-only, test-only
+    # changes) exit at the free --list step instead — the case that
+    # turned the retired job red.
+    paths:
+      - "**.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/mutants-diff.yml"
+
+# A newer push to the same PR supersedes the running check.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Starting value, to be recalibrated once a few PRs have run. The
+  # issue's sizing: a normal PR is a handful to a few dozen mutants;
+  # anything bigger is new-module territory that a dispatched sweep
+  # covers in shards.
+  MUTANT_BUDGET: 60
+
+jobs:
+  mutants:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      # Pinned to the sweep's version: both lean on this version's
+      # exit-code contract (2 = missed found, 3 = timeouts found).
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants@27.1.0
+      - name: Build pull-request diff
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: git diff "$BASE_SHA...$HEAD_SHA" > pr.diff
+      # --list parses sources without building, so the budget decision
+      # costs seconds whatever the diff size.
+      - name: Count mutants in the diff
+        id: budget
+        run: |
+          cargo mutants --in-diff pr.diff --list > mutants-list.txt
+          count=$(wc -l < mutants-list.txt)
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          if [ "$count" -eq 0 ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "### Mutants diff: nothing to test" >> "$GITHUB_STEP_SUMMARY"
+            echo "The diff generates no mutants (config-only or test-only change)." >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$count" -gt "$MUTANT_BUDGET" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "### Mutants diff: skipped — $count mutants exceeds the per-PR budget ($MUTANT_BUDGET)"
+              echo "A diff this size is new-module territory: cover it with a dispatched"
+              echo "module sweep (mutants-sweep.yml, #417) instead of a per-PR run."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "$count mutants in this diff (budget: $MUTANT_BUDGET)"
+          fi
+      - name: Test mutants in changed code
+        if: steps.budget.outputs.run == 'true'
+        run: |
+          # Exit 2 (missed found) and 3 (timeouts found) are the
+          # check's normal yield, reported below — never a red job.
+          # Anything else (baseline failure, internal error) is real.
+          set +e
+          cargo mutants --profile=mutants --in-diff pr.diff --jobs 1
+          code=$?
+          set -e
+          case "$code" in
+            0|2|3) ;;
+            *) echo "cargo mutants failed with exit code $code" >&2; exit "$code" ;;
+          esac
+      - name: Report results
+        if: always() && steps.budget.outputs.run == 'true'
+        run: |
+          {
+            echo "### Mutants diff (${{ steps.budget.outputs.count }} mutants)"
+            for kind in caught missed unviable timeout; do
+              count=$(wc -l < "mutants.out/$kind.txt" 2>/dev/null || echo 0)
+              echo "- $kind: $count"
+            done
+            if [ -s mutants.out/missed.txt ]; then
+              echo '#### Missed — add a test or `#[mutants::skip]` with a reason'
+              echo '```'
+              cat mutants.out/missed.txt
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.budget.outputs.run == 'true'
+        with:
+          name: mutants-in-diff
+          path: |
+            mutants.out/caught.txt
+            mutants.out/missed.txt
+            mutants.out/unviable.txt
+            mutants.out/timeout.txt
+            mutants.out/outcomes.json
+          if-no-files-found: warn
+          retention-days: 14
