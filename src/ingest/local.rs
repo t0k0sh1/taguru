@@ -149,13 +149,12 @@ pub(super) fn run_local(files: &[PathBuf], dry_run: bool, no_embed: bool, as_jso
     // Registry warnings (WAL replay notes, load errors) must reach the
     // operator; stdout stays reserved for the report lines.
     init_logging();
-    let embedder: Option<std::sync::Arc<dyn crate::embedding::EmbeddingProvider>> = if no_embed {
+    let embedder = if no_embed {
         None
     } else {
         // A fresh, never-raised flag: the import runs one command to
         // completion, with no graceful drain to unblock.
-        crate::embedding::HttpEmbeddings::from_env(crate::embedding::ShutdownFlag::default())
-            .map(|provider| std::sync::Arc::new(provider) as _)
+        crate::embedding::provider_from_env(crate::embedding::ShutdownFlag::default())
     };
     // The same knobs serve boots with — one reading for both entrances
     // (cli.rs documents them once).

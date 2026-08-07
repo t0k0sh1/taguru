@@ -480,9 +480,7 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
     // only be installed once.
     static INIT_LOGGING: std::sync::Once = std::sync::Once::new();
     INIT_LOGGING.call_once(crate::ingest::init_logging);
-    let embedder: Option<std::sync::Arc<dyn crate::embedding::EmbeddingProvider>> =
-        crate::embedding::HttpEmbeddings::from_env(crate::embedding::ShutdownFlag::default())
-            .map(|provider| std::sync::Arc::new(provider) as _);
+    let embedder = crate::embedding::provider_from_env(crate::embedding::ShutdownFlag::default());
     let mut config = crate::registry::BootConfig::from_env();
     config.data_dir = data_dir.clone();
     // Per-op WAL durability is for servers that must survive a crash

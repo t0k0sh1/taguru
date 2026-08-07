@@ -290,7 +290,9 @@ ENVIRONMENT (every knob; unset = the shown default):
                                broken declaration refuses boot (off)
   TAGURU_CROSS_SEARCH_CONCURRENCY  member contexts searched in parallel by
                                a single cross-context (group) query (4)
-  TAGURU_EMBED_URL             OpenAI-compatible /embeddings endpoint (off)
+  TAGURU_EMBED_URL             OpenAI-compatible /embeddings endpoint (off);
+                               'local' runs the model in-process when the
+                               binary was built with --features local-embed
   TAGURU_EMBED_MODEL           embedding model name
   TAGURU_EMBED_API_KEY         embedding provider credential
   TAGURU_EMBED_TIMEOUT_SECS    per-attempt provider ceiling (60); a request's

@@ -96,6 +96,18 @@ reqwest = { version = "0.13.4", default-features = false, features = ["rustls", 
 # and widen deny.toml's audit surface (MIT licensed, cargo-deny clean).
 tree-sitter = "0.26.11"
 tree-sitter-rust = "0.24.2"
+# Spike #474: in-process embedding provider (TAGURU_EMBED_URL=local) —
+# downloads an ONNX model once and embeds without any external
+# service. Optional and feature-gated: it pulls ONNX Runtime (a native
+# library), which the default dependency-light build must not carry.
+# Default features off: image-models would drag the image codec tree
+# (exr/rav1e, one of the two RUSTSEC-2024-0436 `paste` paths) for
+# CLIP-style models this crate never runs, and the TLS pair goes
+# rustls like every other client in this tree (reqwest, ureq).
+fastembed = { version = "5.17.4", optional = true, default-features = false, features = [
+    "hf-hub-rustls-tls",
+    "ort-download-binaries-rustls-tls",
+] }
 
 [dev-dependencies]
 # Property-based tests for the hand-rolled binary formats (context
@@ -143,3 +155,8 @@ debug = true
 inherits = "test"
 debug = "none"
 incremental = false
+
+[features]
+# In-process embedding (spike #474): build with
+# `--features local-embed`, then TAGURU_EMBED_URL=local selects it.
+local-embed = ["dep:fastembed"]
