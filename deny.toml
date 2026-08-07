@@ -7,6 +7,12 @@ targets = [
 
 [advisories]
 ignore = [
-    # "RUSTSEC-0000-0000", # crate@x.y.z: reason; revisit when <condition>
+    # paste@1.0.15: unmaintained notice, not a vulnerability — a
+    # compile-time proc-macro with no runtime surface, reached only
+    # through fastembed's hard dependency on tokenizers (the image
+    # codec path was cut by disabling fastembed's image-models
+    # feature). Revisit when tokenizers moves off paste or fastembed
+    # is promoted out of the local-embed spike (#474).
+    "RUSTSEC-2024-0436",
 ]
 yanked = "deny"
