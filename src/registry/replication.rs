@@ -239,4 +239,72 @@ mod tests {
         );
         let _ = fs::remove_dir_all(dir);
     }
+
+    /// A tailed refresh of a HOT entry drops the slot and bumps the
+    /// image generation exactly like an eviction — a staged flush must
+    /// see the slot it captured is gone (vacuous on today's replica,
+    /// load-bearing the moment anything there ever flushes).
+    #[test]
+    fn a_replica_refresh_of_a_hot_entry_bumps_the_image_generation() {
+        let dir = scratch_dir("replica-refresh-generation");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state.create("sake", ContextMeta::default()).unwrap();
+        state.flush_dirty();
+        state
+            .read_context("sake", |context| context.association_count())
+            .map_err(|_| "read")
+            .unwrap();
+        let entry = state.lookup("sake").unwrap();
+        let generation = entry.inner.read().image_generation;
+        state.replica_refresh("sake");
+        {
+            let inner = entry.inner.read();
+            assert!(
+                !matches!(inner.slot, Slot::Hot(_)),
+                "the refresh cools the slot"
+            );
+            assert_eq!(
+                inner.image_generation,
+                generation + 1,
+                "one refresh of a hot entry, one generation"
+            );
+        }
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A replica IS a replica, and its group reload actually reads the
+    /// manifest-delivered .group files into the served map.
+    #[test]
+    fn a_replica_reload_serves_the_group_files_on_disk() {
+        let dir = scratch_dir("replica-group-reload");
+        let state = AppState::boot_with(
+            dir.clone(),
+            usize::MAX,
+            None,
+            BootOptions {
+                replica: Some(std::sync::Arc::new(crate::replica::ReplicaInfo::new(None))),
+                ..BootOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(state.is_replica(), "the replica boot must read as one");
+
+        let record = groups::GroupRecord {
+            description: "蔵まとめ".to_string(),
+            contexts: std::collections::BTreeSet::from(["sake".to_string()]),
+            groups: std::collections::BTreeSet::new(),
+        };
+        fs::write(
+            dir.join(format!("{}.group", file_stem("kura"))),
+            serde_json::to_vec(&record).unwrap(),
+        )
+        .unwrap();
+        state.replica_reload_groups();
+        let (_, groups) = state.group_page(None, usize::MAX);
+        assert_eq!(groups.len(), 1, "{groups:?}");
+        assert_eq!(groups[0].0, "kura");
+        assert_eq!(groups[0].1.contexts.len(), 1);
+
+        let _ = fs::remove_dir_all(dir);
+    }
 }

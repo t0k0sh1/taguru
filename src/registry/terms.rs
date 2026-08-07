@@ -303,4 +303,37 @@ mod tests {
             }
         }
     }
+
+    /// A camel piece is split on the capital AFTER a lowercase run —
+    /// judged on the PREVIOUS character. "wordX" has no acronym tail
+    /// to rescue a drifted index, so only the previous-character test
+    /// can split it.
+    #[test]
+    fn a_trailing_capital_still_splits_off_its_piece() {
+        let word = |text: &str| text_terms(text)[0];
+        let terms = passage_terms("wordX");
+        assert!(
+            terms.contains(&word("word")),
+            "the lowercase piece must be in the stream"
+        );
+    }
+
+    /// Every whole-word term carries the word marker bit OR-ed in —
+    /// an XOR would CLEAR it for hashes that already carry the bit,
+    /// colliding word keys into the pair keyspace.
+    #[test]
+    fn word_terms_always_carry_the_marker_bit() {
+        for text in [
+            "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india",
+            "juliett", "kilo", "lima", "mike", "november", "oscar", "papa", "quebec", "romeo",
+            "sierra", "tango",
+        ] {
+            let terms = text_terms(text);
+            assert_eq!(terms.len(), 1);
+            assert!(
+                terms[0] & (1 << 63) != 0,
+                "word term for {text} lost its marker bit"
+            );
+        }
+    }
 }

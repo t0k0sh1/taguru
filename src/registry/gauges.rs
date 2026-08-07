@@ -648,4 +648,190 @@ mod tests {
 
         let _ = fs::remove_dir_all(dir);
     }
+
+    /// The sidecar lane is the exact five-file sum — meta, sources,
+    /// gloss vectors, paragraph vectors, BM25 — pinned against the
+    /// files' own sizes with every one present and nonzero.
+    #[test]
+    fn disk_usage_sums_the_five_sidecar_files_exactly() {
+        let dir = scratch_dir("gauges-sidecar-sum");
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let embedder = std::sync::Arc::new(crate::registry::test_support::MockEmbeddings::fruity(
+            &calls,
+        )) as std::sync::Arc<dyn crate::embedding::EmbeddingProvider>;
+        // Per-context metrics ON: with them Off the disk sweep is
+        // skipped entirely and this test would assert on zeros.
+        let state = AppState::boot_with(
+            dir.clone(),
+            usize::MAX,
+            Some(embedder),
+            BootOptions {
+                embed_passages: true,
+                passage_vector_limit: 20_000,
+                per_context_metrics: crate::metrics::PerContextMetrics::All,
+                ..BootOptions::default()
+            },
+        )
+        .unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .add_associations(
+                "sake",
+                vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, None)],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        let mut passages = std::collections::BTreeMap::new();
+        passages.insert("第1章".to_string(), "杜氏は高瀬である。".to_string());
+        state
+            .store_passages("sake", plain(passages))
+            .unwrap()
+            .unwrap();
+        state
+            .refresh_embeddings("sake", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        state
+            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        state
+            .search_passages("sake", "杜氏", 3, None, None, Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        state.note_read("sake", true);
+        state.persist_usage();
+        // The eviction persists every dirty sidecar (index, usage,
+        // meta) on the way down.
+        let entry = state.lookup("sake").unwrap();
+        assert!(state.evict_entry("sake", &entry));
+        // The legacy sources file is cleanup-only in current code —
+        // planted directly, the way the sweep tests do, so the lane
+        // sum has all five files nonzero.
+        fs::write(
+            sources_path(&dir, &file_stem("sake")),
+            br#"{"ghost":"legacy sources"}"#,
+        )
+        .unwrap();
+
+        state.refresh_disk_usage();
+        let len = |path: std::path::PathBuf| fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+        let stem = file_stem("sake");
+        let parts = [
+            ("meta", len(meta_path(&dir, &stem))),
+            ("sources", len(sources_path(&dir, &stem))),
+            ("vectors", len(vectors_path(&dir, &stem))),
+            ("pvectors", len(pvectors_path(&dir, &stem))),
+            ("bm25", len(bm25_path(&dir, &stem))),
+        ];
+        for (part, bytes) in parts {
+            assert!(bytes > 1, "the {part} sidecar must be nonzero for this pin");
+        }
+        let expected: u64 = parts.iter().map(|&(_, bytes)| bytes).sum();
+        assert_eq!(
+            entry.disk.lock().sidecar_bytes,
+            expected,
+            "the sidecar lane must be the exact five-file sum"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The scrape's residency numbers are exact sums — the fleet
+    /// total and the per-context row both equal hot graph plus the
+    /// four cached stores, and the unsourced-weight total equals the
+    /// weight actually carried.
+    #[test]
+    fn gauge_snapshot_residency_and_unsourced_weight_are_exact() {
+        let dir = scratch_dir("gauges-exact-sums");
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let embedder = std::sync::Arc::new(crate::registry::test_support::MockEmbeddings::fruity(
+            &calls,
+        )) as std::sync::Arc<dyn crate::embedding::EmbeddingProvider>;
+        let state = AppState::boot_with(
+            dir.clone(),
+            usize::MAX,
+            Some(embedder),
+            BootOptions {
+                embed_passages: true,
+                passage_vector_limit: 20_000,
+                per_context_metrics: crate::metrics::PerContextMetrics::All,
+                ..BootOptions::default()
+            },
+        )
+        .unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        // A sourceless association carries unsourced weight.
+        state
+            .add_associations(
+                "sake",
+                vec![assoc_op("蔵", "杜氏", "高瀬", 2.5, None)],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        let mut passages = std::collections::BTreeMap::new();
+        passages.insert("第1章".to_string(), "杜氏は高瀬である。".to_string());
+        state
+            .store_passages("sake", plain(passages))
+            .unwrap()
+            .unwrap();
+        state
+            .refresh_embeddings("sake", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        state
+            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        state
+            .search_passages("sake", "杜氏", 3, None, None, Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+
+        let entry = state.lookup("sake").unwrap();
+        let graph = {
+            let inner = entry.inner.read();
+            let Slot::Hot(context) = &inner.slot else {
+                panic!("the writes above leave the slot hot");
+            };
+            context.footprint() as u64
+        };
+        let cache = entry.vectors_footprint() as u64
+            + entry.passages_footprint() as u64
+            + entry.bm25_footprint() as u64
+            + entry.passage_vectors_footprint() as u64;
+        assert!(graph > 1 && cache > 1);
+
+        let snapshot = state.gauge_snapshot();
+        assert_eq!(
+            snapshot.resident_bytes,
+            graph + cache,
+            "the fleet total is the exact sum"
+        );
+        assert!(
+            (snapshot.unsourced_weight_total - 2.5).abs() < 1e-9,
+            "{}",
+            snapshot.unsourced_weight_total
+        );
+        let row = snapshot
+            .per_context
+            .iter()
+            .find(|row| row.name == "sake")
+            .expect("per-context rows are on");
+        assert_eq!(
+            row.resident_bytes,
+            graph + cache,
+            "the row repeats the same exact sum"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
 }

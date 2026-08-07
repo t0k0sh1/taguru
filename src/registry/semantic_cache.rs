@@ -651,4 +651,15 @@ mod tests {
         assert_eq!(cache.len(), 0);
         assert!(cache.candidates(&bucket("p"), &unit(1.0, 0.0)).is_empty());
     }
+
+    /// Every candidates() sweep advances the recency clock — even one
+    /// that finds no bucket — or LRU decays into insertion order.
+    #[test]
+    fn a_candidates_sweep_advances_the_recency_clock() {
+        let mut cache = SemanticCache::new(Some(0.5));
+        let _ = cache.candidates(&bucket("missing"), &[1.0, 0.0]);
+        assert_eq!(cache.tick, 1, "a bucket miss is still a recency event");
+        let _ = cache.candidates(&bucket("missing"), &[1.0, 0.0]);
+        assert_eq!(cache.tick, 2);
+    }
 }
