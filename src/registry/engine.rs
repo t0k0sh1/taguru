@@ -2890,6 +2890,9 @@ mod tests {
                 .unwrap()
                 .unwrap();
 
+            let entry = state.lookup("sake").unwrap();
+            let seq_before = entry.inner.read().wal_seq;
+
             // The deterministic partial batch the tail-replay test
             // uses: op 1 applies, op 2 refuses, op 3 goes untried.
             let outcome = state
@@ -2905,8 +2908,15 @@ mod tests {
                 .unwrap();
             assert_eq!(outcome.unwrap_err().applied, 1);
 
-            let entry = state.lookup("sake").unwrap();
-            let books = entry.inner.read().wal_bytes;
+            let inner = entry.inner.read();
+            assert_eq!(
+                inner.wal_seq,
+                seq_before + 1,
+                "the seq must advance by exactly the applied prefix — too high \
+                 dodges the collision the restart below would catch"
+            );
+            let books = inner.wal_bytes;
+            drop(inner);
             let on_disk = fs::metadata(wal_path(&dir, &file_stem("sake")))
                 .unwrap()
                 .len();

@@ -52,6 +52,39 @@ fn dir_contents(dir: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
         .collect()
 }
 
+/// Any PUBLISHED segment anywhere under `dir` carrying `needle`?
+/// Wal segments are uncompressed JSON lines and land whole (a
+/// `LocalFileSystem` put stages a `name#N` temp file, then
+/// renames), so finding the bytes in a `*.jsonl` object proves the
+/// RECORD shipped. Both halves of the filter matter: waiting for a
+/// segment file alone races the shipper (the first segment to
+/// appear can predate the write this test must restore), and
+/// matching a still-staged `#N` temp file would kill the writer
+/// before the rename publishes the segment restore reads.
+fn any_segment_under_contains(dir: &Path, needle: &str) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let path = entry.path();
+        if path.is_dir() {
+            return any_segment_under_contains(&path, needle);
+        }
+        if !entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.ends_with(".jsonl") && !name.contains('#'))
+        {
+            return false;
+        }
+        std::fs::read(&path).is_ok_and(|bytes| {
+            bytes
+                .windows(needle.len())
+                .any(|window| window == needle.as_bytes())
+        })
+    })
+}
+
 fn run_cli(args: &[&str], extra_env: &[(&str, &str)]) -> std::process::Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_taguru"));
     crate::support::common::scrub_taguru_env(&mut command);
@@ -257,39 +290,6 @@ fn shipped_bucket_restores_to_an_equivalent_directory() {
 /// lane's replay can carry the write into the restored directory.
 #[test]
 fn a_hard_killed_writers_bucket_restores_the_shipped_wal_tail() {
-    /// Any PUBLISHED segment anywhere under `dir` carrying `needle`?
-    /// Wal segments are uncompressed JSON lines and land whole (a
-    /// `LocalFileSystem` put stages a `name#N` temp file, then
-    /// renames), so finding the bytes in a `*.jsonl` object proves the
-    /// RECORD shipped. Both halves of the filter matter: waiting for a
-    /// segment file alone races the shipper (the first segment to
-    /// appear can predate the write this test must restore), and
-    /// matching a still-staged `#N` temp file would kill the writer
-    /// before the rename publishes the segment restore reads.
-    fn any_segment_under_contains(dir: &Path, needle: &str) -> bool {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return false;
-        };
-        entries.flatten().any(|entry| {
-            let path = entry.path();
-            if path.is_dir() {
-                return any_segment_under_contains(&path, needle);
-            }
-            if !entry
-                .file_name()
-                .to_str()
-                .is_some_and(|name| name.ends_with(".jsonl") && !name.contains('#'))
-            {
-                return false;
-            }
-            std::fs::read(&path).is_ok_and(|bytes| {
-                bytes
-                    .windows(needle.len())
-                    .any(|window| window == needle.as_bytes())
-            })
-        })
-    }
-
     let bucket = scratch("wal-tail-bucket");
     let server = Server::start_with_env(
         "repl-wal-tail",
@@ -409,12 +409,20 @@ fn the_local_graph_wal_resets_once_the_shipper_catches_up() {
         std::fs::metadata(&wal).is_ok_and(|meta| meta.len() > 0)
     });
 
-    // … the shipper ships it within its interval, and the next flush
-    // tick's housekeeping reset is then allowed to run.
+    // … the shipper publishes the record's segment — proof the gate's
+    // condition is genuinely met, so the reset observed below cannot
+    // be a gate-ignoring early reset passing by luck …
+    wait_for("the record's segment to publish", || {
+        any_segment_under_contains(&bucket.join("gen-00000000000000000001").join("wal"), "杜氏")
+    });
+
+    // … and the next flush tick's housekeeping reset is then allowed
+    // to run. The file must EXIST and be empty: reset truncates, and
+    // treating a vanished (unshipped) log as success would hide it.
     wait_for("the local wal to reset once shipped", || {
         std::fs::metadata(&wal)
             .map(|meta| meta.len() == 0)
-            .unwrap_or(true)
+            .unwrap_or(false)
     });
 
     let data_dir = server.stop_gracefully();
