@@ -341,6 +341,29 @@ pub(super) fn run_local(files: &[PathBuf], dry_run: bool, no_embed: bool, as_jso
                     embed_failures += 1;
                 }
             }
+            // TAGURU_EMBED_PASSAGES=1 is the operator's consent to
+            // spend on passage vectors too — skipping them here while
+            // the glosses above embed automatically left the vector
+            // lane silently absent until a manual refresh (#479).
+            if state.passage_embedding_enabled() {
+                match state.refresh_passage_embeddings(name, Deadline::unbounded()) {
+                    None | Some(Ok(crate::registry::PassageRefreshOutcome { embedded: 0, .. })) => {
+                    }
+                    Some(Ok(outcome)) => {
+                        if !as_json {
+                            println!("{name}: embedded {} passages", outcome.embedded);
+                        }
+                    }
+                    Some(Err(error)) => {
+                        eprintln!(
+                            "taguru: import: {name}: passage embedding refresh failed \
+                             ({error}) — the passages are imported and durable; refresh \
+                             later via POST /contexts/{name}/embeddings/refresh"
+                        );
+                        embed_failures += 1;
+                    }
+                }
+            }
         }
     }
 

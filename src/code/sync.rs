@@ -549,6 +549,18 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
     {
         eprintln!("taguru-code: sync: embeddings refresh: {error}");
     }
+    // Same consent logic as `taguru import` (#479): with
+    // TAGURU_EMBED_PASSAGES=1 the passage vectors must follow the
+    // glosses, or the vector lane stays silently absent until a
+    // server-side refresh this offline flow never performs.
+    if state.embeddings_configured()
+        && state.passage_embedding_enabled()
+        && (imported > 0 || retracted > 0)
+        && let Some(Err(error)) =
+            state.refresh_passage_embeddings(&args.context, taguru::deadline::Deadline::unbounded())
+    {
+        eprintln!("taguru-code: sync: passage embeddings refresh: {error}");
+    }
     // Retract-then-reimport appends to the passage log on every sync,
     // and this process exits before the store's own compaction
     // triggers (write-path floor, eviction) can ever run — left
