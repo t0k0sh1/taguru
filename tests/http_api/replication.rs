@@ -367,6 +367,62 @@ fn a_hard_killed_writers_bucket_restores_the_shipped_wal_tail() {
     }
 }
 
+/// The graph lane's housekeeping WAL reset consults the shipper and
+/// proceeds the moment it has read exactly through the watermark
+/// (`wal_seq - 1`). This pins BOTH failure directions: a reset that
+/// ignores the gate diverges the shipped prefix on every flush, and a
+/// watermark claimed one record too high never satisfies the shipper's
+/// cursor — the local log then grows until the deferral budget (64
+/// MiB) or the WAL cap, neither of which this test would ever reach.
+#[test]
+fn the_local_graph_wal_resets_once_the_shipper_catches_up() {
+    let bucket = scratch("wal-reset-bucket");
+    let server = Server::start_with_env(
+        "repl-wal-reset",
+        &[
+            ("TAGURU_REPLICATE_URL", &bucket_url(&bucket)),
+            ("TAGURU_REPLICATE_INTERVAL_MS", "100"),
+        ],
+    );
+    server.ok(
+        "PUT",
+        "/contexts/sake",
+        Some(json!({"description": "酒蔵の知識"})),
+    );
+    wait_for("the baseline to complete", || {
+        bucket
+            .join("gen-00000000000000000001")
+            .join("complete")
+            .exists()
+    });
+
+    // A write grows the local log …
+    server.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([
+            {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0, "source": "第2段落"},
+        ])),
+    );
+    let wal = server.data_dir.join("sake.wal.jsonl");
+    wait_for("the write to land in the local wal", || {
+        std::fs::metadata(&wal).is_ok_and(|meta| meta.len() > 0)
+    });
+
+    // … the shipper ships it within its interval, and the next flush
+    // tick's housekeeping reset is then allowed to run.
+    wait_for("the local wal to reset once shipped", || {
+        std::fs::metadata(&wal)
+            .map(|meta| meta.len() == 0)
+            .unwrap_or(true)
+    });
+
+    let data_dir = server.stop_gracefully();
+    for dir in [bucket, data_dir] {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
 #[test]
 fn a_second_writer_fences_the_first_which_fail_stops_but_keeps_serving() {
     let bucket = scratch("fence-bucket");

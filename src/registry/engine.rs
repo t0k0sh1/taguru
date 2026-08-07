@@ -2819,4 +2819,547 @@ mod tests {
 
         let _ = fs::remove_dir_all(dir);
     }
+
+    /// `wal_max_bytes == 0` means the cap is OFF — the guard must read
+    /// "a cap is declared AND the log is past it", never "the log is
+    /// past zero" (which is every log, refusing every write).
+    #[test]
+    fn a_zero_wal_cap_disables_the_cap_instead_of_refusing_everything() {
+        let dir = scratch_dir("wal-cap-off");
+        let state = AppState::boot_with(
+            dir.clone(),
+            usize::MAX,
+            None,
+            BootOptions {
+                wal_max_bytes: 0,
+                ..BootOptions::default()
+            },
+        )
+        .unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .add_associations(
+                "sake",
+                vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        let count = state
+            .read_context("sake", |context| context.association_count())
+            .map_err(|_| "read")
+            .unwrap();
+        assert_eq!(count, 1);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The partial-apply re-append must leave the WAL bookkeeping
+    /// telling the truth: `wal_bytes` equal to the bytes actually on
+    /// disk, and `wal_seq` advanced by exactly the applied prefix — a
+    /// drifted seq collides with the next batch's records and replay's
+    /// later-wins dedup silently drops acknowledged ops on restart.
+    #[test]
+    fn partial_apply_bookkeeping_matches_the_disk_and_survives_a_restart() {
+        let dir = scratch_dir("wal-partial-books");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .add_associations(
+                    "sake",
+                    vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
+                    Deadline::unbounded(),
+                )
+                .unwrap()
+                .unwrap();
+            state
+                .add_aliases(
+                    "sake",
+                    &BTreeMap::from([
+                        ("Aomine".to_string(), "青嶺酒造".to_string()),
+                        ("AomineShuzo".to_string(), "青嶺酒造".to_string()),
+                    ]),
+                    &BTreeMap::new(),
+                )
+                .unwrap()
+                .unwrap();
+
+            // The deterministic partial batch the tail-replay test
+            // uses: op 1 applies, op 2 refuses, op 3 goes untried.
+            let outcome = state
+                .remove_aliases(
+                    "sake",
+                    &[
+                        "Aomine".to_string(),
+                        "NONEXISTENT".to_string(),
+                        "AomineShuzo".to_string(),
+                    ],
+                    &[],
+                )
+                .unwrap();
+            assert_eq!(outcome.unwrap_err().applied, 1);
+
+            let entry = state.lookup("sake").unwrap();
+            let books = entry.inner.read().wal_bytes;
+            let on_disk = fs::metadata(wal_path(&dir, &file_stem("sake")))
+                .unwrap()
+                .len();
+            assert_eq!(
+                books, on_disk,
+                "wal_bytes must equal the re-appended file's real size"
+            );
+
+            // A further write rides the corrected seq; no flush — the
+            // WAL alone must carry all of it through the restart.
+            state
+                .add_associations(
+                    "sake",
+                    vec![assoc_op("高瀬", "出身", "南部杜氏", 1.0, None)],
+                    Deadline::unbounded(),
+                )
+                .unwrap()
+                .unwrap();
+        }
+
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let removed = state
+            .read_context("sake", |context| {
+                context.query(Some("Aomine"), Some("代表銘柄"), None)
+            })
+            .map_err(|_| "read")
+            .unwrap();
+        assert!(removed.is_empty(), "the applied removal must replay");
+        let untried = state
+            .read_context("sake", |context| {
+                context.query(Some("AomineShuzo"), Some("代表銘柄"), None)
+            })
+            .map_err(|_| "read")
+            .unwrap();
+        assert_eq!(untried.len(), 1, "the untried alias must survive");
+        let later = state
+            .read_context("sake", |context| {
+                context.query(Some("高瀬"), Some("出身"), None)
+            })
+            .map_err(|_| "read")
+            .unwrap();
+        assert_eq!(
+            later.len(),
+            1,
+            "the write after the partial batch must not collide with its seqs"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The storage-quota "used" is the exact five-lane sum — image,
+    /// passages snapshot, sidecars, graph WAL, passages log — pinned
+    /// here with every lane nonzero against a hand-computed total, so
+    /// no term can silently drop out of (or multiply into) the gate.
+    #[test]
+    fn storage_quota_used_is_the_exact_five_lane_sum() {
+        let dir = scratch_dir("quota-five-lanes");
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        {
+            let embedder = Some(std::sync::Arc::new(
+                crate::registry::test_support::MockEmbeddings::fruity(&calls),
+            )
+                as std::sync::Arc<dyn crate::embedding::EmbeddingProvider>);
+            let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .add_associations(
+                    "sake",
+                    vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
+                    Deadline::unbounded(),
+                )
+                .unwrap()
+                .unwrap();
+            state.flush_dirty();
+            state
+                .refresh_embeddings("sake", Deadline::unbounded())
+                .unwrap()
+                .unwrap();
+            let mut passages = BTreeMap::new();
+            passages.insert("第1章".to_string(), "杜氏は高瀬である。".to_string());
+            state
+                .store_passages("sake", plain(passages))
+                .unwrap()
+                .unwrap();
+            // Evict once: the passage log compacts into a snapshot
+            // (the passages lane), and the sidecars land on disk.
+            let entry = state.lookup("sake").unwrap();
+            state.evict_entry("sake", &entry);
+            // Fresh pending bytes in both live lanes, left unflushed.
+            let mut more = BTreeMap::new();
+            more.insert("第2章".to_string(), "仕込み水は伏流水。".to_string());
+            state.store_passages("sake", plain(more)).unwrap().unwrap();
+            state
+                .add_associations(
+                    "sake",
+                    vec![assoc_op("高瀬", "出身", "南部杜氏", 1.0, None)],
+                    Deadline::unbounded(),
+                )
+                .unwrap()
+                .unwrap();
+        }
+
+        let state = AppState::boot_with(
+            dir.clone(),
+            usize::MAX,
+            None,
+            BootOptions {
+                context_quotas: HashMap::from([(
+                    "sake".to_string(),
+                    ContextQuota {
+                        storage_bytes: Some(1),
+                        cache_bytes: None,
+                    },
+                )]),
+                ..BootOptions::default()
+            },
+        )
+        .unwrap();
+        let entry = state.lookup("sake").unwrap();
+        let disk = *entry.disk.lock();
+        let inner = entry.inner.read();
+        let passages_wal = entry
+            .passages
+            .lock()
+            .as_ref()
+            .map(|store| store.pending_log_bytes())
+            .unwrap_or(inner.passages_wal_bytes);
+        for (lane, bytes) in [
+            ("image", disk.image_bytes),
+            ("passages", disk.passages_bytes),
+            ("sidecar", disk.sidecar_bytes),
+            ("wal", inner.wal_bytes),
+            ("passages_wal", passages_wal),
+        ] {
+            assert!(bytes > 1, "the {lane} lane must be nonzero for this pin");
+        }
+        let expected = disk.image_bytes
+            + disk.passages_bytes
+            + disk.sidecar_bytes
+            + inner.wal_bytes
+            + passages_wal;
+        drop(inner);
+        assert_eq!(
+            state.storage_quota_refusal("sake"),
+            Some((expected, 1)),
+            "used must be the exact five-lane sum"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A failed append that never created the log file has leaked
+    /// nothing: the rollback's NotFound is the CLEAN outcome, and must
+    /// not trigger the recovery flush the genuinely-leaky faults get.
+    #[test]
+    fn a_failed_append_with_no_log_file_skips_the_recovery_flush() {
+        let dir = scratch_dir("wal-append-notfound");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        assert!(
+            !wal_path(&dir, &file_stem("sake")).exists(),
+            "no write has landed; the log must not exist yet"
+        );
+        let flushes_before = rendered(&state)
+            .lines()
+            .filter(|line| line.starts_with("taguru_flush_total"))
+            .map(String::from)
+            .collect::<Vec<_>>();
+
+        // The injected failure fires before any I/O: the append fails
+        // with the file still absent, so the rollback truncate lands
+        // exactly on the NotFound arm.
+        wal::fail_appends_after(0);
+        let outcome = state.add_associations(
+            "sake",
+            vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
+            Deadline::unbounded(),
+        );
+        assert!(matches!(outcome, Err(AccessError::Unpersisted(_))));
+
+        let flushes_after = rendered(&state)
+            .lines()
+            .filter(|line| line.starts_with("taguru_flush_total"))
+            .map(String::from)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            flushes_before, flushes_after,
+            "a leak-free refusal must not spend a recovery flush"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The eviction-save watermark is `wal_seq - 1` — the last seq the
+    /// image actually covers. One higher and the NEXT write's record is
+    /// born replay-inert: present in the log, skipped on restart, the
+    /// acknowledged write silently gone.
+    #[test]
+    fn a_write_after_an_eviction_save_survives_a_restart() {
+        let dir = scratch_dir("evict-watermark");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .add_associations(
+                    "sake",
+                    vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
+                    Deadline::unbounded(),
+                )
+                .unwrap()
+                .unwrap();
+            // A rival flush "in flight" (the claim flag, set by hand)
+            // makes the eviction's out-of-lock flush attempts no-ops,
+            // forcing the LOCK-HELD fallback save — the path that
+            // stamps the watermark itself and truncates the log.
+            let entry = state.lookup("sake").unwrap();
+            entry.flushing.store(true, Ordering::Relaxed);
+            assert!(state.evict_entry("sake", &entry));
+            entry.flushing.store(false, Ordering::Relaxed);
+            // The next write's seq is the first one PAST the image.
+            state
+                .add_associations(
+                    "sake",
+                    vec![assoc_op("高瀬", "出身", "南部杜氏", 1.0, None)],
+                    Deadline::unbounded(),
+                )
+                .unwrap()
+                .unwrap();
+            // No flush: only the WAL carries the second write.
+        }
+
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let survived = state
+            .read_context("sake", |context| {
+                context.query(Some("高瀬"), Some("出身"), None)
+            })
+            .map_err(|_| "read")
+            .unwrap();
+        assert_eq!(
+            survived.len(),
+            1,
+            "the post-eviction write must replay; an over-claimed watermark eats it"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// On a replica the tailer owns every on-disk file: an eviction
+    /// that finds a locally-built (dirty) BM25 index must drop it
+    /// WITHOUT persisting — writing the sidecar would race the files
+    /// the manifest owns.
+    #[test]
+    fn a_replica_eviction_drops_a_dirty_bm25_index_without_writing_it() {
+        let dir = scratch_dir("replica-bm25");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            let mut passages = BTreeMap::new();
+            passages.insert("第1章".to_string(), "杜氏は高瀬である。".to_string());
+            state
+                .store_passages("sake", plain(passages))
+                .unwrap()
+                .unwrap();
+            state.flush_dirty();
+            // No search here: the BM25 sidecar must not exist yet.
+        }
+        assert!(!bm25_path(&dir, &file_stem("sake")).exists());
+
+        let state = AppState::boot_with(
+            dir.clone(),
+            usize::MAX,
+            None,
+            BootOptions {
+                replica: Some(std::sync::Arc::new(crate::replica::ReplicaInfo::new(None))),
+                ..BootOptions::default()
+            },
+        )
+        .unwrap();
+        state
+            .search_passages("sake", "杜氏", 3, None, None, Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        let entry = state.lookup("sake").unwrap();
+        assert!(
+            entry.bm25_dirty.load(Ordering::Relaxed),
+            "the search built the index locally; it is dirty by construction"
+        );
+        state.evict_entry("sake", &entry);
+        assert!(
+            !bm25_path(&dir, &file_stem("sake")).exists(),
+            "a replica must never write the sidecar the manifest owns"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The budget gate's cheap path: off the 64th operation, an
+    /// under-budget estimate skips the sweep entirely — pinned by
+    /// poking the estimate and observing the sweep would have
+    /// reconciled it.
+    #[test]
+    fn the_budget_gate_skips_the_sweep_off_the_reconciliation_beat() {
+        let dir = scratch_dir("budget-gate-skip");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        // Consume op 0 (a multiple of 64: it always sweeps).
+        state.enforce_budget("sake");
+        // Poke a sentinel the next sweep would overwrite …
+        state.0.resident_estimate.store(-42, Ordering::Relaxed);
+        // … and take the off-beat, under-budget path: op 1.
+        state.enforce_budget("sake");
+        assert_eq!(
+            state.0.resident_estimate.load(Ordering::Relaxed),
+            -42,
+            "the off-beat under-budget call must not run the sweep"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The sweep's residency total is the exact five-term sum — hot
+    /// graph plus the four cached stores — pinned against a
+    /// hand-computed total with every term nonzero, so no term can
+    /// drop out of (or multiply into) the eviction arithmetic.
+    #[test]
+    fn the_budget_sweep_total_is_the_exact_five_term_sum() {
+        let dir = scratch_dir("budget-five-terms");
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let embedder = std::sync::Arc::new(crate::registry::test_support::MockEmbeddings::fruity(
+            &calls,
+        ));
+        let state =
+            crate::registry::test_support::boot_for_passage_embedding(&dir, embedder, 20_000);
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .add_associations(
+                "sake",
+                vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert("第1章".to_string(), "杜氏は高瀬である。".to_string());
+        state
+            .store_passages("sake", plain(passages))
+            .unwrap()
+            .unwrap();
+        state
+            .refresh_embeddings("sake", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        state
+            .refresh_passage_embeddings("sake", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        state
+            .search_passages("sake", "杜氏", 3, None, None, Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+
+        let entry = state.lookup("sake").unwrap();
+        let inner = entry.inner.read();
+        let Slot::Hot(context) = &inner.slot else {
+            panic!("the writes above leave the slot hot");
+        };
+        let resident = context.footprint();
+        drop(inner);
+        let terms = [
+            ("graph", resident),
+            ("vectors", entry.vectors_footprint()),
+            ("passages", entry.passages_footprint()),
+            ("bm25", entry.bm25_footprint()),
+            ("passage_vectors", entry.passage_vectors_footprint()),
+        ];
+        for (term, bytes) in terms {
+            assert!(bytes > 1, "the {term} term must be nonzero for this pin");
+        }
+        let expected: usize = terms.iter().map(|&(_, bytes)| bytes).sum();
+
+        // 64 consecutive calls cross the reconciliation beat exactly
+        // once, whatever phase the op counter is in — the sweep on
+        // that beat stores the measured total, and the off-beat calls
+        // after it leave the stored value alone.
+        for _ in 0..64 {
+            state.enforce_budget("sake");
+        }
+        assert_eq!(
+            state.0.resident_estimate.load(Ordering::Relaxed),
+            expected as i64,
+            "the reconciled estimate must be the exact five-term sum"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// Evicting a passage store with NOTHING pending must not compact:
+    /// the snapshot on disk is already current, and a rewrite would
+    /// spend an fsync (and churn the file) on every clean eviction.
+    #[test]
+    #[cfg(unix)]
+    fn evicting_a_clean_passage_store_does_not_rewrite_its_snapshot() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = scratch_dir("evict-clean-passages");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert("第1章".to_string(), "杜氏は高瀬である。".to_string());
+        state
+            .store_passages("sake", plain(passages))
+            .unwrap()
+            .unwrap();
+        let entry = state.lookup("sake").unwrap();
+        // First eviction compacts the pending log into the snapshot.
+        assert!(state.evict_entry("sake", &entry));
+        let snapshot = crate::registry::passages_path(&dir, &file_stem("sake"));
+        let inode = fs::metadata(&snapshot).unwrap().ino();
+
+        // Resident again with nothing pending …
+        state
+            .search_passages("sake", "杜氏", 3, None, None, Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        // … a second eviction must leave the snapshot file alone.
+        assert!(state.evict_entry("sake", &entry));
+        assert_eq!(
+            fs::metadata(&snapshot).unwrap().ino(),
+            inode,
+            "a clean store's eviction rewrote its snapshot"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
 }
