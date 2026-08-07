@@ -876,6 +876,7 @@ mod tests {
     /// must neither rewrite the sidecar nor move the config revision —
     /// the no-op refresh is what the auto-ticker hits forever.
     #[test]
+    #[cfg(unix)]
     fn a_no_op_passage_refresh_neither_rewrites_the_sidecar_nor_bumps_config() {
         use std::os::unix::fs::MetadataExt;
 

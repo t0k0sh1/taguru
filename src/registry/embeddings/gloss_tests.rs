@@ -1793,6 +1793,7 @@ mod tests {
     /// must not rewrite the sidecar — the no-op refresh is the hot
     /// path the auto-ticker hits forever.
     #[test]
+    #[cfg(unix)]
     fn a_no_op_gloss_refresh_leaves_the_sidecar_file_untouched() {
         use std::os::unix::fs::MetadataExt;
 
