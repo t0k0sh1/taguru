@@ -12,4 +12,10 @@ timeout_multiplier = 3.0
 # and `<` mutants on the same comparison are caught).
 exclude_re = [
     "replace > with >= in dispatch_chunks_concurrently",
+    # The in-process embedding provider (local-embed, on by default)
+    # is exercised by an #[ignore]d smoke test that downloads a real
+    # model — CI sweeps can never kill mutants there, and counting
+    # them as missed would only be noise.
+    "LocalEmbeddings",
+    "fastembed_model",
 ]

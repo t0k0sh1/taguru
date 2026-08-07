@@ -157,6 +157,12 @@ debug = "none"
 incremental = false
 
 [features]
-# In-process embedding (spike #474): build with
-# `--features local-embed`, then TAGURU_EMBED_URL=local selects it.
+# In-process embedding (#474) is ON by default: the capability ships
+# in every normally-built binary and a RUNTIME flag
+# (TAGURU_EMBED_URL=local) decides whether it runs — a build-time
+# gate proved to be a wall nobody would climb just to evaluate the
+# lane. `--no-default-features` builds the slim binary; the Docker
+# image must (musl has no ONNX Runtime binaries, and `scratch`
+# cannot dlopen).
+default = ["local-embed"]
 local-embed = ["dep:fastembed"]
