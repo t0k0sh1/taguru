@@ -177,7 +177,7 @@ pub fn provider_from_env(shutdown: ShutdownFlag) -> Option<Arc<dyn EmbeddingProv
     if url.eq_ignore_ascii_case("local") {
         #[cfg(feature = "local-embed")]
         {
-            return match LocalEmbeddings::from_env() {
+            return match LocalEmbeddings::from_env(shutdown) {
                 Ok(provider) => Some(Arc::new(provider) as Arc<dyn EmbeddingProvider>),
                 Err(error) => {
                     tracing::warn!("TAGURU_EMBED_URL=local: {error}; the embedding lane stays off");
@@ -275,8 +275,32 @@ pub const LOCAL_MODELS: [LocalModelInfo; 5] = [
     },
 ];
 
+/// Where local models actually land. fastembed lets `HF_HOME`
+/// override any `with_cache_dir` it is handed, so this mirrors that
+/// precedence rather than promising `~/.taguru/models` and being
+/// wrong whenever a Hugging Face cache is already configured — the
+/// path this resolves is the path that fills up, and `taguru-code
+/// models` prints it. Feature-free (with the same allow rationale as
+/// [`LOCAL_MODELS`]): the default `taguru` server build compiles it
+/// dark.
+#[allow(dead_code)]
+pub fn model_cache_dir() -> Option<std::path::PathBuf> {
+    if let Some(hf_home) = std::env::var_os("HF_HOME").filter(|value| !value.is_empty()) {
+        return Some(std::path::PathBuf::from(hf_home));
+    }
+    #[cfg(unix)]
+    let home = std::env::var_os("HOME");
+    #[cfg(not(unix))]
+    let home = std::env::var_os("USERPROFILE");
+    home.filter(|home| !home.is_empty()).map(|home| {
+        std::path::PathBuf::from(home)
+            .join(".taguru")
+            .join("models")
+    })
+}
+
 /// In-process provider (spike #474): a fastembed ONNX model,
-/// downloaded once into `~/.taguru/models` and run on the CPU — the
+/// downloaded once into [`model_cache_dir`] and run on the CPU — the
 /// embedding lane with no external service to stand up. Selected by
 /// `TAGURU_EMBED_URL=local` + `TAGURU_EMBED_MODEL` naming one of
 /// [`LOCAL_MODELS`].
@@ -284,6 +308,7 @@ pub const LOCAL_MODELS: [LocalModelInfo; 5] = [
 mod local {
     use super::{
         Deadline, DeadlineExceeded, EmbedPurpose, EmbeddingProvider, LOCAL_MODELS, LocalModelInfo,
+        SHUTDOWN_POLL, SHUTDOWN_REFUSAL, ShutdownFlag,
     };
     use parking_lot::Mutex;
 
@@ -311,26 +336,15 @@ mod local {
             .join(", ")
     }
 
-    /// `~/.taguru/models` — the same per-user home the usage log
-    /// (#470) claimed, so everything taguru keeps outside a project
-    /// lives under one roof.
-    fn model_cache_dir() -> Option<std::path::PathBuf> {
-        #[cfg(unix)]
-        let home = std::env::var_os("HOME");
-        #[cfg(not(unix))]
-        let home = std::env::var_os("USERPROFILE");
-        home.filter(|home| !home.is_empty()).map(|home| {
-            std::path::PathBuf::from(home)
-                .join(".taguru")
-                .join("models")
-        })
-    }
-
     pub struct LocalEmbeddings {
         model_name: String,
         /// From the table row: whether texts need the e5 family's
         /// `query: ` / `passage: ` markers prepended.
         e5_prefix: bool,
+        /// The same drain latch the HTTP provider holds: a caller
+        /// queued on the engine lock must notice the stop signal, not
+        /// sit out another batch's inference first.
+        shutdown: ShutdownFlag,
         /// fastembed's session, serialized behind a lock: one
         /// inference at a time is the spike's posture (the refresh
         /// paths batch internally, so parallel sessions would buy
@@ -344,20 +358,20 @@ mod local {
         /// constructs providers at boot, and a missing model is a
         /// boot-time condition an operator must see, not a per-request
         /// surprise.
-        pub fn from_env() -> Result<LocalEmbeddings, String> {
+        pub fn from_env(shutdown: ShutdownFlag) -> Result<LocalEmbeddings, String> {
             let name = std::env::var("TAGURU_EMBED_MODEL").map_err(|_| {
                 format!(
                     "TAGURU_EMBED_MODEL must name the local model; supported: {}",
                     supported()
                 )
             })?;
-            LocalEmbeddings::from_parts(&name)
+            LocalEmbeddings::from_parts(&name, shutdown)
         }
 
         /// The env-free core `from_env` wraps — also the smoke test's
         /// entrance, which must not race other tests over the real
         /// `TAGURU_EMBED_MODEL`.
-        fn from_parts(name: &str) -> Result<LocalEmbeddings, String> {
+        fn from_parts(name: &str, shutdown: ShutdownFlag) -> Result<LocalEmbeddings, String> {
             let info: &LocalModelInfo = LOCAL_MODELS
                 .iter()
                 .find(|info| info.name.eq_ignore_ascii_case(name))
@@ -366,7 +380,7 @@ mod local {
                 })?;
             let model = fastembed_model(info.name)
                 .expect("every LOCAL_MODELS row maps (held by the lockstep test)");
-            let cache = model_cache_dir()
+            let cache = super::model_cache_dir()
                 .ok_or_else(|| "no home directory to cache the model under".to_string())?;
             let engine = fastembed::TextEmbedding::try_new(
                 fastembed::InitOptions::new(model)
@@ -377,6 +391,7 @@ mod local {
             Ok(LocalEmbeddings {
                 model_name: info.name.to_string(),
                 e5_prefix: info.e5_prefix,
+                shutdown,
                 engine: Mutex::new(engine),
             })
         }
@@ -393,14 +408,6 @@ mod local {
             purpose: EmbedPurpose,
             deadline: Deadline,
         ) -> Result<Vec<Vec<f32>>, String> {
-            // Checked before the batch only: ONNX inference has no
-            // cancellation point, so a deadline that expires mid-batch
-            // rides it out — bounded by batch size, unlike the HTTP
-            // provider's unbounded network wait, which is what the
-            // supervised-attempt machinery exists for.
-            if deadline.expired() {
-                return Err(DeadlineExceeded.to_string());
-            }
             let span = crate::trace::span!(
                 "taguru.embed",
                 otel.kind = "client",
@@ -409,6 +416,34 @@ mod local {
                 taguru.embed.purpose = purpose.as_str(),
             );
             let _guard = span.enter();
+            // The engine admits one batch at a time, so a caller can
+            // spend its whole budget QUEUED behind someone else's
+            // inference. Waiting is therefore chopped into
+            // SHUTDOWN_POLL slices, each bounded by the remaining
+            // budget, with both exits re-checked between slices —
+            // the same contract the HTTP provider's supervised wait
+            // keeps. Once the lock is held, deadline and shutdown are
+            // checked once more; past that the batch rides to
+            // completion (ONNX inference has no cancellation point),
+            // bounded by batch size rather than a network's patience.
+            let mut engine = loop {
+                if self.shutdown.active() {
+                    return Err(SHUTDOWN_REFUSAL.to_string());
+                }
+                if deadline.expired() {
+                    return Err(DeadlineExceeded.to_string());
+                }
+                let slice = SHUTDOWN_POLL.min(deadline.remaining());
+                if let Some(engine) = self.engine.try_lock_for(slice) {
+                    break engine;
+                }
+            };
+            if self.shutdown.active() {
+                return Err(SHUTDOWN_REFUSAL.to_string());
+            }
+            if deadline.expired() {
+                return Err(DeadlineExceeded.to_string());
+            }
             if self.e5_prefix {
                 // The e5 card's asymmetric markers — the same
                 // distinction the HTTP provider can only hint at via
@@ -419,14 +454,11 @@ mod local {
                 };
                 let marked: Vec<String> =
                     texts.iter().map(|text| format!("{marker}{text}")).collect();
-                return self
-                    .engine
-                    .lock()
+                return engine
                     .embed(marked, None)
                     .map_err(|error| format!("local embedding failed: {error}"));
             }
-            self.engine
-                .lock()
+            engine
                 .embed(texts, None)
                 .map_err(|error| format!("local embedding failed: {error}"))
         }
@@ -463,7 +495,8 @@ mod local {
         #[test]
         #[ignore = "downloads a model from Hugging Face; needs network"]
         fn local_model_embeds_with_sane_geometry() {
-            let provider = LocalEmbeddings::from_parts("all-minilm-l6-v2-q").unwrap();
+            let provider =
+                LocalEmbeddings::from_parts("all-minilm-l6-v2-q", ShutdownFlag::default()).unwrap();
             let texts = [
                 "a function that parses batches of records",
                 "parse_batch reads one record batch",

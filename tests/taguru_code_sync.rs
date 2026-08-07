@@ -693,6 +693,22 @@ fn models_lists_the_catalog_best_first_and_speaks_json() {
     );
     assert!(parsed["runnable"].is_boolean());
 
+    // fastembed lets HF_HOME override the cache directory it is
+    // handed, so the listing must report the EFFECTIVE path, not a
+    // hardcoded ~/.taguru/models promise.
+    let hf_home = repo.dir.join("hf-cache");
+    let (code, out) = repo.run_with_env(
+        &["models", "--json"],
+        &[("HF_HOME", hf_home.to_str().unwrap())],
+    );
+    assert_eq!(code, 0, "{out}");
+    let parsed: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+    assert_eq!(
+        parsed["cache_dir"].as_str().unwrap(),
+        hf_home.to_str().unwrap(),
+        "HF_HOME must win over the default cache path"
+    );
+
     let (code, _) = repo.run(&["models", "--nonsense"]);
     assert_eq!(code, 2, "unknown flags must refuse, not be ignored");
 }

@@ -120,7 +120,12 @@ fn models(args: &[String]) -> i32 {
             .collect();
         println!(
             "{}",
-            serde_json::json!({ "models": listed, "runnable": runnable })
+            serde_json::json!({
+                "models": listed,
+                "runnable": runnable,
+                "cache_dir": crate::embedding::model_cache_dir()
+                    .map(|dir| dir.display().to_string()),
+            })
         );
         return 0;
     }
@@ -141,7 +146,12 @@ fn models(args: &[String]) -> i32 {
             info.note,
         );
     }
-    println!("\ndownloaded once into ~/.taguru/models; offline afterwards");
+    // The effective cache, not a hardcoded promise: fastembed lets
+    // HF_HOME override the directory this binary asks for.
+    let cache = crate::embedding::model_cache_dir()
+        .map(|dir| dir.display().to_string())
+        .unwrap_or_else(|| "(no home directory found)".to_string());
+    println!("\ndownloaded once into {cache}; offline afterwards");
     if !runnable {
         println!("note: this build lacks --features local-embed — rebuild with it to run these");
     }
