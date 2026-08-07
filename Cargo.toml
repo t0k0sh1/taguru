@@ -96,6 +96,11 @@ reqwest = { version = "0.13.4", default-features = false, features = ["rustls", 
 # and widen deny.toml's audit surface (MIT licensed, cargo-deny clean).
 tree-sitter = "0.26.11"
 tree-sitter-rust = "0.24.2"
+# Spike #474: in-process embedding provider (TAGURU_EMBED_URL=local) —
+# downloads an ONNX model once and embeds without any external
+# service. Optional and feature-gated: it pulls ONNX Runtime (a native
+# library), which the default dependency-light build must not carry.
+fastembed = { version = "5.17.4", optional = true }
 
 [dev-dependencies]
 # Property-based tests for the hand-rolled binary formats (context
@@ -143,3 +148,8 @@ debug = true
 inherits = "test"
 debug = "none"
 incremental = false
+
+[features]
+# In-process embedding (spike #474): build with
+# `--features local-embed`, then TAGURU_EMBED_URL=local selects it.
+local-embed = ["dep:fastembed"]

@@ -164,6 +164,235 @@ impl HttpEmbeddings {
     }
 }
 
+/// The one provider selection every entrance (serve, import,
+/// taguru-code sync) shares. `TAGURU_EMBED_URL` unset = lane off, as
+/// ever; the special value `local` (spike #474) picks the in-process
+/// provider when the binary carries `--features local-embed`, and
+/// warns-then-disables when it does not — a URL scheme was ruled out
+/// because `local` is not an endpoint, and silently treating it as
+/// one would hand ureq a nonsense URL to fail on later; anything
+/// else is an OpenAI-compatible endpoint, exactly as before.
+pub fn provider_from_env(shutdown: ShutdownFlag) -> Option<Arc<dyn EmbeddingProvider>> {
+    let url = std::env::var("TAGURU_EMBED_URL").ok()?;
+    if url.eq_ignore_ascii_case("local") {
+        #[cfg(feature = "local-embed")]
+        {
+            return match LocalEmbeddings::from_env() {
+                Ok(provider) => Some(Arc::new(provider) as Arc<dyn EmbeddingProvider>),
+                Err(error) => {
+                    tracing::warn!("TAGURU_EMBED_URL=local: {error}; the embedding lane stays off");
+                    None
+                }
+            };
+        }
+        #[cfg(not(feature = "local-embed"))]
+        {
+            tracing::warn!(
+                "TAGURU_EMBED_URL=local needs a binary built with --features local-embed; \
+                 the embedding lane stays off"
+            );
+            return None;
+        }
+    }
+    HttpEmbeddings::from_env(shutdown)
+        .map(|provider| Arc::new(provider) as Arc<dyn EmbeddingProvider>)
+}
+
+/// In-process provider (spike #474): a fastembed ONNX model,
+/// downloaded once into `~/.taguru/models` and run on the CPU — the
+/// embedding lane with no external service to stand up. Selected by
+/// `TAGURU_EMBED_URL=local` + `TAGURU_EMBED_MODEL` naming one of the
+/// supported models below.
+#[cfg(feature = "local-embed")]
+mod local {
+    use super::{Deadline, DeadlineExceeded, EmbedPurpose, EmbeddingProvider};
+    use parking_lot::Mutex;
+
+    /// Operator-typeable names → fastembed models. A short, explicit
+    /// list on purpose: an unknown name errors WITH this list instead
+    /// of falling back (the "never silent" config posture). The e5
+    /// family is the one to reach for when the corpus is not English-
+    /// only; the minilm/bge pair are the small English baselines.
+    const LOCAL_MODELS: [(&str, fastembed::EmbeddingModel); 5] = [
+        ("all-minilm-l6-v2", fastembed::EmbeddingModel::AllMiniLML6V2),
+        (
+            "all-minilm-l6-v2-q",
+            fastembed::EmbeddingModel::AllMiniLML6V2Q,
+        ),
+        (
+            "bge-small-en-v1.5",
+            fastembed::EmbeddingModel::BGESmallENV15,
+        ),
+        (
+            "multilingual-e5-small",
+            fastembed::EmbeddingModel::MultilingualE5Small,
+        ),
+        (
+            "multilingual-e5-base",
+            fastembed::EmbeddingModel::MultilingualE5Base,
+        ),
+    ];
+
+    fn supported() -> String {
+        LOCAL_MODELS
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// `~/.taguru/models` — the same per-user home the usage log
+    /// (#470) claimed, so everything taguru keeps outside a project
+    /// lives under one roof.
+    fn model_cache_dir() -> Option<std::path::PathBuf> {
+        #[cfg(unix)]
+        let home = std::env::var_os("HOME");
+        #[cfg(not(unix))]
+        let home = std::env::var_os("USERPROFILE");
+        home.filter(|home| !home.is_empty()).map(|home| {
+            std::path::PathBuf::from(home)
+                .join(".taguru")
+                .join("models")
+        })
+    }
+
+    pub struct LocalEmbeddings {
+        model_name: String,
+        /// fastembed's session, serialized behind a lock: one
+        /// inference at a time is the spike's posture (the refresh
+        /// paths batch internally, so parallel sessions would buy
+        /// throughput at a memory multiple — a later measurement).
+        engine: Mutex<fastembed::TextEmbedding>,
+    }
+
+    impl LocalEmbeddings {
+        /// Loads (downloading on first use) the model named by
+        /// `TAGURU_EMBED_MODEL`. Blocking by design: every caller
+        /// constructs providers at boot, and a missing model is a
+        /// boot-time condition an operator must see, not a per-request
+        /// surprise.
+        pub fn from_env() -> Result<LocalEmbeddings, String> {
+            let name = std::env::var("TAGURU_EMBED_MODEL").map_err(|_| {
+                format!(
+                    "TAGURU_EMBED_MODEL must name the local model; supported: {}",
+                    supported()
+                )
+            })?;
+            LocalEmbeddings::from_parts(&name)
+        }
+
+        /// The env-free core `from_env` wraps — also the smoke test's
+        /// entrance, which must not race other tests over the real
+        /// `TAGURU_EMBED_MODEL`.
+        fn from_parts(name: &str) -> Result<LocalEmbeddings, String> {
+            let model = LOCAL_MODELS
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                .map(|(_, model)| model.clone())
+                .ok_or_else(|| {
+                    format!("unknown local model '{name}'; supported: {}", supported())
+                })?;
+            let cache = model_cache_dir()
+                .ok_or_else(|| "no home directory to cache the model under".to_string())?;
+            let engine = fastembed::TextEmbedding::try_new(
+                fastembed::InitOptions::new(model)
+                    .with_cache_dir(cache)
+                    .with_show_download_progress(true),
+            )
+            .map_err(|error| format!("loading local embedding model '{name}': {error}"))?;
+            Ok(LocalEmbeddings {
+                model_name: name.to_string(),
+                engine: Mutex::new(engine),
+            })
+        }
+    }
+
+    impl EmbeddingProvider for LocalEmbeddings {
+        fn model(&self) -> &str {
+            &self.model_name
+        }
+
+        fn embed(
+            &self,
+            texts: &[&str],
+            purpose: EmbedPurpose,
+            deadline: Deadline,
+        ) -> Result<Vec<Vec<f32>>, String> {
+            // Checked before the batch only: ONNX inference has no
+            // cancellation point, so a deadline that expires mid-batch
+            // rides it out — bounded by batch size, unlike the HTTP
+            // provider's unbounded network wait, which is what the
+            // supervised-attempt machinery exists for.
+            if deadline.expired() {
+                return Err(DeadlineExceeded.to_string());
+            }
+            let span = crate::trace::span!(
+                "taguru.embed",
+                otel.kind = "client",
+                taguru.embed.model = %self.model_name,
+                taguru.embed.inputs = texts.len(),
+                taguru.embed.purpose = purpose.as_str(),
+            );
+            let _guard = span.enter();
+            self.engine
+                .lock()
+                .embed(texts, None)
+                .map_err(|error| format!("local embedding failed: {error}"))
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::time::{Duration, Instant};
+
+        fn cosine(a: &[f32], b: &[f32]) -> f32 {
+            let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+            let norm = |v: &[f32]| v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            dot / (norm(a) * norm(b))
+        }
+
+        /// The spike's feasibility probe — downloads a real model
+        /// (~30 MB, network) so it never runs in the default suite:
+        /// `cargo test --features local-embed -- --ignored local_model`
+        #[test]
+        #[ignore = "downloads a model from Hugging Face; needs network"]
+        fn local_model_embeds_with_sane_geometry() {
+            let provider = LocalEmbeddings::from_parts("all-minilm-l6-v2-q").unwrap();
+            let texts = [
+                "a function that parses batches of records",
+                "parse_batch reads one record batch",
+                "the weather in Lisbon is sunny today",
+            ];
+            let started = Instant::now();
+            let vectors = provider
+                .embed(
+                    &texts,
+                    EmbedPurpose::Index,
+                    Deadline::after(Duration::from_secs(60)),
+                )
+                .unwrap();
+            let elapsed = started.elapsed();
+            assert_eq!(vectors.len(), 3);
+            assert_eq!(vectors[0].len(), 384, "MiniLM-L6 is 384-wide");
+            assert!(vectors.iter().all(|v| v.len() == vectors[0].len()));
+            let related = cosine(&vectors[0], &vectors[1]);
+            let unrelated = cosine(&vectors[0], &vectors[2]);
+            assert!(
+                related > unrelated,
+                "semantic neighbors must score above strangers: {related} vs {unrelated}"
+            );
+            eprintln!(
+                "smoke: 3 texts in {:?} ({related:.3} related vs {unrelated:.3} unrelated)",
+                elapsed
+            );
+        }
+    }
+}
+
+#[cfg(feature = "local-embed")]
+pub use local::LocalEmbeddings;
+
 impl EmbeddingProvider for HttpEmbeddings {
     fn model(&self) -> &str {
         &self.model

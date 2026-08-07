@@ -54,7 +54,6 @@ use std::time::Duration;
 use api::evidence::rerank::{EvidenceReranker, HttpReranker};
 use axum::Router;
 use axum::routing::{get, post};
-use embedding::EmbeddingProvider;
 use env::{
     DEFAULT_MAX_BODY_BYTES, DEFAULT_MCP_MAX_RESULT_BYTES, env_bool, env_number,
     needs_off_loopback_warning, resolve_body_bytes, resolve_flush_secs, resolve_heavy_ops,
@@ -301,7 +300,7 @@ async fn serve(serve_args: cli::ServeArgs, auth_source: auth::AuthSource) {
     // shutdown future below): an in-flight provider wait is abandoned
     // rather than holding the drain for the provider timeout.
     let embed_shutdown = embedding::ShutdownFlag::default();
-    let embedder = embedding::HttpEmbeddings::from_env(embed_shutdown.clone());
+    let embedder = embedding::provider_from_env(embed_shutdown.clone());
     if let Some(embedder) = &embedder {
         info!(model = embedder.model(), "semantic entry tier enabled");
         // Each provider attempt is bounded by the smaller of
@@ -326,7 +325,6 @@ async fn serve(serve_args: cli::ServeArgs, auth_source: auth::AuthSource) {
     if auto_embed {
         info!("auto embedding refresh enabled (runs with each flush)");
     }
-    let embedder = embedder.map(|provider| Arc::new(provider) as Arc<dyn EmbeddingProvider>);
 
     // The optional evidence reranker (#307, ADR 0006 §12) — absent
     // config disables the tier entirely, at no network or credential
