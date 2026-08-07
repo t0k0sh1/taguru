@@ -237,6 +237,8 @@ reuses the same `as_str()`, made `pub(crate)`:
 | `taguru.search.vector.outcome` | new `VectorLaneStatus::code()` | `off` `query_embedding_failed` `no_vectors` `model_changed` `width_changed` `ran` |
 | `taguru.passage.bm25_only` / `.both_lanes` / `.vector_only` | `taguru_passage_lane_contributions_total{lane}` | counts (`i64`) |
 | `taguru.rerank.outcome` | `RerankOutcomeKind` / `REASON_*` | `ok` `not_configured` `model_mismatch` `empty_pool` `invalid_permutation` `circuit_open` `timeout` `provider_error` |
+| `taguru.embed.model` | operator's `TAGURU_EMBED_MODEL` | the configured model name — operator-bounded config like §8's shard-list rule, never user data (shipping on `taguru.embed` since the span was introduced; registered here with #474's second provider) |
+| `taguru.embed.purpose` | `EmbedPurpose::as_str()` | `index` `query` |
 
 The two new `code()` methods follow the file's own `ALL` + exhaustive-`match`
 convention: adding a variant without updating `code()` fails to compile.
@@ -250,7 +252,7 @@ text — `src/metrics.rs:2199` already documents this trap): `taguru.operation`,
 `taguru.fallback.reason`, `taguru.search.terms` / `.pool` / `.hits` /
 `.floor` / `.exact` / `.rows`, `taguru.filter.eligible` / `.total`,
 `taguru.limit`, `taguru.dispatch.bytes`, `taguru.result.bytes`,
-`taguru.shard.index` / `.outcome`, `taguru.error.kind`.
+`taguru.embed.inputs`, `taguru.shard.index` / `.outcome`, `taguru.error.kind`.
 
 Semconv wins where it already exists — `http.request.method`, `http.route`,
 `http.response.status_code` — and is never duplicated under `taguru.*`.

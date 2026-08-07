@@ -181,7 +181,12 @@ pub fn provider_from_env(shutdown: ShutdownFlag) -> Option<Arc<dyn EmbeddingProv
             return match LocalEmbeddings::from_env(shutdown) {
                 Ok(provider) => Some(Arc::new(provider) as Arc<dyn EmbeddingProvider>),
                 Err(error) => {
+                    // Operator guidance in the warn, plus ADR 0008
+                    // §6.2's structured event beside it — the same
+                    // human-line + `taguru.degrade` pairing the stdio
+                    // bridge uses for `bridge_unreachable`.
                     tracing::warn!("TAGURU_EMBED_URL=local: {error}; the embedding lane stays off");
+                    tracing::info!(taguru.reason = "vector_off", "taguru.degrade");
                     None
                 }
             };
@@ -192,6 +197,7 @@ pub fn provider_from_env(shutdown: ShutdownFlag) -> Option<Arc<dyn EmbeddingProv
                 "TAGURU_EMBED_URL=local: this binary was built without the local-embed \
                  feature (--no-default-features); the embedding lane stays off"
             );
+            tracing::info!(taguru.reason = "vector_off", "taguru.degrade");
             return None;
         }
     }
