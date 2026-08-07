@@ -23,6 +23,7 @@ use std::path::PathBuf;
 
 use crate::code::repo_walk::RepoWalk;
 use crate::code::sync;
+use crate::code::usage_log;
 
 /// Default poll interval.
 const DEFAULT_INTERVAL_MS: u64 = 2000;
@@ -110,8 +111,12 @@ pub(crate) fn run(args: &[String]) -> i32 {
 
     // A watch that cannot complete its first sync is misconfigured
     // (no commits, locked dir, broken repo) — say so and exit rather
-    // than retrying a hopeless loop forever.
-    let first = sync::run(&sync_argv);
+    // than retrying a hopeless loop forever. Both this sync and the
+    // loop's re-syncs log as "watch-sync": the watch verb itself never
+    // returns, so only its actual syncs carry usage-analysis signal —
+    // and a name apart from "sync" keeps manual and watch-driven runs
+    // separable in the log.
+    let first = usage_log::record("watch-sync", &sync_argv, || sync::run(&sync_argv));
     if first != 0 {
         eprintln!("taguru-code: watch: initial sync failed — not watching");
         return first;
@@ -144,7 +149,7 @@ pub(crate) fn run(args: &[String]) -> i32 {
             previous_poll = current;
             continue;
         }
-        if sync::run(&sync_argv) == 0 {
+        if usage_log::record("watch-sync", &sync_argv, || sync::run(&sync_argv)) == 0 {
             last_synced = current.clone();
         }
         previous_poll = current;

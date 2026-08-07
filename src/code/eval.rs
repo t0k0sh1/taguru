@@ -311,17 +311,17 @@ pub(crate) fn eval(args: &[String]) -> i32 {
     for miss in misses.iter().take(10) {
         eprintln!("taguru-code: eval: miss: {miss}");
     }
-    println!(
-        "{}",
-        serde_json::json!({
-            "total": total,
-            "hit1": hit1,
-            "hit10": hit10,
-            "hit1_rate": hit1_rate,
-            "hit10_rate": hit10_rate,
-            "line_drift": line_drift,
-        })
-    );
+    let report = serde_json::json!({
+        "total": total,
+        "hit1": hit1,
+        "hit10": hit10,
+        "hit1_rate": hit1_rate,
+        "hit10_rate": hit10_rate,
+        "line_drift": line_drift,
+    })
+    .to_string();
+    crate::code::usage_log::note_output_bytes(report.len() + 1);
+    println!("{report}");
 
     if let Some(thresholds_path) = &args.thresholds {
         let thresholds: serde_json::Value = match std::fs::read_to_string(thresholds_path)
