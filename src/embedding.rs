@@ -198,45 +198,115 @@ pub fn provider_from_env(shutdown: ShutdownFlag) -> Option<Arc<dyn EmbeddingProv
         .map(|provider| Arc::new(provider) as Arc<dyn EmbeddingProvider>)
 }
 
+/// One local model `TAGURU_EMBED_URL=local` accepts. Compiled
+/// feature-free so `taguru-code models` can teach what a default
+/// build COULD run; the feature-gated provider below is its only
+/// other reader, which leaves it dark in a default `taguru` server
+/// build (hence the allow).
+#[allow(dead_code)]
+pub struct LocalModelInfo {
+    pub name: &'static str,
+    /// Size of the one-time download, in MiB (the ONNX file fastembed
+    /// actually fetches — measured off the Hub, not the model card).
+    pub download_mib: u32,
+    pub dims: u32,
+    pub multilingual: bool,
+    /// Model-weight license. Commercial use must stay unrestricted
+    /// (Apache-2.0/MIT only): cargo-deny audits crates, not weights,
+    /// so this column IS the audit — check it before adding a row.
+    pub license: &'static str,
+    /// The e5 family scores properly only when texts carry the model
+    /// card's `query: ` / `passage: ` markers; the provider applies
+    /// them from [`EmbedPurpose`] when this is set.
+    pub e5_prefix: bool,
+    pub note: &'static str,
+}
+
+/// Supported local models, BEST PICK FIRST — `taguru-code models`
+/// prints this order verbatim, and the unknown-name error recites the
+/// same names. Keep the ordering an actual recommendation, not
+/// insertion history.
+#[allow(dead_code)]
+pub const LOCAL_MODELS: [LocalModelInfo; 5] = [
+    LocalModelInfo {
+        name: "paraphrase-multilingual-minilm-l12-v2-q",
+        download_mib: 224,
+        dims: 384,
+        multilingual: true,
+        license: "Apache-2.0",
+        e5_prefix: false,
+        note: "default pick: smallest multilingual (Japanese included)",
+    },
+    LocalModelInfo {
+        name: "multilingual-e5-small",
+        download_mib: 448,
+        dims: 384,
+        multilingual: true,
+        license: "MIT",
+        e5_prefix: true,
+        note: "retrieval-trained multilingual; stronger, twice the download",
+    },
+    LocalModelInfo {
+        name: "all-minilm-l6-v2-q",
+        download_mib: 21,
+        dims: 384,
+        multilingual: false,
+        license: "Apache-2.0",
+        e5_prefix: false,
+        note: "smallest and fastest; English-only corpora",
+    },
+    LocalModelInfo {
+        name: "bge-small-en-v1.5",
+        download_mib: 126,
+        dims: 384,
+        multilingual: false,
+        license: "MIT",
+        e5_prefix: false,
+        note: "stronger English retrieval than MiniLM",
+    },
+    LocalModelInfo {
+        name: "multilingual-e5-base",
+        download_mib: 1058,
+        dims: 768,
+        multilingual: true,
+        license: "MIT",
+        e5_prefix: true,
+        note: "highest quality here; a 1 GiB download",
+    },
+];
+
 /// In-process provider (spike #474): a fastembed ONNX model,
 /// downloaded once into `~/.taguru/models` and run on the CPU — the
 /// embedding lane with no external service to stand up. Selected by
-/// `TAGURU_EMBED_URL=local` + `TAGURU_EMBED_MODEL` naming one of the
-/// supported models below.
+/// `TAGURU_EMBED_URL=local` + `TAGURU_EMBED_MODEL` naming one of
+/// [`LOCAL_MODELS`].
 #[cfg(feature = "local-embed")]
 mod local {
-    use super::{Deadline, DeadlineExceeded, EmbedPurpose, EmbeddingProvider};
+    use super::{
+        Deadline, DeadlineExceeded, EmbedPurpose, EmbeddingProvider, LOCAL_MODELS, LocalModelInfo,
+    };
     use parking_lot::Mutex;
 
-    /// Operator-typeable names → fastembed models. A short, explicit
-    /// list on purpose: an unknown name errors WITH this list instead
-    /// of falling back (the "never silent" config posture). The e5
-    /// family is the one to reach for when the corpus is not English-
-    /// only; the minilm/bge pair are the small English baselines.
-    const LOCAL_MODELS: [(&str, fastembed::EmbeddingModel); 5] = [
-        ("all-minilm-l6-v2", fastembed::EmbeddingModel::AllMiniLML6V2),
-        (
-            "all-minilm-l6-v2-q",
-            fastembed::EmbeddingModel::AllMiniLML6V2Q,
-        ),
-        (
-            "bge-small-en-v1.5",
-            fastembed::EmbeddingModel::BGESmallENV15,
-        ),
-        (
-            "multilingual-e5-small",
-            fastembed::EmbeddingModel::MultilingualE5Small,
-        ),
-        (
-            "multilingual-e5-base",
-            fastembed::EmbeddingModel::MultilingualE5Base,
-        ),
-    ];
+    /// The one place a listed name becomes a fastembed model. Kept as
+    /// a match beside the table (not in it) so the table stays
+    /// feature-free; the tests below hold the two in lockstep.
+    fn fastembed_model(name: &str) -> Option<fastembed::EmbeddingModel> {
+        Some(match name {
+            "paraphrase-multilingual-minilm-l12-v2-q" => {
+                fastembed::EmbeddingModel::ParaphraseMLMiniLML12V2Q
+            }
+            "multilingual-e5-small" => fastembed::EmbeddingModel::MultilingualE5Small,
+            "all-minilm-l6-v2-q" => fastembed::EmbeddingModel::AllMiniLML6V2Q,
+            "bge-small-en-v1.5" => fastembed::EmbeddingModel::BGESmallENV15,
+            "multilingual-e5-base" => fastembed::EmbeddingModel::MultilingualE5Base,
+            _ => return None,
+        })
+    }
 
     fn supported() -> String {
         LOCAL_MODELS
             .iter()
-            .map(|(name, _)| *name)
+            .map(|info| info.name)
             .collect::<Vec<_>>()
             .join(", ")
     }
@@ -258,6 +328,9 @@ mod local {
 
     pub struct LocalEmbeddings {
         model_name: String,
+        /// From the table row: whether texts need the e5 family's
+        /// `query: ` / `passage: ` markers prepended.
+        e5_prefix: bool,
         /// fastembed's session, serialized behind a lock: one
         /// inference at a time is the spike's posture (the refresh
         /// paths batch internally, so parallel sessions would buy
@@ -285,13 +358,14 @@ mod local {
         /// entrance, which must not race other tests over the real
         /// `TAGURU_EMBED_MODEL`.
         fn from_parts(name: &str) -> Result<LocalEmbeddings, String> {
-            let model = LOCAL_MODELS
+            let info: &LocalModelInfo = LOCAL_MODELS
                 .iter()
-                .find(|(key, _)| key.eq_ignore_ascii_case(name))
-                .map(|(_, model)| model.clone())
+                .find(|info| info.name.eq_ignore_ascii_case(name))
                 .ok_or_else(|| {
                     format!("unknown local model '{name}'; supported: {}", supported())
                 })?;
+            let model = fastembed_model(info.name)
+                .expect("every LOCAL_MODELS row maps (held by the lockstep test)");
             let cache = model_cache_dir()
                 .ok_or_else(|| "no home directory to cache the model under".to_string())?;
             let engine = fastembed::TextEmbedding::try_new(
@@ -301,7 +375,8 @@ mod local {
             )
             .map_err(|error| format!("loading local embedding model '{name}': {error}"))?;
             Ok(LocalEmbeddings {
-                model_name: name.to_string(),
+                model_name: info.name.to_string(),
+                e5_prefix: info.e5_prefix,
                 engine: Mutex::new(engine),
             })
         }
@@ -334,6 +409,22 @@ mod local {
                 taguru.embed.purpose = purpose.as_str(),
             );
             let _guard = span.enter();
+            if self.e5_prefix {
+                // The e5 card's asymmetric markers — the same
+                // distinction the HTTP provider can only hint at via
+                // its purpose header, applied for real here.
+                let marker = match purpose {
+                    EmbedPurpose::Index => "passage: ",
+                    EmbedPurpose::Query => "query: ",
+                };
+                let marked: Vec<String> =
+                    texts.iter().map(|text| format!("{marker}{text}")).collect();
+                return self
+                    .engine
+                    .lock()
+                    .embed(marked, None)
+                    .map_err(|error| format!("local embedding failed: {error}"));
+            }
             self.engine
                 .lock()
                 .embed(texts, None)
@@ -345,6 +436,20 @@ mod local {
     mod tests {
         use super::*;
         use std::time::{Duration, Instant};
+
+        /// The feature-free table and the feature-gated match must
+        /// name the same models — a row added to one without the
+        /// other would otherwise surface only as a runtime panic.
+        #[test]
+        fn every_listed_model_maps_to_a_fastembed_model() {
+            for info in &LOCAL_MODELS {
+                assert!(
+                    fastembed_model(info.name).is_some(),
+                    "{} is listed but unmapped",
+                    info.name
+                );
+            }
+        }
 
         fn cosine(a: &[f32], b: &[f32]) -> f32 {
             let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();

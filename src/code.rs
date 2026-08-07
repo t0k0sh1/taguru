@@ -50,12 +50,17 @@ USAGE:
   taguru-code status                    show sync state
   taguru-code evalset --out FILE        generate an eval set from the synced repo
   taguru-code eval --eval FILE          measure find accuracy (exit 3 on regression)
+  taguru-code models [--json]           list local embedding models, best pick first
 
 ENVIRONMENT:
   TAGURU_USAGE_LOG            0/false/off disables the per-invocation usage log
   TAGURU_USAGE_LOG_DIR        where usage records go (default $HOME/.taguru/logs)
   TAGURU_USAGE_LOG_MAX_BYTES  total cap across usage-*.jsonl, oldest days deleted
                               first (default 52428800 = 50 MiB, 0 = uncapped)
+  TAGURU_EMBED_URL            'local' embeds in-process during sync (needs a
+                              build with --features local-embed); any other
+                              value is an OpenAI-compatible /embeddings endpoint
+  TAGURU_EMBED_MODEL          which model — see `taguru-code models`
 ";
 
 /// Dispatches one invocation; returns the process exit code.
@@ -72,6 +77,7 @@ pub(crate) fn run(args: &[String]) -> i32 {
         Some("tree") => usage_log::record("tree", &args[1..], || query::tree(&args[1..])),
         Some("evalset") => usage_log::record("evalset", &args[1..], || eval::evalset(&args[1..])),
         Some("eval") => usage_log::record("eval", &args[1..], || eval::eval(&args[1..])),
+        Some("models") => usage_log::record("models", &args[1..], || models(&args[1..])),
         Some(other) => {
             eprintln!("taguru-code: unknown argument '{other}' — try 'taguru-code --help'");
             2
@@ -81,6 +87,65 @@ pub(crate) fn run(args: &[String]) -> i32 {
             2
         }
     }
+}
+
+/// The `models` verb: what `TAGURU_EMBED_URL=local` can run, in
+/// recommendation order (the table's own order). Static on purpose —
+/// the listing must work, and teach, even on a default build that
+/// cannot run any of them; whether THIS binary can is one line at the
+/// end, not a reason to hide the catalog.
+fn models(args: &[String]) -> i32 {
+    let json = match args.first().map(String::as_str) {
+        None => false,
+        Some("--json") if args.len() == 1 => true,
+        Some(other) => {
+            eprintln!("taguru-code: models: unknown argument '{other}' — only --json is accepted");
+            return 2;
+        }
+    };
+    let runnable = cfg!(feature = "local-embed");
+    if json {
+        let listed: Vec<serde_json::Value> = crate::embedding::LOCAL_MODELS
+            .iter()
+            .map(|info| {
+                serde_json::json!({
+                    "name": info.name,
+                    "download_mib": info.download_mib,
+                    "dims": info.dims,
+                    "multilingual": info.multilingual,
+                    "license": info.license,
+                    "note": info.note,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::json!({ "models": listed, "runnable": runnable })
+        );
+        return 0;
+    }
+    println!("local embedding models, best pick first:");
+    println!("(TAGURU_EMBED_URL=local TAGURU_EMBED_MODEL=<name> taguru-code sync)\n");
+    for info in &crate::embedding::LOCAL_MODELS {
+        println!(
+            "  {:<41} {:>4} MiB  {:>3}d  {:<12} {:<11} {}",
+            info.name,
+            info.download_mib,
+            info.dims,
+            if info.multilingual {
+                "multilingual"
+            } else {
+                "English"
+            },
+            info.license,
+            info.note,
+        );
+    }
+    println!("\ndownloaded once into ~/.taguru/models; offline afterwards");
+    if !runnable {
+        println!("note: this build lacks --features local-embed — rebuild with it to run these");
+    }
+    0
 }
 
 #[cfg(test)]

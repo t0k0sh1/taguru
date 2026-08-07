@@ -662,3 +662,37 @@ fn usage_log_cap_deletes_oldest_days_but_keeps_today() {
     let record: serde_json::Value = serde_json::from_str(content.lines().next().unwrap()).unwrap();
     assert_eq!(record["command"], "sync", "today's record survives");
 }
+
+/// `models` lists the local-embedding catalog in recommendation
+/// order, feature or no feature — the default build must still teach
+/// what a `--features local-embed` build could run.
+#[test]
+fn models_lists_the_catalog_best_first_and_speaks_json() {
+    let repo = Repo::new();
+    let (code, out) = repo.run(&["models"]);
+    assert_eq!(code, 0, "{out}");
+    let paraphrase = out
+        .find("paraphrase-multilingual-minilm-l12-v2-q")
+        .expect("the recommended default must be listed");
+    let minilm = out.find("all-minilm-l6-v2-q").expect("catalog entry");
+    assert!(
+        paraphrase < minilm,
+        "recommendation order: the multilingual default comes first\n{out}"
+    );
+    assert!(out.contains("Apache-2.0") && out.contains("MIT"), "{out}");
+
+    let (code, out) = repo.run(&["models", "--json"]);
+    assert_eq!(code, 0, "{out}");
+    let parsed: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+    let models = parsed["models"].as_array().unwrap();
+    assert_eq!(models[0]["name"], "paraphrase-multilingual-minilm-l12-v2-q");
+    assert!(
+        models
+            .iter()
+            .all(|m| m["license"] == "Apache-2.0" || m["license"] == "MIT")
+    );
+    assert!(parsed["runnable"].is_boolean());
+
+    let (code, _) = repo.run(&["models", "--nonsense"]);
+    assert_eq!(code, 2, "unknown flags must refuse, not be ignored");
+}
