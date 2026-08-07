@@ -139,6 +139,20 @@ async-trait = "0.1.89"
 name = "context"
 harness = false
 
+# macOS defaults to split-debuginfo="unpacked", which keeps every
+# .rcgu.o object file in target/debug/deps/ permanently so debuggers
+# can read debug info from them. Combined with cargo never
+# garbage-collecting old build generations, that grew target/ past
+# 100 GiB (330k leftover .o files). "packed" folds debug info into
+# .dSYM bundles at link time and lets the objects be deleted.
+[profile.dev]
+split-debuginfo = "packed"
+
+# Debug info for dependencies is rarely stepped into; dropping it
+# shrinks each build generation by the largest share of its size.
+[profile.dev.package."*"]
+debug = false
+
 # Callgrind needs debug symbols to attribute instructions to source
 # locations.
 [profile.bench]
