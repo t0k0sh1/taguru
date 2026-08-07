@@ -174,6 +174,21 @@ USAGE:
                                         the positional URL are aliases, name
                                         the target either way; unnamed, it
                                         defaults to TAGURU_ADDR
+  taguru consolidation --context NAME [--checks LIST] [--into NAME]
+                       [--dry-run] [--url URL] [URL]
+                                        judge a running server's
+                                        consolidation-audit candidates
+                                        (merge/contradiction/staleness,
+                                        ADR 0012) with the extract LLM and
+                                        store the judgments as an ordinary
+                                        derived context (default
+                                        'NAME::consolidation') keyed by each
+                                        candidate's fingerprint — re-runs
+                                        reuse stored judgments, dismissals
+                                        included, until the evidence moves;
+                                        proposals only, applied by the
+                                        operator through ordinary writes
+                                        (see: taguru consolidation --help)
   taguru --help                         this text
 
 CONFIGURATION FILE (--config FILE, or TAGURU_CONFIG=FILE):
@@ -427,6 +442,7 @@ pub fn dispatch() -> Command {
         Some("extract") => exit(crate::extract::run(&args[1..])),
         Some("calibrate") => exit(crate::calibrate::run(&args[1..])),
         Some("communities") => exit(crate::communities::run(&args[1..])),
+        Some("consolidation") => exit(crate::consolidation::run(&args[1..])),
         Some(other) => {
             eprintln!("taguru: unknown argument '{other}' — try 'taguru --help'");
             exit(2)

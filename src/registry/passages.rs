@@ -94,6 +94,54 @@ impl AppState {
         Some(outcome)
     }
 
+    /// The window→eligible-source join of a windowed graph read
+    /// (ADR 0011 §4 steps 1–2): every source name whose metadata the
+    /// filter admits, read from the passage store — the one place
+    /// `SourceMeta` lives — for a handler to resolve into a
+    /// [`taguru::context::SourceWindow`] inside its `read_context`
+    /// closure. Runs BEFORE `read_context`, like `hidden_label`: the
+    /// store takes its own locks, and this keeps the join out of the
+    /// entry's read path. `None` when the context does not exist.
+    /// Sources with no stored passage (associations-only imports) have
+    /// no metadata and are absent by construction — ADR 0011 §4's
+    /// documented rule for undatable sources, not an oversight.
+    pub fn window_source_names(
+        &self,
+        name: &str,
+        filter: &crate::passages::SourceFilter,
+    ) -> Option<io::Result<std::collections::BTreeSet<String>>> {
+        let entry = self.lookup(name)?;
+        let _fence = entry.read_unless_deleted()?;
+        Some(
+            self.entry_passages(&entry, &file_stem(name))
+                .map(|store| store.eligible_sources(filter).0),
+        )
+    }
+
+    /// Every source's effective time (`date.or(stored_at)`, the
+    /// `SourceFilter` rule) as one map — the consolidation audit's
+    /// join input (ADR 0012 §4 `staleness`, the ADR 0011 §4 layering:
+    /// dates never enter the library, so the caller joins by name).
+    /// Sources with neither field — and sources with no stored passage
+    /// at all — are simply absent. `None` when the context does not
+    /// exist. Runs before `read_context`, like `window_source_names`.
+    pub fn source_effective_times(
+        &self,
+        name: &str,
+    ) -> Option<io::Result<std::collections::HashMap<String, u64>>> {
+        let entry = self.lookup(name)?;
+        let _fence = entry.read_unless_deleted()?;
+        Some(self.entry_passages(&entry, &file_stem(name)).map(|store| {
+            store
+                .source_entries()
+                .into_iter()
+                .filter_map(|(source, meta)| {
+                    meta.date.or(meta.stored_at).map(|time| (source, time))
+                })
+                .collect()
+        }))
+    }
+
     /// Dereferences source ids (as found on attributions) back to their
     /// registered passages, reporting the ids that have none.
     #[allow(clippy::type_complexity)]
@@ -429,6 +477,122 @@ mod tests {
             .unwrap();
         assert!(found["第1段落"].starts_with("仕込み水"));
         assert!(missing.is_empty());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// ADR 0011 §4 steps 1–2 at the registry seam: the passage store's
+    /// metadata decides which sources a window admits, and that set —
+    /// resolved into a `SourceWindow` inside `read_context` — is what a
+    /// windowed graph read sees. A source with no stored passage has no
+    /// metadata and is invisible to every window, by the documented
+    /// rule.
+    #[test]
+    fn window_source_names_joins_metadata_and_feeds_windowed_reads() {
+        use crate::passages::{PassageSubmission, SourceFilter, SourceMeta};
+        use taguru::deadline::Deadline;
+
+        let dir = scratch_dir("window-join");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+
+        let dated = |text: &str, date: u64| PassageSubmission {
+            meta: SourceMeta {
+                date: Some(date),
+                ..SourceMeta::default()
+            },
+            ..PassageSubmission::plain(text.to_string())
+        };
+        let mut passages = BTreeMap::new();
+        passages.insert("doc-old".to_string(), dated("旧杜氏は高瀬。", 100));
+        passages.insert("doc-new".to_string(), dated("新杜氏は青山。", 200));
+        state.store_passages("sake", passages).unwrap().unwrap();
+
+        let assert_op = |object: &str, source: &str| crate::registry::AssocOp {
+            subject: "蔵".to_string(),
+            label: "杜氏".to_string(),
+            object: object.to_string(),
+            weight: 1.0,
+            source: Some(source.to_string()),
+            paragraph: None,
+        };
+        state
+            .add_associations(
+                "sake",
+                vec![
+                    assert_op("高瀬", "doc-old"),
+                    assert_op("青山", "doc-new"),
+                    // An associations-only source: no passage, no
+                    // metadata, invisible to every window.
+                    assert_op("幽霊", "doc-undated"),
+                ],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+
+        let window_after = SourceFilter {
+            tags: Vec::new(),
+            since: Some(150),
+            until: None,
+        };
+        let eligible = state
+            .window_source_names("sake", &window_after)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            eligible.iter().collect::<Vec<_>>(),
+            vec!["doc-new"],
+            "the join admits exactly the in-window, dated sources"
+        );
+
+        let hits = state
+            .read_context("sake", |context| {
+                let window = context.source_window(eligible.iter().map(String::as_str));
+                context.query_any_within(&["蔵"], &[], &[], &window)
+            })
+            .unwrap();
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].object, "青山");
+
+        // The unwindowed read still sees all three, undated included.
+        let all = state
+            .read_context("sake", |context| context.query_any(&["蔵"], &[], &[]))
+            .unwrap();
+        assert_eq!(all.len(), 3);
+
+        assert!(
+            state.window_source_names("nope", &window_after).is_none(),
+            "an unknown context is None, matching lookup_passages"
+        );
+
+        // The upper bound AT the boundary: [since, until) is half-open,
+        // so until == doc-new's own date (200) excludes it — the
+        // operator-confusion (< vs <=) this value is the only witness
+        // for at this layer.
+        let window_before = SourceFilter {
+            tags: Vec::new(),
+            since: None,
+            until: Some(200),
+        };
+        let eligible = state
+            .window_source_names("sake", &window_before)
+            .unwrap()
+            .unwrap();
+        assert_eq!(eligible.iter().collect::<Vec<_>>(), vec!["doc-old"]);
+
+        // source_effective_times, the consolidation audit's join input:
+        // dated sources map to their date, the undated
+        // associations-only source is absent, an unknown context is
+        // None.
+        let times = state.source_effective_times("sake").unwrap().unwrap();
+        assert_eq!(times.get("doc-old"), Some(&100));
+        assert_eq!(times.get("doc-new"), Some(&200));
+        assert!(!times.contains_key("doc-undated"));
+        assert!(state.source_effective_times("nope").is_none());
 
         let _ = fs::remove_dir_all(dir);
     }

@@ -66,6 +66,12 @@ pub struct ExploreRequest {
     pub limit: Option<usize>,
     /// Resume past a previous page's last match — see [`ExploreCursor`].
     pub after: Option<ExploreCursor>,
+    /// Optional assertion-time window (ADR 0011), half-open
+    /// `[since, until)`, epoch seconds: an edge no in-window source
+    /// attests neither reports nor bridges the walk. Same contract as
+    /// passage search's window; `since >= until` is refused.
+    pub since: Option<u64>,
+    pub until: Option<u64>,
 }
 
 /// A bounded explore result: the same `{total, matches}` shape as
@@ -100,15 +106,28 @@ pub async fn explore(
     // worker.
     let hidden = tokio::task::block_in_place(|| state.hidden_label(&name));
     let excluded: Vec<&str> = hidden.into_iter().collect();
+    let window_names = match super::sources::resolve_window(
+        &state,
+        &name,
+        request.since,
+        request.until,
+        started_at,
+    ) {
+        Ok(names) => names,
+        Err(refusal) => return *refusal,
+    };
     match state.read_context(&name, |context| {
         let origins: Vec<&str> = request.origins.iter().map(String::as_str).collect();
         // The clamp turns "omitted = the whole component" into
         // "omitted = the server's hop ceiling".
-        context.explore_excluding(
-            &origins,
-            clamp(request.max_depth, Context::UNBOUNDED, MAX_EXPLORE_DEPTH),
-            &excluded,
-        )
+        let max_depth = clamp(request.max_depth, Context::UNBOUNDED, MAX_EXPLORE_DEPTH);
+        match &window_names {
+            None => context.explore_excluding(&origins, max_depth, &excluded),
+            Some(names) => {
+                let window = context.source_window(names.iter().map(String::as_str));
+                context.explore_within(&origins, max_depth, &excluded, &window)
+            }
+        }
     }) {
         Ok(matches) => {
             // Depth alone does not bound the response: one dense hub
@@ -233,6 +252,12 @@ pub struct ActivateRequest {
     pub decay: Option<f64>,
     /// Omitted means 20 results.
     pub limit: Option<usize>,
+    /// Optional assertion-time window (ADR 0011) — see
+    /// [`ExploreRequest::since`]. Both the fan total and the conducted
+    /// magnitude use the windowed sums, so out-of-window evidence
+    /// neither ranks nor leaks activation.
+    pub since: Option<u64>,
+    pub until: Option<u64>,
 }
 
 pub async fn activate(
@@ -252,14 +277,27 @@ pub async fn activate(
     // same reason for `block_in_place` as there.
     let hidden = tokio::task::block_in_place(|| state.hidden_label(&name));
     let excluded: Vec<&str> = hidden.into_iter().collect();
+    let window_names = match super::sources::resolve_window(
+        &state,
+        &name,
+        request.since,
+        request.until,
+        started_at,
+    ) {
+        Ok(names) => names,
+        Err(refusal) => return *refusal,
+    };
     match state.read_context(&name, |context| {
         let origins: Vec<&str> = request.origins.iter().map(String::as_str).collect();
-        context.activate_excluding(
-            &origins,
-            request.decay.unwrap_or(0.5),
-            clamp(request.limit, 20, MAX_MATCH_LIMIT),
-            &excluded,
-        )
+        let decay = request.decay.unwrap_or(0.5);
+        let limit = clamp(request.limit, 20, MAX_MATCH_LIMIT);
+        match &window_names {
+            None => context.activate_excluding(&origins, decay, limit, &excluded),
+            Some(names) => {
+                let window = context.source_window(names.iter().map(String::as_str));
+                context.activate_within(&origins, decay, limit, &excluded, &window)
+            }
+        }
     }) {
         Ok((total, matches)) => {
             state.note_search(SearchOp::Activate, &name, total == 0);

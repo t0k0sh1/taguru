@@ -392,7 +392,7 @@ pub struct SearchPassagesRequest {
 /// filter reaches any cache key: two spellings of one filter must
 /// mint one key. Shared by search, cross search, and explain, so the
 /// three surfaces cannot drift on what a legal filter is.
-fn source_filter(
+pub(super) fn source_filter(
     tags: &[String],
     since: Option<u64>,
     until: Option<u64>,
@@ -436,6 +436,44 @@ fn source_filter(
         return Ok(None);
     }
     Ok(Some(crate::passages::SourceFilter { tags, since, until }))
+}
+
+/// Resolves a graph-lane request's optional assertion-time window into
+/// the source names it admits (ADR 0011 §4 steps 1–2). `Ok(None)` when
+/// no window was asked for, so the caller stays on the exact unwindowed
+/// path; the window contract itself is [`source_filter`]'s — the shared
+/// validator, so the graph lanes and the passage lanes cannot drift on
+/// what a legal window is (`since >= until` refused up front). The
+/// metadata join runs off the async worker before `read_context`, the
+/// same pre-resolution rule `hidden_label`/`schema_of` follow, and a
+/// store that cannot be read answers like a schema that cannot be
+/// loaded: a logged `Internal`, never a silently unwindowed result.
+pub(super) fn resolve_window(
+    state: &AppState,
+    name: &str,
+    since: Option<u64>,
+    until: Option<u64>,
+    started_at: Instant,
+) -> Result<Option<std::collections::BTreeSet<String>>, Box<Response>> {
+    let Some(filter) = source_filter(&[], since, until, started_at)? else {
+        return Ok(None);
+    };
+    match tokio::task::block_in_place(|| state.window_source_names(name, &filter)) {
+        None => Err(Box::new(not_found(name, started_at))),
+        Some(Ok(names)) => Ok(Some(names)),
+        Some(Err(io_error)) => {
+            // ADR 0008 §7: never a span field named `error`; the detail
+            // rides the message text, matching `query`'s schema-load
+            // failure arm.
+            tracing::warn!(context = %name, "window source join failed: {io_error}");
+            state.metrics().record_error(ErrorKind::Load);
+            Err(Box::new(error(
+                ErrorCode::Internal,
+                format!("context '{name}' source metadata could not be read — see server logs"),
+                started_at,
+            )))
+        }
+    }
 }
 
 /// The filter fields exactly as they enter a retrieval cache key —

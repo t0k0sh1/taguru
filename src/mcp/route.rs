@@ -256,6 +256,8 @@ pub fn route_tool(
                     "object_types",
                     "limit",
                     "after",
+                    "since",
+                    "until",
                 ],
             )),
         ),
@@ -267,7 +269,9 @@ pub fn route_tool(
                 path,
                 Some(pick(
                     arguments,
-                    &["contexts", "groups", "cue", "limit", "after"],
+                    &[
+                        "contexts", "groups", "cue", "limit", "after", "since", "until",
+                    ],
                 )),
             )
         }
@@ -277,7 +281,10 @@ pub fn route_tool(
             (
                 "POST",
                 path,
-                Some(pick(arguments, &["origins", "decay", "limit"])),
+                Some(pick(
+                    arguments,
+                    &["origins", "decay", "limit", "since", "until"],
+                )),
             )
         }
         "explore" => {
@@ -286,7 +293,10 @@ pub fn route_tool(
             (
                 "POST",
                 path,
-                Some(pick(arguments, &["origins", "max_depth", "limit", "after"])),
+                Some(pick(
+                    arguments,
+                    &["origins", "max_depth", "limit", "after", "since", "until"],
+                )),
             )
         }
         "paths" => {
@@ -493,6 +503,24 @@ pub fn route_tool(
             format!("{}/vocabulary/audit", context_path("context")?),
             Some(pick(arguments, &["dice_floor", "cosine_floor"])),
         ),
+        "audit_consolidation" => {
+            need_present(arguments, "checks")?;
+            (
+                "POST",
+                format!("{}/consolidation/audit", context_path("context")?),
+                Some(pick(
+                    arguments,
+                    &[
+                        "checks",
+                        "limit",
+                        "evidence_cap",
+                        "dice_floor",
+                        "cosine_floor",
+                        "floor_secs",
+                    ],
+                )),
+            )
+        }
         "audit_coverage" => {
             let path = format!("{}/unreachable_from", context_path("context")?);
             need_present(arguments, "origins")?;

@@ -4,6 +4,7 @@ use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 
 use crate::deadline::{Deadline, DeadlineExceeded};
 
+use super::window::{EdgeLens, FullLens};
 use super::{
     Activation, Association, ConceptId, Context, EdgeId, EdgeRecord, LabelId, PathsResult,
     Recollection, Trail, accumulate_saturating, clamp_unit_or,
@@ -46,7 +47,7 @@ impl Context {
     /// nothing, and `max_depth == 0` returns nothing — zero hops of
     /// association-following reaches no associations.
     pub fn explore(&self, origins: &[&str], max_depth: usize) -> Vec<Recollection> {
-        self.explore_impl(origins, max_depth, |_| true)
+        self.explore_impl(origins, max_depth, |_| true, &FullLens { context: self })
     }
 
     /// [`Context::explore`] with a set of relation labels hidden from the
@@ -83,16 +84,20 @@ impl Context {
             .iter()
             .filter_map(|name| self.label_ids.get(*name).copied())
             .collect();
-        self.explore_impl(origins, max_depth, move |label: LabelId| {
-            !excluded_ids.contains(&label)
-        })
+        self.explore_impl(
+            origins,
+            max_depth,
+            move |label: LabelId| !excluded_ids.contains(&label),
+            &FullLens { context: self },
+        )
     }
 
-    fn explore_impl(
+    pub(super) fn explore_impl(
         &self,
         origins: &[&str],
         max_depth: usize,
         visible: impl Fn(LabelId) -> bool,
+        lens: &impl EdgeLens,
     ) -> Vec<Recollection> {
         let mut node_distances: HashMap<ConceptId, usize> = HashMap::new();
         let mut parents: HashMap<ConceptId, ConceptId> = HashMap::new();
@@ -122,8 +127,11 @@ impl Context {
                 // attribution records — so it must not act as a bridge to
                 // otherwise-unrelated live facts. count == 0 is the
                 // dead-edge test everywhere else (heaviest, compacted, the
-                // export); apply it here too.
-                if edge.count == 0 || !visible(edge.label) {
+                // export); apply it here too. The lens test rides along:
+                // an edge a source window cannot attest must not bridge
+                // either (ADR 0011 §5), and the unwindowed lens folds to
+                // constant true.
+                if edge.count == 0 || !visible(edge.label) || !lens.alive(edge_id, edge) {
                     continue;
                 }
                 reached.entry(edge_id).or_insert((hop, concept_id));
@@ -148,7 +156,7 @@ impl Context {
             .map(|(distance, edge_id, from)| Recollection {
                 distance,
                 path: self.path_from(&parents, from),
-                association: self.association(edge_id),
+                association: lens.association(edge_id),
             })
             .collect()
     }
@@ -224,7 +232,7 @@ impl Context {
     /// `decay == 1.0` through dedicated relays, activation barely decays
     /// and the walk still covers whatever stays above the floor.
     pub fn activate(&self, origins: &[&str], decay: f64, limit: usize) -> (usize, Vec<Activation>) {
-        self.activate_impl(origins, decay, limit, |_| true)
+        self.activate_impl(origins, decay, limit, |_| true, &FullLens { context: self })
     }
 
     /// [`Context::activate`] with a set of relation labels hidden from
@@ -256,17 +264,22 @@ impl Context {
             .iter()
             .filter_map(|name| self.label_ids.get(*name).copied())
             .collect();
-        self.activate_impl(origins, decay, limit, move |label: LabelId| {
-            !excluded_ids.contains(&label)
-        })
+        self.activate_impl(
+            origins,
+            decay,
+            limit,
+            move |label: LabelId| !excluded_ids.contains(&label),
+            &FullLens { context: self },
+        )
     }
 
-    fn activate_impl(
+    pub(super) fn activate_impl(
         &self,
         origins: &[&str],
         decay: f64,
         limit: usize,
         visible: impl Fn(LabelId) -> bool,
+        lens: &impl EdgeLens,
     ) -> (usize, Vec<Activation>) {
         // NaN must shrink every signal to nothing (like decay == 0.0),
         // not propagate — clamp alone would let it through, since the
@@ -317,12 +330,15 @@ impl Context {
                 // hidden label (ADR 0009 §6.3) is excluded from the same
                 // fold — it must not dilute a neighbor's share of real
                 // facts, the same reason `activate_excluding` filters
-                // the propagation loop below identically.
+                // the propagation loop below identically. The lens rides
+                // along for the same double reason: an edge a source
+                // window cannot attest must neither dilute the fan total
+                // nor conduct (ADR 0011 §4 step 4).
                 .filter(|&edge_id| {
                     let edge = &self.edges[edge_id as usize];
-                    edge.count > 0 && visible(edge.label)
+                    edge.count > 0 && visible(edge.label) && lens.alive(edge_id, edge)
                 })
-                .map(|edge_id| self.edges[edge_id as usize].sum.abs())
+                .map(|edge_id| lens.magnitude(edge_id, &self.edges[edge_id as usize]))
                 .fold(0.0, |mut acc, magnitude| {
                     // Individually-finite magnitudes can sum past f64's
                     // range; an infinite total would zero every flow and
@@ -338,14 +354,14 @@ impl Context {
                 .chain(self.incoming(concept))
                 .filter(|&edge_id| {
                     let edge = &self.edges[edge_id as usize];
-                    edge.count > 0 && visible(edge.label)
+                    edge.count > 0 && visible(edge.label) && lens.alive(edge_id, edge)
                 })
             {
                 let edge = &self.edges[edge_id as usize];
                 // Ranking: fan-independent, so a busy endpoint doesn't
                 // sink its own facts. Netted-out (or zero-decay) signals
                 // carry nothing and are skipped entirely.
-                let score = activation * decay * edge.sum.abs();
+                let score = activation * decay * lens.magnitude(edge_id, edge);
                 if score <= 0.0 {
                     continue;
                 }
@@ -391,7 +407,7 @@ impl Context {
             .map(|(strength, edge_id, from)| Activation {
                 strength,
                 path: self.path_from(&parents, from),
-                association: self.association(edge_id),
+                association: lens.association(edge_id),
             })
             .collect();
         (total, matches)

@@ -383,6 +383,8 @@ pub(super) fn tool_definitions() -> Vec<Value> {
                         "object": { "type": ["string", "array"] },
                         "subject_types": { "type": ["string", "array"], "description": "filter: subject's declared type(s), is_a-expanded" },
                         "object_types": { "type": ["string", "array"], "description": "filter: object's declared type(s), is_a-expanded" },
+                        "since": { "type": "integer", "minimum": 0, "description": "assertion-time window start, epoch seconds, half-open [since, until): only facts an in-window-dated source attests, weights from those attributions alone. Single context only" },
+                        "until": { "type": "integer", "minimum": 0, "description": "assertion-time window end (exclusive), epoch seconds. until alone = as-of (knowledge available by then). Single context only" },
                         "limit": { "type": "integer", "minimum": 0, "description": "default 100, capped at 1000" },
                         "after": match_after
                     }),
@@ -401,6 +403,8 @@ pub(super) fn tool_definitions() -> Vec<Value> {
             search_target_schema(
                 json!({
                     "cue": { "type": "string" },
+                    "since": { "type": "integer", "minimum": 0, "description": "assertion-time window start, epoch seconds, half-open [since, until). Single context only" },
+                    "until": { "type": "integer", "minimum": 0, "description": "assertion-time window end (exclusive), epoch seconds. until alone = as-of. Single context only" },
                     "limit": { "type": "integer", "minimum": 0, "description": "default 100, capped at 1000" },
                     "after": match_after
                 }),
@@ -415,7 +419,9 @@ pub(super) fn tool_definitions() -> Vec<Value> {
                     "context": context,
                     "origins": { "type": "array", "items": { "type": "string" } },
                     "decay": { "type": "number", "description": "default 0.5" },
-                    "limit": { "type": "integer", "minimum": 0, "description": "default 20" }
+                    "limit": { "type": "integer", "minimum": 0, "description": "default 20" },
+                    "since": { "type": "integer", "minimum": 0, "description": "assertion-time window start, epoch seconds, half-open [since, until): out-of-window evidence neither ranks nor conducts activation" },
+                    "until": { "type": "integer", "minimum": 0, "description": "assertion-time window end (exclusive), epoch seconds. until alone = as-of" }
                 }),
                 &["context", "origins"],
             ),
@@ -443,6 +449,8 @@ pub(super) fn tool_definitions() -> Vec<Value> {
                     "origins": { "type": "array", "items": { "type": "string" } },
                     "max_depth": { "type": "integer", "minimum": 0, "description": "hop ceiling; default and max 10 (larger values are clamped, not refused)" },
                     "limit": { "type": "integer", "minimum": 0, "description": "default 100, capped at 1000" },
+                    "since": { "type": "integer", "minimum": 0, "description": "assertion-time window start, epoch seconds, half-open [since, until): an edge no in-window source attests neither reports nor bridges" },
+                    "until": { "type": "integer", "minimum": 0, "description": "assertion-time window end (exclusive), epoch seconds. until alone = as-of" },
                     "after": {
                         "type": "object",
                         "description": "resume past the previous page's last recollection — copy every field verbatim from it. total stays constant across pages",
@@ -744,6 +752,22 @@ pub(super) fn tool_definitions() -> Vec<Value> {
                     "cosine_floor": { "type": "number", "description": "semantic floor (default 0.6)" }
                 }),
                 &["context"],
+            ),
+        ),
+        (
+            "audit_consolidation",
+            "Consolidation candidates (ADR 0012), sections chosen by `checks`: merge (spelling/synonym twins corroborated by shared live structure, types attached when a schema exists), contradiction (multiple live objects under one subject+label, ranked by how one-object the label usually is, rows dated; plus sign-contested edges with both sides' sources), staleness (facts whose latest assertion trails their own subject's newest, with an honest undatable count). CANDIDATES for review, never verdicts — judge each, then apply through ordinary writes (alias / retract / negative weight / re-import). Every candidate carries a `fingerprint` over its own evidence: judge once per fingerprint and reuse the judgment until it moves.",
+            object_schema(
+                json!({
+                    "context": context,
+                    "checks": { "type": "array", "minItems": 1, "items": { "type": "string", "enum": ["merge", "contradiction", "staleness"] }, "description": "required, non-empty: each section is a full-graph pass" },
+                    "limit": { "type": "integer", "minimum": 0, "description": "per-section candidate ceiling (default 100, capped at 1000); totals stay exact" },
+                    "evidence_cap": { "type": "integer", "minimum": 0, "description": "per-list merge evidence ceiling (default 20)" },
+                    "dice_floor": { "type": "number", "description": "merge: lexical floor (default 0.6)" },
+                    "cosine_floor": { "type": "number", "description": "merge: semantic floor (default 0.6)" },
+                    "floor_secs": { "type": "integer", "minimum": 0, "description": "staleness: minimum gap in seconds (default 0)" }
+                }),
+                &["context", "checks"],
             ),
         ),
         (

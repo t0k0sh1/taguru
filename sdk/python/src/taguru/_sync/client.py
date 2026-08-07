@@ -849,14 +849,36 @@ class Context:
     # -- graph reads ---------------------------------------------------------
 
     def recall(
-        self, cue: str, *, limit: int | None = None, after: MatchCursor | None = None
+        self,
+        cue: str,
+        *,
+        limit: int | None = None,
+        after: MatchCursor | None = None,
+        since: int | None = None,
+        until: int | None = None,
     ) -> MatchPage:
         """Associations whose subject/object entry-matches the cue.
 
         ``after`` resumes past the previous page's last match; ``total``
         stays constant across pages.
+
+        ``since``/``until`` (epoch seconds, half-open ``[since, until)``)
+        window the graph by assertion time: only facts an in-window-dated
+        source attests, weights re-derived from those attributions alone
+        (ADR 0011). ``until`` alone reads as-of.
         """
-        result = self._post("/recall", drop_none({"cue": cue, "limit": limit, "after": after}))
+        result = self._post(
+            "/recall",
+            drop_none(
+                {
+                    "cue": cue,
+                    "limit": limit,
+                    "after": after,
+                    "since": since,
+                    "until": until,
+                }
+            ),
+        )
         return decode(MatchPage, result)  # type: ignore[no-any-return]
 
     def query(
@@ -869,12 +891,20 @@ class Context:
         object_types: str | Sequence[str] | None = None,
         limit: int | None = None,
         after: MatchCursor | None = None,
+        since: int | None = None,
+        until: int | None = None,
     ) -> MatchPage:
         """Exact-position query; each position takes one name or an OR-set.
         ``subject_types``/``object_types`` further narrow by declared
         entity type (``is_a``-expanded) when this context has an
         installed schema; a schema-free context answers empty for a
-        non-empty filter."""
+        non-empty filter.
+
+        ``since``/``until`` (epoch seconds, half-open ``[since, until)``)
+        window the graph by assertion time: only facts an in-window-dated
+        source attests, weights re-derived from those attributions alone
+        (ADR 0011). ``until`` alone reads as-of.
+        """
         body = drop_none(
             {
                 "subject": subject,
@@ -884,6 +914,8 @@ class Context:
                 "object_types": object_types,
                 "limit": limit,
                 "after": after,
+                "since": since,
+                "until": until,
             }
         )
         result = self._post("/query", body)
@@ -901,11 +933,18 @@ class Context:
         max_depth: int | None = None,
         limit: int | None = None,
         after: ExploreCursor | None = None,
+        since: int | None = None,
+        until: int | None = None,
     ) -> ExplorePage:
         """Exhaustive hop-annotated walk (truncation keeps the nearest).
 
         ``after`` resumes past the previous page's last recollection;
         ``total`` stays constant across pages.
+
+        ``since``/``until`` (epoch seconds, half-open ``[since, until)``)
+        window the graph by assertion time: only facts an in-window-dated
+        source attests, weights re-derived from those attributions alone
+        (ADR 0011). ``until`` alone reads as-of.
         """
         body = drop_none(
             {
@@ -913,6 +952,8 @@ class Context:
                 "max_depth": max_depth,
                 "limit": limit,
                 "after": after,
+                "since": since,
+                "until": until,
             }
         )
         result = self._post("/explore", body)
@@ -949,13 +990,23 @@ class Context:
         *,
         decay: float | None = None,
         limit: int | None = None,
+        since: int | None = None,
+        until: int | None = None,
     ) -> ActivationPage:
-        """Spreading activation from origins, strongest first."""
+        """Spreading activation from origins, strongest first.
+
+        ``since``/``until`` (epoch seconds, half-open ``[since, until)``)
+        window the graph by assertion time: only facts an in-window-dated
+        source attests, weights re-derived from those attributions alone
+        (ADR 0011). ``until`` alone reads as-of.
+        """
         body = drop_none(
             {
                 "origins": [origins] if isinstance(origins, str) else list(origins),
                 "decay": decay,
                 "limit": limit,
+                "since": since,
+                "until": until,
             }
         )
         result = self._post("/activate", body)
@@ -1468,6 +1519,38 @@ class Context:
         )
         result = self._post("/drift/audit", body)
         return decode(DriftAudit, result)  # type: ignore[no-any-return]
+
+    def audit_consolidation(
+        self,
+        checks: Sequence[str],
+        *,
+        limit: int | None = None,
+        evidence_cap: int | None = None,
+        dice_floor: float | None = None,
+        cosine_floor: float | None = None,
+        floor_secs: int | None = None,
+    ) -> dict[str, Any]:
+        """Merge / contradiction / staleness candidates (ADR 0012).
+
+        Sections chosen by ``checks`` (required, non-empty); every
+        candidate carries a ``fingerprint`` over its own evidence —
+        judge once per fingerprint, reuse the judgment until it moves.
+        Candidates, never verdicts: apply through ordinary writes.
+        The response is served as parsed JSON in the endpoint's own
+        shape.
+        """
+        body = drop_none(
+            {
+                "checks": list(checks),
+                "limit": limit,
+                "evidence_cap": evidence_cap,
+                "dice_floor": dice_floor,
+                "cosine_floor": cosine_floor,
+                "floor_secs": floor_secs,
+            }
+        )
+        result = self._post("/consolidation/audit", body)
+        return result  # type: ignore[no-any-return]
 
     def refresh_embeddings(self) -> RefreshOutcome:
         """Re-embed new/changed glosses (diff-only, idempotent).

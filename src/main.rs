@@ -9,6 +9,7 @@ mod clock;
 mod communities;
 mod compact;
 mod config;
+mod consolidation;
 #[cfg(test)]
 mod context_proptest;
 // The same file lib.rs includes — see src/crc32c.rs for why the
@@ -781,6 +782,13 @@ fn routes(
         // skips the full scan, so both join this unconditional group
         // rather than carrying the limiter as an extension.
         .route("/contexts/{name}/schema/audit", post(api::audit_schema))
+        // ADR 0012 §8: every consolidation section is O(edges) or
+        // worse (the merge sweep is pairwise) — no cheap default to
+        // protect, so the unconditional group, not drift's pattern.
+        .route(
+            "/contexts/{name}/consolidation/audit",
+            post(api::audit_consolidation),
+        )
         .route(
             "/contexts/{name}/schema/validate",
             post(api::validate_schema),

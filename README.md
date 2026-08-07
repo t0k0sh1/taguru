@@ -101,6 +101,19 @@ stored_at`), applied *before* the retrieval lanes run, so "only
 documents tagged X from the last year" is a server-side eligibility
 set, not client-side post-filtering that silently starves `limit`.
 
+The same `since`/`until` window works on the **graph lanes** —
+`recall`, `query`, `explore`, and `activate`, one context at a time
+(ADR 0011): an association is visible iff at least one in-window
+source attests it, with its weight and citations re-derived from the
+in-window attributions alone, and the walks neither report nor bridge
+through out-of-window edges. `until` alone reads *as-of* — "the
+knowledge available by then" — so a fact superseded later still
+answers for the year it was asserted. An association's temporal
+position is its sources' assertion time; there is no stored end time,
+and a source that never stored a passage has no metadata, so no
+window can see its facts — date your sources and the graph gains a
+time axis with no migration at all.
+
 For corpus-overview questions ("what are the main themes here?") there
 is a third lane: `taguru communities` detects communities on the
 association graph server-side and derives an artifact of LLM summaries
@@ -109,6 +122,22 @@ unchanged graph re-runs without a single LLM call — and
 `POST /contexts/{name}/communities/search` (MCP: `search_communities`)
 ranks those summaries with an honest staleness verdict when the graph
 has moved on since.
+
+Long-lived contexts accumulate spelling-twin concepts, conflicting
+facts, and assertions the corpus has moved past;
+`POST /contexts/{name}/consolidation/audit` (MCP:
+`audit_consolidation`, ADR 0012) surfaces them as **candidates, never
+verdicts** — merge pairs corroborated by shared live structure,
+multi-object facts ranked by how one-object their label usually is
+(rows dated by assertion time), sign-contested edges with both sides'
+sources, and facts trailing their own subject's newest assertion.
+`taguru consolidation` is the judging half, communities-patterned:
+each candidate carries a fingerprint over its own evidence, judgments
+(dismissals included) are stored in a derived context keyed by that
+fingerprint, and a re-run over an unchanged graph makes zero LLM
+calls. Applying an accepted proposal is always an ordinary write — an
+alias, a retraction, a negative-weight assertion, or a re-import —
+never an automatic change.
 
 Handing retrieved evidence to an external answer model with a bounded
 context window? [`POST /contexts/{name}/evidence`](https://t0k0sh1.github.io/taguru/evidence.html)

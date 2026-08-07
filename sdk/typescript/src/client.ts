@@ -919,10 +919,15 @@ export class Context {
    * Associations whose subject/object entry-matches the cue. `after`
    * resumes past the previous page's last match; `total` stays constant
    * across pages.
+   *
+   * `since`/`until` (epoch seconds, half-open `[since, until)`) window
+   * the graph by assertion time: only facts an in-window-dated source
+   * attests, weights re-derived from those attributions alone
+   * (ADR 0011). `until` alone reads as-of.
    */
   async recall(
     cue: string,
-    options: { limit?: number; after?: MatchCursor } = {},
+    options: { limit?: number; after?: MatchCursor; since?: number; until?: number } = {},
   ): Promise<MatchPage> {
     const result = await this.post(
       "/recall",
@@ -930,6 +935,8 @@ export class Context {
         cue,
         limit: options.limit,
         after: options.after ? matchCursor(options.after) : undefined,
+        since: options.since,
+        until: options.until,
       }),
     );
     return result as MatchPage;
@@ -940,6 +947,11 @@ export class Context {
    * `subject_types`/`object_types` further narrow by declared entity type
    * (`is_a`-expanded) when this context has an installed schema; a
    * schema-free context answers empty for a non-empty filter.
+   *
+   * `since`/`until` (epoch seconds, half-open `[since, until)`) window
+   * the graph by assertion time: only facts an in-window-dated source
+   * attests, weights re-derived from those attributions alone
+   * (ADR 0011). `until` alone reads as-of.
    */
   async query(
     options: {
@@ -950,6 +962,8 @@ export class Context {
       object_types?: OneOrMany;
       limit?: number;
       after?: MatchCursor;
+      since?: number;
+      until?: number;
     } = {},
   ): Promise<MatchPage> {
     const result = await this.post(
@@ -962,6 +976,8 @@ export class Context {
         object_types: options.object_types,
         limit: options.limit,
         after: options.after ? matchCursor(options.after) : undefined,
+        since: options.since,
+        until: options.until,
       }),
     );
     return result as MatchPage;
@@ -977,10 +993,21 @@ export class Context {
    * Exhaustive hop-annotated walk (truncation keeps the nearest). `after`
    * resumes past the previous page's last recollection; `total` stays
    * constant across pages.
+   *
+   * `since`/`until` (epoch seconds, half-open `[since, until)`) window
+   * the graph by assertion time: only facts an in-window-dated source
+   * attests, weights re-derived from those attributions alone
+   * (ADR 0011). `until` alone reads as-of.
    */
   async explore(
     origins: string | string[],
-    options: { max_depth?: number; limit?: number; after?: ExploreCursor } = {},
+    options: {
+      max_depth?: number;
+      limit?: number;
+      after?: ExploreCursor;
+      since?: number;
+      until?: number;
+    } = {},
   ): Promise<ExplorePage> {
     const result = await this.post(
       "/explore",
@@ -989,6 +1016,8 @@ export class Context {
         max_depth: options.max_depth,
         limit: options.limit,
         after: options.after,
+        since: options.since,
+        until: options.until,
       }),
     );
     return result as ExplorePage;
@@ -1033,10 +1062,17 @@ export class Context {
     return result as ChangesPage;
   }
 
-  /** Spreading activation from origins, strongest first. */
+  /**
+   * Spreading activation from origins, strongest first.
+   *
+   * `since`/`until` (epoch seconds, half-open `[since, until)`) window
+   * the graph by assertion time: only facts an in-window-dated source
+   * attests, weights re-derived from those attributions alone
+   * (ADR 0011). `until` alone reads as-of.
+   */
   async activate(
     origins: string | string[],
-    options: { decay?: number; limit?: number } = {},
+    options: { decay?: number; limit?: number; since?: number; until?: number } = {},
   ): Promise<ActivationPage> {
     const result = await this.post(
       "/activate",
@@ -1044,6 +1080,8 @@ export class Context {
         origins: typeof origins === "string" ? [origins] : origins,
         decay: options.decay,
         limit: options.limit,
+        since: options.since,
+        until: options.until,
       }),
     );
     return result as ActivationPage;
@@ -1544,6 +1582,38 @@ export class Context {
       }),
     );
     return result as DriftAudit;
+  }
+
+  /**
+   * Merge / contradiction / staleness candidates (ADR 0012). Sections
+   * chosen by `checks` (required, non-empty); every candidate carries a
+   * `fingerprint` over its own evidence — judge once per fingerprint,
+   * reuse the judgment until it moves. Candidates, never verdicts:
+   * apply through ordinary writes. Served as parsed JSON in the
+   * endpoint's own shape.
+   */
+  async auditConsolidation(
+    checks: string[],
+    options: {
+      limit?: number;
+      evidence_cap?: number;
+      dice_floor?: number;
+      cosine_floor?: number;
+      floor_secs?: number;
+    } = {},
+  ): Promise<Record<string, unknown>> {
+    const result = await this.post(
+      "/consolidation/audit",
+      dropUndefined({
+        checks,
+        limit: options.limit,
+        evidence_cap: options.evidence_cap,
+        dice_floor: options.dice_floor,
+        cosine_floor: options.cosine_floor,
+        floor_secs: options.floor_secs,
+      }),
+    );
+    return result as Record<string, unknown>;
   }
 
   /**

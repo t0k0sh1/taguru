@@ -30,6 +30,13 @@ pub struct RecallRequest {
     pub limit: Option<usize>,
     /// Resume past a previous page's last match — see [`MatchCursor`].
     pub after: Option<MatchCursor>,
+    /// Optional assertion-time window (ADR 0011), half-open
+    /// `[since, until)`, epoch seconds — only associations an
+    /// in-window source attests, weights re-derived from those
+    /// attributions alone. Same contract as passage search's window;
+    /// `since >= until` is refused.
+    pub since: Option<u64>,
+    pub until: Option<u64>,
 }
 
 pub async fn recall(
@@ -55,6 +62,11 @@ pub async fn recall(
             &request.cue,
             clamp(request.limit, DEFAULT_MATCH_LIMIT, MAX_MATCH_LIMIT),
             request.after.as_ref(),
+            // Distinct windows are distinct entries (ADR 0011 §8); the
+            // [graph, passages] lane pair this op already keys on covers
+            // the metadata this result now depends on.
+            request.since,
+            request.until,
         ))
         .ok(),
     );
@@ -75,7 +87,23 @@ pub async fn recall(
         }
         return ok(found.payload.as_ref(), started_at);
     }
-    match state.read_context(&name, |context| context.recall(&request.cue)) {
+    let window_names = match super::sources::resolve_window(
+        &state,
+        &name,
+        request.since,
+        request.until,
+        started_at,
+    ) {
+        Ok(names) => names,
+        Err(refusal) => return *refusal,
+    };
+    match state.read_context(&name, |context| match &window_names {
+        None => context.recall(&request.cue),
+        Some(names) => {
+            let window = context.source_window(names.iter().map(String::as_str));
+            context.recall_within(&request.cue, &window)
+        }
+    }) {
         Ok(result) => {
             let (total, matches) = page(result, request.limit, request.after.as_ref());
             state.note_search(SearchOp::Recall, &name, total == 0);
@@ -382,6 +410,31 @@ pub struct CrossRecallRequest {
     /// Resume past a previous page's last match — see
     /// [`CrossMatchCursor`].
     pub after: Option<CrossMatchCursor>,
+    /// Declared but refused (ADR 0011 §8 scopes the assertion-time
+    /// window to the single-context lanes): named here so a windowed
+    /// cross call fails loudly instead of running silently unwindowed
+    /// — request bodies ignore unknown fields, which would otherwise
+    /// turn a typo'd expectation into wrong results.
+    pub since: Option<u64>,
+    pub until: Option<u64>,
+}
+
+/// Refuses a cross-context search that asked for an assertion-time
+/// window — see the field doc on [`CrossRecallRequest::since`]; the
+/// single-context lanes are the windowed surface (ADR 0011 §8).
+fn refuse_cross_window(
+    since: Option<u64>,
+    until: Option<u64>,
+    started_at: Instant,
+) -> Option<Response> {
+    (since.is_some() || until.is_some()).then(|| {
+        error(
+            ErrorCode::InvalidArgument,
+            "since/until are not supported on cross-context search — window one context at a time"
+                .to_string(),
+            started_at,
+        )
+    })
 }
 
 /// [`cross_query`]'s per-target sibling of `query`'s own schema
@@ -444,6 +497,9 @@ pub async fn cross_recall(
     AppJson(request): AppJson<CrossRecallRequest>,
 ) -> Response {
     let started_at = Instant::now();
+    if let Some(refusal) = refuse_cross_window(request.since, request.until, started_at) {
+        return refusal;
+    }
     let targets = match cross_targets(
         &state,
         &scope,
@@ -556,6 +612,11 @@ pub struct QueryRequest {
     pub limit: Option<usize>,
     /// Resume past a previous page's last match — see [`MatchCursor`].
     pub after: Option<MatchCursor>,
+    /// Optional assertion-time window (ADR 0011) — see
+    /// [`RecallRequest::since`]; identical contract on every graph
+    /// lane.
+    pub since: Option<u64>,
+    pub until: Option<u64>,
 }
 
 /// Whether `subject_types`/`object_types` name at least one type — the
@@ -671,6 +732,9 @@ pub async fn query(
             as_refs(&request.object_types),
             clamp(request.limit, DEFAULT_MATCH_LIMIT, MAX_MATCH_LIMIT),
             request.after.as_ref(),
+            // Distinct windows are distinct entries (ADR 0011 §8).
+            request.since,
+            request.until,
         ))
         .ok(),
     );
@@ -721,12 +785,33 @@ pub async fn query(
     } else {
         None
     };
+    let window_names = match super::sources::resolve_window(
+        &state,
+        &name,
+        request.since,
+        request.until,
+        started_at,
+    ) {
+        Ok(names) => names,
+        Err(refusal) => return *refusal,
+    };
     match state.read_context(&name, |context| {
-        let matches = context.query_any(
-            &as_refs(&request.subject),
-            &as_refs(&request.label),
-            &as_refs(&request.object),
-        );
+        let matches = match &window_names {
+            None => context.query_any(
+                &as_refs(&request.subject),
+                &as_refs(&request.label),
+                &as_refs(&request.object),
+            ),
+            Some(names) => {
+                let window = context.source_window(names.iter().map(String::as_str));
+                context.query_any_within(
+                    &as_refs(&request.subject),
+                    &as_refs(&request.label),
+                    &as_refs(&request.object),
+                    &window,
+                )
+            }
+        };
         type_filter(
             context,
             schema.as_deref(),
@@ -794,6 +879,9 @@ pub struct CrossQueryRequest {
     /// Resume past a previous page's last match — see
     /// [`CrossMatchCursor`].
     pub after: Option<CrossMatchCursor>,
+    /// Declared but refused — see [`CrossRecallRequest::since`].
+    pub since: Option<u64>,
+    pub until: Option<u64>,
 }
 
 /// [`query`] across several named contexts at once — the same
@@ -808,6 +896,9 @@ pub async fn cross_query(
     AppJson(request): AppJson<CrossQueryRequest>,
 ) -> Response {
     let started_at = Instant::now();
+    if let Some(refusal) = refuse_cross_window(request.since, request.until, started_at) {
+        return refusal;
+    }
     if let Some(refusal) = validate_positions(
         &request.subject,
         &request.label,

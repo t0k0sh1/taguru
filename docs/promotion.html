@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Memory promotion (episodic → semantic) — Taguru</title>
+  <meta name="description" content="The promotion runbook: keep session notes (episodic memory) in an ordinary scratch context under session-source and date conventions, then promote the keepers into a permanent context with extract → import → consolidation audit → retract — provenance and assertion time intact, forgetting always explicit.">
+  <link rel="icon" type="image/png" href="favicon.png">
+  <link rel="stylesheet" href="style.css">
+  <script src="site.js"></script>
+</head>
+<body>
+
+<div class="topbar">
+  <button class="nav-toggle" id="nav-toggle" type="button" aria-label="Toggle menu">☰</button>
+  <a class="brand" href="index.html"><img class="brand-mark" src="logo.png" alt="">Taguru</a>
+  <button class="theme-toggle" type="button" aria-label="Toggle theme">◐</button>
+</div>
+<div class="scrim" id="scrim"></div>
+
+<div class="layout">
+<aside class="sidebar">
+  <a class="brand" href="index.html"><img class="brand-mark" src="logo.png" alt="">Taguru</a>
+  <nav class="side-nav">
+    <div class="side-group">
+      <a href="index.html">Home</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Guide</div>
+      <a href="getting-started.html">Getting started</a>
+      <a href="concepts.html">Concepts</a>
+      <a href="modeling.html">Modeling</a>
+      <a href="promotion.html" aria-current="page">Memory promotion</a>
+      <a href="troubleshooting.html">Troubleshooting</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Reference</div>
+      <a href="schema.html">Context schema</a>
+      <a href="import.html">Batch import</a>
+      <a href="extract.html">Document extraction</a>
+      <a href="connectors.html">Ingest connectors</a>
+      <a href="benchmark.html">Extraction benchmark</a>
+      <a href="evaluate.html">Retrieval quality gate</a>
+      <a href="evidence.html">Evidence assembly</a>
+      <a href="long-running.html">Long-running ingestion</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Deploy</div>
+      <a href="docker-compose.html">Docker Compose</a>
+      <a href="kubernetes.html">Kubernetes</a>
+      <a href="aws.html">AWS</a>
+      <a href="azure.html">Azure</a>
+      <a href="gcp.html">Google Cloud</a>
+      <a href="bedrock.html">Amazon Bedrock</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">How it works</div>
+      <a href="architecture.html">Internal architecture</a>
+      <a href="tracing.html">Tracing</a>
+      <a href="mcp-rag-walkthrough.html">MCP walkthrough</a>
+      <a href="local-rag-walkthrough.html">Local RAG walkthrough</a>
+    </div>
+  </nav>
+  <div class="sidebar-footer">
+    <a href="https://github.com/t0k0sh1/taguru">GitHub ↗</a>
+    <button class="theme-toggle" type="button" aria-label="Toggle theme">◐</button>
+  </div>
+</aside>
+
+<main class="content">
+<div class="page">
+
+  <header class="hero">
+    <div class="eyebrow">guide · memory promotion</div>
+    <h1>Memory promotion — episodic notes into semantic knowledge</h1>
+    <p class="lede">
+      Agent sessions produce raw notes worth keeping for a while and a few facts worth keeping
+      forever. Taguru already has the destination (the association graph) and the vehicle
+      (<code>taguru extract</code>, <code>POST /import</code>); this page fixes the
+      <b>conventions and the procedure</b> that make the lifecycle work with <b>no new server
+      machinery</b>: scratch is an ordinary context, promotion is ordinary writes, and
+      forgetting is always an explicit operation (issue #423; ADR 0011, ADR 0012).
+    </p>
+  </header>
+
+  <section>
+    <h2 id="conventions">Scratch conventions</h2>
+    <ul>
+      <li><b>Scratch is an ordinary context</b> — <code>scratch-{agent}</code>, or
+        <code>scratch-{agent}-{topic}</code> when sessions must not mix. There is no TTL and
+        none is planned: nothing in this store expires silently.</li>
+      <li><b>Source ids name the session, globally uniquely</b>:
+        <code>session:{agent}:{id}</code> (the id a UUID or an equally unique token) for the
+        running note, with <code>/{doc}</code> appended when one session produces several
+        documents. Uniqueness is load-bearing: import is retract-then-apply <b>per source
+        id</b>, so two agents sharing a bare <code>session:{id}</code> in one permanent
+        context would silently replace each other's assertions. The id survives promotion,
+        so a promoted fact's citation still names the session that produced it — provenance
+        rides the existing source/citation machinery.</li>
+      <li><b>Always declare <code>date</code></b> when storing passages.
+        <code>date ?? stored_at</code> is the assertion time every windowed graph read
+        (<code>since</code>/<code>until</code>, ADR 0011) and the staleness audit run on. An
+        associations-only source stores no metadata and is invisible to every window — store
+        at least the session note as a passage.</li>
+      <li><b>Tag</b> scratch sources with the session's topics; passage search's
+        <code>tags</code> filter is how a later session finds its own trail.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2 id="procedure">The promotion procedure</h2>
+    <ol>
+      <li><b>Review</b> the scratch context: <code>recall</code>/<code>query</code>, or
+        <code>taguru communities --context scratch-…</code> for a themed overview once the
+        scratch has grown.</li>
+      <li><b>Extract the keepers</b> with <code>taguru extract</code> over the session
+        passages (or hand-write the batch), targeting the <b>permanent</b> context — keeping
+        the <code>session:{agent}:{id}</code> source ids and the <code>date</code>s. Resolve
+        spellings against the permanent context first (<code>resolve</code> /
+        <code>resolve_label</code>): reuse its vocabulary, never fork it.</li>
+      <li><b>Import</b> via <code>POST /import</code> / <code>taguru import</code> —
+        retract-then-apply per source makes re-promoting the same session idempotent.</li>
+      <li><b>Audit the landing zone</b>: <code>taguru consolidation --context NAME</code>
+        (or the <code>audit_consolidation</code> MCP tool). Promotion is exactly when merge
+        twins and contradictions appear; judgments are proposals keyed by evidence
+        fingerprint (re-runs over an unchanged graph cost zero LLM calls), and applying an
+        accepted one is always an ordinary write — an alias, a retraction, a negative-weight
+        assertion, or a re-import.</li>
+      <li><b>Retire the promoted scratch</b>: <code>retract_source</code> the promoted
+        session sources (or delete the scratch context once everything promoted).
+        Unpromoted scratch stays until someone decides otherwise — that is the posture, not
+        a gap.</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2 id="pitfalls">What not to do</h2>
+    <ul>
+      <li>Don't promote into a fresh spelling universe — the resolve-first rule in step 2 is
+        what keeps one referent one spelling.</li>
+      <li>Don't invent an end date for a superseded fact: assert the new fact with its own
+        date; as-of queries (<code>until</code>) and the audit's dated rows sort the regimes
+        out (ADR 0011 §6).</li>
+      <li>Don't auto-expire scratch, and don't skip the audit on a large promotion — an
+        unchanged graph re-audits for free.</li>
+    </ul>
+    <p>An agent-facing version of this runbook ships as a skill template in
+      <code>examples/skills/memory-promotion/</code>.</p>
+  </section>
+
+  <footer class="colophon">
+    <span>MIT License</span>
+    <a href="https://github.com/t0k0sh1/taguru">github.com/t0k0sh1/taguru</a>
+  </footer>
+
+</div>
+</main>
+</div>
+</body>
+</html>
