@@ -170,7 +170,8 @@ services:
       of <code>taguru-code models</code> (e.g.
       <code>paraphrase-multilingual-minilm-l12-v2-q</code>, or
       <code>multilingual-e5-small</code> for stronger recall) downloads the ONNX model
-      once into <code>~/.taguru/models</code> and embeds on the CPU, offline afterwards.
+      once into <code>HF_HOME</code> when set, or <code>~/.taguru/models</code> otherwise,
+      and embeds on the CPU, offline afterwards.
       The Docker image ships without it (ONNX Runtime publishes no musl binaries), which
       is why the container path above points at Ollama instead.
     </p>
