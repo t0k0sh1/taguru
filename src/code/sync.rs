@@ -520,6 +520,7 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
         }
     }
     let mut imported = 0usize;
+    let mut partial_writes = false;
     let mut ops_since_flush = 0usize;
     for (path, batch, fingerprint) in &batches {
         match crate::ingest::apply_batch(&state, batch) {
@@ -531,6 +532,12 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
             }
             Err(refusal) => {
                 eprintln!("taguru-code: sync: {path}: {}", refusal.text());
+                // A refusal can land AFTER durable writes (the
+                // retraction, the passage, a partial prefix) — the
+                // same reason `taguru import` folds
+                // `wrote_anything()` into its touched set: those
+                // writes still need their vectors below.
+                partial_writes |= refusal.wrote_anything();
                 failures += 1;
             }
         }
@@ -542,12 +549,25 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
     }
     state.flush_dirty();
     state.persist_usage();
+    let wrote_something = imported > 0 || retracted > 0 || partial_writes;
     if state.embeddings_configured()
-        && (imported > 0 || retracted > 0)
+        && wrote_something
         && let Some(Err(error)) =
             state.refresh_embeddings(&args.context, taguru::deadline::Deadline::unbounded())
     {
         eprintln!("taguru-code: sync: embeddings refresh: {error}");
+    }
+    // Same consent logic as `taguru import` (#479): with
+    // TAGURU_EMBED_PASSAGES=1 the passage vectors must follow the
+    // glosses, or the vector lane stays silently absent until a
+    // server-side refresh this offline flow never performs.
+    if state.embeddings_configured()
+        && state.passage_embedding_enabled()
+        && wrote_something
+        && let Some(Err(error)) =
+            state.refresh_passage_embeddings(&args.context, taguru::deadline::Deadline::unbounded())
+    {
+        eprintln!("taguru-code: sync: passage embeddings refresh: {error}");
     }
     // Retract-then-reimport appends to the passage log on every sync,
     // and this process exits before the store's own compaction
