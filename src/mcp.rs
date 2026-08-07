@@ -65,6 +65,7 @@ mod tests {
             "sources": ["s"], "source": "s", "query": "q", "paragraph": 0,
             "stream": "{}", "to": "ctx2", "expected": "x",
             "subject": "s", "label": "l", "object": "o",
+            "checks": ["merge"],
             "schema": 1, "mode": "strict", "closed_labels": false,
             "types": {}, "relations": {},
             "document": {

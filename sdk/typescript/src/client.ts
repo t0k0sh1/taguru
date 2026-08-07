@@ -1563,6 +1563,38 @@ export class Context {
   }
 
   /**
+   * Merge / contradiction / staleness candidates (ADR 0012). Sections
+   * chosen by `checks` (required, non-empty); every candidate carries a
+   * `fingerprint` over its own evidence — judge once per fingerprint,
+   * reuse the judgment until it moves. Candidates, never verdicts:
+   * apply through ordinary writes. Served as parsed JSON in the
+   * endpoint's own shape.
+   */
+  async auditConsolidation(
+    checks: string[],
+    options: {
+      limit?: number;
+      evidence_cap?: number;
+      dice_floor?: number;
+      cosine_floor?: number;
+      floor_secs?: number;
+    } = {},
+  ): Promise<Record<string, unknown>> {
+    const result = await this.post(
+      "/consolidation/audit",
+      dropUndefined({
+        checks,
+        limit: options.limit,
+        evidence_cap: options.evidence_cap,
+        dice_floor: options.dice_floor,
+        cosine_floor: options.cosine_floor,
+        floor_secs: options.floor_secs,
+      }),
+    );
+    return result as Record<string, unknown>;
+  }
+
+  /**
    * Re-embed new/changed glosses (diff-only, idempotent). Throws
    * EmbeddingUnavailableError (501) when the server has no provider
    * configured.

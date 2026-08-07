@@ -493,6 +493,24 @@ pub fn route_tool(
             format!("{}/vocabulary/audit", context_path("context")?),
             Some(pick(arguments, &["dice_floor", "cosine_floor"])),
         ),
+        "audit_consolidation" => {
+            need_present(arguments, "checks")?;
+            (
+                "POST",
+                format!("{}/consolidation/audit", context_path("context")?),
+                Some(pick(
+                    arguments,
+                    &[
+                        "checks",
+                        "limit",
+                        "evidence_cap",
+                        "dice_floor",
+                        "cosine_floor",
+                        "floor_secs",
+                    ],
+                )),
+            )
+        }
         "audit_coverage" => {
             let path = format!("{}/unreachable_from", context_path("context")?);
             need_present(arguments, "origins")?;

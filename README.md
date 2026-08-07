@@ -123,6 +123,22 @@ unchanged graph re-runs without a single LLM call — and
 ranks those summaries with an honest staleness verdict when the graph
 has moved on since.
 
+Long-lived contexts accumulate spelling-twin concepts, conflicting
+facts, and assertions the corpus has moved past;
+`POST /contexts/{name}/consolidation/audit` (MCP:
+`audit_consolidation`, ADR 0012) surfaces them as **candidates, never
+verdicts** — merge pairs corroborated by shared live structure,
+multi-object facts ranked by how one-object their label usually is
+(rows dated by assertion time), sign-contested edges with both sides'
+sources, and facts trailing their own subject's newest assertion.
+`taguru consolidation` is the judging half, communities-patterned:
+each candidate carries a fingerprint over its own evidence, judgments
+(dismissals included) are stored in a derived context keyed by that
+fingerprint, and a re-run over an unchanged graph makes zero LLM
+calls. Applying an accepted proposal is always an ordinary write — an
+alias, a retraction, a negative-weight assertion, or a re-import —
+never an automatic change.
+
 Handing retrieved evidence to an external answer model with a bounded
 context window? [`POST /contexts/{name}/evidence`](https://t0k0sh1.github.io/taguru/evidence.html)
 (MCP: `assemble_evidence`) is opt-in evidence assembly: it runs the same

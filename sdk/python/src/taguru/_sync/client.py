@@ -1520,6 +1520,38 @@ class Context:
         result = self._post("/drift/audit", body)
         return decode(DriftAudit, result)  # type: ignore[no-any-return]
 
+    def audit_consolidation(
+        self,
+        checks: Sequence[str],
+        *,
+        limit: int | None = None,
+        evidence_cap: int | None = None,
+        dice_floor: float | None = None,
+        cosine_floor: float | None = None,
+        floor_secs: int | None = None,
+    ) -> dict[str, Any]:
+        """Merge / contradiction / staleness candidates (ADR 0012).
+
+        Sections chosen by ``checks`` (required, non-empty); every
+        candidate carries a ``fingerprint`` over its own evidence —
+        judge once per fingerprint, reuse the judgment until it moves.
+        Candidates, never verdicts: apply through ordinary writes.
+        The response is served as parsed JSON in the endpoint's own
+        shape.
+        """
+        body = drop_none(
+            {
+                "checks": list(checks),
+                "limit": limit,
+                "evidence_cap": evidence_cap,
+                "dice_floor": dice_floor,
+                "cosine_floor": cosine_floor,
+                "floor_secs": floor_secs,
+            }
+        )
+        result = self._post("/consolidation/audit", body)
+        return result  # type: ignore[no-any-return]
+
     def refresh_embeddings(self) -> RefreshOutcome:
         """Re-embed new/changed glosses (diff-only, idempotent).
 

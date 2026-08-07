@@ -755,6 +755,22 @@ pub(super) fn tool_definitions() -> Vec<Value> {
             ),
         ),
         (
+            "audit_consolidation",
+            "Consolidation candidates (ADR 0012), sections chosen by `checks`: merge (spelling/synonym twins corroborated by shared live structure, types attached when a schema exists), contradiction (multiple live objects under one subject+label, ranked by how one-object the label usually is, rows dated; plus sign-contested edges with both sides' sources), staleness (facts whose latest assertion trails their own subject's newest, with an honest undatable count). CANDIDATES for review, never verdicts — judge each, then apply through ordinary writes (alias / retract / negative weight / re-import). Every candidate carries a `fingerprint` over its own evidence: judge once per fingerprint and reuse the judgment until it moves.",
+            object_schema(
+                json!({
+                    "context": context,
+                    "checks": { "type": "array", "items": { "type": "string", "enum": ["merge", "contradiction", "staleness"] }, "description": "required, non-empty: each section is a full-graph pass" },
+                    "limit": { "type": "integer", "minimum": 0, "description": "per-section candidate ceiling (default 100, capped at 1000); totals stay exact" },
+                    "evidence_cap": { "type": "integer", "minimum": 0, "description": "per-list merge evidence ceiling (default 20)" },
+                    "dice_floor": { "type": "number", "description": "merge: lexical floor (default 0.6)" },
+                    "cosine_floor": { "type": "number", "description": "merge: semantic floor (default 0.6)" },
+                    "floor_secs": { "type": "integer", "minimum": 0, "description": "staleness: minimum gap in seconds (default 0)" }
+                }),
+                &["context", "checks"],
+            ),
+        ),
+        (
             "audit_coverage",
             "Post-ingest audit: associations unreachable from origins (the document's main entities). Non-empty = membership edges are missing — add them before finishing.",
             object_schema(
