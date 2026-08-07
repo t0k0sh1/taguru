@@ -2072,4 +2072,307 @@ mod tests {
 
         let _ = fs::remove_dir_all(dir);
     }
+
+    /// With no paragraph named, the explained paragraph is the
+    /// TARGET source's own best-ranked hit — never another source's.
+    /// And an overlapping target reports no 表記ゆれ term table: the
+    /// lexical evidence already explains the hit.
+    #[test]
+    fn explain_picks_the_targets_own_ranked_paragraph() {
+        let dir = scratch_dir("explain-own-hit");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert("doc-a".to_string(), "杜氏は高瀬である。".to_string());
+        passages.insert(
+            "doc-b".to_string(),
+            "仕込み水は伏流水。\n\n杜氏の交代が続いた。".to_string(),
+        );
+        state
+            .store_passages("sake", plain(passages))
+            .unwrap()
+            .unwrap();
+
+        let explanation = state
+            .explain_passage_search(
+                "sake",
+                "杜氏",
+                "doc-b",
+                None,
+                3,
+                None,
+                None,
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        let PassageExplainLookup::Explained(explanation) = explanation else {
+            panic!("expected an Explained verdict");
+        };
+        assert_eq!(
+            explanation.paragraph, 1,
+            "doc-b's own ranked paragraph, not doc-a's"
+        );
+        assert!(
+            explanation.lexical.is_some(),
+            "the overlap is lexical evidence"
+        );
+        assert!(
+            explanation.paragraph_terms.is_none(),
+            "an overlapping target needs no 表記ゆれ table"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A target sharing NOTHING with the query falls back to its
+    /// first paragraph — the tie at zero is broken by "first", never
+    /// "last" — and the 表記ゆれ table carries the CHOSEN paragraph's
+    /// own question spellings, not a sibling's. (Nonzero shares cannot
+    /// reach this fallback at all: BM25's smoothed idf keeps every
+    /// tf>0 paragraph in the unbounded ranking.)
+    #[test]
+    fn explain_fallback_takes_the_first_paragraph_at_a_zero_share_tie() {
+        let dir = scratch_dir("explain-fallback-zero");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut submissions = BTreeMap::new();
+        submissions.insert(
+            "doc-a".to_string(),
+            crate::passages::PassageSubmission {
+                text: "杜氏は高瀬である。".to_string(),
+                questions: Vec::new(),
+                sections: Vec::new(),
+                locators: Vec::new(),
+                meta: crate::passages::SourceMeta::default(),
+            },
+        );
+        submissions.insert(
+            "doc-c".to_string(),
+            crate::passages::PassageSubmission {
+                text: "無関係な文。\n\n別の無関係。".to_string(),
+                questions: vec![
+                    (0, "選択質問マーカー".to_string()),
+                    (1, "無関係の質問マーカー".to_string()),
+                ],
+                sections: Vec::new(),
+                locators: Vec::new(),
+                meta: crate::passages::SourceMeta::default(),
+            },
+        );
+        state.store_passages("sake", submissions).unwrap().unwrap();
+
+        let explanation = state
+            .explain_passage_search(
+                "sake",
+                "杜氏",
+                "doc-c",
+                None,
+                3,
+                None,
+                None,
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        let PassageExplainLookup::Explained(explanation) = explanation else {
+            panic!("expected an Explained verdict");
+        };
+        assert_eq!(
+            explanation.paragraph, 0,
+            "a zero-share tie is broken by FIRST paragraph"
+        );
+        let terms = explanation
+            .paragraph_terms
+            .as_ref()
+            .expect("no overlap — the 表記ゆれ table renders");
+        // Spellings arrive as normalized 2-grams: 選択 rides only on
+        // the chosen paragraph's question, の質 only on the sibling's
+        // (its text neighbors are 係な, never 係の).
+        assert!(
+            terms.iter().any(|term| term == "選択"),
+            "the chosen paragraph's question spellings ride along: {terms:?}"
+        );
+        assert!(
+            !terms.iter().any(|term| term == "の質"),
+            "a sibling paragraph's question must not: {terms:?}"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The vector verdict's cosine is the TARGET row's own score —
+    /// matched on source AND paragraph AND content hash — and an
+    /// edited (stale) row reports "not yet re-embedded", never the
+    /// stale score.
+    #[test]
+    fn explain_cosine_is_the_targets_own_row_and_stale_rows_report_none() {
+        let dir = scratch_dir("explain-cosine-row");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let state =
+            boot_for_passage_embedding(&dir, Arc::new(MockEmbeddings::fruity(&calls)), 20_000);
+        state
+            .create("fruit", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert("doc-x".to_string(), "りんごは真っ赤に実った。".to_string());
+        passages.insert("doc-y".to_string(), "アップルパイの記録。".to_string());
+        state
+            .store_passages("fruit", plain(passages))
+            .unwrap()
+            .unwrap();
+        state
+            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+
+        let explain = |state: &AppState, source: &str| {
+            let explanation = state
+                .explain_passage_search(
+                    "fruit",
+                    "みかん",
+                    source,
+                    None,
+                    3,
+                    Some(0.1),
+                    None,
+                    Deadline::unbounded(),
+                )
+                .unwrap()
+                .unwrap();
+            let PassageExplainLookup::Explained(explanation) = explanation else {
+                panic!("expected an Explained verdict");
+            };
+            let VectorLaneReport::Ran { cosine, .. } = explanation.vector else {
+                panic!("expected the vector lane to have run");
+            };
+            cosine
+        };
+
+        // doc-y (アップル, 0.5376) outranks doc-x (りんご, 0.28) at the
+        // same paragraph index: the explained cosine must still be the
+        // target's own row.
+        let cosine = explain(&state, "doc-x").expect("doc-x's row is live");
+        assert!((cosine - 0.28).abs() < 1e-6, "{cosine}");
+
+        // An edit makes doc-x's row stale (hash mismatch): the verdict
+        // is "not yet re-embedded", not the stale row's score.
+        let mut edited = BTreeMap::new();
+        edited.insert("doc-x".to_string(), "青りんごに切り替えた。".to_string());
+        state
+            .store_passages("fruit", plain(edited))
+            .unwrap()
+            .unwrap();
+        assert!(
+            explain(&state, "doc-x").is_none(),
+            "a stale row must read as not-yet-re-embedded"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// `limit_to_reach` starts its verification at rank + 1 exactly:
+    /// a start one low doubles PAST the true answer and reports a
+    /// limit larger than the one that actually serves the target.
+    #[test]
+    fn explain_limit_to_reach_is_the_exact_serving_limit() {
+        let dir = scratch_dir("explain-limit-exact");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        // Five sources with strictly descending 杜氏 frequency: the
+        // target sits at rank 2 (third place) of a five-deep ranking.
+        let mut passages = BTreeMap::new();
+        passages.insert(
+            "doc-1".to_string(),
+            "杜氏、杜氏、杜氏、杜氏、杜氏の五連。".to_string(),
+        );
+        passages.insert("doc-2".to_string(), "杜氏と杜氏と杜氏と杜氏。".to_string());
+        passages.insert("doc-3".to_string(), "杜氏の杜氏による杜氏。".to_string());
+        passages.insert("doc-4".to_string(), "杜氏と杜氏の記録。".to_string());
+        passages.insert("doc-5".to_string(), "杜氏の単独記録。".to_string());
+        state
+            .store_passages("sake", plain(passages))
+            .unwrap()
+            .unwrap();
+
+        let explanation = state
+            .explain_passage_search(
+                "sake",
+                "杜氏",
+                "doc-3",
+                None,
+                1,
+                None,
+                None,
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        let PassageExplainLookup::Explained(explanation) = explanation else {
+            panic!("expected an Explained verdict");
+        };
+        assert_eq!(
+            explanation.limit_to_reach,
+            Some(3),
+            "rank 2 serves at limit 3, and the probe must start there"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A source retracted while its digest still sits in the BM25
+    /// sidecar is repair work the reload must count and perform — the
+    /// leftover digests are drift exactly like edited ones.
+    #[test]
+    fn a_reloaded_bm25_sidecar_drops_a_retracted_sources_rows() {
+        let dir = scratch_dir("bm25-retract-drift");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert("doc-a".to_string(), "杜氏は高瀬である。".to_string());
+        passages.insert("doc-b".to_string(), "仕込み水は伏流水。".to_string());
+        state
+            .store_passages("sake", plain(passages))
+            .unwrap()
+            .unwrap();
+        state
+            .search_passages("sake", "杜氏", 3, None, None, Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        // Persist the two-source sidecar, then retract one source and
+        // drop the in-memory index so the next search must reload.
+        let entry = state.lookup("sake").unwrap();
+        assert!(state.evict_entry("sake", &entry));
+        state.retract_source("sake", "doc-b").unwrap();
+        let entry = state.lookup("sake").unwrap();
+        assert!(
+            entry.bm25.read().is_none(),
+            "the eviction dropped the index"
+        );
+
+        let hits = state
+            .search_passages("sake", "伏流水", 3, None, None, Deadline::unbounded())
+            .unwrap()
+            .unwrap()
+            .hits;
+        assert!(
+            hits.is_empty(),
+            "the retracted source's rows must not survive the sidecar reload: {hits:?}"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
 }
