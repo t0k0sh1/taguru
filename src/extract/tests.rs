@@ -1172,6 +1172,122 @@ fn manifests_reextract_when_the_candidates_mode_changes() {
 }
 
 #[test]
+fn vocabulary_flag_parses_once_and_rejects_a_duplicate() {
+    fn parse(words: &[&str]) -> Result<Args, i32> {
+        Args::parse(&words.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+    let parsed = parse(&[
+        "--context",
+        "c",
+        "--out",
+        "o",
+        "--vocabulary",
+        "vocab.jsonl",
+        "doc.md",
+    ])
+    .unwrap();
+    assert_eq!(
+        parsed.vocabulary.as_deref(),
+        Some(Path::new("vocab.jsonl")),
+        "a single --vocabulary must parse and carry its path"
+    );
+    let duplicate = parse(&[
+        "--context",
+        "c",
+        "--out",
+        "o",
+        "--vocabulary",
+        "a.jsonl",
+        "--vocabulary",
+        "b.jsonl",
+        "doc.md",
+    ]);
+    assert!(
+        matches!(duplicate, Err(2)),
+        "a duplicate is a usage error, never a silent last-wins"
+    );
+}
+
+/// One-sided streams must load: concept names with no label alias, and
+/// label aliases with no association, are each real vocabulary — the
+/// emptiness refusal fires only when BOTH sets are empty.
+#[test]
+fn load_vocabulary_accepts_one_sided_streams() {
+    let dir = std::env::temp_dir().join(format!("taguru-vocab-sided-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+
+    fs::write(
+        dir.join("concepts-only.jsonl"),
+        concat!(
+            r#"{"taguru_batch":1,"context":"ops","source":"s1"}"#,
+            "\n",
+            r#"{"alias":"cargo-nextest","canonical":"nextest","kind":"concept"}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    let concepts_only = load_vocabulary(&dir.join("concepts-only.jsonl")).unwrap();
+    assert!(concepts_only.concepts.contains("nextest"));
+    assert!(concepts_only.labels.is_empty());
+
+    fs::write(
+        dir.join("labels-only.jsonl"),
+        concat!(
+            r#"{"taguru_batch":1,"context":"ops","source":"s2"}"#,
+            "\n",
+            r#"{"alias":"担当","canonical":"管理者","kind":"label"}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    let labels_only = load_vocabulary(&dir.join("labels-only.jsonl")).unwrap();
+    assert!(labels_only.concepts.is_empty());
+    assert!(labels_only.labels.contains("管理者"));
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// `vocabulary_digest` is the benchmark harness's view of the same
+/// fingerprint extract folds into its manifests — it must BE that
+/// digest, and track content.
+#[test]
+fn vocabulary_digest_matches_the_load_and_tracks_content() {
+    let dir = std::env::temp_dir().join(format!("taguru-vocab-digest-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("v.jsonl");
+    fs::write(
+        &path,
+        concat!(
+            r#"{"taguru_batch":1,"context":"ops","source":"s1"}"#,
+            "\n",
+            r#"{"subject":"CI","label":"使用","object":"nextest","weight":1.0}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    let digest = vocabulary_digest(&path).unwrap();
+    assert_eq!(digest, load_vocabulary(&path).unwrap().digest);
+    fs::write(
+        &path,
+        concat!(
+            r#"{"taguru_batch":1,"context":"ops","source":"s1"}"#,
+            "\n",
+            r#"{"subject":"CI","label":"使用","object":"cargo-nextest","weight":1.0}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    assert_ne!(
+        vocabulary_digest(&path).unwrap(),
+        digest,
+        "a changed name set must change the digest"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn load_vocabulary_harvests_canonicals_and_labels_never_alias_spellings() {
     let dir = std::env::temp_dir().join(format!("taguru-vocab-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);

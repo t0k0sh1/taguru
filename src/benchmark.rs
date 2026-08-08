@@ -490,6 +490,7 @@ mod args_tests {
             ["--parallel", "2"],
             ["--max-output-tokens", "100"],
             ["--max-attempts", "3"],
+            ["--vocabulary", "v2"],
         ] {
             let mut words = vec!["--models", "m.json", "--context", "c", "--out", "o"];
             // A first occurrence for the flags the base line lacks, so
@@ -501,6 +502,29 @@ mod args_tests {
             words.push(corpus);
             assert_eq!(args(&words).unwrap_err(), 2, "{duplicated:?}");
         }
+    }
+
+    /// The happy path the duplicate test above cannot see: a single
+    /// `--vocabulary` must parse and carry its path (a mutated guard
+    /// that rejects every occurrence would still pass the
+    /// duplicate-errors test).
+    #[test]
+    fn vocabulary_flag_parses_once() {
+        let dir = std::env::temp_dir();
+        let corpus = dir.to_str().unwrap();
+        let parsed = args(&[
+            "--models",
+            "m.json",
+            "--context",
+            "c",
+            "--out",
+            "o",
+            "--vocabulary",
+            "vocab.jsonl",
+            corpus,
+        ])
+        .unwrap();
+        assert_eq!(parsed.vocabulary.as_deref(), Some(Path::new("vocab.jsonl")));
     }
 
     #[test]
