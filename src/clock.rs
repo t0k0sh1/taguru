@@ -78,5 +78,8 @@ mod tests {
         assert_eq!(days_from_civil(2024, 2, 29), 1709164800 / 86400);
         assert_eq!(days_from_civil(2000, 3, 1), 951868800 / 86400);
         assert_eq!(days_from_civil(1969, 12, 31), -1);
+        // The negative-year era branch (`y - 399`): year 0 is a leap
+        // year (≡ 2000 mod 400), so -1-03-01 → 0-03-01 spans 366 days.
+        assert_eq!(days_from_civil(0, 3, 1) - days_from_civil(-1, 3, 1), 366);
     }
 }

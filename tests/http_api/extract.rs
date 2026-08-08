@@ -1119,6 +1119,95 @@ fn extract_coverage_reports_uncovered_candidate_pair_sentences() {
     let _ = std::fs::remove_dir_all(&out);
 }
 
+/// The `/{stem}` suffix can push a within-cap `--source-id` over the
+/// 1024-byte source cap only at extract time — exactly at the cap
+/// both documents pass; one byte over fails them before any model
+/// call.
+#[test]
+fn extract_suffixed_source_ids_respect_the_name_cap() {
+    let docs = batch_dir("extract-source-cap-docs");
+    std::fs::write(docs.join("aa.md"), "壱。").unwrap();
+    std::fs::write(docs.join("bb.md"), "弐。").unwrap();
+    let out = batch_dir("extract-source-cap-out");
+
+    // 1022 + "/" + 2-byte stem = 1025: one over MAX_NAME_BYTES (1024).
+    let over = "s".repeat(1022);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", "http://127.0.0.1:9/v1"),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "ops",
+            "--source-id",
+            &over,
+            docs.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stderr.contains("source cap"), "{stderr}");
+
+    // 1021 + "/" + 2 = 1024: exactly at the cap, both documents land.
+    let at_cap = "s".repeat(1021);
+    let reply = |name: &str, text: &str| {
+        json!({"associations": [
+            {"subject": name, "label": "l", "object": text, "weight": 1.0, "paragraph": 0}
+        ]})
+        .to_string()
+    };
+    let (url, requests) = stub_chat_server(vec![reply("壱", "壱。"), reply("弐", "弐。")]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "ops",
+            "--source-id",
+            &at_cap,
+            docs.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    requests.join().unwrap();
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// The `--source-id` usage errors name their actual cause: a
+/// duplicate says "given twice", an empty id says "must not be
+/// empty" — both exit 2, so only the wording tells the operator
+/// which mistake they made.
+#[test]
+fn extract_source_id_usage_errors_name_their_cause() {
+    let out = batch_dir("extract-source-id-usage-out");
+    let (code, _, stderr) = run_extract(
+        &out,
+        &[],
+        &[
+            "--context",
+            "c",
+            "--source-id",
+            "a",
+            "--source-id",
+            "b",
+            "doc.md",
+        ],
+    );
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("--source-id given twice"), "{stderr}");
+    let (code, _, stderr) =
+        run_extract(&out, &[], &["--context", "c", "--source-id", "", "doc.md"]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("--source-id must not be empty"), "{stderr}");
+    let _ = std::fs::remove_dir_all(&out);
+}
+
 /// #466 S1 (ADR 0017): `--source-id`/`--date`/`--tag` bake the
 /// promotion runbook's conventions into the written batch — the
 /// session source id (with the `/{doc}` stem suffix across several

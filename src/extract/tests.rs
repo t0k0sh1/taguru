@@ -3839,3 +3839,76 @@ fn manifests_rewrite_when_the_runbook_metadata_changes() {
         &[]
     ));
 }
+
+#[test]
+fn runbook_flag_boundaries_hold_exactly() {
+    fn parse(words: Vec<String>) -> Result<Args, i32> {
+        Args::parse(&words)
+    }
+    fn base() -> Vec<String> {
+        ["--context", "c", "--out", "o"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    }
+    // A duplicate --date is a usage error, never last-wins.
+    let mut dated = base();
+    dated.extend(
+        ["--date", "2026-08-06", "--date", "2026-08-07", "doc.md"]
+            .iter()
+            .map(|s| s.to_string()),
+    );
+    assert!(matches!(parse(dated), Err(2)));
+    // An empty tag is refused, not stored.
+    let mut empty_tag = base();
+    empty_tag.extend(["--tag", "", "doc.md"].iter().map(|s| s.to_string()));
+    assert!(matches!(parse(empty_tag), Err(2)));
+    // Tag bytes: exactly at the cap passes, one over fails.
+    let mut at_cap = base();
+    at_cap.extend([
+        "--tag".to_string(),
+        "t".repeat(crate::api::MAX_TAG_BYTES),
+        "doc.md".to_string(),
+    ]);
+    assert!(parse(at_cap).is_ok());
+    let mut over_cap = base();
+    over_cap.extend([
+        "--tag".to_string(),
+        "t".repeat(crate::api::MAX_TAG_BYTES + 1),
+        "doc.md".to_string(),
+    ]);
+    assert!(matches!(parse(over_cap), Err(2)));
+    // Tag count: exactly the per-source cap passes, one more fails.
+    let mut full = base();
+    for i in 0..crate::api::MAX_TAGS_PER_SOURCE {
+        full.extend(["--tag".to_string(), format!("t{i}")]);
+    }
+    full.push("doc.md".to_string());
+    assert!(parse(full).is_ok());
+    let mut overfull = base();
+    for i in 0..=crate::api::MAX_TAGS_PER_SOURCE {
+        overfull.extend(["--tag".to_string(), format!("t{i}")]);
+    }
+    overfull.push("doc.md".to_string());
+    assert!(matches!(parse(overfull), Err(2)));
+    // Source id bytes: exactly at the name cap passes, one over fails.
+    let mut id_at_cap = base();
+    id_at_cap.extend([
+        "--source-id".to_string(),
+        "s".repeat(MAX_NAME_BYTES),
+        "doc.md".to_string(),
+    ]);
+    assert!(parse(id_at_cap).is_ok());
+    let mut id_over = base();
+    id_over.extend([
+        "--source-id".to_string(),
+        "s".repeat(MAX_NAME_BYTES + 1),
+        "doc.md".to_string(),
+    ]);
+    assert!(matches!(parse(id_over), Err(2)));
+    // A fourth dash-separated part is refused even when the first
+    // three name a real date; day 0 is refused before the civil
+    // arithmetic ever sees it.
+    assert_eq!(parse_date("2026-08-06-07"), None);
+    assert_eq!(parse_date("2026-08-00"), None);
+}
