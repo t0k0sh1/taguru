@@ -207,6 +207,7 @@ interface RealAzureBlobItem {
     contentMD5?: Uint8Array;
   };
   versionId?: string;
+  isCurrentVersion?: boolean;
 }
 interface RealAzureDownloadResponse {
   contentType?: string;
@@ -217,7 +218,10 @@ interface RealAzureBlobClient {
   getTags(): Promise<{ tags: Record<string, string> } | undefined>;
 }
 interface RealAzureContainerClient {
-  listBlobsFlat(options?: { prefix?: string }): AsyncIterable<RealAzureBlobItem>;
+  listBlobsFlat(options?: {
+    prefix?: string;
+    includeVersions?: boolean;
+  }): AsyncIterable<RealAzureBlobItem>;
   getBlobClient(key: string): RealAzureBlobClient;
 }
 
@@ -233,7 +237,15 @@ async function streamToBytes(stream: NodeJS.ReadableStream): Promise<Uint8Array>
 function adaptRealContainerClient(real: RealAzureContainerClient): AzureContainerClientLike {
   return {
     async *listBlobs(prefix) {
-      for await (const item of real.listBlobsFlat({ prefix })) {
+      // Without `includeVersions`, `BlobItem.versionId` is never populated,
+      // so a versioning-enabled container could not use objectFingerprint's
+      // top tier. With it, every version is listed — keep only the current
+      // one per blob; a container without versioning yields items with no
+      // `versionId`/`isCurrentVersion` at all, which must still pass.
+      for await (const item of real.listBlobsFlat({ prefix, includeVersions: true })) {
+        if (item.versionId !== undefined && item.isCurrentVersion !== true) {
+          continue;
+        }
         yield {
           name: item.name,
           size: item.properties.contentLength ?? 0,

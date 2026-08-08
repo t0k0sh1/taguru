@@ -114,6 +114,34 @@ const CONTENT_TYPE =
 // naive per-file cap.
 const DEFAULT_MAX_FILE_BYTES = 64 * 1024 * 1024;
 
+// OOXML is XML and compresses extremely well: a package under the raw
+// file cap above can still DECLARE tens of GiB of decompressed entries (a
+// zip bomb). The central directory's declared sizes are summed BEFORE any
+// entry is inflated, and a package past this cap is refused with a
+// `content_too_large` diagnostic — the cap and the diagnostic are kept
+// identical between docx.ts and pptx.ts.
+const MAX_DECOMPRESSED_BYTES = 256 * 1024 * 1024;
+
+class DecompressedSizeExceededError extends Error {}
+
+function unzipBounded(
+  unzipSync: OoxmlDeps["unzipSync"],
+  raw: Uint8Array,
+): Record<string, Uint8Array> {
+  let total = 0;
+  return unzipSync(raw, {
+    filter: (file) => {
+      total += file.originalSize;
+      if (total > MAX_DECOMPRESSED_BYTES) {
+        throw new DecompressedSizeExceededError(
+          `the package declares more than ${MAX_DECOMPRESSED_BYTES} decompressed bytes`,
+        );
+      }
+      return true;
+    },
+  });
+}
+
 // MS-OFFCRYPTO password-protected Office documents (including .docx) are
 // re-packaged as a whole OLE2/Compound File Binary container, not a zip —
 // this is that container format's own magic number (the first 8 bytes of
@@ -388,7 +416,10 @@ function headingLevel(
     }
   }
   const outline = paragraphOutlineLevel(paragraph);
-  if (outline !== null) {
+  // ECMA-376: `w:outlineLvl` values 0-8 are outline levels 1-9; the value
+  // 9 explicitly means "body text, no outline level" and must not read as
+  // a level-10 heading.
+  if (outline !== null && outline >= 0 && outline <= 8) {
     return outline + 1;
   }
   return null;
@@ -773,7 +804,7 @@ export class DocxConnector implements Connector {
     let documentXmlText: string;
     let coreTitle: string | null;
     try {
-      const entries = deps.unzipSync(raw);
+      const entries = unzipBounded(deps.unzipSync, raw);
       const documentXmlBytes = entries["word/document.xml"];
       if (!documentXmlBytes) {
         throw new Error("missing required part word/document.xml");
@@ -797,6 +828,9 @@ export class DocxConnector implements Connector {
       });
       coreTitle = readCoreTitle(deps, entries["docProps/core.xml"]);
     } catch (error) {
+      if (error instanceof DecompressedSizeExceededError) {
+        return failure("content_too_large", error.message, rawContentSha256);
+      }
       // A grab-bag of zip/XML failures for a malformed package, none
       // sharing a common base — every such failure is still this
       // document's own structure failing to parse.

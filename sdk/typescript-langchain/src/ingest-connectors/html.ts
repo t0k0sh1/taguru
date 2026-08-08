@@ -1367,7 +1367,7 @@ export class HtmlConnector implements Connector {
     let response: Response;
     let finalUrl: string;
     try {
-      const result = await this.fetchFollowingRedirects(reference);
+      const result = await this.fetchFollowingRedirects(reference, deadline);
       response = result.response;
       finalUrl = result.finalUrl;
     } catch (error) {
@@ -1469,9 +1469,20 @@ export class HtmlConnector implements Connector {
    */
   private async fetchFollowingRedirects(
     startUrl: string,
+    deadline: number,
   ): Promise<{ response: Response; finalUrl: string }> {
     let currentUrl = startUrl;
     for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
+      // `maxTotalSeconds` is the TOTAL wall-clock budget for the fetch
+      // (its JSDoc's contract) — without this per-hop check, a redirect
+      // chain alone could spend up to (MAX_REDIRECTS + 1) × `timeout`
+      // seconds before the body-read loop ever sees the deadline.
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        throw new Error(
+          `the fetch exceeded the ${this.maxTotalSeconds}-second total time budget`,
+        );
+      }
       if (!this.allowPrivateNetworks) {
         await assertPublicDestination(currentUrl);
       }
@@ -1484,7 +1495,7 @@ export class HtmlConnector implements Connector {
         method: "GET",
         redirect: "manual",
         headers,
-        signal: AbortSignal.timeout(this.timeout * 1000),
+        signal: AbortSignal.timeout(Math.min(this.timeout * 1000, remainingMs)),
       });
       const location = response.headers.get("location");
       const isRedirect = REDIRECT_STATUSES.has(response.status) && location !== null;

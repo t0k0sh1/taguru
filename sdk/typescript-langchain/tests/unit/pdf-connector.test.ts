@@ -213,11 +213,16 @@ describe("PdfConnector", () => {
           await vi.importActual<typeof PdfjsLib>("pdfjs-dist/legacy/build/pdf.mjs");
         return {
           ...actual,
-          getDocument: (params: Parameters<typeof actual.getDocument>[0]) => ({
-            promise: actual
-              .getDocument(params)
-              .promise.then((doc) => wrapFlakyPages(doc, flakyPages)),
-          }),
+          getDocument: (params: Parameters<typeof actual.getDocument>[0]) => {
+            const task = actual.getDocument(params);
+            return {
+              promise: task.promise.then((doc) => wrapFlakyPages(doc, flakyPages)),
+              // The connector destroys the loading task in a finally —
+              // the wrapper must forward that to the real task or the
+              // mock leaks the very resources the finally exists to free.
+              destroy: () => task.destroy(),
+            };
+          },
         };
       });
     }

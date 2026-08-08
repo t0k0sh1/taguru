@@ -77,6 +77,17 @@ test("outline level fallback recognizes a non-heading named style", async () => 
   ).toEqual([[0, "Localized Heading"]]);
 });
 
+test("outline level 9 is body text, not a heading", async () => {
+  // ECMA-376: `w:outlineLvl` value 9 explicitly means "no outline level".
+  // `outlineHeading(text, 10)` emits `w:val="9"` (the helper is 1-based).
+  const body = outlineHeading("Plain body paragraph", 10) + para("Body.");
+  const path = await write("doc.docx", docxBytes(body));
+  const document = await new DocxConnector().read(path);
+
+  expect(document.diagnostics).toEqual([]);
+  expect(document.sections).toEqual([]);
+});
+
 test("table becomes one paragraph with a table locator", async () => {
   const body =
     para("Intro") +

@@ -24,7 +24,7 @@
  * re-running the same paragraph split the server runs.
  */
 
-import type { Locator } from "taguru";
+import type { Locator, Open } from "taguru";
 
 /**
  * Checked for equality, like `taguru`'s own `BATCH_VERSION`/
@@ -58,8 +58,14 @@ export const MAX_TAGS_PER_SOURCE = 32;
  * query parameter `canonicalizeUrl` strips). The second and later
  * occurrences are reported `skipped` with this code; only the first is
  * ever fetched/parsed/imported.
+ *
+ * `Open<...>` (the same forward-compatibility pattern the core SDK's
+ * enum-like response fields use, ADR 0005 §4): `fromDict` preserves a
+ * future code this SDK version does not know yet, so a checkpoint or
+ * document written by a newer SDK still round-trips here instead of
+ * degrading to "corrupt".
  */
-export type DiagnosticCode =
+export type DiagnosticCode = Open<
   | "unreadable"
   | "unsupported_format"
   | "encrypted"
@@ -68,7 +74,8 @@ export type DiagnosticCode =
   | "source_id_too_long"
   | "content_too_large"
   | "partial_extraction"
-  | "duplicate_source";
+  | "duplicate_source"
+>;
 
 export const DIAGNOSTIC_CODES: ReadonlySet<string> = new Set<string>([
   "unreadable",
@@ -159,8 +166,12 @@ function parseDiagnostic(data: unknown): Diagnostic | null {
   if (!isRecord(data)) {
     return null;
   }
+  // An UNKNOWN code string is deliberately kept (see `DiagnosticCode`'s
+  // `Open<...>` note): rejecting it here would make every checkpoint
+  // written by a newer SDK unreadable the moment ADR 0007 §8 gains an
+  // additive code.
   const code = data["code"];
-  if (typeof code !== "string" || !DIAGNOSTIC_CODES.has(code)) {
+  if (typeof code !== "string" || code.length === 0) {
     return null;
   }
   const message = requiredStr(data, "message");
@@ -168,7 +179,7 @@ function parseDiagnostic(data: unknown): Diagnostic | null {
   if (message === null || source === null) {
     return null;
   }
-  return new Diagnostic({ code: code as DiagnosticCode, message, source });
+  return new Diagnostic({ code, message, source });
 }
 
 /**

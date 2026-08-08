@@ -304,7 +304,14 @@ export class SourceEventSink {
       return;
     }
     try {
-      fs.writeSync(this.fd, JSON.stringify(event.toDict()) + "\n");
+      // `writeSync` may write fewer bytes than asked (a caller-supplied
+      // descriptor can be a pipe) — loop until the line is complete so a
+      // JSONL record is never truncated mid-line.
+      const line = Buffer.from(JSON.stringify(event.toDict()) + "\n", "utf8");
+      let offset = 0;
+      while (offset < line.length) {
+        offset += fs.writeSync(this.fd, line, offset, line.length - offset);
+      }
     } catch (error) {
       // A caller-supplied descriptor this sink never owns (see the class
       // doc comment) may already be closed by the time a later `write`
@@ -316,6 +323,16 @@ export class SourceEventSink {
             "later events this run will not be recorded",
         );
         this.warned = true;
+      }
+      // An owned fd must be closed before nulling `this.fd` — `close()`
+      // is a no-op once `fd` is null, so skipping this would leak the
+      // descriptor on every failing pass of a long-running watch.
+      if (this.ownsHandle) {
+        try {
+          fs.closeSync(this.fd);
+        } catch {
+          // best-effort
+        }
       }
       this.fd = null;
     }

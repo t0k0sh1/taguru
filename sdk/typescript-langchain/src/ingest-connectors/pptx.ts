@@ -99,6 +99,34 @@ const CONTENT_TYPE =
 // docx.ts uses for the same reason.
 const DEFAULT_MAX_FILE_BYTES = 64 * 1024 * 1024;
 
+// OOXML is XML and compresses extremely well: a package under the raw
+// file cap above can still DECLARE tens of GiB of decompressed entries (a
+// zip bomb). The central directory's declared sizes are summed BEFORE any
+// entry is inflated, and a package past this cap is refused with a
+// `content_too_large` diagnostic — the cap and the diagnostic are kept
+// identical between docx.ts and pptx.ts.
+const MAX_DECOMPRESSED_BYTES = 256 * 1024 * 1024;
+
+class DecompressedSizeExceededError extends Error {}
+
+function unzipBounded(
+  unzipSync: OoxmlDeps["unzipSync"],
+  raw: Uint8Array,
+): Record<string, Uint8Array> {
+  let total = 0;
+  return unzipSync(raw, {
+    filter: (file) => {
+      total += file.originalSize;
+      if (total > MAX_DECOMPRESSED_BYTES) {
+        throw new DecompressedSizeExceededError(
+          `the package declares more than ${MAX_DECOMPRESSED_BYTES} decompressed bytes`,
+        );
+      }
+      return true;
+    },
+  });
+}
+
 // MS-OFFCRYPTO password-protected Office documents (including .pptx) are
 // re-packaged as a whole OLE2/Compound File Binary container, not a zip —
 // the same magic number docx.ts already checks for the same reason.
@@ -737,13 +765,29 @@ function buildPresentation(
 function partialExtractionMessage(
   entries: Record<string, Uint8Array>,
 ): string | null {
-  const combined = Object.keys(entries)
-    .filter((name) => SLIDE_PART_RE.test(name))
-    .map((name) => decodeUtf8(entries[name]!))
-    .join("");
-  const kinds = PARTIAL_CONTENT_MARKERS.filter(([marker]) =>
-    combined.includes(marker),
-  ).map(([, name]) => name);
+  // Scanned slide by slide, never decoded-and-joined into one string —
+  // the joined XML of a well-compressed deck can run to hundreds of MiB,
+  // and every marker found ends its own search early. `kinds` is rebuilt
+  // in PARTIAL_CONTENT_MARKERS declaration order so the message wording
+  // is independent of slide order.
+  const found = new Set<string>();
+  for (const name of Object.keys(entries)) {
+    if (!SLIDE_PART_RE.test(name)) {
+      continue;
+    }
+    if (found.size === PARTIAL_CONTENT_MARKERS.length) {
+      break;
+    }
+    const slideText = decodeUtf8(entries[name]!);
+    for (const [marker, kind] of PARTIAL_CONTENT_MARKERS) {
+      if (!found.has(kind) && slideText.includes(marker)) {
+        found.add(kind);
+      }
+    }
+  }
+  const kinds = PARTIAL_CONTENT_MARKERS.filter(([, kind]) => found.has(kind)).map(
+    ([, kind]) => kind,
+  );
   if (kinds.length === 0) {
     return null;
   }
@@ -923,7 +967,7 @@ export class PptxConnector implements Connector {
     let entries: Record<string, Uint8Array>;
     let coreTitle: string | null;
     try {
-      entries = deps.unzipSync(raw);
+      entries = unzipBounded(deps.unzipSync, raw);
       body = buildPresentation(deps, entries, {
         extractTitles: this.extractTitles,
         extractSpeakerNotes: this.extractSpeakerNotes,
@@ -931,6 +975,9 @@ export class PptxConnector implements Connector {
       });
       coreTitle = readCoreTitle(deps, entries["docProps/core.xml"]);
     } catch (error) {
+      if (error instanceof DecompressedSizeExceededError) {
+        return failure("content_too_large", error.message, rawContentSha256);
+      }
       // A grab-bag of zip/XML failures for a malformed package, none
       // sharing a common base — every such failure is still this
       // document's own structure failing to parse.

@@ -324,7 +324,15 @@ function adaptRealClient(real: RealS3Client, commands: S3Module): S3ClientLike {
             versionId: obj.VersionId ?? null,
           };
         }
-        if (!response.IsTruncated) {
+        // Also stop when a truncated response carries neither marker —
+        // an S3-compatible store (MinIO, R2, ...) that omits both would
+        // otherwise make the next iteration resend the identical request
+        // forever, re-yielding the same objects. `listObjectsV2` above
+        // already treats a missing NextContinuationToken the same way.
+        if (
+          !response.IsTruncated ||
+          (response.NextKeyMarker === undefined && response.NextVersionIdMarker === undefined)
+        ) {
           break;
         }
         keyMarker = response.NextKeyMarker;

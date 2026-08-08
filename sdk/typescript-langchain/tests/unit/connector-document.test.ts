@@ -71,7 +71,10 @@ describe("fromDict returns null on structural mismatch", () => {
         (payload["locators"] as unknown[]).push({ paragraph: "not-an-int", locator: {} }),
     ],
     ["missing_source", (payload) => delete payload["source"]],
-    ["bad_diagnostic", (payload) => (payload["diagnostics"] = [{ code: "not-a-real-code" }])],
+    [
+      "bad_diagnostic",
+      (payload) => (payload["diagnostics"] = [{ code: 42, message: "m", source: "s" }]),
+    ],
   ];
   test.each(cases)("%s", (_name, mutate) => {
     const payload = document({
@@ -80,6 +83,17 @@ describe("fromDict returns null on structural mismatch", () => {
     mutate(payload);
     expect(ConnectorDocument.fromDict(payload)).toBeNull();
   });
+});
+
+test("fromDict preserves an unknown diagnostic code", () => {
+  // DiagnosticCode is an Open<...> union (ADR 0005 §4's additive-enum
+  // rule): a document written by a newer SDK with a future §8 code must
+  // round-trip here, never degrade to "structural mismatch".
+  const payload = document().toDict();
+  payload["diagnostics"] = [{ code: "future-code", message: "m", source: "doc.md" }];
+  const restored = ConnectorDocument.fromDict(payload);
+  expect(restored).not.toBeNull();
+  expect(restored!.diagnostics[0]!.code).toBe("future-code");
 });
 
 test("fromDict rejects non-dict input", () => {

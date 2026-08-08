@@ -625,15 +625,19 @@ export class PdfConnector implements Connector {
 
     const pdfjsLib = await loadPdfjs();
 
+    // pdfjs-dist takes ownership of (and detaches) a TypedArray `data`
+    // buffer it is given — `raw.slice()` hands it a throwaway copy so
+    // `raw` itself stays readable afterward (it is still needed below,
+    // e.g. as an `OcrRequest.content` payload).
+    const loadingTask = pdfjsLib.getDocument({
+      data: raw.slice(),
+      verbosity: pdfjsLib.VerbosityLevel.ERRORS,
+    });
     let doc: PdfjsLib.PDFDocumentProxy;
     try {
-      // pdfjs-dist takes ownership of (and detaches) a TypedArray `data`
-      // buffer it is given — `raw.slice()` hands it a throwaway copy so
-      // `raw` itself stays readable afterward (it is still needed below,
-      // e.g. as an `OcrRequest.content` payload).
-      doc = await pdfjsLib.getDocument({ data: raw.slice(), verbosity: pdfjsLib.VerbosityLevel.ERRORS })
-        .promise;
+      doc = await loadingTask.promise;
     } catch (error) {
+      await loadingTask.destroy().catch(() => {});
       if (isPasswordException(error)) {
         return failure(
           "encrypted",
@@ -644,6 +648,41 @@ export class PdfConnector implements Connector {
       return failure("corrupt", String(error), rawContentSha256);
     }
 
+    try {
+      return await this.readOpenDocument(doc, {
+        source,
+        displayName,
+        raw,
+        rawContentSha256,
+        failure,
+      });
+    } finally {
+      // The loading task keeps transport, page, and font caches alive
+      // until destroy() (pdfjs-dist v6 puts destroy on the task, not the
+      // document proxy) — without this, a long syncReferences/
+      // syncObjectStorage run over many PDFs would accumulate them all
+      // across every early-return path.
+      await loadingTask.destroy().catch(() => {});
+    }
+  }
+
+  /** The body of `read` past document opening — split out so `read` can
+   * `finally`-destroy the `PDFDocumentProxy` across every return path. */
+  private async readOpenDocument(
+    doc: PdfjsLib.PDFDocumentProxy,
+    context: {
+      source: string;
+      displayName: string;
+      raw: Uint8Array;
+      rawContentSha256: string;
+      failure: (
+        code: DiagnosticCode,
+        message: string,
+        rawContentSha256?: string,
+      ) => Promise<ConnectorDocument>;
+    },
+  ): Promise<ConnectorDocument> {
+    const { source, displayName, raw, rawContentSha256, failure } = context;
     const pageCount = doc.numPages;
     if (pageCount === 0) {
       return failure("corrupt", "the document has no pages", rawContentSha256);

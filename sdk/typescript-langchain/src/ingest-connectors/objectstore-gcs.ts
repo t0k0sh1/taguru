@@ -325,8 +325,16 @@ export class GCSObjectStore implements ObjectStore {
     if (blob === null) {
       throw new ObjectNotFoundError(`gs://${this.bucketName}/${key}: no such object`);
     }
-    const body = await blob.download();
-    return new FetchedObject({ body, contentType: blob.contentType });
+    // The download itself must classify too — a network drop, timeout, or
+    // permission denial here would otherwise propagate as a raw Error,
+    // which `syncObjectStorage`'s per-object catch (transient/permanent/
+    // not-found only) treats as fatal for the whole run.
+    try {
+      const body = await blob.download();
+      return new FetchedObject({ body, contentType: blob.contentType });
+    } catch (error) {
+      throw classifyGcsError(error, () => new ObjectNotFoundError(errorMessage(error)));
+    }
   }
 
   /**

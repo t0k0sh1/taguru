@@ -450,7 +450,12 @@ export async function openObjectStore(
     return [new AzureBlobObjectStore(container), prefix];
   }
   if (scheme === "file") {
-    const directory = tolerantDecode(parsed.pathname);
+    // `fileURLToPath`, not `parsed.pathname`: on Windows the WHATWG
+    // pathname keeps a leading slash before the drive letter
+    // (`file:///C:/docs` → `/C:/docs`), which no filesystem API accepts;
+    // it also handles UNC paths and percent-decoding correctly.
+    const { fileURLToPath } = await import("node:url");
+    const directory = fileURLToPath(parsed);
     return [await FileObjectStore.open(directory), ""];
   }
   throw new Error(

@@ -502,9 +502,19 @@ export class S3Connector implements Connector {
     const fsp = await import("node:fs/promises");
     const os = await import("node:os");
     const pathMod = await import("node:path");
-    const staged = pathMod.join(os.tmpdir(), `taguru-s3-${crypto.randomUUID()}${suffix}`);
+    // `suffix` comes from the object KEY — bucket-controlled, untrusted
+    // input. Every suffix that reaches here already matched a connector's
+    // own extension table (plain `.[alnum]` shapes), but the file name is
+    // rebuilt only from a shape that provably cannot smuggle a path
+    // separator (`..\` traversal on Windows) — anything else is dropped.
+    // `wx` refuses to overwrite an existing file at the staged path.
+    const safeSuffix = /^\.[A-Za-z0-9]{1,16}$/.test(suffix) ? suffix : "";
+    const staged = pathMod.join(
+      os.tmpdir(),
+      `taguru-s3-${crypto.randomUUID()}${safeSuffix}`,
+    );
     try {
-      await fsp.writeFile(staged, fetched.body);
+      await fsp.writeFile(staged, fetched.body, { flag: "wx" });
       let document = await connector.read(staged);
       document = reidentify(document, { source, displayName, contentType: fetched.contentType });
       if (tags.length > 0) {
