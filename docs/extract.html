@@ -235,7 +235,8 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
     <p>Model output is treated as untrusted input, and the contract is enforced on this side of the wire:</p>
     <ul>
       <li>Exact duplicate triples fold into one line (the in-document paraphrase rule, applied mechanically).</li>
-      <li>Invalid items — empty names, names over the caps, zero/non-finite/over-cap weights, unknown alias kinds, dangling or shadowing aliases, out-of-range questions — earn a <b>path-addressed corrective turn</b> by default (see below), never a silent drop.</li>
+      <li>Items that could never import as answered are <b>removed mechanically</b>, before any corrective turn (ADR 0013): an association or alias with a required field missing or empty, an alias that maps a spelling to itself, an alias whose canonical names nothing the document's associations contain, and a subject/object that never appears in the document text (a whitespace- and case-blind check, so a normalized compound like <code>プール最大接続数</code> for a document that says <code>プールの最大接続数</code> still passes). Every removal is named path-first on stderr, counted on the report line as <code>removed (mechanical validation)</code>, and listed in the <a href="#diagnostics">diagnostics sidecar</a> — never a silent drop.</li>
+      <li>Invalid items removal cannot judge — wrong-typed or oversized fields, zero/non-finite/over-cap weights, unknown alias kinds, shadowing or conflicting aliases, out-of-range questions — earn a <b>path-addressed corrective turn</b> by default (see below): a present-but-wrong value is content the model can actually fix.</li>
       <li>A missing or out-of-range paragraph tag loses <b>only the tag</b>, never the fact — the association keeps the model's subject/label/object/weight judgment as-is.</li>
       <li>An alias is adopted only when its canonical is a name this file's associations register, and never when the alias spelling is itself such a name (either would fail the batch at apply time).</li>
       <li>Every file written is re-parsed with the import parser before it is written — <b>extract cannot produce a file import would reject</b>.</li>
@@ -262,17 +263,25 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       never asked to shrink.
     </p>
     <p>
-      A syntactically valid answer that still fails the contract above gets the same corrective
-      treatment, bounded by the same <code>TAGURU_EXTRACT_MAX_ATTEMPTS</code>/
+      A syntactically valid answer that still fails the contract above first goes through the
+      mechanical pass (ADR 0013): removable items come out with their removals recorded, and only
+      if issues remain that removal cannot judge does the answer earn a corrective turn — the
+      corrective turn is the <i>last resort</i>, not the first response. That demotion is
+      measured, not aesthetic: on the failure corpus that motivated it (empty <code>object</code>
+      fields, self-referential aliases), corrective turns burned 53–63 seconds per document
+      across five attempts without fixing anything, while removal is instant, deterministic, and
+      loses nothing a corrected answer would have kept. The corrective treatment itself is
+      bounded by the same <code>TAGURU_EXTRACT_MAX_ATTEMPTS</code>/
       <code>TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES</code> controls — never a second, unbounded
       mechanism. The turn names every violation by its exact JSON path (for example
-      <code>associations[1].weight: expected finite non-zero number, got string "strong"</code> or
-      <code>aliases[0].canonical: names nothing the associations contain</code>) and asks for the
-      complete corrected object: keep every item, correct the named fields rather than deleting
-      their items, add nothing that wasn't already there, JSON only. A dangling or shadowing alias
-      can only be judged once every chunk of the document has answered — that check runs once per
-      document, right before the facts are merged, and (like the per-chunk check) spends at most
-      one corrective turn before giving up. If the corrected answer is <i>still</i> invalid, or the
+      <code>associations[1].weight: expected finite non-zero number, got string "strong"</code>)
+      and asks for the complete corrected object: keep every item, correct the named fields
+      rather than deleting their items, add nothing that wasn't already there, JSON only. A
+      shadowing or conflicting alias can only be judged once every chunk of the document has
+      answered — that check runs once per document, right before the facts are merged, and (like
+      the per-chunk check) spends at most one corrective turn before giving up; a <i>dangling</i>
+      alias found at that same point is mechanically pruned instead, after any corrective turns,
+      since an alias whose canonical resolves to nothing cannot import at all. If the corrected answer is <i>still</i> invalid, or the
       model answers with something cut off, refused, or empty, the source fails outright and
       nothing is written — a batch is only ever the source's complete, valid truth, never a subset
       quietly missing the items that didn't fit. <code>--lossy</code> (or
@@ -520,7 +529,9 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       the answer parsed but failed the contract — under <code>--schema</code> this includes
       <code>"domain"</code>/<code>"range"</code> entries from <code>schema_output_issues</code>,
       the same issue vocabulary <a href="schema.html#write-time">the server's own write-time
-      check</a> uses), <code>elapsed_seconds</code>, and a nested
+      check</a> uses), <code>removed_items</code> (path-addressed, on a <code>stop_valid</code>
+      attempt whose accepted answer had items mechanically removed — ADR 0013; omitted when
+      nothing was), <code>elapsed_seconds</code>, and a nested
       <code>provider_metadata</code> (<code>finish_reason</code> as received,
       <code>input_tokens</code>/<code>output_tokens</code>/<code>total_tokens</code> when the
       backend reports usage — <code>null</code> for <code>timeout</code>/<code>transport</code>,
@@ -552,7 +563,9 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       structured counterpart to the single human-readable summary line every run already prints:
       <code>source</code>, <code>batch_path</code>, <code>associations</code>, <code>concepts</code>,
       <code>labels</code> (counted separately, unlike the summary line's combined "alias(es)"
-      figure), <code>questions</code>, <code>duplicates</code>, and <code>dropped</code>. A
+      figure), <code>questions</code>, <code>duplicates</code>, <code>dropped</code>, and
+      <code>removed</code> (the mechanical-validation count the summary line reports — ADR
+      0013). A
       document that fails never reaches this record — its absence marks exactly that, the same
       "absence marks incomplete" convention <code>--diagnostics-out</code> consumers should apply
       to any record kind this sidecar might add in the future.

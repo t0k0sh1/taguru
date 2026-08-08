@@ -53,6 +53,9 @@ impl Extraction {
 /// chunk-1 alias whose canonical only shows up in chunk 3 is valid
 /// (see `merge`'s own comment on this below), so validating aliases
 /// output-by-output would reject something `merge` happily accepts.
+/// Since ADR 0013 this returns only the CORRECTIVE half of that
+/// judgment (shadowing, conflicting mappings); a dangling canonical is
+/// the mechanical half, removed by `prune_unresolvable_aliases`.
 /// Called only once Stage 1 (`interpret_model_output`'s own issues) is
 /// clean for every output, so every alias here already has a
 /// well-formed, non-self `alias`/`canonical`/`kind` to judge — items
@@ -63,25 +66,7 @@ impl Extraction {
 /// output order, so the caller can address a single targeted
 /// corrective turn per offending output.
 pub(super) fn cross_output_issues(outputs: &[ChunkOutput]) -> Vec<(usize, Vec<String>)> {
-    let mut concept_names: HashSet<String> = HashSet::new();
-    let mut label_names: HashSet<String> = HashSet::new();
-    for chunk in outputs {
-        let output = &chunk.output;
-        for item in &output.associations {
-            let subject = item.subject.as_deref().unwrap_or_default().trim();
-            let label = item.label.as_deref().unwrap_or_default().trim();
-            let object = item.object.as_deref().unwrap_or_default().trim();
-            if !subject.is_empty() {
-                concept_names.insert(subject.to_string());
-            }
-            if !object.is_empty() {
-                concept_names.insert(object.to_string());
-            }
-            if !label.is_empty() {
-                label_names.insert(label.to_string());
-            }
-        }
-    }
+    let (concept_names, label_names) = association_name_sets(outputs);
 
     // First-registered spelling → canonical wins, exactly like merge()'s
     // Entry::Vacant/Entry::Occupied fold — a later output naming the
@@ -115,9 +100,11 @@ pub(super) fn cross_output_issues(outputs: &[ChunkOutput]) -> Vec<(usize, Vec<St
                 continue;
             }
             if !names.contains(canonical) {
-                issues.push(format!(
-                    "{path}.canonical: names nothing the associations contain"
-                ));
+                // ADR 0013: a dangling canonical is no longer a
+                // corrective issue — it cannot import (merge() drops
+                // it), so `prune_unresolvable_aliases` removes it with
+                // accounting after any corrective turns complete. It
+                // still never registers a mapping here.
                 continue;
             }
             match registry.get(spelling) {
@@ -140,6 +127,35 @@ pub(super) fn cross_output_issues(outputs: &[ChunkOutput]) -> Vec<(usize, Vec<St
         }
     }
     issues_by_output
+}
+
+/// The merged name sets every cross-output judgment is made against:
+/// every non-empty subject/object spelling (concepts) and label
+/// spelling (labels) across ALL outputs — a chunk-1 alias whose
+/// canonical only shows up in chunk 3 resolves. Shared by
+/// [`cross_output_issues`] and `prune_unresolvable_aliases` so the two
+/// halves of Stage 2 (corrective vs. mechanical, ADR 0013) can never
+/// disagree on what "the associations contain."
+pub(super) fn association_name_sets(outputs: &[ChunkOutput]) -> (HashSet<String>, HashSet<String>) {
+    let mut concept_names: HashSet<String> = HashSet::new();
+    let mut label_names: HashSet<String> = HashSet::new();
+    for chunk in outputs {
+        for item in &chunk.output.associations {
+            let subject = item.subject.as_deref().unwrap_or_default().trim();
+            let label = item.label.as_deref().unwrap_or_default().trim();
+            let object = item.object.as_deref().unwrap_or_default().trim();
+            if !subject.is_empty() {
+                concept_names.insert(subject.to_string());
+            }
+            if !object.is_empty() {
+                concept_names.insert(object.to_string());
+            }
+            if !label.is_empty() {
+                label_names.insert(label.to_string());
+            }
+        }
+    }
+    (concept_names, label_names)
 }
 
 /// ADR 0009 §11.2: the schema-side sibling of [`cross_output_issues`]

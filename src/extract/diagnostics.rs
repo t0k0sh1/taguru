@@ -69,6 +69,7 @@ impl DiagnosticsSink {
             provider_metadata,
             parse_error: attempt.parse_error.map(str::to_string),
             validation_issues: attempt.validation_issues.map(<[String]>::to_vec),
+            removed_items: attempt.removed_items.map(<[String]>::to_vec),
             piece_bytes: attempt.piece_bytes,
             requested_max_tokens: attempt.requested_max_tokens,
             response_text,
@@ -111,7 +112,13 @@ impl DiagnosticsSink {
     /// never reaches this call site, so its absence here marks exactly
     /// that, the same "absence marks incomplete" convention `kind:
     /// "cell"` uses at the harness's cell scope (ADR 0003 §9.2).
-    pub(super) fn emit_document(&self, source: &str, extraction: &Extraction, out_path: &Path) {
+    pub(super) fn emit_document(
+        &self,
+        source: &str,
+        extraction: &Extraction,
+        removed: usize,
+        out_path: &Path,
+    ) {
         self.write_record(&DocumentRecord {
             kind: "document",
             source: source.to_string(),
@@ -121,6 +128,7 @@ impl DiagnosticsSink {
             questions: extraction.questions.len(),
             duplicates: extraction.duplicates,
             dropped: extraction.dropped,
+            removed,
             batch_path: out_path.display().to_string(),
         });
     }
@@ -193,6 +201,10 @@ pub(super) struct DiagnosticsAttempt<'a> {
     pub(super) response: Option<&'a ChatCompletion>,
     pub(super) parse_error: Option<&'a str>,
     pub(super) validation_issues: Option<&'a [String]>,
+    /// ADR 0013: the mechanical pass's removals on a `stop_valid`
+    /// attempt — `Some` exactly when the accepted answer had items
+    /// removed; every other state is `None`.
+    pub(super) removed_items: Option<&'a [String]>,
     /// Ladder-only: the byte length of the piece this round asked
     /// about, distinguishing split sub-pieces that share one
     /// `chunk_index`.
@@ -226,6 +238,10 @@ pub(super) struct AttemptRecord {
     pub(super) provider_metadata: Option<ProviderMetadataRecord>,
     pub(super) parse_error: Option<String>,
     pub(super) validation_issues: Option<Vec<String>>,
+    /// Rust-only, like `piece_bytes` below: absent (never null) when
+    /// the attempt removed nothing — the flagless shape is unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) removed_items: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) piece_bytes: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -277,5 +293,10 @@ pub(super) struct DocumentRecord {
     pub(super) questions: usize,
     pub(super) duplicates: usize,
     pub(super) dropped: usize,
+    /// ADR 0013: how many items the mechanical pass removed across the
+    /// document's accepted answers (Stage 1 and the Stage 2 alias
+    /// prune together) — the count `Run::report` prints as "removed
+    /// (mechanical validation)".
+    pub(super) removed: usize,
     pub(super) batch_path: String,
 }

@@ -53,6 +53,12 @@ pub(super) struct CheckpointUnit {
     /// conversation from these).
     pub(super) user: String,
     pub(super) answer: String,
+    /// ADR 0013's mechanical-removal records for this unit, so a
+    /// resumed document still reports every removal its reused units
+    /// carried. `default` because a pre-0013 checkpoint file simply
+    /// had no removals to record — its units validated fully.
+    #[serde(default)]
+    pub(super) removed: Vec<String>,
 }
 
 /// One document's durable checkpoint state: the settings it was

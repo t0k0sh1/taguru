@@ -235,13 +235,17 @@ impl Run {
             // resumes from exactly here, never further back.
             ChunkLoopResult::Interrupted => return Ok(Outcome::Interrupted),
         };
-        // Issue #199 Stage 2: cross-chunk alias validation (dangling
-        // canonical, shadowing, conflicting mappings), widened by ADR
-        // 0009 §11.2 to the schema's own domain/range judgment when
-        // `--schema` installed one — the judgment Stage 1 cannot make
-        // per-output, only merge() itself could before this issue,
-        // silently. `--lossy` skips it, matching Stage 1's skip:
-        // merge() alone decides what survives.
+        // Issue #199 Stage 2: cross-chunk alias validation (shadowing,
+        // conflicting mappings), widened by ADR 0009 §11.2 to the
+        // schema's own domain/range judgment when `--schema` installed
+        // one — the judgment Stage 1 cannot make per-output, only
+        // merge() itself could before this issue, silently. A dangling
+        // canonical is no longer corrected but mechanically pruned
+        // (ADR 0013) — AFTER the corrective turns, so every corrective
+        // message's item indices still match the replayed answers.
+        // `--lossy` skips both, matching Stage 1's skip: merge() alone
+        // decides what survives.
+        let mut removed = Vec::new();
         if !self.lossy {
             let cross_issues = combined_cross_output_issues(&outputs, self.schema.as_deref());
             if !cross_issues.is_empty() {
@@ -253,6 +257,17 @@ impl Run {
                     canonical_paragraphs,
                 )?;
             }
+            let chunk_total = chunks.len();
+            for chunk in &outputs {
+                for reason in &chunk.removed {
+                    removed.push(if chunk_total > 1 {
+                        format!("chunk {}/{chunk_total} {reason}", chunk.chunk_index + 1)
+                    } else {
+                        reason.clone()
+                    });
+                }
+            }
+            removed.extend(prune_unresolvable_aliases(&mut outputs, chunk_total));
         }
         let extraction = merge(
             outputs.into_iter().map(|chunk| chunk.output).collect(),
@@ -297,9 +312,15 @@ impl Run {
         // per-chunk outputs already extracted are still good.
         checkpoints.clear();
         self.vocabulary.extend(extraction.label_vocabulary());
-        self.report(source, &extraction, &out_path);
+        // ADR 0013's accounting half: every mechanical removal is
+        // named on stderr, path first — the report line below carries
+        // only the count. Never-silent-drop survives as visibility.
+        for reason in &removed {
+            eprintln!("taguru: extract: {source}: removed: {reason}");
+        }
+        self.report(source, &extraction, removed.len(), &out_path);
         if let Some(sink) = self.diagnostics.as_ref() {
-            sink.emit_document(source, &extraction, &out_path);
+            sink.emit_document(source, &extraction, removed.len(), &out_path);
         }
         Ok(Outcome::Written)
     }
@@ -516,6 +537,7 @@ impl Run {
                             response: None,
                             parse_error: Some(&message),
                             validation_issues: None,
+                            removed_items: None,
                             piece_bytes: None,
                             requested_max_tokens: options.max_tokens,
                         });
@@ -540,6 +562,7 @@ impl Run {
                         response: Some(&response),
                         parse_error: Some(&message),
                         validation_issues: None,
+                        removed_items: None,
                         piece_bytes: None,
                         requested_max_tokens: options.max_tokens,
                     });
@@ -569,6 +592,7 @@ impl Run {
                         response: Some(&response),
                         parse_error: Some(&message),
                         validation_issues: None,
+                        removed_items: None,
                         piece_bytes: None,
                         requested_max_tokens: options.max_tokens,
                     });
@@ -593,14 +617,19 @@ impl Run {
                         response: Some(&response),
                         parse_error: Some(&message),
                         validation_issues: None,
+                        removed_items: None,
                         piece_bytes: None,
                         requested_max_tokens: options.max_tokens,
                     });
                 }
                 return Err(format!("{label}: {}", empty_answer_diagnosis()));
             }
-            match evaluate_answer(&response.content, rules.as_ref()) {
-                Ok(output) => {
+            match evaluate_answer(
+                &response.content,
+                rules.as_ref(),
+                user_message_document(&user),
+            ) {
+                Ok(evaluated) => {
                     if let Some(sink) = sink {
                         sink.emit(DiagnosticsAttempt {
                             source,
@@ -614,15 +643,18 @@ impl Run {
                             response: Some(&response),
                             parse_error: None,
                             validation_issues: None,
+                            removed_items: (!evaluated.removed.is_empty())
+                                .then_some(evaluated.removed.as_slice()),
                             piece_bytes: None,
                             requested_max_tokens: options.max_tokens,
                         });
                     }
                     outputs[output_index] = ChunkOutput {
-                        output,
+                        output: evaluated.output,
                         chunk_index,
                         user,
                         answer: response.content,
+                        removed: evaluated.removed,
                     };
                 }
                 Err(AnswerFault::Syntax(error)) => {
@@ -639,6 +671,7 @@ impl Run {
                             response: Some(&response),
                             parse_error: Some(&error),
                             validation_issues: None,
+                            removed_items: None,
                             piece_bytes: None,
                             requested_max_tokens: options.max_tokens,
                         });
@@ -668,6 +701,7 @@ impl Run {
                             response: Some(&response),
                             parse_error: Some(&message),
                             validation_issues: Some(&issues),
+                            removed_items: None,
                             piece_bytes: None,
                             requested_max_tokens: options.max_tokens,
                         });
@@ -729,10 +763,24 @@ impl Run {
     }
 
     /// The one report line a written document earns.
-    pub(super) fn report(&self, source: &str, extraction: &Extraction, out_path: &Path) {
+    pub(super) fn report(
+        &self,
+        source: &str,
+        extraction: &Extraction,
+        removed: usize,
+        out_path: &Path,
+    ) {
         let mut notes = String::new();
         if extraction.duplicates > 0 {
             notes.push_str(&format!(", {} duplicate(s) folded", extraction.duplicates));
+        }
+        if removed > 0 {
+            // ADR 0013: mechanically removed, each named on stderr —
+            // distinct from `--lossy`'s validate-nothing drops and
+            // from merge()'s policy trims below.
+            notes.push_str(&format!(
+                ", {removed} item(s) removed (mechanical validation)"
+            ));
         }
         if extraction.dropped > 0 {
             // Under the default (strict) mode, a surviving `dropped`

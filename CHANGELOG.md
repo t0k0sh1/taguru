@@ -7,6 +7,24 @@ Entries that change an on-disk format or a response shape say so.
 
 ## [Unreleased]
 
+### Changed
+- `taguru extract`'s strict (default) mode now removes mechanically —
+  before spending any LLM corrective turn — items that could never
+  import as answered: associations/aliases with a required field
+  missing or empty, self-referential aliases, aliases whose canonical
+  resolves to nothing, and subjects/objects that never appear in the
+  document text (#496 S1, ADR 0013). The corrective turn is demoted to
+  the last resort for what removal cannot judge (wrong-typed or
+  out-of-range values, shadowing/conflicting aliases, schema
+  violations). **Behavior change**: a source that previously failed
+  after fruitless corrective turns on such items now succeeds with the
+  removals named on stderr, counted on the report line as
+  `removed (mechanical validation)`, and listed in the
+  `--diagnostics-out` sidecar (`attempt` records gain `removed_items`,
+  `document` records gain `removed` — both additive). `--lossy` is
+  unchanged byte for byte. Extraction checkpoint files gain a
+  `removed` field per unit (`serde(default)`; older files still load).
+
 ## [0.8.0] - 2026-08-05
 
 ### Added

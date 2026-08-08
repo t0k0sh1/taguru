@@ -28,6 +28,11 @@ pub(super) struct ChunkOutput {
     pub(super) chunk_index: usize,
     pub(super) user: String,
     pub(super) answer: String,
+    /// ADR 0013: the path-addressed record of every item the
+    /// mechanical pass removed from `output` — carried here (and
+    /// through the checkpoint) so the document-level report can
+    /// account for the removals of reused units too.
+    pub(super) removed: Vec<String>,
 }
 
 /// How a Stage 1 corrective turn (issue #199) asks the model to try
@@ -131,6 +136,7 @@ pub(super) fn extract_chunk(
                         response: None,
                         parse_error: Some(&message),
                         validation_issues: None,
+                        removed_items: None,
                         piece_bytes: None,
                         requested_max_tokens: None,
                     });
@@ -139,8 +145,8 @@ pub(super) fn extract_chunk(
             }
         };
         let elapsed = started.elapsed();
-        match evaluate_answer(&response.content, rules) {
-            Ok(output) => {
+        match evaluate_answer(&response.content, rules, user_message_document(user)) {
+            Ok(evaluated) => {
                 if let Some(sink) = sink {
                     sink.emit(DiagnosticsAttempt {
                         source,
@@ -159,15 +165,18 @@ pub(super) fn extract_chunk(
                         response: Some(&response),
                         parse_error: None,
                         validation_issues: None,
+                        removed_items: (!evaluated.removed.is_empty())
+                            .then_some(evaluated.removed.as_slice()),
                         piece_bytes: None,
                         requested_max_tokens: None,
                     });
                 }
                 return Ok(ChunkOutput {
-                    output,
+                    output: evaluated.output,
                     chunk_index,
                     user: user.to_string(),
                     answer: response.content,
+                    removed: evaluated.removed,
                 });
             }
             Err(AnswerFault::Syntax(error)) => {
@@ -193,6 +202,7 @@ pub(super) fn extract_chunk(
                         response: Some(&response),
                         parse_error: Some(&error),
                         validation_issues: None,
+                        removed_items: None,
                         piece_bytes: None,
                         requested_max_tokens: None,
                     });
@@ -223,6 +233,7 @@ pub(super) fn extract_chunk(
                         response: Some(&response),
                         parse_error: Some(&diagnosis),
                         validation_issues: Some(&issues),
+                        removed_items: None,
                         piece_bytes: None,
                         requested_max_tokens: None,
                     });
@@ -250,6 +261,7 @@ pub(super) fn checkpointed_unit(checkpoints: &CheckpointStore, piece: &str) -> O
         chunk_index: unit.chunk_index,
         user: unit.user,
         answer: unit.answer,
+        removed: unit.removed,
     })
 }
 
@@ -270,6 +282,7 @@ pub(super) fn record_checkpoint(
             output: output.output.clone(),
             user: output.user.clone(),
             answer: output.answer.clone(),
+            removed: output.removed.clone(),
         },
     );
 }
@@ -494,6 +507,7 @@ pub(super) fn extract_round(
                         response: None,
                         parse_error: Some(&message),
                         validation_issues: None,
+                        removed_items: None,
                         piece_bytes: Some(piece_bytes),
                         requested_max_tokens: max_tokens,
                     });
@@ -502,8 +516,8 @@ pub(super) fn extract_round(
             }
         };
         let elapsed = started.elapsed();
-        match classify_attempt(&response, context.rules) {
-            AttemptOutcome::Valid(output) => {
+        match classify_attempt(&response, context.rules, user_message_document(user)) {
+            AttemptOutcome::Valid(evaluated) => {
                 if let Some(sink) = context.sink {
                     sink.emit(DiagnosticsAttempt {
                         source: context.source,
@@ -517,15 +531,18 @@ pub(super) fn extract_round(
                         response: Some(&response),
                         parse_error: None,
                         validation_issues: None,
+                        removed_items: (!evaluated.removed.is_empty())
+                            .then_some(evaluated.removed.as_slice()),
                         piece_bytes: Some(piece_bytes),
                         requested_max_tokens: max_tokens,
                     });
                 }
                 return RoundOutcome::Valid(ChunkOutput {
-                    output,
+                    output: evaluated.output,
                     chunk_index: context.chunk_index,
                     user: user.to_string(),
                     answer: response.content,
+                    removed: evaluated.removed,
                 });
             }
             AttemptOutcome::LengthLimited => {
@@ -546,6 +563,7 @@ pub(super) fn extract_round(
                         response: Some(&response),
                         parse_error: Some(&message),
                         validation_issues: None,
+                        removed_items: None,
                         piece_bytes: Some(piece_bytes),
                         requested_max_tokens: max_tokens,
                     });
@@ -568,6 +586,7 @@ pub(super) fn extract_round(
                         response: Some(&response),
                         parse_error: Some(&message),
                         validation_issues: None,
+                        removed_items: None,
                         piece_bytes: Some(piece_bytes),
                         requested_max_tokens: max_tokens,
                     });
@@ -589,6 +608,7 @@ pub(super) fn extract_round(
                         response: Some(&response),
                         parse_error: Some(&diagnosis),
                         validation_issues: None,
+                        removed_items: None,
                         piece_bytes: Some(piece_bytes),
                         requested_max_tokens: max_tokens,
                     });
@@ -629,6 +649,7 @@ pub(super) fn extract_round(
                         response: Some(&response),
                         parse_error: Some(&error),
                         validation_issues: None,
+                        removed_items: None,
                         piece_bytes: Some(piece_bytes),
                         requested_max_tokens: max_tokens,
                     });
@@ -665,6 +686,7 @@ pub(super) fn extract_round(
                         response: Some(&response),
                         parse_error: Some(&diagnosis),
                         validation_issues: Some(&issues),
+                        removed_items: None,
                         piece_bytes: Some(piece_bytes),
                         requested_max_tokens: max_tokens,
                     });
@@ -681,7 +703,7 @@ pub(super) fn extract_round(
 /// One attempt's §7 state, classified from provider metadata BEFORE
 /// any parse-level interpretation.
 pub(super) enum AttemptOutcome {
-    Valid(ModelOutput),
+    Valid(EvaluatedAnswer),
     Malformed(String),
     /// Issue #199: syntactically valid JSON that still carries
     /// path-addressed Stage 1 validity issues.
@@ -700,6 +722,7 @@ pub(super) enum AttemptOutcome {
 pub(super) fn classify_attempt(
     response: &ChatCompletion,
     rules: Option<&ItemRules>,
+    document: &str,
 ) -> AttemptOutcome {
     let finish_reason = response.finish_reason.as_deref();
     if indicates_length_limit(finish_reason) {
@@ -713,8 +736,8 @@ pub(super) fn classify_attempt(
     if is_empty_answer(&response.content) {
         return AttemptOutcome::Empty;
     }
-    match evaluate_answer(&response.content, rules) {
-        Ok(output) => AttemptOutcome::Valid(output),
+    match evaluate_answer(&response.content, rules, document) {
+        Ok(evaluated) => AttemptOutcome::Valid(evaluated),
         Err(AnswerFault::Syntax(error)) => AttemptOutcome::Malformed(error),
         Err(AnswerFault::Invalid(issues)) => AttemptOutcome::Invalid(issues),
     }
@@ -819,18 +842,32 @@ pub(super) enum AnswerFault {
     Invalid(Vec<String>),
 }
 
+/// A strict-mode answer that passed the gate: the output with
+/// mechanically-removed items already gone and their path-addressed
+/// records (ADR 0013). Lossy mode always returns `removed` empty —
+/// its contract is that nothing is validated at all.
+pub(super) struct EvaluatedAnswer {
+    pub(super) output: ModelOutput,
+    pub(super) removed: Vec<String>,
+}
+
 /// The Stage 1 gate every corrective-loop entry point calls instead of
 /// [`parse_model_output`] directly: parse, then — when `rules` is
-/// `Some`, i.e. this run is not `--lossy` — validate every item and
-/// fail on any path-addressed issue. `rules: None` (lossy mode) parses
-/// only and discards whatever `interpret_model_output` would have
-/// flagged, reproducing today's behavior byte for byte: the same
-/// request goes out, the same answer is accepted, `merge()` alone
+/// `Some`, i.e. this run is not `--lossy` — run the mechanical pass
+/// (ADR 0013): items that cannot import as answered are removed with
+/// accounting, and only the issues removal cannot judge (a present but
+/// wrong-typed or out-of-range value) still fail the answer into a
+/// corrective turn. `document` is the document text this answer replied
+/// to — the occurrence check's haystack. `rules: None` (lossy mode)
+/// parses only and discards whatever `interpret_model_output` would
+/// have flagged, reproducing the pre-#199 behavior byte for byte: the
+/// same request goes out, the same answer is accepted, `merge()` alone
 /// decides what survives.
 pub(super) fn evaluate_answer(
     content: &str,
     rules: Option<&ItemRules>,
-) -> Result<ModelOutput, AnswerFault> {
+    document: &str,
+) -> Result<EvaluatedAnswer, AnswerFault> {
     let value = candidate_json(content).map_err(AnswerFault::Syntax)?;
     match rules {
         None => {
@@ -839,14 +876,23 @@ pub(super) fn evaluate_answer(
                 questions_requested: true,
             };
             let (output, _issues) = interpret_model_output(&value, &lenient_rules);
-            Ok(output)
+            Ok(EvaluatedAnswer {
+                output,
+                removed: Vec::new(),
+            })
         }
         Some(rules) => {
-            let (output, issues) = interpret_model_output(&value, rules);
-            if issues.is_empty() {
-                Ok(output)
+            let evaluation = mechanical_interpret(&value, rules, document);
+            if evaluation.issues.is_empty() {
+                Ok(EvaluatedAnswer {
+                    output: evaluation.output,
+                    removed: evaluation.removed,
+                })
             } else {
-                Err(AnswerFault::Invalid(issues))
+                // The whole answer goes back for correction; this
+                // attempt's removals die with it — the accepted
+                // attempt's own mechanical pass is the one that counts.
+                Err(AnswerFault::Invalid(evaluation.issues))
             }
         }
     }

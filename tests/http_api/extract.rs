@@ -229,8 +229,11 @@ fn chat_error(status: u16, reason: &str, extra_header: &str, body: &str) -> Stri
 /// paragraphs, eight or so of which alone exceed `extract.rs`'s 24 KiB
 /// chunk cap.
 fn multi_chunk_document(count: usize) -> String {
+    // "s value-" attests the stub answers' names (subject "S", object
+    // "value-N") under the occurrence check (ADR 0013): "value-" plus
+    // any digits covers ≥ 3/4 of "value-N" whichever chunk answers.
     (0..count)
-        .map(|i| format!("Paragraph {i}: {}", "x".repeat(3000)))
+        .map(|i| format!("Paragraph {i}: s value- {}", "x".repeat(3000)))
         .collect::<Vec<_>>()
         .join("\n\n")
 }
@@ -1929,7 +1932,10 @@ fn length_limited_escalates_once_with_a_neutral_resend_when_a_budget_is_set() {
 fn a_length_terminated_answer_that_happens_to_parse_is_never_treated_as_success() {
     let docs = batch_dir("extract-validprefix-docs");
     let doc = docs.join("a.md");
-    std::fs::write(&doc, "small document").unwrap();
+    // "whole answer"/"half answer" attest the stub names under the
+    // occurrence check without putting the literal "half_answer"
+    // token into the passage the batch assertion greps for.
+    std::fs::write(&doc, "whole answer half answer x small document").unwrap();
     let out = batch_dir("extract-validprefix-out");
 
     let prefix = json!({"associations":
@@ -2548,7 +2554,7 @@ fn changing_max_output_tokens_forces_a_re_extraction() {
 fn strict_default_corrects_an_invalid_weight_and_keeps_every_item() {
     let docs = batch_dir("extract-strict-weight-docs");
     let doc = docs.join("a.md");
-    std::fs::write(&doc, "small document").unwrap();
+    std::fs::write(&doc, "a small b document").unwrap();
     let out = batch_dir("extract-strict-weight-out");
 
     let bad_reply = json!({
@@ -2601,7 +2607,7 @@ fn strict_default_corrects_an_invalid_weight_and_keeps_every_item() {
 fn strict_default_fails_the_source_when_the_corrected_answer_is_still_invalid() {
     let docs = batch_dir("extract-strict-fail-docs");
     let doc = docs.join("a.md");
-    std::fs::write(&doc, "small document").unwrap();
+    std::fs::write(&doc, "a small b document").unwrap();
     let out = batch_dir("extract-strict-fail-out");
 
     let bad_reply = json!({
@@ -2643,7 +2649,7 @@ fn strict_default_fails_the_source_when_the_corrected_answer_is_still_invalid() 
 fn a_failed_reextraction_leaves_the_existing_batch_untouched() {
     let docs = batch_dir("extract-strict-untouched-docs");
     let doc = docs.join("a.md");
-    std::fs::write(&doc, "small document").unwrap();
+    std::fs::write(&doc, "a small b document").unwrap();
     let out = batch_dir("extract-strict-untouched-out");
 
     let good_reply = json!({
@@ -2694,21 +2700,21 @@ fn a_failed_reextraction_leaves_the_existing_batch_untouched() {
     let _ = std::fs::remove_dir_all(&out);
 }
 
-/// Stage 2 (cross-chunk alias validation): a dangling canonical earns
+/// Stage 2 (cross-chunk alias validation): a shadowing alias earns
 /// its own corrective turn naming the exact alias path.
 #[test]
-fn a_dangling_alias_earns_a_cross_chunk_corrective_turn() {
-    let docs = batch_dir("extract-strict-dangling-docs");
+fn a_shadowing_alias_earns_a_cross_chunk_corrective_turn() {
+    let docs = batch_dir("extract-strict-shadowing-docs");
     let doc = docs.join("a.md");
-    std::fs::write(&doc, "small document").unwrap();
-    let out = batch_dir("extract-strict-dangling-out");
+    std::fs::write(&doc, "a small b document").unwrap();
+    let out = batch_dir("extract-strict-shadowing-out");
 
     let bad_reply = json!({
         "associations": [
             {"subject": "a", "label": "l", "object": "b"}
         ],
         "aliases": [
-            {"alias": "x", "canonical": "存在しない", "kind": "concept"}
+            {"alias": "a", "canonical": "b", "kind": "concept"}
         ]
     })
     .to_string();
@@ -2730,13 +2736,63 @@ fn a_dangling_alias_earns_a_cross_chunk_corrective_turn() {
         run_extract(&out, &provider, &["--context", "c", doc.to_str().unwrap()]);
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(!stdout.contains("dropped"), "{stdout}");
+    assert!(!stdout.contains("removed"), "{stdout}");
 
     let requests = requests.join().unwrap();
     assert_eq!(requests.len(), 2);
     assert!(
-        requests[1].contains("aliases[0].canonical: names nothing the associations contain"),
+        requests[1].contains("aliases[0].alias: names something the associations already contain"),
         "{}",
         requests[1]
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// ADR 0013 (#496 S1): a dangling canonical is no longer a corrective
+/// issue — it is pruned mechanically after Stage 2, with the removal
+/// named on stderr and counted on the report line, and the run spends
+/// zero corrective turns on it.
+#[test]
+fn a_dangling_alias_is_pruned_mechanically_with_zero_corrective_turns() {
+    let docs = batch_dir("extract-strict-dangling-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "a small b document").unwrap();
+    let out = batch_dir("extract-strict-dangling-out");
+
+    let reply = json!({
+        "associations": [
+            {"subject": "a", "label": "l", "object": "b"}
+        ],
+        "aliases": [
+            {"alias": "x", "canonical": "存在しない", "kind": "concept"}
+        ]
+    })
+    .to_string();
+    let (url, requests) = stub_chat_server(vec![reply]);
+    let provider = [
+        ("TAGURU_EXTRACT_URL", url.as_str()),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+    let (code, stdout, stderr) =
+        run_extract(&out, &provider, &["--context", "c", doc.to_str().unwrap()]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(!stdout.contains("dropped"), "{stdout}");
+    assert!(
+        stdout.contains("1 item(s) removed (mechanical validation)"),
+        "{stdout}"
+    );
+    assert!(
+        stderr.contains(
+            "removed: aliases[0]: canonical \"存在しない\" names nothing the associations contain"
+        ),
+        "{stderr}"
+    );
+    assert_eq!(
+        requests.join().unwrap().len(),
+        1,
+        "a dangling canonical must not spend a corrective turn"
     );
 
     let _ = std::fs::remove_dir_all(&docs);
@@ -2797,7 +2853,13 @@ fn an_out_of_range_question_paragraph_earns_a_corrective_turn() {
 fn a_chunk_1_alias_resolved_by_a_later_chunk_needs_no_corrective_turn() {
     let docs = batch_dir("extract-strict-crosschunk-docs");
     let doc = docs.join("big.md");
-    std::fs::write(&doc, multi_chunk_document(20)).unwrap();
+    // The final paragraph carries the names the last chunk's answer
+    // uses, so the occurrence check (ADR 0013) attests them.
+    std::fs::write(
+        &doc,
+        format!("{}\n\n青嶺酒造の杜氏は高瀬。", multi_chunk_document(20)),
+    )
+    .unwrap();
     let doc_src = doc.to_str().unwrap();
     let out = batch_dir("extract-strict-crosschunk-out");
 
@@ -3673,17 +3735,20 @@ fn extract_without_diagnostics_out_writes_no_sidecar() {
 fn diagnostics_records_the_stage_two_cross_chunk_correction() {
     let docs = batch_dir("extract-diag-stage2-docs");
     let doc = docs.join("a.md");
-    std::fs::write(&doc, "small document").unwrap();
+    std::fs::write(&doc, "a small b document").unwrap();
     let out = batch_dir("extract-diag-stage2-out");
     let diag_dir = batch_dir("extract-diag-stage2-diag");
     let diag = diag_dir.join("diag.jsonl");
 
+    // A SHADOWING alias: since ADR 0013 a dangling canonical is pruned
+    // mechanically instead of corrected, so shadowing is what still
+    // exercises the cross_chunk corrective record.
     let bad_reply = json!({
         "associations": [
             {"subject": "a", "label": "l", "object": "b"}
         ],
         "aliases": [
-            {"alias": "x", "canonical": "存在しない", "kind": "concept"}
+            {"alias": "a", "canonical": "b", "kind": "concept"}
         ]
     })
     .to_string();
@@ -3871,7 +3936,7 @@ fn diagnostics_writes_one_chunk_record_per_chunk_before_any_attempt() {
 fn diagnostics_writes_a_document_record_whose_counts_match_the_written_batch() {
     let docs = batch_dir("extract-diag-docrec-docs");
     let doc = docs.join("a.md");
-    std::fs::write(&doc, "small document").unwrap();
+    std::fs::write(&doc, "a small b document").unwrap();
     let out = batch_dir("extract-diag-docrec-out");
     let diag_dir = batch_dir("extract-diag-docrec-diag");
     let diag = diag_dir.join("diag.jsonl");
@@ -3930,6 +3995,7 @@ fn diagnostics_writes_a_document_record_whose_counts_match_the_written_batch() {
     assert_eq!(record["questions"], 0);
     assert_eq!(record["duplicates"], 1);
     assert_eq!(record["dropped"], 0);
+    assert_eq!(record["removed"], 0);
 
     let written = stray_batch_files(&out);
     assert_eq!(written.len(), 1, "{written:?}");
