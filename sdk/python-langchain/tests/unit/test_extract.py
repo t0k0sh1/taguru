@@ -7,7 +7,6 @@ two producers can never silently diverge on the batch contract.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import jsonschema
 from taguru import RelationDef, SchemaDocument, TypeDef
@@ -45,11 +44,9 @@ from taguru_langchain._extract import (
     split_paragraphs,
     system_prompt,
 )
+from tests.unit._repo import repo_root
 
-# sdk/python-langchain/tests/unit/test_extract.py -> repo root: same depth
-# tests/integration/conftest.py's REPO_ROOT climbs (unit, tests,
-# python-langchain, sdk).
-FIXTURES_ROOT = Path(__file__).resolve().parents[4] / "tests" / "fixtures" / "model_output"
+FIXTURES_ROOT = repo_root() / "tests" / "fixtures" / "model_output"
 
 
 def association(subject: str, label: str, object_: str, weight: float) -> ModelAssociation:

@@ -92,7 +92,12 @@ else:
     _PYTHON_PPTX_IMPORT_ERROR = None
 
 from .._extract import MAX_PASSAGE_BYTES
-from ._structure import byte_len, sanitize_paragraph_text
+from ._structure import (
+    byte_len,
+    decompressed_size_within,
+    read_member_within,
+    sanitize_paragraph_text,
+)
 from .document import (
     MAX_SECTION_BYTES,
     ConnectorDocument,
@@ -311,35 +316,26 @@ def _build_presentation(
     return result
 
 
-def _total_decompressed_size(raw: bytes) -> int | None:
-    """Every entry's OWN declared uncompressed size (``ZipInfo.file_size``),
-    summed — read from the central directory, never by actually
-    decompressing anything, so this check itself cannot be turned into
-    another decompression bomb. ``None`` when ``raw`` isn't even a valid
-    zip; that failure is for the `corrupt` path further down to report, not
-    this one."""
-    try:
-        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
-            return sum(entry.file_size for entry in archive.infolist())
-    except zipfile.BadZipFile:
-        return None
-
-
 def _partial_extraction_message(raw: bytes, max_decompressed_bytes: int) -> str | None:
     try:
         with zipfile.ZipFile(io.BytesIO(raw)) as archive:
-            slide_infos = [
-                info for info in archive.infolist() if _SLIDE_PART_RE.match(info.filename)
+            slide_names = [
+                info.filename for info in archive.infolist() if _SLIDE_PART_RE.match(info.filename)
             ]
-            if sum(info.file_size for info in slide_infos) > max_decompressed_bytes:
-                # `read()`'s own decompressed-size cap already excludes this
-                # case on the normal call path; guarded again here so this
-                # function stays safe to call on its own, never
-                # decompressing more than the same bound allows.
-                return None
-            combined = b"".join(archive.read(info) for info in slide_infos)
-    except (KeyError, zipfile.BadZipFile):
+    except zipfile.BadZipFile:
         return None
+    # Bounded, no-trust-`file_size` reads (see `_structure`): safe to call
+    # on its own, never decompressing more than `read()`'s own cap allows.
+    # The running budget bounds the combined slide XML, not each slide alone.
+    combined = bytearray()
+    for name in slide_names:
+        remaining = max_decompressed_bytes - len(combined)
+        if remaining <= 0:
+            break
+        part = read_member_within(raw, name, remaining)
+        if part is None:
+            return None
+        combined += part
     kinds = [name for marker, name in _PARTIAL_CONTENT_MARKERS if marker in combined]
     if not kinds:
         return None
@@ -525,10 +521,12 @@ class PptxConnector:
 
         # Checked before python-pptx ever touches the bytes: a small,
         # high-ratio zip can pass `max_file_bytes` (a cap on the COMPRESSED
-        # size) and still exhaust memory decompressing during parsing. A
-        # non-zip file falls through (`None`) to the existing `corrupt`
-        # path below, unchanged.
-        decompressed_size = _total_decompressed_size(raw)
+        # size) and still exhaust memory decompressing during parsing. The
+        # size is measured by real (bounded) decompression, not the
+        # forgeable `file_size` header — see `_structure`. A non-zip file
+        # falls through (`None`) to the existing `corrupt` path below,
+        # unchanged.
+        decompressed_size = decompressed_size_within(raw, self._max_decompressed_bytes)
         if decompressed_size is not None and decompressed_size > self._max_decompressed_bytes:
             return failure(
                 "content_too_large",

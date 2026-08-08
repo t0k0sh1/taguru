@@ -373,3 +373,50 @@ def test_filesystem_store_close_releases_every_held_lock(tmp_path: Path) -> None
             fcntl.flock(external.fileno(), fcntl.LOCK_UN)
         finally:
             external.close()
+
+
+def test_filesystem_store_a_forked_child_still_conflicts_on_an_inherited_source(
+    tmp_path: Path,
+) -> None:
+    """The lock and its `_locks` entry are both inherited across `os.fork()`
+    (same open file description → same kernel lock). A child that trusted
+    `source in self._locks` alone would think it held a lock it merely
+    inherited and clobber the parent's source with no conflict check. It
+    must instead re-acquire and hit `CheckpointLockedError`, while a
+    DIFFERENT source the parent never locked still succeeds."""
+    store = FilesystemCheckpointStore(tmp_path)
+    store.save("parent.md", b"{}")  # parent holds the lock on this source
+
+    same_r, same_w = os.pipe()
+    diff_r, diff_w = os.pipe()
+    pid = os.fork()
+    if pid == 0:  # pragma: no cover - runs only in the forked child
+        os.close(same_r)
+        os.close(diff_r)
+        try:
+            store.append("parent.md", b'{"unit": "h1"}\n')
+            os.write(same_w, b"no-conflict")
+        except CheckpointLockedError:
+            os.write(same_w, b"conflict")
+        except BaseException as error:  # noqa: BLE001 - relayed to the parent
+            os.write(same_w, b"error:" + repr(error).encode())
+        os.close(same_w)
+        try:
+            store.save("child.md", b"{}")
+            os.write(diff_w, b"ok")
+        except BaseException as error:  # noqa: BLE001 - relayed to the parent
+            os.write(diff_w, b"error:" + repr(error).encode())
+        os.close(diff_w)
+        os._exit(0)
+
+    os.close(same_w)
+    os.close(diff_w)
+    _pid, status = os.waitpid(pid, 0)
+    same_outcome = os.read(same_r, 200).decode()
+    diff_outcome = os.read(diff_r, 200).decode()
+    os.close(same_r)
+    os.close(diff_r)
+
+    assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
+    assert same_outcome == "conflict"
+    assert diff_outcome == "ok"

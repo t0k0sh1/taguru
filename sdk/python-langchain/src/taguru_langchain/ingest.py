@@ -1679,6 +1679,13 @@ class TaguruIngester:
         spun up just for that when none is already running. Called from
         inside a running loop, the async client is left for :meth:`aclose`
         instead.
+
+        A ``checkpoint_store`` is likewise never closed here — it is the
+        caller's (its advisory locks, if it holds any, release on the
+        caller's own ``close()`` or on process exit). A run interrupted
+        mid-document therefore keeps that source's lock until the store is
+        closed; this is deliberate — the source's checkpoints are still
+        being written, and another run must keep seeing it as taken.
         """
         if not self._owns_clients:
             return

@@ -190,6 +190,16 @@ def _write_atomic(path: Path, data: bytes) -> None:
     _fsync_dir(path.parent)
 
 
+@dataclass
+class _HeldLock:
+    """One advisory lock ``FilesystemCheckpointStore`` holds, tagged with the
+    PID that took it so a fork-inherited entry (see ``_acquire_lock``) is
+    distinguishable from one this very process acquired."""
+
+    handle: IO[bytes]
+    pid: int
+
+
 class FilesystemCheckpointStore:
     """One JSON file per document under ``directory`` — the SDK analogue of
     ``taguru extract``'s ``.extract-checkpoints/``. ``directory`` is never
@@ -211,7 +221,7 @@ class FilesystemCheckpointStore:
 
     def __init__(self, directory: str | os.PathLike[str]) -> None:
         self._directory = Path(directory)
-        self._locks: dict[str, IO[bytes]] = {}
+        self._locks: dict[str, _HeldLock] = {}
 
     def path_for(self, source: str) -> Path:
         """The file ``source`` maps to — public so an operator can inspect
@@ -225,12 +235,30 @@ class FilesystemCheckpointStore:
         return path.with_name(path.name + ".lock")
 
     def _acquire_lock(self, source: str) -> None:
-        """Idempotent: a source already held by THIS instance (the common
-        case — every write after a document's first goes through here
-        again) is a no-op, never a re-acquisition attempt against our own
-        lock."""
-        if fcntl is None or source in self._locks:
+        """Idempotent within a process: a source already held by THIS
+        process (the common case — every write after a document's first
+        goes through here again) is a no-op, never a re-acquisition attempt
+        against our own lock.
+
+        Fork-safe: an ``flock`` and the ``_locks`` entry that records it are
+        both inherited across ``os.fork()`` (the child shares the parent's
+        open file description, hence the very same kernel lock). A child
+        that skipped re-acquisition on `source in self._locks` alone would
+        believe it holds a lock it merely inherited, and write to the same
+        source with no conflict check. So the entry carries the PID that
+        took it: an entry stamped with another PID is a fork inheritance —
+        drop our inherited fd (closing it leaves the owner's lock intact,
+        since the owner's own fd still references that open file
+        description) and acquire our own, which correctly conflicts if the
+        owner still holds it."""
+        if fcntl is None:
             return
+        held = self._locks.get(source)
+        if held is not None:
+            if held.pid == os.getpid():
+                return
+            held.handle.close()
+            del self._locks[source]
         lock_path = self._lock_path(source)
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         handle = open(lock_path, "a+b")
@@ -239,16 +267,16 @@ class FilesystemCheckpointStore:
         except OSError as error:
             handle.close()
             raise CheckpointLockedError(source) from error
-        self._locks[source] = handle
+        self._locks[source] = _HeldLock(handle=handle, pid=os.getpid())
 
     def _release_lock(self, source: str) -> None:
-        handle = self._locks.pop(source, None)
-        if handle is not None:
+        held = self._locks.pop(source, None)
+        if held is not None:
             # Closing the fd releases the OS-level flock by itself; no
             # explicit LOCK_UN needed. The sidecar file itself is left in
             # place (cheap, and its mere existence carries no state) —
             # only the in-process handle holding the lock open goes away.
-            handle.close()
+            held.handle.close()
 
     def load(self, source: str) -> bytes | None:
         try:

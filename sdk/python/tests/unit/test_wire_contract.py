@@ -42,11 +42,9 @@ from taguru._models import (
     PassagePage,
     PathsPage,
 )
+from tests.unit._repo import repo_root
 
-# sdk/python/tests/unit/test_wire_contract.py -> repo root: same depth
-# sdk/python-langchain/tests/unit/test_extract.py's own comment climbs
-# (unit, tests, python, sdk).
-REPO_ROOT = Path(__file__).resolve().parents[4]
+REPO_ROOT = repo_root()
 WIRE_DIR = REPO_ROOT / "tests" / "fixtures" / "wire"
 
 # sdk/spec/check_contract.py is a script, not an installed package —

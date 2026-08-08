@@ -352,6 +352,50 @@ async def test_agraph_lane_fetches_citations_concurrently_not_sequentially(
     assert [d.metadata["source"] for d in documents] == ["docs/a.md", "docs/b.md"]
 
 
+class _FailingCiteContext(_ConcurrencyProbeContext):
+    """Like the concurrency probe, but the FIRST citation lookup raises a
+    non-404 error while the second is still sleeping — the shape that
+    proves the lane cancels its siblings instead of orphaning them."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = 0
+        self.cancelled = 0
+
+    async def cite_passage(self, source: str, paragraph: int) -> Citation:
+        self.started += 1
+        if source == "docs/a.md":
+            raise ValueError("boom")  # a non-NotFoundError, must propagate
+        try:
+            await asyncio.sleep(1.0)  # long; a live sibling would outlast the raise
+        except asyncio.CancelledError:
+            self.cancelled += 1
+            raise
+        return Citation(text="unreached", source=source)
+
+
+async def test_agraph_lane_cancels_sibling_fetches_when_one_raises(
+    sync_client: Taguru, async_client: AsyncTaguru, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    probe = _FailingCiteContext()
+    monkeypatch.setattr(async_client, "context", lambda name: probe)
+    retriever = TaguruRetriever(
+        context="sake", client=sync_client, async_client=async_client, include_text=False
+    )
+
+    # Driven at the lane directly: `_aget_relevant_documents`'s bare-context
+    # path deliberately tolerates a graph-lane failure (that isolation has
+    # its own tests), which would hide the cancellation behavior under test.
+    with pytest.raises(ValueError, match="boom"):
+        await retriever._agraph_lane(async_client, "sake", "青嶺酒造")
+
+    # The error propagates (not swallowed as a 404 would be), and the still
+    # in-flight sibling is cancelled rather than left to run on as an
+    # orphaned "Task exception was never retrieved" task.
+    assert probe.started == 2
+    assert probe.cancelled == 1
+
+
 async def test_async_cross_matches_sync(sync_client: Taguru, async_client: AsyncTaguru) -> None:
     retriever = TaguruRetriever(
         contexts=["sake"], groups=["childg"], client=sync_client, async_client=async_client

@@ -194,3 +194,23 @@ def test_parse_retry_after_takes_a_bare_delay_and_refuses_the_rest() -> None:
     assert parse_retry_after("-1") is None
     assert parse_retry_after("") is None
     assert parse_retry_after(None) is None
+
+
+def test_backoff_delay_is_full_jitter_over_the_capped_exponential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pin the exact bounds handed to ``random.uniform``: full jitter starts
+    at 0.0 (not the previous delay) and the upper bound is base·2^attempt
+    until it saturates at the cap."""
+    calls: list[tuple[float, float]] = []
+
+    def record(low: float, high: float) -> float:
+        calls.append((low, high))
+        return 0.0
+
+    monkeypatch.setattr("taguru._retry.random.uniform", record)
+    backoff_delay(3)
+    assert calls == [(0.0, 0.5 * 2.0**3)]
+    calls.clear()
+    backoff_delay(100)
+    assert calls == [(0.0, BACKOFF_CAP_SECS)]

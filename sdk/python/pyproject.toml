@@ -41,10 +41,29 @@ dev = [
     "unasync>=0.6",
     "pyyaml>=6",
     "pip-audit>=2.7",
+    # Mutation testing, gated in CI against `mutation-baseline.txt` via
+    # `sdk/spec/check_mutants.py`. Core SDK only — see that script's docstring.
+    "mutmut>=3.7",
 ]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/taguru"]
+
+[tool.mutmut]
+source_paths = ["src/taguru/"]
+# integrationテストはサーバーバイナリ(TAGURU_TEST_BIN)前提なので、
+# hermeticなunitテストだけをミュータント判定に使う。
+pytest_add_cli_args_test_selection = ["tests/unit/"]
+# _async/_sync のクライアント本体は実サーバー相手のintegrationテストが
+# 担当領域で、unitテストだけでは大半のミュータントが判定不能(no tests)に
+# なりノイズにしかならないため除外する。_sync はさらに generate_sync.py の
+# 自動生成物でもある。testing.py はユーザー向けテストヘルパーで同様に
+# integration側でのみ実行される。
+do_not_mutate = [
+    "src/taguru/_async/*",
+    "src/taguru/_sync/*",
+    "src/taguru/testing.py",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

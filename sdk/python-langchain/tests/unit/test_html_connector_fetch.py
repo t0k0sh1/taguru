@@ -125,6 +125,37 @@ def test_the_source_id_is_the_final_url_after_a_redirect() -> None:
     assert document.diagnostics == ()
 
 
+def test_a_redirected_failure_names_the_final_url_not_the_start() -> None:
+    """The module contract — "the source id is the final URL" — holds on
+    failure paths too: two start URLs redirecting to one failing endpoint
+    must fold to one source, and the diagnostic must name the URL that
+    actually answered."""
+    with serve(
+        {
+            "/start": Route(location="/final-404"),
+            "/final-404": Route(status=404, body=b"gone"),
+        }
+    ) as server:
+        document = HtmlConnector(allow_private_networks=True).read(f"{server.base_url}/start")
+
+    assert [d.code for d in document.diagnostics] == ["unreadable"]
+    assert document.source == f"{server.base_url}/final-404"
+    assert document.metadata.display_name == "final-404"
+
+
+def test_a_redirected_wrong_content_type_names_the_final_url() -> None:
+    with serve(
+        {
+            "/start": Route(location="/final-json"),
+            "/final-json": Route(content_type="application/json", body=b"{}"),
+        }
+    ) as server:
+        document = HtmlConnector(allow_private_networks=True).read(f"{server.base_url}/start")
+
+    assert [d.code for d in document.diagnostics] == ["unsupported_format"]
+    assert document.source == f"{server.base_url}/final-json"
+
+
 def test_userinfo_and_signed_query_params_are_stripped_from_the_source_id() -> None:
     with serve({"/page": Route(body=_PAGE)}) as server:
         host = server.base_url.removeprefix("http://")

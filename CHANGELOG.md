@@ -7,7 +7,34 @@ Entries that change an on-disk format or a response shape say so.
 
 ## [Unreleased]
 
+### Added
+- Mutation testing for the core Python SDK: `mutmut` seeds faults and the
+  new `sdk/spec/check_mutants.py` gate (a `python-mutation` CI job, run on
+  the latest Python) fails on any surviving mutant not on the reviewed
+  `sdk/python/mutation-baseline.txt` allowlist. `sdk/python-langchain`
+  carries a `[tool.mutmut]` config for manual runs but is not gated (its
+  coverage leans on the server-backed integration suite).
+
 ### Fixed
+- Python LangChain: `HtmlConnector` now detects BOM-less UTF-16 (and
+  refuses any text that still decodes with stray NUL bytes) instead of
+  reading it as UTF-8 — a page that decoded without error but left
+  `<script>` bodies in the extracted text now decodes correctly or is
+  reported `corrupt`. A fetch that fails *after* a redirect
+  (`>= 400` status or a non-HTML content type) now reports the final
+  URL as the source id, matching the success path. `DocxConnector`/
+  `PptxConnector`'s decompression-bomb guard now measures the real
+  decompressed size by (bounded) decompression instead of trusting the
+  zip's `file_size` header, which an attacker can forge small.
+  `FileObjectStore.list()` skips an unreadable subdirectory instead of
+  aborting the whole enumeration (a permission denial on the store root
+  still surfaces). `TaguruRetriever`'s async graph lane cancels its
+  still-in-flight citation fetches when one raises, and its
+  cross-context walk no longer swallows a `CancelledError` returned by
+  `asyncio.gather`. `FilesystemCheckpointStore`'s advisory lock is now
+  fork-safe: a forked child re-acquires rather than trusting an
+  inherited lock entry, so it correctly conflicts on a source the
+  parent holds.
 - Python SDK: `decode()` now refuses a wrong-shaped container inside a
   response (a `list` field fed a dict, a `dict` field fed a list) with
   `ResponseShapeError`, instead of silently taking a dict's keys or

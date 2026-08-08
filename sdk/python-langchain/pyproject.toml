@@ -114,6 +114,16 @@ dev = [
 [tool.hatch.build.targets.wheel]
 packages = ["src/taguru_langchain"]
 
+# Manual use only — `sdk/spec/check_mutants.py` gates the CORE SDK, not this
+# package (its coverage leans on the server-backed integration suite, so a
+# hermetic gate would be mostly noise). Provided so `mutmut run` works here
+# on demand for spot-checking a module.
+[tool.mutmut]
+source_paths = ["src/taguru_langchain/"]
+# integrationテストはサーバーバイナリ(TAGURU_TEST_BIN)前提なので、
+# hermeticなunitテストだけをミュータント判定に使う。
+pytest_add_cli_args_test_selection = ["tests/unit/"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]

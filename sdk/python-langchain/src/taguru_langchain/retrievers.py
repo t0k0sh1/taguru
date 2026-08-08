@@ -264,6 +264,13 @@ class TaguruRetriever(BaseRetriever):
             frontier = []
             for entry in entries:
                 if isinstance(entry, BaseException):
+                    # Match the sync walk's `except Exception`: a plain fetch
+                    # failure is tolerated (one deleted/erroring group must
+                    # not blank the walk), but a BaseException that is NOT an
+                    # Exception — CancelledError above all — must propagate,
+                    # never be swallowed as if it were a missing group.
+                    if not isinstance(entry, Exception):
+                        raise entry
                     continue
                 members.update(entry.contexts)
                 frontier.extend(entry.groups)
@@ -289,15 +296,26 @@ class TaguruRetriever(BaseRetriever):
         async def _fetch_one(pair: tuple[str, int]) -> Citation | None:
             # Wrapped per-pair (not gather's return_exceptions=True) so a
             # 404 on one citation resolves to None without also having to
-            # sift real errors out of a mixed exceptions/results list —
-            # any OTHER error still propagates and cancels the rest,
-            # exactly like the sequential loop this replaces did.
+            # sift real errors out of a mixed exceptions/results list.
             try:
                 return await ctx.cite_passage(*pair)
             except NotFoundError:
                 return None
 
-        fetched = await asyncio.gather(*(_fetch_one(pair) for pair in wanted_pairs))
+        # `gather` raises on the first non-404 error but does NOT cancel the
+        # siblings — they would run on as orphaned tasks, surfacing later as
+        # "Task exception was never retrieved" once the client is closed. To
+        # match the sync lane's sequential loop (which simply never starts
+        # the later lookups once one raises), cancel and drain the rest
+        # before re-raising.
+        tasks = [asyncio.ensure_future(_fetch_one(pair)) for pair in wanted_pairs]
+        try:
+            fetched = await asyncio.gather(*tasks)
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
         citations: dict[tuple[str, int], Citation | None] = dict(
             zip(wanted_pairs, fetched, strict=True)
         )
@@ -357,9 +375,18 @@ class TaguruRetriever(BaseRetriever):
                 *(self._agraph_lane(self.async_client, target, query) for target in targets),
                 return_exceptions=True,
             )
-            graph_docs = _interleave(
-                [docs if not isinstance(docs, BaseException) else [] for docs in per_target]
-            )
+            lanes: list[list[Document]] = []
+            for docs in per_target:
+                if isinstance(docs, BaseException):
+                    # As in `_aresolve_targets`: a plain failure blanks only
+                    # that one target's lane, but a non-Exception
+                    # BaseException (CancelledError) must propagate.
+                    if not isinstance(docs, Exception):
+                        raise docs
+                    lanes.append([])
+                else:
+                    lanes.append(docs)
+            graph_docs = _interleave(lanes)
         text_hits = []
         if self.include_text:
             # Same isolation as the sync lane above: one gone target must

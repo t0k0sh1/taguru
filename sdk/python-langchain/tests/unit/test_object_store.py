@@ -137,6 +137,36 @@ def test_file_object_store_base_uri(tmp_path: Path) -> None:
     assert store.base_uri == f"file://{tmp_path.resolve().as_posix()}"
 
 
+def test_file_object_store_skips_an_unreadable_subdirectory(tmp_path: Path) -> None:
+    """An unreadable subtree is skipped, never fatal — one locked
+    subdirectory must not abort enumeration of everything else (the
+    tolerance `Path.rglob` had before the `os.scandir` scan replaced it)."""
+    write_bucket(
+        tmp_path,
+        {"top.txt": b"a", "readable/inner.txt": b"b", "locked/secret.txt": b"c"},
+    )
+    locked = tmp_path / "locked"
+    locked.chmod(0o000)
+    try:
+        keys = sorted(meta.key for meta in FileObjectStore(tmp_path).list(""))
+    finally:
+        locked.chmod(0o755)  # so tmp_path teardown can remove it
+    assert keys == ["readable/inner.txt", "top.txt"]
+
+
+def test_file_object_store_surfaces_an_unreadable_root(tmp_path: Path) -> None:
+    """A permission denial on the store's ROOT is a misconfigured store, not
+    one unreadable corner — it surfaces rather than yielding silence."""
+    root = tmp_path / "bucket"
+    write_bucket(root, {"a.txt": b"x"})
+    root.chmod(0o000)
+    try:
+        with pytest.raises(PermissionError):
+            list(FileObjectStore(root).list(""))
+    finally:
+        root.chmod(0o755)
+
+
 # ---------------------------------------------------------------------------
 # open_object_store — scheme dispatch, mirroring src/ship.rs's open_store
 # ---------------------------------------------------------------------------
