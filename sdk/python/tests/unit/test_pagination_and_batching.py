@@ -140,6 +140,17 @@ def test_chunk_associations_yields_oversized_single_op_alone() -> None:
     assert [len(c) for c in chunks] == [1, 1]
 
 
+def test_chunk_associations_charges_the_separating_comma_exactly() -> None:
+    """One byte under the exact two-op serialization must split — the comma
+    between elements is real wire bytes, and undercounting it by one would
+    ship chunks that overshoot ``max_chunk_bytes``."""
+    ops = [_op(0), _op(1)]
+    one = len(dumps_compact(_op(0)))
+    exactly_two = 2 + one + 1 + one
+    assert [len(c) for c in chunk_associations(ops, 10_000, exactly_two)] == [2]
+    assert [len(c) for c in chunk_associations(ops, 10_000, exactly_two - 1)] == [1, 1]
+
+
 def test_add_associations_batched_sums_applied_counts() -> None:
     batches: list[int] = []
 

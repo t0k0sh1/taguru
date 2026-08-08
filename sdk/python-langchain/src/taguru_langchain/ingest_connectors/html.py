@@ -258,21 +258,39 @@ def _validate_public_destination(request: httpx.Request) -> None:
 
 
 def _resolve_charset(raw: bytes, content_type_header: str | None) -> str:
-    """`Content-Type` header `charset=` first, else an ASCII-safe scan of a
-    `<meta charset=...>`/`<meta http-equiv="Content-Type" content="...
-    charset=...">` tag in the first 2 KiB (where HTML5 requires one to
-    live), else UTF-8. A BOM is handled separately, after decoding (see
-    `read`'s `str.removeprefix("\\ufeff")`, the same convention `text.py`
-    already uses) rather than sniffed here — simpler, and correct for the
-    overwhelmingly common UTF-8(-with-BOM) case this reference connector
-    targets."""
+    """A byte-order mark first (it is definitive, and the UTF-16 ones make
+    every later text-level scan meaningless), then `Content-Type` header
+    `charset=`, else an ASCII-safe scan of a `<meta charset=...>`/`<meta
+    http-equiv="Content-Type" content="... charset=...">` tag in the first
+    2 KiB (where HTML5 requires one to live), else UTF-8 — after one last
+    look for the interleaved-NUL shape of BOM-less UTF-16. That last case
+    matters because it decodes as UTF-8 WITHOUT error: every ASCII-range
+    character in UTF-16 pairs its code with a NUL byte, so the "text"
+    comes out with NULs between the markup's characters, the parser sees
+    no tags at all, and `<script>` bodies (dropped from text on every
+    healthy path) would ride into the body text undiagnosed. A UTF-8 BOM
+    still surfaces as U+FEFF after decoding and is stripped in `_parse`
+    (the same convention `text.py` uses)."""
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        # The utf-16 codec consumes the BOM itself and picks the endianness.
+        return "utf-16"
     if content_type_header:
         header_match = _HEADER_CHARSET_RE.search(content_type_header)
         if header_match:
             return header_match.group(1)
-    meta_match = _CHARSET_RE.search(raw[:2048])
+    sample = raw[:2048]
+    meta_match = _CHARSET_RE.search(sample)
     if meta_match:
         return meta_match.group(1).decode("ascii", errors="ignore")
+    if sample:
+        # BOM-less UTF-16 heuristic: markup is ASCII, so one byte of every
+        # pair is NUL — concentrated on odd offsets for LE, even for BE.
+        odd_nuls = sample[1::2].count(0)
+        even_nuls = sample[0::2].count(0)
+        if odd_nuls > len(sample) // 4 and odd_nuls > 2 * even_nuls:
+            return "utf-16-le"
+        if even_nuls > len(sample) // 4 and even_nuls > 2 * odd_nuls:
+            return "utf-16-be"
     return "utf-8"
 
 
@@ -436,11 +454,7 @@ class _Extractor:
         self._flush_buffer()
         return "\n\n".join(self.paragraphs)
 
-    def _should_drop(self, node: _Node) -> bool:
-        if node.tag in _DROP_TAGS:
-            return True
-        if node.tag in _CONDITIONAL_DROP_TAGS and self._drop_header_footer:
-            return True
+    def _hidden_by_attrs(self, node: _Node) -> bool:
         if "hidden" in node.attrs:
             return True
         if node.attrs.get("aria-hidden", "").strip().lower() == "true":
@@ -448,6 +462,13 @@ class _Extractor:
         if node.attrs.get("role", "").strip().lower() in _ROLE_DENYLIST:
             return True
         return False
+
+    def _should_drop(self, node: _Node) -> bool:
+        if node.tag in _DROP_TAGS:
+            return True
+        if node.tag in _CONDITIONAL_DROP_TAGS and self._drop_header_footer:
+            return True
+        return self._hidden_by_attrs(node)
 
     def _commit_paragraph(self, text: str) -> int | None:
         """Appends `text` as a new paragraph (attaching the current
@@ -476,7 +497,12 @@ class _Extractor:
 
     def _visit(self, node: _Node, ambient_id: str | None) -> None:
         if self._should_drop(node):
-            if node.tag in ("iframe", "frame"):
+            # Flag only a frame a reader would have seen. One hidden by its
+            # own attributes contributes no visible content, and one inside
+            # an already-dropped subtree (nav/aside/...) never reaches this
+            # visit at all — the diagnostic means "visible embedded content
+            # was not fetched", not "a frame tag existed somewhere".
+            if node.tag in ("iframe", "frame") and not self._hidden_by_attrs(node):
                 self.had_dropped_frame = True
             return
         own_id = node.attrs.get("id")
@@ -796,39 +822,48 @@ class HtmlConnector:
             with client:
                 headers = {"User-Agent": self._user_agent}
                 with client.stream("GET", reference, headers=headers) as response:
+                    # Resolved before ANY response-driven exit: after a
+                    # redirect chain, every failure from here on must name
+                    # the URL that actually answered, exactly like the
+                    # success path and the size/deadline failures below —
+                    # "the source id is the final URL" is this module's
+                    # contract, and observability-side identity (e.g.
+                    # duplicate_source folding) depends on it.
+                    final_url = str(response.url)
+
+                    def response_failure(code: DiagnosticCode, message: str) -> ConnectorDocument:
+                        return self._failure(
+                            source=canonicalize_url(_strip_fragment(final_url)),
+                            display_name=_url_display_name(final_url),
+                            code=code,
+                            message=message,
+                            raw_content_sha256=_EMPTY_SHA256,
+                        )
+
                     if response.status_code >= 400:
-                        return early_failure("unreadable", f"HTTP {response.status_code}")
+                        return response_failure("unreadable", f"HTTP {response.status_code}")
                     content_type_header = response.headers.get("content-type")
                     if content_type_header is not None:
                         main_type = content_type_header.split(";", 1)[0].strip().lower()
                         if main_type not in _ALLOWED_CONTENT_TYPES:
-                            return early_failure(
+                            return response_failure(
                                 "unsupported_format",
                                 f"unsupported content type {content_type_header!r} "
                                 "(expected text/html)",
                             )
-                    final_url = str(response.url)
                     chunks = bytearray()
                     for chunk in response.iter_bytes():
                         chunks += chunk
                         if len(chunks) > self._max_file_bytes:
-                            return self._failure(
-                                source=canonicalize_url(_strip_fragment(final_url)),
-                                display_name=_url_display_name(final_url),
-                                code="content_too_large",
-                                message=f"exceeds the {self._max_file_bytes}-byte fetch cap",
-                                raw_content_sha256=_EMPTY_SHA256,
+                            return response_failure(
+                                "content_too_large",
+                                f"exceeds the {self._max_file_bytes}-byte fetch cap",
                             )
                         if time.monotonic() > deadline:
-                            return self._failure(
-                                source=canonicalize_url(_strip_fragment(final_url)),
-                                display_name=_url_display_name(final_url),
-                                code="unreadable",
-                                message=(
-                                    f"the fetch exceeded the {self._max_total_seconds}-second "
-                                    "total time budget"
-                                ),
-                                raw_content_sha256=_EMPTY_SHA256,
+                            return response_failure(
+                                "unreadable",
+                                f"the fetch exceeded the {self._max_total_seconds}-second "
+                                "total time budget",
                             )
         except (httpx.HTTPError, httpx.InvalidURL, _BlockedDestination) as error:
             return early_failure("unreadable", str(error))
@@ -885,6 +920,19 @@ class HtmlConnector:
         # leading BOM would otherwise land inside paragraph 0 verbatim,
         # exactly the case `text.py` already guards.
         text_raw = text_raw.removeprefix("﻿")
+        if "\x00" in text_raw:
+            # NUL never occurs in legitimate HTML (WHATWG treats it as a
+            # parse error), and it survives `.decode("utf-8")` without an
+            # exception — its presence means the charset guess was wrong
+            # (binary data, or an undeclared multi-byte encoding the
+            # heuristics above did not catch). Parsing on would see no
+            # tags, so `<script>` bodies would leak into the body text;
+            # refuse with a diagnostic instead.
+            return failure(
+                "corrupt",
+                "decoded text contains NUL characters — the byte stream is "
+                "binary or its character encoding was misdeclared",
+            )
 
         try:
             builder = _TreeBuilder()

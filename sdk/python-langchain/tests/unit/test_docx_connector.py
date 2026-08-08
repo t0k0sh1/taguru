@@ -19,6 +19,7 @@ from .._docx import (  # noqa: E402
     encrypted_docx,
     endnote_reference_para,
     footnote_reference_para,
+    forged_size_zip_bomb_docx,
     heading,
     outline_heading,
     para,
@@ -26,6 +27,7 @@ from .._docx import (  # noqa: E402
     table_with_nested_cell,
     table_with_nested_cells,
     textbox_para,
+    zip_bomb_docx,
 )
 
 
@@ -295,6 +297,39 @@ def test_oversized_extracted_text_is_reported_content_too_large(tmp_path: Path) 
     assert [d.code for d in document.diagnostics] == ["content_too_large"]
 
 
+def test_zip_bomb_shaped_docx_is_refused_before_parsing(tmp_path: Path) -> None:
+    """`max_file_bytes` bounds only the COMPRESSED size of the zip a .docx
+    is; a small, high-ratio zip must still be refused via the separate
+    `max_decompressed_bytes` cap before python-docx ever decompresses it."""
+    path = _write(tmp_path, "bomb.docx", zip_bomb_docx())
+    document = DocxConnector(max_decompressed_bytes=1024).read(str(path))
+
+    assert document.text == ""
+    assert [d.code for d in document.diagnostics] == ["content_too_large"]
+    assert "decompressed" in document.diagnostics[0].message
+
+
+def test_normal_docx_still_parses_under_the_decompressed_size_cap(tmp_path: Path) -> None:
+    path = _write(tmp_path, "doc.docx", docx_bytes(para("Body.")))
+    document = DocxConnector().read(str(path))
+
+    assert document.diagnostics == ()
+    assert document.text == "Body."
+
+
+def test_a_docx_with_forged_uncompressed_sizes_is_still_refused(tmp_path: Path) -> None:
+    """A metadata-only cap (summing `ZipInfo.file_size`) is bypassable: the
+    header can declare 50 bytes while the deflate stream expands to
+    megabytes. The cap must measure the real, decompressed size — so this
+    bomb, which reports `file_size == 50`, is still refused."""
+    path = _write(tmp_path, "forged.docx", forged_size_zip_bomb_docx(payload_size=8 * 1024 * 1024))
+    document = DocxConnector(max_decompressed_bytes=1024 * 1024).read(str(path))
+
+    assert document.text == ""
+    assert [d.code for d in document.diagnostics] == ["content_too_large"]
+    assert "decompressed" in document.diagnostics[0].message
+
+
 def test_oversized_source_id_is_reported_without_reading_the_file() -> None:
     long_reference = ("x" * 1025) + ".docx"
     document = DocxConnector().read(long_reference)
@@ -402,6 +437,20 @@ def test_metadata_title_falls_back_to_first_heading(tmp_path: Path) -> None:
     document = DocxConnector().read(str(path))
 
     assert document.metadata.title == "Heading Title"
+
+
+def test_metadata_title_does_not_fall_back_to_a_heading_when_extract_headings_is_false(
+    tmp_path: Path,
+) -> None:
+    """Matching TextFileConnector/PdfConnector/PptxConnector: disabling
+    heading extraction must mean title derivation behaves as if the
+    document had no headings at all, not merely that no SectionEntry is
+    produced."""
+    body = heading("Heading Title", 1) + para("Body.")
+    path = _write(tmp_path, "doc.docx", docx_bytes(body))
+    document = DocxConnector(extract_headings=False).read(str(path))
+
+    assert document.metadata.title is None
 
 
 def test_metadata_content_type_is_the_ooxml_wordprocessing_mime_type(

@@ -8,6 +8,14 @@ reviews:
   auto_review:
     enabled: true
     drafts: false
+    # 初回プッシュだけ自動レビューし、以降のプッシュは PR に
+    # `@coderabbitai review` とコメントしたときだけ実行する。レビューは
+    # 開発者ごと・時間あたりのレート制限を消費するため、小さな修正
+    # プッシュを短時間に重ねる運用だと毎プッシュのインクリメンタル
+    # レビューが枠を食い潰し「Review rate limited」でスキップされて
+    # いた(#500)。対応コミットを積み終えてから手動で1回頼む方が、
+    # 同じ枠でレビューが実際に走る。
+    auto_incremental_review: false
   path_filters:
     # `.codex/skills/**` はgraphifyツールのインストーラーが生成するベンダー
     # 済みのスキル定義・プロンプト文書で、このRustサーバー自体のコード品質

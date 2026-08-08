@@ -7,6 +7,7 @@ This file is produced from ``taguru._async.client`` by
 from __future__ import annotations
 
 import time
+import functools
 import os
 import tempfile
 from collections.abc import Generator, Iterator, Mapping, Sequence
@@ -598,7 +599,14 @@ class Contexts:
 
     def delete(self, name: str) -> bool:
         """Delete a context, files included (admin role)."""
-        result = self._client._request_json("DELETE", f"/contexts/{encode_name(name)}")
+        result = self._client._request_json(
+            "DELETE",
+            f"/contexts/{encode_name(name)}",
+            # A repeat delete 404s, so a phantom retry after an ambiguous
+            # transport failure would surface as NotFoundError even though
+            # the first delete already applied.
+            retry=RetryClass.UNSAFE_ON_AMBIGUOUS,
+        )
         return bool(result)
 
     def rename(self, name: str, to: str) -> bool:
@@ -710,7 +718,14 @@ class Groups:
 
     def delete(self, name: str) -> bool:
         """Delete the bundling only — member contexts and child groups stay."""
-        result = self._client._request_json("DELETE", f"/groups/{encode_name(name)}")
+        result = self._client._request_json(
+            "DELETE",
+            f"/groups/{encode_name(name)}",
+            # A repeat delete 404s, so a phantom retry after an ambiguous
+            # transport failure would surface as NotFoundError even though
+            # the first delete already applied.
+            retry=RetryClass.UNSAFE_ON_AMBIGUOUS,
+        )
         return bool(result)
 
     def rename(self, name: str, to: str) -> bool:
@@ -1583,12 +1598,18 @@ class Context:
         url = self._client._base_url + self._path + "/export"
         headers = dict(self._client._headers)
         _tracing.inject_headers(headers)
-        with self._client._http.stream("GET", url, headers=headers) as response:
-            if response.status_code >= 400:
-                response.read()
-                raise_for_response(response)
-            for chunk in response.iter_bytes():
-                yield chunk
+        try:
+            with self._client._http.stream("GET", url, headers=headers) as response:
+                if response.status_code >= 400:
+                    response.read()
+                    raise_for_response(response)
+                for chunk in response.iter_bytes():
+                    yield chunk
+        except httpx.HTTPError as exc:
+            # Bypasses `_send_core` (see above), so it must wrap connection
+            # and mid-stream failures the same way that one does — otherwise
+            # a raw httpx exception escapes `except TaguruError` here alone.
+            raise TransportError(str(exc) or type(exc).__name__) from exc
 
     def export_to_file(self, path: str | Path) -> None:
         """Stream the export straight to a file, atomically.
@@ -1597,7 +1618,14 @@ class Context:
         or interrupted export never leaves a truncated file at ``path``.
         """
         target = Path(path)
-        fd, tmp_name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
+        # `mkstemp`, `unlink`, and `replace` are blocking filesystem calls
+        # like `handle.write` below — route them the same way, or a slow
+        # disk stalls the event loop even though writes look non-blocking.
+        fd, tmp_name = call_blocking(
+            functools.partial(
+                tempfile.mkstemp, dir=target.parent, prefix=f".{target.name}.", suffix=".tmp"
+            )
+        )
         tmp = Path(tmp_name)
         stream = self.export_stream()
         try:
@@ -1605,11 +1633,11 @@ class Context:
                 for chunk in stream:
                     call_blocking(handle.write, chunk)
         except BaseException:
-            tmp.unlink(missing_ok=True)
+            call_blocking(functools.partial(tmp.unlink, missing_ok=True))
             raise
         finally:
             stream.close()
-        tmp.replace(target)
+        call_blocking(tmp.replace, target)
 
     # -- evidence assembly ---------------------------------------------------------------
 

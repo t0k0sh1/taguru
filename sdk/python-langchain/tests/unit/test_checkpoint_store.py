@@ -4,6 +4,7 @@ TaguruIngester."""
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,7 @@ import pytest
 
 from taguru_langchain._extract import ModelOutput
 from taguru_langchain.checkpoints import (
+    CheckpointLockedError,
     FilesystemCheckpointStore,
     _checkpoint_file_name,
     _CheckpointFingerprint,
@@ -79,8 +81,11 @@ def test_checkpoint_file_name_truncation_keeps_distinct_sources_distinct() -> No
 def test_atomic_write_leaves_no_tmp_litter(tmp_path: Path) -> None:
     store = FilesystemCheckpointStore(tmp_path)
     store.save("docs/aomine.md", b"{}")
-    entries = os.listdir(tmp_path)
-    assert entries == [_checkpoint_file_name("docs/aomine.md")]
+    # The checkpoint file itself, plus the sidecar advisory-lock file
+    # `save` creates on a source's first write (issue #<concurrent-run
+    # clobber>) — no OTHER litter (staged temp files, ...) survives.
+    checkpoint_name = _checkpoint_file_name("docs/aomine.md")
+    assert set(os.listdir(tmp_path)) == {checkpoint_name, f"{checkpoint_name}.lock"}
 
 
 def test_a_failed_replace_keeps_the_old_file_and_cleans_up_staging(
@@ -97,7 +102,8 @@ def test_a_failed_replace_keeps_the_old_file_and_cleans_up_staging(
         store.save("docs/aomine.md", b"replacement")
 
     assert store.load("docs/aomine.md") == b"original"
-    assert os.listdir(tmp_path) == [_checkpoint_file_name("docs/aomine.md")]
+    checkpoint_name = _checkpoint_file_name("docs/aomine.md")
+    assert set(os.listdir(tmp_path)) == {checkpoint_name, f"{checkpoint_name}.lock"}
 
 
 def test_load_never_creates_the_directory_and_save_creates_it_on_demand(tmp_path: Path) -> None:
@@ -192,3 +198,225 @@ def test_document_checkpoints_a_single_corrupt_unit_invalidates_the_whole_file()
     # The whole file degrades to empty — the still-good "good" unit is NOT
     # salvaged, matching Rust's single-serde-parse posture.
     assert restored.units == {}
+
+
+# -- _DocumentCheckpoints: JSON Lines format (issue #<O(N^2) checkpoint saves>) --
+
+
+def test_document_checkpoints_round_trips_two_units_through_jsonl_bytes() -> None:
+    fingerprint = _fingerprint()
+    unit1 = _CheckpointUnit(chunk_index=0, output=ModelOutput(), user="u1", answer="a1")
+    unit2 = _CheckpointUnit(chunk_index=1, output=ModelOutput(), user="u2", answer="a2")
+    checkpoints = _DocumentCheckpoints(fingerprint=fingerprint, units={"h1": unit1, "h2": unit2})
+    restored = _DocumentCheckpoints.from_bytes(checkpoints.to_bytes(), fingerprint)
+    assert restored.lookup("h1") == unit1
+    assert restored.lookup("h2") == unit2
+
+
+def test_document_checkpoints_tolerates_a_torn_trailing_line_from_a_crash_mid_append() -> None:
+    fingerprint = _fingerprint()
+    unit1 = _CheckpointUnit(chunk_index=0, output=ModelOutput(), user="u1", answer="a1")
+    unit2 = _CheckpointUnit(chunk_index=1, output=ModelOutput(), user="u2", answer="a2")
+    checkpoints = _DocumentCheckpoints(fingerprint=fingerprint, units={"h1": unit1, "h2": unit2})
+    data = checkpoints.to_bytes()
+    # Simulate a crash mid-`append`: the last line's own trailing newline
+    # (and a few bytes before it) never made it to disk.
+    torn = data[:-6]
+    assert not torn.endswith(b"\n")
+    restored = _DocumentCheckpoints.from_bytes(torn, fingerprint)
+    # The complete "h1" unit (and the header) survive; the torn "h2" line
+    # is discarded rather than invalidating everything already durably
+    # appended before it.
+    assert restored.lookup("h1") == unit1
+    assert restored.lookup("h2") is None
+
+
+def test_document_checkpoints_still_loads_the_legacy_single_object_format_with_real_units() -> None:
+    fingerprint = _fingerprint()
+    unit = _CheckpointUnit(chunk_index=0, output=ModelOutput(), user="u", answer="a")
+    legacy_payload = {"fingerprint": fingerprint.to_dict(), "units": {"h1": unit.to_dict()}}
+    data = json.dumps(legacy_payload).encode("utf-8")
+    # An in-flight pre-migration checkpoint keeps resuming exactly as
+    # before the JSONL migration — never treated as corrupt just because
+    # it predates it.
+    restored = _DocumentCheckpoints.from_bytes(data, fingerprint)
+    assert restored.lookup("h1") == unit
+
+
+def test_document_checkpoints_jsonl_duplicate_unit_lines_let_the_last_one_win() -> None:
+    fingerprint = _fingerprint()
+    stale = _CheckpointUnit(chunk_index=0, output=ModelOutput(), user="stale", answer="stale")
+    fresh = _CheckpointUnit(chunk_index=0, output=ModelOutput(), user="fresh", answer="fresh")
+    header = json.dumps({"fingerprint": fingerprint.to_dict()}).encode("utf-8")
+    stale_line = json.dumps({"unit": "h1", **stale.to_dict()}).encode("utf-8")
+    fresh_line = json.dumps({"unit": "h1", **fresh.to_dict()}).encode("utf-8")
+    data = header + b"\n" + stale_line + b"\n" + fresh_line + b"\n"
+    restored = _DocumentCheckpoints.from_bytes(data, fingerprint)
+    assert restored.lookup("h1") == fresh
+
+
+def test_document_checkpoints_a_corrupt_middle_line_in_jsonl_invalidates_the_whole_file() -> None:
+    fingerprint = _fingerprint()
+    good = _CheckpointUnit(chunk_index=0, output=ModelOutput(), user="u", answer="a")
+    header = json.dumps({"fingerprint": fingerprint.to_dict()}).encode("utf-8")
+    bad_line = json.dumps({"unit": "bad", "chunk_index": 0}).encode(
+        "utf-8"
+    )  # no output/user/answer
+    good_line = json.dumps({"unit": "good", **good.to_dict()}).encode("utf-8")
+    # The bad line has a well-formed trailing newline AND a line after it
+    # — genuine corruption, not the crash-mid-append tail the test above
+    # tolerates.
+    data = header + b"\n" + bad_line + b"\n" + good_line + b"\n"
+    restored = _DocumentCheckpoints.from_bytes(data, fingerprint)
+    assert restored.units == {}
+
+
+# -- FilesystemCheckpointStore: append() and the advisory per-source lock ------
+# (issue #<O(N^2) checkpoint saves> / issue #<concurrent-run clobber>) ---------
+
+
+def test_filesystem_store_append_adds_only_the_new_record_not_a_full_rewrite(
+    tmp_path: Path,
+) -> None:
+    store = FilesystemCheckpointStore(tmp_path)
+    fingerprint = _fingerprint()
+    unit1 = _CheckpointUnit(chunk_index=0, output=ModelOutput(), user="u1", answer="a1")
+    checkpoints = _DocumentCheckpoints(fingerprint=fingerprint, units={"h1": unit1})
+    store.save("docs/aomine.md", checkpoints.to_bytes())
+    size_after_save = store.path_for("docs/aomine.md").stat().st_size
+
+    checkpoints.record(
+        "h2", _CheckpointUnit(chunk_index=1, output=ModelOutput(), user="u2", answer="a2")
+    )
+    new_record = checkpoints.unit_bytes("h2")
+    store.append("docs/aomine.md", new_record)
+    size_after_append = store.path_for("docs/aomine.md").stat().st_size
+
+    # The file grew by exactly the new record's own bytes — proof `append`
+    # never touched (let alone rewrote) what `save` already wrote.
+    assert size_after_append - size_after_save == len(new_record)
+    restored = _DocumentCheckpoints.from_bytes(store.load("docs/aomine.md"), fingerprint)
+    assert set(restored.units) == {"h1", "h2"}
+
+
+def test_filesystem_store_save_raises_when_another_holder_already_locked_the_source(
+    tmp_path: Path,
+) -> None:
+    store = FilesystemCheckpointStore(tmp_path)
+    lock_path = Path(f"{store.path_for('docs/aomine.md')}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    external = open(lock_path, "a+b")
+    fcntl.flock(external.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        with pytest.raises(CheckpointLockedError, match="docs/aomine.md"):
+            store.save("docs/aomine.md", b"{}")
+    finally:
+        external.close()
+
+
+def test_filesystem_store_append_raises_when_another_holder_already_locked_the_source(
+    tmp_path: Path,
+) -> None:
+    store = FilesystemCheckpointStore(tmp_path)
+    lock_path = Path(f"{store.path_for('docs/aomine.md')}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    external = open(lock_path, "a+b")
+    fcntl.flock(external.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        with pytest.raises(CheckpointLockedError, match="docs/aomine.md"):
+            store.append("docs/aomine.md", b'{"unit": "h1"}\n')
+    finally:
+        external.close()
+
+
+def test_filesystem_store_a_second_save_for_a_source_it_already_locked_is_not_a_re_acquisition(
+    tmp_path: Path,
+) -> None:
+    """The common case — every write after a document's first goes through
+    `_acquire_lock` again — must be a no-op against the SAME instance's own
+    lock, never mistaken for contention."""
+    store = FilesystemCheckpointStore(tmp_path)
+    store.save("docs/aomine.md", b"{}")
+    store.save("docs/aomine.md", b"{}")  # must not raise CheckpointLockedError
+
+
+def test_filesystem_store_delete_releases_the_held_lock(tmp_path: Path) -> None:
+    store = FilesystemCheckpointStore(tmp_path)
+    store.save("docs/aomine.md", b"{}")
+    lock_path = Path(f"{store.path_for('docs/aomine.md')}.lock")
+
+    external = open(lock_path, "a+b")
+    try:
+        with pytest.raises(OSError):
+            fcntl.flock(external.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+        store.delete("docs/aomine.md")
+
+        fcntl.flock(external.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)  # must not raise now
+        fcntl.flock(external.fileno(), fcntl.LOCK_UN)
+    finally:
+        external.close()
+
+
+def test_filesystem_store_close_releases_every_held_lock(tmp_path: Path) -> None:
+    store = FilesystemCheckpointStore(tmp_path)
+    store.save("a.md", b"{}")
+    store.save("b.md", b"{}")
+
+    store.close()
+
+    for source in ("a.md", "b.md"):
+        lock_path = Path(f"{store.path_for(source)}.lock")
+        external = open(lock_path, "a+b")
+        try:
+            fcntl.flock(external.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)  # must not raise
+            fcntl.flock(external.fileno(), fcntl.LOCK_UN)
+        finally:
+            external.close()
+
+
+def test_filesystem_store_a_forked_child_still_conflicts_on_an_inherited_source(
+    tmp_path: Path,
+) -> None:
+    """The lock and its `_locks` entry are both inherited across `os.fork()`
+    (same open file description → same kernel lock). A child that trusted
+    `source in self._locks` alone would think it held a lock it merely
+    inherited and clobber the parent's source with no conflict check. It
+    must instead re-acquire and hit `CheckpointLockedError`, while a
+    DIFFERENT source the parent never locked still succeeds."""
+    store = FilesystemCheckpointStore(tmp_path)
+    store.save("parent.md", b"{}")  # parent holds the lock on this source
+
+    same_r, same_w = os.pipe()
+    diff_r, diff_w = os.pipe()
+    pid = os.fork()
+    if pid == 0:  # pragma: no cover - runs only in the forked child
+        os.close(same_r)
+        os.close(diff_r)
+        try:
+            store.append("parent.md", b'{"unit": "h1"}\n')
+            os.write(same_w, b"no-conflict")
+        except CheckpointLockedError:
+            os.write(same_w, b"conflict")
+        except BaseException as error:  # noqa: BLE001 - relayed to the parent
+            os.write(same_w, b"error:" + repr(error).encode())
+        os.close(same_w)
+        try:
+            store.save("child.md", b"{}")
+            os.write(diff_w, b"ok")
+        except BaseException as error:  # noqa: BLE001 - relayed to the parent
+            os.write(diff_w, b"error:" + repr(error).encode())
+        os.close(diff_w)
+        os._exit(0)
+
+    os.close(same_w)
+    os.close(diff_w)
+    _pid, status = os.waitpid(pid, 0)
+    same_outcome = os.read(same_r, 200).decode()
+    diff_outcome = os.read(diff_r, 200).decode()
+    os.close(same_r)
+    os.close(diff_r)
+
+    assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
+    assert same_outcome == "conflict"
+    assert diff_outcome == "ok"

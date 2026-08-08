@@ -30,7 +30,9 @@ reads either.
 from __future__ import annotations
 
 import io
+import struct
 import zipfile
+import zlib
 from collections.abc import Sequence
 
 from pptx import Presentation
@@ -229,6 +231,41 @@ def with_smartart(raw: bytes, *, slide_number: int = 1) -> bytes:
 
 def with_ole_object(raw: bytes, *, slide_number: int = 1) -> bytes:
     return _inject_marker(raw, _OLE_OBJECT_MARKER, slide_number=slide_number)
+
+
+def zip_bomb_pptx(declared_size: int = 2 * 1024 * 1024) -> bytes:
+    """A small, high-ratio zip whose one entry declares ``declared_size``
+    zero bytes but compresses to almost nothing — the shape
+    `PptxConnector`'s `max_decompressed_bytes` cap exists to refuse before
+    python-pptx ever decompresses it. Never assembled into a fully valid
+    pptx package: the cap is checked, and this document refused, before
+    python-pptx would ever open it."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("ppt/slides/slide1.xml", b"\0" * declared_size)
+    return buf.getvalue()
+
+
+def forged_size_zip_bomb_pptx(payload_size: int = 32 * 1024 * 1024) -> bytes:
+    """A zip bomb that DEFEATS a metadata-only check: its one entry really
+    decompresses to ``payload_size`` bytes, but every ``file_size`` field
+    (local header and central directory) is forged down to 50, so
+    ``ZipInfo.file_size`` reports 50 while the deflate stream still expands
+    to megabytes — the exact bypass `decompressed_size_within` closes."""
+    payload = b"\0" * payload_size
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("ppt/slides/slide1.xml", payload)
+    raw = bytearray(buf.getvalue())
+    central = raw.find(b"PK\x01\x02")
+    local = raw.find(b"PK\x03\x04")
+    forged = 50
+    struct.pack_into("<I", raw, central + 24, forged)
+    struct.pack_into("<I", raw, local + 22, forged)
+    crc = zlib.crc32(payload[:forged])
+    struct.pack_into("<I", raw, central + 16, crc)
+    struct.pack_into("<I", raw, local + 14, crc)
+    return bytes(raw)
 
 
 def corrupt_pptx(kind: str = "not_zip") -> bytes:

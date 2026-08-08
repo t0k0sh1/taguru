@@ -9,14 +9,14 @@ CI's default, OTel-less job too, not only the second OTel-installed pass.
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import get_args
 
 import yaml
 
 from taguru import _tracing
+from tests.unit._repo import repo_root
 
-SPEC_PATH = Path(__file__).resolve().parents[3] / "spec" / "tracing.yaml"
+SPEC_PATH = repo_root() / "sdk" / "spec" / "tracing.yaml"
 
 
 def load_spec() -> dict[str, object]:
@@ -68,9 +68,14 @@ def test_privacy_vocabulary_matches_the_shared_spec() -> None:
     # `taguru._tracing.Span`'s public surface IS that closed vocabulary —
     # `count`/`flag`/`skip` (this SDK's name for the spec's "reason" kind)
     # /`citation_missing`, nothing else.
+    # Names carrying `__mutmut_` are trampolines mutmut injects into the
+    # class namespace during mutation runs — instrumentation artifacts,
+    # not part of Span's public surface this closed vocabulary describes.
     public_methods = {
         name
         for name in vars(_tracing.Span)
-        if not name.startswith("_") and callable(getattr(_tracing.Span, name))
+        if not name.startswith("_")
+        and "__mutmut_" not in name
+        and callable(getattr(_tracing.Span, name))
     }
     assert public_methods == {"count", "flag", "skip", "citation_missing"}

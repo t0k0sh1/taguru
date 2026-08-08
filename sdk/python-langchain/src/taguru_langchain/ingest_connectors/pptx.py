@@ -92,7 +92,12 @@ else:
     _PYTHON_PPTX_IMPORT_ERROR = None
 
 from .._extract import MAX_PASSAGE_BYTES
-from ._structure import byte_len, sanitize_paragraph_text
+from ._structure import (
+    byte_len,
+    decompressed_size_within,
+    read_member_within,
+    sanitize_paragraph_text,
+)
 from .document import (
     MAX_SECTION_BYTES,
     ConnectorDocument,
@@ -118,6 +123,16 @@ _CONTENT_TYPE: Final = "application/vnd.openxmlformats-officedocument.presentati
 # and a heavily-styled small deck's raw bytes can still exceed a naive
 # per-file cap.
 _DEFAULT_MAX_FILE_BYTES: Final = 64 * 1024 * 1024
+
+# `max_file_bytes` bounds only the COMPRESSED size of the zip a .pptx
+# actually is; a small, high-ratio zip can still decompress to something
+# large enough to exhaust memory in python-pptx's own parsing (and in this
+# module's own `_partial_extraction_message` re-decompression). 8x the
+# default raw-file cap — the same multiplier `docx.py` uses for the same
+# reason — is generous enough for any legitimate deck's own XML/markup
+# expansion ratio while still bounding the worst case a hostile file could
+# demand.
+_DEFAULT_MAX_DECOMPRESSED_BYTES: Final = 8 * _DEFAULT_MAX_FILE_BYTES
 
 # MS-OFFCRYPTO password-protected Office documents (including .pptx) are
 # re-packaged as a whole OLE2/Compound File Binary container, not a zip —
@@ -301,13 +316,26 @@ def _build_presentation(
     return result
 
 
-def _partial_extraction_message(raw: bytes) -> str | None:
+def _partial_extraction_message(raw: bytes, max_decompressed_bytes: int) -> str | None:
     try:
         with zipfile.ZipFile(io.BytesIO(raw)) as archive:
-            slide_names = [name for name in archive.namelist() if _SLIDE_PART_RE.match(name)]
-            combined = b"".join(archive.read(name) for name in slide_names)
-    except (KeyError, zipfile.BadZipFile):
+            slide_names = [
+                info.filename for info in archive.infolist() if _SLIDE_PART_RE.match(info.filename)
+            ]
+    except zipfile.BadZipFile:
         return None
+    # Bounded, no-trust-`file_size` reads (see `_structure`): safe to call
+    # on its own, never decompressing more than `read()`'s own cap allows.
+    # The running budget bounds the combined slide XML, not each slide alone.
+    combined = bytearray()
+    for name in slide_names:
+        remaining = max_decompressed_bytes - len(combined)
+        if remaining <= 0:
+            break
+        part = read_member_within(raw, name, remaining)
+        if part is None:
+            return None
+        combined += part
     kinds = [name for marker, name in _PARTIAL_CONTENT_MARKERS if marker in combined]
     if not kinds:
         return None
@@ -338,8 +366,12 @@ class PptxConnector:
     ``extract_tables`` (default ``True``) controls whether a table's row/
     cell text is extracted as its own paragraph; when ``False``, a table
     contributes nothing (never folded into a neighboring shape's text).
-    ``max_file_bytes`` (default 64 MiB) caps the raw file size checked
-    before any parsing.
+    ``max_file_bytes`` (default 64 MiB) caps the raw (compressed) file size
+    checked before any parsing. ``max_decompressed_bytes`` (default 8x
+    ``max_file_bytes``) separately caps the SUM of every zip entry's own
+    declared uncompressed size — a small, high-ratio zip can stay well
+    under ``max_file_bytes`` while still decompressing to something large
+    enough to exhaust memory in ``python-pptx``'s own parsing.
     """
 
     def __init__(
@@ -349,6 +381,7 @@ class PptxConnector:
         extract_speaker_notes: bool = True,
         extract_tables: bool = True,
         max_file_bytes: int = _DEFAULT_MAX_FILE_BYTES,
+        max_decompressed_bytes: int = _DEFAULT_MAX_DECOMPRESSED_BYTES,
     ) -> None:
         if _Presentation is None:
             raise ImportError(
@@ -359,6 +392,7 @@ class PptxConnector:
         self._extract_speaker_notes = extract_speaker_notes
         self._extract_tables = extract_tables
         self._max_file_bytes = max_file_bytes
+        self._max_decompressed_bytes = max_decompressed_bytes
 
     @property
     def parser(self) -> str:
@@ -388,6 +422,7 @@ class PptxConnector:
                 "extract_speaker_notes": self._extract_speaker_notes,
                 "extract_tables": self._extract_tables,
                 "max_file_bytes": self._max_file_bytes,
+                "max_decompressed_bytes": self._max_decompressed_bytes,
             }
         )
 
@@ -484,6 +519,22 @@ class PptxConnector:
                 raw_content_sha256,
             )
 
+        # Checked before python-pptx ever touches the bytes: a small,
+        # high-ratio zip can pass `max_file_bytes` (a cap on the COMPRESSED
+        # size) and still exhaust memory decompressing during parsing. The
+        # size is measured by real (bounded) decompression, not the
+        # forgeable `file_size` header — see `_structure`. A non-zip file
+        # falls through (`None`) to the existing `corrupt` path below,
+        # unchanged.
+        decompressed_size = decompressed_size_within(raw, self._max_decompressed_bytes)
+        if decompressed_size is not None and decompressed_size > self._max_decompressed_bytes:
+            return failure(
+                "content_too_large",
+                f"{decompressed_size} decompressed bytes exceeds the "
+                f"{self._max_decompressed_bytes}-byte decompressed-size cap",
+                raw_content_sha256,
+            )
+
         try:
             presentation = _Presentation(io.BytesIO(raw))
             body = _build_presentation(
@@ -515,7 +566,7 @@ class PptxConnector:
             )
 
         diagnostics: list[Diagnostic] = []
-        partial_message = _partial_extraction_message(raw)
+        partial_message = _partial_extraction_message(raw, self._max_decompressed_bytes)
         if partial_message is not None:
             diagnostics.append(
                 Diagnostic(code="partial_extraction", message=partial_message, source=source)

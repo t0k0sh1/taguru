@@ -9,7 +9,22 @@ from pathlib import Path
 import httpx
 import pytest
 
-from taguru import DirectoryEntry, GroupImportOutcome, TaguruError
+from taguru import (
+    DirectoryEntry,
+    GroupImportOutcome,
+    Issue,
+    RateLimitError,
+    ServerError,
+    TaguruError,
+    TransportError,
+)
+from taguru._shared import (
+    ContractState,
+    normalize_import_outcomes,
+    raise_for_response,
+    run_contract_probe,
+    unwrap_envelope_full,
+)
 
 from .conftest import async_client, err_response, ok_response, sync_client
 
@@ -95,6 +110,55 @@ def test_export_returns_raw_ndjson() -> None:
     assert client.context("sake").export() == ndjson
 
 
+def test_export_stream_wraps_a_connect_failure_as_transport_error() -> None:
+    """``export_stream`` is the one call site that bypasses ``_send`` (ADR
+    0005 §3.8); without its own wrapping, a connection failure here would
+    escape as a raw httpx exception and slip past ``except TaguruError``."""
+
+    def handler(_req: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused")
+
+    client = sync_client(handler)
+    with pytest.raises(TransportError):
+        for _chunk in client.context("sake").export_stream():
+            pass
+
+    client = sync_client(handler)
+    with pytest.raises(TaguruError):
+        for _chunk in client.context("sake").export_stream():
+            pass
+
+
+async def test_async_export_stream_wraps_a_connect_failure_as_transport_error() -> None:
+    def handler(_req: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused")
+
+    client = async_client(handler)
+    with pytest.raises(TransportError):
+        async for _chunk in client.context("sake").export_stream():
+            pass
+
+    client = async_client(handler)
+    with pytest.raises(TaguruError):
+        async for _chunk in client.context("sake").export_stream():
+            pass
+
+
+async def test_async_export_to_file_wraps_a_connect_failure_as_transport_error(tmp_path) -> None:
+    """The wrapping must survive threading the stream through
+    ``export_to_file``, not just direct iteration of ``export_stream``."""
+
+    def handler(_req: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused")
+
+    client = async_client(handler)
+    target = tmp_path / "backup.jsonl"
+    with pytest.raises(TransportError):
+        await client.context("sake").export_to_file(target)
+    assert not target.exists()
+    assert list(tmp_path.iterdir()) == []  # no leftover temp file
+
+
 def test_export_to_file_cleans_up_and_closes_the_stream_on_failure(tmp_path) -> None:
     client = sync_client(lambda _req: httpx.Response(200, text="unused"))
     ctx = client.context("sake")
@@ -144,7 +208,8 @@ async def test_async_export_to_file_cleans_up_and_closes_the_stream_on_failure(t
 
 
 async def test_async_export_to_file_writes_off_the_event_loop_thread(tmp_path, monkeypatch) -> None:
-    """Each chunk write must run in a worker thread, or a slow disk stalls the loop."""
+    """Each chunk write and the final atomic rename must run in a worker
+    thread, or a slow disk stalls the loop."""
     client = async_client(lambda _req: httpx.Response(200, text="unused"))
     ctx = client.context("sake")
 
@@ -157,7 +222,9 @@ async def test_async_export_to_file_writes_off_the_event_loop_thread(tmp_path, m
 
     loop_thread = threading.current_thread()
     write_threads: list[threading.Thread] = []
+    replace_threads: list[threading.Thread] = []
     original_fdopen = os.fdopen
+    original_replace = Path.replace
 
     class RecordingWriter:
         def __init__(self, fd: int) -> None:
@@ -173,11 +240,18 @@ async def test_async_export_to_file_writes_off_the_event_loop_thread(tmp_path, m
         def __exit__(self, *exc_info: object) -> None:
             self._raw.close()
 
+    def spying_replace(self: Path, target_path: Path) -> Path:
+        replace_threads.append(threading.current_thread())
+        return original_replace(self, target_path)
+
     monkeypatch.setattr(os, "fdopen", lambda fd, mode: RecordingWriter(fd))
+    monkeypatch.setattr(Path, "replace", spying_replace)
     await ctx.export_to_file(target)
 
     assert len(write_threads) == 2
     assert all(thread is not loop_thread for thread in write_threads)
+    assert len(replace_threads) == 1
+    assert replace_threads[0] is not loop_thread
     assert target.read_bytes() == b"chunk-one-chunk-two"
 
 
@@ -463,3 +537,131 @@ def test_error_message_and_body_survive() -> None:
         "error": "context 'x' does not exist",
         "time": 0.001,
     }
+
+
+# --- raise_for_response / unwrap_envelope_full, pinned field by field ---
+
+
+def test_error_response_threads_code_time_body_and_retry_after() -> None:
+    payload = {"status": "error", "error": "slow down", "code": "over_limit", "time": 0.25}
+    response = httpx.Response(429, json=payload, headers={"retry-after": "3"})
+    with pytest.raises(RateLimitError) as excinfo:
+        raise_for_response(response)
+    error = excinfo.value
+    assert error.message == "slow down"
+    assert error.code == "over_limit"
+    assert error.time == 0.25
+    assert error.body == payload
+    assert error.retry_after == 3.0
+
+
+def test_error_json_without_error_text_synthesizes_the_status_message() -> None:
+    response = httpx.Response(500, json={"status": "error"})
+    with pytest.raises(ServerError) as excinfo:
+        raise_for_response(response)
+    assert excinfo.value.message == "HTTP 500"
+    assert excinfo.value.time is None
+    assert excinfo.value.body == {"status": "error"}
+
+
+def test_plain_text_error_keeps_the_text_body_and_retry_after() -> None:
+    response = httpx.Response(
+        429, content=b"too many", headers={"retry-after": "2", "content-type": "text/plain"}
+    )
+    with pytest.raises(RateLimitError) as excinfo:
+        raise_for_response(response)
+    error = excinfo.value
+    assert error.message == "too many"
+    assert error.body == "too many"
+    assert error.time is None
+    assert error.retry_after == 2.0
+
+
+def test_non_json_envelope_error_names_the_status_and_body() -> None:
+    response = httpx.Response(
+        200, content=b"<html>oops</html>", headers={"content-type": "text/html"}
+    )
+    with pytest.raises(TaguruError) as excinfo:
+        unwrap_envelope_full(response)
+    error = excinfo.value
+    assert error.message == "expected a JSON envelope, got a non-JSON body"
+    assert error.status == 200
+    assert error.body == "<html>oops</html>"
+
+
+def test_wrong_envelope_shape_error_names_the_status_and_body() -> None:
+    """A body carrying ``result`` but no ``status: "ok"`` is NOT the
+    envelope — accepting it would hand back data the server never blessed."""
+    response = httpx.Response(200, json={"result": 1})
+    with pytest.raises(TaguruError) as excinfo:
+        unwrap_envelope_full(response)
+    error = excinfo.value
+    assert error.message == "response is not the taguru envelope shape"
+    assert error.status == 200
+    assert error.body == {"result": 1}
+
+
+def test_import_result_threads_schemas_issues_and_violations_through() -> None:
+    outcome = {
+        "context": "sake",
+        "source": "a",
+        "created": True,
+        "retracted": 0,
+        "associations": 2,
+        "aliases": 0,
+        "passage_stored": True,
+        "passage_dropped": False,
+        "questions_stored": 0,
+        "questions_dropped": 0,
+        "sections_stored": 0,
+        "sections_dropped": 0,
+        "locators_stored": 3,
+        "locators_dropped": 1,
+        "association_paragraphs_dropped": 0,
+    }
+    issue = Issue(path="associations[0].weight", kind="range", expected="0..1", actual="7")
+
+    result = normalize_import_outcomes(
+        {
+            "batches": [outcome],
+            "groups": [{"name": "g", "outcome": "created", "contexts": 1, "groups": 0}],
+            "schemas": [{"context": "sake", "mode": "warn", "types": 2, "relations": 1}],
+        },
+        issues=[issue],
+        schema_violations=4,
+    )
+    assert [group.name for group in result.groups] == ["g"]
+    decoded_schemas = [
+        (schema.context, schema.mode, schema.types, schema.relations) for schema in result.schemas
+    ]
+    assert decoded_schemas == [("sake", "warn", 2, 1)]
+    assert result.issues == [issue]
+    assert result.schema_violations == 4
+
+    defaulted = normalize_import_outcomes({"batches": [outcome]})
+    assert defaulted.groups == []
+    assert defaulted.schemas == []
+    assert defaulted.issues == []
+    assert defaulted.schema_violations == 0
+
+    legacy = normalize_import_outcomes(outcome, issues=[issue], schema_violations=2)
+    assert [batch.source for batch in legacy.batches] == ["a"]
+    assert legacy.issues == [issue]
+    assert legacy.schema_violations == 2
+
+
+async def test_contract_probe_clears_its_task_slot_for_the_next_caller() -> None:
+    """``state.task`` must return to ``None`` after the probe settles — any
+    other sentinel would make the next fresh probe await a non-task."""
+    state = ContractState()
+    calls = 0
+
+    async def probe() -> None:
+        nonlocal calls
+        calls += 1
+
+    await run_contract_probe(state, probe)
+    assert state.task is None
+    await run_contract_probe(state, probe)
+    assert calls == 2
+    assert state.task is None

@@ -64,6 +64,12 @@ pub enum Message {
     /// rule for a reply whose id could not be established is that the
     /// id "MUST be Null", so there is nothing valid left to echo.
     InvalidId,
+    /// The `jsonrpc` member is missing or not exactly the string
+    /// "2.0" — required on every request by JSON-RPC 2.0 (§4), so this
+    /// is not a message under the contract either transport speaks.
+    /// Carries whatever (already shape-valid) id was present so the
+    /// refusal stays correlatable.
+    WrongJsonRpcVersion { id: Value },
 }
 
 /// The requests both transports answer.
@@ -77,11 +83,12 @@ pub enum Call {
 }
 
 /// Sorts one decoded message into [`Message`]. Never fails: an id of
-/// the wrong type is [`Message::InvalidId`], and any other garbage is
-/// [`Message::Undecodable`] — both transports answer both with a
-/// JSON-RPC error, the latter carrying whatever id was found so a
-/// message missing only its method is still owed a correlatable reply,
-/// not a null one.
+/// the wrong type is [`Message::InvalidId`], a missing or wrong
+/// `jsonrpc` declaration is [`Message::WrongJsonRpcVersion`], and any
+/// other garbage is [`Message::Undecodable`] — both transports answer
+/// all three with a JSON-RPC error, the latter two carrying whatever
+/// id was found so a message missing only its method (or its version
+/// declaration) is still owed a correlatable reply, not a null one.
 pub fn classify(message: &Value) -> Message {
     let id = match message.get("id") {
         Some(id) if !id.is_null() => id.clone(),
@@ -94,6 +101,16 @@ pub fn classify(message: &Value) -> Message {
     // id makes the request invalid no matter what else it carries.
     if !matches!(id, Value::Null | Value::String(_) | Value::Number(_)) {
         return Message::InvalidId;
+    }
+    // §4 makes `"jsonrpc": "2.0"` mandatory on every request. Checked
+    // after the id gate (a bad id already has nothing valid to echo)
+    // but before anything else: silently serving a message that never
+    // declared the contract would promise 2.0 semantics to a sender
+    // who never asked for them. This refuses notifications too — a
+    // method with no id but the wrong `jsonrpc` is not a 2.0
+    // notification, and answering beats dropping it without a trace.
+    if message.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+        return Message::WrongJsonRpcVersion { id };
     }
     let Some(method) = message.get("method").and_then(Value::as_str) else {
         return Message::Undecodable { id };
@@ -132,9 +149,16 @@ pub fn classify(message: &Value) -> Message {
 /// [`Message::Notification`], discarding `params`, so a transport that
 /// wants to act on this one specific notification (the stdio bridge,
 /// to stop waiting on a reply nothing wants anymore) reads the raw
-/// message here instead.
+/// message here instead. Gated on the message actually classifying as
+/// a notification: one with the wrong `jsonrpc` declaration (or an id,
+/// which makes it a request) is owed its `-32600`/`-32601` refusal
+/// from the ordinary dispatch path, and a refused message must not
+/// ALSO reach into the queue and cancel a tracked call on the way.
 #[allow(dead_code)] // consumed by the stdio bridge; the HTTP transport has no per-connection state to cancel against
 pub fn cancelled_request_id(message: &Value) -> Option<Value> {
+    if !matches!(classify(message), Message::Notification) {
+        return None;
+    }
     if message.get("method").and_then(Value::as_str) != Some("notifications/cancelled") {
         return None;
     }

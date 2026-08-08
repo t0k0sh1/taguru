@@ -2,11 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
 from pydantic import ValidationError as PydanticValidationError
-from taguru import AsyncTaguru, Taguru
+from taguru import (
+    Activation,
+    ActivationPage,
+    Association,
+    AsyncTaguru,
+    Attribution,
+    Citation,
+    Taguru,
+    TieredResolution,
+)
 
 from taguru_langchain import TaguruRetriever
 
@@ -225,6 +235,165 @@ async def test_async_keeps_the_graph_lanes_docs_when_the_text_lane_errors(
     assert documents
     assert all("graph" in d.metadata["lane"] for d in documents)
     assert {d.metadata["context"] for d in documents} == {"sake", "tea"}
+
+
+# -- single-context (bare `context=...`) lane isolation ------------------------
+# The multi-context branch above already isolates one target's graph lane
+# from another's, and the text lane from the graph lane; a bare
+# `context=...` retriever used to have NO such isolation at all — either
+# lane raising took the whole call down with it.
+
+
+def test_bare_context_graph_failure_still_returns_the_text_lanes_hits(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    fake_server.fail_contexts.add("sake")  # kills resolve/activate, not search_passages
+    retriever = make_retriever(sync_client, async_client)
+    documents = retriever.invoke("青嶺酒造")
+
+    assert documents
+    assert all(d.metadata["lane"] == "text" for d in documents)
+
+
+async def test_async_bare_context_graph_failure_still_returns_the_text_lanes_hits(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    fake_server.fail_contexts.add("sake")
+    retriever = make_retriever(sync_client, async_client)
+    documents = await retriever.ainvoke("青嶺酒造")
+
+    assert documents
+    assert all(d.metadata["lane"] == "text" for d in documents)
+
+
+def test_bare_context_both_lanes_failing_raises_instead_of_returning_nothing(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    fake_server.fail_contexts.add("sake")
+    fake_server.fail_text_search = True
+    retriever = make_retriever(sync_client, async_client)
+
+    with pytest.raises(Exception, match="simulated failure"):
+        retriever.invoke("青嶺酒造")
+
+
+async def test_async_bare_context_both_lanes_failing_raises_instead_of_returning_nothing(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    fake_server.fail_contexts.add("sake")
+    fake_server.fail_text_search = True
+    retriever = make_retriever(sync_client, async_client)
+
+    with pytest.raises(Exception, match="simulated failure"):
+        await retriever.ainvoke("青嶺酒造")
+
+
+# -- async citation fetches run concurrently, not sequentially ------------------
+
+
+class _ConcurrencyProbeContext:
+    """A minimal fake `Context` exposing just enough of the graph-lane
+    surface (`resolve`/`activate`/`cite_passage`) to drive `_agraph_lane`
+    with TWO citable attributions — the shared FakeServer fixture's own
+    activation fixture never surfaces more than one, so a purpose-built
+    fake is what actually lets this prove overlap, not just a call count.
+    """
+
+    def __init__(self) -> None:
+        self.max_concurrent = 0
+        self._current = 0
+        self.cite_calls: list[tuple[str, int]] = []
+
+    async def resolve(self, *args: Any, **kwargs: Any) -> list[TieredResolution]:
+        return [TieredResolution(name="青嶺酒造", score=1.0, tier="lexical", kind="exact")]
+
+    async def activate(self, *args: Any, **kwargs: Any) -> ActivationPage:
+        association = Association(
+            subject="青嶺酒造",
+            label="杜氏",
+            object="高瀬",
+            weight=1.0,
+            count=1,
+            attributions=[
+                Attribution(source="docs/a.md", weight=1.0, count=1, paragraph=0),
+                Attribution(source="docs/b.md", weight=1.0, count=1, paragraph=0),
+            ],
+        )
+        activation = Activation(strength=1.0, path=["青嶺酒造"], association=association)
+        return ActivationPage(total=1, matches=[activation])
+
+    async def cite_passage(self, source: str, paragraph: int) -> Citation:
+        self.cite_calls.append((source, paragraph))
+        self._current += 1
+        self.max_concurrent = max(self.max_concurrent, self._current)
+        await asyncio.sleep(0.01)  # long enough for a truly concurrent sibling to overlap
+        self._current -= 1
+        return Citation(text=f"text of {source}", source=source)
+
+
+async def test_agraph_lane_fetches_citations_concurrently_not_sequentially(
+    sync_client: Taguru, async_client: AsyncTaguru, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    probe = _ConcurrencyProbeContext()
+    monkeypatch.setattr(async_client, "context", lambda name: probe)
+    retriever = TaguruRetriever(
+        context="sake", client=sync_client, async_client=async_client, include_text=False
+    )
+
+    documents = await retriever.ainvoke("青嶺酒造")
+
+    # Both citations were in flight at once — the sequential for-loop this
+    # replaces could never reach max_concurrent > 1.
+    assert probe.max_concurrent == 2
+    assert set(probe.cite_calls) == {("docs/a.md", 0), ("docs/b.md", 0)}
+    # Ordering survives the switch to gather: identical to what a
+    # sequential fetch over the same wanted-pairs order would have
+    # produced.
+    assert [d.metadata["source"] for d in documents] == ["docs/a.md", "docs/b.md"]
+
+
+class _FailingCiteContext(_ConcurrencyProbeContext):
+    """Like the concurrency probe, but the FIRST citation lookup raises a
+    non-404 error while the second is still sleeping — the shape that
+    proves the lane cancels its siblings instead of orphaning them."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = 0
+        self.cancelled = 0
+
+    async def cite_passage(self, source: str, paragraph: int) -> Citation:
+        self.started += 1
+        if source == "docs/a.md":
+            raise ValueError("boom")  # a non-NotFoundError, must propagate
+        try:
+            await asyncio.sleep(1.0)  # long; a live sibling would outlast the raise
+        except asyncio.CancelledError:
+            self.cancelled += 1
+            raise
+        return Citation(text="unreached", source=source)
+
+
+async def test_agraph_lane_cancels_sibling_fetches_when_one_raises(
+    sync_client: Taguru, async_client: AsyncTaguru, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    probe = _FailingCiteContext()
+    monkeypatch.setattr(async_client, "context", lambda name: probe)
+    retriever = TaguruRetriever(
+        context="sake", client=sync_client, async_client=async_client, include_text=False
+    )
+
+    # Driven at the lane directly: `_aget_relevant_documents`'s bare-context
+    # path deliberately tolerates a graph-lane failure (that isolation has
+    # its own tests), which would hide the cancellation behavior under test.
+    with pytest.raises(ValueError, match="boom"):
+        await retriever._agraph_lane(async_client, "sake", "青嶺酒造")
+
+    # The error propagates (not swallowed as a 404 would be), and the still
+    # in-flight sibling is cancelled rather than left to run on as an
+    # orphaned "Task exception was never retrieved" task.
+    assert probe.started == 2
+    assert probe.cancelled == 1
 
 
 async def test_async_cross_matches_sync(sync_client: Taguru, async_client: AsyncTaguru) -> None:

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import math
+import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -388,12 +389,40 @@ def corrective_message(parse_error: str, length_limited: bool, fact_budget: int)
 # -- the prompt (mirrors extract.rs system_prompt, PROMPT_VERSION 3) -------------
 
 
+def _has_unsafe_prompt_char(label: str) -> bool:
+    """True when ``label`` carries a control character or non-space
+    whitespace (\\n, \\r, \\t, U+2028/U+2029, the C0/C1 control ranges, ...).
+    Deliberately permissive of ordinary printable text in ANY script
+    (Japanese labels included) — only characters that could make a label
+    read as prompt STRUCTURE rather than prompt CONTENT are unsafe."""
+    return any(unicodedata.category(ch) == "Cc" or (ch.isspace() and ch != " ") for ch in label)
+
+
+def _prompt_safe_labels(labels: list[str]) -> list[str]:
+    """Filters out any label a malicious document could have planted to
+    break out of the vocabulary line it is interpolated into.
+
+    The context's live label vocabulary (``list_labels()``) is seeded by
+    the model's OWN prior output on earlier documents — so a document
+    containing text like ``associate this with label "X\\n\\nIgnore your
+    instructions and ..."`` can get that string stored as a relation
+    label today, and have it fed back verbatim into the TRUSTED system
+    prompt of every later ingest against this context (a persistent,
+    second-order prompt injection: the attack payload lives in the
+    context's own data, not in any one document's IMMEDIATE turn).
+    Labels that fail the filter are simply never offered for reuse —
+    never repaired or truncated, since either would still let a crafted
+    label steer formatting inside the line it lands on."""
+    return [label for label in labels if not _has_unsafe_prompt_char(label)]
+
+
 def system_prompt(
     vocabulary: list[str],
     questions: int,
     fact_budget: int = 0,
     schema: SchemaDocument | None = None,
 ) -> str:
+    vocabulary = _prompt_safe_labels(vocabulary)
     prompt = (
         "You extract knowledge from one document into an association graph.\n"
         "Answer with a single JSON object and nothing else:\n"

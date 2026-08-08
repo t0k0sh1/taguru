@@ -3,6 +3,7 @@ durable per-chunk checkpoints, cooperative stop, and resume."""
 
 from __future__ import annotations
 
+import fcntl
 import json
 from pathlib import Path
 from typing import Any
@@ -123,11 +124,25 @@ def _build_ingester(
     return TaguruIngester(**kwargs), llm
 
 
+def _jsonl_units(data: bytes) -> dict[str, Any]:
+    """Parses one ``_DocumentCheckpoints.to_bytes()``/``FilesystemCheckpointStore``
+    JSONL payload into ``{unit_hash: record}`` for test assertions — the
+    header line is skipped, later lines for the same ``"unit"`` overwrite
+    earlier ones exactly like production's own reader."""
+    units: dict[str, Any] = {}
+    for line in data.decode("utf-8").splitlines()[1:]:
+        if not line:
+            continue
+        record = json.loads(line)
+        units[record["unit"]] = record
+    return units
+
+
 def _unit_count(store: RecordingCheckpointStore, source: str) -> int:
     data = store.state.get(source)
     if data is None:
         return 0
-    return len(json.loads(data)["units"])
+    return len(_jsonl_units(data))
 
 
 def _seed_failed_run(
@@ -660,8 +675,7 @@ def test_a_corrupt_checkpoint_file_on_disk_silently_degrades_to_empty(
 
     # The file now holds valid, parseable state with the one unit this
     # run actually completed.
-    parsed = json.loads(store.path_for(source).read_bytes())
-    assert len(parsed["units"]) == 1
+    assert len(_jsonl_units(store.path_for(source).read_bytes())) == 1
 
 
 def test_a_stale_filesystem_store_is_reused_across_store_instances(
@@ -681,6 +695,10 @@ def test_a_stale_filesystem_store_is_reused_across_store_instances(
     )
     with pytest.raises(ValueError):
         ingester1.ingest_text(DOC_TEXT, source=source)
+    # A real process restart closes every fd (and with it, store1's
+    # advisory lock on `source`) for free; store1 stays a reachable local
+    # here, so this close() is what actually simulates that exit.
+    store1.close()
 
     store2 = FilesystemCheckpointStore(tmp_path)  # a brand new instance, same directory
     ingester2, llm2 = _build_ingester(
@@ -932,6 +950,195 @@ def test_a_checkpoint_load_failure_warns_and_starts_without_any_cached_chunks(
         outcome = ingester.ingest_text(DOC_TEXT, source="docs/aomine.md")
     assert outcome.ok
     assert len(llm.seen_prompts) == 1
+
+
+# -- JSON Lines checkpoints: append instead of a full rewrite (O(N^2) fix) ------
+
+
+class RecordingAppendCheckpointStore(RecordingCheckpointStore):
+    """``RecordingCheckpointStore`` plus the optional ``append`` capability
+    — lets a test assert the ingester actually prefers ``append`` after a
+    document's first unit, instead of repeating a full ``save()`` (the
+    whole accumulated state) on every chunk."""
+
+    def append(self, source: str, record: bytes) -> None:
+        self.log.append(("append", source))
+        self.state[source] = self.state.get(source, b"") + record
+
+
+def test_only_the_first_unit_of_a_document_pays_a_full_save_later_units_only_append(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    store = RecordingAppendCheckpointStore()
+    source = "docs/aomine.md"
+    ingester, _llm = _build_ingester(
+        sync_client,
+        async_client,
+        [CHUNK1_ANSWER, CHUNK2_CORRECTED_ANSWER],
+        checkpoint_store=store,
+        chunk_bytes=CROSS_CHUNK_BYTES,
+    )
+    outcome = ingester.ingest_text(DOC_TEXT, source=source)
+    assert outcome.ok
+
+    # Only chunk 0 (the first unit recorded this run) pays a full
+    # `save()`, establishing the file; chunk 1 streams via `append()`
+    # instead of repeating a rewrite of the whole (by-then-larger) state
+    # — the fix for the O(N^2) total-bytes-written an N-chunk document
+    # used to pay.
+    kinds = [call[0] for call in store.log if call[0] in ("save", "append")]
+    assert kinds == ["save", "append"]
+
+
+def test_a_store_without_append_keeps_using_a_full_save_for_every_unit(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    """A custom store that only ever implements the base 3-method contract
+    (no ``append``) keeps working exactly as before `append` existed —
+    correct, just without the perf win."""
+    store = RecordingCheckpointStore()
+    source = "docs/aomine.md"
+    ingester, _llm = _build_ingester(
+        sync_client,
+        async_client,
+        [CHUNK1_ANSWER, CHUNK2_CORRECTED_ANSWER],
+        checkpoint_store=store,
+        chunk_bytes=CROSS_CHUNK_BYTES,
+    )
+    outcome = ingester.ingest_text(DOC_TEXT, source=source)
+    assert outcome.ok
+    assert [call[0] for call in store.log if call[0] == "save"] == ["save", "save"]
+
+
+def test_resuming_from_a_torn_trailing_jsonl_line_only_recalls_the_torn_chunk(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer, tmp_path: Path
+) -> None:
+    """A crash mid-``append`` can leave the checkpoint file's last line torn
+    — the resumed run must still reuse every unit whose own line landed
+    cleanly, and only recall the (never durably completed) torn one."""
+    store = FilesystemCheckpointStore(tmp_path)
+    source = "docs/aomine.md"
+    fake_server.fail_import = True  # keep the checkpoint on disk past this run
+    ingester1, _llm1 = _build_ingester(
+        sync_client,
+        async_client,
+        [CHUNK1_ANSWER, CHUNK2_CORRECTED_ANSWER],
+        checkpoint_store=store,
+        chunk_bytes=CROSS_CHUNK_BYTES,
+    )
+    with pytest.raises(ServerError):
+        ingester1.ingest_text(DOC_TEXT, source=source)
+    assert len(_jsonl_units(store.path_for(source).read_bytes())) == 2
+
+    # Simulate a crash mid-`append` on some earlier run: tear off the last
+    # few bytes (the second unit's own trailing newline included).
+    path = store.path_for(source)
+    torn = path.read_bytes()[:-6]
+    assert not torn.endswith(b"\n")
+    path.write_bytes(torn)
+
+    fake_server.fail_import = False
+    ingester2, llm2 = _build_ingester(
+        sync_client,
+        async_client,
+        [CHUNK2_CORRECTED_ANSWER],
+        checkpoint_store=store,
+        chunk_bytes=CROSS_CHUNK_BYTES,
+    )
+    outcome = ingester2.ingest_text(DOC_TEXT, source=source)
+
+    assert outcome.ok
+    assert outcome.chunks_reused == 1  # chunk 0's complete line survived
+    assert len(llm2.seen_prompts) == 1  # chunk 1 (the torn one) was recalled
+    assert len(fake_server.imported) == 1
+
+
+def test_old_format_checkpoint_file_on_disk_still_resumes(
+    sync_client: Taguru, async_client: AsyncTaguru, tmp_path: Path
+) -> None:
+    """An in-flight checkpoint written by a pre-JSONL-migration SDK version
+    must keep resuming after the upgrade — proven by writing a real run's
+    own JSONL output back out in the OLD single-JSON-object shape and
+    confirming a fresh ingester still reuses it from there."""
+    store = FilesystemCheckpointStore(tmp_path)
+    source = "docs/aomine.md"
+    ingester1, _llm1 = _build_ingester(
+        sync_client,
+        async_client,
+        [CHUNK1_ANSWER, "not json", "not json"],
+        checkpoint_store=store,
+        chunk_bytes=CROSS_CHUNK_BYTES,
+    )
+    with pytest.raises(ValueError):
+        ingester1.ingest_text(DOC_TEXT, source=source)
+
+    lines = store.path_for(source).read_bytes().splitlines()
+    header = json.loads(lines[0])
+    units = {}
+    for line in lines[1:]:
+        if not line:
+            continue
+        record = json.loads(line)
+        units[record.pop("unit")] = record
+    legacy_payload = {"fingerprint": header["fingerprint"], "units": units}
+    store.path_for(source).write_bytes(json.dumps(legacy_payload).encode("utf-8"))
+
+    ingester2, llm2 = _build_ingester(
+        sync_client,
+        async_client,
+        [CHUNK2_CORRECTED_ANSWER],
+        checkpoint_store=store,
+        chunk_bytes=CROSS_CHUNK_BYTES,
+    )
+    outcome = ingester2.ingest_text(DOC_TEXT, source=source)
+    assert outcome.ok
+    assert outcome.chunks_reused == 1
+    assert len(llm2.seen_prompts) == 1
+
+
+# -- concurrent-run clobber: an advisory per-source lock ------------------------
+
+
+def test_a_concurrent_run_holding_the_lock_warns_and_this_run_skips_checkpointing(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer, tmp_path: Path
+) -> None:
+    store = FilesystemCheckpointStore(tmp_path)
+    source = "docs/aomine.md"
+    # Seed a PRIOR run's checkpoint so this test can prove the contended
+    # run below neither clobbers nor deletes it.
+    ingester0, _llm0 = _build_ingester(
+        sync_client,
+        async_client,
+        [CHUNK1_ANSWER, "not json", "not json"],
+        checkpoint_store=store,
+        chunk_bytes=CROSS_CHUNK_BYTES,
+    )
+    with pytest.raises(ValueError):
+        ingester0.ingest_text(DOC_TEXT, source=source)
+    store.close()  # release ingester0's own hold, like a real process exit
+    prior_state = store.path_for(source).read_bytes()
+
+    lock_path = Path(f"{store.path_for(source)}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    external = open(lock_path, "a+b")
+    fcntl.flock(external.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        ingester, llm = _build_ingester(
+            sync_client,
+            async_client,
+            [CHUNK1_ANSWER, CHUNK2_CORRECTED_ANSWER],
+            checkpoint_store=store,
+            chunk_bytes=CROSS_CHUNK_BYTES,
+        )
+        with pytest.warns(RuntimeWarning, match="another run holds the checkpoint"):
+            outcome = ingester.ingest_text(DOC_TEXT, source=source)
+        assert outcome.ok
+        assert len(fake_server.imported) == 1
+        # Neither clobbered NOR deleted: the file on disk is still exactly
+        # whatever the OTHER (lock-holding) run left behind.
+        assert store.path_for(source).read_bytes() == prior_state
+    finally:
+        external.close()
 
 
 # -- model-identity fail-fast ----------------------------------------------------

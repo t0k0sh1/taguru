@@ -20,7 +20,9 @@ reads real Word output, not only this module's own dialect.
 from __future__ import annotations
 
 import io
+import struct
 import zipfile
+import zlib
 from collections.abc import Sequence
 
 _CONTENT_TYPES = b"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -210,6 +212,43 @@ def docx_bytes(body_xml: str, *, title: str | None = None) -> bytes:
         archive.writestr("word/_rels/document.xml.rels", _DOCUMENT_RELS)
         archive.writestr("docProps/core.xml", core.encode())
     return buf.getvalue()
+
+
+def zip_bomb_docx(declared_size: int = 2 * 1024 * 1024) -> bytes:
+    """A small, high-ratio zip whose one entry declares ``declared_size``
+    zero bytes but compresses to almost nothing — the shape
+    `DocxConnector`'s `max_decompressed_bytes` cap exists to refuse before
+    python-docx ever decompresses it. Never assembled into a fully valid
+    docx package (no ``[Content_Types].xml``, etc.): the cap is checked,
+    and this document refused, before python-docx would ever open it."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("word/document.xml", b"\0" * declared_size)
+    return buf.getvalue()
+
+
+def forged_size_zip_bomb_docx(payload_size: int = 32 * 1024 * 1024) -> bytes:
+    """A zip bomb that DEFEATS a metadata-only check: its one entry really
+    decompresses to ``payload_size`` bytes, but every ``file_size`` field
+    (local header and central directory) is forged down to 50 so
+    ``ZipInfo.file_size`` reports 50. Only decompressing for real reveals
+    the true size — the exact bypass `decompressed_size_within` closes.
+    The CRC is repaired for the 50-byte prefix so a truncating reader
+    accepts it too."""
+    payload = b"\0" * payload_size
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("word/document.xml", payload)
+    raw = bytearray(buf.getvalue())
+    central = raw.find(b"PK\x01\x02")
+    local = raw.find(b"PK\x03\x04")
+    forged = 50
+    struct.pack_into("<I", raw, central + 24, forged)  # central: uncompressed size
+    struct.pack_into("<I", raw, local + 22, forged)  # local: uncompressed size
+    crc = zlib.crc32(payload[:forged])
+    struct.pack_into("<I", raw, central + 16, crc)
+    struct.pack_into("<I", raw, local + 14, crc)
+    return bytes(raw)
 
 
 def corrupt_docx(kind: str = "not_zip") -> bytes:

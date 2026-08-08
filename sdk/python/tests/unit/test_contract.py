@@ -16,6 +16,7 @@ import pytest
 
 import taguru
 from taguru import IncompatibleServerError, TransportError
+from taguru._contract import SUPPORTED_HTTP_CONTRACTS, ServerContract, incompatibility
 
 from .conftest import async_client, ok_response, sync_client
 
@@ -349,3 +350,65 @@ async def test_wait_until_ready_raises_immediately_instead_of_stalling_async() -
     with pytest.raises(IncompatibleServerError):
         await client.wait_until_ready(timeout=5.0, interval=0.5)
     assert time.monotonic() - started < 1.0
+
+
+# --- incompatibility() message assembly, pinned verbatim ---
+#
+# The message is the whole user experience of a refused connection: it names
+# both ranges, the server release when known, and the exact pip command to
+# run. The client-driven tests above only look at the error type, so the
+# wording is pinned here, directly against the builder.
+
+
+def _joined(versions: tuple[int, ...]) -> str:
+    return ", ".join(str(version) for version in versions)
+
+
+def test_incompatibility_for_a_newer_server_names_both_ranges_and_the_upgrade() -> None:
+    seen = ServerContract(server="9.9.9", supported=(5, 6))
+    error = incompatibility(seen, "http://test")
+    assert error is not None
+    assert error.message == (
+        f"taguru SDK {taguru.__version__} speaks http_contract "
+        f"{_joined(SUPPORTED_HTTP_CONTRACTS)}, but the server at http://test "
+        f"(taguru 9.9.9) supports http_contract 5, 6 — no version in common. "
+        f"Upgrade this SDK to a release that speaks http_contract 5, 6: "
+        f"pip install --upgrade 'taguru>=9.9.9'"
+    )
+    assert error.sdk_version == taguru.__version__
+    assert error.server_version == "9.9.9"
+    assert error.supported_contracts == SUPPORTED_HTTP_CONTRACTS
+    assert error.server_contracts == (5, 6)
+
+
+def test_incompatibility_without_a_server_version_drops_the_note_and_the_pin() -> None:
+    seen = ServerContract(server=None, supported=(5,))
+    error = incompatibility(seen, "http://test")
+    assert error is not None
+    assert error.message == (
+        f"taguru SDK {taguru.__version__} speaks http_contract "
+        f"{_joined(SUPPORTED_HTTP_CONTRACTS)}, but the server at http://test "
+        f"supports http_contract 5 — no version in common. "
+        f"Upgrade this SDK to a release that speaks http_contract 5."
+    )
+
+
+def test_incompatibility_for_an_older_server_pins_this_sdk_to_its_release() -> None:
+    seen = ServerContract(server="0.6.2", supported=(0,))
+    error = incompatibility(seen, "http://test")
+    assert error is not None
+    assert error.message.endswith(
+        f"Upgrade the server to a release that speaks http_contract "
+        f"{_joined(SUPPORTED_HTTP_CONTRACTS)}, "
+        f"or pin this SDK to the server's release: pip install 'taguru==0.6.*'"
+    )
+
+
+def test_incompatibility_generic_remedy_when_neither_side_is_plainly_older() -> None:
+    seen = ServerContract(server=None, supported=(0,))
+    error = incompatibility(seen, "http://test")
+    assert error is not None
+    assert error.message.endswith(
+        "Upgrade or downgrade one side to a pair that shares a contract version; "
+        "this SDK's range is declared as taguru.SUPPORTED_HTTP_CONTRACTS."
+    )

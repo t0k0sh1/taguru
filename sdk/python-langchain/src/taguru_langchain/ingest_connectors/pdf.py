@@ -366,15 +366,30 @@ class PdfConnector:
 
         ocr_diagnostics: list[Diagnostic] = []
         ocr_adapter_error: str | None = None
-        if self._ocr_adapter is not None and empty_pages:
-            page_texts, empty_pages, ocr_diagnostics, ocr_adapter_error = _recover_with_ocr(
-                self._ocr_adapter,
-                source=source,
-                raw=raw,
-                page_texts=page_texts,
-                empty_pages=empty_pages,
-                min_chars_per_page=self._min_chars_per_page,
-            )
+        if self._ocr_adapter is not None:
+            # A page whose extract_text() raised is exactly as unusable to
+            # this connector as one that decoded to nothing — both are
+            # offered to a configured adapter together, in page order, so it
+            # gets one chance to recover every page this connector itself
+            # could not read, not only the ones that merely decoded empty.
+            recovery_candidates = sorted({*empty_pages, *failed_pages})
+            if recovery_candidates:
+                page_texts, unrecovered, ocr_diagnostics, ocr_adapter_error = _recover_with_ocr(
+                    self._ocr_adapter,
+                    source=source,
+                    raw=raw,
+                    page_texts=page_texts,
+                    empty_pages=recovery_candidates,
+                    min_chars_per_page=self._min_chars_per_page,
+                )
+                recovered_pages = set(recovery_candidates) - set(unrecovered)
+                # A recovered page stops counting toward whichever
+                # diagnostic (ocr_required, or corrupt/partial_extraction)
+                # it would otherwise have produced; a page still unrecovered
+                # keeps its original classification, unchanged from before
+                # recovery was attempted.
+                empty_pages = [page for page in empty_pages if page not in recovered_pages]
+                failed_pages = [page for page in failed_pages if page not in recovered_pages]
 
         paragraphs: list[str] = []
         locators: list[LocatorEntry] = []

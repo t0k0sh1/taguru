@@ -54,11 +54,17 @@ class FakeServer:
     def __init__(self) -> None:
         self.calls: list[tuple[str, Any]] = []
         self.imported: list[str] = []
-        # Context names whose every request should fail with a 500, to
-        # exercise cross-context partial-failure handling.
+        # Context names whose graph-lane requests (resolve/activate/
+        # citations) should fail with a 500, to exercise cross-context
+        # partial-failure handling. Deliberately excludes that context's
+        # own /sources/search (the text lane) — see `fail_text_search`
+        # below — so a bare single-context retriever can exercise "graph
+        # fails, text still returns" with this knob alone.
         self.fail_contexts: set[str] = set()
-        # When set, the cross-context /sources/search call (the text
-        # lane) fails with a 500, to exercise text/graph lane isolation.
+        # When set, EVERY /sources/search call fails with a 500 — the
+        # top-level cross-context one AND a single context's own
+        # `Context.search_passages` — to exercise text/graph lane
+        # isolation for both the cross-context and bare-context retrievers.
         self.fail_text_search = False
         # 200 = refreshed; 501 = no embedding provider configured (default);
         # 502 = the provider itself failed. The 501/502 pair both map to
@@ -108,7 +114,11 @@ class FakeServer:
                 body = request.content.decode("utf-8")
         self.calls.append((path, body))
         context_match = re.match(r"^/contexts/([^/]+)/", path)
-        if context_match and context_match.group(1) in self.fail_contexts:
+        if (
+            context_match
+            and context_match.group(1) in self.fail_contexts
+            and not path.endswith("/sources/search")
+        ):
             return httpx.Response(
                 500,
                 json={
@@ -199,6 +209,16 @@ class FakeServer:
         if path.endswith("/citations"):
             return ok({"text": "杜氏は高瀬である。", "source": body["source"], "section": "人物"})
         if path.endswith("/sources/search"):
+            if self.fail_text_search:
+                return httpx.Response(
+                    500,
+                    json={
+                        "status": "error",
+                        "code": "internal",
+                        "error": "simulated failure",
+                        "time": 0.001,
+                    },
+                )
             return ok(
                 {
                     "plan": {

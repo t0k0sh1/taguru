@@ -273,6 +273,40 @@ def test_oversized_extracted_text_is_reported_content_too_large(tmp_path: Path) 
     assert [d.code for d in document.diagnostics] == ["content_too_large"]
 
 
+def test_zip_bomb_shaped_pptx_is_refused_before_parsing(tmp_path: Path) -> None:
+    """`max_file_bytes` bounds only the COMPRESSED size of the zip a .pptx
+    is; a small, high-ratio zip must still be refused via the separate
+    `max_decompressed_bytes` cap before python-pptx ever decompresses it."""
+    path = _write(tmp_path, "bomb.pptx", _pptx.zip_bomb_pptx())
+    document = PptxConnector(max_decompressed_bytes=1024).read(str(path))
+
+    assert document.text == ""
+    assert [d.code for d in document.diagnostics] == ["content_too_large"]
+    assert "decompressed" in document.diagnostics[0].message
+
+
+def test_normal_pptx_still_parses_under_the_decompressed_size_cap(tmp_path: Path) -> None:
+    raw = _pptx.pptx_bytes(title="Slide Title", bodies=["Body."])
+    path = _write(tmp_path, "deck.pptx", raw)
+    document = PptxConnector().read(str(path))
+
+    assert document.diagnostics == ()
+    assert document.text == "Slide Title\n\nBody."
+
+
+def test_a_pptx_with_forged_uncompressed_sizes_is_still_refused(tmp_path: Path) -> None:
+    """A metadata-only cap (summing `ZipInfo.file_size`) is bypassable: the
+    header can declare 50 bytes while the deflate stream expands to
+    megabytes. The cap must measure the real, decompressed size."""
+    raw = _pptx.forged_size_zip_bomb_pptx(payload_size=8 * 1024 * 1024)
+    path = _write(tmp_path, "forged.pptx", raw)
+    document = PptxConnector(max_decompressed_bytes=1024 * 1024).read(str(path))
+
+    assert document.text == ""
+    assert [d.code for d in document.diagnostics] == ["content_too_large"]
+    assert "decompressed" in document.diagnostics[0].message
+
+
 def test_oversized_source_id_is_reported_without_reading_the_file() -> None:
     long_reference = ("x" * 1025) + ".pptx"
     document = PptxConnector().read(long_reference)

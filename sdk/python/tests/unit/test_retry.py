@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from taguru import PermissionDeniedError, RateLimitError, ServerError, TransportError
-from taguru._retry import parse_retry_after
+from taguru._retry import BACKOFF_CAP_SECS, backoff_delay, parse_retry_after
 
 from .conftest import err_response, ok_response, sync_client
 
@@ -114,6 +114,23 @@ def test_ambiguous_failure_never_retries_rename() -> None:
     assert handler.calls == 1
 
 
+def test_ambiguous_failure_never_retries_delete() -> None:
+    """A repeat delete 404s, so a phantom retry after an ambiguous transport
+    failure would surface as `NotFoundError` even though the first delete
+    already applied."""
+    handler = FlakyHandler(1, lambda: httpx.ReadTimeout("mid-flight"))
+    client = sync_client(handler)
+    with pytest.raises(TransportError):
+        client.contexts.delete("sake")
+    assert handler.calls == 1
+
+    handler = FlakyHandler(1, lambda: httpx.ReadTimeout("mid-flight"))
+    client = sync_client(handler)
+    with pytest.raises(TransportError):
+        client.groups.delete("kura")
+    assert handler.calls == 1
+
+
 def test_retries_zero_disables_retry() -> None:
     handler = FlakyHandler(1, lambda: err_response(429, "budget", {"retry-after": "0"}))
     client = sync_client(handler, retries=0)
@@ -155,6 +172,13 @@ def test_retry_budget_exhausts_and_raises_last_error() -> None:
     assert handler.calls == 3  # initial + 2 retries
 
 
+def test_backoff_delay_does_not_overflow_on_a_large_attempt_count() -> None:
+    """`2.0 ** attempt` overflows past attempt 1023; the exponent must be
+    clamped before exponentiation so an unusually large `retries` count
+    still returns a capped delay instead of raising `OverflowError`."""
+    assert 0.0 <= backoff_delay(1024) <= BACKOFF_CAP_SECS
+
+
 def test_parse_retry_after_takes_a_bare_delay_and_refuses_the_rest() -> None:
     assert parse_retry_after("5") == 5.0
     assert parse_retry_after("  0.5  ") == 0.5
@@ -170,3 +194,23 @@ def test_parse_retry_after_takes_a_bare_delay_and_refuses_the_rest() -> None:
     assert parse_retry_after("-1") is None
     assert parse_retry_after("") is None
     assert parse_retry_after(None) is None
+
+
+def test_backoff_delay_is_full_jitter_over_the_capped_exponential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pin the exact bounds handed to ``random.uniform``: full jitter starts
+    at 0.0 (not the previous delay) and the upper bound is base·2^attempt
+    until it saturates at the cap."""
+    calls: list[tuple[float, float]] = []
+
+    def record(low: float, high: float) -> float:
+        calls.append((low, high))
+        return 0.0
+
+    monkeypatch.setattr("taguru._retry.random.uniform", record)
+    backoff_delay(3)
+    assert calls == [(0.0, 0.5 * 2.0**3)]
+    calls.clear()
+    backoff_delay(100)
+    assert calls == [(0.0, BACKOFF_CAP_SECS)]
