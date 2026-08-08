@@ -190,7 +190,7 @@ jobs:
             gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$PR/comments" \
               -F body=@comment.md > /dev/null
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always() && steps.budget.outputs.run == 'true'
         with:
           name: mutants-in-diff
