@@ -36,7 +36,9 @@ jobs:
     timeout-minutes: 15
     strategy:
       matrix:
-        python-version: ["3.10", "3.13"]
+        # Oldest supported (requires-python >= 3.10) plus the two most
+        # recent stable releases.
+        python-version: ["3.10", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -135,11 +137,16 @@ jobs:
     needs: build-server
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      matrix:
+        # The declared engines floor (>=20) plus the two current LTS
+        # lines. The floor stays 20 until 1.0.0 revisits engines.
+        node-version: ["20", "22", "24"]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version: ${{ matrix.node-version }}
       - uses: actions/download-artifact@v8
         with:
           name: taguru-server-binary
