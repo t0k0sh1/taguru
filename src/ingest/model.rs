@@ -101,6 +101,17 @@ impl Batch {
             .collect()
     }
 
+    /// Every association as `[subject, label, object]` — the coverage
+    /// check's input (ADR 0016, #496 S4) when a manifest-skipped
+    /// document is judged from its already-written batch instead of a
+    /// fresh extraction.
+    pub(crate) fn association_triples(&self) -> Vec<[&str; 3]> {
+        self.associations
+            .iter()
+            .map(|op| [op.subject.as_str(), op.label.as_str(), op.object.as_str()])
+            .collect()
+    }
+
     pub(super) fn describe(&self) -> String {
         format!(
             "context '{}' ← source '{}': {} association(s), {} alias(es){}{}{}{}",

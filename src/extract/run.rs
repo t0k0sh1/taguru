@@ -59,6 +59,12 @@ pub(super) struct Run {
     /// (ADR 0014, #496 S2) and stamps `candidates_manifest_value` into
     /// the manifest/checkpoint fingerprints.
     pub(super) candidates: bool,
+    /// Resolved from `--coverage`/TAGURU_EXTRACT_COVERAGE (`false`,
+    /// the default). `true` reports every sentence holding a candidate
+    /// pair that no accepted association covers (ADR 0016, #496 S4) —
+    /// report-only: the batch is unchanged, so unlike `candidates`
+    /// this is never a fingerprint input.
+    pub(super) coverage: bool,
     /// `--vocabulary`'s harvested target-context concept names, capped
     /// for the prompt (ADR 0015; empty = the control is off).
     pub(super) vocabulary_names: Vec<String>,
@@ -195,8 +201,19 @@ impl Run {
             )
             && out_path.is_file()
         {
-            self.absorb_vocabulary(source, &out_path);
+            let batch = self.absorb_vocabulary(source, &out_path);
             println!("{source}: unchanged, skipped (--force re-extracts)");
+            // ADR 0016: coverage is a pure function of (document text,
+            // written associations), so a skipped document is judged
+            // too, from the batch it already has — no model call, and
+            // a past run's recall ceiling stays measurable for free.
+            if self.coverage
+                && let Some(batch) = batch
+            {
+                for gap in coverage_gaps(&text, &batch.association_triples()) {
+                    eprintln!("taguru: extract: {source}: uncovered: {}", gap.describe());
+                }
+            }
             return Ok(Outcome::Unchanged);
         }
 
@@ -355,9 +372,43 @@ impl Run {
         for reason in &removed {
             eprintln!("taguru: extract: {source}: removed: {reason}");
         }
-        self.report(source, &extraction, removed.len(), &out_path);
+        // ADR 0016 (#496 S4), the recall-side half: every sentence
+        // whose candidate pair no accepted association covers, named
+        // on stderr the same way — the report line carries the count.
+        let uncovered = if self.coverage {
+            let triples: Vec<[&str; 3]> = extraction
+                .associations
+                .iter()
+                .map(|fact| {
+                    [
+                        fact.subject.as_str(),
+                        fact.label.as_str(),
+                        fact.object.as_str(),
+                    ]
+                })
+                .collect();
+            coverage_gaps(&text, &triples)
+        } else {
+            Vec::new()
+        };
+        for gap in &uncovered {
+            eprintln!("taguru: extract: {source}: uncovered: {}", gap.describe());
+        }
+        self.report(
+            source,
+            &extraction,
+            removed.len(),
+            uncovered.len(),
+            &out_path,
+        );
         if let Some(sink) = self.diagnostics.as_ref() {
-            sink.emit_document(source, &extraction, removed.len(), &out_path);
+            sink.emit_document(
+                source,
+                &extraction,
+                removed.len(),
+                uncovered.len(),
+                &out_path,
+            );
         }
         Ok(Outcome::Written)
     }
@@ -801,19 +852,30 @@ impl Run {
     /// bit-rotted) — that failure is reported, not swallowed: a silent
     /// miss here would shrink every LATER document's "relation labels
     /// already in use" prompt with no diagnostic at all, degrading
-    /// label reuse for the rest of the run without a trace.
-    pub(super) fn absorb_vocabulary(&mut self, source: &str, out_path: &Path) {
+    /// label reuse for the rest of the run without a trace. The parsed
+    /// batch is returned (`None` on that failure) so the caller's
+    /// coverage check (ADR 0016) reuses this one read instead of
+    /// parsing the file twice.
+    pub(super) fn absorb_vocabulary(
+        &mut self,
+        source: &str,
+        out_path: &Path,
+    ) -> Option<crate::ingest::Batch> {
         match fs::File::open(out_path)
             .map_err(|error| error.to_string())
             .and_then(|file| crate::ingest::parse_batch(std::io::BufReader::new(file)))
         {
-            Ok(batch) => self.vocabulary.extend(batch.label_vocabulary()),
+            Ok(batch) => {
+                self.vocabulary.extend(batch.label_vocabulary());
+                Some(batch)
+            }
             Err(error) => {
                 eprintln!(
                     "taguru: extract: {source}: {}: unreadable, so its labels were not \
                      absorbed into this run's vocabulary: {error}",
                     out_path.display()
                 );
+                None
             }
         }
     }
@@ -824,6 +886,7 @@ impl Run {
         source: &str,
         extraction: &Extraction,
         removed: usize,
+        uncovered: usize,
         out_path: &Path,
     ) {
         let mut notes = String::new();
@@ -837,6 +900,12 @@ impl Run {
             notes.push_str(&format!(
                 ", {removed} item(s) removed (mechanical validation)"
             ));
+        }
+        if uncovered > 0 {
+            // ADR 0016: sentences whose candidate pair nothing covers,
+            // each quoted on stderr — a recall accounting, never a
+            // failure: the batch above was still written whole.
+            notes.push_str(&format!(", {uncovered} sentence(s) uncovered (coverage)"));
         }
         if extraction.dropped > 0 {
             // Under the default (strict) mode, a surviving `dropped`

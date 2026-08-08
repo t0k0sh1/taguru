@@ -221,6 +221,7 @@ fn chunk_and_document_records_serialize_their_fixed_key_sets() {
             duplicates: 3,
             dropped: 0,
             removed: 0,
+            uncovered: 0,
             batch_path: "out/doc.md.jsonl".to_string(),
         })
         .unwrap(),
@@ -246,6 +247,7 @@ fn chunk_and_document_records_serialize_their_fixed_key_sets() {
             "questions",
             "removed",
             "source",
+            "uncovered",
         ]
     );
 }
@@ -3121,4 +3123,77 @@ fn read_document_rejects_a_stream_whose_metadata_never_reflected_its_size() {
 
     writer.join().unwrap();
     let _ = fs::remove_dir_all(&dir);
+}
+
+// ---- coverage verification (ADR 0016, #496 S4) ----
+
+#[test]
+fn coverage_flags_the_candidate_pair_sentence_no_association_reached() {
+    let text = "バックアップはS3へ保存する。\n\n- 頻度: 日次\n- 保持期間: 30日";
+    let triples = [
+        ["バックアップ", "保存先", "S3"],
+        ["バックアップ", "保持期間", "30日"],
+    ];
+    let gaps = coverage_gaps(text, &triples);
+    let described: Vec<String> = gaps.iter().map(|gap| gap.describe()).collect();
+    // The first sentence and the retention line are each covered by
+    // two parts of a triple; the frequency line — the 2026-08-08
+    // bench's systematically-dropped fact shape — is the one gap,
+    // addressed by the canonical paragraph index.
+    assert_eq!(described, vec!["[paragraph 1] - 頻度: 日次"]);
+}
+
+#[test]
+fn two_of_three_parts_cover_a_fact_whose_subject_lives_elsewhere() {
+    // The subject is a heading the discipline's implicit-membership
+    // rule pulls in; the sentence itself carries only label + object.
+    // Demanding all three parts would flag exactly this legitimate
+    // extraction — two of three must suffice.
+    let text = "夜間バックアップ:\n頻度は毎回「日次」とする。";
+    assert!(coverage_gaps(text, &[["夜間バックアップ", "頻度", "日次"]]).is_empty());
+    // One part alone (the subject appearing in passing) covers nothing.
+    let gaps = coverage_gaps(text, &[["頻度", "分類", "運用条件"]]);
+    assert_eq!(gaps.len(), 1, "{:?}", gaps[0].describe());
+}
+
+#[test]
+fn sentences_without_a_candidate_pair_owe_no_coverage() {
+    // All-hiragana prose yields at most one term (承認); a lone
+    // identifier yields one. Neither holds a pair, so even an empty
+    // extraction owes them nothing — the check is precision-biased
+    // toward dense technical lines by construction.
+    let text = "彼はそれをすぐに承認した。\n\nnextest";
+    assert!(coverage_gaps(text, &[]).is_empty());
+}
+
+#[test]
+fn an_ascii_period_does_not_split_but_a_terminator_does() {
+    // '.' lives inside identifiers, so "alpha beta. gamma delta" stays
+    // one sentence — a triple joining its far ends covers it whole.
+    assert!(coverage_gaps("alpha beta. gamma delta", &[["alpha", "rel", "delta"]]).is_empty());
+    // The full-width terminator is a boundary: the same triple now
+    // lands one part per sentence, covering neither.
+    let gaps = coverage_gaps("alpha beta。gamma delta", &[["alpha", "rel", "delta"]]);
+    assert_eq!(gaps.len(), 2);
+    // Full-width !/? split too — spelled as escapes on purpose: the
+    // ASCII lookalikes are indistinguishable in a terminal, which is
+    // exactly how they once replaced the intended characters here.
+    for terminator in ['\u{ff01}', '\u{ff1f}'] {
+        let text = format!("alpha beta{terminator}gamma delta");
+        let gaps = coverage_gaps(&text, &[["alpha", "rel", "delta"]]);
+        assert_eq!(gaps.len(), 2, "terminator {terminator:?}");
+    }
+}
+
+#[test]
+fn a_gap_quote_is_capped_at_a_char_boundary() {
+    let sentence = format!("頻度 日次 {}", "ー".repeat(200));
+    let gaps = coverage_gaps(&sentence, &[]);
+    assert_eq!(gaps.len(), 1);
+    let quote = &gaps[0].quote;
+    assert!(quote.ends_with('…'), "{quote}");
+    assert!(
+        quote.len() <= GAP_QUOTE_MAX_BYTES + '…'.len_utf8(),
+        "{quote}"
+    );
 }

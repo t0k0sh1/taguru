@@ -112,6 +112,7 @@ TAGURU_EXTRACT_MAX_OUTPUT_TOKENS  default for --max-output-tokens (default unset
 TAGURU_EXTRACT_LOSSY  default for --lossy (default 0/false)
 TAGURU_EXTRACT_CANDIDATES  default for --candidates (default 0/false)
 TAGURU_EXTRACT_VOCABULARY  default for --vocabulary (default unset, off)
+TAGURU_EXTRACT_COVERAGE  default for --coverage (default 0/false)
 TAGURU_EXTRACT_DIAGNOSTICS  default for --diagnostics-out (default unset, off)
 TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
                     each diagnostics record, capped to this many bytes;
@@ -151,12 +152,17 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
                     and a context spelling never fails the occurrence
                     check; off by default, content-digest re-extracts
                     (ADR 0015)
+--coverage          report every sentence holding two or more of the
+                    document's own names (the --candidates segmentation)
+                    that no extracted association covers — one stderr line
+                    per sentence, a count on the report line; report-only,
+                    off by default, never re-extracts (ADR 0016)
 --diagnostics-out FILE  write a JSONL sidecar of tagged records (see below):
                     one per chunk (provenance), one per LLM attempt (source,
                     chunk, attempt, terminal state, finish_reason, token
                     usage, latency, parse/validation issues), one per
-                    document written (association/alias/duplicate/dropped
-                    counts); off by default, ignored under --dry-run
+                    document written (association/alias/duplicate/dropped/
+                    uncovered counts); off by default, ignored under --dry-run
 --context NAME      the context every batch file targets
 --description TEXT  attach a create block (used only when the context is absent)
 --schema FILE       a context schema document (see below) — the same shape
@@ -291,6 +297,23 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       (alphabetical, deterministic); relevance-ranked selection is ADR 0015 §4's measured
       upgrade path. Re-export the context periodically — a stale vocabulary still steers
       correctly toward every name it knows and simply misses newer ones.
+    </p>
+    <p>
+      <code>--coverage</code> (ADR 0016, #496 S4) is the recall-side mirror of the mechanical
+      validation above: where the occurrence check removes what the model asserted and the
+      document never said, coverage reports what the document said and the model never
+      asserted. Every sentence holding two or more of the document's own names (the
+      <code>--candidates</code> segmentation, applied whether or not that flag is on) is owed a
+      triple; when no extracted association lands at least two of its three parts
+      (subject/label/object) in the sentence, the sentence is flagged — one stderr line each
+      (<code>uncovered: [paragraph N] &lt;sentence&gt;</code>), a count on the report line, an
+      <code>uncovered</code> count in the diagnostics document record. <b>Report-only</b>: the
+      batch is written whole either way, no extra model call is made, and the flag is not a
+      computation input — a rerun over an unchanged corpus skips every document and still
+      reports, judging each from the batch it already wrote, so any past run's recall ceiling
+      is measurable for free. A gap is a lead, not a verdict (a name-dense heading can flag
+      without a real miss); re-extracting flagged sentences automatically is ADR 0016 §4's
+      measured upgrade path.
     </p>
     <p>
       A model that answers with anything but the JSON object gets a corrective turn: its own bad
@@ -614,9 +637,10 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       structured counterpart to the single human-readable summary line every run already prints:
       <code>source</code>, <code>batch_path</code>, <code>associations</code>, <code>concepts</code>,
       <code>labels</code> (counted separately, unlike the summary line's combined "alias(es)"
-      figure), <code>questions</code>, <code>duplicates</code>, <code>dropped</code>, and
+      figure), <code>questions</code>, <code>duplicates</code>, <code>dropped</code>,
       <code>removed</code> (the mechanical-validation count the summary line reports — ADR
-      0013). A
+      0013), and <code>uncovered</code> (the coverage-gap count under <code>--coverage</code> —
+      ADR 0016; <code>0</code> when the flag is off). A
       document that fails never reaches this record — its absence marks exactly that, the same
       "absence marks incomplete" convention <code>--diagnostics-out</code> consumers should apply
       to any record kind this sidecar might add in the future.
