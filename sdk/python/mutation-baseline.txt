@@ -1,0 +1,46 @@
+# Known-equivalent surviving mutants for `mutmut run` (sdk/python).
+#
+# Every name listed here was inspected by hand and shown to be an
+# EQUIVALENT mutant — the mutation cannot change observable behavior, so
+# no test can kill it. CI (`sdk/spec/check_mutants.py`) fails on any
+# surviving mutant NOT on this list; a survivor that appears here keeps
+# the gate green. If a listed name stops surviving (the function was
+# edited and mutant numbering shifted), regenerate the affected entries.
+#
+# Why each entry is equivalent:
+# - x_decode__mutmut_24: `origin is typing.Union and origin is
+#   types.UnionType` — on Python 3.14+ typing.Union IS types.UnionType
+#   (PEP 649-era unification), so or/and are indistinguishable there.
+#   (On <=3.13 this mutant is killable; the CI gate runs latest Python.)
+# - IncompatibleServerError __init__ mutmut_3: drops `status=None`, which
+#   is already the parameter's default.
+# - x_error_for_status__mutmut_96/110: drop `status=status` where the
+#   constructor's default (429/503) equals the status being mapped.
+# - x_encode_name__mutmut_5: `quote(safe="XXXX")` — "X" is unreserved and
+#   never percent-encoded regardless of `safe`.
+# - x_dumps_compact__mutmut_3: `ensure_ascii=None` is falsy, same as False.
+# - x_dumps_compact__mutmut_12: "UTF-8" is a case-insensitive codec alias.
+# - x_raise_for_response__mutmut_6: httpx header lookup is case-insensitive.
+# - x_raise_for_response__mutmut_43/48: on the non-JSON path `time` is
+#   always None, so `time=None` / dropping the kwarg changes nothing.
+# - x_incompatibility__mutmut_7: the joined SDK range currently has one
+#   element, so the separator string is never used.
+# - x_incompatibility__mutmut_16/21: >/>= (</<=) differ only when the
+#   ranges share their boundary version — but then the intersection is
+#   non-empty and incompatibility() already returned None.
+# - x_backoff_delay__mutmut_6: exponent clamp 64 vs 65 — both make
+#   base*2^n dwarf BACKOFF_CAP_SECS, so min() picks the cap either way.
+taguru._contract.x_incompatibility__mutmut_16
+taguru._contract.x_incompatibility__mutmut_21
+taguru._contract.x_incompatibility__mutmut_7
+taguru._decode.x_decode__mutmut_24
+taguru._errors.x_error_for_status__mutmut_110
+taguru._errors.x_error_for_status__mutmut_96
+taguru._errors.xǁIncompatibleServerErrorǁ__init____mutmut_3
+taguru._retry.x_backoff_delay__mutmut_6
+taguru._shared.x_dumps_compact__mutmut_12
+taguru._shared.x_dumps_compact__mutmut_3
+taguru._shared.x_encode_name__mutmut_5
+taguru._shared.x_raise_for_response__mutmut_43
+taguru._shared.x_raise_for_response__mutmut_48
+taguru._shared.x_raise_for_response__mutmut_6

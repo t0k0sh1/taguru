@@ -7,12 +7,20 @@ additively (`ResponseShapeError` is still a `ValueError` too).
 
 from __future__ import annotations
 
+import dataclasses
+import typing
+
 import pytest
 
 from taguru import AuditNames, PassageLookup, PassagePage, ResponseShapeError, TaguruError
 from taguru._decode import decode
 
 from .conftest import ok_response, sync_client
+
+
+@dataclasses.dataclass
+class _Wrapped:
+    value: int
 
 
 def test_container_shape_mismatch_raises_response_shape_error() -> None:
@@ -58,3 +66,37 @@ def test_shape_mismatch_from_a_real_call_is_caught_by_bare_taguru_error() -> Non
     client = sync_client(lambda _req: ok_response([]))
     with pytest.raises(TaguruError):
         client.context("sake").search_passages("cue")
+
+
+def test_an_optional_dataclass_unwraps_through_the_union_branch() -> None:
+    """`X | None` must decode through `X`, not fall through as raw data —
+    falling through would hand callers a plain dict where a dataclass
+    instance is promised."""
+    decoded = decode(_Wrapped | None, {"value": 3})
+    assert decoded == _Wrapped(value=3)
+    assert decode(_Wrapped | None, None) is None
+
+
+def test_type_hints_are_resolved_once_per_class_then_cached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`typing.get_type_hints` re-evaluates string annotations on every call
+    — the cache is what keeps decoding hot paths off that cost, so pin that
+    a second decode of the same class never resolves hints again."""
+    real = typing.get_type_hints
+    calls = 0
+
+    def counting(cls: type) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return real(cls)
+
+    monkeypatch.setattr("taguru._decode.typing.get_type_hints", counting)
+
+    @dataclasses.dataclass
+    class Fresh:
+        value: int
+
+    assert decode(Fresh, {"value": 1}) == Fresh(value=1)
+    assert decode(Fresh, {"value": 2}) == Fresh(value=2)
+    assert calls == 1

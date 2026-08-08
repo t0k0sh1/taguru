@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
+import pytest
 from taguru import Locator
 
 from taguru_langchain._extract import MAX_PASSAGE_BYTES, split_paragraphs
@@ -449,3 +450,67 @@ def test_timeout_and_user_agent_are_excluded_from_the_options_digest(tmp_path: P
     b = HtmlConnector(timeout=99.0, user_agent="b").read(str(path))
 
     assert a.fingerprint_inputs.parse_options_digest == b.fingerprint_inputs.parse_options_digest
+
+
+_UTF16_PAGE = (
+    "<html><head><title>T</title></head><body>"
+    '<script>leakSecret("token=abc123");</script>'
+    "<main><p>Body text.</p></main></body></html>"
+)
+
+
+@pytest.mark.parametrize("encoding", ["utf-16-le", "utf-16-be"])
+def test_bomless_utf16_is_detected_and_script_bodies_stay_out_of_the_text(
+    tmp_path: Path, encoding: str
+) -> None:
+    """BOM-less UTF-16 decodes as UTF-8 *without error* — every ASCII char
+    gains an interleaved NUL, the parser then sees no tags at all, and the
+    `<script>` body (dropped on every healthy path) used to ride into the
+    body text undiagnosed."""
+    path = tmp_path / "doc.html"
+    path.write_bytes(_UTF16_PAGE.encode(encoding))
+    document = HtmlConnector().read(str(path))
+
+    assert document.diagnostics == ()
+    assert document.text == "Body text."
+    assert "leakSecret" not in document.text
+
+
+def test_utf16_with_a_bom_decodes_through_the_bom_sniff(tmp_path: Path) -> None:
+    path = tmp_path / "doc.html"
+    path.write_bytes(_UTF16_PAGE.encode("utf-16"))  # codec writes the BOM
+    document = HtmlConnector().read(str(path))
+
+    assert document.diagnostics == ()
+    assert document.text == "Body text."
+
+
+def test_nul_bytes_surviving_the_decode_are_refused_as_corrupt(tmp_path: Path) -> None:
+    """Scattered NULs (not the interleaved UTF-16 shape) still decode as
+    UTF-8; parsing on would leak script content, so the connector must
+    refuse with a diagnostic instead."""
+    path = tmp_path / "doc.html"
+    path.write_bytes(b"<html><body><p>x\x00y</p><script>evil()</script></body></html>")
+    document = HtmlConnector().read(str(path))
+
+    assert document.text == ""
+    assert [d.code for d in document.diagnostics] == ["corrupt"]
+    assert "evil" not in document.text
+
+
+def test_a_hidden_iframe_is_not_reported_as_partial_extraction(tmp_path: Path) -> None:
+    """The diagnostic means "visible embedded content was not fetched" — an
+    iframe hidden by its own attributes shows a reader nothing, so its
+    exclusion loses nothing, matching how a frame inside a dropped
+    `<nav>` subtree already stays undiagnosed."""
+    path = _write(
+        tmp_path,
+        "doc.html",
+        """<html><body><main><p>Real text.</p>
+        <iframe hidden src="https://example.com/embed"></iframe>
+        </main></body></html>""",
+    )
+    document = HtmlConnector().read(str(path))
+
+    assert document.text == "Real text."
+    assert document.diagnostics == ()

@@ -135,3 +135,93 @@ def test_error_for_status_is_reexported_and_builds_by_status() -> None:
     error = error_for_status(404, "not found", code="no_context")
     assert isinstance(error, NotFoundError)
     assert error.code == "no_context"
+
+
+_ATTRIBUTE_CARRIER_CASES = [
+    (401, AuthenticationError),
+    (403, PermissionDeniedError),
+    (404, NotFoundError),
+    (409, ConflictError),
+    (400, ValidationError),
+    (415, ValidationError),
+    (422, ValidationError),
+    (413, PayloadTooLargeError),
+    (408, RequestTimeoutError),
+    (429, RateLimitError),
+    (503, ServiceUnavailableError),
+    (507, StorageFullError),
+    (501, EmbeddingUnavailableError),
+    (502, EmbeddingUnavailableError),
+    (500, ServerError),
+    (599, ServerError),
+    (600, UnexpectedStatusError),
+    (418, UnexpectedStatusError),
+]
+
+
+@pytest.mark.parametrize(
+    "status,expected",
+    _ATTRIBUTE_CARRIER_CASES,
+    ids=[f"{status}-{cls.__name__}" for status, cls in _ATTRIBUTE_CARRIER_CASES],
+)
+def test_error_for_status_threads_every_attribute_through(
+    status: int, expected: type[TaguruError]
+) -> None:
+    """Each mapped class must carry ALL the caller's fields, not just be the
+    right type — a dropped ``code``/``time``/``body`` keyword would lose
+    exactly the diagnostics the error exists to surface. 600 rides along to
+    pin the 5xx range's exclusive upper bound."""
+    body = {"detail": "sentinel"}
+    error = error_for_status(
+        status, "boom", code="some_code", time=1.25, body=body, retry_after=7.5
+    )
+    assert type(error) is expected, f"{status} must map to exactly {expected.__name__}"
+    assert error.message == "boom"
+    assert error.status == status
+    assert error.code == "some_code"
+    assert error.time == 1.25
+    assert error.body is body
+    if isinstance(error, (RateLimitError, ServiceUnavailableError)):
+        assert error.retry_after == 7.5
+
+
+def test_direct_constructors_default_their_status_and_keep_every_field() -> None:
+    body = {"detail": "sentinel"}
+
+    rate = RateLimitError("boom", code="over_limit", time=0.5, body=body, retry_after=2.0)
+    assert (rate.status, rate.code, rate.time, rate.body, rate.retry_after) == (
+        429,
+        "over_limit",
+        0.5,
+        body,
+        2.0,
+    )
+    assert RateLimitError("boom").status == 429
+
+    unavailable = ServiceUnavailableError(
+        "boom", code="shedding", time=0.5, body=body, retry_after=2.0
+    )
+    assert (
+        unavailable.status,
+        unavailable.code,
+        unavailable.time,
+        unavailable.body,
+        unavailable.retry_after,
+    ) == (503, "shedding", 0.5, body, 2.0)
+    assert ServiceUnavailableError("boom").status == 503
+
+    embedding = EmbeddingUnavailableError(
+        "boom", status=501, code="not_configured", time=0.5, body=body
+    )
+    assert (embedding.status, embedding.code, embedding.time, embedding.body) == (
+        501,
+        "not_configured",
+        0.5,
+        body,
+    )
+
+
+def test_embedding_error_rejection_names_the_offending_status() -> None:
+    with pytest.raises(ValueError) as excinfo:
+        EmbeddingUnavailableError("boom", status=500)
+    assert str(excinfo.value) == "EmbeddingUnavailableError requires status=501 or 502, got 500"

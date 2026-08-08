@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
-from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
+from tests.unit._repo import repo_root
+
+REPO_ROOT = repo_root()
 
 _spec = importlib.util.spec_from_file_location(
     "check_contract", REPO_ROOT / "sdk" / "spec" / "check_contract.py"

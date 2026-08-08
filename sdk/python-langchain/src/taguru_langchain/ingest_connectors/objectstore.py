@@ -86,11 +86,20 @@ class PermanentStoreError(Exception):
 # errno set `pathlib.Path.is_file()` itself already ignores (a path that
 # vanished between listing and stat, a path component that turned out not
 # to be a directory, a stale/looping symlink) — `FileObjectStore.list()`'s
-# own `os.scandir`-based scan below matches that posture exactly: anything
-# else (e.g. `EACCES`, permission denied) is an unexpected failure this
-# scan does not silently swallow, exactly as `Path.is_file()`/`Path.stat()`
-# do not.
+# own `os.scandir`-based scan below matches that posture exactly when it
+# stats an individual entry.
 _IGNORED_STAT_ERRNOS: Final = frozenset({errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP})
+
+# When it comes to OPENING a nested directory to recurse into, the scan is
+# additionally tolerant of permission denials: an unreadable subtree
+# (`EACCES`/`EPERM`) is skipped, never fatal, so one locked subdirectory
+# does not abort enumeration of everything else. This matches
+# `Path.rglob("*")`'s own tolerance — the enumeration `list()` used before
+# this scan replaced it (issue #362) — for which partial coverage of a
+# bulk ingest tree is the right posture. A permission denial opening the
+# store's ROOT still surfaces (see `list`): that is a misconfigured store,
+# not one unreadable corner of an otherwise-fine tree.
+_IGNORED_DESCEND_ERRNOS: Final = _IGNORED_STAT_ERRNOS | {errno.EACCES, errno.EPERM}
 
 
 class ObjectNotFoundError(Exception):
@@ -246,19 +255,32 @@ class FileObjectStore:
         for its own stat (``entry.stat(follow_symlinks=True)``), matching
         ``Path.is_file()``/``Path.stat()``'s own default of following
         symlinks — so it is still yielded, under its own symlink path,
-        exactly as the previous implementation yielded it."""
+        exactly as the previous implementation yielded it. An unreadable
+        subdirectory is skipped rather than aborting the whole scan (see
+        ``_IGNORED_DESCEND_ERRNOS``)."""
         with os.scandir(directory) as scanned:
             for entry in scanned:
                 path = Path(entry.path)
                 try:
-                    if entry.is_dir(follow_symlinks=False):
-                        yield from self._scan(path)
-                        continue
-                    info = entry.stat(follow_symlinks=True)
+                    is_directory = entry.is_dir(follow_symlinks=False)
+                    if not is_directory:
+                        info = entry.stat(follow_symlinks=True)
                 except OSError as error:
                     if error.errno in _IGNORED_STAT_ERRNOS:
                         continue
                     raise
+                if is_directory:
+                    # Opening the subdirectory (its own `os.scandir`) is what
+                    # can raise EACCES, and it does so lazily as this
+                    # `yield from` first drives the sub-generator — hence the
+                    # guard is here, around the descent, not the stat above.
+                    try:
+                        yield from self._scan(path)
+                    except OSError as error:
+                        if error.errno in _IGNORED_DESCEND_ERRNOS:
+                            continue
+                        raise
+                    continue
                 if S_ISREG(info.st_mode):
                     yield path, info
 

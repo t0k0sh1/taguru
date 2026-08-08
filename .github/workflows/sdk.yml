@@ -133,6 +133,28 @@ jobs:
         env:
           TAGURU_TEST_BIN: ${{ github.workspace }}/bin/taguru
 
+  # Mutation testing for the core Python SDK, gated against the reviewed
+  # `mutation-baseline.txt`: a survivor not on that allowlist fails the job.
+  # Latest Python only (the mutants are logic, not version-specific, so one
+  # interpreter suffices) and no server binary — it runs the hermetic unit
+  # suite alone (`[tool.mutmut]`'s `pytest_add_cli_args_test_selection`), so
+  # it needs neither `build-server` nor `TAGURU_TEST_BIN`. Core SDK only;
+  # `sdk/python-langchain` leans on the server-backed integration suite for
+  # its own coverage, so a hermetic mutation gate there would be mostly
+  # noise (see `sdk/spec/check_mutants.py`).
+  python-mutation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - name: Install the core SDK
+        run: pip install -e "sdk/python[dev]"
+      - name: Mutation gate (core SDK)
+        run: python sdk/spec/check_mutants.py
+
   typescript:
     needs: build-server
     runs-on: ubuntu-latest
