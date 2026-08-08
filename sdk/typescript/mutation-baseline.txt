@@ -44,16 +44,6 @@
 #   the block at all. (Unlike transport.ts:154:7's `"result" in parsed`,
 #   nothing here uses the `in` operator, which is what makes THAT sibling
 #   mutant genuinely killable and this one not.)
-# - transport.ts:246:75 (the whole `while` loop body in
-#   `isPreConnectFailure` emptied to `{}`): `current` is never
-#   reassigned and `seen` never populated inside an empty body, so the
-#   loop condition stays permanently true and the call hangs in a
-#   synchronous infinite loop for any non-null/undefined input — genuine
-#   divergent behavior, but a synchronous infinite loop cannot be
-#   distinguished from "still running" by any in-process test without
-#   itself hanging (JS has no way to preempt synchronous code); Stryker's
-#   own test-runner timeout is what surfaces it, hence Timeout rather
-#   than a normal pass/fail here.
 # - errors.ts:159 (`super(message, { status: null })` inside
 #   IncompatibleServerError's constructor, object literal emptied to
 #   `{}`): `TaguruError`'s own constructor reads `options.status ?? null`
@@ -65,7 +55,6 @@ src/contract.ts:112:29 EqualityOperator -> seenMax <= sdkMin
 src/errors.ts:159:20 ObjectLiteral -> {}
 src/transport.ts:113:7 ConditionalExpression -> true
 src/transport.ts:240:14 ConditionalExpression -> true
-src/transport.ts:246:75 BlockStatement -> {}
 src/transport.ts:249:9 ConditionalExpression -> true
 src/transport.ts:255:16 ConditionalExpression -> true
 src/transport.ts:67:35 StringLiteral -> ""

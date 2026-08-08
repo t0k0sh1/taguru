@@ -10,7 +10,7 @@
  * parts DIRECTLY — `word/document.xml` and `word/styles.xml` — through two
  * optional dependencies loaded ONLY via dynamic `import()` inside `read()`
  * (never at module top level, so a caller who never ingests DOCX never
- * pays for them): `fflate` (`unzipSync`, the zip container) and
+ * pays for them): `fflate` (streaming `Unzip`, the zip container) and
  * `fast-xml-parser` (`XMLParser` with `preserveOrder: true`, so element
  * order — paragraphs vs tables vs runs — survives exactly as OOXML wrote
  * it, plus `XMLValidator` to reject malformed XML `XMLParser.parse` itself
@@ -264,7 +264,6 @@ function basenameOf(reference: string): string {
 }
 
 interface OoxmlDeps {
-  unzipSync: typeof import("fflate").unzipSync;
   Unzip: typeof import("fflate").Unzip;
   UnzipInflate: typeof import("fflate").UnzipInflate;
   XMLParser: typeof import("fast-xml-parser").XMLParser;
@@ -282,11 +281,11 @@ interface OoxmlDeps {
  */
 async function loadOoxmlDeps(): Promise<OoxmlDeps> {
   try {
-    const [{ unzipSync, Unzip, UnzipInflate }, { XMLParser, XMLValidator }] = await Promise.all([
+    const [{ Unzip, UnzipInflate }, { XMLParser, XMLValidator }] = await Promise.all([
       import("fflate"),
       import("fast-xml-parser"),
     ]);
-    return { unzipSync, Unzip, UnzipInflate, XMLParser, XMLValidator };
+    return { Unzip, UnzipInflate, XMLParser, XMLValidator };
   } catch (error) {
     throw new Error(
       "DocxConnector requires fflate and fast-xml-parser — install with " +

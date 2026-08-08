@@ -25,7 +25,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { exit } from "node:process";
@@ -34,11 +34,14 @@ const SDK = join(dirname(fileURLToPath(import.meta.url)), "..", "typescript");
 const BASELINE = join(SDK, "mutation-baseline.txt");
 const REPORT = join(SDK, "reports", "mutation", "mutation.json");
 
-/** The statuses that mean "the suite did not cleanly kill this" — the same
- * posture check_mutants.py takes with survived/timeout/suspicious. Stryker's
+/** The statuses that mean "the suite did not cleanly kill this". Stryker's
  * NoCoverage (no test even executes the mutated line) is included: within
- * the gated scope an uncovered line is as much a hole as an unasserted one. */
-const ESCAPED_STATUSES = new Set(["Survived", "Timeout", "NoCoverage"]);
+ * the gated scope an uncovered line is as much a hole as an unasserted one.
+ * Timeout is NOT: in Stryker's own semantics a timed-out mutant is
+ * DETECTED (it counts toward the mutation score's numerator) — for a
+ * mutant that turns a loop infinite, hanging the suite until the runner's
+ * timeout is the only observable kill an in-process test can produce. */
+const ESCAPED_STATUSES = new Set(["Survived", "NoCoverage"]);
 
 function loadBaseline() {
   let text;
@@ -80,6 +83,9 @@ function survivors() {
 function main() {
   const verifyOnly = process.argv.includes("--verify");
   if (!verifyOnly) {
+    // A stale report from an earlier run must never be what the gate
+    // verifies: delete it first, and require the run to regenerate it.
+    rmSync(REPORT, { force: true });
     const result = spawnSync("npx", ["stryker", "run"], {
       cwd: SDK,
       stdio: "inherit",
@@ -89,7 +95,12 @@ function main() {
       return 1;
     }
     // Stryker's own exit code is threshold-based; the baseline comparison
-    // below is the actual gate, so a non-zero here is not itself fatal.
+    // below is the actual gate, so a non-zero here is not itself fatal —
+    // but a run that produced no report at all is.
+    if (!existsSync(REPORT)) {
+      console.error(`stryker did not produce ${REPORT}`);
+      return 1;
+    }
   }
 
   const baseline = loadBaseline();

@@ -464,6 +464,10 @@ test("extractHeadings false does not derive the title from a heading", async () 
   const document = await new DocxConnector({ extractHeadings: false }).read(path);
 
   expect(document.metadata.title).toBeNull();
+  // The body itself must still have been extracted — a null title from a
+  // failed parse would satisfy the assertion above alone.
+  expect(document.text).toContain("Body.");
+  expect(document.text).toContain("Heading Title");
 });
 
 test("metadata content_type is the OOXML wordprocessing MIME type", async () => {

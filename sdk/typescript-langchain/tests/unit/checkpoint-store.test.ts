@@ -197,6 +197,34 @@ describe("FilesystemCheckpointStore", () => {
     await store.close();
   });
 
+  it("delete refuses to remove a checkpoint another live run holds", async () => {
+    // A run whose every chunk was a cache hit never saved, so it holds no
+    // lock — its cleanup must not destroy the holder's on-disk state.
+    const first = new FilesystemCheckpointStore(dir);
+    const second = new FilesystemCheckpointStore(dir);
+    await first.save("docs/aomine.md", encode("one"));
+    await expect(second.delete("docs/aomine.md")).rejects.toThrow(CheckpointLockedError);
+    expect(decode((await first.load("docs/aomine.md"))!)).toBe("one");
+    await first.close();
+  });
+
+  it("delete of a never-saved source is a no-op that creates nothing", async () => {
+    const nested = join(dir, "never-created");
+    const store = new FilesystemCheckpointStore(nested);
+    await store.delete("docs/aomine.md");
+    expect(existsSync(nested)).toBe(false);
+  });
+
+  it("concurrent saves on one instance do not self-conflict", async () => {
+    const store = new FilesystemCheckpointStore(dir);
+    await Promise.all([
+      store.save("docs/aomine.md", encode("a")),
+      store.save("docs/aomine.md", encode("b")),
+    ]);
+    expect(await store.load("docs/aomine.md")).not.toBeNull();
+    await store.close();
+  });
+
   it("a live holder's lock is respected", async () => {
     const { writeFile, mkdir } = fsPromises;
     const store = new FilesystemCheckpointStore(dir);

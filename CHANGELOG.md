@@ -69,6 +69,10 @@ Entries that change an on-disk format or a response shape say so.
   extraction-raising pages to a configured `OcrAdapter`, and
   `DocxConnector` with `extractHeadings: false` no longer derives
   `metadata.title` from a heading.
+- Python and TypeScript LangChain: single-context retrieval with only
+  ONE lane enabled now raises when that lane fails, instead of returning
+  an empty result that reads as "nothing found" — completing the
+  lane-isolation fix (which only covered the both-lanes-enabled case).
 - Python LangChain: `HtmlConnector` now detects BOM-less UTF-16 (and
   refuses any text that still decodes with stray NUL bytes) instead of
   reading it as UTF-8 — a page that decoded without error but left

@@ -228,6 +228,10 @@ export class FilesystemCheckpointStore implements CheckpointStore {
   private readonly directory: string;
   /** source → lock file path, for every lock THIS instance holds. */
   private readonly locks = new Map<string, string>();
+  /** source → the acquisition already in flight, so concurrent writes on
+   * one instance await the same attempt instead of racing `locks` and
+   * self-conflicting on their own half-taken lock. */
+  private readonly pendingLocks = new Map<string, Promise<void>>();
 
   constructor(directory: string) {
     this.directory = directory;
@@ -245,9 +249,21 @@ export class FilesystemCheckpointStore implements CheckpointStore {
    * dead PID is a crashed run's leftover and is reclaimed once.
    */
   private async acquireLock(source: string): Promise<void> {
+    const pending = this.pendingLocks.get(source);
+    if (pending !== undefined) {
+      return pending;
+    }
     if (this.locks.has(source)) {
       return;
     }
+    const acquisition = this.acquireLockNow(source).finally(() => {
+      this.pendingLocks.delete(source);
+    });
+    this.pendingLocks.set(source, acquisition);
+    return acquisition;
+  }
+
+  private async acquireLockNow(source: string): Promise<void> {
     const { mkdir, open, readFile, rm } = await import("node:fs/promises");
     const { dirname } = await import("node:path");
     const lockPath = await this.lockPath(source);
@@ -320,8 +336,24 @@ export class FilesystemCheckpointStore implements CheckpointStore {
   }
 
   async delete(source: string): Promise<void> {
-    const { rm } = await import("node:fs/promises");
-    await rm(await this.pathFor(source), { force: true });
+    const { access, rm } = await import("node:fs/promises");
+    const path = await this.pathFor(source);
+    if (!this.locks.has(source)) {
+      try {
+        await access(path);
+      } catch {
+        // Nothing saved for `source` — deleting an already-empty source
+        // is not an error, and needs no lock (taking one here would also
+        // create the directory a never-saved store must not create).
+        return;
+      }
+      // A run that never saved (every chunk a cache hit) holds no lock —
+      // deleting under another LIVE run's advisory lock would destroy
+      // THAT run's checkpoint, so take the lock first; contention rejects
+      // with CheckpointLockedError and leaves the holder's state alone.
+      await this.acquireLock(source);
+    }
+    await rm(path, { force: true });
     await this.releaseLock(source);
   }
 

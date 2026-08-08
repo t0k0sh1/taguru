@@ -241,20 +241,26 @@ export class TaguruRetriever extends BaseRetriever {
       }
       let textHits: PassageHit[] = [];
       let textFailed = false;
+      let textError: unknown;
       if (this.include_text) {
         try {
           const page = await this.client.context(target).searchPassages(query, {
             limit: this.text_limit,
           });
           textHits = page.hits;
-        } catch {
+        } catch (error) {
           textFailed = true;
+          textError = error;
         }
       }
-      if (graphFailed && textFailed) {
-        // Neither lane produced anything — an empty result here would
-        // read as "nothing found" instead of "retrieval is broken."
-        throw graphError;
+      // "Every ENABLED lane failed" — a disabled lane is not a healthy
+      // one, so with a single lane enabled its failure alone must raise:
+      // an empty result here would read as "nothing found" instead of
+      // "retrieval is broken."
+      const graphHealthy = this.include_graph && !graphFailed;
+      const textHealthy = this.include_text && !textFailed;
+      if ((graphFailed || textFailed) && !graphHealthy && !textHealthy) {
+        throw graphFailed ? graphError : textError;
       }
       return mergeLanes(graphDocs, textHits, this.k, target);
     }

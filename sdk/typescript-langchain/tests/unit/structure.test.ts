@@ -6,7 +6,7 @@
  * the Python twin's `_structure.decompressed_size_within` closed).
  */
 
-import { Unzip, UnzipInflate, unzipSync, zipSync } from "fflate";
+import { Unzip, UnzipInflate, zipSync } from "fflate";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -14,7 +14,7 @@ import {
   unzipWithinCap,
 } from "../../src/ingest-connectors/structure.js";
 
-const deps = { Unzip, UnzipInflate, unzipSync };
+const deps = { Unzip, UnzipInflate };
 
 /**
  * Overwrite the uncompressed-size field of every local file header
@@ -24,7 +24,9 @@ const deps = { Unzip, UnzipInflate, unzipSync };
 function forgeDeclaredSizes(zip: Uint8Array, forged: number): Uint8Array {
   const out = new Uint8Array(zip);
   const view = new DataView(out.buffer, out.byteOffset, out.byteLength);
-  for (let i = 0; i + 4 <= out.length; i += 1) {
+  // 28 covers the widest write below (central-directory offset 24 + 4);
+  // a signature closer to the end has no complete size field to forge.
+  for (let i = 0; i + 28 <= out.length; i += 1) {
     if (out[i] === 0x50 && out[i + 1] === 0x4b) {
       if (out[i + 2] === 0x03 && out[i + 3] === 0x04) {
         view.setUint32(i + 22, forged, true);

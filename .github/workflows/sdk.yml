@@ -239,6 +239,10 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+        with:
+          # npm install runs install-time scripts; don't leave GITHUB_TOKEN
+          # in .git/config for them to read.
+          persist-credentials: false
       - uses: actions/setup-node@v7
         with:
           node-version: "24"

@@ -1465,7 +1465,7 @@ export class HtmlConnector implements Connector {
         try {
           result = await reader.read();
         } catch (error) {
-          return earlyFailure("unreadable", errorMessage(error));
+          return responseFailure("unreadable", errorMessage(error));
         }
         if (result.done) {
           break;

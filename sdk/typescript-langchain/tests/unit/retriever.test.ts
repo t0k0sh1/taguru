@@ -69,6 +69,29 @@ describe("TaguruRetriever", () => {
     expect(documents.every((d) => String(d.metadata["lane"]).includes("graph"))).toBe(true);
   });
 
+  it.each([
+    [
+      "graph-only",
+      { include_text: false },
+      (server: FakeServer): void => void server.failGraphLane.add("sake"),
+    ],
+    [
+      "text-only",
+      { include_graph: false },
+      (server: FakeServer): void => void (server.failTextSearch = true),
+    ],
+  ] as const)(
+    "raises when the only enabled lane fails (%s)",
+    async (_kind, fields, breakLane) => {
+      // A disabled lane is not a healthy one: with a single lane enabled,
+      // its failure alone must surface as "retrieval is broken", never as
+      // an empty "nothing found".
+      const server = new FakeServer();
+      breakLane(server);
+      await expect(make(server, { ...fields }).invoke("青嶺酒造")).rejects.toThrow();
+    },
+  );
+
   it("raises when both single-context lanes fail", async () => {
     // Neither lane produced anything — an empty result would read as
     // "nothing found" instead of "retrieval is broken."

@@ -11,7 +11,7 @@
  * `.rels`, for slide order), each `ppt/slides/slideN.xml` (+ its own
  * `.rels`, for a speaker-notes relationship), and each referenced
  * `ppt/notesSlides/notesSlideN.xml` — through the same two dynamically
- * `import()`-ed optional deps `docx.ts` uses (`fflate`'s `unzipSync`,
+ * `import()`-ed optional deps `docx.ts` uses (`fflate`'s streaming `Unzip`,
  * `fast-xml-parser`'s `XMLParser`/`XMLValidator`).
  *
  * A slide's shapes are walked in `p:spTree`'s own child order (the slide
@@ -246,7 +246,6 @@ function basenameOf(reference: string): string {
 }
 
 interface OoxmlDeps {
-  unzipSync: typeof import("fflate").unzipSync;
   Unzip: typeof import("fflate").Unzip;
   UnzipInflate: typeof import("fflate").UnzipInflate;
   XMLParser: typeof import("fast-xml-parser").XMLParser;
@@ -259,11 +258,11 @@ interface OoxmlDeps {
  * module never depends on docx.ts). */
 async function loadOoxmlDeps(): Promise<OoxmlDeps> {
   try {
-    const [{ unzipSync, Unzip, UnzipInflate }, { XMLParser, XMLValidator }] = await Promise.all([
+    const [{ Unzip, UnzipInflate }, { XMLParser, XMLValidator }] = await Promise.all([
       import("fflate"),
       import("fast-xml-parser"),
     ]);
-    return { unzipSync, Unzip, UnzipInflate, XMLParser, XMLValidator };
+    return { Unzip, UnzipInflate, XMLParser, XMLValidator };
   } catch (error) {
     throw new Error(
       "PptxConnector requires fflate and fast-xml-parser — install with " +
