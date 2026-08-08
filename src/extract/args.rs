@@ -48,6 +48,11 @@ pub(super) struct Args {
     /// vocabulary at all — resolved in [`run`], same pattern as
     /// `schema`. ADR 0015 (#496 S3).
     pub(super) vocabulary: Option<PathBuf>,
+    /// `None` defers to TAGURU_EXTRACT_COVERAGE, and then to `false`
+    /// (no coverage report — stdout/stderr byte-for-byte pre-S4) —
+    /// resolved in [`run`], same pattern as `candidates`. ADR 0016
+    /// (#496 S4).
+    pub(super) coverage: Option<bool>,
     /// `None` defers to TAGURU_EXTRACT_DIAGNOSTICS, and then to no
     /// sidecar at all (today's behavior: one stderr line per failed
     /// document, nothing else) — resolved in [`run`], same pattern as
@@ -77,6 +82,7 @@ impl Args {
         let mut lossy: Option<bool> = None;
         let mut candidates: Option<bool> = None;
         let mut vocabulary: Option<PathBuf> = None;
+        let mut coverage: Option<bool> = None;
         let mut diagnostics_out: Option<PathBuf> = None;
         let mut schema: Option<PathBuf> = None;
         let mut context: Option<String> = None;
@@ -95,6 +101,7 @@ impl Args {
                 "--no-passage" => no_passage = true,
                 "--lossy" => lossy = Some(true),
                 "--candidates" => candidates = Some(true),
+                "--coverage" => coverage = Some(true),
                 "--vocabulary" => match rest.next() {
                     Some(path) if vocabulary.is_none() => vocabulary = Some(PathBuf::from(path)),
                     Some(_) => {
@@ -363,6 +370,7 @@ impl Args {
             lossy,
             candidates,
             vocabulary,
+            coverage,
             diagnostics_out,
             schema,
             context,

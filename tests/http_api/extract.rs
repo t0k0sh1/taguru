@@ -335,6 +335,9 @@ fn scrub_extract_env(command: &mut Command) -> &mut Command {
         .env_remove("TAGURU_EXTRACT_STRUCTURED_OUTPUT")
         .env_remove("TAGURU_EXTRACT_MAX_OUTPUT_TOKENS")
         .env_remove("TAGURU_EXTRACT_LOSSY")
+        .env_remove("TAGURU_EXTRACT_CANDIDATES")
+        .env_remove("TAGURU_EXTRACT_VOCABULARY")
+        .env_remove("TAGURU_EXTRACT_COVERAGE")
         .env_remove("TAGURU_EXTRACT_DIAGNOSTICS")
         .env_remove("TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES")
         .env_remove("TAGURU_EXTRACT_SCHEMA")
@@ -1026,6 +1029,86 @@ fn extract_candidates_flag_folds_the_document_names_into_the_system_prompt() {
         !requests[0].contains("Names appearing in this document"),
         "{}",
         requests[0]
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// ADR 0016 (#496 S4): `--coverage` reports every candidate-pair
+/// sentence no accepted association covers — one stderr line each, a
+/// count on the report line, an `uncovered` count in the diagnostics
+/// document record — and judges a manifest-skipped document from its
+/// already-written batch, calling no model at all.
+#[test]
+fn extract_coverage_reports_uncovered_candidate_pair_sentences() {
+    let docs = batch_dir("extract-coverage-docs");
+    let doc = docs.join("ops.md");
+    std::fs::write(
+        &doc,
+        "バックアップはS3へ保存する。\n\n- 頻度: 日次\n- 保持期間: 30日",
+    )
+    .unwrap();
+    let out = batch_dir("extract-coverage-out");
+    let diagnostics = out.join("diag.jsonl");
+
+    // The reply covers the first sentence (subject+object) and the
+    // retention line (label+object) but never the frequency line —
+    // the systematically-dropped fact shape the check exists to name.
+    let reply = json!({"associations": [
+        {"subject": "バックアップ", "label": "保存先", "object": "S3", "weight": 1.0, "paragraph": 0},
+        {"subject": "バックアップ", "label": "保持期間", "object": "30日", "weight": 1.0, "paragraph": 1}
+    ]})
+    .to_string();
+    let (url, requests) = stub_chat_server(vec![reply]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "ops",
+            "--coverage",
+            "--diagnostics-out",
+            diagnostics.to_str().unwrap(),
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains("1 sentence(s) uncovered (coverage)"),
+        "{stdout}"
+    );
+    assert!(
+        stderr.contains("uncovered: [paragraph 1] - 頻度: 日次"),
+        "{stderr}"
+    );
+    let document = read_diagnostics(&diagnostics)
+        .into_iter()
+        .find(|record| record["kind"] == "document")
+        .expect("a document record");
+    assert_eq!(document["uncovered"], 1);
+    requests.join().unwrap();
+
+    // Report-only: the flag is not a computation input, so a rerun
+    // skips — and still judges the gap from the batch it already
+    // wrote. It must call nothing: the stub above accepted exactly
+    // one connection, so a second request would fail this run.
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &["--context", "ops", "--coverage", doc.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("unchanged, skipped"), "{stdout}");
+    assert!(
+        stderr.contains("uncovered: [paragraph 1] - 頻度: 日次"),
+        "{stderr}"
     );
 
     let _ = std::fs::remove_dir_all(&docs);

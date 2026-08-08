@@ -8,6 +8,16 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- `taguru extract --coverage` / `TAGURU_EXTRACT_COVERAGE` (#496 S4,
+  ADR 0016): report every sentence that holds a candidate pair (two or
+  more deterministically segmented document names) yet is covered by
+  no extracted association — the systematic recall ceiling made
+  visible, per document, with each sentence quoted on stderr and
+  counted on the report line and in the diagnostics `document` record
+  (additive `uncovered` field). Report-only and off by default: the
+  batch is unchanged, the flag is not a computation input, and a
+  manifest-skipped document is judged from its already-written batch
+  with no model call.
 - `taguru extract --vocabulary PATH` / `TAGURU_EXTRACT_VOCABULARY`
   (#496 S3, ADR 0015): steer a new document's spellings toward a
   target context's existing vocabulary, loaded from exported batch

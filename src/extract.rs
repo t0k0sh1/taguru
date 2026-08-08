@@ -77,6 +77,8 @@ mod chat_client;
 mod checkpoint;
 #[path = "extract/chunking.rs"]
 mod chunking;
+#[path = "extract/coverage.rs"]
+mod coverage;
 #[path = "extract/diagnostics.rs"]
 mod diagnostics;
 #[path = "extract/documents.rs"]
@@ -130,9 +132,12 @@ use chunking::{
     AnswerFault, ChunkOutput, corrective_assistant_turn, corrective_validation_message,
     evaluate_answer, extract_chunk_or_ladder, indicates_length_limit, indicates_refusal,
 };
+use coverage::coverage_gaps;
 use diagnostics::DiagnosticsAttempt;
 use manifest::{CHECKPOINT_DIR_NAME, batch_file_name, checkpoint_file_name};
-use mechanical::{mechanical_interpret, normalize_for_occurrence, prune_unresolvable_aliases};
+use mechanical::{
+    mechanical_interpret, name_occurs, normalize_for_occurrence, prune_unresolvable_aliases,
+};
 use parse::{
     ItemRules, ModelAlias, ModelAssociation, ModelOutput, candidate_json, describe_value,
     empty_answer_diagnosis, get_present, interpret_alias_item, interpret_association_item,
@@ -159,11 +164,11 @@ use chat_client::build_chat_body;
 #[cfg(test)]
 use chunking::{AttemptOutcome, MAX_LISTED_ISSUES, classify_attempt, corrective_message};
 #[cfg(test)]
+use coverage::GAP_QUOTE_MAX_BYTES;
+#[cfg(test)]
 use diagnostics::{AttemptRecord, ChunkRecord, DocumentRecord, ProviderMetadataRecord};
 #[cfg(test)]
 use documents::chunk_plan_with_cap;
-#[cfg(test)]
-use mechanical::name_occurs;
 #[cfg(test)]
 use parse::{ModelQuestion, parse_model_output};
 #[cfg(test)]
@@ -176,7 +181,7 @@ const USAGE: &str = "\
 usage: taguru extract [--dry-run] [--force] [--no-passage] [--questions N]
                       [--fact-budget N] [--config FILE] [--parallel N]
                       [--structured-output MODE] [--max-output-tokens N]
-                      [--lossy] [--candidates] [--vocabulary PATH]
+                      [--lossy] [--candidates] [--vocabulary PATH] [--coverage]
                       [--diagnostics-out FILE] [--schema FILE]
                       --context NAME [--description TEXT] --out DIR FILE|DIR...
 
@@ -200,6 +205,7 @@ chat endpoint:
   TAGURU_EXTRACT_LOSSY  default for --lossy (0/false)
   TAGURU_EXTRACT_CANDIDATES  default for --candidates (0/false)
   TAGURU_EXTRACT_VOCABULARY  default for --vocabulary (unset, off)
+  TAGURU_EXTRACT_COVERAGE  default for --coverage (0/false)
   TAGURU_EXTRACT_DIAGNOSTICS  default for --diagnostics-out (unset, off)
   TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
                       each diagnostics record, capped to this many bytes;
@@ -252,6 +258,14 @@ chat endpoint:
                       to the model as preferred spellings, and a
                       context spelling never fails the occurrence check.
                       Off by default; changing the names re-extracts
+  --coverage          report every sentence that holds two or more of the
+                      document's own names (the --candidates segmentation)
+                      yet is covered by no extracted association — one
+                      stderr line per sentence, a count on the report
+                      line. Report-only: the batch is never changed, no
+                      extra model call is made, and a manifest-skipped
+                      document is judged from its already-written batch.
+                      Off by default
   --diagnostics-out FILE  write a JSONL sidecar of tagged records (`kind`):
                       one \"chunk\" record per chunk with its provenance
                       (source, chunk_index/total, hash, paragraph range);
@@ -259,7 +273,7 @@ chat endpoint:
                       attempt, ADR 0001 §7 state, finish_reason, token
                       usage, latency, parse/validation issues); one
                       \"document\" record per document written (association/
-                      alias/duplicate/dropped counts) — metadata only;
+                      alias/duplicate/dropped/uncovered counts) — metadata only;
                       TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES opts an \"attempt\"
                       record into a byte-capped raw answer. Truncated fresh
                       at open: FILE describes this run, not a log appended
@@ -538,6 +552,23 @@ pub fn run(args: &[String]) -> i32 {
             Err(_) => false,
         },
     };
+    // Same resolution and validation strength as --candidates above.
+    // ADR 0016 (#496 S4): report-only, so unlike --candidates this is
+    // NOT a computation input — no fingerprint carries it.
+    let coverage_on = match args.coverage {
+        Some(value) => value,
+        None => match std::env::var("TAGURU_EXTRACT_COVERAGE") {
+            Ok(value) if value == "1" || value.eq_ignore_ascii_case("true") => true,
+            Ok(value) if value == "0" || value.eq_ignore_ascii_case("false") => false,
+            Ok(_) => {
+                return crate::config::subcommand_usage_error(
+                    "extract",
+                    "TAGURU_EXTRACT_COVERAGE takes 1/true or 0/false",
+                );
+            }
+            Err(_) => false,
+        },
+    };
     // Flag-over-env, same pattern as --schema below. ADR 0015: the
     // named file/directory must load and yield names, or the run stops
     // — silently extracting without the vocabulary the operator asked
@@ -691,6 +722,7 @@ pub fn run(args: &[String]) -> i32 {
         parallel,
         lossy,
         candidates: candidates_on,
+        coverage: coverage_on,
         vocabulary_names: context_vocabulary
             .as_ref()
             .map(ContextVocabulary::prompt_names)

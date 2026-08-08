@@ -117,6 +117,7 @@ impl DiagnosticsSink {
         source: &str,
         extraction: &Extraction,
         removed: usize,
+        uncovered: usize,
         out_path: &Path,
     ) {
         self.write_record(&DocumentRecord {
@@ -129,6 +130,7 @@ impl DiagnosticsSink {
             duplicates: extraction.duplicates,
             dropped: extraction.dropped,
             removed,
+            uncovered,
             batch_path: out_path.display().to_string(),
         });
     }
@@ -298,5 +300,9 @@ pub(super) struct DocumentRecord {
     /// prune together) — the count `Run::report` prints as "removed
     /// (mechanical validation)".
     pub(super) removed: usize,
+    /// ADR 0016: how many candidate-pair sentences no accepted
+    /// association covered — the count `Run::report` prints as
+    /// "uncovered (coverage)"; always 0 when `--coverage` is off.
+    pub(super) uncovered: usize,
     pub(super) batch_path: String,
 }
