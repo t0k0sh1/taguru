@@ -82,6 +82,11 @@ fn init_telemetry() -> Option<opentelemetry_sdk::trace::SdkTracerProvider> {
 }
 
 fn main() {
+    // Installed first, before anything can panic: the DEFAULT hook
+    // prints the panic payload to stderr, and this process' stderr is
+    // the MCP client's log (see `panic_line`'s doc for why the payload
+    // must not land there).
+    std::panic::set_hook(Box::new(|info| eprintln!("{}", panic_line(info))));
     let tracer_provider = init_telemetry();
     let base = std::env::var("TAGURU_URL").unwrap_or_else(|_| "http://127.0.0.1:8248".to_string());
     let token = std::env::var("TAGURU_API_TOKEN").ok();
@@ -105,6 +110,18 @@ fn main() {
         token,
         agent: bridge_agent(Duration::from_secs(timeout_secs)),
     });
+    // The server has the same courtesy for the mirror-image risk
+    // (listening off-loopback with rate limiting off — see
+    // `needs_off_loopback_warning` in main.rs); this is the bridge's
+    // side of it. Not an error: a trusted network segment is the
+    // operator's call, but the token leaving the host in cleartext
+    // deserves one stderr line before the first request carries it.
+    if needs_plaintext_token_warning(&bridge.base, bridge.token.is_some()) {
+        eprintln!(
+            "taguru-mcp: TAGURU_URL is plain http beyond loopback, so TAGURU_API_TOKEN \
+             travels unencrypted — prefer https, or tunnel to loopback"
+        );
+    }
 
     // The probe runs BEFORE the stdio loop: until it settles, the
     // bridge cannot answer even `initialize`. A dead server fails it in
@@ -424,7 +441,7 @@ fn run_tool_worker(
             span.record("taguru.error.kind", "cancelled");
             continue;
         }
-        let outcome = dispatch_tool(bridge, &job.name, &job.arguments);
+        let outcome = catch_tool_panic(|| dispatch_tool(bridge, &job.name, &job.arguments));
         // ureq has no mid-flight abort, so a cancel that landed once
         // the call was already running can't stop the request — but
         // it still stops the now-unwanted reply from reaching the
@@ -608,6 +625,46 @@ fn dispatch_tool(bridge: &Bridge, name: &str, arguments: &Value) -> Result<Strin
     }
 }
 
+/// The one line the bridge's process-wide panic hook logs — location
+/// only, NEVER the payload. `panic!`'s formatted message can embed
+/// whatever data the panicking code held (a candidate string, a corpus
+/// paragraph), and this process' stderr is not a log the operator
+/// curates: MCP clients capture their servers' stderr into their own
+/// log files, which are retained and sometimes shipped. The default
+/// hook would print exactly that payload, so `main` replaces it with
+/// this before anything can panic. The file:line keeps the report
+/// diagnosable without quoting any data.
+fn panic_line(info: &std::panic::PanicHookInfo<'_>) -> String {
+    match info.location() {
+        Some(location) => {
+            format!("taguru-mcp: panicked at {location}; payload withheld from this log")
+        }
+        None => "taguru-mcp: panicked; payload withheld from this log".to_string(),
+    }
+}
+
+/// Contains a panic escaping a tool dispatch to the one call it broke —
+/// the stdio twin of the HTTP transport's `CatchPanicLayer` (see
+/// `remote_mcp::routes`). Without it, a panicking dispatch would unwind
+/// `run_tool_worker`'s loop: the call's reply never emits (its sender
+/// hangs on the id forever), its `tracked_calls`/`active_by_id` entries
+/// leak, and the pool — sized once at startup, never replenished — is
+/// permanently one worker smaller. The payload is deliberately never
+/// read here, and the process-wide hook (`panic_line`) already withheld
+/// it at the panic site while logging the location — this line only
+/// adds the one fact that hook couldn't know: the panic was contained
+/// and the call answered. The client gets fixed prose either way.
+fn catch_tool_panic(
+    dispatch: impl FnOnce() -> Result<String, mcp::ToolError>,
+) -> Result<String, mcp::ToolError> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(dispatch)).unwrap_or_else(|_payload| {
+        eprintln!("taguru-mcp: tool dispatch panicked; the call was answered with an error");
+        Err(mcp::ToolError::from(
+            "internal error: the tool call panicked; see the bridge's stderr log".to_string(),
+        ))
+    })
+}
+
 /// Dispatches one already-classified, non-batch message. Notifications
 /// get no reply (correct JSON-RPC — nothing is waiting); everything
 /// else that cannot be dispatched gets a JSON-RPC error, exactly like
@@ -633,6 +690,13 @@ fn dispatch(bridge: &Bridge, instructions: &str, classified: mcp::Message) -> Op
                 Value::Null,
                 -32600,
                 "id must be a string, a number, or null".to_string(),
+            ));
+        }
+        mcp::Message::WrongJsonRpcVersion { id } => {
+            return Some(mcp::error_response(
+                id,
+                -32600,
+                "not a JSON-RPC 2.0 message (jsonrpc must be \"2.0\")".to_string(),
             ));
         }
         mcp::Message::Request { id, call } => (id, call),
@@ -699,6 +763,39 @@ fn resolve_timeout_secs(raw: Option<String>) -> u64 {
     raw.and_then(|value| value.parse::<u64>().ok())
         .filter(|&secs| secs > 0)
         .unwrap_or(75)
+}
+
+/// True when the configured base URL would carry the bearer token in
+/// cleartext beyond this host: a token is set, the scheme is plain
+/// `http`, and the host is not loopback. `https` encrypts the hop;
+/// loopback never leaves the machine; no token means nothing secret is
+/// on the wire. An unparseable URL is not warned about here — the
+/// first real request will fail loudly on its own.
+fn needs_plaintext_token_warning(base: &str, has_token: bool) -> bool {
+    if !has_token {
+        return false;
+    }
+    let Ok(uri) = base.parse::<http::Uri>() else {
+        return false;
+    };
+    if uri.scheme_str() != Some("http") {
+        return false;
+    }
+    let Some(host) = uri.host() else {
+        return false;
+    };
+    // `Uri::host()` keeps an IPv6 literal's brackets; strip them so it
+    // parses as an address below.
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    if host.eq_ignore_ascii_case("localhost") {
+        return false;
+    }
+    match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => !ip.is_loopback(),
+        // A named host that is not localhost resolves off this machine
+        // for all this process can tell.
+        Err(_) => true,
+    }
 }
 
 /// The bridge's HTTP client: 4xx/5xx come back as responses, not
@@ -872,6 +969,90 @@ mod tests {
             )
             .is_none()
         );
+
+        // A message that never declares `"jsonrpc": "2.0"` is refused
+        // -32600 with its id echoed — not served under a contract its
+        // sender never named.
+        let reply = handle(
+            &bridge(),
+            "",
+            &serde_json::json!({"id": 7, "method": "ping"}),
+        )
+        .expect("a version-less message must be answered");
+        assert_eq!(reply["error"]["code"], -32600, "{reply}");
+        assert_eq!(reply["id"], 7, "{reply}");
+    }
+
+    /// The stdio twin of the HTTP transport's `CatchPanicLayer`: a
+    /// panic escaping a tool dispatch must become this one call's error
+    /// reply, not unwind the worker — an unwound worker is never
+    /// replaced, and the call's sender would hang on its id forever.
+    #[test]
+    fn a_panicking_dispatch_becomes_an_error_reply_not_a_dead_worker() {
+        // Silence the default hook for the deliberate panic below so
+        // the test log doesn't carry a spurious backtrace.
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let outcome = catch_tool_panic(|| panic!("boom"));
+        std::panic::set_hook(previous);
+        let error = outcome.expect_err("a panic must surface as an error");
+        assert!(error.text.contains("panicked"), "{}", error.text);
+        // The panic's own text stays in stderr, out of the reply — it
+        // can carry internal detail the client has no business seeing.
+        assert!(!error.text.contains("boom"), "{}", error.text);
+    }
+
+    /// The process-wide hook's whole point: a panic whose payload
+    /// carries data must reach stderr as a location only — the MCP
+    /// client on the other side keeps this process' stderr in its own
+    /// log files.
+    #[test]
+    fn the_panic_hook_line_names_the_location_but_never_the_payload() {
+        let captured: Arc<Mutex<String>> = Arc::default();
+        let sink = Arc::clone(&captured);
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            *sink.lock() = panic_line(info);
+        }));
+        let _ = std::panic::catch_unwind(|| panic!("a corpus paragraph the log must not quote"));
+        std::panic::set_hook(previous);
+        let line = captured.lock().clone();
+        assert!(line.contains("panicked at"), "{line}");
+        assert!(line.contains(file!()), "{line}");
+        assert!(!line.contains("corpus paragraph"), "{line}");
+    }
+
+    #[test]
+    fn the_plaintext_token_warning_fires_only_off_loopback_over_http() {
+        // Plain http beyond this host with a token: the one case worth
+        // a warning.
+        assert!(needs_plaintext_token_warning("http://10.0.0.5:8248", true));
+        assert!(needs_plaintext_token_warning(
+            "http://taguru.internal:8248",
+            true
+        ));
+        // No token: nothing secret is on the wire.
+        assert!(!needs_plaintext_token_warning(
+            "http://10.0.0.5:8248",
+            false
+        ));
+        // https encrypts the hop, wherever it goes.
+        assert!(!needs_plaintext_token_warning(
+            "https://taguru.internal",
+            true
+        ));
+        // Loopback never leaves the machine — named, v4, or v6.
+        assert!(!needs_plaintext_token_warning(
+            "http://localhost:8248",
+            true
+        ));
+        assert!(!needs_plaintext_token_warning(
+            "http://127.0.0.1:8248",
+            true
+        ));
+        assert!(!needs_plaintext_token_warning("http://[::1]:8248", true));
+        // An unparseable URL fails loudly on the first request instead.
+        assert!(!needs_plaintext_token_warning("not a url", true));
     }
 
     /// The stdio backward-compatibility probe: a dual-era client's

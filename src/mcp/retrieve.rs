@@ -191,7 +191,7 @@ fn retrieve_inner(
     };
 
     let context = need(arguments, "context")?.to_string();
-    let origins: Vec<String> = match arguments.get("origins") {
+    let mut origins: Vec<String> = match arguments.get("origins") {
         Some(Value::String(text)) => vec![text.clone()],
         Some(Value::Array(items)) => {
             // Each origin cue fans out to its own `resolve` round trip (and,
@@ -223,6 +223,13 @@ fn retrieve_inner(
             return Err("argument 'origins' must be a string or an array of strings".to_string());
         }
     };
+    // A repeated cue would re-run the same `resolve` round trip — real
+    // backend work per copy, which the length cap above does not bound
+    // (1000 copies of one cue pass it) — for a result the cue-keyed
+    // `resolved` map can only hold once anyway. First occurrence wins,
+    // so anchor order still follows the caller's own ordering.
+    let mut seen_cues: HashSet<String> = HashSet::new();
+    origins.retain(|cue| seen_cues.insert(cue.clone()));
     let auto_pick = optional_bool(arguments, "auto_pick", true)?;
     let describe_first = optional_bool(arguments, "describe_first", true)?;
     let fetch_citations = optional_bool(arguments, "fetch_citations", true)?;
@@ -254,6 +261,11 @@ fn retrieve_inner(
     );
     let mut resolved = serde_json::Map::new();
     let mut anchors: Vec<String> = Vec::new();
+    // Membership lives in a set (the Vec keeps first-seen order), same
+    // shape as `seen_triples`/`seen_keys` in the steps below — distinct
+    // cues can still resolve to one anchor, and `Vec::contains` here
+    // would rescan the whole list per origin.
+    let mut seen_anchors: HashSet<String> = HashSet::new();
     {
         let _guard = resolve_span.enter();
         for cue in &origins {
@@ -279,7 +291,7 @@ fn retrieve_inner(
             };
             resolved.insert(cue.clone(), candidates);
             if let Some(picked) = picked
-                && !anchors.contains(&picked)
+                && seen_anchors.insert(picked.clone())
             {
                 anchors.push(picked);
             }

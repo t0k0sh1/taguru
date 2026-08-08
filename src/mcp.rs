@@ -330,6 +330,21 @@ mod tests {
         }
     }
 
+    /// Tools with a second required argument still name `context` first
+    /// when BOTH are missing — the ordering `add_associations`' own
+    /// comment in route.rs states as the file's convention. These two
+    /// used to check their secondary argument ahead of the context.
+    #[test]
+    fn multi_required_tools_name_the_missing_context_before_the_secondary() {
+        for tool in ["audit_consolidation", "validate_schema"] {
+            let err = route_tool(tool, &json!({})).unwrap_err();
+            assert!(
+                err.contains("'context'"),
+                "tool '{tool}' with nothing at all should name 'context' first, got: {err}"
+            );
+        }
+    }
+
     /// `cite_passage` accepts either `paragraph` or its deprecated alias
     /// `index` (positive cases covered above); omitting both must refuse
     /// rather than route a citation request with neither name present.
@@ -914,6 +929,39 @@ mod tests {
         ));
     }
 
+    /// §4 makes `"jsonrpc": "2.0"` mandatory on every message; one that
+    /// never declares it (or declares another version) is refused
+    /// rather than silently served under a contract its sender never
+    /// named — with the id preserved so the refusal stays correlatable.
+    #[test]
+    fn classify_refuses_a_missing_or_wrong_jsonrpc_declaration() {
+        for message in [
+            json!({"id": 1, "method": "ping"}),
+            json!({"jsonrpc": "1.0", "id": 1, "method": "ping"}),
+            json!({"jsonrpc": 2.0, "id": 1, "method": "ping"}),
+        ] {
+            assert!(
+                matches!(
+                    classify(&message),
+                    Message::WrongJsonRpcVersion { ref id } if *id == json!(1)
+                ),
+                "{message}"
+            );
+        }
+        // No id doesn't make it a notification: it was never a 2.0
+        // message at all, so it is answered (null id), not dropped.
+        assert!(matches!(
+            classify(&json!({"jsonrpc": "1.0", "method": "ping"})),
+            Message::WrongJsonRpcVersion { ref id } if id.is_null()
+        ));
+        // A malformed id still wins: per §4's own rule there is nothing
+        // valid left to echo, whatever else is wrong with the message.
+        assert!(matches!(
+            classify(&json!({"id": [1], "method": "ping"})),
+            Message::InvalidId
+        ));
+    }
+
     /// The one notification method a transport needs to look inside —
     /// everything else stays opaque behind `Message::Notification`.
     #[test]
@@ -946,6 +994,34 @@ mod tests {
         );
         assert_eq!(
             cancelled_request_id(&json!({"jsonrpc": "2.0", "method": "notifications/cancelled"})),
+            None
+        );
+        // A cancellation that is not a well-formed 2.0 notification —
+        // wrong or missing `jsonrpc`, or an id that makes it a request
+        // — is refused by the ordinary dispatch path, and a refused
+        // message must not also cancel a tracked call on the way.
+        assert_eq!(
+            cancelled_request_id(&json!({
+                "jsonrpc": "1.0",
+                "method": "notifications/cancelled",
+                "params": { "requestId": 7 },
+            })),
+            None
+        );
+        assert_eq!(
+            cancelled_request_id(&json!({
+                "method": "notifications/cancelled",
+                "params": { "requestId": 7 },
+            })),
+            None
+        );
+        assert_eq!(
+            cancelled_request_id(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "notifications/cancelled",
+                "params": { "requestId": 7 },
+            })),
             None
         );
     }
@@ -1341,6 +1417,39 @@ mod tests {
             }])
         );
         assert_eq!(result["passage_hits"], json!([]));
+    }
+
+    /// A duplicated origin cue must not multiply backend work: the cue
+    /// list is deduplicated up front, so each DISTINCT cue drives
+    /// exactly one `resolve` round trip — the length cap alone would
+    /// still let 1000 copies of one cue buy 1000 resolves.
+    #[test]
+    fn run_retrieve_resolves_each_distinct_origin_cue_once() {
+        let arguments = json!({
+            "context": "sake",
+            "origins": ["tokyo", "tokyo", "edo", "tokyo"],
+            "describe_first": false,
+            "fetch_citations": false,
+        });
+        let mut resolve_calls = 0;
+        let result = run_retrieve(&arguments, |_method, path, _body| {
+            if path.ends_with("/resolve") {
+                resolve_calls += 1;
+                Ok(envelope(
+                    json!([{"name": "Tokyo", "score": 1.0, "tier": "exact"}]),
+                ))
+            } else if path.ends_with("/activate") {
+                Ok(envelope(json!({"total": 0, "matches": []})))
+            } else {
+                panic!("unexpected call: {path}");
+            }
+        })
+        .expect("run_retrieve succeeds");
+        assert_eq!(resolve_calls, 2, "one resolve per distinct cue");
+        // Both surviving cues still report their candidates.
+        assert_eq!(result["resolved"].as_object().unwrap().len(), 2);
+        assert_eq!(result["resolved"]["tokyo"][0]["name"], "Tokyo");
+        assert_eq!(result["resolved"]["edo"][0]["name"], "Tokyo");
     }
 
     /// A budget that the first citation round trip alone pushes past
