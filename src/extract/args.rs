@@ -519,7 +519,19 @@ pub(super) fn parse_date(text: &str) -> Option<u64> {
     let year = parts.next()?.parse::<i64>().ok()?;
     let month = parts.next()?.parse::<u32>().ok()?;
     let day = parts.next()?.parse::<u32>().ok()?;
-    if parts.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+    // Separate checks rather than one `||` chain: the round-trip below
+    // already refuses any out-of-range month/day (it renders as a
+    // different date), so a chained condition's operator is
+    // mutation-equivalent noise — and the range checks' real job is
+    // keeping the civil arithmetic's inputs in-domain (day 0 would
+    // underflow `d - 1` there).
+    if parts.next().is_some() {
+        return None;
+    }
+    if !(1..=12).contains(&month) {
+        return None;
+    }
+    if !(1..=31).contains(&day) {
         return None;
     }
     let days = crate::clock::days_from_civil(year, month, day);
