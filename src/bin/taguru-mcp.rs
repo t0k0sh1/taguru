@@ -82,6 +82,11 @@ fn init_telemetry() -> Option<opentelemetry_sdk::trace::SdkTracerProvider> {
 }
 
 fn main() {
+    // Installed first, before anything can panic: the DEFAULT hook
+    // prints the panic payload to stderr, and this process' stderr is
+    // the MCP client's log (see `panic_line`'s doc for why the payload
+    // must not land there).
+    std::panic::set_hook(Box::new(|info| eprintln!("{}", panic_line(info))));
     let tracer_provider = init_telemetry();
     let base = std::env::var("TAGURU_URL").unwrap_or_else(|_| "http://127.0.0.1:8248".to_string());
     let token = std::env::var("TAGURU_API_TOKEN").ok();
@@ -620,6 +625,24 @@ fn dispatch_tool(bridge: &Bridge, name: &str, arguments: &Value) -> Result<Strin
     }
 }
 
+/// The one line the bridge's process-wide panic hook logs — location
+/// only, NEVER the payload. `panic!`'s formatted message can embed
+/// whatever data the panicking code held (a candidate string, a corpus
+/// paragraph), and this process' stderr is not a log the operator
+/// curates: MCP clients capture their servers' stderr into their own
+/// log files, which are retained and sometimes shipped. The default
+/// hook would print exactly that payload, so `main` replaces it with
+/// this before anything can panic. The file:line keeps the report
+/// diagnosable without quoting any data.
+fn panic_line(info: &std::panic::PanicHookInfo<'_>) -> String {
+    match info.location() {
+        Some(location) => {
+            format!("taguru-mcp: panicked at {location}; payload withheld from this log")
+        }
+        None => "taguru-mcp: panicked; payload withheld from this log".to_string(),
+    }
+}
+
 /// Contains a panic escaping a tool dispatch to the one call it broke —
 /// the stdio twin of the HTTP transport's `CatchPanicLayer` (see
 /// `remote_mcp::routes`). Without it, a panicking dispatch would unwind
@@ -627,11 +650,10 @@ fn dispatch_tool(bridge: &Bridge, name: &str, arguments: &Value) -> Result<Strin
 /// hangs on the id forever), its `tracked_calls`/`active_by_id` entries
 /// leak, and the pool — sized once at startup, never replenished — is
 /// permanently one worker smaller. The payload is deliberately never
-/// read here: a `panic!`'s formatted message can embed whatever data
-/// the dispatch was holding, and the panic hook already printed it
-/// (with file and line) at the panic site — this line only adds the
-/// one fact that hook couldn't know, that the panic was contained and
-/// the call answered. The client gets fixed prose either way.
+/// read here, and the process-wide hook (`panic_line`) already withheld
+/// it at the panic site while logging the location — this line only
+/// adds the one fact that hook couldn't know: the panic was contained
+/// and the call answered. The client gets fixed prose either way.
 fn catch_tool_panic(
     dispatch: impl FnOnce() -> Result<String, mcp::ToolError>,
 ) -> Result<String, mcp::ToolError> {
@@ -978,6 +1000,26 @@ mod tests {
         // The panic's own text stays in stderr, out of the reply — it
         // can carry internal detail the client has no business seeing.
         assert!(!error.text.contains("boom"), "{}", error.text);
+    }
+
+    /// The process-wide hook's whole point: a panic whose payload
+    /// carries data must reach stderr as a location only — the MCP
+    /// client on the other side keeps this process' stderr in its own
+    /// log files.
+    #[test]
+    fn the_panic_hook_line_names_the_location_but_never_the_payload() {
+        let captured: Arc<Mutex<String>> = Arc::default();
+        let sink = Arc::clone(&captured);
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            *sink.lock() = panic_line(info);
+        }));
+        let _ = std::panic::catch_unwind(|| panic!("a corpus paragraph the log must not quote"));
+        std::panic::set_hook(previous);
+        let line = captured.lock().clone();
+        assert!(line.contains("panicked at"), "{line}");
+        assert!(line.contains(file!()), "{line}");
+        assert!(!line.contains("corpus paragraph"), "{line}");
     }
 
     #[test]
