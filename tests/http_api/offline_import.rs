@@ -1748,6 +1748,15 @@ fn the_import_endpoint_refuses_with_the_cli_wording_and_api_statuses() {
         refusal["error"].as_str().unwrap().contains("line 3"),
         "{refusal}"
     );
+    // Nothing in the stream was touched, and the refusal's structured
+    // fields (issue #182) say so — a correcting host resends the fixed
+    // stream whole rather than guessing from the prose.
+    assert_eq!(refusal["integrity"], json!("nothing_written"), "{refusal}");
+    assert_eq!(
+        refusal["retryable_after_correction"],
+        json!(true),
+        "{refusal}"
+    );
 
     // Absent context, no create block: 404.
     let (status, refusal) = post_import(

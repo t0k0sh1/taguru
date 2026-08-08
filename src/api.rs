@@ -2653,6 +2653,176 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A render refusal while the budget still stands is the conflict
+    /// it says it is — a reserved export id colliding with a real
+    /// source answers 409 wording the client can act on, not a timeout
+    /// inviting a pointless retry.
+    #[tokio::test]
+    async fn export_frames_a_render_refusal_as_conflict_while_the_budget_stands() {
+        let dir =
+            std::env::temp_dir().join(format!("taguru-api-export-conflict-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+
+        let response = export_response(
+            &state,
+            "sake",
+            Ok(Err(
+                "source id 'export:empty' is reserved by export — rename the source and re-export"
+                    .to_string(),
+            )),
+            Deadline::unbounded(),
+            Instant::now(),
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], ErrorCode::Conflict.as_str(), "{body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .expect("error is a string")
+                .contains("reserved by export"),
+            "{body}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The same render failure with the budget spent is a timeout, not
+    /// a conflict: render() gives up mid-walk once its deadline checks
+    /// trip, and the response must re-ask the deadline to say so —
+    /// the export equivalent of search_passages' reclassification.
+    #[tokio::test]
+    async fn export_reclassifies_a_render_failure_as_timeout_once_the_budget_is_spent() {
+        use taguru::deadline::DeadlineExceeded;
+
+        let dir =
+            std::env::temp_dir().join(format!("taguru-api-export-timeout-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+
+        // Mirrors deadline.rs's `a_zero_budget_is_already_expired`: the
+        // clock advances between construction and observation, so a
+        // zero budget cannot be observed as anything but expired.
+        let deadline = Deadline::after(std::time::Duration::ZERO);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        assert!(deadline.expired(), "a zero budget must read as expired");
+
+        let response = export_response(
+            &state,
+            "sake",
+            Ok(Err(DeadlineExceeded.to_string())),
+            deadline,
+            Instant::now(),
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], ErrorCode::Timeout.as_str(), "{body}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A group-restore refusal on a validation arm carries issue #182's
+    /// full durable-prefix accounting: every batch landed before the
+    /// group phase refused, and the structured fields must say exactly
+    /// that — not just the prose.
+    #[tokio::test]
+    async fn restore_refusal_carries_the_durable_prefix_fields_on_a_validation_arm() {
+        use crate::registry::RestoreGroupsError;
+
+        let dir =
+            std::env::temp_dir().join(format!("taguru-api-restore-detail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+
+        let response = restore_refusal(
+            &state,
+            RestoreGroupsError::Duplicate("kura".to_string()),
+            2,
+            Instant::now(),
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], ErrorCode::InvalidArgument.as_str(), "{body}");
+        assert_eq!(body["integrity"], "durable_prefix", "{body}");
+        assert_eq!(body["durable_batches"], 2, "{body}");
+        assert_eq!(body["retryable_after_correction"], true, "{body}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A refused schema record reports the stream's durable prefix the
+    /// same way (issue #182): the batches landed, the record did not,
+    /// and a corrected resend resolves it — each claim a structured
+    /// field, not prose.
+    #[tokio::test]
+    async fn schema_import_refusal_carries_the_durable_prefix_fields() {
+        let dir = std::env::temp_dir().join(format!(
+            "taguru-api-schema-refusal-detail-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+
+        let response = schema_import_refusal(
+            &state,
+            "sake",
+            crate::ingest::SchemaApplyError::ReservedAlias("蔵".to_string()),
+            1,
+            0,
+            Instant::now(),
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], ErrorCode::InvalidArgument.as_str(), "{body}");
+        assert_eq!(body["integrity"], "durable_prefix", "{body}");
+        assert_eq!(body["durable_batches"], 1, "{body}");
+        assert_eq!(body["retryable_after_correction"], true, "{body}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A budget spent mid-stream answers the timeout with the same
+    /// accounting: the note names the resumable position and the
+    /// structured fields carry the durable-prefix claim — one batch
+    /// landed, this one was not attempted.
+    #[tokio::test]
+    async fn import_budget_refusal_carries_the_durable_prefix_fields() {
+        let stream = crate::ingest::parse_stream(
+            concat!(
+                "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", ",
+                "\"create\": {\"description\": \"d\"}}\n",
+                "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"b.md\"}\n",
+            )
+            .as_bytes(),
+        )
+        .expect("a well-formed two-batch stream parses");
+
+        let response = import_budget_refusal(1, 2, &stream.batches[1], 1, false, Instant::now());
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], ErrorCode::Timeout.as_str(), "{body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .expect("error is a string")
+                .contains("batch 2 of 2"),
+            "{body}"
+        );
+        assert_eq!(body["integrity"], "durable_prefix", "{body}");
+        assert_eq!(body["durable_batches"], 1, "{body}");
+    }
+
     /// `include_twins` is the only expensive branch `audit_drift` runs
     /// — the unsourced/alias sweeps ahead of it are a cheap O(n) pass.
     /// The heavy-ops permit must therefore only be spent on that

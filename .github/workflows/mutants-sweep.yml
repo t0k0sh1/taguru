@@ -71,10 +71,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       # Pinned: the sweep leans on this exact version's --shard
       # semantics and exit-code contract (2 = missed found), validated
-      # locally before this workflow landed.
+      # locally before this workflow landed. nextest is the test tool
+      # .cargo/mutants.toml names.
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-mutants@27.1.0
+          tool: cargo-mutants@27.1.0,cargo-nextest@0.9.143
       - name: Disk before
         run: df -h /
       # cargo-mutants removes its scratch trees on exit, so an

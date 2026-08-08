@@ -162,6 +162,11 @@ fn import_stops_at_the_capped_batch_as_a_resumable_prefix() {
         message.contains("batch 2 of 2"),
         "the refusal names the resumable position: {message}"
     );
+    // The machine-readable half of the same resumable-prefix claim
+    // (issue #182): exactly one batch is durable, and the fields say
+    // so without parsing the prose.
+    assert_eq!(refused["integrity"], json!("durable_prefix"), "{refused}");
+    assert_eq!(refused["durable_batches"], json!(1), "{refused}");
 
     // The uncapped batch before the stop landed whole — the created
     // context AND its association line, not just the create block.
