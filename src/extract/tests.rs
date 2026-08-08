@@ -58,6 +58,7 @@ fn attempt_record_serializes_the_shared_key_set() {
         }),
         parse_error: Some("bad json".to_string()),
         validation_issues: None,
+        removed_items: None,
         piece_bytes: Some(1024),
         requested_max_tokens: Some(512),
         response_text: Some("raw answer".to_string()),
@@ -126,6 +127,7 @@ fn attempt_record_serializes_the_shared_key_set() {
         provider_metadata: None,
         parse_error: None,
         validation_issues: None,
+        removed_items: None,
         piece_bytes: None,
         requested_max_tokens: None,
         response_text: None,
@@ -138,7 +140,12 @@ fn attempt_record_serializes_the_shared_key_set() {
         .keys()
         .map(String::as_str)
         .collect();
-    for absent in ["piece_bytes", "requested_max_tokens", "response_text"] {
+    for absent in [
+        "piece_bytes",
+        "requested_max_tokens",
+        "response_text",
+        "removed_items",
+    ] {
         assert!(!keys.contains(absent), "{absent} must be omitted: {value}");
     }
     for present in [
@@ -213,6 +220,7 @@ fn chunk_and_document_records_serialize_their_fixed_key_sets() {
             questions: 0,
             duplicates: 3,
             dropped: 0,
+            removed: 0,
             batch_path: "out/doc.md.jsonl".to_string(),
         })
         .unwrap(),
@@ -236,6 +244,7 @@ fn chunk_and_document_records_serialize_their_fixed_key_sets() {
             "kind",
             "labels",
             "questions",
+            "removed",
             "source",
         ]
     );
@@ -624,6 +633,12 @@ fn json_schema_accepts_and_rejects_the_shared_fixtures() {
 /// (`rules`, `answer`, `issues`, `corrected`) tuple so all three
 /// producers can mechanically check `validate(answer) == issues`
 /// and `validate(corrected) == []` against the SAME payloads.
+/// This exercises the shared PARSE-level accounting
+/// (`interpret_model_output` + `cross_output_issues`), which stays
+/// the cross-producer parity surface; what the Rust strict path then
+/// removes mechanically instead of correcting lives in its own
+/// corpus, `removed/` (ADR 0013 — Rust-only until the SDK follow-ups
+/// land).
 #[test]
 fn repaired_fixtures_name_their_issues_and_their_corrections_validate_clean() {
     let fixtures_root =
@@ -722,6 +737,236 @@ fn repaired_fixtures_name_their_issues_and_their_corrections_validate_clean() {
     );
 }
 
+/// ADR 0013's own corpus: each `removed/*.json` names one (`rules`,
+/// `document`, `answer`, `removed`) tuple the mechanical pass must
+/// resolve with ZERO corrective issues — the #496 S1 acceptance gate
+/// ("the failure corpus is removed with zero LLM corrective turns"),
+/// checked against the production entry points themselves
+/// (`mechanical_interpret`, then `prune_unresolvable_aliases` exactly
+/// as `extract_document` orders them).
+#[test]
+fn removed_fixtures_are_removed_mechanically_with_zero_corrective_issues() {
+    let fixtures_root =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/model_output/removed");
+    let mut count = 0;
+    for entry in fs::read_dir(&fixtures_root).expect("removed fixtures dir") {
+        let path = entry.expect("dir entry").path();
+        let text = fs::read_to_string(&path).expect("read fixture");
+        let fixture: serde_json::Value =
+            serde_json::from_str(&text).expect("fixture is valid JSON");
+        let label = path.display().to_string();
+
+        let rules = ItemRules {
+            paragraph_count: fixture["rules"]["paragraph_count"].as_u64().unwrap() as usize,
+            questions_requested: fixture["rules"]["questions_cap"].as_u64().unwrap() > 0,
+        };
+        let document = fixture["document"].as_str().unwrap();
+        let expected_removed: Vec<String> = fixture["removed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap().to_string())
+            .collect();
+
+        let evaluation = mechanical_interpret(&fixture["answer"], &rules, document);
+        assert_eq!(
+            evaluation.issues,
+            Vec::<String>::new(),
+            "{label}: the mechanical pass must leave nothing for a corrective turn"
+        );
+        let mut removed = evaluation.removed;
+        let mut outputs = [chunk_output(evaluation.output)];
+        removed.extend(prune_unresolvable_aliases(&mut outputs, 1));
+        assert_eq!(removed, expected_removed, "{label}: removals didn't match");
+        assert_eq!(
+            outputs[0].output.associations.len() as u64,
+            fixture["surviving_associations"].as_u64().unwrap(),
+            "{label}: surviving associations"
+        );
+        assert_eq!(
+            outputs[0].output.aliases.len() as u64,
+            fixture["surviving_aliases"].as_u64().unwrap(),
+            "{label}: surviving aliases"
+        );
+        count += 1;
+    }
+    assert!(count > 0, "the removed fixture directory must not be empty");
+}
+
+/// The demotion boundary (ADR 0013): a present-but-wrong value stays
+/// corrective even while a mechanically-absent item in the SAME
+/// answer would be removed — the removal only lands once the answer
+/// has nothing left to correct.
+#[test]
+fn mechanical_pass_keeps_present_but_wrong_values_for_the_corrective_turn() {
+    let rules = ItemRules {
+        paragraph_count: 1,
+        questions_requested: false,
+    };
+    let answer = serde_json::json!({
+        "associations": [
+            {"subject": "a", "label": "l", "object": ""},
+            {"subject": "a", "label": "l", "object": "b", "weight": 0}
+        ],
+        "aliases": []
+    });
+    let evaluation = mechanical_interpret(&answer, &rules, "a l b");
+    assert_eq!(
+        evaluation.issues,
+        vec!["associations[1].weight: expected finite non-zero number, got 0".to_string()]
+    );
+    // The corrective path wins the answer: evaluate_answer discards
+    // this attempt's removals and fails into the corrective turn.
+    let result = evaluate_answer(&answer.to_string(), Some(&rules), "a l b");
+    assert!(matches!(result, Err(AnswerFault::Invalid(_))));
+}
+
+/// Same wrong-typed weight, but wrapped through evaluate_answer with
+/// only removable departures: accepted first pass, removals recorded
+/// — zero corrective turns is Ok-on-first-evaluation by construction.
+#[test]
+fn evaluate_answer_accepts_after_mechanical_removal_and_records_it() {
+    let rules = ItemRules {
+        paragraph_count: 1,
+        questions_requested: false,
+    };
+    let content = r#"{"associations": [
+        {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬"},
+        {"subject": "リリース署名鍵", "label": "管理者", "object": ""}
+    ], "aliases": [
+        {"alias": "nextest", "canonical": "nextest", "kind": "concept"}
+    ]}"#;
+    let document = "青嶺酒造の杜氏は高瀬さん。リリース署名鍵と nextest の管理者でもある。";
+    let evaluated =
+        evaluate_answer(content, Some(&rules), document).expect("only removable departures");
+    assert_eq!(
+        evaluated.removed,
+        vec![
+            "associations[1]: object empty".to_string(),
+            "aliases[0]: alias equals its canonical".to_string(),
+        ]
+    );
+    assert_eq!(evaluated.output.associations.len(), 1);
+    assert!(evaluated.output.aliases.is_empty());
+}
+
+#[test]
+fn name_occurrence_is_whitespace_and_case_blind_and_covers_compounds() {
+    let haystack = normalize_for_occurrence(
+        "CI のテストランナーは cargo-nextest。プールの最大接続数は 20 だったのを 100 に引き上げた。",
+    );
+    // Verbatim after normalization.
+    assert!(name_occurs(&haystack, "cargo-nextest"));
+    assert!(name_occurs(&haystack, "Cargo-Nextest"));
+    // A particle dropped from a compound still covers.
+    assert!(name_occurs(&haystack, "CI テストランナー"));
+    assert!(name_occurs(&haystack, "プール最大接続数"));
+    // A composed change-direction object covers through its parts.
+    assert!(name_occurs(&haystack, "20→100"));
+    // Short names must appear verbatim.
+    assert!(name_occurs(&haystack, "100"));
+    assert!(!name_occurs(&haystack, "k6"));
+    // A fabricated entity sharing only fragments fails the threshold.
+    assert!(!name_occurs(&haystack, "MongoDB"));
+    assert!(!name_occurs(&haystack, "経理部の田中"));
+}
+
+/// Labels are never occurrence-checked: a relation label is the
+/// model's vocabulary (often reused from the run's own prompt), not
+/// a name the document must spell out — #496 S1 names subject/object
+/// only.
+#[test]
+fn mechanical_pass_never_occurrence_checks_labels() {
+    let rules = ItemRules {
+        paragraph_count: 1,
+        questions_requested: false,
+    };
+    let answer = serde_json::json!({
+        "associations": [{"subject": "青嶺酒造", "label": "内包する", "object": "高瀬"}],
+        "aliases": []
+    });
+    let evaluation = mechanical_interpret(&answer, &rules, "青嶺酒造には高瀬がいる。");
+    assert!(evaluation.issues.is_empty());
+    assert!(evaluation.removed.is_empty());
+    assert_eq!(evaluation.output.associations.len(), 1);
+}
+
+/// Shadowing keeps its corrective turn: the prune removes ONLY what
+/// cannot import (a dangling canonical); an alias whose spelling IS
+/// an association name carries real, judgeable content.
+#[test]
+fn prune_keeps_shadowing_and_conflicting_aliases_for_correction() {
+    let mut outputs = [chunk_output(ModelOutput {
+        associations: vec![association("青嶺酒造", "杜氏", "高瀬", 1.0)],
+        aliases: vec![
+            alias("高瀬", "青嶺酒造", "concept"),   // shadowing — corrective
+            alias("蔵元", "存在しない", "concept"), // dangling — pruned
+        ],
+        questions: Vec::new(),
+    })];
+    let removed = prune_unresolvable_aliases(&mut outputs, 1);
+    assert_eq!(
+        removed,
+        vec![
+            "aliases[1]: canonical \"存在しない\" names nothing the associations contain"
+                .to_string()
+        ]
+    );
+    assert_eq!(outputs[0].output.aliases.len(), 1);
+    assert_eq!(outputs[0].output.aliases[0].alias.as_deref(), Some("高瀬"));
+}
+
+/// A multi-chunk document labels its prune records with the chunk
+/// coordinates, and a canonical that only resolves in ANOTHER chunk's
+/// associations survives — the same merged-name-set rule merge() and
+/// cross_output_issues already follow.
+#[test]
+fn prune_resolves_canonicals_across_outputs_and_labels_chunks() {
+    let mut outputs = [
+        chunk_output(ModelOutput {
+            associations: Vec::new(),
+            aliases: vec![
+                alias("Aomine", "青嶺酒造", "concept"), // resolves in chunk 2
+                alias("蔵元", "存在しない", "concept"), // dangling everywhere
+            ],
+            questions: Vec::new(),
+        }),
+        ChunkOutput {
+            output: ModelOutput {
+                associations: vec![association("青嶺酒造", "杜氏", "高瀬", 1.0)],
+                aliases: Vec::new(),
+                questions: Vec::new(),
+            },
+            chunk_index: 1,
+            user: String::new(),
+            answer: String::new(),
+            removed: Vec::new(),
+        },
+    ];
+    let removed = prune_unresolvable_aliases(&mut outputs, 2);
+    assert_eq!(
+        removed,
+        vec![
+            "chunk 1/2 aliases[1]: canonical \"存在しない\" names nothing the associations contain"
+                .to_string()
+        ]
+    );
+    assert_eq!(outputs[0].output.aliases.len(), 1);
+}
+
+/// A pre-0013 checkpoint file has no `removed` field — its units
+/// validated fully under the old rules, so absence reads as "nothing
+/// removed" rather than invalidating the file.
+#[test]
+fn checkpoint_unit_without_a_removed_field_deserializes_empty() {
+    let unit: CheckpointUnit = serde_json::from_str(
+        r#"{"chunk_index": 0, "output": {"associations": [], "aliases": [], "questions": []},
+            "user": "u", "answer": "a"}"#,
+    )
+    .expect("pre-0013 unit deserializes");
+    assert!(unit.removed.is_empty());
+}
+
 fn association(subject: &str, label: &str, object: &str, weight: f64) -> ModelAssociation {
     ModelAssociation {
         subject: Some(subject.into()),
@@ -749,6 +994,7 @@ fn chunk_output(output: ModelOutput) -> ChunkOutput {
         chunk_index: 0,
         user: String::new(),
         answer: String::new(),
+        removed: Vec::new(),
     }
 }
 
@@ -829,7 +1075,7 @@ fn cross_output_issues_lets_a_canonical_resolved_in_a_later_output_through() {
 }
 
 #[test]
-fn cross_output_issues_names_dangling_and_shadowing_aliases_by_output() {
+fn cross_output_issues_names_shadowing_and_leaves_dangling_to_the_prune() {
     let outputs = vec![chunk_output(ModelOutput {
         associations: vec![association("青嶺酒造", "杜氏", "高瀬", 1.0)],
         aliases: vec![
@@ -838,14 +1084,14 @@ fn cross_output_issues_names_dangling_and_shadowing_aliases_by_output() {
         ],
         questions: Vec::new(),
     })];
+    // ADR 0013: the dangling canonical is the mechanical half —
+    // prune_unresolvable_aliases removes it (see its own tests) —
+    // so only the shadowing judgment is left for a corrective turn.
     assert_eq!(
         cross_output_issues(&outputs),
         vec![(
             0,
-            vec![
-                "aliases[0].canonical: names nothing the associations contain".to_string(),
-                "aliases[1].alias: names something the associations already contain".to_string(),
-            ]
+            vec!["aliases[1].alias: names something the associations already contain".to_string()]
         )]
     );
 }
@@ -1175,7 +1421,7 @@ fn combined_cross_output_issues_merges_alias_and_schema_findings_per_output() {
             association("青嶺酒造", crate::schema::SCHEMA_TYPE_LABEL, "Person", 1.0), // wrong type
             association("青嶺酒造", "杜氏", "高瀬", 1.0), // domain violation
         ],
-        aliases: vec![alias("蔵元", "存在しない", "concept")], // dangling alias
+        aliases: vec![alias("高瀬", "青嶺酒造", "concept")], // shadowing alias
         questions: Vec::new(),
     })];
     let issues = combined_cross_output_issues(&outputs, Some(&schema));
@@ -1664,7 +1910,7 @@ fn classify_attempt_reads_provider_metadata_before_the_parse() {
         usage: None,
     };
     assert!(matches!(
-        classify_attempt(&completion, None),
+        classify_attempt(&completion, None, ""),
         AttemptOutcome::LengthLimited
     ));
     // Length also outranks emptiness: a thinking model that burned
@@ -1676,7 +1922,7 @@ fn classify_attempt_reads_provider_metadata_before_the_parse() {
         usage: None,
     };
     assert!(matches!(
-        classify_attempt(&empty_at_cap, None),
+        classify_attempt(&empty_at_cap, None, ""),
         AttemptOutcome::LengthLimited
     ));
     let refused = ChatCompletion {
@@ -1685,7 +1931,7 @@ fn classify_attempt_reads_provider_metadata_before_the_parse() {
         usage: None,
     };
     assert!(matches!(
-        classify_attempt(&refused, None),
+        classify_attempt(&refused, None, ""),
         AttemptOutcome::Refusal(reason) if reason == "content_filter"
     ));
     let empty = ChatCompletion {
@@ -1694,7 +1940,7 @@ fn classify_attempt_reads_provider_metadata_before_the_parse() {
         usage: None,
     };
     assert!(matches!(
-        classify_attempt(&empty, None),
+        classify_attempt(&empty, None, ""),
         AttemptOutcome::Empty
     ));
     let ok = ChatCompletion {
@@ -1703,7 +1949,7 @@ fn classify_attempt_reads_provider_metadata_before_the_parse() {
         usage: None,
     };
     assert!(matches!(
-        classify_attempt(&ok, None),
+        classify_attempt(&ok, None, ""),
         AttemptOutcome::Valid(_)
     ));
     let malformed = ChatCompletion {
@@ -1712,7 +1958,7 @@ fn classify_attempt_reads_provider_metadata_before_the_parse() {
         usage: None,
     };
     assert!(matches!(
-        classify_attempt(&malformed, None),
+        classify_attempt(&malformed, None, ""),
         AttemptOutcome::Malformed(_)
     ));
 
@@ -1731,7 +1977,7 @@ fn classify_attempt_reads_provider_metadata_before_the_parse() {
         usage: None,
     };
     assert!(matches!(
-        classify_attempt(&invalid, Some(&strict_rules)),
+        classify_attempt(&invalid, Some(&strict_rules), "a l b"),
         AttemptOutcome::Invalid(_)
     ));
 }
@@ -2284,7 +2530,8 @@ fn evaluate_answer_in_strict_mode_surfaces_validity_issues_lossy_mode_ignores() 
         paragraph_count: 1,
         questions_requested: false,
     };
-    let Err(AnswerFault::Invalid(issues)) = evaluate_answer(content, Some(&strict_rules)) else {
+    let Err(AnswerFault::Invalid(issues)) = evaluate_answer(content, Some(&strict_rules), "a l b")
+    else {
         panic!("expected AnswerFault::Invalid");
     };
     assert_eq!(
@@ -2295,9 +2542,10 @@ fn evaluate_answer_in_strict_mode_surfaces_validity_issues_lossy_mode_ignores() 
     // Lossy mode (`rules: None`) ignores the same issue and hands
     // back the parsed output, byte-for-byte parse_model_output's
     // behavior.
-    let output = evaluate_answer(content, None).expect("lossy mode never fails on validity");
-    assert_eq!(output.associations.len(), 1);
-    assert_eq!(output.associations[0].weight, None);
+    let evaluated = evaluate_answer(content, None, "").expect("lossy mode never fails on validity");
+    assert_eq!(evaluated.output.associations.len(), 1);
+    assert_eq!(evaluated.output.associations[0].weight, None);
+    assert!(evaluated.removed.is_empty(), "lossy mode never removes");
 }
 
 #[test]
@@ -2306,7 +2554,7 @@ fn evaluate_answer_reports_a_syntax_fault_before_any_validation() {
         paragraph_count: 1,
         questions_requested: false,
     };
-    match evaluate_answer("not json at all", Some(&strict_rules)) {
+    match evaluate_answer("not json at all", Some(&strict_rules), "") {
         Err(AnswerFault::Syntax(message)) => assert!(message.contains("not a JSON object")),
         _ => panic!("expected AnswerFault::Syntax"),
     }

@@ -1,0 +1,28 @@
+{
+  "rules": {
+    "paragraph_count": 1,
+    "questions_cap": 0
+  },
+  "document": "青嶺酒造の杜氏は高瀬さん。蔵元としても知られる。",
+  "answer": {
+    "associations": [
+      {
+        "subject": "青嶺酒造",
+        "label": "杜氏",
+        "object": "高瀬"
+      }
+    ],
+    "aliases": [
+      {
+        "alias": "蔵元",
+        "canonical": "存在しない",
+        "kind": "concept"
+      }
+    ]
+  },
+  "removed": [
+    "aliases[0]: canonical \"存在しない\" names nothing the associations contain"
+  ],
+  "surviving_associations": 1,
+  "surviving_aliases": 0
+}

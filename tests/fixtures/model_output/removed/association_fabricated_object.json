@@ -1,0 +1,32 @@
+{
+  "rules": {
+    "paragraph_count": 1,
+    "questions_cap": 0
+  },
+  "document": "staging 環境のデータベースは PostgreSQL 16。プールの最大接続数は 100。",
+  "answer": {
+    "associations": [
+      {
+        "subject": "staging 環境",
+        "label": "データベース",
+        "object": "PostgreSQL 16"
+      },
+      {
+        "subject": "プール最大接続数",
+        "label": "変更後",
+        "object": "100"
+      },
+      {
+        "subject": "staging 環境",
+        "label": "データベース",
+        "object": "MongoDB"
+      }
+    ],
+    "aliases": []
+  },
+  "removed": [
+    "associations[2].object: \"MongoDB\" does not appear in the document text"
+  ],
+  "surviving_associations": 2,
+  "surviving_aliases": 0
+}

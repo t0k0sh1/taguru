@@ -170,3 +170,17 @@ pub(super) fn user_message(source: &str, index: usize, total: usize, text: &str)
         format!("Document '{source}':\n\n{text}")
     }
 }
+
+/// [`user_message`]'s inverse: the document text a user turn carried,
+/// with the one-line preamble stripped. The occurrence check (ADR
+/// 0013) must judge names against the DOCUMENT alone — the preamble
+/// embeds the source path, and letting a name pass because it happens
+/// to appear in a directory name would make validation depend on
+/// where the file lives. Every preamble is a single line, so the
+/// first blank line is always the boundary, even when the document's
+/// own text contains more of them.
+pub(super) fn user_message_document(user: &str) -> &str {
+    user.split_once("\n\n")
+        .map(|(_, text)| text)
+        .unwrap_or(user)
+}

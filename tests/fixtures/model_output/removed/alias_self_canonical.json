@@ -1,0 +1,33 @@
+{
+  "rules": {
+    "paragraph_count": 1,
+    "questions_cap": 0
+  },
+  "document": "CI のテストランナーは nextest。cargo-nextest とも呼ばれる。",
+  "answer": {
+    "associations": [
+      {
+        "subject": "CI テストランナー",
+        "label": "使用",
+        "object": "nextest"
+      }
+    ],
+    "aliases": [
+      {
+        "alias": "nextest",
+        "canonical": "nextest",
+        "kind": "concept"
+      },
+      {
+        "alias": "cargo-nextest",
+        "canonical": "nextest",
+        "kind": "concept"
+      }
+    ]
+  },
+  "removed": [
+    "aliases[0]: alias equals its canonical"
+  ],
+  "surviving_associations": 1,
+  "surviving_aliases": 1
+}

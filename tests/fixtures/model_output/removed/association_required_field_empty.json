@@ -1,0 +1,27 @@
+{
+  "rules": {
+    "paragraph_count": 1,
+    "questions_cap": 0
+  },
+  "document": "青嶺酒造の杜氏は高瀬さん。リリース署名鍵の管理者でもある。",
+  "answer": {
+    "associations": [
+      {
+        "subject": "青嶺酒造",
+        "label": "杜氏",
+        "object": "高瀬"
+      },
+      {
+        "subject": "リリース署名鍵",
+        "label": "管理者",
+        "object": ""
+      }
+    ],
+    "aliases": []
+  },
+  "removed": [
+    "associations[1]: object empty"
+  ],
+  "surviving_associations": 1,
+  "surviving_aliases": 0
+}

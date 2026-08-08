@@ -78,6 +78,8 @@ mod diagnostics;
 mod documents;
 #[path = "extract/manifest.rs"]
 mod manifest;
+#[path = "extract/mechanical.rs"]
+mod mechanical;
 #[path = "extract/parse.rs"]
 mod parse;
 #[path = "extract/prompt.rs"]
@@ -112,7 +114,7 @@ pub(crate) use structured_output::json_schema_response_format;
 // hub itself brings into scope) — the same reason ingest.rs's hub
 // centralizes this instead of having every submodule import from
 // every sibling it needs.
-use aggregate::{Extraction, combined_cross_output_issues, merge};
+use aggregate::{Extraction, association_name_sets, combined_cross_output_issues, merge};
 use chat_client::{ChatCompletion, ChatError, ChatFailure, classify_io_error};
 use checkpoint::{CheckpointFingerprint, CheckpointStore, CheckpointUnit};
 use chunking::{
@@ -121,11 +123,14 @@ use chunking::{
 };
 use diagnostics::DiagnosticsAttempt;
 use manifest::{CHECKPOINT_DIR_NAME, batch_file_name, checkpoint_file_name};
+use mechanical::{mechanical_interpret, prune_unresolvable_aliases};
 use parse::{
-    ItemRules, ModelAlias, ModelOutput, candidate_json, empty_answer_diagnosis,
-    interpret_model_output, is_empty_answer, model_output_json_schema, strip_fences,
+    ItemRules, ModelAlias, ModelAssociation, ModelOutput, candidate_json, describe_value,
+    empty_answer_diagnosis, get_present, interpret_alias_item, interpret_association_item,
+    interpret_model_output, interpret_questions, is_empty_answer, model_output_json_schema,
+    quote_for_issue, strip_fences,
 };
-use prompt::{system_prompt, user_message};
+use prompt::{system_prompt, user_message, user_message_document};
 use render::{chunk, floor_char_boundary, render_batch, split_labeled_piece, split_oversized};
 use run::labeled_document;
 use structured_output::{jittered_backoff, parse_retry_after, read_capped_chat_body, snippet};
@@ -146,7 +151,9 @@ use diagnostics::{AttemptRecord, ChunkRecord, DocumentRecord, ProviderMetadataRe
 #[cfg(test)]
 use documents::chunk_plan_with_cap;
 #[cfg(test)]
-use parse::{ModelAssociation, ModelQuestion, parse_model_output};
+use mechanical::{name_occurs, normalize_for_occurrence};
+#[cfg(test)]
+use parse::{ModelQuestion, parse_model_output};
 #[cfg(test)]
 use structured_output::{
     RETRY_MAX_BACKOFF, conforms_to_model_output_shape, json_object_response_format,
