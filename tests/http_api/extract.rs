@@ -1110,6 +1110,97 @@ fn extract_coverage_reports_uncovered_candidate_pair_sentences() {
         stderr.contains("uncovered: [paragraph 1] - 頻度: 日次"),
         "{stderr}"
     );
+    // EXACTLY one gap: the skip path must judge with the batch's real
+    // associations — an empty or fabricated triple set would flag the
+    // two covered sentences as well.
+    assert_eq!(stderr.matches("uncovered:").count(), 1, "{stderr}");
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// TAGURU_EXTRACT_COVERAGE resolves like its boolean siblings: `1`
+/// turns the report on, `0` keeps it off (and keeps every report line
+/// free of an "uncovered" note — the count note must not render at
+/// zero either), anything else is a hard usage error.
+#[test]
+fn extract_coverage_env_resolves_like_its_boolean_siblings() {
+    let docs = batch_dir("extract-coverage-env-docs");
+    let covered = docs.join("covered.md");
+    std::fs::write(&covered, "テストランナーはnextestを使う。").unwrap();
+    let gapped = docs.join("gapped.md");
+    std::fs::write(
+        &gapped,
+        "バックアップはS3へ保存する。\n\n- 頻度: 日次\n- 保持期間: 30日",
+    )
+    .unwrap();
+    let out = batch_dir("extract-coverage-env-out");
+
+    // Directory expansion sorts by name: covered.md answers first.
+    let covered_reply = json!({"associations": [
+        {"subject": "テストランナー", "label": "採用", "object": "nextest", "weight": 1.0, "paragraph": 0}
+    ]})
+    .to_string();
+    let gapped_reply = json!({"associations": [
+        {"subject": "バックアップ", "label": "保存先", "object": "S3", "weight": 1.0, "paragraph": 0},
+        {"subject": "バックアップ", "label": "保持期間", "object": "30日", "weight": 1.0, "paragraph": 1}
+    ]})
+    .to_string();
+    let (url, requests) = stub_chat_server(vec![covered_reply, gapped_reply]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+            ("TAGURU_EXTRACT_COVERAGE", "1"),
+        ],
+        &["--context", "ops", docs.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains("1 sentence(s) uncovered (coverage)"),
+        "{stdout}"
+    );
+    // The fully-covered document's own report line carries NO
+    // uncovered note — a zero count must not render as ", 0
+    // sentence(s) uncovered".
+    let covered_line = stdout
+        .lines()
+        .find(|line| line.contains("covered.md:"))
+        .expect("covered.md earns a report line");
+    assert!(!covered_line.contains("uncovered"), "{covered_line}");
+    requests.join().unwrap();
+
+    // `0` (both documents now unchanged): off means no uncovered
+    // report anywhere, and no usage error.
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+            ("TAGURU_EXTRACT_COVERAGE", "0"),
+        ],
+        &["--context", "ops", docs.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("unchanged, skipped"), "{stdout}");
+    assert!(!stderr.contains("uncovered"), "{stderr}");
+
+    // Anything else is a usage error, not a silent default.
+    let (code, _, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+            ("TAGURU_EXTRACT_COVERAGE", "banana"),
+        ],
+        &["--context", "ops", docs.to_str().unwrap()],
+    );
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains("TAGURU_EXTRACT_COVERAGE takes 1/true or 0/false"),
+        "{stderr}"
+    );
 
     let _ = std::fs::remove_dir_all(&docs);
     let _ = std::fs::remove_dir_all(&out);
