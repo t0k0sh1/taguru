@@ -996,6 +996,34 @@ mod tests {
             cancelled_request_id(&json!({"jsonrpc": "2.0", "method": "notifications/cancelled"})),
             None
         );
+        // A cancellation that is not a well-formed 2.0 notification —
+        // wrong or missing `jsonrpc`, or an id that makes it a request
+        // — is refused by the ordinary dispatch path, and a refused
+        // message must not also cancel a tracked call on the way.
+        assert_eq!(
+            cancelled_request_id(&json!({
+                "jsonrpc": "1.0",
+                "method": "notifications/cancelled",
+                "params": { "requestId": 7 },
+            })),
+            None
+        );
+        assert_eq!(
+            cancelled_request_id(&json!({
+                "method": "notifications/cancelled",
+                "params": { "requestId": 7 },
+            })),
+            None
+        );
+        assert_eq!(
+            cancelled_request_id(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "notifications/cancelled",
+                "params": { "requestId": 7 },
+            })),
+            None
+        );
     }
 
     /// Absent, wrong-typed, or malformed `_meta` is "no parent", never

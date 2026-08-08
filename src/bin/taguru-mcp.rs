@@ -626,21 +626,17 @@ fn dispatch_tool(bridge: &Bridge, name: &str, arguments: &Value) -> Result<Strin
 /// `run_tool_worker`'s loop: the call's reply never emits (its sender
 /// hangs on the id forever), its `tracked_calls`/`active_by_id` entries
 /// leak, and the pool — sized once at startup, never replenished — is
-/// permanently one worker smaller. The payload's text goes to stderr,
-/// where this process logs; the client gets the same fixed prose either
-/// way, since the panic message itself can carry internal detail.
+/// permanently one worker smaller. The payload is deliberately never
+/// read here: a `panic!`'s formatted message can embed whatever data
+/// the dispatch was holding, and the panic hook already printed it
+/// (with file and line) at the panic site — this line only adds the
+/// one fact that hook couldn't know, that the panic was contained and
+/// the call answered. The client gets fixed prose either way.
 fn catch_tool_panic(
     dispatch: impl FnOnce() -> Result<String, mcp::ToolError>,
 ) -> Result<String, mcp::ToolError> {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(dispatch)).unwrap_or_else(|payload| {
-        let message = if let Some(text) = payload.downcast_ref::<String>() {
-            text.as_str()
-        } else if let Some(text) = payload.downcast_ref::<&str>() {
-            text
-        } else {
-            "(non-string payload)"
-        };
-        eprintln!("taguru-mcp: tool dispatch panicked: {message}");
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(dispatch)).unwrap_or_else(|_payload| {
+        eprintln!("taguru-mcp: tool dispatch panicked; the call was answered with an error");
         Err(mcp::ToolError::from(
             "internal error: the tool call panicked; see the bridge's stderr log".to_string(),
         ))

@@ -149,9 +149,16 @@ pub fn classify(message: &Value) -> Message {
 /// [`Message::Notification`], discarding `params`, so a transport that
 /// wants to act on this one specific notification (the stdio bridge,
 /// to stop waiting on a reply nothing wants anymore) reads the raw
-/// message here instead.
+/// message here instead. Gated on the message actually classifying as
+/// a notification: one with the wrong `jsonrpc` declaration (or an id,
+/// which makes it a request) is owed its `-32600`/`-32601` refusal
+/// from the ordinary dispatch path, and a refused message must not
+/// ALSO reach into the queue and cancel a tracked call on the way.
 #[allow(dead_code)] // consumed by the stdio bridge; the HTTP transport has no per-connection state to cancel against
 pub fn cancelled_request_id(message: &Value) -> Option<Value> {
+    if !matches!(classify(message), Message::Notification) {
+        return None;
+    }
     if message.get("method").and_then(Value::as_str) != Some("notifications/cancelled") {
         return None;
     }
