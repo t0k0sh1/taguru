@@ -6,37 +6,45 @@
  *
  * The Python suite pins three golden scenarios — `s3_sync`,
  * `references_dry_run`, `references_run` — produced by
- * `sync_object_storage`/`sync_references`, connector DRIVERS this SDK has
- * not yet ported to TypeScript (issue #415 tracks this `observability`
- * module alone; the S3/references drivers are separate, later ports that
- * depend on `RunRecorder.attach`/`attached`). This file therefore ports the
- * driver-independent half of the Python suite:
+ * `sync_object_storage`/`sync_references`. `syncReferences` (issue #415's
+ * own `references.ts` port) has now landed in this SDK, so this file adds
+ * its two golden scenarios (`references_dry_run`, `references_run`) below,
+ * alongside the driver-independent machinery this file always carried:
  *
  * - The stable summary key set every golden must share
  *   (`test_summary_key_set_matches_every_golden`).
  * - The normalization/compare machinery
- *   (`_normalize_events_jsonl`/`_normalize_summary`/`_compare_or_write`) a
- *   later S3/references port can reuse verbatim to add its own goldens
- *   under `tests/fixtures/ingest-observability/`, proven here against a
- *   synthetic run rather than a real connector driver.
+ *   (`_normalize_events_jsonl`/`_normalize_summary`/`_compare_or_write`),
+ *   proven against a synthetic run below and reused verbatim by the two
+ *   `syncReferences` goldens.
  *
- * Once `syncObjectStorage`/`syncReferences` land in TypeScript, their own
- * golden-scenario tests belong in this file, alongside these.
+ * `s3_sync` — `syncObjectStorage` has not yet been ported to TypeScript
+ * (issue #415 tracks this module pair only: `bridge.ts`/`references.ts`) —
+ * is left for that future port to add here, alongside these two.
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { FakeListChatModel } from "@langchain/core/utils/testing";
 import { expect, test } from "vitest";
 
+import { TaguruIngester } from "../../src/ingest.js";
 import { Diagnostic } from "../../src/ingest-connectors/document.js";
+import { HtmlConnector } from "../../src/ingest-connectors/html.js";
 import {
   RUN_SUMMARY_KIND,
   RUN_SUMMARY_VERSION,
   RunReport,
   SourceEvent,
 } from "../../src/ingest-connectors/observability.js";
+import { syncReferences } from "../../src/ingest-connectors/references.js";
+import { TextFileConnector } from "../../src/ingest-connectors/text.js";
+import { type Route, serve } from "../httpd.js";
+import { RecordingCheckpointStore } from "./checkpoints.test.js";
+import { FakeServer } from "./stub.js";
 
 const FIXTURES_ROOT = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -242,5 +250,93 @@ test("compareOrWrite regenerates a golden and then matches it byte for byte", ()
     }
     rmSync(jsonlPath, { force: true });
     rmSync(summaryPath, { force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Golden 2: syncReferences({ dryRun: true }) — the per-kind dry-run table:
+// local unchanged (matching probe), local parsed (no probe), unsupported
+// extension (skipped), missing file (skipped), URL (always parsed, no
+// network).
+// ---------------------------------------------------------------------------
+
+const EMPTY_ANSWER = JSON.stringify({ associations: [], aliases: [], questions: [] });
+
+function goldenIngester(server: FakeServer): TaguruIngester {
+  return new TaguruIngester({
+    context: "sake",
+    llm: new FakeListChatModel({ responses: Array(20).fill(EMPTY_ANSWER) as string[] }),
+    client: server.client(),
+  });
+}
+
+test("references_dry_run golden", async () => {
+  const tmpPath = mkdtempSync(join(tmpdir(), "taguru-references-dry-run-golden-"));
+  try {
+    const probed = join(tmpPath, "probed.md");
+    writeFileSync(probed, "paragraph one.", "utf-8");
+    const unprobed = join(tmpPath, "unprobed.md");
+    writeFileSync(unprobed, "paragraph two.", "utf-8");
+    const unsupported = join(tmpPath, "unsupported.exe");
+    writeFileSync(unsupported, "binary-ish", "utf-8");
+    const missing = join(tmpPath, "missing.md");
+
+    const checkpoints = new RecordingCheckpointStore();
+    // A real run over `probed` alone, to populate its file-probe checkpoint
+    // — `unprobed` deliberately never runs for real, so its dry-run stays
+    // `parsed`.
+    await syncReferences([probed], { ingester: goldenIngester(new FakeServer()), checkpoints });
+
+    const report = await syncReferences(
+      [probed, unprobed, unsupported, missing, "http://127.0.0.1:1/unreachable.html"],
+      { ingester: goldenIngester(new FakeServer()), checkpoints, dryRun: true },
+    );
+
+    const replacements: Array<[string, string]> = [[tmpPath, "<tmp>"]];
+    const jsonl = normalizeEventsJsonl(report.eventsJsonl(), replacements);
+    const summary = normalizeSummary(report.toDict());
+    compareOrWrite("references_dry_run", { jsonl, summary });
+  } finally {
+    rmSync(tmpPath, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Golden 3: syncReferences — a real run: an imported local file, a
+// duplicate reference of that same file, and a redirected URL (retarget).
+// ---------------------------------------------------------------------------
+
+test("references_run golden", async () => {
+  const tmpPath = mkdtempSync(join(tmpdir(), "taguru-references-run-golden-"));
+  try {
+    const reference = join(tmpPath, "manual.md");
+    writeFileSync(reference, "paragraph one.", "utf-8");
+
+    const routes: Record<string, Route> = {
+      "/old.html": { location: "/new.html" },
+      "/new.html": { body: Buffer.from("<html><body><p>paragraph two.</p></body></html>") },
+    };
+    const server = await serve(routes);
+    let report: RunReport;
+    let replacements: Array<[string, string]>;
+    try {
+      report = await syncReferences([reference, reference, `${server.baseUrl}/old.html`], {
+        ingester: goldenIngester(new FakeServer()),
+        checkpoints: new RecordingCheckpointStore(),
+        connectors: [new TextFileConnector(), new HtmlConnector({ allowPrivateNetworks: true })],
+      });
+      replacements = [
+        [tmpPath, "<tmp>"],
+        [server.baseUrl, "http://<server>"],
+      ];
+    } finally {
+      await server.close();
+    }
+
+    const jsonl = normalizeEventsJsonl(report.eventsJsonl(), replacements);
+    const summary = normalizeSummary(report.toDict());
+    compareOrWrite("references_run", { jsonl, summary });
+  } finally {
+    rmSync(tmpPath, { recursive: true, force: true });
   }
 });

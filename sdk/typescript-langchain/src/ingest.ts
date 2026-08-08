@@ -15,7 +15,9 @@ import {
   NotFoundError,
   Taguru,
   type ImportOutcome,
+  type LocatorSpec,
   type SchemaDocument,
+  type SectionSpec,
 } from "taguru";
 
 import {
@@ -83,6 +85,17 @@ export interface IngestOutcome {
   aliases: number;
   passage_stored: boolean;
   questions_stored: number;
+  sections_stored: number;
+  /** Sections named in `ingestText(..., { sections })` whose paragraph
+   * index fell outside the document's own paragraph range, or whose
+   * paragraph was already claimed by an earlier section — dropped and
+   * counted rather than failing the ingest (ADR 0007 §5, mirrors the
+   * server's `ImportOutcome.sections_dropped`). */
+  sections_dropped: number;
+  locators_stored: number;
+  /** Same accounting as `sections_dropped`, for `ingestText(..., {
+   * locators })` (ADR 0007 §7). */
+  locators_dropped: number;
   /** Under the strict default this counts only merge()'s policy trims
    * (per-paragraph question-cap overflow, a volunteered question when
    * none was requested) — a business-rule-invalid item is corrected or
@@ -127,6 +140,10 @@ const emptyOutcome = (source: string): IngestOutcome => ({
   aliases: 0,
   passage_stored: false,
   questions_stored: 0,
+  sections_stored: 0,
+  sections_dropped: 0,
+  locators_stored: 0,
+  locators_dropped: 0,
   duplicates_dropped: 0,
   invalid_dropped: 0,
   llm_calls: 0,
@@ -738,10 +755,27 @@ export class TaguruIngester {
   /**
    * Ingest one text under one source id. Throws on failure (unlike
    * `ingestDocuments`, there is no "continue with the rest" here).
+   *
+   * `sections`/`locators` (ADR 0007 §7, issue #347) are paragraph-indexed
+   * positional metadata a connector derived from `text` — typed citation
+   * locators (page/slide/sheet/table) and free-text section headings,
+   * respectively. Both index into `splitParagraphs(text)` (extract.ts),
+   * the exact split the server itself uses; an entry naming a paragraph
+   * index outside that range is dropped and counted
+   * (`IngestOutcome.sections_dropped`/`locators_dropped`), never a hard
+   * failure. Silently dropped (not an error) when `include_passage:
+   * false` — a locator/section attaches to this batch's own passage
+   * line, and import refuses the dangling reference when there is none.
    */
   async ingestText(
     text: string,
-    options: { source: string; dry_run?: boolean; should_stop?: ShouldStop },
+    options: {
+      source: string;
+      sections?: readonly SectionSpec[];
+      locators?: readonly LocatorSpec[];
+      dry_run?: boolean;
+      should_stop?: ShouldStop;
+    },
   ): Promise<IngestOutcome> {
     const stop = normalizeStop(options.should_stop);
     const outcome = emptyOutcome(options.source);
@@ -939,6 +973,8 @@ export class TaguruIngester {
       description,
       extraction,
       this.include_passage ? text : null,
+      options.sections ?? [],
+      options.locators ?? [],
     );
     reparseBatch(ndjson);
     outcome.ndjson = ndjson;
@@ -1222,6 +1258,10 @@ function record(outcome: IngestOutcome, applied: ImportOutcome): void {
   outcome.aliases = applied.aliases;
   outcome.passage_stored = applied.passage_stored;
   outcome.questions_stored = applied.questions_stored;
+  outcome.sections_stored = applied.sections_stored;
+  outcome.sections_dropped = applied.sections_dropped;
+  outcome.locators_stored = applied.locators_stored;
+  outcome.locators_dropped = applied.locators_dropped;
 }
 
 /**
