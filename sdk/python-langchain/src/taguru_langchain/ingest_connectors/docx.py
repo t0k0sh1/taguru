@@ -121,6 +121,15 @@ _CONTENT_TYPE: Final = "application/vnd.openxmlformats-officedocument.wordproces
 # naive per-file cap.
 _DEFAULT_MAX_FILE_BYTES: Final = 64 * 1024 * 1024
 
+# `max_file_bytes` bounds only the COMPRESSED size of the zip a .docx
+# actually is; a small, high-ratio zip can still decompress to something
+# large enough to exhaust memory in python-docx's own parsing (and in this
+# module's own `_partial_extraction_message` re-decompression). 8x the
+# default raw-file cap is generous enough for any legitimate document's own
+# XML/markup expansion ratio while still bounding the worst case a hostile
+# file could demand.
+_DEFAULT_MAX_DECOMPRESSED_BYTES: Final = 8 * _DEFAULT_MAX_FILE_BYTES
+
 # MS-OFFCRYPTO password-protected Office documents (including .docx) are
 # re-packaged as a whole OLE2/Compound File Binary container, not a zip —
 # this is that container format's own magic number (the first 8 bytes of
@@ -226,10 +235,14 @@ def _build_body(
         index = commit(paragraph.text)
         if index is None:
             return
+        if not extract_headings:
+            # Disabled heading extraction must mean "as if this document had
+            # no headings" for title derivation too (matching
+            # TextFileConnector/PdfConnector/PptxConnector), not merely "no
+            # SectionEntry" — first_heading feeds `_document_title` below.
+            return
         if result.first_heading is None:
             result.first_heading = label
-        if not extract_headings:
-            return
         while heading_stack and heading_stack[-1][0] >= level:
             heading_stack.pop()
         heading_stack.append((level, label))
@@ -266,10 +279,18 @@ def _build_body(
         # `_handle_table` above accepts for row text); deduplicated here by
         # underlying element identity so a merged cell's own nested table
         # isn't walked — and counted — more than once.
+        # An `id(cell._tc)`-keyed set turns the old O(cells²) linear scan
+        # into O(cells) — `seen_cells` still keeps every already-seen
+        # `_Cell` (and therefore its `_tc`) alive for the rest of this scan,
+        # since a `_tc` freed mid-scan could have its `id()` reused by a
+        # later cell's `_tc` and silently defeat the dedup.
+        seen_tc_ids: set[int] = set()
         seen_cells: list[_DocxCell] = []
         for row in table.rows:
             for cell in row.cells:
-                if not any(cell._tc is seen._tc for seen in seen_cells):  # noqa: SLF001
+                tc_id = id(cell._tc)  # noqa: SLF001
+                if tc_id not in seen_tc_ids:
+                    seen_tc_ids.add(tc_id)
                     seen_cells.append(cell)
         nested_index = 0
         for cell in seen_cells:
@@ -293,10 +314,31 @@ def _build_body(
     return result
 
 
-def _partial_extraction_message(raw: bytes) -> str | None:
+def _total_decompressed_size(raw: bytes) -> int | None:
+    """Every entry's OWN declared uncompressed size (``ZipInfo.file_size``),
+    summed — read from the central directory, never by actually
+    decompressing anything, so this check itself cannot be turned into
+    another decompression bomb. ``None`` when ``raw`` isn't even a valid
+    zip; that failure is for the `corrupt` path further down to report, not
+    this one."""
     try:
         with zipfile.ZipFile(io.BytesIO(raw)) as archive:
-            body_xml = archive.read("word/document.xml")
+            return sum(entry.file_size for entry in archive.infolist())
+    except zipfile.BadZipFile:
+        return None
+
+
+def _partial_extraction_message(raw: bytes, max_decompressed_bytes: int) -> str | None:
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+            info = archive.getinfo("word/document.xml")
+            if info.file_size > max_decompressed_bytes:
+                # `read()`'s own decompressed-size cap already excludes this
+                # case on the normal call path; guarded again here so this
+                # function stays safe to call on its own, never
+                # decompressing more than the same bound allows.
+                return None
+            body_xml = archive.read(info)
     except (KeyError, zipfile.BadZipFile):
         return None
     kinds = [name for marker, name in _PARTIAL_CONTENT_MARKERS if marker in body_xml]
@@ -327,8 +369,12 @@ class DocxConnector:
     carries its `{"kind": "table"}` locator — the table's row/cell text is
     always extracted as its own paragraph either way, same posture.
     ``heading_separator`` (default ``" > "``) joins a breadcrumb's levels.
-    ``max_file_bytes`` (default 64 MiB) caps the raw file size checked
-    before any parsing.
+    ``max_file_bytes`` (default 64 MiB) caps the raw (compressed) file size
+    checked before any parsing. ``max_decompressed_bytes`` (default 8x
+    ``max_file_bytes``) separately caps the SUM of every zip entry's own
+    declared uncompressed size — a small, high-ratio zip can stay well
+    under ``max_file_bytes`` while still decompressing to something large
+    enough to exhaust memory in ``python-docx``'s own parsing.
     """
 
     def __init__(
@@ -338,6 +384,7 @@ class DocxConnector:
         heading_separator: str = " > ",
         extract_tables: bool = True,
         max_file_bytes: int = _DEFAULT_MAX_FILE_BYTES,
+        max_decompressed_bytes: int = _DEFAULT_MAX_DECOMPRESSED_BYTES,
     ) -> None:
         if _DocxDocument is None:
             raise ImportError(
@@ -348,6 +395,7 @@ class DocxConnector:
         self._heading_separator = heading_separator
         self._extract_tables = extract_tables
         self._max_file_bytes = max_file_bytes
+        self._max_decompressed_bytes = max_decompressed_bytes
 
     @property
     def parser(self) -> str:
@@ -377,6 +425,7 @@ class DocxConnector:
                 "heading_separator": self._heading_separator,
                 "extract_tables": self._extract_tables,
                 "max_file_bytes": self._max_file_bytes,
+                "max_decompressed_bytes": self._max_decompressed_bytes,
             }
         )
 
@@ -474,6 +523,20 @@ class DocxConnector:
                 raw_content_sha256,
             )
 
+        # Checked before python-docx ever touches the bytes: a small,
+        # high-ratio zip can pass `max_file_bytes` (a cap on the COMPRESSED
+        # size) and still exhaust memory decompressing during parsing. A
+        # non-zip file falls through (`None`) to the existing `corrupt`
+        # path below, unchanged.
+        decompressed_size = _total_decompressed_size(raw)
+        if decompressed_size is not None and decompressed_size > self._max_decompressed_bytes:
+            return failure(
+                "content_too_large",
+                f"{decompressed_size} decompressed bytes exceeds the "
+                f"{self._max_decompressed_bytes}-byte decompressed-size cap",
+                raw_content_sha256,
+            )
+
         try:
             document = _DocxDocument(io.BytesIO(raw))
             body = _build_body(
@@ -505,7 +568,7 @@ class DocxConnector:
             )
 
         diagnostics: list[Diagnostic] = []
-        partial_message = _partial_extraction_message(raw)
+        partial_message = _partial_extraction_message(raw, self._max_decompressed_bytes)
         if partial_message is not None:
             diagnostics.append(
                 Diagnostic(code="partial_extraction", message=partial_message, source=source)

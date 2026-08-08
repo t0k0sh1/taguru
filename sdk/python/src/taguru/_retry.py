@@ -50,8 +50,15 @@ def should_retry_transport(ambiguous: bool, retry_class: RetryClass) -> bool:
 
 
 def backoff_delay(attempt: int) -> float:
-    """Full-jitter exponential backoff for the given 0-based attempt."""
-    return random.uniform(0.0, min(BACKOFF_CAP_SECS, BACKOFF_BASE_SECS * (2.0**attempt)))
+    """Full-jitter exponential backoff for the given 0-based attempt.
+
+    ``attempt`` is an unbounded caller-supplied count (a large ``retries``),
+    so the exponent is clamped before it grows past what ``float`` can hold —
+    2**1024 already raises ``OverflowError``; 64 is nowhere close to that but
+    already dwarfs ``BACKOFF_CAP_SECS`` once multiplied through.
+    """
+    exponent = min(attempt, 64)
+    return random.uniform(0.0, min(BACKOFF_CAP_SECS, BACKOFF_BASE_SECS * (2.0**exponent)))
 
 
 def parse_retry_after(value: str | None) -> float | None:

@@ -24,11 +24,20 @@ import os
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import IO, Protocol, runtime_checkable
 
 from langchain_core.language_models import BaseChatModel
 
 from ._extract import ModelOutput
+
+try:
+    import fcntl
+except ImportError:  # Windows has no flock — advisory locking is skipped
+    # there (see FilesystemCheckpointStore._acquire_lock); `fcntl` stays
+    # unbound on that platform and every reference to it is guarded by an
+    # `is None` check, never reached at runtime on a platform where the
+    # import itself failed.
+    fcntl = None  # type: ignore[assignment]
 
 
 class CheckpointStore(Protocol):
@@ -49,6 +58,16 @@ class CheckpointStore(Protocol):
       (``load``) or the completed chunk still counts for this run
       (``save``). A ``delete`` failure is silently ignored — nothing
       correctness-critical depends on prompt cleanup.
+
+    A store MAY additionally implement ``append(source: str, record:
+    bytes) -> None`` (see :class:`_AppendCapableCheckpointStore`): appends
+    one already-serialized record to whatever ``save`` last wrote, without
+    rewriting the rest. This is a pure performance opt-in — a store that
+    omits it keeps working exactly as before, just at ``save``'s O(document
+    size) cost on every chunk instead of O(1). A store may also raise
+    :class:`CheckpointLockedError` from ``save``/``append`` to report that
+    another run already holds ``source``; :class:`FilesystemCheckpointStore`
+    does this via an advisory per-source lock.
     """
 
     def load(self, source: str) -> bytes | None:
@@ -65,6 +84,37 @@ class CheckpointStore(Protocol):
         """Remove any saved value for ``source``. Deleting an already-empty
         source is not an error."""
         ...
+
+
+@runtime_checkable
+class _AppendCapableCheckpointStore(Protocol):
+    """The optional extension :class:`CheckpointStore` implementations may
+    add — checked via ``isinstance`` (``@runtime_checkable`` makes that a
+    structural, attribute-presence check) rather than required on every
+    store, so a custom store that only ever implements the base 3 methods
+    keeps working unchanged."""
+
+    def append(self, source: str, record: bytes) -> None:
+        """Append one already-serialized record — produced by
+        :meth:`_DocumentCheckpoints.unit_bytes` — to whatever ``save`` last
+        wrote for ``source``. Never called before at least one ``save`` has
+        established the file this run."""
+        ...
+
+
+class CheckpointLockedError(RuntimeError):
+    """Raised by a store's ``save``/``append`` when another run already
+    holds ``source``'s advisory lock (see
+    :class:`FilesystemCheckpointStore`). Deliberately a distinct type from
+    a generic store failure: the ingester reacts to lock CONTENTION by
+    disabling further checkpoint writes for this document for the rest of
+    the run (and skipping its end-of-run delete, so it never touches state
+    that belongs to whoever holds the lock) instead of re-warning on the
+    same conflict for every remaining chunk."""
+
+    def __init__(self, source: str) -> None:
+        super().__init__(f"checkpoint for {source!r} is locked by another run")
+        self.source = source
 
 
 def _flatten_source(source: str) -> str:
@@ -144,10 +194,24 @@ class FilesystemCheckpointStore:
     """One JSON file per document under ``directory`` — the SDK analogue of
     ``taguru extract``'s ``.extract-checkpoints/``. ``directory`` is never
     created until the first ``save``; a source with nothing checkpointed
-    yet never gets a file."""
+    yet never gets a file.
+
+    Guards against two concurrent runs on the SAME source silently
+    last-writer-winning each other's checkpoint (issue #<concurrent-run
+    clobber>): the first ``save``/``append`` for a source acquires an
+    advisory, exclusive, non-blocking ``flock`` on a sidecar
+    ``<checkpoint-file>.lock`` file, held for this instance's lifetime (or
+    until :meth:`delete`/:meth:`close`). A second run's write attempt on
+    the same source raises :class:`CheckpointLockedError` instead of
+    racing the first run's writes. Process death releases the OS-level
+    lock automatically, so a crashed run never wedges the next one; a
+    platform with no ``fcntl`` (Windows) silently skips locking rather than
+    refusing to run there.
+    """
 
     def __init__(self, directory: str | os.PathLike[str]) -> None:
         self._directory = Path(directory)
+        self._locks: dict[str, IO[bytes]] = {}
 
     def path_for(self, source: str) -> Path:
         """The file ``source`` maps to — public so an operator can inspect
@@ -156,6 +220,36 @@ class FilesystemCheckpointStore:
         invalidation path)."""
         return self._directory / _checkpoint_file_name(source)
 
+    def _lock_path(self, source: str) -> Path:
+        path = self.path_for(source)
+        return path.with_name(path.name + ".lock")
+
+    def _acquire_lock(self, source: str) -> None:
+        """Idempotent: a source already held by THIS instance (the common
+        case — every write after a document's first goes through here
+        again) is a no-op, never a re-acquisition attempt against our own
+        lock."""
+        if fcntl is None or source in self._locks:
+            return
+        lock_path = self._lock_path(source)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(lock_path, "a+b")
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            handle.close()
+            raise CheckpointLockedError(source) from error
+        self._locks[source] = handle
+
+    def _release_lock(self, source: str) -> None:
+        handle = self._locks.pop(source, None)
+        if handle is not None:
+            # Closing the fd releases the OS-level flock by itself; no
+            # explicit LOCK_UN needed. The sidecar file itself is left in
+            # place (cheap, and its mere existence carries no state) —
+            # only the in-process handle holding the lock open goes away.
+            handle.close()
+
     def load(self, source: str) -> bytes | None:
         try:
             return self.path_for(source).read_bytes()
@@ -163,10 +257,36 @@ class FilesystemCheckpointStore:
             return None
 
     def save(self, source: str, data: bytes) -> None:
+        self._acquire_lock(source)
         _write_atomic(self.path_for(source), data)
+
+    def append(self, source: str, record: bytes) -> None:
+        """Appends one already-serialized JSONL line — the O(1)-per-chunk
+        counterpart to ``save``'s O(document-size) full rewrite. Not
+        wrapped in ``_write_atomic``'s temp-file-then-rename: an append
+        can't be made atomic that way without paying the full-rewrite cost
+        it exists to avoid. A crash mid-append can leave a torn final
+        line, which :meth:`_DocumentCheckpoints.from_bytes` already
+        tolerates by discarding it on the next load."""
+        self._acquire_lock(source)
+        path = self.path_for(source)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "ab") as handle:
+            handle.write(record)
+            handle.flush()
+            os.fsync(handle.fileno())
 
     def delete(self, source: str) -> None:
         self.path_for(source).unlink(missing_ok=True)
+        self._release_lock(source)
+
+    def close(self) -> None:
+        """Release every advisory lock this instance still holds, without
+        touching the checkpoint files themselves — the explicit
+        "this run is done with these sources" signal a real process exit
+        gives for free by closing all its file descriptors."""
+        for source in list(self._locks):
+            self._release_lock(source)
 
 
 def _derive_model_identity(llm: BaseChatModel) -> str | None:
@@ -308,13 +428,36 @@ class _CheckpointUnit:
 class _DocumentCheckpoints:
     """One document's durable checkpoint state: the settings it was
     extracted under, and every unit completed so far, keyed by content
-    hash. Serialized as one small JSON object, rewritten in full
-    (``_write_atomic``) after every new unit lands — small enough that a
-    read-modify-write-whole-file is simpler, and just as durable, as an
-    append-only log."""
+    hash.
+
+    Serialized as JSON Lines: one header line (``{"fingerprint": {...}}``),
+    then one line per unit (``{"unit": "<hash>", ...unit fields}``) —
+    issue #<O(N^2) checkpoint saves>. This is what lets
+    :meth:`unit_bytes`'s single new line be handed to an append-capable
+    store instead of ``to_bytes()``'s full rewrite: an N-chunk document
+    then costs O(document size) total on disk, not O(N * document size).
+    A pre-migration checkpoint (one JSON object with a top-level ``units``
+    key) is still accepted on load — see :meth:`_parse` — so an in-flight
+    old-format checkpoint keeps resuming across the migration."""
 
     fingerprint: _CheckpointFingerprint
     units: dict[str, _CheckpointUnit] = field(default_factory=dict)
+    established_on_disk: bool = field(default=False, compare=False, repr=False)
+    """True once THIS RUN has written the file at least once via a full
+    ``save()`` — only after that may later units in the same run be
+    streamed with ``append()`` instead of repeating the full rewrite.
+    Always starts ``False`` on a freshly loaded/empty instance, even when
+    ``units`` is already non-empty from a resumed run: the very first NEW
+    unit recorded this run still needs a full, format-establishing
+    ``save()`` (the on-disk file may predate the JSONL migration, or may
+    not exist at all yet)."""
+    locked_out: bool = field(default=False, compare=False, repr=False)
+    """True once a write for this document reported
+    :class:`CheckpointLockedError` — another run already holds this
+    source. Further writes are skipped outright (rather than repeating,
+    and re-warning on, the same conflict every remaining chunk), and the
+    end-of-run delete is skipped too, so this run never touches state that
+    belongs to whoever holds the lock."""
 
     @classmethod
     def empty(cls, fingerprint: _CheckpointFingerprint) -> _DocumentCheckpoints:
@@ -331,7 +474,10 @@ class _DocumentCheckpoints:
         invalidates the WHOLE file rather than salvaging the units that
         happen to still parse, mirroring Rust's single-``serde_json``-parse
         posture: a partially-trustworthy checkpoint file is treated
-        exactly like an absent one."""
+        exactly like an absent one. The one deliberate exception is a torn
+        FINAL line with no unit lines after it (a crash mid-``append``) —
+        see :meth:`_parse_jsonl` — which is discarded rather than
+        invalidating everything already durably appended before it."""
         parsed = cls._parse(data, fingerprint)
         return parsed if parsed is not None else cls.empty(fingerprint)
 
@@ -341,12 +487,31 @@ class _DocumentCheckpoints:
     ) -> _DocumentCheckpoints | None:
         if data is None:
             return None
+        legacy = cls._sniff_legacy_object(data)
+        if legacy is not None:
+            return cls._parse_legacy(legacy, fingerprint)
+        return cls._parse_jsonl(data, fingerprint)
+
+    @staticmethod
+    def _sniff_legacy_object(data: bytes) -> dict[str, object] | None:
+        """The pre-migration format was one JSON object with a top-level
+        ``units`` key; JSONL's own header line is ALSO a bare ``{...}``
+        object (just ``{"fingerprint": ...}``, no ``units`` key), so the
+        two can only be told apart by attempting a whole-document parse
+        and checking for that key — never by a cheaper prefix check."""
+        stripped = data.lstrip()
+        if not stripped.startswith(b"{"):
+            return None
         try:
             raw = json.loads(data)
         except (json.JSONDecodeError, UnicodeDecodeError):
             return None
-        if not isinstance(raw, dict):
-            return None
+        return raw if isinstance(raw, dict) and "units" in raw else None
+
+    @classmethod
+    def _parse_legacy(
+        cls, raw: dict[str, object], fingerprint: _CheckpointFingerprint
+    ) -> _DocumentCheckpoints | None:
         loaded_fingerprint = _CheckpointFingerprint.from_dict(raw.get("fingerprint"))
         if loaded_fingerprint != fingerprint:
             return None
@@ -361,12 +526,75 @@ class _DocumentCheckpoints:
             units[key] = unit
         return cls(fingerprint=fingerprint, units=units)
 
+    @classmethod
+    def _parse_jsonl(
+        cls, data: bytes, fingerprint: _CheckpointFingerprint
+    ) -> _DocumentCheckpoints | None:
+        # A well-formed file (even with zero units) always ends in "\n" —
+        # every line this class itself ever writes carries one. A file
+        # NOT ending in "\n" was torn mid-write (a crash mid-`append`,
+        # mid-`save`, or even mid-header); its incomplete last line is
+        # discarded rather than treated as a corruption that invalidates
+        # every unit durably written before it.
+        raw_lines = data.split(b"\n")
+        if raw_lines:
+            # Well-formed data: this is the trailing empty string left by
+            # the final line's own "\n". Torn data: this is the partial,
+            # unparseable tail itself. Either way it is never a line to
+            # parse — every OTHER element already sits between two
+            # newlines (or the start of the file and one), so it is
+            # complete regardless of which case this was.
+            raw_lines.pop()
+        if not raw_lines:
+            return None
+        try:
+            header = json.loads(raw_lines[0])
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return None
+        if not isinstance(header, dict):
+            return None
+        loaded_fingerprint = _CheckpointFingerprint.from_dict(header.get("fingerprint"))
+        if loaded_fingerprint != fingerprint:
+            return None
+        units: dict[str, _CheckpointUnit] = {}
+        for line in raw_lines[1:]:
+            try:
+                record = json.loads(line)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                # Not the tolerated case above (that was already popped
+                # off before this loop even starts) — a corrupt line
+                # anywhere else still invalidates the whole file.
+                return None
+            if not isinstance(record, dict) or "unit" not in record:
+                return None
+            unit = _CheckpointUnit.from_dict(record)
+            if unit is None:
+                return None
+            units[str(record["unit"])] = unit  # duplicate unit lines: last one wins
+        return cls(fingerprint=fingerprint, units=units)
+
+    @staticmethod
+    def _header_line(fingerprint: _CheckpointFingerprint) -> bytes:
+        return (json.dumps({"fingerprint": fingerprint.to_dict()}) + "\n").encode("utf-8")
+
+    @staticmethod
+    def _unit_line(unit_hash: str, unit: _CheckpointUnit) -> bytes:
+        payload: dict[str, object] = {"unit": unit_hash, **unit.to_dict()}
+        return (json.dumps(payload) + "\n").encode("utf-8")
+
     def to_bytes(self) -> bytes:
-        payload = {
-            "fingerprint": self.fingerprint.to_dict(),
-            "units": {key: unit.to_dict() for key, unit in self.units.items()},
-        }
-        return json.dumps(payload).encode("utf-8")
+        """Full JSONL rewrite: the header line plus every accumulated
+        unit's own line — what a first write (or a store with no
+        ``append``) always persists."""
+        lines = [self._header_line(self.fingerprint)]
+        lines.extend(self._unit_line(key, unit) for key, unit in self.units.items())
+        return b"".join(lines)
+
+    def unit_bytes(self, unit_hash: str) -> bytes:
+        """The single JSONL line for one already-``record``ed unit — what
+        an append-capable store persists instead of ``to_bytes()``'s full
+        rewrite."""
+        return self._unit_line(unit_hash, self.units[unit_hash])
 
     def lookup(self, unit_hash: str) -> _CheckpointUnit | None:
         return self.units.get(unit_hash)

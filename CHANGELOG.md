@@ -7,7 +7,46 @@ Entries that change an on-disk format or a response shape say so.
 
 ## [Unreleased]
 
+### Fixed
+- Python SDK: `decode()` now refuses a wrong-shaped container inside a
+  response (a `list` field fed a dict, a `dict` field fed a list) with
+  `ResponseShapeError`, instead of silently taking a dict's keys or
+  escaping as a bare `AttributeError` past `except TaguruError`.
+  `contexts.delete`/`groups.delete` no longer auto-retry after an
+  ambiguous transport failure — a repeat of an applied delete answers
+  404, so the retry turned success into `NotFoundError`.
+  `export_stream`/`export_to_file` now raise the SDK's
+  `TransportError` on connection failures like every other call path.
+  `backoff_delay` no longer overflows at extreme retry counts.
+- Python LangChain: `PdfConnector` now offers pages whose text
+  extraction *raised* to a configured `OcrAdapter` (previously only
+  sparse-but-successful pages were recovered). `DocxConnector` with
+  `extract_headings=False` no longer derives `metadata.title` from a
+  heading. Presigned-URL canonicalization also strips
+  `X-Amz-Date`/`X-Amz-Expires`/`X-Amz-Algorithm`/`X-Amz-SignedHeaders`
+  and their `X-Goog-*` equivalents, so the same object presigned twice
+  keeps one source id. `TaguruRetriever` with a single `context=` now
+  isolates the graph and text lanes like the multi-context path
+  already did (one lane failing no longer discards the other's hits),
+  and the async graph lane fetches citations concurrently.
+
 ### Changed
+- Python LangChain ingest checkpoints are now written as JSON Lines
+  and appended per chunk (**on-disk format change**; files from older
+  versions still load, and a torn trailing line from a crash is
+  discarded on resume). Saving is O(chunk) instead of rewriting the
+  whole accumulated state each chunk. `FilesystemCheckpointStore`
+  additionally holds an advisory per-source lock so two runs over the
+  same source no longer clobber each other's progress — the loser
+  proceeds without checkpointing and says so in a `RuntimeWarning`.
+  `DocxConnector`/`PptxConnector` gain `max_decompressed_bytes`
+  (default 8× `max_file_bytes`): a zip whose declared uncompressed
+  size exceeds it is refused as `content_too_large` before parsing,
+  closing a decompression-bomb hole the compressed-size cap left open.
+  `TaguruIngester` folds only control-character-free labels from the
+  context's vocabulary into its extraction prompt, cutting off a
+  second-order prompt-injection path via planted labels, and now
+  validates `chunk_bytes`/`vocabulary_cap` at construction.
 - `taguru extract`'s strict (default) mode now removes mechanically —
   before spending any LLM corrective turn — items that could never
   import as answered: associations/aliases with a required field

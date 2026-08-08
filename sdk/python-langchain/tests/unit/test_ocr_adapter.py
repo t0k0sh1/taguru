@@ -136,6 +136,84 @@ def test_partial_recovery_leaves_the_remaining_pages_named(tmp_path: Path) -> No
     assert "page(s) 1, 3" in document.diagnostics[0].message
 
 
+def test_extraction_raising_page_is_recovered_when_an_adapter_is_configured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A page whose ``extract_text()`` raises is exactly as unusable to this
+    connector as one that decoded to nothing — a configured adapter must be
+    offered a chance to recover it too, not only pages that merely decoded
+    empty."""
+    from pypdf._page import PageObject
+
+    path = _write(
+        tmp_path,
+        "doc.pdf",
+        text_pdf(
+            [
+                "Page one has plenty of readable text.",
+                "Page two has plenty of readable text.",
+            ]
+        ),
+    )
+
+    original = PageObject.extract_text
+    calls = {"n": 0}
+
+    def flaky(self: PageObject, *args: object, **kwargs: object) -> str:
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("simulated per-page decode failure")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(PageObject, "extract_text", flaky)
+    adapter = FakeOcrAdapter(recovered={"2": "Recovered failed page, plenty of characters."})
+
+    document = PdfConnector(ocr_adapter=adapter).read(str(path))
+
+    assert document.diagnostics == ()
+    assert "Recovered failed page, plenty of characters." in document.text
+    assert adapter.received_requests[0].locators == (Locator(kind="page", value="2"),)
+
+
+def test_extraction_raising_page_the_adapter_cannot_recover_stays_partial_extraction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An adapter's own failure to recover a raising page must leave it
+    reported exactly as ``partial_extraction`` as if no adapter had been
+    configured at all — matching the no-adapter behavior this connector
+    already had for a page whose extraction raised."""
+    from pypdf._page import PageObject
+
+    path = _write(
+        tmp_path,
+        "doc.pdf",
+        text_pdf(
+            [
+                "Page one has plenty of readable text.",
+                "Page two has plenty of readable text.",
+            ]
+        ),
+    )
+
+    original = PageObject.extract_text
+    calls = {"n": 0}
+
+    def flaky(self: PageObject, *args: object, **kwargs: object) -> str:
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("simulated per-page decode failure")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(PageObject, "extract_text", flaky)
+    adapter = FakeOcrAdapter()  # recovers nothing for any requested page
+
+    document = PdfConnector(ocr_adapter=adapter).read(str(path))
+
+    assert [d.code for d in document.diagnostics] == ["partial_extraction"]
+    assert document.diagnostics[0].message.endswith("page(s) 2")
+    assert adapter.received_requests[0].locators == (Locator(kind="page", value="2"),)
+
+
 def test_adapter_exception_leaves_the_page_ocr_required_and_names_the_failure(
     tmp_path: Path,
 ) -> None:

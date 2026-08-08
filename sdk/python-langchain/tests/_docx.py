@@ -212,6 +212,19 @@ def docx_bytes(body_xml: str, *, title: str | None = None) -> bytes:
     return buf.getvalue()
 
 
+def zip_bomb_docx(declared_size: int = 2 * 1024 * 1024) -> bytes:
+    """A small, high-ratio zip whose one entry declares ``declared_size``
+    zero bytes but compresses to almost nothing — the shape
+    `DocxConnector`'s `max_decompressed_bytes` cap exists to refuse before
+    python-docx ever decompresses it. Never assembled into a fully valid
+    docx package (no ``[Content_Types].xml``, etc.): the cap is checked,
+    and this document refused, before python-docx would ever open it."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("word/document.xml", b"\0" * declared_size)
+    return buf.getvalue()
+
+
 def corrupt_docx(kind: str = "not_zip") -> bytes:
     """Three distinct corruption shapes ``DocxConnector`` must all report as
     `corrupt`, never raise: ``"not_zip"`` (not a zip container at all),

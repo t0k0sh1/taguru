@@ -534,6 +534,25 @@ def test_validation_rejects_bad_fact_budget_max_attempts_and_corrective_context_
         TaguruIngester(context="c", llm=llm, client=sync_client, corrective_context_bytes=-1)
 
 
+def test_validation_rejects_bad_chunk_bytes_and_vocabulary_cap(
+    sync_client: Taguru, async_client: AsyncTaguru
+) -> None:
+    """chunk_bytes<=0 would silently degenerate to 1-char chunks (an
+    unbounded number of model calls for any real document) and a negative
+    vocabulary_cap has no sane meaning — both must fail fast at
+    construction, exactly like every other numeric setting here."""
+    llm = FakeListChatModel(responses=["{}"])
+    with pytest.raises(ValueError, match="chunk_bytes"):
+        TaguruIngester(context="c", llm=llm, client=sync_client, chunk_bytes=0)
+    with pytest.raises(ValueError, match="chunk_bytes"):
+        TaguruIngester(context="c", llm=llm, client=sync_client, chunk_bytes=-1)
+    with pytest.raises(ValueError, match="vocabulary_cap"):
+        TaguruIngester(context="c", llm=llm, client=sync_client, vocabulary_cap=-1)
+    # The floors themselves are accepted (chunk_bytes >= 1, vocabulary_cap
+    # >= 0 — 0 means "offer no vocabulary at all", a legitimate choice).
+    TaguruIngester(context="c", llm=llm, client=sync_client, chunk_bytes=1, vocabulary_cap=0)
+
+
 def test_structured_output_is_off_by_default(
     sync_client: Taguru, async_client: AsyncTaguru
 ) -> None:

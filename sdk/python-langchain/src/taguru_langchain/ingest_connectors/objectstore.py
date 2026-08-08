@@ -30,12 +30,14 @@ treats it as "skip this object this pass," not a failure at all.
 
 from __future__ import annotations
 
+import errno
 import mimetypes
 import os
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from stat import S_ISREG
 from typing import TYPE_CHECKING, Final, Literal, Protocol
 from urllib.parse import unquote, urlsplit
 
@@ -78,6 +80,17 @@ class PermanentStoreError(Exception):
     auth failure on every future enumeration pass would silently mask a
     real, fixable problem behind an endless quiet retry loop (ADR 0007
     §9)."""
+
+
+# The same "not really a filesystem error, treat this path as not-a-file"
+# errno set `pathlib.Path.is_file()` itself already ignores (a path that
+# vanished between listing and stat, a path component that turned out not
+# to be a directory, a stale/looping symlink) — `FileObjectStore.list()`'s
+# own `os.scandir`-based scan below matches that posture exactly: anything
+# else (e.g. `EACCES`, permission denied) is an unexpected failure this
+# scan does not silently swallow, exactly as `Path.is_file()`/`Path.stat()`
+# do not.
+_IGNORED_STAT_ERRNOS: Final = frozenset({errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP})
 
 
 class ObjectNotFoundError(Exception):
@@ -206,18 +219,48 @@ class FileObjectStore:
         return f"file://{self._directory.as_posix()}"
 
     def list(self, prefix: str) -> Iterator[ObjectMeta]:
-        for path in sorted(self._directory.rglob("*")):
-            if not path.is_file():
-                continue
+        entries = sorted(self._scan(self._directory), key=lambda item: item[0])
+        for path, info in entries:
             key = path.relative_to(self._directory).as_posix()
             if not key.startswith(prefix):
                 continue
-            stat = path.stat()
             yield ObjectMeta(
                 key=key,
-                size=stat.st_size,
-                last_modified=datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc),
+                size=info.st_size,
+                last_modified=datetime.fromtimestamp(info.st_mtime, tz=timezone.utc),
             )
+
+    def _scan(self, directory: Path) -> Iterator[tuple[Path, os.stat_result]]:
+        """Recurses ``directory`` via ``os.scandir``, yielding each regular
+        file's path together with its own ``os.stat_result`` — one stat
+        syscall per entry (``DirEntry.stat()`` is cached on the entry
+        itself, reused here for both the file/directory type test AND the
+        metadata :meth:`list` needs) in place of the previous
+        ``sorted(directory.rglob("*"))`` plus ``Path.is_file()``/
+        ``Path.stat()``'s own two separate stat calls per path.
+
+        A symlinked directory is never recursed into —
+        ``entry.is_dir(follow_symlinks=False)`` is true only for a REAL
+        directory entry, matching ``Path.rglob("*")``'s own refusal to
+        descend into one. A symlink to a regular file is still followed
+        for its own stat (``entry.stat(follow_symlinks=True)``), matching
+        ``Path.is_file()``/``Path.stat()``'s own default of following
+        symlinks — so it is still yielded, under its own symlink path,
+        exactly as the previous implementation yielded it."""
+        with os.scandir(directory) as scanned:
+            for entry in scanned:
+                path = Path(entry.path)
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        yield from self._scan(path)
+                        continue
+                    info = entry.stat(follow_symlinks=True)
+                except OSError as error:
+                    if error.errno in _IGNORED_STAT_ERRNOS:
+                        continue
+                    raise
+                if S_ISREG(info.st_mode):
+                    yield path, info
 
     def get(self, key: str, *, version_id: str | None = None) -> FetchedObject:
         del version_id  # file:// has no versions; a caller never passes one here

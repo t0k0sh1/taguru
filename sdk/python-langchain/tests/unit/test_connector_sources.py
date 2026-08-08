@@ -57,6 +57,16 @@ def test_canonicalize_url_strips_userinfo() -> None:
         "apikey",
         "api_key",
         "X-AMZ-SIGNATURE",  # case-insensitive match on the key
+        "x-amz-date",
+        "x-amz-expires",
+        "x-amz-algorithm",
+        "x-amz-signedheaders",
+        "x-goog-signature",
+        "x-goog-credential",
+        "x-goog-date",
+        "x-goog-expires",
+        "x-goog-algorithm",
+        "x-goog-signedheaders",
     ],
 )
 def test_canonicalize_url_strips_denylisted_query_parameters(denied_key: str) -> None:
@@ -66,6 +76,35 @@ def test_canonicalize_url_strips_denylisted_query_parameters(denied_key: str) ->
     assert "secret" not in canonical
     assert denied_key.lower() not in {key.lower() for key in query}
     assert query["kept"] == ["1"]
+
+
+def test_canonicalize_url_gives_the_same_id_to_the_same_object_presigned_twice() -> None:
+    # AWS SigV4 re-issues x-amz-date/x-amz-expires on every presign of the
+    # same S3 object; canonicalization must collapse both issuances to one
+    # source id or the object gets re-ingested as if it were new each time.
+    first = canonicalize_url(
+        "https://bucket.s3.amazonaws.com/report.html"
+        "?x-amz-credential=AKIA%2F20260101%2Fus-east-1%2Fs3%2Faws4_request"
+        "&x-amz-date=20260101T000000Z"
+        "&x-amz-expires=3600"
+        "&x-amz-signature=aaaa"
+    )
+    second = canonicalize_url(
+        "https://bucket.s3.amazonaws.com/report.html"
+        "?x-amz-credential=AKIA%2F20260101%2Fus-east-1%2Fs3%2Faws4_request"
+        "&x-amz-date=20260102T000000Z"
+        "&x-amz-expires=7200"
+        "&x-amz-signature=bbbb"
+    )
+    assert first == second
+
+
+def test_canonicalize_url_keeps_a_legitimate_date_parameter_on_a_non_aws_url() -> None:
+    # "date" is a plausible, innocent app query parameter; only the
+    # AWS/GCS-prefixed forms (x-amz-date, x-goog-date) are signature-shaped
+    # and denylisted.
+    url = "https://example.com/report.html?date=2026-01-01"
+    assert canonicalize_url(url) == url
 
 
 def test_canonicalize_url_preserves_order_of_kept_query_parameters() -> None:

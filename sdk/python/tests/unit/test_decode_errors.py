@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from taguru import PassagePage, ResponseShapeError, TaguruError
+from taguru import AuditNames, PassageLookup, PassagePage, ResponseShapeError, TaguruError
 from taguru._decode import decode
 
 from .conftest import ok_response, sync_client
@@ -33,6 +33,23 @@ def test_response_shape_error_is_also_a_value_error() -> None:
 def test_missing_required_field_raises_response_shape_error() -> None:
     with pytest.raises(ResponseShapeError, match=r"^missing required field 'plan'"):
         decode(PassagePage, {})
+
+
+def test_list_field_fed_a_dict_raises_response_shape_error_instead_of_returning_its_keys() -> None:
+    """Without the isinstance check, iterating a dict yields its keys, so a
+    `list[str]` field silently decoded a dict into a list of its key names
+    instead of rejecting the shape mismatch."""
+    with pytest.raises(ResponseShapeError, match=r"^expected a list for list\[str\], got dict$"):
+        decode(AuditNames, {"total": 1, "names": {"a": 1}})
+
+
+def test_dict_field_fed_a_list_raises_response_shape_error_instead_of_attribute_error() -> None:
+    """Without the isinstance check, `.items()` on a list raised a bare
+    `AttributeError` instead of the dedicated, catchable shape error."""
+    with pytest.raises(
+        ResponseShapeError, match=r"^expected a dict for dict\[str, str\], got list$"
+    ):
+        decode(PassageLookup, {"passages": ["oops"]})
 
 
 def test_shape_mismatch_from_a_real_call_is_caught_by_bare_taguru_error() -> None:

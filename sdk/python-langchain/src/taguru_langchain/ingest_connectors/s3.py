@@ -636,6 +636,19 @@ def sync_object_storage(
     listing already carries ADR 0007 §9's fingerprint fields, so
     ``unchanged`` is exactly as reliable here as on a real run
     (ADR 0007 §11).
+
+    Memory: because the full listing is drained into ``metas`` before the
+    first fetch (the §11 ordering trade-off above), this function's own
+    memory use scales linearly with the number of objects under ``prefix``
+    — one ``ObjectMeta`` per object, for the whole run, regardless of how
+    many have been fetched/imported so far. The ``RunRecorder`` this
+    function constructs internally adds its own linear-in-source-count
+    retention on top (``keep_events=True``, the default — see
+    :class:`~.observability.RunRecorder`), since this function does not
+    currently expose a way to override it. For a bucket/prefix with a very
+    large object count, prefer partitioning the sync into multiple calls
+    over narrower prefixes, each with its own bounded inventory and event
+    list, rather than one call across the entire bucket.
     """
     if deletion_policy not in _DELETION_POLICIES:
         raise ValueError(f"deletion_policy must be one of {sorted(_DELETION_POLICIES)}")
