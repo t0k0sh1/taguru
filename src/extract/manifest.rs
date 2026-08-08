@@ -93,6 +93,27 @@ pub(super) struct ManifestEntry {
     /// computation input.
     #[serde(default)]
     pub(super) vocabulary_digest: String,
+    /// `--source-id`'s EFFECTIVE written source for this document
+    /// (`""` = off, the path was written) — #466 S1, ADR 0017: baked
+    /// into the emitted header like `context`/`description`, so a
+    /// change must rewrite the batch rather than skip with the old id
+    /// in place. The effective value (suffix included), not the flag,
+    /// so a revision of the multi-document suffix scheme re-extracts
+    /// too. Prompt-neutral on purpose: the model is still shown the
+    /// document path, which is why this field is NOT in the checkpoint
+    /// fingerprint — cached chunk answers stay reusable across a
+    /// source-id change.
+    #[serde(default)]
+    pub(super) source_id: String,
+    /// `--date` of the run that wrote this batch (0 = no field
+    /// emitted): baked into the passage line, same reasoning — and the
+    /// same checkpoint-fingerprint exemption — as `source_id`.
+    #[serde(default)]
+    pub(super) date: u64,
+    /// `--tag`s of the run that wrote this batch (empty = no field
+    /// emitted): likewise.
+    #[serde(default)]
+    pub(super) tags: Vec<String>,
     pub(super) output: String,
 }
 
@@ -130,6 +151,9 @@ impl Manifest {
         schema_digest: &str,
         candidates: &str,
         vocabulary_digest: &str,
+        source_id: &str,
+        date: u64,
+        tags: &[String],
     ) -> bool {
         self.documents.get(source).is_some_and(|entry| {
             entry.sha256 == sha256
@@ -146,6 +170,9 @@ impl Manifest {
                 && entry.schema_digest == schema_digest
                 && entry.candidates == candidates
                 && entry.vocabulary_digest == vocabulary_digest
+                && entry.source_id == source_id
+                && entry.date == date
+                && entry.tags == tags
         })
     }
 
@@ -166,6 +193,9 @@ impl Manifest {
         schema_digest: &str,
         candidates: &str,
         vocabulary_digest: &str,
+        source_id: &str,
+        date: u64,
+        tags: &[String],
         output: &str,
     ) {
         self.documents.insert(
@@ -185,6 +215,9 @@ impl Manifest {
                 schema_digest: schema_digest.to_string(),
                 candidates: candidates.to_string(),
                 vocabulary_digest: vocabulary_digest.to_string(),
+                source_id: source_id.to_string(),
+                date,
+                tags: tags.to_vec(),
                 output: output.to_string(),
             },
         );

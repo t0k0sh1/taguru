@@ -11,6 +11,28 @@ use super::*;
 pub(super) struct Run {
     pub(super) context: String,
     pub(super) description: Option<String>,
+    /// `--source-id` (#466 S1, ADR 0017): the promotion runbook's
+    /// session source id, written into the batch header in place of
+    /// the document path. `None` = the path, today's batch byte for
+    /// byte. The MANIFEST stays keyed by the document path either way
+    /// — the path names the input, this names the output.
+    pub(super) source_id: Option<String>,
+    /// `--date` (#466 S1): epoch seconds for the passage line's
+    /// `date` field (`None` = no field).
+    pub(super) date: Option<u64>,
+    /// `--tag` (#466 S1): tags for the passage line (empty = no field).
+    pub(super) tags: Vec<String>,
+    /// Whether this run extracts more than one document — under
+    /// `--source-id` that appends the runbook's `/{doc}` suffix
+    /// (the file stem) so per-source retract-then-apply cannot make
+    /// two documents silently replace each other.
+    pub(super) multi_document: bool,
+    /// Written-source claims (the batch HEADER's source), mirroring
+    /// `claimed`'s file-name check one level up: two documents whose
+    /// effective source ids collide would clobber each other at import
+    /// (retract-then-apply is per source id), so the second one fails
+    /// here instead.
+    pub(super) claimed_source_ids: BTreeMap<String, String>,
     pub(super) force: bool,
     pub(super) dry_run: bool,
     pub(super) no_passage: bool,
@@ -102,6 +124,26 @@ impl Run {
             questions_requested: self.questions > 0,
         })
     }
+
+    /// The source id the batch header carries: the document path
+    /// (today's behavior), or `--source-id`'s override — verbatim for
+    /// a single document, with the runbook's `/{doc}` suffix (the file
+    /// stem) when the run extracts several, since one session id
+    /// covering two documents would make import's per-source
+    /// retract-then-apply fold them into one another.
+    pub(super) fn written_source(&self, path: &Path, source: &str) -> String {
+        match &self.source_id {
+            None => source.to_string(),
+            Some(id) if !self.multi_document => id.clone(),
+            Some(id) => {
+                let stem = path
+                    .file_stem()
+                    .map(|stem| stem.to_string_lossy())
+                    .unwrap_or_default();
+                format!("{id}/{stem}")
+            }
+        }
+    }
 }
 
 /// [`Run::extract_chunks`]'s result: either every chunk completed, or a
@@ -180,8 +222,34 @@ impl Run {
         self.claimed.insert(file_name.clone(), source.to_string());
         let out_path = self.out.join(&file_name);
 
+        let written_source = self.written_source(path, source);
+        if written_source.len() > MAX_NAME_BYTES {
+            return Err(format!(
+                "its source id '{written_source}' is {} bytes, over the \
+                 {MAX_NAME_BYTES}-byte source cap",
+                written_source.len()
+            ));
+        }
+        if let Some(other) = self.claimed_source_ids.get(&written_source) {
+            return Err(format!(
+                "its source id '{written_source}' collides with '{other}' — import's \
+                 retract-then-apply is per source id, so one would silently replace the \
+                 other; rename one of the documents"
+            ));
+        }
+        self.claimed_source_ids
+            .insert(written_source.clone(), source.to_string());
+
         let text = read_document(path)?;
         let hash = sha256_hex(text.as_bytes());
+        // The fingerprint's source-id value is the EFFECTIVE written
+        // source, but only under the flag — "" when off, so pre-S1
+        // manifest entries (no field) keep matching default runs.
+        let source_id_value = if self.source_id.is_some() {
+            written_source.as_str()
+        } else {
+            ""
+        };
         if !self.force
             && self.manifest.matches(
                 source,
@@ -198,6 +266,9 @@ impl Run {
                 &self.schema_digest,
                 candidates_manifest_value(self.candidates),
                 &self.vocabulary_digest,
+                source_id_value,
+                self.date.unwrap_or(0),
+                &self.tags,
             )
             && out_path.is_file()
         {
@@ -328,10 +399,12 @@ impl Run {
         );
         let body = render_batch(
             &self.context,
-            source,
+            &written_source,
             self.description.as_deref(),
             &extraction,
             (!self.no_passage).then_some(text.as_str()),
+            self.date,
+            &self.tags,
         );
         if let Err(message) = crate::ingest::parse_batch(Cursor::new(body.as_bytes())) {
             return Err(format!(
@@ -357,6 +430,9 @@ impl Run {
             &self.schema_digest,
             candidates_manifest_value(self.candidates),
             &self.vocabulary_digest,
+            source_id_value,
+            self.date.unwrap_or(0),
+            &self.tags,
             &file_name,
         );
         // The batch is durably written and manifest-recorded — the

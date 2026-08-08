@@ -115,9 +115,16 @@
         scratch has grown.</li>
       <li><b>Extract the keepers</b> with <code>taguru extract</code> over the session
         passages (or hand-write the batch), targeting the <b>permanent</b> context — keeping
-        the <code>session:{agent}:{id}</code> source ids and the <code>date</code>s. Resolve
-        spellings against the permanent context first (<code>resolve</code> /
-        <code>resolve_label</code>): reuse its vocabulary, never fork it.</li>
+        the <code>session:{agent}:{id}</code> source ids and the <code>date</code>s:
+        <code>--source-id</code>, <code>--date</code>, and <code>--tag</code> bake all three
+        conventions into the emitted batch directly (ADR 0017), so no hand-editing of the
+        generated file remains. Resolve spellings against the permanent context rather than
+        forking its vocabulary: export it (<code>taguru export --out DIR</code>) and hand the
+        export to <code>--vocabulary</code> (ADR 0015), which steers the extraction toward
+        the context's existing spellings and admits them through validation — the manual
+        <code>resolve</code>/<code>resolve_label</code> pass remains for hand-written
+        batches. <code>--coverage</code> (ADR 0016) reports what the extraction left behind,
+        sentence by sentence — the mechanical floor under the review this step owes.</li>
       <li><b>Import</b> via <code>POST /import</code> / <code>taguru import</code> —
         retract-then-apply per source makes re-promoting the same session idempotent.</li>
       <li><b>Audit the landing zone</b>: <code>taguru consolidation --context NAME</code>

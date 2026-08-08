@@ -1109,6 +1109,9 @@ fn manifests_reextract_when_the_candidates_mode_changes() {
         "",
         candidates_manifest_value(true),
         "",
+        "",
+        0,
+        &[],
         "a.md.jsonl",
     );
     assert!(manifest.matches(
@@ -1125,12 +1128,31 @@ fn manifests_reextract_when_the_candidates_mode_changes() {
         false,
         "",
         candidates_manifest_value(true),
-        ""
+        "",
+        "",
+        0,
+        &[]
     ));
     // Turning the control off — or a future algorithm revision — is a
     // computation-input change like any other.
     assert!(!manifest.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "", "", ""
+        "a.md",
+        "hash-1",
+        "model-1",
+        "sake",
+        0,
+        false,
+        "",
+        0,
+        "",
+        0,
+        false,
+        "",
+        "",
+        "",
+        "",
+        0,
+        &[]
     ));
     // Pre-S2 entries (no field) default to "" and keep matching
     // default-off runs.
@@ -1150,10 +1172,29 @@ fn manifests_reextract_when_the_candidates_mode_changes() {
         "",
         "",
         "",
+        "",
+        0,
+        &[],
         "b.md.jsonl",
     );
     assert!(legacy.matches(
-        "b.md", "hash-2", "model-1", "sake", 0, false, "", 0, "", 0, false, "", "", ""
+        "b.md",
+        "hash-2",
+        "model-1",
+        "sake",
+        0,
+        false,
+        "",
+        0,
+        "",
+        0,
+        false,
+        "",
+        "",
+        "",
+        "",
+        0,
+        &[]
     ));
     assert!(!legacy.matches(
         "b.md",
@@ -1169,7 +1210,10 @@ fn manifests_reextract_when_the_candidates_mode_changes() {
         false,
         "",
         candidates_manifest_value(true),
-        ""
+        "",
+        "",
+        0,
+        &[]
     ));
 }
 
@@ -1408,16 +1452,67 @@ fn manifests_reextract_when_the_vocabulary_digest_changes() {
         "",
         "",
         "digest-a",
+        "",
+        0,
+        &[],
         "a.md.jsonl",
     );
     assert!(manifest.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "", "", "digest-a"
+        "a.md",
+        "hash-1",
+        "model-1",
+        "sake",
+        0,
+        false,
+        "",
+        0,
+        "",
+        0,
+        false,
+        "",
+        "",
+        "digest-a",
+        "",
+        0,
+        &[]
     ));
     assert!(!manifest.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "", "", "digest-b"
+        "a.md",
+        "hash-1",
+        "model-1",
+        "sake",
+        0,
+        false,
+        "",
+        0,
+        "",
+        0,
+        false,
+        "",
+        "",
+        "digest-b",
+        "",
+        0,
+        &[]
     ));
     assert!(!manifest.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "", "", ""
+        "a.md",
+        "hash-1",
+        "model-1",
+        "sake",
+        0,
+        false,
+        "",
+        0,
+        "",
+        0,
+        false,
+        "",
+        "",
+        "",
+        "",
+        0,
+        &[]
     ));
 }
 
@@ -2034,6 +2129,8 @@ fn rendered_batches_pass_the_import_parser() {
         Some("酒蔵の記憶"),
         &extraction,
         Some("一段落目。\n\n二段落目。"),
+        None,
+        &[],
     );
     // A passage with newlines still serializes to one line each:
     // header, passage, question, fact, alias.
@@ -2065,7 +2162,7 @@ fn a_stripped_passage_strips_the_paragraph_locators_too() {
         0,
         2,
     );
-    let body = render_batch("sake", "docs/aomine.md", None, &extraction, None);
+    let body = render_batch("sake", "docs/aomine.md", None, &extraction, None, None, &[]);
     assert!(
         !body.contains("\"paragraph\""),
         "no passage line, no locators: {body}"
@@ -2094,6 +2191,8 @@ fn a_paragraph_survives_extract_through_ingest_into_a_queried_attribution() {
         Some("配線テスト"),
         &extraction,
         Some("一段落目。\n\n二段落目。"),
+        None,
+        &[],
     );
     let batch = crate::ingest::parse_batch(Cursor::new(body.as_bytes()))
         .expect("extract must never emit what import refuses");
@@ -2139,52 +2238,231 @@ fn manifests_skip_only_exact_recomputations() {
         "",
         "",
         "",
+        "",
+        0,
+        &[],
         "a.md.jsonl",
     );
     assert!(manifest.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "", "", ""
+        "a.md",
+        "hash-1",
+        "model-1",
+        "sake",
+        0,
+        false,
+        "",
+        0,
+        "",
+        0,
+        false,
+        "",
+        "",
+        "",
+        "",
+        0,
+        &[]
     ));
     assert!(!manifest.matches(
-        "a.md", "hash-2", "model-1", "sake", 0, false, "", 0, "", 0, false, "", "", ""
+        "a.md",
+        "hash-2",
+        "model-1",
+        "sake",
+        0,
+        false,
+        "",
+        0,
+        "",
+        0,
+        false,
+        "",
+        "",
+        "",
+        "",
+        0,
+        &[]
     ));
     assert!(!manifest.matches(
-        "a.md", "hash-1", "model-2", "sake", 0, false, "", 0, "", 0, false, "", "", ""
+        "a.md",
+        "hash-1",
+        "model-2",
+        "sake",
+        0,
+        false,
+        "",
+        0,
+        "",
+        0,
+        false,
+        "",
+        "",
+        "",
+        "",
+        0,
+        &[]
     ));
     assert!(!manifest.matches(
-        "b.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "", "", ""
+        "b.md",
+        "hash-1",
+        "model-1",
+        "sake",
+        0,
+        false,
+        "",
+        0,
+        "",
+        0,
+        false,
+        "",
+        "",
+        "",
+        "",
+        0,
+        &[]
     ));
     // A re-pointed --context must re-extract, not keep files whose
     // headers still name the old target.
     assert!(!manifest.matches(
-        "a.md", "hash-1", "model-1", "vats", 0, false, "", 0, "", 0, false, "", "", ""
+        "a.md",
+        "hash-1",
+        "model-1",
+        "vats",
+        0,
+        false,
+        "",
+        0,
+        "",
+        0,
+        false,
+        "",
+        "",
+        "",
+        "",
+        0,
+        &[]
     ));
     // Toggling --no-passage changes whether the batch carries the
     // source passage at all — a skip would keep the stale shape.
     assert!(!manifest.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, true, "", 0, "", 0, false, "", "", ""
+        "a.md",
+        "hash-1",
+        "model-1",
+        "sake",
+        0,
+        true,
+        "",
+        0,
+        "",
+        0,
+        false,
+        "",
+        "",
+        "",
+        "",
+        0,
+        &[]
     ));
     // A changed --description is baked into the batch header, so it
     // must re-extract too rather than skip with the old one.
     assert!(!manifest.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "new desc", 0, "", 0, false, "", "", ""
+        "a.md",
+        "hash-1",
+        "model-1",
+        "sake",
+        0,
+        false,
+        "new desc",
+        0,
+        "",
+        0,
+        false,
+        "",
+        "",
+        "",
+        "",
+        0,
+        &[]
     ));
     // A changed --fact-budget is folded into the system prompt like
     // --questions, so it must re-extract too rather than skip.
     assert!(!manifest.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "", 5, "", 0, false, "", "", ""
+        "a.md",
+        "hash-1",
+        "model-1",
+        "sake",
+        0,
+        false,
+        "",
+        5,
+        "",
+        0,
+        false,
+        "",
+        "",
+        "",
+        "",
+        0,
+        &[]
     ));
     // A changed --structured-output or --max-output-tokens changes
     // what the model can answer — computation inputs like the rest.
     assert!(!manifest.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "auto", 0, false, "", "", ""
+        "a.md",
+        "hash-1",
+        "model-1",
+        "sake",
+        0,
+        false,
+        "",
+        0,
+        "auto",
+        0,
+        false,
+        "",
+        "",
+        "",
+        "",
+        0,
+        &[]
     ));
     assert!(!manifest.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 2048, false, "", "", ""
+        "a.md",
+        "hash-1",
+        "model-1",
+        "sake",
+        0,
+        false,
+        "",
+        0,
+        "",
+        2048,
+        false,
+        "",
+        "",
+        "",
+        "",
+        0,
+        &[]
     ));
     // Issue #199: a changed --lossy changes what the batch's facts
     // even are (dropped vs. corrected), so it must re-extract too.
     assert!(!manifest.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, true, "", "", ""
+        "a.md",
+        "hash-1",
+        "model-1",
+        "sake",
+        0,
+        false,
+        "",
+        0,
+        "",
+        0,
+        true,
+        "",
+        "",
+        "",
+        "",
+        0,
+        &[]
     ));
 
     // A prompt bump invalidates entries recorded under the old one.
@@ -2194,7 +2472,23 @@ fn manifests_skip_only_exact_recomputations() {
         .expect("just recorded")
         .prompt_version = PROMPT_VERSION + 1;
     assert!(!manifest.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "", "", ""
+        "a.md",
+        "hash-1",
+        "model-1",
+        "sake",
+        0,
+        false,
+        "",
+        0,
+        "",
+        0,
+        false,
+        "",
+        "",
+        "",
+        "",
+        0,
+        &[]
     ));
 
     let dir = std::env::temp_dir().join(format!("taguru-manifest-{}", std::process::id()));
@@ -2218,11 +2512,30 @@ fn manifests_skip_only_exact_recomputations() {
         "",
         "",
         "",
+        "",
+        0,
+        &[],
         "a.md.jsonl",
     );
     manifest.save(&path).unwrap();
     assert!(Manifest::load(&path).matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "", "", ""
+        "a.md",
+        "hash-1",
+        "model-1",
+        "sake",
+        0,
+        false,
+        "",
+        0,
+        "",
+        0,
+        false,
+        "",
+        "",
+        "",
+        "",
+        0,
+        &[]
     ));
     fs::write(&path, "not json").unwrap();
     assert!(Manifest::load(&path).documents.is_empty());
@@ -2239,7 +2552,23 @@ fn manifests_skip_only_exact_recomputations() {
     let legacy = Manifest::load(&path);
     assert_eq!(legacy.documents.len(), 1);
     assert!(!legacy.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "", "", ""
+        "a.md",
+        "hash-1",
+        "model-1",
+        "sake",
+        0,
+        false,
+        "",
+        0,
+        "",
+        0,
+        false,
+        "",
+        "",
+        "",
+        "",
+        0,
+        &[]
     ));
 
     // An entry written before the structured_output/
@@ -2258,7 +2587,23 @@ fn manifests_skip_only_exact_recomputations() {
     .unwrap();
     let pre_ladder = Manifest::load(&path);
     assert!(pre_ladder.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "", "", ""
+        "a.md",
+        "hash-1",
+        "model-1",
+        "sake",
+        0,
+        false,
+        "",
+        0,
+        "",
+        0,
+        false,
+        "",
+        "",
+        "",
+        "",
+        0,
+        &[]
     ));
     assert!(!pre_ladder.matches(
         "a.md",
@@ -2274,12 +2619,31 @@ fn manifests_skip_only_exact_recomputations() {
         false,
         "",
         "",
-        ""
+        "",
+        "",
+        0,
+        &[]
     ));
     // Issue #199: an entry from before --lossy existed defaults to
     // `false` (strict) and must NOT match a --lossy run.
     assert!(!pre_ladder.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, true, "", "", ""
+        "a.md",
+        "hash-1",
+        "model-1",
+        "sake",
+        0,
+        false,
+        "",
+        0,
+        "",
+        0,
+        true,
+        "",
+        "",
+        "",
+        "",
+        0,
+        &[]
     ));
     let _ = fs::remove_dir_all(&dir);
 }
@@ -2302,21 +2666,72 @@ fn manifests_reextract_when_the_schema_digest_changes() {
         "digest-1",
         "",
         "",
+        "",
+        0,
+        &[],
         "a.md.jsonl",
     );
     assert!(manifest.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "digest-1", "", ""
+        "a.md",
+        "hash-1",
+        "model-1",
+        "sake",
+        0,
+        false,
+        "",
+        0,
+        "",
+        0,
+        false,
+        "digest-1",
+        "",
+        "",
+        "",
+        0,
+        &[]
     ));
     // A different --schema document — even with everything else
     // identical — must re-extract: the prompt's schema block and
     // self-validation both changed under it.
     assert!(!manifest.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "digest-2", "", ""
+        "a.md",
+        "hash-1",
+        "model-1",
+        "sake",
+        0,
+        false,
+        "",
+        0,
+        "",
+        0,
+        false,
+        "digest-2",
+        "",
+        "",
+        "",
+        0,
+        &[]
     ));
     // Dropping --schema entirely (querying with "") must also
     // re-extract a schema-recorded entry, not just swap it.
     assert!(!manifest.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "", "", ""
+        "a.md",
+        "hash-1",
+        "model-1",
+        "sake",
+        0,
+        false,
+        "",
+        0,
+        "",
+        0,
+        false,
+        "",
+        "",
+        "",
+        "",
+        0,
+        &[]
     ));
 
     // An entry written before `--schema` existed defaults to "" —
@@ -2338,13 +2753,48 @@ fn manifests_reextract_when_the_schema_digest_changes() {
         "",
         "",
         "",
+        "",
+        0,
+        &[],
         "b.md.jsonl",
     );
     assert!(legacy.matches(
-        "b.md", "hash-2", "model-1", "sake", 0, false, "", 0, "", 0, false, "", "", ""
+        "b.md",
+        "hash-2",
+        "model-1",
+        "sake",
+        0,
+        false,
+        "",
+        0,
+        "",
+        0,
+        false,
+        "",
+        "",
+        "",
+        "",
+        0,
+        &[]
     ));
     assert!(!legacy.matches(
-        "b.md", "hash-2", "model-1", "sake", 0, false, "", 0, "", 0, false, "digest-1", "", ""
+        "b.md",
+        "hash-2",
+        "model-1",
+        "sake",
+        0,
+        false,
+        "",
+        0,
+        "",
+        0,
+        false,
+        "digest-1",
+        "",
+        "",
+        "",
+        0,
+        &[]
     ));
 }
 
@@ -3196,4 +3646,269 @@ fn a_gap_quote_is_capped_at_a_char_boundary() {
         quote.len() <= GAP_QUOTE_MAX_BYTES + '…'.len_utf8(),
         "{quote}"
     );
+}
+
+// ---- promotion runbook conventions (#466 S1, ADR 0017) ----
+
+#[test]
+fn dates_parse_as_epoch_seconds_or_utc_civil_days() {
+    assert_eq!(parse_date("1785974400"), Some(1785974400));
+    // A civil date is that day's UTC midnight, round-tripped through
+    // the rendering direction.
+    let seconds = parse_date("2026-08-06").expect("a real date parses");
+    assert_eq!(crate::clock::iso8601_utc(seconds), "2026-08-06T00:00:00Z");
+    assert_eq!(parse_date("1970-01-01"), None); // 0 is the manifest's off sentinel
+    assert_eq!(parse_date("0"), None);
+    assert_eq!(parse_date("2026-02-30"), None); // normalizes ≠ as-written → refused
+    assert_eq!(parse_date("2026-13-01"), None);
+    assert_eq!(parse_date("session-note"), None);
+    assert_eq!(parse_date(""), None);
+}
+
+#[test]
+fn runbook_flags_parse_and_their_contradictions_are_usage_errors() {
+    fn parse(words: &[&str]) -> Result<Args, i32> {
+        Args::parse(&words.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+    let base = ["--context", "c", "--out", "o"];
+    let mut ok = base.to_vec();
+    ok.extend([
+        "--source-id",
+        "session:claude:abc",
+        "--date",
+        "2026-08-06",
+        "--tag",
+        "ops",
+        "--tag",
+        "リリース",
+        "--tag",
+        "ops", // duplicates fold instead of erroring or double-writing
+        "doc.md",
+    ]);
+    let parsed = parse(&ok).expect("the runbook flags parse");
+    assert_eq!(parsed.source_id.as_deref(), Some("session:claude:abc"));
+    assert_eq!(
+        parsed.date,
+        Some(parse_date("2026-08-06").expect("a real date parses"))
+    );
+    assert_eq!(parsed.tags, vec!["ops".to_string(), "リリース".to_string()]);
+
+    let mut twice = base.to_vec();
+    twice.extend(["--source-id", "a", "--source-id", "b", "doc.md"]);
+    assert!(matches!(parse(&twice), Err(2)));
+    let mut empty = base.to_vec();
+    empty.extend(["--source-id", "", "doc.md"]);
+    assert!(matches!(parse(&empty), Err(2)));
+    let mut bad_date = base.to_vec();
+    bad_date.extend(["--date", "yesterday", "doc.md"]);
+    assert!(matches!(parse(&bad_date), Err(2)));
+    // Metadata rides the passage line, so stripping the passage while
+    // asking for it is a contradiction, not a silent drop.
+    let mut stripped = base.to_vec();
+    stripped.extend(["--no-passage", "--date", "2026-08-06", "doc.md"]);
+    assert!(matches!(parse(&stripped), Err(2)));
+    let mut stripped_tag = base.to_vec();
+    stripped_tag.extend(["--no-passage", "--tag", "ops", "doc.md"]);
+    assert!(matches!(parse(&stripped_tag), Err(2)));
+}
+
+#[test]
+fn the_passage_line_carries_date_and_tags_exactly_when_given() {
+    let extraction = merge(
+        vec![parse_model_output(
+            r#"{"associations": [{"subject": "a", "label": "l", "object": "b", "weight": 1.0}]}"#,
+        )
+        .unwrap()],
+        0,
+        1,
+    );
+    let plain = render_batch("c", "s", None, &extraction, Some("本文。"), None, &[]);
+    let passage_line = plain.lines().nth(1).expect("header then passage");
+    // No flags → the passage line stays byte-for-byte pre-S1.
+    assert_eq!(passage_line, r#"{"passage":"本文。"}"#);
+
+    let tagged = render_batch(
+        "c",
+        "session:claude:abc",
+        None,
+        &extraction,
+        Some("本文。"),
+        Some(1785974400),
+        &["ops".to_string(), "リリース".to_string()],
+    );
+    let header: serde_json::Value = serde_json::from_str(tagged.lines().next().unwrap()).unwrap();
+    assert_eq!(header["source"], "session:claude:abc");
+    let passage: serde_json::Value = serde_json::from_str(tagged.lines().nth(1).unwrap()).unwrap();
+    assert_eq!(passage["date"], 1785974400u64);
+    assert_eq!(passage["tags"], serde_json::json!(["ops", "リリース"]));
+    // What extract writes, import accepts.
+    crate::ingest::parse_batch(Cursor::new(tagged.as_bytes())).unwrap();
+}
+
+#[test]
+fn manifests_rewrite_when_the_runbook_metadata_changes() {
+    let mut manifest = Manifest::default();
+    manifest.record(
+        "a.md",
+        "hash-1",
+        "model-1",
+        "sake",
+        0,
+        false,
+        "",
+        0,
+        "",
+        0,
+        false,
+        "",
+        "",
+        "",
+        "session:claude:abc",
+        1785974400,
+        &["ops".to_string()],
+        "a.md.jsonl",
+    );
+    let matches_with = |source_id: &str, date: u64, tags: &[String]| {
+        manifest.matches(
+            "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "", "", "",
+            source_id, date, tags,
+        )
+    };
+    assert!(matches_with(
+        "session:claude:abc",
+        1785974400,
+        &["ops".to_string()]
+    ));
+    // Any of the three changing must rewrite the batch — they are all
+    // baked into the emitted file.
+    assert!(!matches_with(
+        "session:claude:xyz",
+        1785974400,
+        &["ops".to_string()]
+    ));
+    assert!(!matches_with("session:claude:abc", 0, &["ops".to_string()]));
+    assert!(!matches_with("session:claude:abc", 1785974400, &[]));
+
+    // Pre-S1 entries (no fields) keep matching default runs.
+    let mut legacy = Manifest::default();
+    legacy.record(
+        "b.md",
+        "hash-2",
+        "model-1",
+        "sake",
+        0,
+        false,
+        "",
+        0,
+        "",
+        0,
+        false,
+        "",
+        "",
+        "",
+        "",
+        0,
+        &[],
+        "b.md.jsonl",
+    );
+    let json = serde_json::to_string(&legacy).unwrap();
+    let reloaded: Manifest = serde_json::from_str(
+        &json
+            .replace(r#""source_id":"","#, "")
+            .replace(r#""date":0,"#, "")
+            .replace(r#""tags":[],"#, ""),
+    )
+    .unwrap();
+    assert!(reloaded.matches(
+        "b.md",
+        "hash-2",
+        "model-1",
+        "sake",
+        0,
+        false,
+        "",
+        0,
+        "",
+        0,
+        false,
+        "",
+        "",
+        "",
+        "",
+        0,
+        &[]
+    ));
+}
+
+#[test]
+fn runbook_flag_boundaries_hold_exactly() {
+    fn parse(words: Vec<String>) -> Result<Args, i32> {
+        Args::parse(&words)
+    }
+    fn base() -> Vec<String> {
+        ["--context", "c", "--out", "o"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    }
+    // A duplicate --date is a usage error, never last-wins.
+    let mut dated = base();
+    dated.extend(
+        ["--date", "2026-08-06", "--date", "2026-08-07", "doc.md"]
+            .iter()
+            .map(|s| s.to_string()),
+    );
+    assert!(matches!(parse(dated), Err(2)));
+    // An empty tag is refused, not stored.
+    let mut empty_tag = base();
+    empty_tag.extend(["--tag", "", "doc.md"].iter().map(|s| s.to_string()));
+    assert!(matches!(parse(empty_tag), Err(2)));
+    // Tag bytes: exactly at the cap passes, one over fails.
+    let mut at_cap = base();
+    at_cap.extend([
+        "--tag".to_string(),
+        "t".repeat(crate::api::MAX_TAG_BYTES),
+        "doc.md".to_string(),
+    ]);
+    assert!(parse(at_cap).is_ok());
+    let mut over_cap = base();
+    over_cap.extend([
+        "--tag".to_string(),
+        "t".repeat(crate::api::MAX_TAG_BYTES + 1),
+        "doc.md".to_string(),
+    ]);
+    assert!(matches!(parse(over_cap), Err(2)));
+    // Tag count: exactly the per-source cap passes, one more fails.
+    let mut full = base();
+    for i in 0..crate::api::MAX_TAGS_PER_SOURCE {
+        full.extend(["--tag".to_string(), format!("t{i}")]);
+    }
+    full.push("doc.md".to_string());
+    assert!(parse(full).is_ok());
+    let mut overfull = base();
+    for i in 0..=crate::api::MAX_TAGS_PER_SOURCE {
+        overfull.extend(["--tag".to_string(), format!("t{i}")]);
+    }
+    overfull.push("doc.md".to_string());
+    assert!(matches!(parse(overfull), Err(2)));
+    // Source id bytes: exactly at the name cap passes, one over fails.
+    let mut id_at_cap = base();
+    id_at_cap.extend([
+        "--source-id".to_string(),
+        "s".repeat(MAX_NAME_BYTES),
+        "doc.md".to_string(),
+    ]);
+    assert!(parse(id_at_cap).is_ok());
+    let mut id_over = base();
+    id_over.extend([
+        "--source-id".to_string(),
+        "s".repeat(MAX_NAME_BYTES + 1),
+        "doc.md".to_string(),
+    ]);
+    assert!(matches!(parse(id_over), Err(2)));
+    // A fourth dash-separated part is refused even when the first
+    // three name a real date; day 0 is refused before the civil
+    // arithmetic ever sees it.
+    assert_eq!(parse_date("2026-08-06-07"), None);
+    assert_eq!(parse_date("2026-08-00"), None);
 }
