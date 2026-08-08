@@ -703,10 +703,13 @@ export class PdfConnector implements Connector {
       }
     }
 
+    // Set lookups keep the per-page skip checks O(1) — Array.includes here
+    // would make a mostly-unusable large PDF quadratic.
+    const failedPageSet = new Set(failedPages);
     let emptyPages: number[] = [];
     for (let index = 0; index < pageCount; index += 1) {
       const pageNumber = index + 1;
-      if (failedPages.includes(pageNumber)) {
+      if (failedPageSet.has(pageNumber)) {
         continue;
       }
       if (pageCharCount(pageTexts[index]!) < this.minCharsPerPage) {
@@ -733,9 +736,11 @@ export class PdfConnector implements Connector {
     const paragraphs: string[] = [];
     const locators: LocatorEntry[] = [];
     const pageParagraphStarts: Array<number | null> = new Array(pageCount).fill(null);
+    // Built after OCR recovery, which may have shrunk emptyPages.
+    const emptyPageSet = new Set(emptyPages);
     for (let index = 0; index < pageCount; index += 1) {
       const pageNumber = index + 1;
-      if (failedPages.includes(pageNumber) || emptyPages.includes(pageNumber)) {
+      if (failedPageSet.has(pageNumber) || emptyPageSet.has(pageNumber)) {
         continue;
       }
       const pageParagraphs = splitParagraphs(pageTexts[index]!);

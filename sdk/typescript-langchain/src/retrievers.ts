@@ -391,8 +391,10 @@ function interleave(perTarget: Document[][]): Document[] {
  * retriever's own target.
  */
 function hitContext(hit: PassageHit, fallback: string | undefined): string | undefined {
+  // `??`, not `||`: a hit explicitly tagged with a context — even an
+  // empty-string one — must keep it rather than inherit the fallback.
   const tagged = (hit as { context?: string }).context;
-  return tagged || fallback;
+  return tagged ?? fallback;
 }
 
 function textDocument(hit: PassageHit, context: string | undefined): Document {
@@ -436,7 +438,21 @@ function mergeLanes(
   };
 
   graphDocs.forEach((document, rank) => {
-    scored.set(keyOf(document), { score: rrf(rank), document });
+    const key = keyOf(document);
+    const existing = scored.get(key);
+    if (existing === undefined) {
+      scored.set(key, { score: rrf(rank), document });
+    } else {
+      // Two graph docs can land on one key (e.g. the same graph-only
+      // triple reached via different paths) — merge like the text lane
+      // below does, never overwrite the better-ranked document.
+      const merged = existing.document.metadata["associations"] as AssociationMeta[] | undefined;
+      const extra = document.metadata["associations"] as AssociationMeta[] | undefined;
+      if (merged !== undefined && extra !== undefined) {
+        merged.push(...extra);
+      }
+      existing.score += rrf(rank);
+    }
   });
 
   textHits.forEach((hit, rank) => {

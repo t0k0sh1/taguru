@@ -133,10 +133,13 @@ function optionalStr(value: unknown): string | null {
   return value === null || value === undefined ? null : String(value);
 }
 
-/** `String(value)` only when the key is present; a missing required key
- * aborts the parse by returning `null` at the call site. */
+/** `String(value)` only when the key is present with a real value; a
+ * missing key — and a present-but-null/undefined one, which would
+ * otherwise stringify to "null"/"undefined" — aborts the parse by
+ * returning `null` at the call site. */
 function requiredStr(data: Record<string, unknown>, key: string): string | null {
-  return key in data ? String(data[key]) : null;
+  const value = data[key];
+  return value === null || value === undefined ? null : String(value);
 }
 
 /**

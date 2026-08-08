@@ -59,7 +59,13 @@ export function dropUndefined(mapping: Record<string, unknown>): Record<string, 
  * pagination cursor depends on.
  */
 export function sortedEntries(mapping: Record<string, string>): Array<[string, string]> {
-  return Object.entries(mapping).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  // `<` on strings compares UTF-16 code units, which diverges from UTF-8
+  // byte order for supplementary-plane keys (an emoji sorts before
+  // U+E000–U+FFFF in UTF-16, after in UTF-8) — enough to desync a
+  // pagination cursor computed from this order.
+  return Object.entries(mapping).sort(([a], [b]) =>
+    Buffer.compare(Buffer.from(a, "utf-8"), Buffer.from(b, "utf-8")),
+  );
 }
 
 /** Split a batch by both element count and serialized body size. */

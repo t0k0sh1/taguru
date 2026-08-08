@@ -45,6 +45,7 @@
  */
 
 import {
+  degradeTagFailures,
   errorMessage,
   FetchedObject,
   type ObjectStore,
@@ -344,23 +345,14 @@ export class GCSObjectStore implements ObjectStore {
    * failure reading it yields `{}`, never a failed object).
    */
   async objectTags(key: string): Promise<Record<string, string>> {
-    let blob: GCSBlobLike | null;
-    try {
-      const client = await this.clientOrBuild();
-      blob = await client.bucket(this.bucketName).getBlob(key);
-    } catch (error) {
-      if (error instanceof PermanentStoreError) {
-        return {};
-      }
-      const classified = classifyGcsError(error, () => new ObjectNotFoundError(errorMessage(error)));
-      if (classified instanceof TransientStoreError) {
-        // Transient failures re-raise (retry next pass) exactly as the
-        // S3 backend's `objectTags` does; only the permanent/not-found
-        // cases degrade to "no tags."
-        throw classified;
-      }
-      return {};
-    }
+    const blob = await degradeTagFailures<GCSBlobLike | null>(
+      async () => {
+        const client = await this.clientOrBuild();
+        return client.bucket(this.bucketName).getBlob(key);
+      },
+      (error) => classifyGcsError(error, () => new ObjectNotFoundError(errorMessage(error))),
+      null,
+    );
     if (blob === null || blob.metadata === null) {
       return {};
     }

@@ -195,6 +195,31 @@ export interface ObjectStore {
   objectTags(key: string): Promise<Record<string, string>>;
 }
 
+/**
+ * ADR 0007 §9's tags-degrade contract, shared by every cloud backend's
+ * `objectTags`: permanent/not-found failures degrade to `empty` (never
+ * fail the object over a tags-only permission gap or a vanished object),
+ * while transient failures re-raise so the next sync pass retries.
+ */
+export async function degradeTagFailures<T>(
+  read: () => Promise<T>,
+  classify: (error: unknown) => Error,
+  empty: T,
+): Promise<T> {
+  try {
+    return await read();
+  } catch (error) {
+    if (error instanceof PermanentStoreError) {
+      return empty;
+    }
+    const classified = classify(error);
+    if (classified instanceof TransientStoreError) {
+      throw classified;
+    }
+    return empty;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // file:// — node:fs only. The test/air-gapped backend (issue #351's own
 // "minio/localstack を使わず file:// バケットでテスト" requirement), the same

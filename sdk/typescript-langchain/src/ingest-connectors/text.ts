@@ -203,6 +203,14 @@ export class TextFileConnector implements Connector {
     } catch (error) {
       return failure("unreadable", String(error));
     }
+    // Re-check on the bytes actually read: a file appended to between the
+    // stat() above and the readFile() would otherwise slip past the cap.
+    if (raw.byteLength > MAX_PASSAGE_BYTES) {
+      return failure(
+        "content_too_large",
+        `${raw.byteLength} bytes exceeds the ${MAX_PASSAGE_BYTES}-byte passage cap`,
+      );
+    }
     const rawContentSha256 = await sha256HexBytes(raw);
 
     let text: string;

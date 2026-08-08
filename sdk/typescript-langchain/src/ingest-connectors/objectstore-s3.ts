@@ -43,6 +43,7 @@
  */
 
 import {
+  degradeTagFailures,
   errorMessage,
   FetchedObject,
   type ObjectStore,
@@ -520,21 +521,13 @@ export class S3ObjectStore implements ObjectStore {
    * requires (mirrors the GCS/Azure backends' own `objectTags`).
    */
   async objectTags(key: string): Promise<Record<string, string>> {
-    try {
-      const client = await this.clientOrBuild();
-      return { ...(await client.getObjectTagging(this.bucketName, key)) };
-    } catch (error) {
-      if (error instanceof PermanentStoreError) {
-        return {};
-      }
-      const classified = classifyS3Error(error, () => new ObjectNotFoundError(errorMessage(error)));
-      if (classified instanceof TransientStoreError) {
-        // Transient failures re-raise (retry next pass) exactly as the
-        // GCS/Azure backends' own `objectTags` does; only the
-        // permanent/not-found cases degrade to "no tags."
-        throw classified;
-      }
-      return {};
-    }
+    return degradeTagFailures(
+      async () => {
+        const client = await this.clientOrBuild();
+        return { ...(await client.getObjectTagging(this.bucketName, key)) };
+      },
+      (error) => classifyS3Error(error, () => new ObjectNotFoundError(errorMessage(error))),
+      {},
+    );
   }
 }

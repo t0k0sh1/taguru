@@ -162,7 +162,10 @@ export class Taguru {
     // through to the next source, matching the Python SDK's `base_url or env
     // or DEFAULT` — an unusable URL should never win over the default.
     this.baseUrl = (options.base_url || env?.[ENV_URL] || DEFAULT_BASE_URL).replace(/\/+$/, "");
-    this.apiKey = options.api_key ?? env?.[ENV_TOKEN];
+    // Same `||` rationale: an explicit "" api_key (an unset secret in a
+    // config template) must fall through to the env var, not silently
+    // disable auth.
+    this.apiKey = options.api_key || env?.[ENV_TOKEN];
     this.retries = options.retries ?? DEFAULT_RETRIES;
     this.timeoutSecs = options.timeout ?? DEFAULT_TIMEOUT_SECS;
     this.headers = normalizeHeaders(options.headers ?? {});
@@ -1826,18 +1829,25 @@ export class Context {
       const resolved: Record<string, TieredResolution[]> = {};
       const anchors: string[] = [];
       await tracing.span(tracing.SPAN_RESOLVE, async () => {
-        for (const cue of cues) {
-          const candidates = await this.resolve(cue, {
-            dice_floor: options.dice_floor,
-            semantic_floor: options.semantic_floor,
-            limit: options.resolve_limit,
-          });
+        // Each cue's resolve is independent — fetch them concurrently, then
+        // fold in cue order so `resolved`/`anchors` stay deterministic.
+        const perCue = await Promise.all(
+          cues.map((cue) =>
+            this.resolve(cue, {
+              dice_floor: options.dice_floor,
+              semantic_floor: options.semantic_floor,
+              limit: options.resolve_limit,
+            }),
+          ),
+        );
+        cues.forEach((cue, index) => {
+          const candidates = perCue[index]!;
           resolved[cue] = candidates;
           const picked = autoPick ? candidates[0]?.name : cue;
           if (picked !== undefined && !anchors.includes(picked)) {
             anchors.push(picked);
           }
-        }
+        });
       });
       root.count(tracing.ATTR_ANCHOR_COUNT, anchors.length);
 
@@ -1849,9 +1859,10 @@ export class Context {
       if (anchors.length > 0) {
         if (describeFirst) {
           await tracing.span(tracing.SPAN_DESCRIBE, async () => {
-            for (const anchor of anchors) {
-              outline[anchor] = await this.describe(anchor);
-            }
+            const described = await Promise.all(anchors.map((anchor) => this.describe(anchor)));
+            anchors.forEach((anchor, index) => {
+              outline[anchor] = described[index] ?? null;
+            });
           });
         } else {
           root.skip("describe_disabled");
@@ -1910,19 +1921,29 @@ export class Context {
             }
           }
           let missing = 0;
-          for (const [source, paragraph] of wanted) {
-            try {
-              citations.set(
-                citationKey(source, paragraph),
-                await this.citePassage(source, paragraph),
-              );
-            } catch (error) {
-              // The locator points at a passage that was never stored (or
-              // was retracted) — the graph fact itself still stands.
-              if (!(error instanceof NotFoundError)) {
-                throw error;
+          // Each citation is its own round trip with per-item error
+          // handling — fetch them concurrently instead of serially.
+          const fetched = await Promise.all(
+            wanted.map(async ([source, paragraph]) => {
+              try {
+                return [
+                  citationKey(source, paragraph),
+                  await this.citePassage(source, paragraph),
+                ] as const;
+              } catch (error) {
+                // The locator points at a passage that was never stored (or
+                // was retracted) — the graph fact itself still stands.
+                if (!(error instanceof NotFoundError)) {
+                  throw error;
+                }
+                missing += 1;
+                return null;
               }
-              missing += 1;
+            }),
+          );
+          for (const entry of fetched) {
+            if (entry !== null) {
+              citations.set(entry[0], entry[1]);
             }
           }
           citationsSpan.citationMissing(missing);
