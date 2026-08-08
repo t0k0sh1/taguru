@@ -1538,6 +1538,228 @@ fn probe_model(model: &ResolvedModel) -> ManifestModel {
     }
 }
 
+#[cfg(test)]
+mod probe_model_tests {
+    use super::*;
+
+    /// A canned-response probe stub: each connection is answered by the
+    /// first route whose prefix matches the request line (`"POST
+    /// /api/show"`, `"GET /api/tags"`, `"GET /v1/models"`), with 404 for
+    /// anything unrouted. `Connection: close` forces the client to
+    /// reconnect per request, so routing stays per-request. The acceptor
+    /// thread is spawn-and-forget, the same shape as the extract stubs:
+    /// `probe_model` returns only after every response it will ever read
+    /// has arrived, so nothing waits on the thread.
+    fn stub_probe_server(routes: Vec<(&'static str, u16, String)>) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut buffer = Vec::new();
+                let mut chunk = [0u8; 8192];
+                let header_end = loop {
+                    let Ok(read) = stream.read(&mut chunk) else {
+                        break 0;
+                    };
+                    if read == 0 {
+                        break 0;
+                    }
+                    buffer.extend_from_slice(&chunk[..read]);
+                    if let Some(position) =
+                        buffer.windows(4).position(|window| window == b"\r\n\r\n")
+                    {
+                        break position + 4;
+                    }
+                };
+                if header_end == 0 {
+                    continue;
+                }
+                let headers = String::from_utf8_lossy(&buffer[..header_end]).to_string();
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())?
+                    })
+                    .unwrap_or(0);
+                while buffer.len() < header_end + content_length {
+                    let Ok(read) = stream.read(&mut chunk) else {
+                        break;
+                    };
+                    if read == 0 {
+                        break;
+                    }
+                    buffer.extend_from_slice(&chunk[..read]);
+                }
+                let (status, body) = routes
+                    .iter()
+                    .find(|(prefix, ..)| headers.starts_with(prefix))
+                    .map(|(_, status, body)| (*status, body.clone()))
+                    .unwrap_or((404, String::new()));
+                let response = format!(
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        url
+    }
+
+    fn model_at(url: &str) -> ResolvedModel {
+        ResolvedModel {
+            id: "qwen25-7b-q4".to_string(),
+            label: None,
+            model: "qwen2.5:7b-instruct-q4_K_M".to_string(),
+            url: format!("{url}/v1/chat/completions"),
+            api_key_env: None,
+            structured_output: "auto".to_string(),
+            timeout_secs: 120,
+            note: None,
+        }
+    }
+
+    #[test]
+    fn ollama_native_facts_reach_the_manifest_model() {
+        let url = stub_probe_server(vec![
+            (
+                "POST /api/show",
+                200,
+                serde_json::json!({
+                    "details": {"quantization_level": "Q4_K_M"},
+                    "model_info": {"qwen2.context_length": 32768},
+                })
+                .to_string(),
+            ),
+            (
+                "GET /api/tags",
+                200,
+                serde_json::json!({
+                    "models": [
+                        {"name": "other:latest", "digest": "sha256:other"},
+                        {"name": "qwen2.5:7b-instruct-q4_K_M", "digest": "sha256:abc123"},
+                    ],
+                })
+                .to_string(),
+            ),
+        ]);
+        let model = model_at(&url);
+        let entry = probe_model(&model);
+        assert_eq!(entry.digest.as_deref(), Some("sha256:abc123"));
+        assert_eq!(entry.quantization.as_deref(), Some("Q4_K_M"));
+        assert_eq!(entry.context_window, Some(32768));
+        assert!(entry.provider_probe.ok);
+        assert_eq!(entry.provider_probe.note, None);
+        assert_eq!(
+            entry.provider_probe.attempted,
+            vec!["POST /api/show", "GET /api/tags"]
+        );
+        assert_eq!(entry.model_id, "qwen25-7b-q4");
+        assert_eq!(entry.model_name, "qwen2.5:7b-instruct-q4_K_M");
+        assert_eq!(entry.endpoint, model.url);
+        assert_eq!(entry.structured_output_requested, "auto");
+        assert_eq!(entry.timeout_secs, 120);
+    }
+
+    #[test]
+    fn the_openai_compatible_fallback_records_the_attempt_trail() {
+        let url = stub_probe_server(vec![
+            ("POST /api/show", 404, "{}".to_string()),
+            (
+                "GET /v1/models",
+                200,
+                serde_json::json!({"data": []}).to_string(),
+            ),
+        ]);
+        let entry = probe_model(&model_at(&url));
+        assert!(entry.provider_probe.ok);
+        assert_eq!(
+            entry.provider_probe.attempted,
+            vec!["POST /api/show", "GET /v1/models"]
+        );
+        let note = entry
+            .provider_probe
+            .note
+            .expect("fallback must carry a note");
+        assert!(note.contains("carries no digest"), "{note}");
+        assert_eq!(entry.digest, None);
+        assert_eq!(entry.quantization, None);
+        assert_eq!(entry.context_window, None);
+    }
+
+    #[test]
+    fn a_non_200_fallback_is_recorded_as_not_ok() {
+        let url = stub_probe_server(vec![
+            ("POST /api/show", 404, "{}".to_string()),
+            ("GET /v1/models", 500, "{}".to_string()),
+        ]);
+        let entry = probe_model(&model_at(&url));
+        assert!(!entry.provider_probe.ok);
+        assert_eq!(
+            entry.provider_probe.attempted,
+            vec!["POST /api/show", "GET /v1/models"]
+        );
+        let note = entry
+            .provider_probe
+            .note
+            .expect("a refusal must carry a note");
+        assert!(note.contains("/v1/models answered"), "{note}");
+        assert!(note.contains("500"), "{note}");
+    }
+
+    #[test]
+    fn an_unreachable_endpoint_is_recorded_as_not_ok() {
+        // Bind then drop, so the port is known-closed rather than
+        // known-slow — both probe requests fail at connect time.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let entry = probe_model(&model_at(&url));
+        assert!(!entry.provider_probe.ok);
+        assert_eq!(
+            entry.provider_probe.attempted,
+            vec!["POST /api/show", "GET /v1/models"]
+        );
+        let note = entry
+            .provider_probe
+            .note
+            .expect("an error must carry a note");
+        assert!(!note.is_empty());
+    }
+
+    #[test]
+    fn an_unparseable_url_is_recorded_without_a_probe() {
+        let entry = probe_model(&ResolvedModel {
+            url: "not a url".to_string(),
+            ..model_at("http://127.0.0.1:1")
+        });
+        assert!(!entry.provider_probe.ok);
+        assert_eq!(
+            entry.provider_probe.note.as_deref(),
+            Some("url is unparseable")
+        );
+        assert!(entry.provider_probe.attempted.is_empty());
+        assert_eq!(entry.model_id, "qwen25-7b-q4");
+    }
+
+    #[test]
+    fn a_url_without_a_host_is_recorded_without_a_probe() {
+        let entry = probe_model(&ResolvedModel {
+            url: "data:text/plain,hello".to_string(),
+            ..model_at("http://127.0.0.1:1")
+        });
+        assert!(!entry.provider_probe.ok);
+        assert_eq!(
+            entry.provider_probe.note.as_deref(),
+            Some("url has no host")
+        );
+        assert!(entry.provider_probe.attempted.is_empty());
+    }
+}
+
 // ============================== manifest.json ==============================
 //
 // ADR 0003 §10: range-acceptance (IMAGE_VERSION posture) — taguru both
