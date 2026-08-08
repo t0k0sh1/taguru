@@ -26,6 +26,12 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # Same pin as the mutants workflows (they name nextest as their
+      # test tool in .cargo/mutants.toml); .config/nextest.toml carries
+      # the per-test slow-timeout containment both rely on.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.143
       - name: Format
         run: cargo fmt --check
       # --all-targets reaches the examples too, which cargo test never
@@ -35,8 +41,18 @@ jobs:
       # Unit tests (lib + server + MCP bridge), the HTTP integration
       # tests (spawn the real binary on a free port), and the QA recall
       # floor all run here; --locked pins the committed Cargo.lock.
+      # nextest runs the test binaries in one parallel pool with
+      # per-test process isolation and kills any test that stalls
+      # (.config/nextest.toml), instead of cargo test's serial
+      # binary-by-binary pass.
       - name: Test
-        run: cargo test --locked
+        run: cargo nextest run --locked
+      # nextest never runs doctests (rustdoc owns those). The tree has
+      # none that execute today — every doc fence is `text`/`json` — but
+      # this keeps a future runnable doctest from silently dropping out
+      # of CI.
+      - name: Doctests
+        run: cargo test --doc --locked
 
   # Independent of `check`: no Rust toolchain needed, and a newly
   # published CVE turning this red on an unrelated PR is a different
