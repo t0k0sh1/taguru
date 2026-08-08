@@ -8,6 +8,18 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- `taguru extract --candidates` / `TAGURU_EXTRACT_CANDIDATES` (#496 S2,
+  ADR 0014): offer the document's own names — segmented
+  deterministically, dictionary-free — to the model as preferred
+  subject/object spellings, preventing spelling twins at answer time
+  instead of detecting them at audit time. Non-restrictive by contract
+  and off by default; the control is a manifest/checkpoint computation
+  input, so toggling it re-extracts. `taguru benchmark extract` gains
+  the matching `--candidates` forwarding, and its `manifest.json`
+  `extraction_settings` records two new fields — `candidates` and
+  `lossy` (the latter closes a pre-existing resume-fairness gap):
+  both additive with `serde(default)` (`false`), so existing results
+  directories keep loading and match default-off/non-lossy reruns.
 - Mutation testing for the core Python SDK: `mutmut` seeds faults and the
   new `sdk/spec/check_mutants.py` gate (a `python-mutation` CI job, run on
   the latest Python) fails on any surviving mutant not on the reviewed

@@ -24,7 +24,10 @@
 //!
 //! Split into submodules by concern: `args` parses the CLI into
 //! `Args`/`Outcome`/`CorrectionPolicy`/`StructuredOutputMode`/
-//! `LadderConfig`; `signals` is the cooperative stop-request listener;
+//! `LadderConfig`; `candidates` segments a document's own names for
+//! the prompt's candidate block (ADR 0014); `mechanical` is ADR 0013's
+//! deterministic validation pass; `signals` is the cooperative
+//! stop-request listener;
 //! `run` is `Run` and the per-document/per-chunk pipeline that drives
 //! it; `documents` discovers and chunks input files; `chat_client` is
 //! the `/chat/completions` client; `diagnostics` is the JSONL sidecar;
@@ -66,6 +69,8 @@ use crate::sha256::sha256_hex;
 mod aggregate;
 #[path = "extract/args.rs"]
 mod args;
+#[path = "extract/candidates.rs"]
+mod candidates;
 #[path = "extract/chat_client.rs"]
 mod chat_client;
 #[path = "extract/checkpoint.rs"]
@@ -115,6 +120,7 @@ pub(crate) use structured_output::json_schema_response_format;
 // centralizes this instead of having every submodule import from
 // every sibling it needs.
 use aggregate::{Extraction, association_name_sets, combined_cross_output_issues, merge};
+use candidates::{candidate_terms, candidates_block, candidates_manifest_value};
 use chat_client::{ChatCompletion, ChatError, ChatFailure, classify_io_error};
 use checkpoint::{CheckpointFingerprint, CheckpointStore, CheckpointUnit};
 use chunking::{
@@ -143,6 +149,8 @@ use structured_output::{jittered_backoff, parse_retry_after, read_capped_chat_bo
 #[cfg(test)]
 use aggregate::{cross_output_issues, schema_output_issues};
 #[cfg(test)]
+use candidates::{CANDIDATE_CAP, CANDIDATE_MAX_BYTES};
+#[cfg(test)]
 use chat_client::build_chat_body;
 #[cfg(test)]
 use chunking::{AttemptOutcome, MAX_LISTED_ISSUES, classify_attempt, corrective_message};
@@ -164,7 +172,8 @@ const USAGE: &str = "\
 usage: taguru extract [--dry-run] [--force] [--no-passage] [--questions N]
                       [--fact-budget N] [--config FILE] [--parallel N]
                       [--structured-output MODE] [--max-output-tokens N]
-                      [--lossy] [--diagnostics-out FILE] [--schema FILE]
+                      [--lossy] [--candidates] [--diagnostics-out FILE]
+                      [--schema FILE]
                       --context NAME [--description TEXT] --out DIR FILE|DIR...
 
 Reads documents (.md/.txt; a directory expands to its files, sorted by
@@ -185,6 +194,7 @@ chat endpoint:
   TAGURU_EXTRACT_STRUCTURED_OUTPUT  default for --structured-output (off)
   TAGURU_EXTRACT_MAX_OUTPUT_TOKENS  default for --max-output-tokens (unset)
   TAGURU_EXTRACT_LOSSY  default for --lossy (0/false)
+  TAGURU_EXTRACT_CANDIDATES  default for --candidates (0/false)
   TAGURU_EXTRACT_DIAGNOSTICS  default for --diagnostics-out (unset, off)
   TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
                       each diagnostics record, capped to this many bytes;
@@ -224,6 +234,12 @@ chat endpoint:
                       Default (off): an invalid item earns one targeted
                       corrective turn; if it is still invalid afterward,
                       the source fails and nothing is written.
+  --candidates        offer the document's own names (kanji/katakana
+                      compounds, ASCII identifiers — segmented
+                      deterministically, no dictionary) to the model as
+                      preferred subject/object spellings. Non-restrictive:
+                      names outside the list stay allowed. Off by default;
+                      toggling it re-extracts (a computation input)
   --diagnostics-out FILE  write a JSONL sidecar of tagged records (`kind`):
                       one \"chunk\" record per chunk with its provenance
                       (source, chunk_index/total, hash, paragraph range);
@@ -495,6 +511,21 @@ pub fn run(args: &[String]) -> i32 {
             Err(_) => false,
         },
     };
+    // Same resolution and validation strength as --lossy above.
+    let candidates_on = match args.candidates {
+        Some(value) => value,
+        None => match std::env::var("TAGURU_EXTRACT_CANDIDATES") {
+            Ok(value) if value == "1" || value.eq_ignore_ascii_case("true") => true,
+            Ok(value) if value == "0" || value.eq_ignore_ascii_case("false") => false,
+            Ok(_) => {
+                return crate::config::subcommand_usage_error(
+                    "extract",
+                    "TAGURU_EXTRACT_CANDIDATES takes 1/true or 0/false",
+                );
+            }
+            Err(_) => false,
+        },
+    };
     // Flag-over-env, same pattern as --parallel above. Unlike a parsed
     // knob, any nonempty path is a valid value, so there is no "bad env
     // value" usage error here.
@@ -620,6 +651,7 @@ pub fn run(args: &[String]) -> i32 {
         claimed: BTreeMap::new(),
         parallel,
         lossy,
+        candidates: candidates_on,
         diagnostics,
         schema,
         schema_digest,

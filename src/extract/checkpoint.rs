@@ -31,6 +31,12 @@ pub(super) struct CheckpointFingerprint {
     /// only invalidates once `--schema` is actually engaged.
     #[serde(default)]
     pub(super) schema_digest: String,
+    /// `--candidates`' algorithm fingerprint (`""` = off) — ADR 0014.
+    /// Same `default` reasoning as `schema_digest`: a pre-S2 checkpoint
+    /// was necessarily written with candidates off, so it still matches
+    /// a default rerun and only invalidates once `--candidates` engages.
+    #[serde(default)]
+    pub(super) candidates: String,
 }
 
 /// One durable unit of extraction work: a top-level chunk, or (issue

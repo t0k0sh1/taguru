@@ -16,6 +16,7 @@ pub(super) fn system_prompt(
     questions: usize,
     fact_budget: usize,
     schema: Option<&crate::schema::InstalledSchema>,
+    candidates: &[String],
 ) -> String {
     let mut prompt = String::from(
         "You extract knowledge from one document into an association graph.\n\
@@ -79,6 +80,12 @@ pub(super) fn system_prompt(
             prompt.push_str(&schema_block(document, vocabulary));
         }
     }
+    // ADR 0014 (#496 S2): the document's own candidate names, last —
+    // after the run-wide vocabulary and schema blocks, since it is the
+    // only per-document block. Empty (candidates off, or a document
+    // with no names) appends nothing, keeping the prompt byte-for-byte
+    // pre-S2.
+    prompt.push_str(&candidates_block(candidates));
     prompt
 }
 

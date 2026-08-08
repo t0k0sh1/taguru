@@ -110,6 +110,7 @@ TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES  cap a corrective turn's replay of
 TAGURU_EXTRACT_STRUCTURED_OUTPUT  default for --structured-output (default off)
 TAGURU_EXTRACT_MAX_OUTPUT_TOKENS  default for --max-output-tokens (default unset)
 TAGURU_EXTRACT_LOSSY  default for --lossy (default 0/false)
+TAGURU_EXTRACT_CANDIDATES  default for --candidates (default 0/false)
 TAGURU_EXTRACT_DIAGNOSTICS  default for --diagnostics-out (default unset, off)
 TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
                     each diagnostics record, capped to this many bytes;
@@ -137,6 +138,11 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
 --lossy             restore the pre-#199 behavior: drop a business-rule-invalid
                     item (bad weight, dangling alias, out-of-range question, …)
                     and count it instead of correcting or failing (see below)
+--candidates        offer the document's own names (kanji/katakana compounds,
+                    ASCII identifiers — segmented deterministically, no
+                    dictionary) as preferred subject/object spellings;
+                    non-restrictive, off by default; toggling re-extracts
+                    (ADR 0014)
 --diagnostics-out FILE  write a JSONL sidecar of tagged records (see below):
                     one per chunk (provenance), one per LLM attempt (source,
                     chunk, attempt, terminal state, finish_reason, token
@@ -241,6 +247,24 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       <li>An alias is adopted only when its canonical is a name this file's associations register, and never when the alias spelling is itself such a name (either would fail the batch at apply time).</li>
       <li>Every file written is re-parsed with the import parser before it is written — <b>extract cannot produce a file import would reject</b>.</li>
     </ul>
+    <p>
+      <code>--candidates</code> (ADR 0014, #496 S2) attacks spelling variance one step earlier,
+      before the model answers at all: the document's own names — kanji/katakana compounds split
+      at hiragana boundaries, script-adjacent mixtures like <code>約40分</code>, ASCII identifiers
+      like <code>cargo-nextest</code> — are segmented deterministically (no dictionary, no model,
+      the same list on every run) and offered in the system prompt as preferred subject/object
+      spellings. The block is <b>non-restrictive by contract</b>: the model is asked to reuse a
+      listed spelling when one names the entity it means, and explicitly told that entities
+      outside the list stay allowed — constraining spelling never becomes constraining what may
+      be extracted. Off by default; toggling it (a computation input) re-extracts. All-hiragana
+      nouns and multi-word Latin noun phrases are known blind spots of the dictionary-free
+      segmenter — ADR 0014 documents the limits and the measured path to a morphological
+      analyzer if they ever cost recall. Pair it with
+      <a href="#structured-output"><code>--structured-output</code></a>: under a candidate
+      block, a mid-size model was measured emitting the offered spellings as unquoted JSON
+      values — a syntax failure class constrained decoding removes structurally, which is
+      exactly the syntax/naming role split the two controls are designed around.
+    </p>
     <p>
       A model that answers with anything but the JSON object gets a corrective turn: its own bad
       answer goes back to it, followed by a request to try again. By default that happens once —

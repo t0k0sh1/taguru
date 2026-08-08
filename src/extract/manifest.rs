@@ -81,6 +81,12 @@ pub(super) struct ManifestEntry {
     /// like any other computation input.
     #[serde(default)]
     pub(super) schema_digest: String,
+    /// `--candidates`' algorithm fingerprint (`""` = off) — ADR 0014,
+    /// same default-to-off reasoning as `schema_digest` above: the
+    /// candidate block changes what the prompt asks for, so toggling
+    /// the control (or revising the segmentation algorithm) re-extracts.
+    #[serde(default)]
+    pub(super) candidates: String,
     pub(super) output: String,
 }
 
@@ -116,6 +122,7 @@ impl Manifest {
         max_output_tokens: usize,
         lossy: bool,
         schema_digest: &str,
+        candidates: &str,
     ) -> bool {
         self.documents.get(source).is_some_and(|entry| {
             entry.sha256 == sha256
@@ -130,6 +137,7 @@ impl Manifest {
                 && entry.max_output_tokens == max_output_tokens
                 && entry.lossy == lossy
                 && entry.schema_digest == schema_digest
+                && entry.candidates == candidates
         })
     }
 
@@ -148,6 +156,7 @@ impl Manifest {
         max_output_tokens: usize,
         lossy: bool,
         schema_digest: &str,
+        candidates: &str,
         output: &str,
     ) {
         self.documents.insert(
@@ -165,6 +174,7 @@ impl Manifest {
                 max_output_tokens,
                 lossy,
                 schema_digest: schema_digest.to_string(),
+                candidates: candidates.to_string(),
                 output: output.to_string(),
             },
         );
