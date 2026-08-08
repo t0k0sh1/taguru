@@ -6,13 +6,18 @@
 
 ## Pre-PR Mutation Gate
 
-- Before `gh pr create` — and before pushing fix commits to an existing PR — run the same diff-scoped mutation check CI runs (mutants-diff.yml), so missed mutants are resolved locally instead of surfacing as a CI round-trip:
+- Before `gh pr create` — and before pushing fix commits to an existing PR — run the same diff-scoped mutation check CI runs (mutants-diff.yml), so missed mutants are resolved locally instead of surfacing as a CI round-trip. Fetch first so the diff matches the PR's actual base, and count before running — the full run only happens within CI's per-PR budget (60):
   ```sh
-  diff=$(mktemp) && git diff origin/main...HEAD > "$diff"
-  cargo mutants --profile=mutants --in-diff "$diff"
+  git fetch origin main &&
+    diff=$(mktemp) && git diff origin/main...HEAD > "$diff" &&
+    if [ "$(cargo mutants --in-diff "$diff" --list | wc -l)" -le 60 ]; then
+      cargo mutants --profile=mutants --in-diff "$diff"
+    else
+      echo "over budget: dispatch a module sweep (mutants-sweep.yml) instead"
+    fi
   ```
   Exit codes 2 (missed) and 3 (timeouts) are findings, not infrastructure failures. Resolve every missed mutant before the PR goes up: add a test that kills it, or mark it `#[mutants::skip]` with a reason comment.
-- Exception: if `cargo mutants --in-diff "$diff" --list | wc -l` exceeds 60, the diff is over CI's per-PR budget and mutants-diff.yml will skip it — skip the local run too and cover the ground with a dispatched module sweep (mutants-sweep.yml) instead.
+- Over-budget diffs are new-module territory: CI skips them too, so cover that ground with a dispatched module sweep (mutants-sweep.yml) instead of a local run.
 
 ## Disk Hygiene
 
