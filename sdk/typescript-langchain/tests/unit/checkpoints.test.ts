@@ -56,21 +56,21 @@ export class RecordingCheckpointStore implements CheckpointStore {
   }
 }
 
-class FailingLoadStore extends RecordingCheckpointStore {
+export class FailingLoadStore extends RecordingCheckpointStore {
   override async load(source: string): Promise<Uint8Array | null> {
     this.log.push(["load", source]);
     throw new Error("simulated load failure");
   }
 }
 
-class FailingSaveStore extends RecordingCheckpointStore {
+export class FailingSaveStore extends RecordingCheckpointStore {
   override async save(source: string, _data: Uint8Array): Promise<void> {
     this.log.push(["save", source]);
     throw new Error("simulated save failure");
   }
 }
 
-class FailingDeleteStore extends RecordingCheckpointStore {
+export class FailingDeleteStore extends RecordingCheckpointStore {
   override async delete(source: string): Promise<void> {
     this.log.push(["delete", source]);
     throw new Error("simulated delete failure");
