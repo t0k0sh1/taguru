@@ -343,6 +343,7 @@ ENVIRONMENT (every knob; unset = the shown default):
   TAGURU_EXTRACT_MAX_OUTPUT_TOKENS  default for --max-output-tokens (unset)
   TAGURU_EXTRACT_LOSSY         default for --lossy (0/false)
   TAGURU_EXTRACT_CANDIDATES    default for --candidates (0/false)
+  TAGURU_EXTRACT_VOCABULARY    default for --vocabulary (unset, off)
   TAGURU_EXTRACT_DIAGNOSTICS   default for --diagnostics-out (unset, off)
   TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text
                                to each diagnostics record, capped to this

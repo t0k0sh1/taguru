@@ -37,6 +37,10 @@ pub(super) struct CheckpointFingerprint {
     /// a default rerun and only invalidates once `--candidates` engages.
     #[serde(default)]
     pub(super) candidates: String,
+    /// `--vocabulary`'s content digest (`""` = off) — ADR 0015, same
+    /// `default` reasoning as `schema_digest`/`candidates`.
+    #[serde(default)]
+    pub(super) vocabulary_digest: String,
 }
 
 /// One durable unit of extraction work: a top-level chunk, or (issue

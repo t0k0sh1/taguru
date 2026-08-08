@@ -59,6 +59,16 @@ pub(super) struct Run {
     /// (ADR 0014, #496 S2) and stamps `candidates_manifest_value` into
     /// the manifest/checkpoint fingerprints.
     pub(super) candidates: bool,
+    /// `--vocabulary`'s harvested target-context concept names, capped
+    /// for the prompt (ADR 0015; empty = the control is off).
+    pub(super) vocabulary_names: Vec<String>,
+    /// The FULL harvested concept set, occurrence-normalized — the
+    /// ADR 0013 check's allowlist, uncapped on purpose: a context
+    /// spelling is legitimate whether or not it fit the prompt list.
+    pub(super) vocabulary_allowlist: HashSet<String>,
+    /// Content digest of the harvested name sets (`""` = off) — a
+    /// manifest/checkpoint computation input like `schema_digest`.
+    pub(super) vocabulary_digest: String,
     /// Resolved from `--diagnostics-out`/TAGURU_EXTRACT_DIAGNOSTICS
     /// (`None`, the default: no sidecar, stdout/stderr byte-for-byte
     /// today's). Issue #200.
@@ -117,6 +127,7 @@ impl Run {
             lossy: self.lossy,
             schema_digest: self.schema_digest.clone(),
             candidates: candidates_manifest_value(self.candidates).to_string(),
+            vocabulary_digest: self.vocabulary_digest.clone(),
         }
     }
 
@@ -180,6 +191,7 @@ impl Run {
                 self.lossy,
                 &self.schema_digest,
                 candidates_manifest_value(self.candidates),
+                &self.vocabulary_digest,
             )
             && out_path.is_file()
         {
@@ -327,6 +339,7 @@ impl Run {
             self.lossy,
             &self.schema_digest,
             candidates_manifest_value(self.candidates),
+            &self.vocabulary_digest,
             &file_name,
         );
         // The batch is durably written and manifest-recorded — the
@@ -390,6 +403,7 @@ impl Run {
             self.questions,
             self.fact_budget,
             self.schema.as_deref(),
+            &self.vocabulary_names,
             candidates,
         );
         let rules = self.item_rules(paragraph_count);
@@ -409,6 +423,7 @@ impl Run {
                 self.fact_budget,
                 self.ladder.as_ref(),
                 rules.as_ref(),
+                &self.vocabulary_allowlist,
                 self.diagnostics.as_ref(),
                 checkpoints,
             ) {
@@ -457,6 +472,7 @@ impl Run {
             self.questions,
             self.fact_budget,
             self.schema.as_deref(),
+            &self.vocabulary_names,
             candidates,
         );
         let rules = self.item_rules(paragraph_count);
@@ -476,6 +492,7 @@ impl Run {
                     self.fact_budget,
                     self.ladder.as_ref(),
                     rules.as_ref(),
+                    &self.vocabulary_allowlist,
                     self.diagnostics.as_ref(),
                     checkpoints,
                 )
@@ -524,6 +541,7 @@ impl Run {
             self.questions,
             self.fact_budget,
             self.schema.as_deref(),
+            &self.vocabulary_names,
             candidates,
         );
         let options = RequestOptions {
@@ -665,6 +683,7 @@ impl Run {
                 &response.content,
                 rules.as_ref(),
                 user_message_document(&user),
+                &self.vocabulary_allowlist,
             ) {
                 Ok(evaluated) => {
                     if let Some(sink) = sink {

@@ -55,7 +55,8 @@ adr/0003-extraction-model-benchmark.md.
 const USAGE: &str = "\
 usage: taguru benchmark extract --models FILE --context NAME --out DIR
                       [--runs N] [--questions N] [--fact-budget N]
-                      [--no-passage] [--lossy] [--candidates] [--description TEXT]
+                      [--no-passage] [--lossy] [--candidates] [--vocabulary PATH]
+                      [--description TEXT]
                       [--parallel N] [--max-output-tokens N]
                       [--max-attempts N] CORPUS_DIR
 
@@ -90,6 +91,7 @@ corpus under the same task settings (ADR 0003). Writes, under --out:
   --no-passage        forwarded to every cell's --no-passage
   --lossy             forwarded to every cell's --lossy
   --candidates        forwarded to every cell's --candidates
+  --vocabulary PATH   forwarded to every cell's --vocabulary (ADR 0015)
   --description TEXT  forwarded to every cell's --description
   --parallel N        forwarded to every cell's --parallel (1)
   --max-output-tokens N  forwarded to every cell's --max-output-tokens
@@ -138,6 +140,7 @@ struct BenchArgs {
     no_passage: bool,
     lossy: bool,
     candidates: bool,
+    vocabulary: Option<PathBuf>,
     description: Option<String>,
     parallel: usize,
     max_output_tokens: Option<usize>,
@@ -156,6 +159,7 @@ impl BenchArgs {
         let mut no_passage = false;
         let mut lossy = false;
         let mut candidates = false;
+        let mut vocabulary: Option<PathBuf> = None;
         let mut description: Option<String> = None;
         let mut parallel: Option<usize> = None;
         let mut max_output_tokens: Option<usize> = None;
@@ -252,6 +256,15 @@ impl BenchArgs {
                 "--no-passage" => no_passage = true,
                 "--lossy" => lossy = true,
                 "--candidates" => candidates = true,
+                "--vocabulary" => match rest.next() {
+                    Some(path) if vocabulary.is_none() => vocabulary = Some(PathBuf::from(path)),
+                    _ => {
+                        return Err(subcommand_usage_error(
+                            "benchmark",
+                            "--vocabulary needs a path and may only be given once",
+                        ));
+                    }
+                },
                 "--description" => match rest.next() {
                     Some(text) if description.is_none() => description = Some(text.clone()),
                     Some(_) => {
@@ -400,6 +413,7 @@ impl BenchArgs {
             no_passage,
             lossy,
             candidates,
+            vocabulary,
             description,
             parallel: parallel.unwrap_or(1),
             max_output_tokens,
@@ -1605,6 +1619,10 @@ struct ExtractionSettings {
     /// ADR 0014 (#496 S2): the candidate-block control, same reasoning.
     #[serde(default)]
     candidates: bool,
+    /// ADR 0015 (#496 S3): the vocabulary content digest ("" = off) —
+    /// the same fingerprint extract folds into its own manifests.
+    #[serde(default)]
+    vocabulary_sha256: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
@@ -2281,6 +2299,10 @@ fn run_cell(
         "TAGURU_EXTRACT_CANDIDATES",
         if bench_args.candidates { "1" } else { "0" },
     );
+    match &bench_args.vocabulary {
+        Some(path) => cmd.env("TAGURU_EXTRACT_VOCABULARY", path),
+        None => cmd.env("TAGURU_EXTRACT_VOCABULARY", ""),
+    };
 
     cmd.arg("--context").arg(&bench_args.context);
     if bench_args.questions > 0 {
@@ -2619,6 +2641,16 @@ fn run_extract(args: &[String]) -> i32 {
             .to_string()
             .as_bytes(),
     );
+    let vocabulary_sha256 = match &args.vocabulary {
+        Some(path) => match crate::extract::vocabulary_digest(path) {
+            Ok(digest) => digest,
+            Err(message) => {
+                eprintln!("taguru: benchmark: --vocabulary: {message}");
+                return 1;
+            }
+        },
+        None => String::new(),
+    };
     let extraction_settings = ExtractionSettings {
         prompt_version: crate::extract::PROMPT_VERSION,
         chunk_bytes: crate::extract::CHUNK_BYTES,
@@ -2635,6 +2667,7 @@ fn run_extract(args: &[String]) -> i32 {
         schema_sha256,
         lossy: args.lossy,
         candidates: args.candidates,
+        vocabulary_sha256,
     };
 
     if let Err(error) = fs::create_dir_all(&args.out) {

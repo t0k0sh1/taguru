@@ -91,6 +91,7 @@ pub(super) fn extract_chunk(
     policy: &CorrectionPolicy,
     fact_budget: usize,
     rules: Option<&ItemRules>,
+    vocabulary: &HashSet<String>,
     sink: Option<&DiagnosticsSink>,
 ) -> Result<ChunkOutput, String> {
     let base = [
@@ -145,7 +146,12 @@ pub(super) fn extract_chunk(
             }
         };
         let elapsed = started.elapsed();
-        match evaluate_answer(&response.content, rules, user_message_document(user)) {
+        match evaluate_answer(
+            &response.content,
+            rules,
+            user_message_document(user),
+            vocabulary,
+        ) {
             Ok(evaluated) => {
                 if let Some(sink) = sink {
                     sink.emit(DiagnosticsAttempt {
@@ -304,6 +310,7 @@ pub(super) fn extract_chunk_or_ladder(
     fact_budget: usize,
     ladder: Option<&LadderConfig>,
     rules: Option<&ItemRules>,
+    vocabulary: &HashSet<String>,
     sink: Option<&DiagnosticsSink>,
     checkpoints: &CheckpointStore,
 ) -> Result<Vec<ChunkOutput>, String> {
@@ -322,6 +329,7 @@ pub(super) fn extract_chunk_or_ladder(
                 policy,
                 fact_budget,
                 rules,
+                vocabulary,
                 sink,
             )?;
             record_checkpoint(checkpoints, source, piece, &output);
@@ -338,6 +346,7 @@ pub(super) fn extract_chunk_or_ladder(
                 policy,
                 fact_budget,
                 rules,
+                vocabulary,
                 sink,
                 checkpoints,
             };
@@ -361,6 +370,7 @@ pub(super) struct PieceContext<'a> {
     pub(super) policy: &'a CorrectionPolicy,
     pub(super) fact_budget: usize,
     pub(super) rules: Option<&'a ItemRules>,
+    pub(super) vocabulary: &'a HashSet<String>,
     pub(super) sink: Option<&'a DiagnosticsSink>,
     pub(super) checkpoints: &'a CheckpointStore,
 }
@@ -516,7 +526,12 @@ pub(super) fn extract_round(
             }
         };
         let elapsed = started.elapsed();
-        match classify_attempt(&response, context.rules, user_message_document(user)) {
+        match classify_attempt(
+            &response,
+            context.rules,
+            user_message_document(user),
+            context.vocabulary,
+        ) {
             AttemptOutcome::Valid(evaluated) => {
                 if let Some(sink) = context.sink {
                     sink.emit(DiagnosticsAttempt {
@@ -723,6 +738,7 @@ pub(super) fn classify_attempt(
     response: &ChatCompletion,
     rules: Option<&ItemRules>,
     document: &str,
+    vocabulary: &HashSet<String>,
 ) -> AttemptOutcome {
     let finish_reason = response.finish_reason.as_deref();
     if indicates_length_limit(finish_reason) {
@@ -736,7 +752,7 @@ pub(super) fn classify_attempt(
     if is_empty_answer(&response.content) {
         return AttemptOutcome::Empty;
     }
-    match evaluate_answer(&response.content, rules, document) {
+    match evaluate_answer(&response.content, rules, document, vocabulary) {
         Ok(evaluated) => AttemptOutcome::Valid(evaluated),
         Err(AnswerFault::Syntax(error)) => AttemptOutcome::Malformed(error),
         Err(AnswerFault::Invalid(issues)) => AttemptOutcome::Invalid(issues),
@@ -867,6 +883,7 @@ pub(super) fn evaluate_answer(
     content: &str,
     rules: Option<&ItemRules>,
     document: &str,
+    vocabulary: &HashSet<String>,
 ) -> Result<EvaluatedAnswer, AnswerFault> {
     let value = candidate_json(content).map_err(AnswerFault::Syntax)?;
     match rules {
@@ -882,7 +899,7 @@ pub(super) fn evaluate_answer(
             })
         }
         Some(rules) => {
-            let evaluation = mechanical_interpret(&value, rules, document);
+            let evaluation = mechanical_interpret(&value, rules, document, vocabulary);
             if evaluation.issues.is_empty() {
                 Ok(EvaluatedAnswer {
                     output: evaluation.output,

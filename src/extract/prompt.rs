@@ -16,6 +16,7 @@ pub(super) fn system_prompt(
     questions: usize,
     fact_budget: usize,
     schema: Option<&crate::schema::InstalledSchema>,
+    context_names: &[String],
     candidates: &[String],
 ) -> String {
     let mut prompt = String::from(
@@ -74,6 +75,10 @@ pub(super) fn system_prompt(
         prompt.push_str(&labels.join(", "));
         prompt.push('\n');
     }
+    // ADR 0015 (#496 S3): the target context's own concept names,
+    // after the label vocabulary they extend and before the schema
+    // and candidate blocks. Empty (no --vocabulary) appends nothing.
+    prompt.push_str(&context_names_block(context_names));
     if let Some(schema) = schema {
         let document = schema.document();
         if document.mode != crate::schema::SchemaMode::Off {
