@@ -637,9 +637,10 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       structured counterpart to the single human-readable summary line every run already prints:
       <code>source</code>, <code>batch_path</code>, <code>associations</code>, <code>concepts</code>,
       <code>labels</code> (counted separately, unlike the summary line's combined "alias(es)"
-      figure), <code>questions</code>, <code>duplicates</code>, <code>dropped</code>, and
+      figure), <code>questions</code>, <code>duplicates</code>, <code>dropped</code>,
       <code>removed</code> (the mechanical-validation count the summary line reports — ADR
-      0013). A
+      0013), and <code>uncovered</code> (the coverage-gap count under <code>--coverage</code> —
+      ADR 0016; <code>0</code> when the flag is off). A
       document that fails never reaches this record — its absence marks exactly that, the same
       "absence marks incomplete" convention <code>--diagnostics-out</code> consumers should apply
       to any record kind this sidecar might add in the future.

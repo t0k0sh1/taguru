@@ -94,7 +94,7 @@ pub(super) fn coverage_gaps(text: &str, triples: &[[&str; 3]]) -> Vec<CoverageGa
 /// flagging less rather than fabricating gaps.
 fn sentences(paragraph: &str) -> impl Iterator<Item = &str> {
     paragraph
-        .split(['。', '!', '?', '!', '?', '\n'])
+        .split(['。', '!', '?', '\u{ff01}', '\u{ff1f}', '\n'])
         .map(str::trim)
         .filter(|sentence| !sentence.is_empty())
 }

@@ -3175,6 +3175,14 @@ fn an_ascii_period_does_not_split_but_a_terminator_does() {
     // lands one part per sentence, covering neither.
     let gaps = coverage_gaps("alpha beta。gamma delta", &[["alpha", "rel", "delta"]]);
     assert_eq!(gaps.len(), 2);
+    // Full-width !/? split too — spelled as escapes on purpose: the
+    // ASCII lookalikes are indistinguishable in a terminal, which is
+    // exactly how they once replaced the intended characters here.
+    for terminator in ['\u{ff01}', '\u{ff1f}'] {
+        let text = format!("alpha beta{terminator}gamma delta");
+        let gaps = coverage_gaps(&text, &[["alpha", "rel", "delta"]]);
+        assert_eq!(gaps.len(), 2, "terminator {terminator:?}");
+    }
 }
 
 #[test]
