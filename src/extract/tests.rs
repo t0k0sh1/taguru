@@ -958,6 +958,180 @@ fn prune_resolves_canonicals_across_outputs_and_labels_chunks() {
 /// validated fully under the old rules, so absence reads as "nothing
 /// removed" rather than invalidating the file.
 #[test]
+fn candidate_terms_segment_scripts_and_merge_adjacent_runs() {
+    let terms = candidate_terms(
+        "CI のテストランナーは cargo-nextest。プールの最大接続数を 20 から 100 に。\n\
+         障害は PostgreSQL 16 のコネクションプール枯渇。復旧まで約40分、通知は Slack の #ops。",
+    );
+    // Hiragana separates; katakana/kanji/ASCII runs survive whole, and
+    // script-adjacent runs merge (約40分). Pure numbers are dropped.
+    for expected in [
+        "CI",
+        "テストランナー",
+        "cargo-nextest",
+        "プール",
+        "最大接続数",
+        "PostgreSQL",
+        "コネクションプール枯渇",
+        "復旧",
+        "約40分",
+        "通知",
+        "Slack",
+        "#ops",
+    ] {
+        assert!(
+            terms.iter().any(|t| t == expected),
+            "{expected} missing: {terms:?}"
+        );
+    }
+    assert!(
+        !terms.iter().any(|t| t == "20"),
+        "pure digits must drop: {terms:?}"
+    );
+    assert!(
+        !terms.iter().any(|t| t == "16"),
+        "pure digits must drop: {terms:?}"
+    );
+    assert!(
+        !terms.iter().any(|t| t == "の"),
+        "hiragana never enters: {terms:?}"
+    );
+    // First-appearance order, exact dedup.
+    let ci = terms.iter().position(|t| t == "CI").unwrap();
+    let slack = terms.iter().position(|t| t == "Slack").unwrap();
+    assert!(ci < slack);
+    assert_eq!(
+        terms.iter().filter(|t| *t == "プール").count(),
+        1,
+        "duplicates fold: {terms:?}"
+    );
+}
+
+#[test]
+fn candidate_terms_cap_count_and_drop_oversized_or_single_char_tokens() {
+    let mut text = String::new();
+    for i in 0..(CANDIDATE_CAP + 50) {
+        text.push_str(&format!("word{i} "));
+    }
+    let terms = candidate_terms(&text);
+    assert_eq!(terms.len(), CANDIDATE_CAP);
+    assert_eq!(terms[0], "word0", "earliest names survive the cap");
+
+    let oversized = "x".repeat(CANDIDATE_MAX_BYTES + 1);
+    assert!(
+        candidate_terms(&oversized).is_empty(),
+        "over the byte cap drops"
+    );
+    assert!(
+        candidate_terms("a 鍵 ").is_empty(),
+        "single characters anchor nothing"
+    );
+    assert!(
+        candidate_terms("--- ... 12.5 2.0.1").is_empty(),
+        "digits+connectors drop"
+    );
+}
+
+#[test]
+fn system_prompt_offers_candidates_only_when_given_and_stays_nonrestrictive() {
+    let without = system_prompt(&BTreeSet::new(), 0, 0, None, &[]);
+    assert!(!without.contains("Names appearing in this document"));
+
+    let terms = vec!["署名鍵".to_string(), "cargo-nextest".to_string()];
+    let with = system_prompt(&BTreeSet::new(), 0, 0, None, &terms);
+    assert!(with.contains("Names appearing in this document"));
+    assert!(with.contains("署名鍵, cargo-nextest"));
+    // The anti-checklist clause: the measured failure mode (2026-08-08
+    // bench) was models padding answers and alias tables to "cover"
+    // the list — the block must forbid that in so many words.
+    assert!(with.contains("never add associations or aliases just to cover this list"));
+    // The non-restrictive contract (#496's 検討事項): the block must
+    // say, in so many words, that unlisted entities stay allowed.
+    assert!(with.contains("still allowed"));
+    // The block appends; everything before it is byte-for-byte the
+    // no-candidates prompt.
+    assert!(with.starts_with(&without));
+}
+
+#[test]
+fn manifests_reextract_when_the_candidates_mode_changes() {
+    let mut manifest = Manifest::default();
+    manifest.record(
+        "a.md",
+        "hash-1",
+        "model-1",
+        "sake",
+        0,
+        false,
+        "",
+        0,
+        "",
+        0,
+        false,
+        "",
+        candidates_manifest_value(true),
+        "a.md.jsonl",
+    );
+    assert!(manifest.matches(
+        "a.md",
+        "hash-1",
+        "model-1",
+        "sake",
+        0,
+        false,
+        "",
+        0,
+        "",
+        0,
+        false,
+        "",
+        candidates_manifest_value(true)
+    ));
+    // Turning the control off — or a future algorithm revision — is a
+    // computation-input change like any other.
+    assert!(!manifest.matches(
+        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "", ""
+    ));
+    // Pre-S2 entries (no field) default to "" and keep matching
+    // default-off runs.
+    let mut legacy = Manifest::default();
+    legacy.record(
+        "b.md",
+        "hash-2",
+        "model-1",
+        "sake",
+        0,
+        false,
+        "",
+        0,
+        "",
+        0,
+        false,
+        "",
+        "",
+        "b.md.jsonl",
+    );
+    assert!(legacy.matches(
+        "b.md", "hash-2", "model-1", "sake", 0, false, "", 0, "", 0, false, "", ""
+    ));
+    assert!(!legacy.matches(
+        "b.md",
+        "hash-2",
+        "model-1",
+        "sake",
+        0,
+        false,
+        "",
+        0,
+        "",
+        0,
+        false,
+        "",
+        candidates_manifest_value(true)
+    ));
+}
+
+#[test]
 fn checkpoint_unit_without_a_removed_field_deserializes_empty() {
     let unit: CheckpointUnit = serde_json::from_str(
         r#"{"chunk_index": 0, "output": {"associations": [], "aliases": [], "questions": []},
@@ -1673,52 +1847,53 @@ fn manifests_skip_only_exact_recomputations() {
         0,
         false,
         "",
+        "",
         "a.md.jsonl",
     );
     assert!(manifest.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, ""
+        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "", ""
     ));
     assert!(!manifest.matches(
-        "a.md", "hash-2", "model-1", "sake", 0, false, "", 0, "", 0, false, ""
+        "a.md", "hash-2", "model-1", "sake", 0, false, "", 0, "", 0, false, "", ""
     ));
     assert!(!manifest.matches(
-        "a.md", "hash-1", "model-2", "sake", 0, false, "", 0, "", 0, false, ""
+        "a.md", "hash-1", "model-2", "sake", 0, false, "", 0, "", 0, false, "", ""
     ));
     assert!(!manifest.matches(
-        "b.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, ""
+        "b.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "", ""
     ));
     // A re-pointed --context must re-extract, not keep files whose
     // headers still name the old target.
     assert!(!manifest.matches(
-        "a.md", "hash-1", "model-1", "vats", 0, false, "", 0, "", 0, false, ""
+        "a.md", "hash-1", "model-1", "vats", 0, false, "", 0, "", 0, false, "", ""
     ));
     // Toggling --no-passage changes whether the batch carries the
     // source passage at all — a skip would keep the stale shape.
     assert!(!manifest.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, true, "", 0, "", 0, false, ""
+        "a.md", "hash-1", "model-1", "sake", 0, true, "", 0, "", 0, false, "", ""
     ));
     // A changed --description is baked into the batch header, so it
     // must re-extract too rather than skip with the old one.
     assert!(!manifest.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "new desc", 0, "", 0, false, ""
+        "a.md", "hash-1", "model-1", "sake", 0, false, "new desc", 0, "", 0, false, "", ""
     ));
     // A changed --fact-budget is folded into the system prompt like
     // --questions, so it must re-extract too rather than skip.
     assert!(!manifest.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "", 5, "", 0, false, ""
+        "a.md", "hash-1", "model-1", "sake", 0, false, "", 5, "", 0, false, "", ""
     ));
     // A changed --structured-output or --max-output-tokens changes
     // what the model can answer — computation inputs like the rest.
     assert!(!manifest.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "auto", 0, false, ""
+        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "auto", 0, false, "", ""
     ));
     assert!(!manifest.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 2048, false, ""
+        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 2048, false, "", ""
     ));
     // Issue #199: a changed --lossy changes what the batch's facts
     // even are (dropped vs. corrected), so it must re-extract too.
     assert!(!manifest.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, true, ""
+        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, true, "", ""
     ));
 
     // A prompt bump invalidates entries recorded under the old one.
@@ -1728,7 +1903,7 @@ fn manifests_skip_only_exact_recomputations() {
         .expect("just recorded")
         .prompt_version = PROMPT_VERSION + 1;
     assert!(!manifest.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, ""
+        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "", ""
     ));
 
     let dir = std::env::temp_dir().join(format!("taguru-manifest-{}", std::process::id()));
@@ -1750,11 +1925,12 @@ fn manifests_skip_only_exact_recomputations() {
         0,
         false,
         "",
+        "",
         "a.md.jsonl",
     );
     manifest.save(&path).unwrap();
     assert!(Manifest::load(&path).matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, ""
+        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "", ""
     ));
     fs::write(&path, "not json").unwrap();
     assert!(Manifest::load(&path).documents.is_empty());
@@ -1771,7 +1947,7 @@ fn manifests_skip_only_exact_recomputations() {
     let legacy = Manifest::load(&path);
     assert_eq!(legacy.documents.len(), 1);
     assert!(!legacy.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, ""
+        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "", ""
     ));
 
     // An entry written before the structured_output/
@@ -1790,7 +1966,7 @@ fn manifests_skip_only_exact_recomputations() {
     .unwrap();
     let pre_ladder = Manifest::load(&path);
     assert!(pre_ladder.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, ""
+        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "", ""
     ));
     assert!(!pre_ladder.matches(
         "a.md",
@@ -1804,12 +1980,13 @@ fn manifests_skip_only_exact_recomputations() {
         "json-schema",
         0,
         false,
+        "",
         ""
     ));
     // Issue #199: an entry from before --lossy existed defaults to
     // `false` (strict) and must NOT match a --lossy run.
     assert!(!pre_ladder.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, true, ""
+        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, true, "", ""
     ));
     let _ = fs::remove_dir_all(&dir);
 }
@@ -1830,21 +2007,22 @@ fn manifests_reextract_when_the_schema_digest_changes() {
         0,
         false,
         "digest-1",
+        "",
         "a.md.jsonl",
     );
     assert!(manifest.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "digest-1"
+        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "digest-1", ""
     ));
     // A different --schema document — even with everything else
     // identical — must re-extract: the prompt's schema block and
     // self-validation both changed under it.
     assert!(!manifest.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "digest-2"
+        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "digest-2", ""
     ));
     // Dropping --schema entirely (querying with "") must also
     // re-extract a schema-recorded entry, not just swap it.
     assert!(!manifest.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, ""
+        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "", ""
     ));
 
     // An entry written before `--schema` existed defaults to "" —
@@ -1864,13 +2042,14 @@ fn manifests_reextract_when_the_schema_digest_changes() {
         0,
         false,
         "",
+        "",
         "b.md.jsonl",
     );
     assert!(legacy.matches(
-        "b.md", "hash-2", "model-1", "sake", 0, false, "", 0, "", 0, false, ""
+        "b.md", "hash-2", "model-1", "sake", 0, false, "", 0, "", 0, false, "", ""
     ));
     assert!(!legacy.matches(
-        "b.md", "hash-2", "model-1", "sake", 0, false, "", 0, "", 0, false, "digest-1"
+        "b.md", "hash-2", "model-1", "sake", 0, false, "", 0, "", 0, false, "digest-1", ""
     ));
 }
 
@@ -2073,16 +2252,16 @@ fn split_labeled_piece_halves_blocks_with_their_labels_repeated() {
 
 #[test]
 fn the_system_prompt_offers_the_accumulated_vocabulary() {
-    assert!(!system_prompt(&BTreeSet::new(), 0, 0, None).contains("already in use"));
+    assert!(!system_prompt(&BTreeSet::new(), 0, 0, None, &[]).contains("already in use"));
     let vocabulary: BTreeSet<String> = ["杜氏".to_string(), "創業年".to_string()].into();
-    let prompt = system_prompt(&vocabulary, 0, 0, None);
+    let prompt = system_prompt(&vocabulary, 0, 0, None, &[]);
     assert!(
         prompt.contains("杜氏") && prompt.contains("創業年"),
         "{prompt}"
     );
     // The questions ask rides only when asked for.
     assert!(!prompt.contains("search question"));
-    let asking = system_prompt(&vocabulary, 2, 0, None);
+    let asking = system_prompt(&vocabulary, 2, 0, None, &[]);
     assert!(
         asking.contains("up to 2 realistic search question(s)")
             && asking.contains("bracketed number"),
@@ -2092,12 +2271,12 @@ fn the_system_prompt_offers_the_accumulated_vocabulary() {
 
 #[test]
 fn the_system_prompt_omits_the_fact_budget_clause_by_default() {
-    assert!(!system_prompt(&BTreeSet::new(), 0, 0, None).contains("association(s) total"));
+    assert!(!system_prompt(&BTreeSet::new(), 0, 0, None, &[]).contains("association(s) total"));
 }
 
 #[test]
 fn the_system_prompt_states_the_fact_budget_when_set() {
-    let prompt = system_prompt(&BTreeSet::new(), 0, 5, None);
+    let prompt = system_prompt(&BTreeSet::new(), 0, 5, None, &[]);
     assert!(
         prompt.contains("at most 5 association(s) total"),
         "{prompt}"
@@ -2112,7 +2291,7 @@ fn the_system_prompt_offers_the_schema_types_and_a_relation_line_when_mode_is_no
         crate::schema::SchemaMode::Warn,
         false,
     );
-    let prompt = system_prompt(&BTreeSet::new(), 0, 0, Some(&schema));
+    let prompt = system_prompt(&BTreeSet::new(), 0, 0, Some(&schema), &[]);
     assert!(
         prompt.contains("Brewery") && prompt.contains("Person"),
         "{prompt}"
@@ -2132,7 +2311,7 @@ fn the_system_prompt_omits_the_arrow_for_a_relation_constrained_on_one_side_only
         crate::schema::SchemaMode::Warn,
         false,
     );
-    let prompt = system_prompt(&BTreeSet::new(), 0, 0, Some(&schema));
+    let prompt = system_prompt(&BTreeSet::new(), 0, 0, Some(&schema), &[]);
     assert!(prompt.contains("代表銘柄 domain: Brewery"), "{prompt}");
     assert!(!prompt.contains("any"), "{prompt}");
 }
@@ -2145,7 +2324,7 @@ fn the_system_prompt_omits_the_schema_block_when_mode_is_off() {
         crate::schema::SchemaMode::Off,
         false,
     );
-    let prompt = system_prompt(&BTreeSet::new(), 0, 0, Some(&schema));
+    let prompt = system_prompt(&BTreeSet::new(), 0, 0, Some(&schema), &[]);
     assert!(!prompt.contains("Brewery"), "{prompt}");
     assert!(
         !prompt.contains(crate::schema::SCHEMA_TYPE_LABEL),

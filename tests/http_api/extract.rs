@@ -962,6 +962,115 @@ fn a_429_with_retry_after_is_honored_before_the_retry() {
     let _ = std::fs::remove_dir_all(&out);
 }
 
+/// ADR 0014 (#496 S2): `--candidates` folds the document's own
+/// segmented names into the system prompt, non-restrictively; the
+/// default run sends no such block and stays byte-for-byte pre-S2.
+#[test]
+fn extract_candidates_flag_folds_the_document_names_into_the_system_prompt() {
+    let docs = batch_dir("extract-candidates-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "CI のテストランナーは cargo-nextest。").unwrap();
+    let out = batch_dir("extract-candidates-out");
+
+    let reply = json!({"associations": [
+        {"subject": "CI", "label": "テストランナー", "object": "cargo-nextest"}
+    ]})
+    .to_string();
+    let (url, requests) = stub_chat_server(vec![reply.clone()]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &["--context", "c", "--candidates", doc.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+
+    let requests = requests.join().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0].contains("Names appearing in this document"),
+        "{}",
+        requests[0]
+    );
+    assert!(requests[0].contains("cargo-nextest"), "{}", requests[0]);
+    assert!(
+        requests[0].contains("still allowed"),
+        "non-restrictive contract: {}",
+        requests[0]
+    );
+
+    // The same run WITHOUT the flag must not send the block — and must
+    // re-extract (candidates is a computation input), not skip.
+    let (url, requests) = stub_chat_server(vec![reply]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &["--context", "c", doc.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(!stdout.contains("unchanged, skipped"), "{stdout}");
+    let requests = requests.join().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        !requests[0].contains("Names appearing in this document"),
+        "{}",
+        requests[0]
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// TAGURU_EXTRACT_CANDIDATES engages the block without the flag, and a
+/// bad value is a hard usage error — the --lossy env conventions.
+#[test]
+fn extract_candidates_env_var_enables_the_block_and_rejects_bad_values() {
+    let docs = batch_dir("extract-candidates-env-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "CI のテストランナーは cargo-nextest。").unwrap();
+    let out = batch_dir("extract-candidates-env-out");
+
+    let (url, requests) = stub_chat_server(vec![json!({"associations": []}).to_string()]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+            ("TAGURU_EXTRACT_CANDIDATES", "true"),
+        ],
+        &["--context", "c", doc.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let requests = requests.join().unwrap();
+    assert!(
+        requests[0].contains("Names appearing in this document"),
+        "{}",
+        requests[0]
+    );
+
+    let (code, _, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", "http://127.0.0.1:9"),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+            ("TAGURU_EXTRACT_CANDIDATES", "nope"),
+        ],
+        &["--context", "c", doc.to_str().unwrap()],
+    );
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains("TAGURU_EXTRACT_CANDIDATES takes 1/true or 0/false"),
+        "{stderr}"
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
 /// A non-retryable 4xx (anything but 429) fails on the first attempt
 /// without spending the retry budget.
 #[test]

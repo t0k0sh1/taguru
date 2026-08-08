@@ -55,7 +55,7 @@ adr/0003-extraction-model-benchmark.md.
 const USAGE: &str = "\
 usage: taguru benchmark extract --models FILE --context NAME --out DIR
                       [--runs N] [--questions N] [--fact-budget N]
-                      [--no-passage] [--lossy] [--description TEXT]
+                      [--no-passage] [--lossy] [--candidates] [--description TEXT]
                       [--parallel N] [--max-output-tokens N]
                       [--max-attempts N] CORPUS_DIR
 
@@ -89,6 +89,7 @@ corpus under the same task settings (ADR 0003). Writes, under --out:
   --fact-budget N     forwarded to every cell's --fact-budget
   --no-passage        forwarded to every cell's --no-passage
   --lossy             forwarded to every cell's --lossy
+  --candidates        forwarded to every cell's --candidates
   --description TEXT  forwarded to every cell's --description
   --parallel N        forwarded to every cell's --parallel (1)
   --max-output-tokens N  forwarded to every cell's --max-output-tokens
@@ -136,6 +137,7 @@ struct BenchArgs {
     fact_budget: Option<usize>,
     no_passage: bool,
     lossy: bool,
+    candidates: bool,
     description: Option<String>,
     parallel: usize,
     max_output_tokens: Option<usize>,
@@ -153,6 +155,7 @@ impl BenchArgs {
         let mut fact_budget: Option<usize> = None;
         let mut no_passage = false;
         let mut lossy = false;
+        let mut candidates = false;
         let mut description: Option<String> = None;
         let mut parallel: Option<usize> = None;
         let mut max_output_tokens: Option<usize> = None;
@@ -248,6 +251,7 @@ impl BenchArgs {
                 },
                 "--no-passage" => no_passage = true,
                 "--lossy" => lossy = true,
+                "--candidates" => candidates = true,
                 "--description" => match rest.next() {
                     Some(text) if description.is_none() => description = Some(text.clone()),
                     Some(_) => {
@@ -395,6 +399,7 @@ impl BenchArgs {
             fact_budget,
             no_passage,
             lossy,
+            candidates,
             description,
             parallel: parallel.unwrap_or(1),
             max_output_tokens,
@@ -1592,6 +1597,14 @@ struct ExtractionSettings {
     timeout_secs: usize,
     #[serde(default)]
     schema_sha256: String,
+    /// Pre-existing gap closed alongside `candidates`: --lossy shapes
+    /// what every cell's batches even contain, so a resume under a
+    /// flipped flag must invalidate like any other setting change.
+    #[serde(default)]
+    lossy: bool,
+    /// ADR 0014 (#496 S2): the candidate-block control, same reasoning.
+    #[serde(default)]
+    candidates: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
@@ -2264,6 +2277,10 @@ fn run_cell(
         "TAGURU_EXTRACT_LOSSY",
         if bench_args.lossy { "1" } else { "0" },
     );
+    cmd.env(
+        "TAGURU_EXTRACT_CANDIDATES",
+        if bench_args.candidates { "1" } else { "0" },
+    );
 
     cmd.arg("--context").arg(&bench_args.context);
     if bench_args.questions > 0 {
@@ -2616,6 +2633,8 @@ fn run_extract(args: &[String]) -> i32 {
         parallel: args.parallel,
         timeout_secs: crate::extract::DEFAULT_TIMEOUT_SECS,
         schema_sha256,
+        lossy: args.lossy,
+        candidates: args.candidates,
     };
 
     if let Err(error) = fs::create_dir_all(&args.out) {

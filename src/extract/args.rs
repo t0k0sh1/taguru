@@ -40,6 +40,10 @@ pub(super) struct Args {
     /// never a silent drop) — resolved in [`run`], same pattern as
     /// `structured_output`.
     pub(super) lossy: Option<bool>,
+    /// `None` defers to TAGURU_EXTRACT_CANDIDATES, and then to `false`
+    /// (ADR 0014's default-off: the prompt stays byte-for-byte pre-S2)
+    /// — resolved in [`run`], same pattern as `lossy`.
+    pub(super) candidates: Option<bool>,
     /// `None` defers to TAGURU_EXTRACT_DIAGNOSTICS, and then to no
     /// sidecar at all (today's behavior: one stderr line per failed
     /// document, nothing else) — resolved in [`run`], same pattern as
@@ -67,6 +71,7 @@ impl Args {
         let mut structured_output: Option<StructuredOutputMode> = None;
         let mut max_output_tokens: Option<usize> = None;
         let mut lossy: Option<bool> = None;
+        let mut candidates: Option<bool> = None;
         let mut diagnostics_out: Option<PathBuf> = None;
         let mut schema: Option<PathBuf> = None;
         let mut context: Option<String> = None;
@@ -84,6 +89,7 @@ impl Args {
                 "--force" => force = true,
                 "--no-passage" => no_passage = true,
                 "--lossy" => lossy = Some(true),
+                "--candidates" => candidates = Some(true),
                 "--questions" => match rest.next().map(|n| n.parse::<usize>()) {
                     Some(_) if questions > 0 => {
                         return Err(crate::config::subcommand_usage_error(
@@ -335,6 +341,7 @@ impl Args {
             structured_output,
             max_output_tokens,
             lossy,
+            candidates,
             diagnostics_out,
             schema,
             context,

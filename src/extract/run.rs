@@ -53,6 +53,12 @@ pub(super) struct Run {
     /// validation, no corrective turn spent on a business-rule
     /// violation, `report()` marks every drop explicitly as `--lossy`.
     pub(super) lossy: bool,
+    /// Resolved from `--candidates`/TAGURU_EXTRACT_CANDIDATES (`false`,
+    /// the default — ADR 0001 §12.2's default-off discipline). `true`
+    /// appends the document's own candidate names to the system prompt
+    /// (ADR 0014, #496 S2) and stamps `candidates_manifest_value` into
+    /// the manifest/checkpoint fingerprints.
+    pub(super) candidates: bool,
     /// Resolved from `--diagnostics-out`/TAGURU_EXTRACT_DIAGNOSTICS
     /// (`None`, the default: no sidecar, stdout/stderr byte-for-byte
     /// today's). Issue #200.
@@ -110,6 +116,7 @@ impl Run {
             max_output_tokens: self.max_output_tokens.unwrap_or(0),
             lossy: self.lossy,
             schema_digest: self.schema_digest.clone(),
+            candidates: candidates_manifest_value(self.candidates).to_string(),
         }
     }
 
@@ -172,6 +179,7 @@ impl Run {
                 self.max_output_tokens.unwrap_or(0),
                 self.lossy,
                 &self.schema_digest,
+                candidates_manifest_value(self.candidates),
             )
             && out_path.is_file()
         {
@@ -185,6 +193,15 @@ impl Run {
         // association and question can cite an index the server
         // itself validates against.
         let canonical_paragraphs = crate::paragraph::split(&text).len();
+        // ADR 0014: candidate names come from the WHOLE document, once
+        // — every chunk is offered the same list (the vocabulary
+        // discipline's reasoning, one level down), and the corrective
+        // path rebuilds the identical prompt.
+        let candidates = if self.candidates {
+            candidate_terms(&text)
+        } else {
+            Vec::new()
+        };
         let plan = chunk_plan(&text);
         if self.dry_run {
             // Read-only: a dry run still calls/writes nothing, but
@@ -227,8 +244,13 @@ impl Run {
             }
         }
         let chunks: Vec<String> = plan.into_iter().map(|descriptor| descriptor.text).collect();
-        let chunk_result =
-            self.extract_chunks(source, &chunks, canonical_paragraphs, &checkpoints)?;
+        let chunk_result = self.extract_chunks(
+            source,
+            &chunks,
+            canonical_paragraphs,
+            &candidates,
+            &checkpoints,
+        )?;
         let mut outputs = match chunk_result {
             ChunkLoopResult::Complete(outputs) => outputs,
             // Whatever units already landed stay on disk — a rerun
@@ -255,6 +277,7 @@ impl Run {
                     cross_issues,
                     chunks.len(),
                     canonical_paragraphs,
+                    &candidates,
                 )?;
             }
             let chunk_total = chunks.len();
@@ -303,6 +326,7 @@ impl Run {
             self.max_output_tokens.unwrap_or(0),
             self.lossy,
             &self.schema_digest,
+            candidates_manifest_value(self.candidates),
             &file_name,
         );
         // The batch is durably written and manifest-recorded — the
@@ -345,10 +369,17 @@ impl Run {
         source: &str,
         chunks: &[String],
         paragraph_count: usize,
+        candidates: &[String],
         checkpoints: &CheckpointStore,
     ) -> Result<ChunkLoopResult, String> {
         if self.parallel > 1 {
-            return self.extract_chunks_concurrently(source, chunks, paragraph_count, checkpoints);
+            return self.extract_chunks_concurrently(
+                source,
+                chunks,
+                paragraph_count,
+                candidates,
+                checkpoints,
+            );
         }
         let client = self
             .client
@@ -359,6 +390,7 @@ impl Run {
             self.questions,
             self.fact_budget,
             self.schema.as_deref(),
+            candidates,
         );
         let rules = self.item_rules(paragraph_count);
         let mut outputs = Vec::new();
@@ -413,6 +445,7 @@ impl Run {
         source: &str,
         chunks: &[String],
         paragraph_count: usize,
+        candidates: &[String],
         checkpoints: &CheckpointStore,
     ) -> Result<ChunkLoopResult, String> {
         let client = self
@@ -424,6 +457,7 @@ impl Run {
             self.questions,
             self.fact_budget,
             self.schema.as_deref(),
+            candidates,
         );
         let rules = self.item_rules(paragraph_count);
         let indexed: Vec<(usize, &String)> = chunks.iter().enumerate().collect();
@@ -471,6 +505,7 @@ impl Run {
     /// still-invalid, still-cross-conflicting, length-limited,
     /// refused, or empty reply fails the source outright — Stage 2
     /// never splits and never loops a second round.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn correct_cross_output_issues(
         &self,
         source: &str,
@@ -478,6 +513,7 @@ impl Run {
         cross_issues: Vec<(usize, Vec<String>)>,
         chunk_total: usize,
         paragraph_count: usize,
+        candidates: &[String],
     ) -> Result<(), String> {
         let client = self
             .client
@@ -488,6 +524,7 @@ impl Run {
             self.questions,
             self.fact_budget,
             self.schema.as_deref(),
+            candidates,
         );
         let options = RequestOptions {
             response_format: self

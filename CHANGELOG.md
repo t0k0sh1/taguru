@@ -7,6 +7,18 @@ Entries that change an on-disk format or a response shape say so.
 
 ## [Unreleased]
 
+### Added
+- `taguru extract --candidates` / `TAGURU_EXTRACT_CANDIDATES` (#496 S2,
+  ADR 0014): offer the document's own names — segmented
+  deterministically, dictionary-free — to the model as preferred
+  subject/object spellings, preventing spelling twins at answer time
+  instead of detecting them at audit time. Non-restrictive by contract
+  and off by default; the control is a manifest/checkpoint computation
+  input, so toggling it re-extracts. `taguru benchmark extract` gains
+  the matching `--candidates` forwarding, and its
+  `extraction_settings` now also records `--lossy` (a pre-existing
+  resume-fairness gap).
+
 ### Changed
 - `taguru extract`'s strict (default) mode now removes mechanically —
   before spending any LLM corrective turn — items that could never
