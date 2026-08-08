@@ -883,6 +883,18 @@ describe("candidateJson lossless repairs (issue #181-only additions)", () => {
       "braces_slice",
     ]);
   });
+
+  it("handles nesting deeper than the call stack allows recursion", () => {
+    // JSON.parse itself accepts this depth; the non-finite scan must not
+    // blow the call stack on it.
+    const depth = 10_000;
+    const deepObject = '{"a":'.repeat(depth) + "1" + "}".repeat(depth);
+    expect(candidateJson(deepObject).value).toBeTypeOf("object");
+    // A deep non-object answer must fail as wrong-shape (SyntaxFault),
+    // not as a RangeError escaping the scan.
+    const deepArray = "[".repeat(depth) + "1" + "]".repeat(depth);
+    expect(() => candidateJson(deepArray)).toThrow(SyntaxFault);
+  });
 });
 
 describe("batch rendering", () => {

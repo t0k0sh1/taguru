@@ -579,14 +579,25 @@ export function emptyAnswerDiagnosis(): string {
  * "NaN" inside a string literal from false-positiving.
  */
 function containsNonFiniteNumber(value: unknown): boolean {
-  if (typeof value === "number") {
-    return !Number.isFinite(value);
-  }
-  if (Array.isArray(value)) {
-    return value.some(containsNonFiniteNumber);
-  }
-  if (typeof value === "object" && value !== null) {
-    return Object.values(value).some(containsNonFiniteNumber);
+  // An explicit stack, not recursion: JSON.parse accepts nesting far
+  // deeper than the call stack allows a recursive walk (V8 parses
+  // 50k-deep arrays; a recursive traversal overflows around 5k).
+  const pending: unknown[] = [value];
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (typeof current === "number") {
+      if (!Number.isFinite(current)) {
+        return true;
+      }
+    } else if (Array.isArray(current)) {
+      for (const item of current) {
+        pending.push(item);
+      }
+    } else if (typeof current === "object" && current !== null) {
+      for (const item of Object.values(current)) {
+        pending.push(item);
+      }
+    }
   }
   return false;
 }
