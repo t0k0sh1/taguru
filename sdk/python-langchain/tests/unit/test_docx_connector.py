@@ -71,6 +71,18 @@ def test_outline_level_fallback_recognizes_a_non_heading_named_style(
     ]
 
 
+def test_outline_level_9_is_body_text_not_a_heading(tmp_path: Path) -> None:
+    """ECMA-376: ``w:outlineLvl`` value 9 explicitly means "no outline
+    level". ``outline_heading(text, 10)`` emits ``w:val="9"`` (the helper
+    is 1-based)."""
+    body = outline_heading("Plain body paragraph", 10) + para("Body.")
+    path = _write(tmp_path, "doc.docx", docx_bytes(body))
+    document = DocxConnector().read(str(path))
+
+    assert document.diagnostics == ()
+    assert document.sections == ()
+
+
 def test_table_becomes_one_paragraph_with_a_table_locator(tmp_path: Path) -> None:
     body = para("Intro") + table([["A1", "B1"], ["A2", "B2"]]) + para("Outro")
     path = _write(tmp_path, "doc.docx", docx_bytes(body))

@@ -9,7 +9,7 @@
  * as one artifact.
  */
 
-import type { SchemaDocument, TypeDef } from "taguru";
+import type { LocatorSpec, SchemaDocument, SectionSpec, TypeDef } from "taguru";
 
 // Kept equal to src/extract.rs's PROMPT_VERSION. 3 (ADR 0009 §11.1):
 // systemPrompt() gained the schema block. A schema DOCUMENT's own content
@@ -1729,8 +1729,17 @@ function byAliasThenCanonical(a: [string, string], b: [string, string]): number 
 }
 
 /**
- * Header, passage (the document itself), questions, facts, then aliases —
- * one JSON object per line, the exact stream `POST /import` applies.
+ * Header, passage (the document itself), questions, sections, locators,
+ * facts, then aliases — one JSON object per line, the exact stream
+ * `POST /import` applies.
+ *
+ * `sections`/`locators` (ADR 0007 §7, issue #347) attach to THIS batch's
+ * passage line exactly like a question or an association's `paragraph`
+ * pointer does: with the passage stripped (`passage === null`) there is
+ * nothing to locate into, and import refuses the dangling reference
+ * (src/ingest.rs:1518-1524) — so both are silently dropped rather than
+ * emitted, the same posture already taken for association paragraph
+ * pointers a few lines below.
  */
 export function renderBatch(
   context: string,
@@ -1738,6 +1747,8 @@ export function renderBatch(
   description: string | null,
   extraction: Extraction,
   passage: string | null,
+  sections: readonly SectionSpec[] = [],
+  locators: readonly LocatorSpec[] = [],
 ): string {
   const header: Record<string, unknown> = { taguru_batch: 1, context, source };
   if (description !== null) {
@@ -1748,6 +1759,12 @@ export function renderBatch(
     lines.push(JSON.stringify({ passage }));
     for (const [paragraph, question] of extraction.questions) {
       lines.push(JSON.stringify({ paragraph, question }));
+    }
+    for (const section of sections) {
+      lines.push(JSON.stringify({ paragraph: section.paragraph, section: section.section }));
+    }
+    for (const locator of locators) {
+      lines.push(JSON.stringify({ paragraph: locator.paragraph, locator: locator.locator }));
     }
   }
   for (const fact of extraction.associations) {

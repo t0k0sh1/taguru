@@ -180,7 +180,10 @@ def _heading_level(paragraph: _DocxParagraph) -> int | None:
         outline = paragraph_properties.outlineLvl if paragraph_properties is not None else None
     except Exception:  # noqa: BLE001 - degrades to "not a heading"
         outline = None
-    if outline is not None and outline.val is not None:
+    # ECMA-376: ``w:outlineLvl`` values 0-8 are outline levels 1-9; the
+    # value 9 explicitly means "body text, no outline level" and must not
+    # read as a level-10 heading.
+    if outline is not None and outline.val is not None and 0 <= int(outline.val) <= 8:
         return int(outline.val) + 1
     return None
 

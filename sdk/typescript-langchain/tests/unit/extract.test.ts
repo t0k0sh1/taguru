@@ -925,6 +925,48 @@ describe("batch rendering", () => {
     expect(lines[1]).not.toHaveProperty("paragraph");
   });
 
+  it("emits section and locator lines after questions", () => {
+    // ADR 0007 §7/issue #347: sections/locators land right after the
+    // question lines, in that order, mirroring src/export.rs's own
+    // section-then-locator emission order (src/export.rs:447-464).
+    const extraction = merge([output({ questions: [{ paragraph: 0, question: "q?" }] })], 1, 2);
+    const body = renderBatch(
+      "ctx",
+      "src",
+      null,
+      extraction,
+      "一段落目。\n\n二段落目。",
+      [{ paragraph: 0, section: "導入" }],
+      [{ paragraph: 1, locator: { kind: "page", value: "12" } }],
+    );
+    const lines = body.trim().split("\n").map((line) => JSON.parse(line));
+    // header, passage, question, section, locator — nothing else was asked for.
+    expect(lines).toHaveLength(5);
+    expect(lines[3]).toEqual({ paragraph: 0, section: "導入" });
+    expect(lines[4]).toEqual({ paragraph: 1, locator: { kind: "page", value: "12" } });
+  });
+
+  it("drops sections and locators without a passage", () => {
+    // Same dangling-reference rule §7.4 states for association paragraph
+    // pointers: a locator/section attaches to THIS batch's passage line, so
+    // stripping the passage (include_passage: false) must strip them too —
+    // otherwise import refuses the batch outright (src/ingest.rs:1518-1524).
+    const extraction = merge([], 0, 1);
+    const body = renderBatch(
+      "ctx",
+      "src",
+      null,
+      extraction,
+      null,
+      [{ paragraph: 0, section: "導入" }],
+      [{ paragraph: 0, locator: { kind: "page", value: "1" } }],
+    );
+    const lines = body.trim().split("\n").map((line) => JSON.parse(line));
+    expect(lines).toHaveLength(1); // header only
+    expect(body).not.toContain("section");
+    expect(body).not.toContain("locator");
+  });
+
   it("orders aliases by alias then canonical, not by their comma-joined string form", () => {
     // "a,b" -> "c" and "a" -> "b,c" both join to the identical string "a,b,c",
     // so a bare `.sort()` (which stringifies each tuple) would leave them in

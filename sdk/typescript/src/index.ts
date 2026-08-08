@@ -99,6 +99,8 @@ export {
   type LanePlan,
   type LaneRank,
   type LexicalExplain,
+  type Locator,
+  type LocatorSpec,
   type MatchCursor,
   type MatchPage,
   type MatchPlan,

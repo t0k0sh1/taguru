@@ -174,6 +174,71 @@ describe("TaguruIngester", () => {
     expect(lines[5]).toEqual({ alias: "Aomine", canonical: "青嶺酒造", kind: "concept" });
   });
 
+  it("sections and locators render into the batch", async () => {
+    // ADR 0007 §7/issue #347: ingestText(..., { sections, locators })
+    // reaches the wire batch right after the question line.
+    const server = new FakeServer();
+    const outcome = await make(server, [MODEL_ANSWER]).ingestText(DOC_TEXT, {
+      source: "docs/aomine.md",
+      sections: [{ paragraph: 0, section: "沿革" }],
+      locators: [{ paragraph: 1, locator: { kind: "page", value: "3" } }],
+    });
+    expect(outcome.ok).toBe(true);
+    const lines = server.imported[0]!.trim().split("\n").map((line) => JSON.parse(line));
+    expect(lines).toContainEqual({ paragraph: 0, section: "沿革" });
+    expect(lines).toContainEqual({ paragraph: 1, locator: { kind: "page", value: "3" } });
+  });
+
+  it("sections and locators are dropped without a passage", async () => {
+    // include_passage: false strips the passage line, so sections/locators
+    // (which attach to it) must be silently dropped too, not sent dangling
+    // (src/ingest.rs:1518-1524).
+    const server = new FakeServer();
+    const outcome = await make(server, [MODEL_ANSWER], { include_passage: false }).ingestText(
+      DOC_TEXT,
+      {
+        source: "docs/aomine.md",
+        sections: [{ paragraph: 0, section: "沿革" }],
+        locators: [{ paragraph: 1, locator: { kind: "page", value: "3" } }],
+      },
+    );
+    expect(outcome.ok).toBe(true);
+    const ndjson = server.imported[0]!;
+    expect(ndjson).not.toContain("section");
+    expect(ndjson).not.toContain("locator");
+  });
+
+  it("propagates section and locator counts from the server", async () => {
+    // record() copies the server's ImportOutcome.sections_stored/
+    // sections_dropped/locators_stored/locators_dropped onto IngestOutcome
+    // (issue #347).
+    const server = new FakeServer();
+    server.importResultOverride = {
+      context: "sake",
+      source: "docs/aomine.md",
+      created: false,
+      retracted: 0,
+      associations: 2,
+      aliases: 1,
+      passage_stored: true,
+      passage_dropped: false,
+      questions_stored: 1,
+      questions_dropped: 0,
+      sections_stored: 1,
+      sections_dropped: 2,
+      locators_stored: 3,
+      locators_dropped: 4,
+      association_paragraphs_dropped: 0,
+    };
+    const outcome = await make(server, [MODEL_ANSWER]).ingestText(DOC_TEXT, {
+      source: "docs/aomine.md",
+    });
+    expect(outcome.sections_stored).toBe(1);
+    expect(outcome.sections_dropped).toBe(2);
+    expect(outcome.locators_stored).toBe(3);
+    expect(outcome.locators_dropped).toBe(4);
+  });
+
   it("dry run renders but never sends", async () => {
     const server = new FakeServer();
     const outcome = await make(server, [MODEL_ANSWER]).ingestText(DOC_TEXT, {

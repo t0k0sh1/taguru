@@ -138,6 +138,101 @@ was cut off at its output-length cap (`finish_reason`/`done_reason`
 ask switches from "try again" to "try again shorter," naming
 `fact_budget` when one is set.
 
+## Standard ingest connectors (ADR 0007)
+
+The `ingest-connectors` modules (issue #415, the mechanical mirror of the
+Python package's `taguru_langchain.ingest_connectors`) normalize a source
+document — plain text plus paragraph-indexed section headings and typed
+citation locators (page/slide/sheet/table) — into the one shape
+`TaguruIngester` consumes, instead of a bare `pageContent` string. The
+reference connector reads `.md`/`.txt`, extracting ATX headings as
+sections:
+
+```ts
+import { TextFileConnector, ingestConnectorDocument } from "langchain-taguru";
+
+const document = await new TextFileConnector().read("docs/manual.md");
+if (document.diagnostics.length > 0) {
+  // encrypted, corrupt, unsupported format, OCR required, ... — never a
+  // silently empty passage
+}
+const outcome = await ingestConnectorDocument(ingester, document);
+```
+
+`ConnectorDocument.sections`/`.locators` round-trip losslessly through
+`/import` into `Citation.section`/`.locator` on every
+`recall`/`explore`/`activate`/`citePassage` response. A connector's own
+fetch/parse work is independently resumable via `ConnectorCheckpoint`,
+layered over the same `CheckpointStore` `checkpoint_store` already uses
+above — a distinct `namespace` keeps the two from colliding when they
+share one `FilesystemCheckpointStore` directory.
+
+The format connectors mirror their Python twins connector for connector,
+with each parser dependency an optional npm peer kept out of the default
+install per ADR 0007 §3/§4 — a caller ingesting nothing but `.md`/`.txt`
+never pays for a PDF parser:
+
+- `PdfConnector` (issue #348; `npm install pdfjs-dist`) — one
+  `{"kind": "page", "value": ...}` locator per paragraph from the PDF's
+  own page boundaries; the outline (bookmarks) becomes `sections` and the
+  document `title`. A page whose text layer is under `minCharsPerPage`
+  (default 16) non-whitespace characters is named in an `ocr_required`
+  diagnostic; encrypted and corrupt PDFs are `encrypted`/`corrupt` —
+  never a thrown exception.
+- `HtmlConnector` (issue #349; no extra install — the tolerant HTML
+  tokenizer is built in) — local `.html`/`.htm`/`.xhtml` files and
+  `http(s)://` URLs. Boilerplate is stripped, the heading hierarchy
+  becomes a breadcrumb `section` (`"Guide > Installation"`), and each
+  heading's `id` becomes a `{"kind": "fragment", "value": ...}` locator.
+  The source id is the final, fragment-stripped, canonicalized URL (ADR
+  0007 §6.1). A URL fetch refuses private/loopback/link-local
+  destinations (including via redirects) unless `allowPrivateNetworks`
+  is set.
+- `DocxConnector` (issue #350; `npm install fflate fast-xml-parser`) —
+  body walked in real document order; heading breadcrumbs become
+  `sections`; each table becomes exactly one paragraph carrying a
+  `{"kind": "table", "value": ...}` locator. Password-protected packages
+  are `encrypted`, unreachable footnote/comment/text-box content is one
+  `partial_extraction` diagnostic, and `.doc`/`.docm` are
+  `unsupported_format`.
+- `PptxConnector` (issue #352; same two packages as `DocxConnector`) —
+  shapes walked in document order; every body paragraph carries a
+  `{"kind": "slide", "value": ...}` locator, speaker notes carry
+  `{"kind": "speaker_notes", ...}`, and slide titles double as
+  `sections`.
+
+No OCR engine ships in this package or any connector (ADR 0007 §10):
+`OcrAdapter` is the external boundary `PdfConnector` calls out to when one
+is configured (`ocrAdapter`), offered exactly the pages its own threshold
+found unusable; an adapter's failure leaves those pages `ocr_required`, as
+if none had been configured.
+
+Object storage (issues #351/#414) mirrors `src/ship.rs`'s scheme set:
+`openObjectStore("s3://...")`/`"gs://..."`/`"az://..."`/`"file://..."`
+returns an `ObjectStore` scoped to one bucket/prefix. Each cloud store
+dynamically imports its own optional peer (`@aws-sdk/client-s3`,
+`@google-cloud/storage`, `@azure/storage-blob`) and reads only that
+cloud's standard credential chain — no parameter anywhere in this path
+accepts a key or secret directly, and no credential ever reaches a
+checkpoint, batch, log line, or `metadata`. `FileObjectStore` (no
+dependency at all) is the test/air-gapped backend.
+
+`syncObjectStorage` lists a bucket/prefix and dispatches each object to
+whichever connector its extension (or content-type) names. Re-running is
+cheap twice over: an object whose listing metadata (version id / content
+hash / size+last-modified, `ETag` only as a last resort) is unchanged is
+never fetched; one whose bytes are unchanged despite a metadata bump is
+fetched but never re-ingested. Deleted objects are never retracted by
+default — `report.deletedDetected` names them; `deletionPolicy:
+"retract"` and `"mirror"` are explicit opt-ins, and `dryRun: true`
+touches nothing. `syncReferences` is the non-S3 twin for local-file and
+`http(s)://` reference lists, and `watchDirectory` (issue #414) runs the
+same sync over a local directory on an interval. Both drivers return the
+same `RunReport` (ADR 0007 §11): last-phase-only counts over
+`discovered`/`unchanged`/`parsed`/`extracted`/`imported`/`skipped`/
+`failed`, the full per-source `SourceEvent` history, and an optional
+`eventsOut` JSONL sidecar streamed as the run happens.
+
 Not provided, deliberately: a VectorStore facade (Taguru's retrieval is
 structural-first — `similaritySearch` would misrepresent it), a Memory class
 (deprecated upstream in favor of LangGraph state), and agent Tools (the MCP

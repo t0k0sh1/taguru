@@ -1,0 +1,15 @@
+{"bytes":13,"diagnostic":null,"elapsed_ms":0,"kind":"source_event","parser":null,"phase":"discovered","source":"s3://<bucket>/a.md"}
+{"bytes":0,"diagnostic":{"code":"duplicate_source","message":"already claimed as \"s3://<bucket>/a.md\" earlier in this run","source":"s3://<bucket>/a.md"},"elapsed_ms":0,"kind":"source_event","parser":null,"phase":"skipped","source":"s3://<bucket>/a.md"}
+{"bytes":12,"diagnostic":null,"elapsed_ms":0,"kind":"source_event","parser":null,"phase":"discovered","source":"s3://<bucket>/b.md"}
+{"bytes":7,"diagnostic":null,"elapsed_ms":0,"kind":"source_event","parser":null,"phase":"discovered","source":"s3://<bucket>/c.zip"}
+{"bytes":14,"diagnostic":null,"elapsed_ms":0,"kind":"source_event","parser":null,"phase":"discovered","source":"s3://<bucket>/many-tags.md"}
+{"bytes":18,"diagnostic":null,"elapsed_ms":0,"kind":"source_event","parser":null,"phase":"discovered","source":"s3://<bucket>/vanished.md"}
+{"bytes":13,"diagnostic":null,"elapsed_ms":0,"kind":"source_event","parser":"taguru-text-connector","phase":"parsed","source":"s3://<bucket>/a.md"}
+{"bytes":13,"diagnostic":null,"elapsed_ms":0,"kind":"source_event","parser":null,"phase":"extracted","source":"s3://<bucket>/a.md"}
+{"bytes":13,"diagnostic":null,"elapsed_ms":0,"kind":"source_event","parser":"taguru-text-connector","phase":"imported","source":"s3://<bucket>/a.md"}
+{"bytes":12,"diagnostic":null,"elapsed_ms":0,"kind":"source_event","parser":null,"phase":"unchanged","source":"s3://<bucket>/b.md"}
+{"bytes":7,"diagnostic":{"code":"unsupported_format","message":"no connector for extension \".zip\" or content-type null","source":"s3://<bucket>/c.zip"},"elapsed_ms":0,"kind":"source_event","parser":null,"phase":"failed","source":"s3://<bucket>/c.zip"}
+{"bytes":14,"diagnostic":null,"elapsed_ms":0,"kind":"source_event","parser":"taguru-text-connector","phase":"parsed","source":"s3://<bucket>/many-tags.md"}
+{"bytes":14,"diagnostic":null,"elapsed_ms":0,"kind":"source_event","parser":null,"phase":"extracted","source":"s3://<bucket>/many-tags.md"}
+{"bytes":14,"diagnostic":null,"elapsed_ms":0,"kind":"source_event","parser":"taguru-text-connector","phase":"imported","source":"s3://<bucket>/many-tags.md"}
+{"bytes":18,"diagnostic":{"code":"unreadable","message":"object no longer exists","source":"s3://<bucket>/vanished.md"},"elapsed_ms":0,"kind":"source_event","parser":null,"phase":"skipped","source":"s3://<bucket>/vanished.md"}

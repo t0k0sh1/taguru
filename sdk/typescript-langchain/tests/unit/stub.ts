@@ -34,6 +34,10 @@ const ok = (result: unknown): Response =>
 export class FakeServer {
   calls: Array<[string, unknown]> = [];
   imported: string[] = [];
+  /** When set, /import's single-batch outcome is this object verbatim —
+   * mirrors the Python conftest FakeServer's `import_result_override`
+   * knob (used to exercise section/locator count propagation). */
+  importResultOverride: Record<string, unknown> | null = null;
   /** Context names whose every request should fail with a 500, to
    * exercise cross-context partial-failure handling. */
   failContexts = new Set<string>();
@@ -210,7 +214,7 @@ export class FakeServer {
       this.imported.push(typeof init?.body === "string" ? init.body : "");
       return ok({
         batches: [
-          {
+          this.importResultOverride ?? {
             context: "sake",
             source: "docs/aomine.md",
             created: false,
