@@ -38,7 +38,7 @@
   },
   "devDependencies": {
     "taguru": "^0.8.0",
-    "@langchain/core": "^1.2.3",
+    "@langchain/core": "^1.2.4",
     "@types/node": "^26.1.2",
     "ajv": "^8.20.0",
     "eslint": "^10.8.0",
