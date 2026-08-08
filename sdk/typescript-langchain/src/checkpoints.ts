@@ -60,6 +60,21 @@ export interface CheckpointStore {
   delete(source: string): Promise<void>;
 }
 
+/**
+ * A `save` was refused because another live run holds `source`'s advisory
+ * lock (see `FilesystemCheckpointStore`). Distinct from a generic store
+ * failure: the ingester reacts to lock CONTENTION by proceeding without
+ * checkpointing (never deleting state that belongs to whoever holds the
+ * lock) instead of re-warning on every chunk — mirrors the Python twin's
+ * `CheckpointLockedError`.
+ */
+export class CheckpointLockedError extends Error {
+  constructor(source: string) {
+    super(`checkpoint for ${JSON.stringify(source)} is locked by another run`);
+    this.name = "CheckpointLockedError";
+  }
+}
+
 /** SHA-256 of `text`'s UTF-8 bytes, as lowercase hex — the one hash primitive
  * every checkpoint identity (fingerprint content hash, unit hash, long
  * source-name suffix) is built from. */
@@ -180,17 +195,117 @@ async function writeAtomic(path: string, data: Uint8Array): Promise<void> {
   await fsyncDir(dir);
 }
 
+/** True when a process with `pid` is currently alive. EPERM means "alive
+ * but owned by someone else" — still alive. */
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
 /**
  * One JSON file per document under `directory` — the SDK analogue of
  * `taguru extract`'s `.extract-checkpoints/`. `directory` is never created
  * until the first `save`; a source with nothing checkpointed yet never
  * gets a file.
+ *
+ * Guards against two concurrent runs on the SAME source silently
+ * last-writer-winning each other's checkpoint: the first `save` for a
+ * source acquires an advisory, exclusive lock via a PID-stamped sidecar
+ * `<checkpoint-file>.lock` file, held for this instance's lifetime (or
+ * until `delete`/`close`). A second run's write attempt on the same source
+ * rejects with `CheckpointLockedError` instead of racing the first run's
+ * writes. Node has no `flock` in its stdlib (unlike the Python twin's
+ * fcntl-based lock), so a crashed run's leftover lock file is reclaimed by
+ * liveness-checking the recorded PID — a dead holder never wedges the next
+ * run. Best-effort by design: the takeover of a stale lock is not itself
+ * atomic, the same advisory posture the Python twin documents.
  */
 export class FilesystemCheckpointStore implements CheckpointStore {
   private readonly directory: string;
+  /** source → lock file path, for every lock THIS instance holds. */
+  private readonly locks = new Map<string, string>();
+  /** source → the acquisition already in flight, so concurrent writes on
+   * one instance await the same attempt instead of racing `locks` and
+   * self-conflicting on their own half-taken lock. */
+  private readonly pendingLocks = new Map<string, Promise<void>>();
 
   constructor(directory: string) {
     this.directory = directory;
+  }
+
+  private async lockPath(source: string): Promise<string> {
+    return (await this.pathFor(source)) + ".lock";
+  }
+
+  /**
+   * Idempotent within an instance: a source already held here (the common
+   * case — every write after a document's first goes through here again)
+   * is a no-op. A lock file naming a live PID — including this process's
+   * own, via a DIFFERENT store instance — is contention; one naming a
+   * dead PID is a crashed run's leftover and is reclaimed once.
+   */
+  private async acquireLock(source: string): Promise<void> {
+    const pending = this.pendingLocks.get(source);
+    if (pending !== undefined) {
+      return pending;
+    }
+    if (this.locks.has(source)) {
+      return;
+    }
+    const acquisition = this.acquireLockNow(source).finally(() => {
+      this.pendingLocks.delete(source);
+    });
+    this.pendingLocks.set(source, acquisition);
+    return acquisition;
+  }
+
+  private async acquireLockNow(source: string): Promise<void> {
+    const { mkdir, open, readFile, rm } = await import("node:fs/promises");
+    const { dirname } = await import("node:path");
+    const lockPath = await this.lockPath(source);
+    await mkdir(dirname(lockPath), { recursive: true });
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        const handle = await open(lockPath, "wx");
+        try {
+          await handle.writeFile(String(process.pid), "utf-8");
+        } finally {
+          await handle.close();
+        }
+        this.locks.set(source, lockPath);
+        return;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+          throw error;
+        }
+      }
+      let holder: number | null = null;
+      try {
+        holder = Number.parseInt(await readFile(lockPath, "utf-8"), 10);
+      } catch {
+        // Unreadable or vanished between the open and this read — treat
+        // as stale and let the reclaim below (or the next loop) decide.
+      }
+      const stale = holder === null || Number.isNaN(holder) || !processAlive(holder);
+      if (attempt > 0 || !stale) {
+        throw new CheckpointLockedError(source);
+      }
+      await rm(lockPath, { force: true });
+    }
+  }
+
+  private async releaseLock(source: string): Promise<void> {
+    const lockPath = this.locks.get(source);
+    if (lockPath === undefined) {
+      return;
+    }
+    this.locks.delete(source);
+    const { rm } = await import("node:fs/promises");
+    await rm(lockPath, { force: true });
   }
 
   /**
@@ -216,12 +331,44 @@ export class FilesystemCheckpointStore implements CheckpointStore {
   }
 
   async save(source: string, data: Uint8Array): Promise<void> {
+    await this.acquireLock(source);
     await writeAtomic(await this.pathFor(source), data);
   }
 
   async delete(source: string): Promise<void> {
-    const { rm } = await import("node:fs/promises");
-    await rm(await this.pathFor(source), { force: true });
+    const { access, rm } = await import("node:fs/promises");
+    const path = await this.pathFor(source);
+    if (!this.locks.has(source)) {
+      try {
+        await access(path);
+      } catch {
+        // Nothing saved for `source` — deleting an already-empty source
+        // is not an error, and needs no lock (taking one here would also
+        // create the directory a never-saved store must not create).
+        return;
+      }
+      // A run that never saved (every chunk a cache hit) holds no lock —
+      // deleting under another LIVE run's advisory lock would destroy
+      // THAT run's checkpoint, so take the lock first; contention rejects
+      // with CheckpointLockedError and leaves the holder's state alone.
+      await this.acquireLock(source);
+    }
+    await rm(path, { force: true });
+    await this.releaseLock(source);
+  }
+
+  /**
+   * Release every advisory lock this instance still holds, without
+   * touching the checkpoint files themselves — the explicit "this run is
+   * done with these sources" signal. Unlike the Python twin's flock (which
+   * the OS releases on process death), a Node lock file outlives an exit
+   * that skipped this call — the next run reclaims it via the dead-PID
+   * check in `acquireLock`.
+   */
+  async close(): Promise<void> {
+    for (const source of [...this.locks.keys()]) {
+      await this.releaseLock(source);
+    }
   }
 }
 
@@ -422,6 +569,13 @@ function checkpointUnitFromJson(data: unknown): CheckpointUnit | null {
 export class DocumentCheckpoints {
   readonly fingerprint: CheckpointFingerprint;
   private readonly units: Map<string, CheckpointUnit>;
+  /**
+   * Set by the ingester when another run holds this source's advisory
+   * lock (`CheckpointLockedError`): every later save is skipped for this
+   * document — one warning, not one per chunk — and the batch-landed
+   * cleanup leaves the OTHER run's on-disk checkpoint alone.
+   */
+  lockedOut = false;
 
   private constructor(fingerprint: CheckpointFingerprint, units: Map<string, CheckpointUnit>) {
     this.fingerprint = fingerprint;

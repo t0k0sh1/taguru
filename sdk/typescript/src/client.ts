@@ -665,7 +665,12 @@ export class Contexts {
 
   /** Delete a context, files included (admin role). */
   async delete(name: string): Promise<boolean> {
-    const result = await this.client.requestJson("DELETE", `/contexts/${encodeName(name)}`);
+    const result = await this.client.requestJson("DELETE", `/contexts/${encodeName(name)}`, {
+      // A repeat delete 404s, so a phantom retry after an ambiguous
+      // transport failure would surface as NotFoundError even though
+      // the first delete already applied.
+      retry: "unsafe_on_ambiguous",
+    });
     return Boolean(result);
   }
 
@@ -780,7 +785,12 @@ export class Groups {
 
   /** Delete the bundling only — member contexts and child groups stay. */
   async delete(name: string): Promise<boolean> {
-    const result = await this.client.requestJson("DELETE", `/groups/${encodeName(name)}`);
+    const result = await this.client.requestJson("DELETE", `/groups/${encodeName(name)}`, {
+      // A repeat delete 404s, so a phantom retry after an ambiguous
+      // transport failure would surface as NotFoundError even though
+      // the first delete already applied.
+      retry: "unsafe_on_ambiguous",
+    });
     return Boolean(result);
   }
 
@@ -1699,6 +1709,14 @@ export class Context {
       } finally {
         reader.releaseLock();
       }
+    } catch (error) {
+      // Bypasses `sendCore` (see above), so it must wrap connection
+      // failures in TransportError itself — a caller catching TaguruError
+      // must not miss a failed connect or a mid-stream connection drop.
+      if (error instanceof TaguruError) {
+        throw error;
+      }
+      throw new TransportError(describeError(error), { cause: error });
     } finally {
       clearTimeout(timer);
     }

@@ -154,6 +154,42 @@ test("a response trickling past the total time budget is reported unreadable", a
   });
 });
 
+test("a redirected failure names the final url, not the start", async () => {
+  // The module contract — "the source id is the final URL" — holds on
+  // failure paths too: two start URLs redirecting to one failing endpoint
+  // must fold to one source, and the diagnostic must name the URL that
+  // actually answered.
+  await withServer(
+    {
+      "/start": { location: "/final-404" },
+      "/final-404": { status: 404, body: Buffer.from("gone") },
+    },
+    async (server) => {
+      const document = await new HtmlConnector({ allowPrivateNetworks: true }).read(
+        `${server.baseUrl}/start`,
+      );
+      expect(document.diagnostics.map((d) => d.code)).toEqual(["unreadable"]);
+      expect(document.source).toBe(`${server.baseUrl}/final-404`);
+    },
+  );
+});
+
+test("a redirected wrong content type names the final url", async () => {
+  await withServer(
+    {
+      "/start": { location: "/final-json" },
+      "/final-json": { contentType: "application/json", body: Buffer.from("{}") },
+    },
+    async (server) => {
+      const document = await new HtmlConnector({ allowPrivateNetworks: true }).read(
+        `${server.baseUrl}/start`,
+      );
+      expect(document.diagnostics.map((d) => d.code)).toEqual(["unsupported_format"]);
+      expect(document.source).toBe(`${server.baseUrl}/final-json`);
+    },
+  );
+});
+
 test("the source id is the final url after a redirect", async () => {
   await withServer(
     {

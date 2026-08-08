@@ -689,7 +689,7 @@ export class PdfConnector implements Connector {
     }
 
     let pageTexts: string[] = [];
-    const failedPages: number[] = [];
+    let failedPages: number[] = [];
     for (let index = 0; index < pageCount; index += 1) {
       try {
         const page = await doc.getPage(index + 1);
@@ -719,28 +719,46 @@ export class PdfConnector implements Connector {
 
     let ocrDiagnostics: Diagnostic[] = [];
     let ocrAdapterError: string | null = null;
-    if (this.ocrAdapter !== null && emptyPages.length > 0) {
-      const recovered = await recoverWithOcr(this.ocrAdapter, {
-        source,
-        raw,
-        pageTexts,
-        emptyPages,
-        minCharsPerPage: this.minCharsPerPage,
-      });
-      pageTexts = recovered.pageTexts;
-      emptyPages = recovered.emptyPages;
-      ocrDiagnostics = recovered.diagnostics;
-      ocrAdapterError = recovered.adapterError;
+    if (this.ocrAdapter !== null) {
+      // A page whose text extraction THREW is exactly as unusable to this
+      // connector as one that decoded to nothing — both are offered to a
+      // configured adapter together, in page order, so it gets one chance
+      // to recover every page this connector itself could not read, not
+      // only the ones that merely decoded empty.
+      const recoveryCandidates = [...new Set([...emptyPages, ...failedPages])].sort(
+        (a, b) => a - b,
+      );
+      if (recoveryCandidates.length > 0) {
+        const recovered = await recoverWithOcr(this.ocrAdapter, {
+          source,
+          raw,
+          pageTexts,
+          emptyPages: recoveryCandidates,
+          minCharsPerPage: this.minCharsPerPage,
+        });
+        pageTexts = recovered.pageTexts;
+        const unrecovered = new Set(recovered.emptyPages);
+        const recoveredPages = new Set(recoveryCandidates.filter((page) => !unrecovered.has(page)));
+        // A recovered page stops counting toward whichever diagnostic
+        // (ocr_required, or corrupt/partial_extraction) it would otherwise
+        // have produced; a page still unrecovered keeps its original
+        // classification, unchanged from before recovery was attempted.
+        emptyPages = emptyPages.filter((page) => !recoveredPages.has(page));
+        failedPages = failedPages.filter((page) => !recoveredPages.has(page));
+        ocrDiagnostics = recovered.diagnostics;
+        ocrAdapterError = recovered.adapterError;
+      }
     }
 
     const paragraphs: string[] = [];
     const locators: LocatorEntry[] = [];
     const pageParagraphStarts: Array<number | null> = new Array(pageCount).fill(null);
-    // Built after OCR recovery, which may have shrunk emptyPages.
+    // Built after OCR recovery, which may have shrunk both lists.
     const emptyPageSet = new Set(emptyPages);
+    const unusablePageSet = new Set(failedPages);
     for (let index = 0; index < pageCount; index += 1) {
       const pageNumber = index + 1;
-      if (failedPageSet.has(pageNumber) || emptyPageSet.has(pageNumber)) {
+      if (unusablePageSet.has(pageNumber) || emptyPageSet.has(pageNumber)) {
         continue;
       }
       const pageParagraphs = splitParagraphs(pageTexts[index]!);

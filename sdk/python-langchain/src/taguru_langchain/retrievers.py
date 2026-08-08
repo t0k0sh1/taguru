@@ -198,7 +198,7 @@ class TaguruRetriever(BaseRetriever):
                     # already found.
                     graph_error = error
             text_hits: list[PassageHit] = []
-            text_failed = False
+            text_error: Exception | None = None
             if self.include_text:
                 try:
                     text_hits = (
@@ -206,13 +206,23 @@ class TaguruRetriever(BaseRetriever):
                         .search_passages(query, limit=self.text_limit)
                         .hits
                     )
-                except Exception:
-                    text_failed = True
-            if graph_error is not None and text_failed:
-                # Neither lane produced anything — an empty result here
-                # would read as "nothing found" instead of "retrieval is
-                # broken."
-                raise graph_error
+                except Exception as error:
+                    text_error = error
+            # "Every ENABLED lane failed" — a disabled lane is not a
+            # healthy one, so with a single lane enabled its failure alone
+            # must raise: an empty result here would read as "nothing
+            # found" instead of "retrieval is broken."
+            graph_healthy = self.include_graph and graph_error is None
+            text_healthy = self.include_text and text_error is None
+            if (
+                (graph_error is not None or text_error is not None)
+                and not graph_healthy
+                and not text_healthy
+            ):
+                if graph_error is not None:
+                    raise graph_error
+                assert text_error is not None  # implied by the guard above
+                raise text_error
             return _merge_lanes(graph_docs, text_hits, limit, fallback_context=target)
 
         targets = self._resolve_targets(self.client)
@@ -346,20 +356,28 @@ class TaguruRetriever(BaseRetriever):
                     # already found.
                     graph_error = error
             text_hits: list[PassageHit] = []
-            text_failed = False
+            text_error: Exception | None = None
             if self.include_text:
                 try:
                     single = await self.async_client.context(target).search_passages(
                         query, limit=self.text_limit
                     )
                     text_hits = single.hits
-                except Exception:
-                    text_failed = True
-            if graph_error is not None and text_failed:
-                # Neither lane produced anything — an empty result here
-                # would read as "nothing found" instead of "retrieval is
-                # broken."
-                raise graph_error
+                except Exception as error:
+                    text_error = error
+            # Same rule as the sync path above: every ENABLED lane failing
+            # must raise, including when only one lane is enabled.
+            graph_healthy = self.include_graph and graph_error is None
+            text_healthy = self.include_text and text_error is None
+            if (
+                (graph_error is not None or text_error is not None)
+                and not graph_healthy
+                and not text_healthy
+            ):
+                if graph_error is not None:
+                    raise graph_error
+                assert text_error is not None  # implied by the guard above
+                raise text_error
             return _merge_lanes(graph_docs, text_hits, limit, fallback_context=target)
 
         targets = await self._aresolve_targets(self.async_client)

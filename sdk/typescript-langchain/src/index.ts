@@ -12,7 +12,11 @@ export {
   type IngestOutcome,
   type ShouldStop,
 } from "./ingest.js";
-export { FilesystemCheckpointStore, type CheckpointStore } from "./checkpoints.js";
+export {
+  CheckpointLockedError,
+  FilesystemCheckpointStore,
+  type CheckpointStore,
+} from "./checkpoints.js";
 export { MODEL_OUTPUT_JSON_SCHEMA } from "./extract.js";
 export type {
   IngestEvent,

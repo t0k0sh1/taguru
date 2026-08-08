@@ -1,0 +1,62 @@
+# Known-equivalent surviving mutants for `stryker run` (sdk/typescript).
+#
+# Every name listed here was inspected by hand and shown to be an
+# EQUIVALENT mutant — the mutation cannot change observable behavior, so
+# no test can kill it. CI (`sdk/spec/check_mutants_ts.mjs`) fails on any
+# escaped mutant NOT on this list; a survivor that appears here keeps the
+# gate green. If a listed name stops surviving (the file was edited and
+# mutant locations shifted), regenerate the affected entries.
+#
+# Why each entry is equivalent:
+# - contract.ts:107/112 (seenMin > sdkMax / seenMax < sdkMin, > vs >=,
+#   < vs <=): the boundary case (seenMin === sdkMax, or seenMax ===
+#   sdkMin) means that exact version is shared between the two ranges —
+#   but then `incompatibility()` already returned null earlier via the
+#   `supported.some(...)` intersection check, so this branch is never
+#   reached with equal boundaries. Mirrors the Python SDK's
+#   `x_incompatibility__mutmut_16/21`.
+# - transport.ts:67:35/67:60/80:59 (Buffer.from/Buffer.byteLength's
+#   "utf-8" encoding argument replaced with ""): Node treats an empty
+#   encoding string as falsy and falls back to its own default (utf8),
+#   producing byte-identical output — verified directly against Node's
+#   Buffer implementation, not merely assumed.
+# - transport.ts:240:14 (codeOf's `typeof code === "string" ? code :
+#   undefined` forced to always take the `code` branch): the only two
+#   call sites immediately gate the result through `codes.has(...)`
+#   against a `Set<string>` of four literal strings — a non-string value
+#   can never satisfy that strict-equality membership check, so
+#   returning the raw non-string value instead of `undefined` is
+#   unobservable from any caller.
+# - transport.ts:249:9 / 255:16 (`code !== undefined && codes.has(code)` /
+#   `innerCode !== undefined && codes.has(innerCode)`, first conjunct
+#   forced to `true`): `codeOf`'s return type is always exactly
+#   `string | undefined`, and `Set.prototype.has(undefined)` returns
+#   `false` without throwing when the value isn't a member — so forcing
+#   the explicit `undefined` check to `true` cannot change which branch
+#   `codes.has(...)` takes; it is dead code by construction.
+# - transport.ts:113:7 (`typeof parsed === "object" && parsed !== null`
+#   in `errorFromBody`, first conjunct forced to `true`): `parsed` comes
+#   only from `JSON.parse`, so it is always an object/array, or a
+#   primitive (string/number/boolean), or `null` — the retained
+#   `parsed !== null` conjunct still excludes `null`, and reading
+#   `.error`/`.code`/`.time` off any non-null primitive is safe property
+#   access that always yields `undefined`, identical to never entering
+#   the block at all. (Unlike transport.ts:154:7's `"result" in parsed`,
+#   nothing here uses the `in` operator, which is what makes THAT sibling
+#   mutant genuinely killable and this one not.)
+# - errors.ts:159 (`super(message, { status: null })` inside
+#   IncompatibleServerError's constructor, object literal emptied to
+#   `{}`): `TaguruError`'s own constructor reads `options.status ?? null`
+#   — an absent `status` key nullish-coalesces to the same `null` an
+#   explicit `status: null` key would have produced, so the two option
+#   bags are behaviorally identical here.
+src/contract.ts:107:7 EqualityOperator -> seenMin >= sdkMax
+src/contract.ts:112:29 EqualityOperator -> seenMax <= sdkMin
+src/errors.ts:159:20 ObjectLiteral -> {}
+src/transport.ts:113:7 ConditionalExpression -> true
+src/transport.ts:240:14 ConditionalExpression -> true
+src/transport.ts:249:9 ConditionalExpression -> true
+src/transport.ts:255:16 ConditionalExpression -> true
+src/transport.ts:67:35 StringLiteral -> ""
+src/transport.ts:67:60 StringLiteral -> ""
+src/transport.ts:80:59 StringLiteral -> ""

@@ -224,3 +224,30 @@ jobs:
         working-directory: examples/langchain
         env:
           TAGURU_TEST_BIN: ${{ github.workspace }}/bin/taguru
+
+  # Mutation testing for the core TypeScript SDK, gated against the reviewed
+  # `sdk/typescript/mutation-baseline.txt`: an escaped mutant not on that
+  # allowlist fails the job — the Stryker twin of `python-mutation` above.
+  # One Node version only (the mutants are logic, not version-specific) and
+  # no server binary — it runs the hermetic unit suite alone
+  # (`vitest.stryker.config.ts`), so it needs neither `build-server` nor
+  # `TAGURU_TEST_BIN`. Core SDK only; `sdk/typescript-langchain` leans on
+  # the server-backed integration suite for its own coverage, the same
+  # posture `sdk/python-langchain` takes (see `sdk/spec/check_mutants_ts.mjs`).
+  typescript-mutation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # npm install runs install-time scripts; don't leave GITHUB_TOKEN
+          # in .git/config for them to read.
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - name: Install workspace
+        run: npm install --no-fund --no-audit
+        working-directory: sdk
+      - name: Mutation gate (core SDK)
+        run: node sdk/spec/check_mutants_ts.mjs

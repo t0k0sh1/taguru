@@ -48,6 +48,20 @@ test.each([
   "x-amz-signature",
   "x-amz-credential",
   "x-amz-security-token",
+  // SigV4's per-issuance companions: fresh on every presign of the SAME
+  // object, so leaving any of them in would mint a new source id per
+  // presign (duplicate ingestion).
+  "x-amz-date",
+  "x-amz-expires",
+  "x-amz-algorithm",
+  "x-amz-signedheaders",
+  // GCS V4 signed URLs' equivalents.
+  "x-goog-signature",
+  "x-goog-credential",
+  "x-goog-date",
+  "x-goog-expires",
+  "x-goog-algorithm",
+  "x-goog-signedheaders",
   "apikey",
   "api_key",
   "X-AMZ-SIGNATURE", // case-insensitive match on the key
@@ -57,6 +71,27 @@ test.each([
   expect(canonical).not.toContain("secret");
   expect(canonical.toLowerCase()).not.toContain(deniedKey.toLowerCase() + "=");
   expect(canonical).toContain("kept=1");
+});
+
+test("canonicalizeUrl keeps Azure SAS's short keys (collision risk with innocent params)", () => {
+  // se/st/sp/sv/sr churn per SAS issuance too, but they are short enough
+  // to collide with legitimate app query params on arbitrary URLs — kept
+  // on purpose (the documented trade-off in DENYLISTED_QUERY_KEYS).
+  const url = "https://example.com/report.html?sr=1&se=2026-01-01&sp=r";
+  expect(canonicalizeUrl(url)).toBe(url);
+});
+
+test("two presigns of the same S3 object canonicalize to one source id", () => {
+  const first =
+    "https://bucket.s3.amazonaws.com/report.pdf?X-Amz-Algorithm=AWS4-HMAC-SHA256&" +
+    "X-Amz-Credential=AKIA%2F20260808%2Fap%2Fs3%2Faws4_request&X-Amz-Date=20260808T000000Z&" +
+    "X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=aaaa";
+  const second = first
+    .replace("20260808T000000Z", "20260809T120000Z")
+    .replace("X-Amz-Expires=3600", "X-Amz-Expires=900")
+    .replace("X-Amz-Signature=aaaa", "X-Amz-Signature=bbbb");
+  expect(canonicalizeUrl(first)).toBe(canonicalizeUrl(second));
+  expect(canonicalizeUrl(first)).toBe("https://bucket.s3.amazonaws.com/report.pdf");
 });
 
 test("canonicalizeUrl preserves order of kept query parameters", () => {

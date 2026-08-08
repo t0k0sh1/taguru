@@ -41,8 +41,14 @@ export class FakeServer {
   /** Context names whose every request should fail with a 500, to
    * exercise cross-context partial-failure handling. */
   failContexts = new Set<string>();
-  /** When set, the cross-context /sources/search call (the text lane)
-   * fails with a 500, to exercise text/graph lane isolation. */
+  /** Context names whose GRAPH-lane requests (everything under
+   * /contexts/<name>/ except sources/search) fail with a 500 — the
+   * single-context twin of `failContexts`, sparing the text lane so lane
+   * isolation is observable. */
+  failGraphLane = new Set<string>();
+  /** When set, every /sources/search call (cross-context or per-context —
+   * the text lane) fails with a 500, to exercise text/graph lane
+   * isolation. */
   failTextSearch = false;
   /** /embeddings/refresh's status: 501 (default, no provider configured),
    * 200 (success — served with embeddingsRefreshResult), or 502 (provider
@@ -89,6 +95,16 @@ export class FakeServer {
     this.calls.push([path, body]);
     const contextMatch = /^\/contexts\/([^/]+)\//.exec(path);
     if (contextMatch && this.failContexts.has(contextMatch[1]!)) {
+      return new Response(
+        JSON.stringify({ status: "error", code: "internal", error: "simulated failure", time: 0.001 }),
+        { status: 500 },
+      );
+    }
+    if (
+      contextMatch &&
+      this.failGraphLane.has(contextMatch[1]!) &&
+      !path.endsWith("/sources/search")
+    ) {
       return new Response(
         JSON.stringify({ status: "error", code: "internal", error: "simulated failure", time: 0.001 }),
         { status: 500 },
@@ -157,6 +173,12 @@ export class FakeServer {
       return ok({ text: "杜氏は高瀬である。", source, section: "人物" });
     }
     if (path.endsWith("/sources/search")) {
+      if (this.failTextSearch) {
+        return new Response(
+          JSON.stringify({ status: "error", code: "internal", error: "simulated failure", time: 0.001 }),
+          { status: 500 },
+        );
+      }
       return ok({
         plan: {
           contexts: [

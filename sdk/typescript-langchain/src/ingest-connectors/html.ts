@@ -482,24 +482,61 @@ async function assertPublicDestination(urlString: string): Promise<void> {
 // -- charset resolution --------------------------------------------------------
 
 /**
- * `Content-Type` header `charset=` first, else an ASCII-safe scan of a
- * `<meta charset=...>`/`<meta http-equiv="Content-Type" content="...
- * charset=...">` tag in the first 2 KiB (where HTML5 requires one to
- * live), else UTF-8. A BOM is handled separately, after decoding
- * (`parseDocument`'s own leading-BOM strip, the same convention the
- * Python module uses) rather than sniffed here.
+ * A byte-order mark first (it is definitive, and the UTF-16 ones make
+ * every later text-level scan meaningless), then `Content-Type` header
+ * `charset=`, else an ASCII-safe scan of a `<meta charset=...>`/`<meta
+ * http-equiv="Content-Type" content="... charset=...">` tag in the first
+ * 2 KiB (where HTML5 requires one to live), else UTF-8 — after one last
+ * look for the interleaved-NUL shape of BOM-less UTF-16. That last case
+ * matters because it decodes as UTF-8 WITHOUT error: every ASCII-range
+ * character in UTF-16 pairs its code with a NUL byte, so the "text"
+ * comes out with NULs between the markup's characters, the parser sees
+ * no tags at all, and `<script>` bodies (dropped from text on every
+ * healthy path) would ride into the body text undiagnosed. A UTF-8 BOM
+ * still surfaces as U+FEFF after decoding and is stripped in
+ * `parseDocument`, the same convention text.ts uses.
  */
 function resolveCharset(raw: Buffer, contentTypeHeader: string | null): string {
+  if (raw.length >= 2 && raw[0] === 0xff && raw[1] === 0xfe) {
+    // TextDecoder consumes a matching BOM itself for these labels.
+    return "utf-16le";
+  }
+  if (raw.length >= 2 && raw[0] === 0xfe && raw[1] === 0xff) {
+    return "utf-16be";
+  }
   if (contentTypeHeader) {
     const headerMatch = HEADER_CHARSET_RE.exec(contentTypeHeader);
     if (headerMatch) {
       return headerMatch[1]!;
     }
   }
-  const prefix = raw.subarray(0, 2048).toString("latin1");
+  const sample = raw.subarray(0, 2048);
+  const prefix = sample.toString("latin1");
   const metaMatch = CHARSET_RE.exec(prefix);
   if (metaMatch) {
     return metaMatch[1]!;
+  }
+  if (sample.length > 0) {
+    // BOM-less UTF-16 heuristic: markup is ASCII, so one byte of every
+    // pair is NUL — concentrated on odd offsets for LE, even for BE.
+    let oddNuls = 0;
+    let evenNuls = 0;
+    for (let i = 0; i < sample.length; i += 1) {
+      if (sample[i] === 0) {
+        if (i % 2 === 1) {
+          oddNuls += 1;
+        } else {
+          evenNuls += 1;
+        }
+      }
+    }
+    const quarter = Math.floor(sample.length / 4);
+    if (oddNuls > quarter && oddNuls > 2 * evenNuls) {
+      return "utf-16le";
+    }
+    if (evenNuls > quarter && evenNuls > 2 * oddNuls) {
+      return "utf-16be";
+    }
   }
   return "utf-8";
 }
@@ -953,13 +990,7 @@ class Extractor {
     return this.paragraphs.join("\n\n");
   }
 
-  private shouldDrop(node: HtmlNode): boolean {
-    if (DROP_TAGS.has(node.tag)) {
-      return true;
-    }
-    if (CONDITIONAL_DROP_TAGS.has(node.tag) && this.dropHeaderFooter) {
-      return true;
-    }
+  private hiddenByAttrs(node: HtmlNode): boolean {
     if (Object.hasOwn(node.attrs, "hidden")) {
       return true;
     }
@@ -970,6 +1001,16 @@ class Extractor {
       return true;
     }
     return false;
+  }
+
+  private shouldDrop(node: HtmlNode): boolean {
+    if (DROP_TAGS.has(node.tag)) {
+      return true;
+    }
+    if (CONDITIONAL_DROP_TAGS.has(node.tag) && this.dropHeaderFooter) {
+      return true;
+    }
+    return this.hiddenByAttrs(node);
   }
 
   /** Appends `text` as a new paragraph (attaching the current section's
@@ -1002,7 +1043,12 @@ class Extractor {
 
   private visit(node: HtmlNode, ambientId: string | null): void {
     if (this.shouldDrop(node)) {
-      if (node.tag === "iframe" || node.tag === "frame") {
+      // Flag only a frame a reader would have seen. One hidden by its
+      // own attributes contributes no visible content, and one inside an
+      // already-dropped subtree (nav/aside/…) never reaches this visit
+      // at all — the diagnostic means "visible embedded content was not
+      // fetched", not "a frame tag existed somewhere".
+      if ((node.tag === "iframe" || node.tag === "frame") && !this.hiddenByAttrs(node)) {
         this.hadDroppedFrame = true;
       }
       return;
@@ -1374,11 +1420,26 @@ export class HtmlConnector implements Connector {
       return earlyFailure("unreadable", errorMessage(error));
     }
 
+    // Resolved before ANY response-driven exit: after a redirect chain,
+    // every failure from here on must name the URL that actually
+    // answered, exactly like the success path and the size/deadline
+    // failures below — "the source id is the final URL" is this module's
+    // contract, and observability-side identity (e.g. duplicate_source
+    // folding) depends on it.
+    const responseFailure = (code: DiagnosticCode, message: string) =>
+      this.failure({
+        source: canonicalizeUrl(stripFragment(finalUrl)),
+        displayName: urlDisplayName(finalUrl),
+        code,
+        message,
+        rawContentSha256: EMPTY_SHA256,
+      });
+
     if (response.status >= 400) {
       if (response.body) {
         await response.body.cancel().catch(() => {});
       }
-      return earlyFailure("unreadable", `HTTP ${response.status}`);
+      return responseFailure("unreadable", `HTTP ${response.status}`);
     }
 
     const contentTypeHeader = response.headers.get("content-type");
@@ -1388,7 +1449,7 @@ export class HtmlConnector implements Connector {
         if (response.body) {
           await response.body.cancel().catch(() => {});
         }
-        return earlyFailure(
+        return responseFailure(
           "unsupported_format",
           `unsupported content type '${contentTypeHeader}' (expected text/html)`,
         );
@@ -1404,7 +1465,7 @@ export class HtmlConnector implements Connector {
         try {
           result = await reader.read();
         } catch (error) {
-          return earlyFailure("unreadable", errorMessage(error));
+          return responseFailure("unreadable", errorMessage(error));
         }
         if (result.done) {
           break;
@@ -1413,23 +1474,17 @@ export class HtmlConnector implements Connector {
         total += result.value.length;
         if (total > this.maxFileBytes) {
           await reader.cancel().catch(() => {});
-          return this.failure({
-            source: canonicalizeUrl(stripFragment(finalUrl)),
-            displayName: urlDisplayName(finalUrl),
-            code: "content_too_large",
-            message: `exceeds the ${this.maxFileBytes}-byte fetch cap`,
-            rawContentSha256: EMPTY_SHA256,
-          });
+          return responseFailure(
+            "content_too_large",
+            `exceeds the ${this.maxFileBytes}-byte fetch cap`,
+          );
         }
         if (Date.now() > deadline) {
           await reader.cancel().catch(() => {});
-          return this.failure({
-            source: canonicalizeUrl(stripFragment(finalUrl)),
-            displayName: urlDisplayName(finalUrl),
-            code: "unreadable",
-            message: `the fetch exceeded the ${this.maxTotalSeconds}-second total time budget`,
-            rawContentSha256: EMPTY_SHA256,
-          });
+          return responseFailure(
+            "unreadable",
+            `the fetch exceeded the ${this.maxTotalSeconds}-second total time budget`,
+          );
         }
       }
     }
@@ -1536,6 +1591,19 @@ export class HtmlConnector implements Connector {
     // harmless belt-and-suspenders strip for every other charset).
     if (textRaw.startsWith("\ufeff")) {
       textRaw = textRaw.slice(1);
+    }
+    if (textRaw.includes("\u0000")) {
+      // NUL never occurs in legitimate HTML (WHATWG treats it as a parse
+      // error), and it survives a UTF-8 decode without an exception \u2014 its
+      // presence means the charset guess was wrong (binary data, or an
+      // undeclared multi-byte encoding the heuristics above did not
+      // catch). Parsing on would see no tags, so `<script>` bodies would
+      // leak into the body text; refuse with a diagnostic instead.
+      return failure(
+        "corrupt",
+        "decoded text contains NUL characters \u2014 the byte stream is binary or its " +
+          "character encoding was misdeclared",
+      );
     }
 
     let bodyText: string;

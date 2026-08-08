@@ -288,6 +288,49 @@ async def test_async_bare_context_both_lanes_failing_raises_instead_of_returning
         await retriever.ainvoke("青嶺酒造")
 
 
+def test_bare_context_sole_graph_lane_failing_raises(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    """A disabled lane is not a healthy one: with a single lane enabled,
+    its failure alone must surface as "retrieval is broken", never as an
+    empty "nothing found"."""
+    fake_server.fail_contexts.add("sake")
+    retriever = make_retriever(sync_client, async_client, include_text=False)
+
+    with pytest.raises(Exception, match="simulated failure"):
+        retriever.invoke("青嶺酒造")
+
+
+def test_bare_context_sole_text_lane_failing_raises(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    fake_server.fail_text_search = True
+    retriever = make_retriever(sync_client, async_client, include_graph=False)
+
+    with pytest.raises(Exception, match="simulated failure"):
+        retriever.invoke("青嶺酒造")
+
+
+async def test_async_bare_context_sole_graph_lane_failing_raises(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    fake_server.fail_contexts.add("sake")
+    retriever = make_retriever(sync_client, async_client, include_text=False)
+
+    with pytest.raises(Exception, match="simulated failure"):
+        await retriever.ainvoke("青嶺酒造")
+
+
+async def test_async_bare_context_sole_text_lane_failing_raises(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer
+) -> None:
+    fake_server.fail_text_search = True
+    retriever = make_retriever(sync_client, async_client, include_graph=False)
+
+    with pytest.raises(Exception, match="simulated failure"):
+        await retriever.ainvoke("青嶺酒造")
+
+
 # -- async citation fetches run concurrently, not sequentially ------------------
 
 

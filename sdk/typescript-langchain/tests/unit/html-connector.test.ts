@@ -442,3 +442,81 @@ test("timeout and userAgent are excluded from the options digest", async () => {
 
   expect(a.fingerprintInputs.parseOptionsDigest).toBe(b.fingerprintInputs.parseOptionsDigest);
 });
+
+// -- charset hardening (ports of the Python twin's UTF-16/NUL suite) ----------
+
+const UTF16_PAGE =
+  "<html><head><title>T</title></head><body>" +
+  '<script>leakSecret("token=abc123");</script>' +
+  "<main><p>Body text.</p></main></body></html>";
+
+function utf16Bytes(text: string, endian: "le" | "be", bom: boolean): Buffer {
+  let body = Buffer.from(text, "utf16le");
+  if (endian === "be") {
+    body = Buffer.from(body);
+    body.swap16();
+  }
+  if (!bom) {
+    return body;
+  }
+  const mark = endian === "le" ? Buffer.from([0xff, 0xfe]) : Buffer.from([0xfe, 0xff]);
+  return Buffer.concat([mark, body]);
+}
+
+test.each(["le", "be"] as const)(
+  "BOM-less UTF-16 %s is detected and script bodies stay out of the text",
+  async (endian) => {
+    // BOM-less UTF-16 decodes as UTF-8 WITHOUT error — every ASCII char
+    // gains an interleaved NUL, the parser then sees no tags at all, and
+    // the <script> body (dropped on every healthy path) used to ride
+    // into the body text undiagnosed.
+    const path = write("doc.html", utf16Bytes(UTF16_PAGE, endian, false));
+    const document = await new HtmlConnector().read(path);
+
+    expect(document.diagnostics).toEqual([]);
+    expect(document.text).toBe("Body text.");
+    expect(document.text).not.toContain("leakSecret");
+  },
+);
+
+test.each(["le", "be"] as const)(
+  "UTF-16 %s with a BOM decodes through the BOM sniff",
+  async (endian) => {
+    const path = write("doc.html", utf16Bytes(UTF16_PAGE, endian, true));
+    const document = await new HtmlConnector().read(path);
+
+    expect(document.diagnostics).toEqual([]);
+    expect(document.text).toBe("Body text.");
+  },
+);
+
+test("NUL bytes surviving the decode are refused as corrupt", async () => {
+  // Scattered NULs (not the interleaved UTF-16 shape) still decode as
+  // UTF-8; parsing on would leak script content, so the connector must
+  // refuse with a diagnostic instead.
+  const path = write(
+    "doc.html",
+    Buffer.from("<html><body><p>x\u0000y</p><script>evil()</script></body></html>", "latin1"),
+  );
+  const document = await new HtmlConnector().read(path);
+
+  expect(document.text).toBe("");
+  expect(document.diagnostics.map((d) => d.code)).toEqual(["corrupt"]);
+});
+
+test("a hidden iframe is not reported as partial_extraction", async () => {
+  // The diagnostic means "visible embedded content was not fetched" — an
+  // iframe hidden by its own attributes shows a reader nothing, so its
+  // exclusion loses nothing, matching how a frame inside a dropped <nav>
+  // subtree already stays undiagnosed.
+  const path = write(
+    "doc.html",
+    `<html><body><main><p>Real text.</p>
+        <iframe hidden src="https://example.com/embed"></iframe>
+        </main></body></html>`,
+  );
+  const document = await new HtmlConnector().read(path);
+
+  expect(document.text).toBe("Real text.");
+  expect(document.diagnostics).toEqual([]);
+});

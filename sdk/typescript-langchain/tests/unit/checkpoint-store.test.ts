@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   checkpointFileName,
+  CheckpointLockedError,
   deriveModelIdentity,
   DocumentCheckpoints,
   FilesystemCheckpointStore,
@@ -131,6 +132,9 @@ describe("FilesystemCheckpointStore", () => {
   it("atomic write leaves no tmp litter", async () => {
     const store = new FilesystemCheckpointStore(dir);
     await store.save("docs/aomine.md", encode("{}"));
+    // close() releases the advisory lock (removing its sidecar), so only
+    // the checkpoint file itself remains.
+    await store.close();
     expect(readdirSync(dir)).toEqual([await checkpointFileName("docs/aomine.md")]);
   });
 
@@ -140,7 +144,97 @@ describe("FilesystemCheckpointStore", () => {
     vi.mocked(fsPromises.rename).mockRejectedValueOnce(new Error("simulated replace failure"));
     await expect(store.save("docs/aomine.md", encode("replacement"))).rejects.toThrow();
     expect(decode((await store.load("docs/aomine.md"))!)).toBe("original");
+    await store.close();
     expect(readdirSync(dir)).toEqual([await checkpointFileName("docs/aomine.md")]);
+  });
+
+  it("a second store instance is locked out until the first releases", async () => {
+    const first = new FilesystemCheckpointStore(dir);
+    const second = new FilesystemCheckpointStore(dir);
+    await first.save("docs/aomine.md", encode("one"));
+    await expect(second.save("docs/aomine.md", encode("two"))).rejects.toThrow(
+      CheckpointLockedError,
+    );
+    // The loser's failed save must not have clobbered the holder's state.
+    expect(decode((await first.load("docs/aomine.md"))!)).toBe("one");
+    // A DIFFERENT source is not contended.
+    await second.save("docs/other.md", encode("independent"));
+    await first.close();
+    await second.save("docs/aomine.md", encode("two"));
+    expect(decode((await second.load("docs/aomine.md"))!)).toBe("two");
+    await second.close();
+  });
+
+  it("repeat saves by the lock holder are not self-contention", async () => {
+    const store = new FilesystemCheckpointStore(dir);
+    await store.save("docs/aomine.md", encode("one"));
+    await store.save("docs/aomine.md", encode("two"));
+    expect(decode((await store.load("docs/aomine.md"))!)).toBe("two");
+    await store.close();
+  });
+
+  it("delete releases the lock along with the checkpoint", async () => {
+    const first = new FilesystemCheckpointStore(dir);
+    const second = new FilesystemCheckpointStore(dir);
+    await first.save("docs/aomine.md", encode("one"));
+    await first.delete("docs/aomine.md");
+    await second.save("docs/aomine.md", encode("two"));
+    await first.close();
+    await second.close();
+  });
+
+  it("a dead holder's stale lock is reclaimed, never wedging the next run", async () => {
+    const { writeFile, mkdir } = fsPromises;
+    const store = new FilesystemCheckpointStore(dir);
+    const lockPath = (await store.pathFor("docs/aomine.md")) + ".lock";
+    await mkdir(dir, { recursive: true });
+    // A PID no live process holds: spawn-and-reap is racy in a unit test,
+    // so use garbage content — an unreadable holder is treated as stale
+    // exactly like a dead one.
+    await writeFile(lockPath, "not-a-pid", "utf-8");
+    await store.save("docs/aomine.md", encode("recovered"));
+    expect(decode((await store.load("docs/aomine.md"))!)).toBe("recovered");
+    await store.close();
+  });
+
+  it("delete refuses to remove a checkpoint another live run holds", async () => {
+    // A run whose every chunk was a cache hit never saved, so it holds no
+    // lock — its cleanup must not destroy the holder's on-disk state.
+    const first = new FilesystemCheckpointStore(dir);
+    const second = new FilesystemCheckpointStore(dir);
+    await first.save("docs/aomine.md", encode("one"));
+    await expect(second.delete("docs/aomine.md")).rejects.toThrow(CheckpointLockedError);
+    expect(decode((await first.load("docs/aomine.md"))!)).toBe("one");
+    await first.close();
+  });
+
+  it("delete of a never-saved source is a no-op that creates nothing", async () => {
+    const nested = join(dir, "never-created");
+    const store = new FilesystemCheckpointStore(nested);
+    await store.delete("docs/aomine.md");
+    expect(existsSync(nested)).toBe(false);
+  });
+
+  it("concurrent saves on one instance do not self-conflict", async () => {
+    const store = new FilesystemCheckpointStore(dir);
+    await Promise.all([
+      store.save("docs/aomine.md", encode("a")),
+      store.save("docs/aomine.md", encode("b")),
+    ]);
+    expect(await store.load("docs/aomine.md")).not.toBeNull();
+    await store.close();
+  });
+
+  it("a live holder's lock is respected", async () => {
+    const { writeFile, mkdir } = fsPromises;
+    const store = new FilesystemCheckpointStore(dir);
+    const lockPath = (await store.pathFor("docs/aomine.md")) + ".lock";
+    await mkdir(dir, { recursive: true });
+    // This test process itself is the live holder.
+    await writeFile(lockPath, String(process.pid), "utf-8");
+    await expect(store.save("docs/aomine.md", encode("x"))).rejects.toThrow(
+      CheckpointLockedError,
+    );
   });
 
   it("load never creates the directory and save creates it on demand", async () => {
