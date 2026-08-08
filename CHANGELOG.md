@@ -15,9 +15,11 @@ Entries that change an on-disk format or a response shape say so.
   instead of detecting them at audit time. Non-restrictive by contract
   and off by default; the control is a manifest/checkpoint computation
   input, so toggling it re-extracts. `taguru benchmark extract` gains
-  the matching `--candidates` forwarding, and its
-  `extraction_settings` now also records `--lossy` (a pre-existing
-  resume-fairness gap).
+  the matching `--candidates` forwarding, and its `manifest.json`
+  `extraction_settings` records two new fields — `candidates` and
+  `lossy` (the latter closes a pre-existing resume-fairness gap):
+  both additive with `serde(default)` (`false`), so existing results
+  directories keep loading and match default-off/non-lossy reruns.
 
 ### Changed
 - `taguru extract`'s strict (default) mode now removes mechanically —

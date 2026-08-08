@@ -989,16 +989,22 @@ fn extract_candidates_flag_folds_the_document_names_into_the_system_prompt() {
 
     let requests = requests.join().unwrap();
     assert_eq!(requests.len(), 1);
+    // Inspect the SYSTEM message's own candidate block, not the whole
+    // request — the user message quotes the document, which contains
+    // the same names, so a whole-body grep would pass with candidate
+    // extraction broken.
+    let body_start = requests[0].find('{').expect("request carries a JSON body");
+    let body: serde_json::Value = serde_json::from_str(&requests[0][body_start..]).unwrap();
+    let system = body["messages"][0]["content"].as_str().unwrap();
+    assert_eq!(body["messages"][0]["role"], "system");
+    let block = system
+        .split("Names appearing in this document")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no candidate block in the system prompt: {system}"));
+    assert!(block.contains("cargo-nextest"), "{block}");
     assert!(
-        requests[0].contains("Names appearing in this document"),
-        "{}",
-        requests[0]
-    );
-    assert!(requests[0].contains("cargo-nextest"), "{}", requests[0]);
-    assert!(
-        requests[0].contains("still allowed"),
-        "non-restrictive contract: {}",
-        requests[0]
+        block.contains("still allowed"),
+        "non-restrictive contract: {block}"
     );
 
     // The same run WITHOUT the flag must not send the block — and must
