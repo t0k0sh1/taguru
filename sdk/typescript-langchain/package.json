@@ -52,7 +52,7 @@
   },
   "devDependencies": {
     "taguru": "^0.8.0",
-    "@langchain/core": "^1.2.3",
+    "@langchain/core": "^1.2.4",
     "pdfjs-dist": "^6.2.108",
     "fflate": "^0.8.2",
     "fast-xml-parser": "^5.2.0",
@@ -61,7 +61,7 @@
     "eslint": "^10.8.0",
     "tsup": "^8.2.0",
     "typescript": "^6.0.3",
-    "typescript-eslint": "^8.65.0",
+    "typescript-eslint": "^8.66.0",
     "vitest": "^4.1.10"
   }
 }

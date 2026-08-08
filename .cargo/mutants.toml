@@ -5,6 +5,15 @@ additional_cargo_args = ["--locked"]
 profile = "mutants"
 timeout_multiplier = 3.0
 
+# nextest runs the suite's test binaries in one parallel pool with
+# fail-fast across all of them, where `cargo test` runs binary by
+# binary in series: a caught mutant surfaces at its first failing test
+# instead of waiting out every binary scheduled before it. Measured on
+# the #428 api sweep, that halved the median time-to-catch (231s →
+# 102s) and cut the whole-run cost by about a third. Per-test hang
+# containment lives in .config/nextest.toml.
+test_tool = "nextest"
+
 # dispatch_chunks_concurrently's `index` always comes from a fresh
 # next.fetch_add claim, and first_failure only ever holds a value some
 # earlier claim already consumed — index can never equal first_failure, so
