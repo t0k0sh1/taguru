@@ -12,7 +12,7 @@ use taguru::deadline::Deadline;
 use crate::groups::GroupRecord;
 use crate::ingest::AliasRejection;
 use crate::metrics::ErrorKind;
-use crate::registry::AppState;
+use crate::registry::{AccessError, AppState};
 
 use super::groups::{scope_refusal, scoped_member_contexts};
 use super::{
@@ -217,6 +217,47 @@ fn stream_integrity(previewed_or_landed: usize, dry_run: bool) -> (&'static str,
     }
 }
 
+/// The refusal a budget spent partway through [`import_batch`]'s loop
+/// answers: each landed batch is durable (retract-then-apply), so the
+/// stop is a resumable prefix — the note names the position, and the
+/// [`stream_integrity`] fields carry the same claim machine-readably.
+pub(super) fn import_budget_refusal(
+    index: usize,
+    total: usize,
+    batch: &crate::ingest::Batch,
+    landed: usize,
+    dry_run: bool,
+    started_at: Instant,
+) -> Response {
+    let note = import_batch_note(
+        index,
+        total,
+        batch,
+        landed,
+        dry_run,
+        ("not previewed", "not attempted"),
+        (
+            "re-running the preview with more time or a narrower stream is exact",
+            "re-POSTing the remaining stream is exact (each batch replaces its \
+             own source)",
+        ),
+    );
+    let (integrity, durable_batches) = stream_integrity(landed, dry_run);
+    validation_error(
+        ErrorCode::Timeout,
+        format!(
+            "{note}request exceeded its budget partway through a multi-batch \
+             import (TAGURU_REQUEST_TIMEOUT_SECS tunes this)"
+        ),
+        RefusalDetail {
+            integrity: Some(integrity),
+            durable_batches,
+            ..Default::default()
+        },
+        started_at,
+    )
+}
+
 /// Maps one batch's [`ApplyRefusal`](crate::ingest::ApplyRefusal) onto
 /// the response, `note` naming which batch of a stream refused (empty
 /// for a single-batch body, keeping that path's responses exactly as
@@ -406,7 +447,7 @@ pub(super) fn restore_refusal(
 /// Every batch of the stream already landed durably by the time a
 /// schema record is even reached; nothing past this record (later
 /// schemas, every group) applies.
-fn schema_import_refusal(
+pub(super) fn schema_import_refusal(
     state: &AppState,
     context: &str,
     failure: crate::ingest::SchemaApplyError,
@@ -705,31 +746,12 @@ pub async fn import_batch(
             // budget that runs out partway is safe to report as a
             // resumable prefix rather than an all-or-nothing failure.
             if deadline.expired() {
-                let note = import_batch_note(
+                return Err(Box::new(import_budget_refusal(
                     index,
                     total,
                     batch,
                     outcomes.len(),
                     query.dry_run,
-                    ("not previewed", "not attempted"),
-                    (
-                        "re-running the preview with more time or a narrower stream is exact",
-                        "re-POSTing the remaining stream is exact (each batch replaces its \
-                         own source)",
-                    ),
-                );
-                let (integrity, durable_batches) = stream_integrity(outcomes.len(), query.dry_run);
-                return Err(Box::new(validation_error(
-                    ErrorCode::Timeout,
-                    format!(
-                        "{note}request exceeded its budget partway through a multi-batch \
-                         import (TAGURU_REQUEST_TIMEOUT_SECS tunes this)"
-                    ),
-                    RefusalDetail {
-                        integrity: Some(integrity),
-                        durable_batches,
-                        ..Default::default()
-                    },
                     started_at,
                 )));
             }
@@ -998,6 +1020,18 @@ pub async fn export_context(
             .export_context(&name, deadline)
             .map(|snapshot| crate::export::render(&name, &snapshot, deadline))
     });
+    export_response(&state, &name, rendered, deadline, started_at)
+}
+
+/// Maps [`export_context`]'s materialize-and-render outcome onto the
+/// response — the stream itself, or which refusal a render failure is.
+pub(super) fn export_response(
+    state: &AppState,
+    name: &str,
+    rendered: Result<Result<crate::export::Rendered, String>, AccessError>,
+    deadline: Deadline,
+    started_at: Instant,
+) -> Response {
     match rendered {
         Ok(Ok(rendered)) => (
             StatusCode::OK,
@@ -1010,14 +1044,14 @@ pub async fn export_context(
             .into_response(),
         // Mirrors search_passages: render()'s own loop over a large
         // context's associations/aliases can outlast the budget after
-        // the entry check above already passed — reclassify by asking
-        // the same deadline again rather than by matching render()'s
-        // message text.
+        // export_context's entry check already passed — reclassify by
+        // asking the same deadline again rather than by matching
+        // render()'s message text.
         Ok(Err(_)) if deadline.expired() => deadline_exceeded(started_at),
         // A real source colliding with a reserved export id — the one
         // thing a context can hold that the stream cannot say.
         Ok(Err(message)) => error(ErrorCode::Conflict, message, started_at),
-        Err(failure) => access_error(&state, failure, &name, started_at),
+        Err(failure) => access_error(state, failure, name, started_at),
     }
 }
 

@@ -260,9 +260,36 @@ fn key_scopes_gate_roles_contexts_the_directory_and_mcp() {
             .contains("no grant on context 'bunko'"),
         "{out_of_grant}"
     );
+    // Judged before anything applies, and the structured field (issue
+    // #182) says so alongside the prose's own "nothing was applied".
+    assert_eq!(
+        out_of_grant["integrity"],
+        json!("nothing_written"),
+        "{out_of_grant}"
+    );
     let sake_batch = "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"s\"}\n";
     let (status, in_grant) = post_import(&server, sake_batch, Some("ctok"));
     assert_eq!(status, 200, "{in_grant}");
+
+    // A schema record's context is judged by the same grant, one step
+    // earlier than groups (schemas install before groups restore) —
+    // and with the same nothing-written integrity claim.
+    let schema_record = "{\"taguru_schema\": 1, \"context\": \"bunko\", \"mode\": \"warn\", \
+                         \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n";
+    let (status, schema_refused) = post_import(&server, schema_record, Some("ctok"));
+    assert_eq!(status, 403, "{schema_refused}");
+    assert!(
+        schema_refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("no grant on context 'bunko' (a schema record)"),
+        "{schema_refused}"
+    );
+    assert_eq!(
+        schema_refused["integrity"],
+        json!("nothing_written"),
+        "{schema_refused}"
+    );
 
     // MCP tool calls are judged as the routes they land on: the read
     // key's add_associations dispatch refuses with the same 403.
