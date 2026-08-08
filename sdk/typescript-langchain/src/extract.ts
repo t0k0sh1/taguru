@@ -570,14 +570,36 @@ export function emptyAnswerDiagnosis(): string {
   );
 }
 
-function rejectJsonConstant(text: string): void {
-  if (/\b(NaN|Infinity|-Infinity)\b/.test(text)) {
-    // Unreachable in practice: JSON.parse already rejects these as a
-    // SyntaxError (unlike Python's json module, which accepts them as an
-    // extension by default) — this only guards against a future JSON.parse
-    // replacement quietly picking up leniency here.
-    throw new Error(`${text} is not valid JSON`);
+/**
+ * Whether the parsed value contains NaN/±Infinity anywhere. Strict
+ * JSON.parse can never produce one (unlike Python's json module, which
+ * accepts them as an extension by default) — a hit proves a future
+ * JSON.parse replacement quietly picked up leniency, so the value must be
+ * rejected. Inspecting the parsed value, not the raw text, keeps the word
+ * "NaN" inside a string literal from false-positiving.
+ */
+function containsNonFiniteNumber(value: unknown): boolean {
+  // An explicit stack, not recursion: JSON.parse accepts nesting far
+  // deeper than the call stack allows a recursive walk (V8 parses
+  // 50k-deep arrays; a recursive traversal overflows around 5k).
+  const pending: unknown[] = [value];
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (typeof current === "number") {
+      if (!Number.isFinite(current)) {
+        return true;
+      }
+    } else if (Array.isArray(current)) {
+      for (const item of current) {
+        pending.push(item);
+      }
+    } else if (typeof current === "object" && current !== null) {
+      for (const item of Object.values(current)) {
+        pending.push(item);
+      }
+    }
   }
+  return false;
 }
 
 function parseTopLevelObject(text: string): unknown {
@@ -587,15 +609,21 @@ function parseTopLevelObject(text: string): unknown {
   } catch {
     return undefined;
   }
+  if (containsNonFiniteNumber(value)) {
+    return undefined;
+  }
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
 }
 
 function describeParseFailure(text: string): string {
+  let value: unknown;
   try {
-    rejectJsonConstant(text);
-    JSON.parse(text);
+    value = JSON.parse(text);
   } catch (error) {
     return (error as Error).message;
+  }
+  if (containsNonFiniteNumber(value)) {
+    return `${text} is not valid JSON`;
   }
   return "the top-level value is not a JSON object";
 }

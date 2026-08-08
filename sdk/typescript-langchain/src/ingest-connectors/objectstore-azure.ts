@@ -37,6 +37,7 @@
  */
 
 import {
+  degradeTagFailures,
   errorMessage,
   FetchedObject,
   type ObjectStore,
@@ -395,19 +396,14 @@ export class AzureBlobObjectStore implements ObjectStore {
    * so the same tags-only degrade to `{}` applies (ADR 0007 §9).
    */
   async objectTags(key: string): Promise<Record<string, string>> {
-    try {
-      const client = await this.clientOrBuild();
-      const tags = await client.getBlobClient(key).getTags();
-      return { ...(tags ?? {}) };
-    } catch (error) {
-      if (error instanceof PermanentStoreError) {
-        return {};
-      }
-      const classified = classifyAzureError(error, () => new ObjectNotFoundError(errorMessage(error)));
-      if (classified instanceof TransientStoreError) {
-        throw classified;
-      }
-      return {};
-    }
+    return degradeTagFailures(
+      async () => {
+        const client = await this.clientOrBuild();
+        const tags = await client.getBlobClient(key).getTags();
+        return { ...(tags ?? {}) };
+      },
+      (error) => classifyAzureError(error, () => new ObjectNotFoundError(errorMessage(error))),
+      {},
+    );
   }
 }

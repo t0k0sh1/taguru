@@ -182,7 +182,7 @@ export class TextFileConnector implements Connector {
       );
     }
 
-    const { readFile, stat } = await import("node:fs/promises");
+    const { open, stat } = await import("node:fs/promises");
 
     let size: number;
     try {
@@ -197,9 +197,34 @@ export class TextFileConnector implements Connector {
       );
     }
 
+    // Bounded read: a file appended to between the stat() above and this
+    // read must neither slip past the cap nor be slurped whole into memory
+    // before the cap can reject it — stop at the first byte past the cap.
     let raw: Uint8Array;
     try {
-      raw = await readFile(reference);
+      const handle = await open(reference);
+      try {
+        const chunks: Buffer[] = [];
+        let total = 0;
+        for (;;) {
+          const chunk = Buffer.alloc(64 * 1024);
+          const { bytesRead } = await handle.read(chunk, 0, chunk.length, null);
+          if (bytesRead === 0) {
+            break;
+          }
+          total += bytesRead;
+          if (total > MAX_PASSAGE_BYTES) {
+            return failure(
+              "content_too_large",
+              `more than ${MAX_PASSAGE_BYTES} bytes exceeds the ${MAX_PASSAGE_BYTES}-byte passage cap`,
+            );
+          }
+          chunks.push(chunk.subarray(0, bytesRead));
+        }
+        raw = Buffer.concat(chunks);
+      } finally {
+        await handle.close();
+      }
     } catch (error) {
       return failure("unreadable", String(error));
     }
