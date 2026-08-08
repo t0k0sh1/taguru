@@ -71,7 +71,9 @@ from ._extract import (
     user_message,
 )
 from .checkpoints import (
+    CheckpointLockedError,
     CheckpointStore,
+    _AppendCapableCheckpointStore,
     _CheckpointFingerprint,
     _CheckpointUnit,
     _derive_model_identity,
@@ -489,6 +491,10 @@ class TaguruIngester:
                 "corrective_context_bytes must be a non-negative integer, or None to replay "
                 "the prior bad answer in full"
             )
+        if chunk_bytes < 1:
+            raise ValueError("chunk_bytes must be a positive integer")
+        if vocabulary_cap < 0:
+            raise ValueError("vocabulary_cap must be a non-negative integer")
         self.context = context
         self.llm = llm
         self._owns_clients = client is None and async_client is None
@@ -737,15 +743,29 @@ class TaguruIngester:
         piece: str,
         record: _ChunkRecord,
     ) -> None:
-        """Persists the whole (small) checkpoint file before returning, so a
-        kill immediately after this call still finds the unit on the next
-        run. A save failure only warns — the unit still counts for THIS
+        """Persists the completed unit before returning, so a kill
+        immediately after this call still finds it on the next run. The
+        FIRST unit recorded this run always goes through a full ``save()``
+        — establishing the file (in today's JSONL format, whatever format
+        it was in before) atomically; every later unit is streamed with
+        the store's own ``append()`` when it has one, an O(1)-per-chunk
+        write instead of ``save()``'s O(document size) full rewrite (issue
+        #<O(N^2) checkpoint saves>). A store without ``append`` keeps
+        paying the old full-rewrite cost every time — a correctness no-op,
+        just not the perf win.
+
+        A save/append failure only warns — the unit still counts for THIS
         run; a resume that hits the same failure again would simply
-        re-extract it."""
-        if checkpoints is None or self.checkpoint_store is None:
+        re-extract it. A lock-contention failure (another run already
+        holds ``source``) is different in kind: it warns ONCE and disables
+        every further write for this document this run, rather than
+        repeating (and re-warning on) the same conflict every remaining
+        chunk."""
+        if checkpoints is None or self.checkpoint_store is None or checkpoints.locked_out:
             return
+        unit_hash = self._unit_hash(piece)
         checkpoints.record(
-            self._unit_hash(piece),
+            unit_hash,
             _CheckpointUnit(
                 chunk_index=record.chunk_index,
                 output=record.output,
@@ -753,8 +773,21 @@ class TaguruIngester:
                 answer=record.answer,
             ),
         )
+        store = self.checkpoint_store
         try:
-            self.checkpoint_store.save(source, checkpoints.to_bytes())
+            if checkpoints.established_on_disk and isinstance(store, _AppendCapableCheckpointStore):
+                store.append(source, checkpoints.unit_bytes(unit_hash))
+            else:
+                store.save(source, checkpoints.to_bytes())
+                checkpoints.established_on_disk = True
+        except CheckpointLockedError:
+            checkpoints.locked_out = True
+            warnings.warn(
+                f"another run holds the checkpoint for {source!r}; this run proceeds "
+                "WITHOUT checkpointing",
+                RuntimeWarning,
+                stacklevel=3,
+            )
         except Exception as error:
             warnings.warn(
                 f"TaguruIngester failed to save a checkpoint for {source!r}: {error!r} — "
@@ -763,12 +796,19 @@ class TaguruIngester:
                 stacklevel=3,
             )
 
-    def _delete_checkpoints(self, source: str) -> None:
+    def _delete_checkpoints(
+        self, source: str, checkpoints: _DocumentCheckpoints | None = None
+    ) -> None:
         """Best-effort: the checkpoint's whole purpose (resuming an
         INCOMPLETE document) no longer applies once the batch has landed.
         A failure here is silently ignored — nothing correctness-critical
-        depends on this file disappearing promptly."""
+        depends on this file disappearing promptly. Skipped entirely when
+        this run never held ``source``'s lock (``checkpoints.locked_out``)
+        — deleting would destroy whichever OTHER run's checkpoint is
+        actually on disk, not anything this run wrote."""
         if self.checkpoint_store is None:
+            return
+        if checkpoints is not None and checkpoints.locked_out:
             return
         try:
             self.checkpoint_store.delete(source)
@@ -990,7 +1030,7 @@ class TaguruIngester:
         )
         self._record(outcome, applied.batches[0])
         outcome.ok = True
-        self._delete_checkpoints(source)
+        self._delete_checkpoints(source, checkpoints)
 
         if self.refresh_embeddings:
             self._emit(EmbeddingRefreshStarted(source=source))
@@ -1380,7 +1420,7 @@ class TaguruIngester:
         )
         self._record(outcome, applied.batches[0])
         outcome.ok = True
-        await self._adelete_checkpoints(source)
+        await self._adelete_checkpoints(source, checkpoints)
 
         if self.refresh_embeddings:
             self._emit(EmbeddingRefreshStarted(source=source))
@@ -1474,10 +1514,11 @@ class TaguruIngester:
         record: _ChunkRecord,
     ) -> None:
         """Async twin of ``_record_checkpoint``."""
-        if checkpoints is None or self.checkpoint_store is None:
+        if checkpoints is None or self.checkpoint_store is None or checkpoints.locked_out:
             return
+        unit_hash = self._unit_hash(piece)
         checkpoints.record(
-            self._unit_hash(piece),
+            unit_hash,
             _CheckpointUnit(
                 chunk_index=record.chunk_index,
                 output=record.output,
@@ -1485,8 +1526,21 @@ class TaguruIngester:
                 answer=record.answer,
             ),
         )
+        store = self.checkpoint_store
         try:
-            await asyncio.to_thread(self.checkpoint_store.save, source, checkpoints.to_bytes())
+            if checkpoints.established_on_disk and isinstance(store, _AppendCapableCheckpointStore):
+                await asyncio.to_thread(store.append, source, checkpoints.unit_bytes(unit_hash))
+            else:
+                await asyncio.to_thread(store.save, source, checkpoints.to_bytes())
+                checkpoints.established_on_disk = True
+        except CheckpointLockedError:
+            checkpoints.locked_out = True
+            warnings.warn(
+                f"another run holds the checkpoint for {source!r}; this run proceeds "
+                "WITHOUT checkpointing",
+                RuntimeWarning,
+                stacklevel=3,
+            )
         except Exception as error:
             warnings.warn(
                 f"TaguruIngester failed to save a checkpoint for {source!r}: {error!r} — "
@@ -1495,9 +1549,13 @@ class TaguruIngester:
                 stacklevel=3,
             )
 
-    async def _adelete_checkpoints(self, source: str) -> None:
+    async def _adelete_checkpoints(
+        self, source: str, checkpoints: _DocumentCheckpoints | None = None
+    ) -> None:
         """Async twin of ``_delete_checkpoints``."""
         if self.checkpoint_store is None:
+            return
+        if checkpoints is not None and checkpoints.locked_out:
             return
         try:
             await asyncio.to_thread(self.checkpoint_store.delete, source)

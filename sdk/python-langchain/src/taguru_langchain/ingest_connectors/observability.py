@@ -277,6 +277,16 @@ class RunRecorder:
     path explicitly — writing to it does not violate dry-run's "touch
     nothing" contract the way writing to the corpus or a checkpoint store
     would (ADR 0007 §11.1).
+
+    Memory: ``keep_events=True`` (the default) appends every
+    :class:`SourceEvent` — every phase transition of every source, not just
+    the latest — to an in-memory list for the run's entire lifetime, so
+    memory scales linearly with the number of sources processed (and, per
+    source, with how many phases it passes through). On a run over a very
+    large bucket/prefix, pass ``keep_events=False`` to drop that retention;
+    :class:`RunReport`'s own tallies are computed incrementally either way
+    and stay unaffected, and the full event history remains available via
+    ``events_out``'s JSONL sidecar without ever living in memory at once.
     """
 
     def __init__(

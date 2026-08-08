@@ -231,6 +231,19 @@ def with_ole_object(raw: bytes, *, slide_number: int = 1) -> bytes:
     return _inject_marker(raw, _OLE_OBJECT_MARKER, slide_number=slide_number)
 
 
+def zip_bomb_pptx(declared_size: int = 2 * 1024 * 1024) -> bytes:
+    """A small, high-ratio zip whose one entry declares ``declared_size``
+    zero bytes but compresses to almost nothing — the shape
+    `PptxConnector`'s `max_decompressed_bytes` cap exists to refuse before
+    python-pptx ever decompresses it. Never assembled into a fully valid
+    pptx package: the cap is checked, and this document refused, before
+    python-pptx would ever open it."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("ppt/slides/slide1.xml", b"\0" * declared_size)
+    return buf.getvalue()
+
+
 def corrupt_pptx(kind: str = "not_zip") -> bytes:
     """Three distinct corruption shapes ``PptxConnector`` must all report
     as `corrupt`, never raise: ``"not_zip"`` (not a zip container at all),

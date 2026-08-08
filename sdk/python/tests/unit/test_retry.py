@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from taguru import PermissionDeniedError, RateLimitError, ServerError, TransportError
-from taguru._retry import parse_retry_after
+from taguru._retry import BACKOFF_CAP_SECS, backoff_delay, parse_retry_after
 
 from .conftest import err_response, ok_response, sync_client
 
@@ -114,6 +114,23 @@ def test_ambiguous_failure_never_retries_rename() -> None:
     assert handler.calls == 1
 
 
+def test_ambiguous_failure_never_retries_delete() -> None:
+    """A repeat delete 404s, so a phantom retry after an ambiguous transport
+    failure would surface as `NotFoundError` even though the first delete
+    already applied."""
+    handler = FlakyHandler(1, lambda: httpx.ReadTimeout("mid-flight"))
+    client = sync_client(handler)
+    with pytest.raises(TransportError):
+        client.contexts.delete("sake")
+    assert handler.calls == 1
+
+    handler = FlakyHandler(1, lambda: httpx.ReadTimeout("mid-flight"))
+    client = sync_client(handler)
+    with pytest.raises(TransportError):
+        client.groups.delete("kura")
+    assert handler.calls == 1
+
+
 def test_retries_zero_disables_retry() -> None:
     handler = FlakyHandler(1, lambda: err_response(429, "budget", {"retry-after": "0"}))
     client = sync_client(handler, retries=0)
@@ -153,6 +170,13 @@ def test_retry_budget_exhausts_and_raises_last_error() -> None:
     with pytest.raises(RateLimitError):
         client.context("sake").recall("cue")
     assert handler.calls == 3  # initial + 2 retries
+
+
+def test_backoff_delay_does_not_overflow_on_a_large_attempt_count() -> None:
+    """`2.0 ** attempt` overflows past attempt 1023; the exponent must be
+    clamped before exponentiation so an unusually large `retries` count
+    still returns a capped delay instead of raising `OverflowError`."""
+    assert 0.0 <= backoff_delay(1024) <= BACKOFF_CAP_SECS
 
 
 def test_parse_retry_after_takes_a_bare_delay_and_refuses_the_rest() -> None:

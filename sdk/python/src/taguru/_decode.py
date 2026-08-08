@@ -32,9 +32,13 @@ def decode(cls: Any, data: Any) -> Any:
         return None
     origin = typing.get_origin(cls)
     if origin is list:
+        if not isinstance(data, list):
+            raise ResponseShapeError(f"expected a list for {cls}, got {type(data).__name__}")
         (item_type,) = typing.get_args(cls)
         return [decode(item_type, item) for item in data]
     if origin is dict:
+        if not isinstance(data, dict):
+            raise ResponseShapeError(f"expected a dict for {cls}, got {type(data).__name__}")
         _key_type, value_type = typing.get_args(cls)
         return {key: decode(value_type, value) for key, value in data.items()}
     if origin is typing.Union or origin is types.UnionType:

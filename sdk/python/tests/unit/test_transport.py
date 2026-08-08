@@ -9,7 +9,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from taguru import DirectoryEntry, GroupImportOutcome, TaguruError
+from taguru import DirectoryEntry, GroupImportOutcome, TaguruError, TransportError
 
 from .conftest import async_client, err_response, ok_response, sync_client
 
@@ -95,6 +95,55 @@ def test_export_returns_raw_ndjson() -> None:
     assert client.context("sake").export() == ndjson
 
 
+def test_export_stream_wraps_a_connect_failure_as_transport_error() -> None:
+    """``export_stream`` is the one call site that bypasses ``_send`` (ADR
+    0005 §3.8); without its own wrapping, a connection failure here would
+    escape as a raw httpx exception and slip past ``except TaguruError``."""
+
+    def handler(_req: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused")
+
+    client = sync_client(handler)
+    with pytest.raises(TransportError):
+        for _chunk in client.context("sake").export_stream():
+            pass
+
+    client = sync_client(handler)
+    with pytest.raises(TaguruError):
+        for _chunk in client.context("sake").export_stream():
+            pass
+
+
+async def test_async_export_stream_wraps_a_connect_failure_as_transport_error() -> None:
+    def handler(_req: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused")
+
+    client = async_client(handler)
+    with pytest.raises(TransportError):
+        async for _chunk in client.context("sake").export_stream():
+            pass
+
+    client = async_client(handler)
+    with pytest.raises(TaguruError):
+        async for _chunk in client.context("sake").export_stream():
+            pass
+
+
+async def test_async_export_to_file_wraps_a_connect_failure_as_transport_error(tmp_path) -> None:
+    """The wrapping must survive threading the stream through
+    ``export_to_file``, not just direct iteration of ``export_stream``."""
+
+    def handler(_req: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused")
+
+    client = async_client(handler)
+    target = tmp_path / "backup.jsonl"
+    with pytest.raises(TransportError):
+        await client.context("sake").export_to_file(target)
+    assert not target.exists()
+    assert list(tmp_path.iterdir()) == []  # no leftover temp file
+
+
 def test_export_to_file_cleans_up_and_closes_the_stream_on_failure(tmp_path) -> None:
     client = sync_client(lambda _req: httpx.Response(200, text="unused"))
     ctx = client.context("sake")
@@ -144,7 +193,8 @@ async def test_async_export_to_file_cleans_up_and_closes_the_stream_on_failure(t
 
 
 async def test_async_export_to_file_writes_off_the_event_loop_thread(tmp_path, monkeypatch) -> None:
-    """Each chunk write must run in a worker thread, or a slow disk stalls the loop."""
+    """Each chunk write and the final atomic rename must run in a worker
+    thread, or a slow disk stalls the loop."""
     client = async_client(lambda _req: httpx.Response(200, text="unused"))
     ctx = client.context("sake")
 
@@ -157,7 +207,9 @@ async def test_async_export_to_file_writes_off_the_event_loop_thread(tmp_path, m
 
     loop_thread = threading.current_thread()
     write_threads: list[threading.Thread] = []
+    replace_threads: list[threading.Thread] = []
     original_fdopen = os.fdopen
+    original_replace = Path.replace
 
     class RecordingWriter:
         def __init__(self, fd: int) -> None:
@@ -173,11 +225,18 @@ async def test_async_export_to_file_writes_off_the_event_loop_thread(tmp_path, m
         def __exit__(self, *exc_info: object) -> None:
             self._raw.close()
 
+    def spying_replace(self: Path, target_path: Path) -> Path:
+        replace_threads.append(threading.current_thread())
+        return original_replace(self, target_path)
+
     monkeypatch.setattr(os, "fdopen", lambda fd, mode: RecordingWriter(fd))
+    monkeypatch.setattr(Path, "replace", spying_replace)
     await ctx.export_to_file(target)
 
     assert len(write_threads) == 2
     assert all(thread is not loop_thread for thread in write_threads)
+    assert len(replace_threads) == 1
+    assert replace_threads[0] is not loop_thread
     assert target.read_bytes() == b"chunk-one-chunk-two"
 
 

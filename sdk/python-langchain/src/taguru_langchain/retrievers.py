@@ -186,12 +186,33 @@ class TaguruRetriever(BaseRetriever):
         if not self._is_cross():
             target = self.context
             assert target is not None  # _require_a_target
-            graph_docs = self._graph_lane(self.client, target, query) if self.include_graph else []
+            graph_docs: list[Document] = []
+            graph_error: Exception | None = None
+            if self.include_graph:
+                try:
+                    graph_docs = self._graph_lane(self.client, target, query)
+                except Exception as error:
+                    # Isolated exactly like the multi-context branch
+                    # isolates each target's graph lane below: one lane
+                    # failing must not blank out whatever the other lane
+                    # already found.
+                    graph_error = error
             text_hits: list[PassageHit] = []
+            text_failed = False
             if self.include_text:
-                text_hits = (
-                    self.client.context(target).search_passages(query, limit=self.text_limit).hits
-                )
+                try:
+                    text_hits = (
+                        self.client.context(target)
+                        .search_passages(query, limit=self.text_limit)
+                        .hits
+                    )
+                except Exception:
+                    text_failed = True
+            if graph_error is not None and text_failed:
+                # Neither lane produced anything — an empty result here
+                # would read as "nothing found" instead of "retrieval is
+                # broken."
+                raise graph_error
             return _merge_lanes(graph_docs, text_hits, limit, fallback_context=target)
 
         targets = self._resolve_targets(self.client)
@@ -263,12 +284,23 @@ class TaguruRetriever(BaseRetriever):
         if not origins:
             return []
         page = await ctx.activate(origins, decay=self.activate_decay, limit=self.activate_limit)
-        citations: dict[tuple[str, int], Citation | None] = {}
-        for wanted in _wanted_citations(page.matches):
+        wanted_pairs = _wanted_citations(page.matches)
+
+        async def _fetch_one(pair: tuple[str, int]) -> Citation | None:
+            # Wrapped per-pair (not gather's return_exceptions=True) so a
+            # 404 on one citation resolves to None without also having to
+            # sift real errors out of a mixed exceptions/results list —
+            # any OTHER error still propagates and cancels the rest,
+            # exactly like the sequential loop this replaces did.
             try:
-                citations[wanted] = await ctx.cite_passage(*wanted)
+                return await ctx.cite_passage(*pair)
             except NotFoundError:
-                citations[wanted] = None
+                return None
+
+        fetched = await asyncio.gather(*(_fetch_one(pair) for pair in wanted_pairs))
+        citations: dict[tuple[str, int], Citation | None] = dict(
+            zip(wanted_pairs, fetched, strict=True)
+        )
         return _graph_documents(page.matches, citations, self.include_graph_only_facts, target)
 
     async def _aget_relevant_documents(
@@ -285,17 +317,31 @@ class TaguruRetriever(BaseRetriever):
         if not self._is_cross():
             target = self.context
             assert target is not None  # _require_a_target
-            graph_docs = (
-                await self._agraph_lane(self.async_client, target, query)
-                if self.include_graph
-                else []
-            )
+            graph_docs: list[Document] = []
+            graph_error: Exception | None = None
+            if self.include_graph:
+                try:
+                    graph_docs = await self._agraph_lane(self.async_client, target, query)
+                except Exception as error:
+                    # Same isolation as the sync lane above: one lane
+                    # failing must not blank out whatever the other lane
+                    # already found.
+                    graph_error = error
             text_hits: list[PassageHit] = []
+            text_failed = False
             if self.include_text:
-                single = await self.async_client.context(target).search_passages(
-                    query, limit=self.text_limit
-                )
-                text_hits = single.hits
+                try:
+                    single = await self.async_client.context(target).search_passages(
+                        query, limit=self.text_limit
+                    )
+                    text_hits = single.hits
+                except Exception:
+                    text_failed = True
+            if graph_error is not None and text_failed:
+                # Neither lane produced anything — an empty result here
+                # would read as "nothing found" instead of "retrieval is
+                # broken."
+                raise graph_error
             return _merge_lanes(graph_docs, text_hits, limit, fallback_context=target)
 
         targets = await self._aresolve_targets(self.async_client)
