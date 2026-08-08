@@ -1,0 +1,12 @@
+# A test that stops making progress gets killed at 2x60s rather than
+# holding its whole run hostage: under cargo-mutants (which names
+# nextest in .cargo/mutants.toml) a mutant that deadlocks a single
+# test — the registry semaphore shapes — is caught by that test's own
+# termination instead of burning the run-wide timeout, and an
+# interactive `cargo nextest run` gets the same containment. The
+# slowest legitimate test is ~32s (passages snapshot bound), so a 60s
+# slow mark with one reprieve clears it with margin even on a loaded
+# machine. Mutants that merely slow the whole suite down are bounded
+# by cargo-mutants' own timeout_multiplier, not this.
+[profile.default]
+slow-timeout = { period = "60s", terminate-after = 2 }
