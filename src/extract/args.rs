@@ -64,6 +64,17 @@ pub(super) struct Args {
     pub(super) schema: Option<PathBuf>,
     pub(super) context: String,
     pub(super) description: Option<String>,
+    /// #466 S1 (ADR 0017): the promotion runbook's `session:{agent}:{id}`
+    /// source id, replacing the document path in the written batch
+    /// header. `None` keeps the path (today's batch, byte for byte).
+    pub(super) source_id: Option<String>,
+    /// #466 S1: the session's own date (epoch seconds), emitted on the
+    /// written batch's passage line — the assertion time every windowed
+    /// read and the staleness audit run on. `None` emits no field.
+    pub(super) date: Option<u64>,
+    /// #466 S1: the session's topic tags, emitted on the written
+    /// batch's passage line. Empty emits no field.
+    pub(super) tags: Vec<String>,
     pub(super) out: PathBuf,
     pub(super) paths: Vec<String>,
 }
@@ -87,6 +98,9 @@ impl Args {
         let mut schema: Option<PathBuf> = None;
         let mut context: Option<String> = None;
         let mut description: Option<String> = None;
+        let mut source_id: Option<String> = None;
+        let mut date: Option<u64> = None;
+        let mut tags: Vec<String> = Vec::new();
         let mut out: Option<PathBuf> = None;
         let mut paths: Vec<String> = Vec::new();
         let mut rest = args.iter();
@@ -285,6 +299,90 @@ impl Args {
                         ));
                     }
                 },
+                "--source-id" => match rest.next() {
+                    Some(id) if source_id.is_none() && !id.is_empty() => {
+                        source_id = Some(id.clone());
+                    }
+                    Some(id) if id.is_empty() => {
+                        return Err(crate::config::subcommand_usage_error(
+                            "extract",
+                            "--source-id must not be empty",
+                        ));
+                    }
+                    Some(_) => {
+                        return Err(crate::config::subcommand_usage_error(
+                            "extract",
+                            "--source-id given twice",
+                        ));
+                    }
+                    None => {
+                        return Err(crate::config::subcommand_usage_error(
+                            "extract",
+                            "--source-id needs a source id (session:{agent}:{id})",
+                        ));
+                    }
+                },
+                "--date" => match rest.next() {
+                    Some(_) if date.is_some() => {
+                        return Err(crate::config::subcommand_usage_error(
+                            "extract",
+                            "--date given twice",
+                        ));
+                    }
+                    Some(when) => match parse_date(when) {
+                        Some(seconds) => date = Some(seconds),
+                        None => {
+                            return Err(crate::config::subcommand_usage_error(
+                                "extract",
+                                "--date takes YYYY-MM-DD (UTC midnight) or positive epoch seconds",
+                            ));
+                        }
+                    },
+                    None => {
+                        return Err(crate::config::subcommand_usage_error(
+                            "extract",
+                            "--date needs a date (YYYY-MM-DD or epoch seconds)",
+                        ));
+                    }
+                },
+                "--tag" => match rest.next() {
+                    Some(tag) if tag.trim().is_empty() => {
+                        return Err(crate::config::subcommand_usage_error(
+                            "extract",
+                            "--tag must not be empty",
+                        ));
+                    }
+                    Some(tag) if tag.len() > crate::api::MAX_TAG_BYTES => {
+                        return Err(crate::config::subcommand_usage_error(
+                            "extract",
+                            &format!(
+                                "tag of {} bytes exceeds the {}-byte cap",
+                                tag.len(),
+                                crate::api::MAX_TAG_BYTES
+                            ),
+                        ));
+                    }
+                    Some(tag) => {
+                        if !tags.contains(tag) {
+                            tags.push(tag.clone());
+                        }
+                        if tags.len() > crate::api::MAX_TAGS_PER_SOURCE {
+                            return Err(crate::config::subcommand_usage_error(
+                                "extract",
+                                &format!(
+                                    "more than {} tags where a source carries at most that many",
+                                    crate::api::MAX_TAGS_PER_SOURCE
+                                ),
+                            ));
+                        }
+                    }
+                    None => {
+                        return Err(crate::config::subcommand_usage_error(
+                            "extract",
+                            "--tag needs a tag",
+                        ));
+                    }
+                },
                 "--out" => match rest.next() {
                     Some(dir) if out.is_none() => out = Some(PathBuf::from(dir)),
                     Some(_) => {
@@ -352,6 +450,30 @@ impl Args {
                  questions would attach to)",
             ));
         }
+        // Source metadata rides the batch's passage line (the import
+        // wire format has nowhere else to put it — an associations-only
+        // source stores no metadata and is invisible to every windowed
+        // read, docs/promotion.html's own warning), so stripping the
+        // passage while asking for metadata is a contradiction, not a
+        // silent drop.
+        if (date.is_some() || !tags.is_empty()) && no_passage {
+            return Err(crate::config::subcommand_usage_error(
+                "extract",
+                "--date/--tag ride the passage line (--no-passage strips it, and an \
+                 associations-only source stores no metadata)",
+            ));
+        }
+        if let Some(id) = &source_id
+            && id.len() > MAX_NAME_BYTES
+        {
+            return Err(crate::config::subcommand_usage_error(
+                "extract",
+                &format!(
+                    "source id of {} bytes exceeds the {MAX_NAME_BYTES}-byte cap",
+                    id.len()
+                ),
+            ));
+        }
         // TAGURU_CONFIG fallback (issue #248 item 2): --config wins,
         // but a deployment file baked in via the environment still
         // applies when it's absent — the same priority serve/health/
@@ -375,9 +497,40 @@ impl Args {
             schema,
             context,
             description,
+            source_id,
+            date,
+            tags,
             out,
             paths,
         })
+    }
+}
+
+/// `--date`'s two spellings: bare digits are epoch seconds (the wire
+/// format's own unit), `YYYY-MM-DD` is that day's UTC midnight —
+/// what a session note actually records. Zero is rejected in both
+/// spellings so the manifest can keep 0 as its off sentinel, the
+/// `max_output_tokens` precedent.
+pub(super) fn parse_date(text: &str) -> Option<u64> {
+    if !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()) {
+        return text.parse::<u64>().ok().filter(|&seconds| seconds > 0);
+    }
+    let mut parts = text.split('-');
+    let year = parts.next()?.parse::<i64>().ok()?;
+    let month = parts.next()?.parse::<u32>().ok()?;
+    let day = parts.next()?.parse::<u32>().ok()?;
+    if parts.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let days = crate::clock::days_from_civil(year, month, day);
+    // Round-trip through the rendering direction: a lexically plausible
+    // but non-existent date (2026-02-30) normalizes to a different day,
+    // so refusing the mismatch refuses the typo.
+    let seconds = u64::try_from(days.checked_mul(86400)?).ok()?;
+    if crate::clock::iso8601_utc(seconds).starts_with(&format!("{year:04}-{month:02}-{day:02}T")) {
+        Some(seconds).filter(|&seconds| seconds > 0)
+    } else {
+        None
     }
 }
 

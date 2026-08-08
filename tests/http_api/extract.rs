@@ -1119,6 +1119,167 @@ fn extract_coverage_reports_uncovered_candidate_pair_sentences() {
     let _ = std::fs::remove_dir_all(&out);
 }
 
+/// #466 S1 (ADR 0017): `--source-id`/`--date`/`--tag` bake the
+/// promotion runbook's conventions into the written batch — the
+/// session source id (with the `/{doc}` stem suffix across several
+/// documents), the passage line's date and tags — and all three are
+/// manifest computation inputs: same flags skip, a changed date
+/// rewrites. A source-id collision between two documents fails the
+/// second instead of letting import fold them into one another.
+#[test]
+fn extract_bakes_the_runbook_conventions_into_the_batch() {
+    let docs = batch_dir("extract-runbook-docs");
+    std::fs::write(docs.join("s1.md"), "青嶺酒造は1907年に創業した。").unwrap();
+    std::fs::write(docs.join("s2.md"), "杜氏は高瀬。").unwrap();
+    let out = batch_dir("extract-runbook-out");
+
+    let replies = [
+        json!({"associations": [
+            {"subject": "青嶺酒造", "label": "創業年", "object": "1907年", "weight": 1.0, "paragraph": 0}
+        ]})
+        .to_string(),
+        json!({"associations": [
+            {"subject": "高瀬", "label": "役職", "object": "杜氏", "weight": 1.0, "paragraph": 0}
+        ]})
+        .to_string(),
+    ];
+    let flags = [
+        "--context",
+        "ops",
+        "--source-id",
+        "session:claude:abc",
+        "--date",
+        "2026-08-06",
+        "--tag",
+        "ops",
+        "--tag",
+        "リリース",
+    ];
+    let (url, requests) = stub_chat_server(replies.to_vec());
+    let provider = [
+        ("TAGURU_EXTRACT_URL", url.as_str()),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+    let mut args: Vec<&str> = flags.to_vec();
+    let docs_arg = docs.to_str().unwrap().to_string();
+    args.push(&docs_arg);
+    let (code, stdout, stderr) = run_extract(&out, &provider, &args);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    requests.join().unwrap();
+
+    // Several documents: each header carries ID/{stem}; the passage
+    // line carries the date (2026-08-06 UTC midnight) and the tags.
+    for (file, expected_source) in [
+        ("s1.md", "session:claude:abc/s1"),
+        ("s2.md", "session:claude:abc/s2"),
+    ] {
+        let batch_file = std::fs::read_dir(&out)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().contains(&file.replace(".md", "")))
+                    && path.extension().is_some_and(|ext| ext == "jsonl")
+            })
+            .unwrap_or_else(|| panic!("a batch file for {file}"));
+        let body = std::fs::read_to_string(&batch_file).unwrap();
+        let header: Value = serde_json::from_str(body.lines().next().unwrap()).unwrap();
+        assert_eq!(header["source"], expected_source, "{body}");
+        let passage: Value = serde_json::from_str(body.lines().nth(1).unwrap()).unwrap();
+        assert_eq!(passage["date"], 1785974400u64, "{body}");
+        assert_eq!(passage["tags"], json!(["ops", "リリース"]), "{body}");
+    }
+
+    // Same flags again: both documents skip (the metadata is in the
+    // fingerprint and unchanged). No model call — the stub above
+    // accepted exactly two connections.
+    let (code, stdout, stderr) = run_extract(&out, &provider, &args);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert_eq!(stdout.matches("unchanged, skipped").count(), 2, "{stdout}");
+
+    // A changed date must rewrite — a skip would leave the old date in
+    // the emitted file.
+    let (url, requests) = stub_chat_server(replies.to_vec());
+    let mut redated: Vec<&str> = args.clone();
+    let position = redated.iter().position(|a| *a == "2026-08-06").unwrap();
+    redated[position] = "2026-08-07";
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &redated,
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(!stdout.contains("unchanged, skipped"), "{stdout}");
+    requests.join().unwrap();
+
+    // A single document takes the id verbatim — no suffix to invent.
+    let (url, requests) = stub_chat_server(vec![replies[0].clone()]);
+    let single = docs.join("s1.md");
+    let mut single_args: Vec<&str> = flags.to_vec();
+    let single_arg = single.to_str().unwrap().to_string();
+    single_args.push(&single_arg);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &single_args,
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    requests.join().unwrap();
+    let body = std::fs::read_to_string(out.join(format!(
+        "{}.jsonl",
+        single.to_str().unwrap().replace(['/', ':'], "__")
+    )))
+    .unwrap();
+    let header: Value = serde_json::from_str(body.lines().next().unwrap()).unwrap();
+    assert_eq!(header["source"], "session:claude:abc");
+
+    // Two documents whose stems collide would land on ONE source id —
+    // import's per-source retract-then-apply would fold them, so the
+    // second fails before any call is spent on it.
+    let nested_a = docs.join("a");
+    let nested_b = docs.join("b");
+    std::fs::create_dir_all(&nested_a).unwrap();
+    std::fs::create_dir_all(&nested_b).unwrap();
+    std::fs::write(nested_a.join("x.md"), "壱。").unwrap();
+    std::fs::write(nested_b.join("x.md"), "弐。").unwrap();
+    let (url, requests) = stub_chat_server(vec![
+        json!({"associations": [
+            {"subject": "壱", "label": "l", "object": "壱。", "weight": 1.0, "paragraph": 0}
+        ]})
+        .to_string(),
+    ]);
+    let collide_out = batch_dir("extract-runbook-collide-out");
+    let (code, stdout, stderr) = run_extract(
+        &collide_out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "ops",
+            "--source-id",
+            "session:claude:abc",
+            nested_a.join("x.md").to_str().unwrap(),
+            nested_b.join("x.md").to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stderr.contains("collides"), "{stderr}");
+    requests.join().unwrap();
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+    let _ = std::fs::remove_dir_all(&collide_out);
+}
+
 /// TAGURU_EXTRACT_COVERAGE resolves like its boolean siblings: `1`
 /// turns the report on, `0` keeps it off (and keeps every report line
 /// free of an "uncovered" note — the count note must not render at

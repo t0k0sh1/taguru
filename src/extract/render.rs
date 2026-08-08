@@ -12,6 +12,8 @@ pub(super) fn render_batch(
     description: Option<&str>,
     extraction: &Extraction,
     passage: Option<&str>,
+    date: Option<u64>,
+    tags: &[String],
 ) -> String {
     let mut header = serde_json::json!({
         "taguru_batch": 1,
@@ -23,7 +25,18 @@ pub(super) fn render_batch(
     }
     let mut lines = vec![header.to_string()];
     if let Some(text) = passage {
-        lines.push(serde_json::json!({ "passage": text }).to_string());
+        // #466 S1 (ADR 0017): the runbook's source metadata rides the
+        // passage line, exactly where the import wire format carries it
+        // (docs/import.html). Absent fields are omitted, keeping the
+        // no-flags batch byte for byte today's.
+        let mut line = serde_json::json!({ "passage": text });
+        if let Some(date) = date {
+            line["date"] = serde_json::json!(date);
+        }
+        if !tags.is_empty() {
+            line["tags"] = serde_json::json!(tags);
+        }
+        lines.push(line.to_string());
         for (paragraph, question) in &extraction.questions {
             lines.push(
                 serde_json::json!({ "paragraph": paragraph, "question": question }).to_string(),

@@ -8,6 +8,16 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- `taguru extract --source-id ID`, `--date WHEN`, `--tag TAG` (#466
+  S1, ADR 0017): bake the promotion runbook's source conventions into
+  the written batch — the `session:{agent}:{id}` header source (with
+  the `/{doc}` stem suffix across several documents, collisions
+  refused), and the passage line's `date` (`YYYY-MM-DD` or epoch
+  seconds) and `tags`. All three are manifest computation inputs
+  (`serde(default)` — older manifests keep matching default runs) but
+  deliberately not checkpoint inputs: a metadata change rewrites the
+  batch while reusing every cached chunk answer. `--date`/`--tag` with
+  `--no-passage` is a usage error (metadata rides the passage line).
 - `taguru extract --coverage` / `TAGURU_EXTRACT_COVERAGE` (#496 S4,
   ADR 0016): report every sentence that holds a candidate pair (two or
   more deterministically segmented document names) yet is covered by
