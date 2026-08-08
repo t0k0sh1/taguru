@@ -26,6 +26,59 @@ export function sanitizeParagraphText(text: string): string {
 }
 
 /**
+ * A zip package whose entries decompress past the caller's cap — the
+ * decompression-bomb refusal `unzipWithinCap` throws, mapped by the
+ * DOCX/PPTX connectors to a `content_too_large` diagnostic.
+ */
+export class DecompressedSizeExceededError extends Error {}
+
+/** The fflate pieces `unzipWithinCap` needs, injected by the connectors'
+ * own optional-dependency loading (`OoxmlDeps`). */
+export interface BoundedUnzipDeps {
+  Unzip: typeof import("fflate").Unzip;
+  UnzipInflate: typeof import("fflate").UnzipInflate;
+  unzipSync: typeof import("fflate").unzipSync;
+}
+
+/**
+ * `unzipSync`, but refusing any package whose entries decompress to more
+ * than `cap` bytes in total — measured by ACTUALLY inflating every entry
+ * through fflate's streaming `Unzip` (output discarded chunk by chunk, so
+ * memory stays bounded) rather than trusting the central directory's
+ * declared `originalSize`, which an attacker can forge to a small value
+ * while the deflate stream still expands to gigabytes. The stream aborts
+ * at the first byte past `cap`, so a bomb is detected without ever being
+ * materialized. Mirrors the Python twin's
+ * `_structure.decompressed_size_within`. Any other failure (a malformed
+ * zip, an unsupported compression method) propagates for the caller's own
+ * `corrupt` path, exactly as a plain `unzipSync` call would.
+ */
+export function unzipWithinCap(
+  deps: BoundedUnzipDeps,
+  raw: Uint8Array,
+  cap: number,
+): Record<string, Uint8Array> {
+  let total = 0;
+  const unzip = new deps.Unzip((file) => {
+    file.ondata = (error, data, _final) => {
+      if (error) {
+        throw error;
+      }
+      total += data.length;
+      if (total > cap) {
+        throw new DecompressedSizeExceededError(
+          `the package decompresses to more than ${cap} bytes`,
+        );
+      }
+    };
+    file.start();
+  });
+  unzip.register(deps.UnzipInflate);
+  unzip.push(raw, true);
+  return deps.unzipSync(raw);
+}
+
+/**
  * Joins `crumbs` (outermost first) with `separator`, dropping the
  * outermost (least specific) ancestor first until the result fits within
  * `maxBytes` — `null` if even the innermost crumb alone doesn't fit (or

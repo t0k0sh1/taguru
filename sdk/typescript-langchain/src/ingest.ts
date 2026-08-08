@@ -59,6 +59,7 @@ import type {
 import {
   deriveModelIdentity,
   sha256Hex,
+  CheckpointLockedError,
   DocumentCheckpoints,
   type CheckpointFingerprint,
   type CheckpointStore,
@@ -997,7 +998,7 @@ export class TaguruIngester {
     // Deletion happens here — after the import lands, before the
     // best-effort embeddings refresh below — so a refresh warning can
     // never resurrect a checkpoint this document no longer needs.
-    await this.deleteCheckpoints(options.source);
+    await this.deleteCheckpoints(options.source, checkpoints);
 
     if (this.refresh_embeddings) {
       this.emit({ kind: "embedding_refresh_started", source: options.source });
@@ -1214,7 +1215,7 @@ export class TaguruIngester {
     piece: string,
     chunkRecord: ChunkRecord,
   ): Promise<void> {
-    if (checkpoints === null || this.checkpoint_store === undefined) {
+    if (checkpoints === null || this.checkpoint_store === undefined || checkpoints.lockedOut) {
       return;
     }
     checkpoints.record(await sha256Hex(piece), {
@@ -1226,6 +1227,14 @@ export class TaguruIngester {
     try {
       await this.checkpoint_store.save(source, checkpoints.toBytes());
     } catch (error) {
+      if (error instanceof CheckpointLockedError) {
+        checkpoints.lockedOut = true;
+        console.warn(
+          `another run holds the checkpoint for ${JSON.stringify(source)}; this run ` +
+            "proceeds WITHOUT checkpointing",
+        );
+        return;
+      }
       console.warn(
         `TaguruIngester failed to save a checkpoint for ${JSON.stringify(source)}: ` +
           `${String(error)} — the completed chunk still counts this run; a resume may repeat it`,
@@ -1239,8 +1248,17 @@ export class TaguruIngester {
    * from the Rust twin: nothing correctness-critical depends on prompt
    * cleanup, unlike a save that a resume would otherwise repeat).
    */
-  private async deleteCheckpoints(source: string): Promise<void> {
+  private async deleteCheckpoints(
+    source: string,
+    checkpoints: DocumentCheckpoints | null = null,
+  ): Promise<void> {
     if (this.checkpoint_store === undefined) {
+      return;
+    }
+    // Skipped entirely when this run never held `source`'s lock —
+    // deleting would destroy whichever OTHER run's checkpoint is
+    // actually on disk, not anything this run wrote.
+    if (checkpoints !== null && checkpoints.lockedOut) {
       return;
     }
     try {

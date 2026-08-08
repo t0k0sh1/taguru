@@ -74,7 +74,12 @@ import type { Locator } from "taguru";
 
 import { MAX_PASSAGE_BYTES } from "../extract.js";
 import type { Connector } from "./protocol.js";
-import { byteLen, sanitizeParagraphText } from "./structure.js";
+import {
+  byteLen,
+  DecompressedSizeExceededError,
+  sanitizeParagraphText,
+  unzipWithinCap,
+} from "./structure.js";
 import { checkSourceId, fileSourceId } from "./sources.js";
 import {
   ConnectorDocument,
@@ -100,31 +105,16 @@ const CONTENT_TYPE =
 const DEFAULT_MAX_FILE_BYTES = 64 * 1024 * 1024;
 
 // OOXML is XML and compresses extremely well: a package under the raw
-// file cap above can still DECLARE tens of GiB of decompressed entries (a
-// zip bomb). The central directory's declared sizes are summed BEFORE any
-// entry is inflated, and a package past this cap is refused with a
-// `content_too_large` diagnostic — the cap and the diagnostic are kept
+// file cap above can still decompress to tens of GiB (a zip bomb). The
+// real decompressed size is measured by bounded streaming inflation
+// (`unzipWithinCap`, structure.ts) — never the forgeable declared entry
+// sizes — and a package past this cap is refused with a
+// `content_too_large` diagnostic; the cap and the diagnostic are kept
 // identical between docx.ts and pptx.ts.
 const MAX_DECOMPRESSED_BYTES = 256 * 1024 * 1024;
 
-class DecompressedSizeExceededError extends Error {}
-
-function unzipBounded(
-  unzipSync: OoxmlDeps["unzipSync"],
-  raw: Uint8Array,
-): Record<string, Uint8Array> {
-  let total = 0;
-  return unzipSync(raw, {
-    filter: (file) => {
-      total += file.originalSize;
-      if (total > MAX_DECOMPRESSED_BYTES) {
-        throw new DecompressedSizeExceededError(
-          `the package declares more than ${MAX_DECOMPRESSED_BYTES} decompressed bytes`,
-        );
-      }
-      return true;
-    },
-  });
+function unzipBounded(deps: OoxmlDeps, raw: Uint8Array): Record<string, Uint8Array> {
+  return unzipWithinCap(deps, raw, MAX_DECOMPRESSED_BYTES);
 }
 
 // MS-OFFCRYPTO password-protected Office documents (including .pptx) are
@@ -257,6 +247,8 @@ function basenameOf(reference: string): string {
 
 interface OoxmlDeps {
   unzipSync: typeof import("fflate").unzipSync;
+  Unzip: typeof import("fflate").Unzip;
+  UnzipInflate: typeof import("fflate").UnzipInflate;
   XMLParser: typeof import("fast-xml-parser").XMLParser;
   XMLValidator: typeof import("fast-xml-parser").XMLValidator;
 }
@@ -267,11 +259,11 @@ interface OoxmlDeps {
  * module never depends on docx.ts). */
 async function loadOoxmlDeps(): Promise<OoxmlDeps> {
   try {
-    const [{ unzipSync }, { XMLParser, XMLValidator }] = await Promise.all([
+    const [{ unzipSync, Unzip, UnzipInflate }, { XMLParser, XMLValidator }] = await Promise.all([
       import("fflate"),
       import("fast-xml-parser"),
     ]);
-    return { unzipSync, XMLParser, XMLValidator };
+    return { unzipSync, Unzip, UnzipInflate, XMLParser, XMLValidator };
   } catch (error) {
     throw new Error(
       "PptxConnector requires fflate and fast-xml-parser — install with " +
@@ -967,7 +959,7 @@ export class PptxConnector implements Connector {
     let entries: Record<string, Uint8Array>;
     let coreTitle: string | null;
     try {
-      entries = unzipBounded(deps.unzipSync, raw);
+      entries = unzipBounded(deps, raw);
       body = buildPresentation(deps, entries, {
         extractTitles: this.extractTitles,
         extractSpeakerNotes: this.extractSpeakerNotes,

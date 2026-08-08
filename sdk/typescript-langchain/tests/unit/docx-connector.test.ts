@@ -456,6 +456,16 @@ test("metadata title falls back to first heading", async () => {
   expect(document.metadata.title).toBe("Heading Title");
 });
 
+test("extractHeadings false does not derive the title from a heading", async () => {
+  // Disabled heading extraction must mean "as if this document had no
+  // headings" for title derivation too, not merely "no SectionEntry".
+  const body = heading("Heading Title", 1) + para("Body.");
+  const path = await write("doc.docx", docxBytes(body));
+  const document = await new DocxConnector({ extractHeadings: false }).read(path);
+
+  expect(document.metadata.title).toBeNull();
+});
+
 test("metadata content_type is the OOXML wordprocessing MIME type", async () => {
   const path = await write("doc.docx", docxBytes(para("Body.")));
   const document = await new DocxConnector().read(path);

@@ -26,8 +26,30 @@ const DENYLISTED_QUERY_KEYS: ReadonlySet<string> = new Set([
   "x-amz-signature",
   "x-amz-credential",
   "x-amz-security-token",
+  // AWS SigV4's other per-issuance companions: the same object
+  // presigned twice keeps the same x-amz-credential but gets a fresh
+  // x-amz-date/expires/algorithm/signedheaders each time, so leaving
+  // these in would still mint a new source id per presign — exactly
+  // the duplicate-ingestion this canonicalization exists to prevent.
+  "x-amz-date",
+  "x-amz-expires",
+  "x-amz-algorithm",
+  "x-amz-signedheaders",
+  // GCS V4 signed URLs' equivalents of the above.
+  "x-goog-signature",
+  "x-goog-credential",
+  "x-goog-date",
+  "x-goog-expires",
+  "x-goog-algorithm",
+  "x-goog-signedheaders",
   "apikey",
   "api_key",
+  // Deliberately NOT denylisted: Azure SAS's short keys (se, st, sp,
+  // sv, sr). They churn per-issuance the same way, but they are also
+  // short enough to collide with legitimate app query params on
+  // arbitrary URLs (e.g. ?sr=1) — stripping innocent params from a
+  // non-Azure URL was judged worse than accepting that Azure SAS
+  // identity still churns across re-issuance.
 ]);
 
 /**

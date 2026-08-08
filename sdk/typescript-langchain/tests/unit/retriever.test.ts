@@ -51,6 +51,32 @@ describe("TaguruRetriever", () => {
     expect(documents.every((d) => d.metadata["lane"] === "text")).toBe(true);
   });
 
+  it("keeps the text lane when the single-context graph lane errors", async () => {
+    const server = new FakeServer();
+    server.failGraphLane.add("sake");
+    const documents = await make(server).invoke("青嶺酒造");
+    // One lane failing must not blank out what the other lane found —
+    // the same isolation the cross-context branch already had.
+    expect(documents.length).toBeGreaterThan(0);
+    expect(documents.every((d) => d.metadata["lane"] === "text")).toBe(true);
+  });
+
+  it("keeps the graph lane when the single-context text search errors", async () => {
+    const server = new FakeServer();
+    server.failTextSearch = true;
+    const documents = await make(server).invoke("青嶺酒造");
+    expect(documents.length).toBeGreaterThan(0);
+    expect(documents.every((d) => String(d.metadata["lane"]).includes("graph"))).toBe(true);
+  });
+
+  it("raises when both single-context lanes fail", async () => {
+    // Neither lane produced anything — an empty result would read as
+    // "nothing found" instead of "retrieval is broken."
+    const server = new FakeServer();
+    server.failContexts.add("sake");
+    await expect(make(server).invoke("青嶺酒造")).rejects.toThrow();
+  });
+
   it("truncates to k and can switch graph-only facts off", async () => {
     const server = new FakeServer();
     expect(await make(server, { k: 1 }).invoke("青嶺酒造")).toHaveLength(1);

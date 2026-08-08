@@ -26,8 +26,49 @@ Entries that change an on-disk format or a response shape say so.
   `sdk/python/mutation-baseline.txt` allowlist. `sdk/python-langchain`
   carries a `[tool.mutmut]` config for manual runs but is not gated (its
   coverage leans on the server-backed integration suite).
+- Mutation testing for the core TypeScript SDK, the Stryker twin of the
+  gate above: `npm run test:mutation` (sdk/typescript) seeds faults via
+  Stryker against the hermetic unit suite, and the new
+  `sdk/spec/check_mutants_ts.mjs` gate (a `typescript-mutation` CI job)
+  fails on any escaped mutant not on the reviewed
+  `sdk/typescript/mutation-baseline.txt` allowlist. `client.ts`/
+  `testing.ts` lean on the server-backed integration suite (as
+  `sdk/python`'s `_async`/`_sync` do), and `sdk/typescript-langchain` is
+  not gated, mirroring `sdk/python-langchain`.
 
 ### Fixed
+- TypeScript SDK: ported the Python SDK hardening that had not reached
+  the TypeScript twin — `contexts.delete`/`groups.delete` no longer
+  auto-retry after an ambiguous transport failure (the retry turned an
+  applied delete's success into `NotFoundError`), and
+  `exportStream`/`exportToFile` now raise the SDK's `TransportError` on
+  a failed connect or a mid-stream connection drop like every other
+  call path.
+- TypeScript LangChain: ported the Python LangChain hardening that had
+  not reached the TypeScript twins. `DocxConnector`/`PptxConnector`'s
+  decompression-bomb guard now measures the real decompressed size by
+  bounded streaming inflation (shared `unzipWithinCap` in structure.ts)
+  instead of trusting the zip's forgeable declared entry sizes.
+  `HtmlConnector` detects UTF-16 (BOM'd or BOM-less) instead of reading
+  it as UTF-8, refuses decoded text carrying NUL characters as
+  `corrupt`, reports post-redirect failures under the final URL, and no
+  longer flags a hidden `iframe` as `partial_extraction`. Only
+  control-character-free vocabulary labels are folded into the
+  extraction prompt (second-order prompt-injection path via planted
+  labels). Single-context retrieval isolates the graph/text lanes like
+  the cross-context path, and the graph lane fetches citations
+  concurrently. `FilesystemCheckpointStore` holds an advisory
+  per-source lock (PID-stamped lock file with dead-holder reclaim —
+  Node has no stdlib `flock`) so concurrent runs stop clobbering each
+  other's checkpoints, and the ingester proceeds without checkpointing
+  on contention. `FileObjectStore.list()` skips an unreadable
+  subdirectory instead of aborting the whole scan (an unreadable root
+  still surfaces). Presigned-URL canonicalization also strips
+  `X-Amz-Date`/`X-Amz-Expires`/`X-Amz-Algorithm`/`X-Amz-SignedHeaders`
+  and their `X-Goog-*` equivalents. `PdfConnector` offers
+  extraction-raising pages to a configured `OcrAdapter`, and
+  `DocxConnector` with `extractHeadings: false` no longer derives
+  `metadata.title` from a heading.
 - Python LangChain: `HtmlConnector` now detects BOM-less UTF-16 (and
   refuses any text that still decodes with stray NUL bytes) instead of
   reading it as UTF-8 — a page that decoded without error but left

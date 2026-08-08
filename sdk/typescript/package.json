@@ -45,7 +45,8 @@
     "test": "vitest run",
     "test:unit": "vitest run tests/unit",
     "test:integration": "vitest run tests/integration",
-    "check:surface": "tsx scripts/check-surface.ts"
+    "check:surface": "tsx scripts/check-surface.ts",
+    "test:mutation": "stryker run"
   },
   "peerDependencies": {
     "@opentelemetry/api": "^1.9.0"
@@ -60,6 +61,8 @@
     "@opentelemetry/context-async-hooks": "^2.10.0",
     "@opentelemetry/core": "^2.10.0",
     "@opentelemetry/sdk-trace-base": "^2.10.0",
+    "@stryker-mutator/core": "^9.6.1",
+    "@stryker-mutator/vitest-runner": "^9.6.1",
     "@types/node": "^26.1.2",
     "eslint": "^10.8.0",
     "tsup": "^8.2.0",

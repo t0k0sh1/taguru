@@ -193,17 +193,26 @@ export class TaguruRetriever extends BaseRetriever {
       decay: this.activate_decay,
       limit: this.activate_limit,
     });
-    const citations = new Map<string, Citation | null>();
-    for (const [source, paragraph] of wantedCitations(page.matches)) {
-      try {
-        citations.set(citationKey(source, paragraph), await ctx.citePassage(source, paragraph));
-      } catch (error) {
-        if (!(error instanceof NotFoundError)) {
-          throw error;
+    const wanted = wantedCitations(page.matches);
+    // Wrapped per-pair so a 404 on one citation resolves to null without
+    // sifting real errors out of a mixed results list — any OTHER error
+    // still propagates, exactly like the sequential loop this replaces did.
+    const fetched = await Promise.all(
+      wanted.map(async ([source, paragraph]) => {
+        try {
+          return await ctx.citePassage(source, paragraph);
+        } catch (error) {
+          if (!(error instanceof NotFoundError)) {
+            throw error;
+          }
+          return null;
         }
-        citations.set(citationKey(source, paragraph), null);
-      }
-    }
+      }),
+    );
+    const citations = new Map<string, Citation | null>();
+    wanted.forEach(([source, paragraph], index) => {
+      citations.set(citationKey(source, paragraph), fetched[index] ?? null);
+    });
     return graphDocuments(page.matches, citations, this.include_graph_only_facts, target);
   }
 
@@ -216,13 +225,36 @@ export class TaguruRetriever extends BaseRetriever {
   ): Promise<Document[]> {
     if (!this.isCross()) {
       const target = this.context!;
-      const graphDocs = this.include_graph ? await this.graphLane(target, query) : [];
+      let graphDocs: Document[] = [];
+      let graphFailed = false;
+      let graphError: unknown;
+      if (this.include_graph) {
+        try {
+          graphDocs = await this.graphLane(target, query);
+        } catch (error) {
+          // Isolated exactly like the cross-context branch isolates each
+          // target's graph lane below: one lane failing must not blank
+          // out whatever the other lane already found.
+          graphFailed = true;
+          graphError = error;
+        }
+      }
       let textHits: PassageHit[] = [];
+      let textFailed = false;
       if (this.include_text) {
-        const page = await this.client.context(target).searchPassages(query, {
-          limit: this.text_limit,
-        });
-        textHits = page.hits;
+        try {
+          const page = await this.client.context(target).searchPassages(query, {
+            limit: this.text_limit,
+          });
+          textHits = page.hits;
+        } catch {
+          textFailed = true;
+        }
+      }
+      if (graphFailed && textFailed) {
+        // Neither lane produced anything — an empty result here would
+        // read as "nothing found" instead of "retrieval is broken."
+        throw graphError;
       }
       return mergeLanes(graphDocs, textHits, this.k, target);
     }

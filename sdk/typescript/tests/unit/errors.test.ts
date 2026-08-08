@@ -155,3 +155,38 @@ describe("IncompatibleServerError", () => {
     expect(error.server_contracts).toEqual([2]);
   });
 });
+
+describe("TaguruError cause plumbing", () => {
+  it("carries a given cause through to Error.cause", () => {
+    const cause = new Error("root failure");
+    const error = new TaguruError("boom", { cause });
+    expect(error.cause).toBe(cause);
+    expect("cause" in error).toBe(true);
+  });
+
+  it("never sets .cause at all when none is given", () => {
+    const error = new TaguruError("boom");
+    expect(error.cause).toBeUndefined();
+    // Distinguishes "no cause option was passed" from "cause was passed
+    // as undefined": the constructor must not forward an empty `{cause:
+    // undefined}` bag to Error() when `options.cause` is absent.
+    expect("cause" in error).toBe(false);
+  });
+});
+
+describe("errorForStatus 5xx boundary", () => {
+  it("maps every 5xx status not otherwise mapped to ServerError", () => {
+    expect(errorForStatus(500, "x")).toBeInstanceOf(ServerError);
+    expect(errorForStatus(599, "x")).toBeInstanceOf(ServerError);
+  });
+
+  it("maps 499 and 600 (just outside the 5xx band) to UnexpectedStatusError, not ServerError", () => {
+    const below = errorForStatus(499, "x");
+    expect(below).toBeInstanceOf(UnexpectedStatusError);
+    expect(below).not.toBeInstanceOf(ServerError);
+
+    const above = errorForStatus(600, "x");
+    expect(above).toBeInstanceOf(UnexpectedStatusError);
+    expect(above).not.toBeInstanceOf(ServerError);
+  });
+});

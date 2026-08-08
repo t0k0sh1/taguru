@@ -16,7 +16,7 @@
  * longer needs `test.skip` now that it does.
  */
 
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -111,6 +111,44 @@ test("FileObjectStore lists by string prefix, not directory boundary", async () 
     const keys = (await collect(store.list("2026/q1"))).map((m) => m.key).sort();
     expect(keys).toEqual(["2026/q1-notes.txt", "2026/q1-report.pdf"]);
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("FileObjectStore list skips an unreadable subdirectory instead of aborting", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "objectstore-"));
+  const locked = join(dir, "locked");
+  try {
+    writeBucket(dir, { "readable/a.txt": "fine", "locked/secret.txt": "hidden" });
+    chmodSync(locked, 0o000);
+    if (process.getuid?.() === 0) {
+      // Root ignores permission bits — the EACCES this test provokes
+      // cannot happen, so there is nothing to assert.
+      return;
+    }
+    const store = await FileObjectStore.open(dir);
+    const keys = (await collect(store.list(""))).map((m) => m.key);
+    expect(keys).toEqual(["readable/a.txt"]);
+  } finally {
+    chmodSync(locked, 0o755);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("FileObjectStore list still surfaces an unreadable ROOT", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "objectstore-"));
+  try {
+    writeBucket(dir, { "a.txt": "x" });
+    const store = await FileObjectStore.open(dir);
+    chmodSync(dir, 0o000);
+    if (process.getuid?.() === 0) {
+      return;
+    }
+    // A permission denial on the store's root is a misconfigured store,
+    // not one unreadable corner — it must not be silently skipped.
+    await expect(collect(store.list(""))).rejects.toThrow();
+  } finally {
+    chmodSync(dir, 0o755);
     rmSync(dir, { recursive: true, force: true });
   }
 });

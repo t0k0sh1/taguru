@@ -75,6 +75,13 @@ describe("retry policy", () => {
     expect(calls()).toBe(2);
   });
 
+  it("never retries 502 on the unsafe write route", async () => {
+    const { handler, calls } = flaky(1, () => errBody(502, "provider"));
+    const client = stubClient(handler);
+    await expect(client.context("sake").addAssociations([OP])).rejects.toBeInstanceOf(ServerError);
+    expect(calls()).toBe(1);
+  });
+
   it("retries a pre-connect failure even on the unsafe route", async () => {
     const { handler, calls } = flaky(1, connectRefused);
     const client = stubClient(handler);
@@ -170,5 +177,18 @@ describe("parseRetryAfter", () => {
     expect(parseRetryAfter("-1")).toBeNull();
     expect(parseRetryAfter("")).toBeNull();
     expect(parseRetryAfter(null)).toBeNull();
+  });
+
+  it("takes every numeric shape the strict regex must accept, not just single digits", () => {
+    // Each of these pins one specific character class in the regex —
+    // a leading `+` sign, more than one digit before the decimal point,
+    // more than one digit after a bare leading dot, a signed exponent,
+    // and a multi-digit exponent — so a narrowed class (e.g. `\d` instead
+    // of `\d+`) still matches the single-digit cases above but fails here.
+    expect(parseRetryAfter("+5")).toBe(5);
+    expect(parseRetryAfter("12.5")).toBe(12.5);
+    expect(parseRetryAfter(".75")).toBe(0.75);
+    expect(parseRetryAfter("1e+5")).toBe(100000);
+    expect(parseRetryAfter("1e12")).toBe(1e12);
   });
 });

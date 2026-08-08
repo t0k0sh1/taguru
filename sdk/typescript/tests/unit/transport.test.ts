@@ -5,9 +5,18 @@ import { citationKey } from "../../src/models.js";
 import { TaguruError } from "../../src/errors.js";
 import {
   chunkAssociations,
+  DEFAULT_BASE_URL,
   describeError,
+  dropUndefined,
+  ENV_TOKEN,
+  ENV_URL,
+  errorFromBody,
   isPreConnectFailure,
   normalizeHeaders,
+  normalizeImportOutcomes,
+  sleep,
+  sortedEntries,
+  unwrapEnvelopeFull,
 } from "../../src/transport.js";
 import { errBody, okBody, stubClient, type StubRequest } from "./stub.js";
 
@@ -214,6 +223,171 @@ describe("envelope and raw-body handling", () => {
   });
 });
 
+describe("constants", () => {
+  it("pins the default base URL and env var names verbatim", () => {
+    expect(DEFAULT_BASE_URL).toBe("http://127.0.0.1:8248");
+    expect(ENV_URL).toBe("TAGURU_URL");
+    expect(ENV_TOKEN).toBe("TAGURU_API_TOKEN");
+  });
+});
+
+describe("sortedEntries", () => {
+  it("sorts by UTF-8 byte order, diverging from UTF-16 code-unit order", () => {
+    // U+1F600 (an astral emoji, UTF-16 surrogate pair starting 0xD83D)
+    // sorts BEFORE "" in UTF-16 code-unit order (0xD83D < 0xE000)
+    // but AFTER it in UTF-8 byte order (the emoji's lead byte 0xF0 beats
+    // ""'s 3-byte encoding's lead byte 0xEE). A plain `<` string
+    // comparison, or a non-UTF-8 encoding, would sort these the other way.
+    const entries = sortedEntries({ "": "bmp", "\u{1F600}": "astral" });
+    expect(entries).toEqual([
+      ["", "bmp"],
+      ["\u{1F600}", "astral"],
+    ]);
+  });
+});
+
+describe("errorFromBody", () => {
+  it("falls back to HTTP {status} for a whitespace-only non-JSON body (trims first)", () => {
+    const error = errorFromBody(500, null, "   ");
+    expect(error.message).toBe("HTTP 500");
+    expect(error.body).toBe("   ");
+  });
+
+  it("falls back to HTTP {status} for an empty non-JSON body", () => {
+    const error = errorFromBody(404, null, "");
+    expect(error.message).toBe("HTTP 404");
+  });
+
+  it("keeps a real non-JSON message verbatim (trim only strips surrounding whitespace)", () => {
+    const error = errorFromBody(413, null, "  length limit exceeded  ");
+    expect(error.message).toBe("length limit exceeded");
+  });
+
+  it("defaults the message to HTTP {status} for a JSON object with no .error field", () => {
+    const error = errorFromBody(500, null, "{}");
+    expect(error.message).toBe("HTTP 500");
+    expect(error.code).toBeNull();
+    expect(error.time).toBeNull();
+  });
+
+  it("does not crash on a bare JSON null body (typeof null is 'object')", () => {
+    expect(() => errorFromBody(500, null, "null")).not.toThrow();
+    expect(errorFromBody(500, null, "null").message).toBe("HTTP 500");
+  });
+
+  it("ignores a non-string .error, non-string .code, and non-number .time", () => {
+    const error = errorFromBody(
+      500,
+      null,
+      JSON.stringify({ error: 123, code: 42, time: "soon" }),
+    );
+    expect(error.message).toBe("HTTP 500");
+    expect(error.code).toBeNull();
+    expect(error.time).toBeNull();
+  });
+
+  it("takes a well-typed .error/.code/.time verbatim", () => {
+    const error = errorFromBody(404, null, JSON.stringify({ error: "gone", code: "x", time: 1.5 }));
+    expect(error.message).toBe("gone");
+    expect(error.code).toBe("x");
+    expect(error.time).toBe(1.5);
+  });
+});
+
+describe("unwrapEnvelopeFull", () => {
+  it("wraps a JSON parse failure in a TaguruError naming the status and raw body", () => {
+    let caught: unknown;
+    try {
+      unwrapEnvelopeFull(200, "not json");
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(TaguruError);
+    const error = caught as TaguruError;
+    expect(error.message).toBe("expected a JSON envelope, got a non-JSON body");
+    expect(error.status).toBe(200);
+    expect(error.body).toBe("not json");
+    expect(error.cause).toBeInstanceOf(Error);
+  });
+
+  it("rejects a bare JSON null body as not the envelope shape (does not crash)", () => {
+    expect(() => unwrapEnvelopeFull(200, "null")).toThrow(TaguruError);
+    expect(() => unwrapEnvelopeFull(200, "null")).toThrow(/envelope shape/);
+  });
+
+  it("rejects a JSON array body as not the envelope shape", () => {
+    expect(() => unwrapEnvelopeFull(200, "[1,2,3]")).toThrow(/envelope shape/);
+  });
+
+  it("rejects a bare JSON primitive body cleanly, not with a raw TypeError", () => {
+    // `"result" in parsed` throws on a non-object right-hand side — the
+    // `typeof parsed === "object"` guard must actually short-circuit
+    // before reaching it for a number/string/boolean body, or this
+    // throws an uncaught TypeError instead of the clean envelope error.
+    for (const body of ["42", '"just a string"', "true"]) {
+      expect(() => unwrapEnvelopeFull(200, body)).toThrow(TaguruError);
+      expect(() => unwrapEnvelopeFull(200, body)).toThrow(/envelope shape/);
+    }
+  });
+
+  it("rejects a body with 'result' but status !== 'ok', naming the real status/body", () => {
+    let caught: unknown;
+    try {
+      unwrapEnvelopeFull(200, JSON.stringify({ result: 5, status: "pending" }));
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(TaguruError);
+    const error = caught as TaguruError;
+    expect(error.message).toBe("response is not the taguru envelope shape");
+    expect(error.status).toBe(200);
+    expect(error.body).toEqual({ result: 5, status: "pending" });
+  });
+});
+
+describe("isPreConnectFailure on an AggregateError", () => {
+  it("is true when any inner error carries a pre-connect code", () => {
+    const error = new AggregateError([
+      Object.assign(new Error("socket hang up"), { code: "UND_ERR_SOCKET" }),
+      Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }),
+    ]);
+    expect(isPreConnectFailure(error)).toBe(true);
+  });
+
+  it("is false when no inner error carries a pre-connect code", () => {
+    const error = new AggregateError([
+      Object.assign(new Error("socket hang up"), { code: "UND_ERR_SOCKET" }),
+      new Error("no code at all"),
+    ]);
+    expect(isPreConnectFailure(error)).toBe(false);
+  });
+
+  it("does not crash on a non-object entry inside an AggregateError", () => {
+    const error = new AggregateError([
+      null,
+      Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }),
+    ]);
+    expect(isPreConnectFailure(error)).toBe(true);
+  });
+});
+
+describe("isPreConnectFailure code-recognition edge cases", () => {
+  it("recognizes EAI_AGAIN (transient DNS failure)", () => {
+    const error = Object.assign(new Error("getaddrinfo EAI_AGAIN"), { code: "EAI_AGAIN" });
+    expect(isPreConnectFailure(error)).toBe(true);
+  });
+
+  it("does not crash when a .cause chain ends in null (not just undefined)", () => {
+    const error = Object.assign(new Error("outer"), { cause: null });
+    expect(isPreConnectFailure(error)).toBe(false);
+  });
+
+  it("does not crash when a .cause chain includes a bare primitive", () => {
+    const error = Object.assign(new Error("outer"), { cause: 42 });
+    expect(isPreConnectFailure(error)).toBe(false);
+  });
+});
+
 describe("header normalization", () => {
   it("normalizeHeaders lower-cases every key", () => {
     expect(normalizeHeaders({ Authorization: "x", "X-Custom": "y" })).toEqual({
@@ -355,6 +529,30 @@ describe("batching", () => {
   it("chunks by count", () => {
     const chunks = [...chunkAssociations([op(0), op(1), op(2), op(3), op(4)], 2, 1e9)];
     expect(chunks.map((c) => c.length)).toEqual([2, 2, 1]);
+  });
+
+  it("yields nothing for an empty ops list (no trailing empty chunk)", () => {
+    expect([...chunkAssociations([], 10, 1e9)]).toEqual([]);
+  });
+
+  it("never flushes an empty leading chunk when the very first op alone exceeds the budget", () => {
+    // maxChunkBytes smaller than even one op's serialized size: the
+    // `chunk.length > 0` guard must still gate the flush on an empty
+    // chunk — the first op is pushed unconditionally, never preceded by
+    // a spurious empty yield.
+    const chunks = [...chunkAssociations([op(0)], 1e9, 1)];
+    expect(chunks).toEqual([[op(0)]]);
+  });
+
+  it("accounts for the separating comma exactly, one byte off the boundary", () => {
+    // Budget is exactly ONE byte short of fitting two ops (2 + one + comma
+    // + one); every op serializes to the same size here, so three ops
+    // must land one per chunk — a `+`/`-` swap on the comma byte, or an
+    // inverted `chunk.length > 0` ternary guarding it, would fit 2 into
+    // the first chunk instead.
+    const one = Buffer.byteLength(JSON.stringify(op(0)), "utf-8");
+    const chunks = [...chunkAssociations([op(0), op(1), op(2)], 10_000, 2 * one + 2)];
+    expect(chunks.map((c) => c.length)).toEqual([1, 1, 1]);
   });
 
   it("chunks by serialized byte budget", () => {
@@ -610,6 +808,102 @@ describe("describeError", () => {
   it("recurses into an AggregateError nested inside another AggregateError's .errors", () => {
     const error = new AggregateError([new AggregateError([new Error("a"), new Error("b")]), new Error("c")]);
     expect(describeError(error)).toBe("a; b; c");
+  });
+
+  it("falls back to String(error) for a non-Error, non-AggregateError value", () => {
+    // A value that is neither an AggregateError nor an Error (e.g. a
+    // plain string someone `throw`s) must go straight to `String(error)`
+    // — treating it as an Error and reading `.message`/`.name` off it
+    // would silently produce `undefined` instead.
+    expect(describeError("boom")).toBe("boom");
+  });
+
+  it("ignores a cause with a falsy (empty) message, falling back to the outer error", () => {
+    // `cause.message` must be truthy, not merely present, or an
+    // AggregateError-shaped empty message would print a dangling ": ".
+    const error = new TypeError("outer failure", { cause: new Error("") });
+    expect(describeError(error)).toBe("outer failure");
+  });
+});
+
+describe("dropUndefined", () => {
+  it("omits both undefined and null, but keeps defined falsy values", () => {
+    expect(dropUndefined({ a: undefined, b: null, c: 0, d: "", e: false, f: "x" })).toEqual({
+      c: 0,
+      d: "",
+      e: false,
+      f: "x",
+    });
+  });
+});
+
+describe("normalizeImportOutcomes", () => {
+  const BATCH = { context: "sake", source: "a", created: true };
+  const GROUP = { name: "brewers", outcome: "created", contexts: 2, groups: 0 };
+  const SCHEMA = { context: "sake", outcome: "applied" };
+
+  it("takes the structured shape, defaulting missing groups and schemas to []", () => {
+    expect(normalizeImportOutcomes({ batches: [BATCH] })).toEqual({
+      batches: [BATCH],
+      groups: [],
+      schemas: [],
+      issues: [],
+      schema_violations: 0,
+    });
+  });
+
+  it("keeps groups and schemas verbatim when the server sends them", () => {
+    const result = normalizeImportOutcomes({ batches: [BATCH], groups: [GROUP], schemas: [SCHEMA] });
+    expect(result.groups).toEqual([GROUP]);
+    expect(result.schemas).toEqual([SCHEMA]);
+  });
+
+  it("falls back to a single-batch outcome for a batches-less or non-object result (pre-batching servers)", () => {
+    expect(normalizeImportOutcomes(BATCH)).toEqual({
+      batches: [BATCH],
+      groups: [],
+      schemas: [],
+      issues: [],
+      schema_violations: 0,
+    });
+    expect(normalizeImportOutcomes(null).batches).toEqual([null]);
+    expect(normalizeImportOutcomes("not-an-object").batches).toEqual(["not-an-object"]);
+    // `batches` present but not an array still takes the bare-outcome path.
+    expect(normalizeImportOutcomes({ batches: "nope" }).batches).toEqual([{ batches: "nope" }]);
+  });
+
+  it("does not crash when the result itself is undefined", () => {
+    // `result !== null` alone does not prove `result` is safe to index —
+    // it is also `unknown`-typed and could be `undefined`, which throws
+    // on property access unless the `typeof result === "object"` guard
+    // actually short-circuits first.
+    expect(() => normalizeImportOutcomes(undefined)).not.toThrow();
+    expect(normalizeImportOutcomes(undefined).batches).toEqual([undefined]);
+  });
+
+  it("passes through given issues and schema_violations instead of the defaults", () => {
+    const issue = { path: "x", kind: "range", expected: "a", actual: "b" };
+    const result = normalizeImportOutcomes({ batches: [BATCH] }, [issue], 3);
+    expect(result.issues).toEqual([issue]);
+    expect(result.schema_violations).toBe(3);
+  });
+});
+
+describe("sleep", () => {
+  it("does not resolve well before the requested delay has elapsed", async () => {
+    const outcome = await Promise.race([
+      sleep(0.05).then(() => "resolved"),
+      new Promise((resolve) => setTimeout(() => resolve("still-pending"), 5)),
+    ]);
+    expect(outcome).toBe("still-pending");
+  });
+
+  it("eventually resolves — a broken executor would hang the caller forever", async () => {
+    const outcome = await Promise.race([
+      sleep(0.001).then(() => "resolved"),
+      new Promise((resolve) => setTimeout(() => resolve("still-pending"), 300)),
+    ]);
+    expect(outcome).toBe("resolved");
   });
 });
 

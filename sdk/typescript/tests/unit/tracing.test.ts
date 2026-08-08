@@ -216,6 +216,44 @@ describe("retrieve() tracing", () => {
     expect(missing[0]!.attributes?.[tracing.CITATION_MISSING_FIELD]).toBe(1);
   });
 
+  it("does not emit the citation-missing event when nothing was missing", async () => {
+    const allStored = {
+      ...ASSOCIATION,
+      attributions: [
+        { source: "docs/aomine.md", weight: 2.0, count: 2, paragraph: 1, section: null },
+        { source: "docs/other.md", weight: 1.0, count: 1, paragraph: 0, section: null },
+      ],
+    };
+    const handler = (req: StubRequest) => {
+      const body = req.body ? (JSON.parse(req.body) as Record<string, unknown>) : {};
+      if (req.path.endsWith("/resolve")) {
+        return okBody([{ name: "青嶺酒造", score: 1.0, tier: "lexical", kind: "exact" }]);
+      }
+      if (req.path.endsWith("/describe")) {
+        return okBody({ concept: "青嶺酒造", as_subject: [], as_object: [] });
+      }
+      if (req.path.endsWith("/activate")) {
+        return okBody({
+          total: 1,
+          matches: [{ strength: 0.9, path: ["青嶺酒造"], association: allStored }],
+        });
+      }
+      if (req.path.endsWith("/citations")) {
+        // Every source here is stored — none 404s.
+        return okBody({ text: "杜氏は高瀬。", source: body["source"], section: "人物" });
+      }
+      throw new Error(req.path);
+    };
+    const client = stubClient(handler, { retries: 0 });
+    await client.context("sake").retrieve("青嶺");
+
+    const citationsSpan = one("taguru.citations");
+    const missing = citationsSpan.events.filter(
+      (event) => event.name === tracing.CITATION_MISSING_EVENT,
+    );
+    expect(missing).toHaveLength(0);
+  });
+
   it("marks the fallback suppressed when the graph already answered", async () => {
     const client = stubClient(routed([]), { retries: 0 });
     await client.context("sake").retrieve("青嶺", { text_fallback_query: "杜氏は誰か" });

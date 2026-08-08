@@ -10,7 +10,7 @@
 import { describe, expect, it } from "vitest";
 
 import { Taguru } from "../../src/client.js";
-import { incompatibility } from "../../src/contract.js";
+import { incompatibility, parseVersionBody } from "../../src/contract.js";
 import { IncompatibleServerError, TransportError } from "../../src/errors.js";
 import { VERSION } from "../../src/version.js";
 import { okBody, stubClient, type StubHandler, type StubResult } from "./stub.js";
@@ -176,6 +176,9 @@ describe("incompatibility", () => {
     );
     expect(error).toBeInstanceOf(IncompatibleServerError);
     expect(error?.message).toContain("SUPPORTED_HTTP_CONTRACTS");
+    // The SDK's own multi-element range must be comma-space joined too,
+    // not just the server's (`", "` used on both sides of the message).
+    expect(error?.message).toContain("http_contract 1, 3");
   });
 
   it("returns null (compatible) when the ranges intersect", () => {
@@ -242,6 +245,113 @@ describe("export paths", () => {
     const client = stubClient(handler, { checkContract: true });
     const stream = client.context("sake").exportStream();
     await expect(stream.next()).rejects.toBeInstanceOf(IncompatibleServerError);
+  });
+});
+
+// --- parseVersionBody, exercised directly against every shape it must
+// reject (mirrors incompatibility()'s message-pinning tests below: the
+// client-driven tests above only prove the *outcome* — raise or not —
+// while these pin the exact parsing behavior on which that outcome
+// depends).
+
+describe("parseVersionBody", () => {
+  it("rejects every non-object payload", () => {
+    expect(parseVersionBody(null)).toBeNull();
+    expect(parseVersionBody("nope")).toBeNull();
+    expect(parseVersionBody(42)).toBeNull();
+    expect(parseVersionBody(true)).toBeNull();
+    expect(parseVersionBody(undefined)).toBeNull();
+  });
+
+  it("accepts a bare array (typeof is object) but finds no http_contract", () => {
+    expect(parseVersionBody([1, 2, 3])).toBeNull();
+  });
+
+  it("rejects a missing or non-object http_contract", () => {
+    expect(parseVersionBody({})).toBeNull();
+    expect(parseVersionBody({ http_contract: null })).toBeNull();
+    expect(parseVersionBody({ http_contract: "1" })).toBeNull();
+  });
+
+  it("rejects a non-array or non-numeric supported list", () => {
+    expect(parseVersionBody({ http_contract: {} })).toBeNull();
+    expect(parseVersionBody({ http_contract: { supported: "1" } })).toBeNull();
+    expect(parseVersionBody({ http_contract: { supported: [1, "two"] } })).toBeNull();
+  });
+
+  it("parses a valid body, defaulting a missing or non-string server to null", () => {
+    expect(parseVersionBody({ http_contract: { supported: [1, 2] } })).toEqual({
+      server: null,
+      supported: [1, 2],
+    });
+    expect(parseVersionBody({ server: 7, http_contract: { supported: [1] } })).toEqual({
+      server: null,
+      supported: [1],
+    });
+    expect(parseVersionBody({ server: "0.6.0", http_contract: { supported: [1] } })).toEqual({
+      server: "0.6.0",
+      supported: [1],
+    });
+  });
+});
+
+// --- incompatibility() internals, pinned directly against the builder —
+// same posture as the Python SDK's `test_incompatibility_*` cases in
+// `test_contract.py`: the client-driven tests above only check the error
+// TYPE, so the exact remedy wording (and the min/max/join plumbing behind
+// it) is pinned here.
+
+describe("incompatibility message assembly", () => {
+  it("a newer server names both ranges and pins the exact npm upgrade", () => {
+    const error = incompatibility({ server: "9.9.9", supported: [5, 6] }, "http://test");
+    expect(error?.message).toBe(
+      `taguru SDK ${VERSION} speaks http_contract 1, but the server at http://test ` +
+        `(taguru 9.9.9) supports http_contract 5, 6 — no version in common. ` +
+        `Upgrade this SDK to a release that speaks http_contract 5, 6: ` +
+        `npm install taguru@^9.9.9`,
+    );
+  });
+
+  it("without a server version, drops the note and the pin", () => {
+    const error = incompatibility({ server: null, supported: [5] }, "http://test");
+    expect(error?.message).toBe(
+      `taguru SDK ${VERSION} speaks http_contract 1, but the server at http://test ` +
+        `supports http_contract 5 — no version in common. ` +
+        `Upgrade this SDK to a release that speaks http_contract 5.`,
+    );
+  });
+
+  it("an older server pins this SDK to the server's minor release", () => {
+    const error = incompatibility({ server: "0.6.2", supported: [0] }, "http://test");
+    expect(error?.message.endsWith(
+      "Upgrade the server to a release that speaks http_contract 1, or " +
+        "pin this SDK to the server's release: npm install taguru@0.6.x",
+    )).toBe(true);
+  });
+
+  it("names no direction when neither side is plainly older (generic remedy)", () => {
+    const error = incompatibility({ server: null, supported: [0] }, "http://test");
+    expect(error?.message.endsWith(
+      "Upgrade or downgrade one side to a pair that shares a contract version; this " +
+        "SDK's range is declared as taguru's SUPPORTED_HTTP_CONTRACTS.",
+    )).toBe(true);
+  });
+
+  it("picks the min/max of each range independently, not just the first element", () => {
+    // seen.supported and the sdk override are both given in descending
+    // order, so a swapped Math.min/Math.max on either side would flip
+    // which remedy branch is chosen — the ranges here overlap neither at
+    // their boundary nor anywhere else, and land in the generic branch
+    // only when both mins/maxes are computed correctly.
+    const error = incompatibility({ server: "x", supported: [5, 1] }, "http://test", [2, 3]);
+    expect(error?.message).toContain("Upgrade or downgrade one side");
+  });
+
+  it("compatibility uses 'shares at least one version', not 'every version'", () => {
+    // sdk range {1, 2} and server range {1, 3} share version 1 — compatible
+    // even though sdk's 2 is absent from the server's range. A `some` vs
+    // `every` swap on either side would wrongly refuse this.
+    expect(incompatibility({ server: "x", supported: [1, 3] }, "http://test", [1, 2])).toBeNull();
   });
 });
 

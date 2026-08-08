@@ -18,6 +18,8 @@ sdk/**/*.egg-info/
 sdk/**/.pytest_cache/
 sdk/**/.mypy_cache/
 sdk/**/.ruff_cache/
+sdk/**/.stryker-tmp/
+sdk/**/reports/
 # `mutmut run`'s working copy of the source tree (see `[tool.mutmut]` in the
 # SDK pyprojects); regenerated on every run, never committed.
 sdk/**/mutants/

@@ -257,6 +257,29 @@ function guessContentType(fileName: string): string | null {
   return EXTENSION_CONTENT_TYPES.get(fileName.slice(dot).toLowerCase()) ?? null;
 }
 
+/**
+ * Errno codes that skip a subdirectory instead of aborting the scan: the
+ * vanished/not-a-directory/stale-symlink set plus permission denials
+ * (EACCES/EPERM), so one locked subtree does not abort enumeration of
+ * everything else — the posture the Python twin's `_IGNORED_DESCEND_ERRNOS`
+ * takes. A permission denial opening the store's ROOT still surfaces (see
+ * `list`, which calls `collectFiles` on it directly): that is a
+ * misconfigured store, not one unreadable corner of an otherwise-fine tree.
+ */
+const IGNORED_DESCEND_CODES: ReadonlySet<string> = new Set([
+  "ENOENT",
+  "ENOTDIR",
+  "EBADF",
+  "ELOOP",
+  "EACCES",
+  "EPERM",
+]);
+
+function isIgnoredDescendError(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null)?.code;
+  return typeof code === "string" && IGNORED_DESCEND_CODES.has(code);
+}
+
 async function collectFiles(
   fsp: typeof import("node:fs/promises"),
   pathMod: typeof import("node:path"),
@@ -267,7 +290,13 @@ async function collectFiles(
   for (const entry of entries) {
     const full = pathMod.join(dir, entry.name);
     if (entry.isDirectory()) {
-      files.push(...(await collectFiles(fsp, pathMod, full)));
+      try {
+        files.push(...(await collectFiles(fsp, pathMod, full)));
+      } catch (error) {
+        if (!isIgnoredDescendError(error)) {
+          throw error;
+        }
+      }
     } else if (entry.isFile()) {
       files.push(full);
     }
