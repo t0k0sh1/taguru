@@ -94,6 +94,16 @@ pub async fn serve(
                 ),
             );
         }
+        mcp::Message::WrongJsonRpcVersion { id } => {
+            return rpc_over_http(
+                StatusCode::BAD_REQUEST,
+                mcp::error_response(
+                    id,
+                    -32600,
+                    "not a JSON-RPC 2.0 message (jsonrpc must be \"2.0\")".to_string(),
+                ),
+            );
+        }
         mcp::Message::Request { id, call } => (id, call),
     };
 
@@ -1294,6 +1304,33 @@ mod tests {
         let reply: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(status, 400);
         assert_eq!(reply["id"], Value::Null, "{reply}");
+        assert_eq!(reply["error"]["code"], -32600, "{reply}");
+    }
+
+    /// A message that never declares `"jsonrpc": "2.0"` is refused
+    /// -32600 with its id echoed — not served under a contract its
+    /// sender never named.
+    #[tokio::test]
+    async fn a_missing_jsonrpc_declaration_is_refused_with_the_id_echoed() {
+        let body = json!({ "id": 7, "method": "ping" });
+        let response = serve(
+            Router::new(),
+            Arc::new(String::new()),
+            None,
+            None,
+            HeaderMap::new(),
+            Bytes::from(body.to_string()),
+            usize::MAX,
+            Deadline::unbounded(),
+        )
+        .await;
+        let status = response.status().as_u16();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let reply: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(status, 400);
+        assert_eq!(reply["id"], 7, "{reply}");
         assert_eq!(reply["error"]["code"], -32600, "{reply}");
     }
 }

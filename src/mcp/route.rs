@@ -504,10 +504,14 @@ pub fn route_tool(
             Some(pick(arguments, &["dice_floor", "cosine_floor"])),
         ),
         "audit_consolidation" => {
+            // Context first, like every sibling: a caller who omitted
+            // BOTH hears about the primary argument (see
+            // `add_associations`).
+            let path = format!("{}/consolidation/audit", context_path("context")?);
             need_present(arguments, "checks")?;
             (
                 "POST",
-                format!("{}/consolidation/audit", context_path("context")?),
+                path,
                 Some(pick(
                     arguments,
                     &[
@@ -551,10 +555,14 @@ pub fn route_tool(
             Some(pick(arguments, &["limit", "after"])),
         ),
         "validate_schema" => {
+            // Context first, like every sibling: a caller who omitted
+            // BOTH hears about the primary argument (see
+            // `add_associations`).
+            let path = format!("{}/schema/validate", context_path("context")?);
             need_present(arguments, "document")?;
             (
                 "POST",
-                format!("{}/schema/validate", context_path("context")?),
+                path,
                 Some(pick(arguments, &["document", "limit", "after"])),
             )
         }

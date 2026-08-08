@@ -67,6 +67,10 @@ pub(super) fn optional_string<'a>(
 }
 
 /// Copies the listed keys into a request body, skipping absent ones.
+/// The clone per key is the contract, not an oversight: the same
+/// `arguments` is read again by later picks (`retrieve` builds several
+/// requests from one argument object), and the transient copy is
+/// bounded by each transport's own frame/body cap.
 pub(super) fn pick(arguments: &Value, keys: &[&str]) -> Value {
     let mut body = serde_json::Map::new();
     for &key in keys {
