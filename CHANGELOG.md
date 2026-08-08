@@ -8,6 +8,18 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- `taguru extract --vocabulary PATH` / `TAGURU_EXTRACT_VOCABULARY`
+  (#496 S3, ADR 0015): steer a new document's spellings toward a
+  target context's existing vocabulary, loaded from exported batch
+  streams (file or directory). Concept names and labels are offered as
+  preferred spellings (alias spellings never — they are the twins a
+  canonical folds), harvested labels seed the relation-label block
+  from the first document, and a context spelling is admitted by the
+  mechanical occurrence check. Off by default; the harvested name
+  set's content digest is a manifest/checkpoint computation input
+  (`serde(default)`, so older manifests keep matching default runs).
+  `taguru benchmark extract` forwards `--vocabulary` and records
+  `extraction_settings.vocabulary_sha256` (additive, default `""`).
 - `taguru extract --candidates` / `TAGURU_EXTRACT_CANDIDATES` (#496 S2,
   ADR 0014): offer the document's own names — segmented
   deterministically, dictionary-free — to the model as preferred

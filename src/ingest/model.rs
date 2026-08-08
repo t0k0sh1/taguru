@@ -87,6 +87,20 @@ impl Batch {
             .collect()
     }
 
+    /// The concept spellings this batch settles on: every association
+    /// subject/object, plus alias CANONICALS — never alias spellings,
+    /// which are exactly the variants a canonical exists to fold.
+    /// Extract's `--vocabulary` (ADR 0015, #496 S3) harvests these
+    /// from an exported context so a new document is steered toward
+    /// the spellings the graph already uses.
+    pub(crate) fn concept_vocabulary(&self) -> BTreeSet<String> {
+        self.associations
+            .iter()
+            .flat_map(|op| [op.subject.clone(), op.object.clone()])
+            .chain(self.concepts.values().cloned())
+            .collect()
+    }
+
     pub(super) fn describe(&self) -> String {
         format!(
             "context '{}' ← source '{}': {} association(s), {} alias(es){}{}{}{}",

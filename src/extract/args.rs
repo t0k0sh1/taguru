@@ -44,6 +44,10 @@ pub(super) struct Args {
     /// (ADR 0014's default-off: the prompt stays byte-for-byte pre-S2)
     /// — resolved in [`run`], same pattern as `lossy`.
     pub(super) candidates: Option<bool>,
+    /// `None` defers to TAGURU_EXTRACT_VOCABULARY, and then to no
+    /// vocabulary at all — resolved in [`run`], same pattern as
+    /// `schema`. ADR 0015 (#496 S3).
+    pub(super) vocabulary: Option<PathBuf>,
     /// `None` defers to TAGURU_EXTRACT_DIAGNOSTICS, and then to no
     /// sidecar at all (today's behavior: one stderr line per failed
     /// document, nothing else) — resolved in [`run`], same pattern as
@@ -72,6 +76,7 @@ impl Args {
         let mut max_output_tokens: Option<usize> = None;
         let mut lossy: Option<bool> = None;
         let mut candidates: Option<bool> = None;
+        let mut vocabulary: Option<PathBuf> = None;
         let mut diagnostics_out: Option<PathBuf> = None;
         let mut schema: Option<PathBuf> = None;
         let mut context: Option<String> = None;
@@ -90,6 +95,21 @@ impl Args {
                 "--no-passage" => no_passage = true,
                 "--lossy" => lossy = Some(true),
                 "--candidates" => candidates = Some(true),
+                "--vocabulary" => match rest.next() {
+                    Some(path) if vocabulary.is_none() => vocabulary = Some(PathBuf::from(path)),
+                    Some(_) => {
+                        return Err(crate::config::subcommand_usage_error(
+                            "extract",
+                            "--vocabulary given twice",
+                        ));
+                    }
+                    None => {
+                        return Err(crate::config::subcommand_usage_error(
+                            "extract",
+                            "--vocabulary needs a file or directory path",
+                        ));
+                    }
+                },
                 "--questions" => match rest.next().map(|n| n.parse::<usize>()) {
                     Some(_) if questions > 0 => {
                         return Err(crate::config::subcommand_usage_error(
@@ -342,6 +362,7 @@ impl Args {
             max_output_tokens,
             lossy,
             candidates,
+            vocabulary,
             diagnostics_out,
             schema,
             context,

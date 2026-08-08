@@ -42,6 +42,7 @@ pub(super) fn mechanical_interpret(
     value: &serde_json::Value,
     rules: &ItemRules,
     document: &str,
+    vocabulary: &HashSet<String>,
 ) -> MechanicalEvaluation {
     let haystack = normalize_for_occurrence(document);
     let mut issues = Vec::new();
@@ -55,7 +56,14 @@ pub(super) fn mechanical_interpret(
             .iter()
             .enumerate()
             .filter_map(|(index, item)| {
-                association_mechanically(index, item, &haystack, &mut issues, &mut removed)
+                association_mechanically(
+                    index,
+                    item,
+                    &haystack,
+                    vocabulary,
+                    &mut issues,
+                    &mut removed,
+                )
             })
             .collect(),
         Some(other) => {
@@ -108,6 +116,7 @@ fn association_mechanically(
     index: usize,
     item: &serde_json::Value,
     haystack: &str,
+    vocabulary: &HashSet<String>,
     issues: &mut Vec<String>,
     removed: &mut Vec<String>,
 ) -> Option<ModelAssociation> {
@@ -137,7 +146,10 @@ fn association_mechanically(
         let name = name
             .as_deref()
             .expect("no absence and no issue means the field parsed");
-        if !name_occurs(haystack, name) {
+        // ADR 0015: a spelling the target context already uses is not
+        // a fabrication, however the document spells the entity — the
+        // vocabulary allowlist is consulted before removal.
+        if !name_occurs(haystack, name) && !vocabulary.contains(&normalize_for_occurrence(name)) {
             removed.push(format!(
                 "{path}.{field}: {} does not appear in the document text",
                 quote_for_issue(name)

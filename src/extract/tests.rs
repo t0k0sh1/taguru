@@ -768,7 +768,8 @@ fn removed_fixtures_are_removed_mechanically_with_zero_corrective_issues() {
             .map(|value| value.as_str().unwrap().to_string())
             .collect();
 
-        let evaluation = mechanical_interpret(&fixture["answer"], &rules, document);
+        let evaluation =
+            mechanical_interpret(&fixture["answer"], &rules, document, &HashSet::new());
         assert_eq!(
             evaluation.issues,
             Vec::<String>::new(),
@@ -810,14 +811,14 @@ fn mechanical_pass_keeps_present_but_wrong_values_for_the_corrective_turn() {
         ],
         "aliases": []
     });
-    let evaluation = mechanical_interpret(&answer, &rules, "a l b");
+    let evaluation = mechanical_interpret(&answer, &rules, "a l b", &HashSet::new());
     assert_eq!(
         evaluation.issues,
         vec!["associations[1].weight: expected finite non-zero number, got 0".to_string()]
     );
     // The corrective path wins the answer: evaluate_answer discards
     // this attempt's removals and fails into the corrective turn.
-    let result = evaluate_answer(&answer.to_string(), Some(&rules), "a l b");
+    let result = evaluate_answer(&answer.to_string(), Some(&rules), "a l b", &HashSet::new());
     assert!(matches!(result, Err(AnswerFault::Invalid(_))));
 }
 
@@ -837,8 +838,8 @@ fn evaluate_answer_accepts_after_mechanical_removal_and_records_it() {
         {"alias": "nextest", "canonical": "nextest", "kind": "concept"}
     ]}"#;
     let document = "青嶺酒造の杜氏は高瀬さん。リリース署名鍵と nextest の管理者でもある。";
-    let evaluated =
-        evaluate_answer(content, Some(&rules), document).expect("only removable departures");
+    let evaluated = evaluate_answer(content, Some(&rules), document, &HashSet::new())
+        .expect("only removable departures");
     assert_eq!(
         evaluated.removed,
         vec![
@@ -885,7 +886,8 @@ fn mechanical_pass_never_occurrence_checks_labels() {
         "associations": [{"subject": "青嶺酒造", "label": "内包する", "object": "高瀬"}],
         "aliases": []
     });
-    let evaluation = mechanical_interpret(&answer, &rules, "青嶺酒造には高瀬がいる。");
+    let evaluation =
+        mechanical_interpret(&answer, &rules, "青嶺酒造には高瀬がいる。", &HashSet::new());
     assert!(evaluation.issues.is_empty());
     assert!(evaluation.removed.is_empty());
     assert_eq!(evaluation.output.associations.len(), 1);
@@ -1035,11 +1037,11 @@ fn candidate_terms_cap_count_and_drop_oversized_or_single_char_tokens() {
 
 #[test]
 fn system_prompt_offers_candidates_only_when_given_and_stays_nonrestrictive() {
-    let without = system_prompt(&BTreeSet::new(), 0, 0, None, &[]);
+    let without = system_prompt(&BTreeSet::new(), 0, 0, None, &[], &[]);
     assert!(!without.contains("Names appearing in this document"));
 
     let terms = vec!["署名鍵".to_string(), "cargo-nextest".to_string()];
-    let with = system_prompt(&BTreeSet::new(), 0, 0, None, &terms);
+    let with = system_prompt(&BTreeSet::new(), 0, 0, None, &[], &terms);
     assert!(with.contains("Names appearing in this document"));
     // The measured prose rendering (re-encoding the list regressed the
     // bench — see candidates_block's comment), framed as data in so
@@ -1104,6 +1106,7 @@ fn manifests_reextract_when_the_candidates_mode_changes() {
         false,
         "",
         candidates_manifest_value(true),
+        "",
         "a.md.jsonl",
     );
     assert!(manifest.matches(
@@ -1119,12 +1122,13 @@ fn manifests_reextract_when_the_candidates_mode_changes() {
         0,
         false,
         "",
-        candidates_manifest_value(true)
+        candidates_manifest_value(true),
+        ""
     ));
     // Turning the control off — or a future algorithm revision — is a
     // computation-input change like any other.
     assert!(!manifest.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "", ""
+        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "", "", ""
     ));
     // Pre-S2 entries (no field) default to "" and keep matching
     // default-off runs.
@@ -1143,10 +1147,11 @@ fn manifests_reextract_when_the_candidates_mode_changes() {
         false,
         "",
         "",
+        "",
         "b.md.jsonl",
     );
     assert!(legacy.matches(
-        "b.md", "hash-2", "model-1", "sake", 0, false, "", 0, "", 0, false, "", ""
+        "b.md", "hash-2", "model-1", "sake", 0, false, "", 0, "", 0, false, "", "", ""
     ));
     assert!(!legacy.matches(
         "b.md",
@@ -1161,7 +1166,256 @@ fn manifests_reextract_when_the_candidates_mode_changes() {
         0,
         false,
         "",
-        candidates_manifest_value(true)
+        candidates_manifest_value(true),
+        ""
+    ));
+}
+
+#[test]
+fn vocabulary_flag_parses_once_and_rejects_a_duplicate() {
+    fn parse(words: &[&str]) -> Result<Args, i32> {
+        Args::parse(&words.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+    let parsed = parse(&[
+        "--context",
+        "c",
+        "--out",
+        "o",
+        "--vocabulary",
+        "vocab.jsonl",
+        "doc.md",
+    ])
+    .unwrap();
+    assert_eq!(
+        parsed.vocabulary.as_deref(),
+        Some(Path::new("vocab.jsonl")),
+        "a single --vocabulary must parse and carry its path"
+    );
+    let duplicate = parse(&[
+        "--context",
+        "c",
+        "--out",
+        "o",
+        "--vocabulary",
+        "a.jsonl",
+        "--vocabulary",
+        "b.jsonl",
+        "doc.md",
+    ]);
+    assert!(
+        matches!(duplicate, Err(2)),
+        "a duplicate is a usage error, never a silent last-wins"
+    );
+}
+
+/// One-sided streams must load: concept names with no label alias, and
+/// label aliases with no association, are each real vocabulary — the
+/// emptiness refusal fires only when BOTH sets are empty.
+#[test]
+fn load_vocabulary_accepts_one_sided_streams() {
+    let dir = std::env::temp_dir().join(format!("taguru-vocab-sided-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+
+    fs::write(
+        dir.join("concepts-only.jsonl"),
+        concat!(
+            r#"{"taguru_batch":1,"context":"ops","source":"s1"}"#,
+            "\n",
+            r#"{"alias":"cargo-nextest","canonical":"nextest","kind":"concept"}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    let concepts_only = load_vocabulary(&dir.join("concepts-only.jsonl")).unwrap();
+    assert!(concepts_only.concepts.contains("nextest"));
+    assert!(concepts_only.labels.is_empty());
+
+    fs::write(
+        dir.join("labels-only.jsonl"),
+        concat!(
+            r#"{"taguru_batch":1,"context":"ops","source":"s2"}"#,
+            "\n",
+            r#"{"alias":"担当","canonical":"管理者","kind":"label"}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    let labels_only = load_vocabulary(&dir.join("labels-only.jsonl")).unwrap();
+    assert!(labels_only.concepts.is_empty());
+    assert!(labels_only.labels.contains("管理者"));
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// `vocabulary_digest` is the benchmark harness's view of the same
+/// fingerprint extract folds into its manifests — it must BE that
+/// digest, and track content.
+#[test]
+fn vocabulary_digest_matches_the_load_and_tracks_content() {
+    let dir = std::env::temp_dir().join(format!("taguru-vocab-digest-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("v.jsonl");
+    fs::write(
+        &path,
+        concat!(
+            r#"{"taguru_batch":1,"context":"ops","source":"s1"}"#,
+            "\n",
+            r#"{"subject":"CI","label":"使用","object":"nextest","weight":1.0}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    let digest = vocabulary_digest(&path).unwrap();
+    assert_eq!(digest, load_vocabulary(&path).unwrap().digest);
+    fs::write(
+        &path,
+        concat!(
+            r#"{"taguru_batch":1,"context":"ops","source":"s1"}"#,
+            "\n",
+            r#"{"subject":"CI","label":"使用","object":"cargo-nextest","weight":1.0}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    assert_ne!(
+        vocabulary_digest(&path).unwrap(),
+        digest,
+        "a changed name set must change the digest"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn load_vocabulary_harvests_canonicals_and_labels_never_alias_spellings() {
+    let dir = std::env::temp_dir().join(format!("taguru-vocab-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    // Two batches in ONE stream — the shape a context export writes.
+    fs::write(
+        dir.join("export.jsonl"),
+        concat!(
+            r#"{"taguru_batch":1,"context":"ops","source":"s1"}"#,
+            "\n",
+            r#"{"subject":"CI","label":"テストランナー","object":"nextest","weight":1.0}"#,
+            "\n",
+            r#"{"alias":"cargo-nextest","canonical":"nextest","kind":"concept"}"#,
+            "\n",
+            r#"{"taguru_batch":1,"context":"ops","source":"s2"}"#,
+            "\n",
+            r#"{"subject":"リリース署名鍵","label":"管理者","object":"山科","weight":1.0}"#,
+            "\n",
+            r#"{"alias":"担当","canonical":"管理者","kind":"label"}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    let vocabulary = load_vocabulary(&dir.join("export.jsonl")).unwrap();
+    for name in ["CI", "nextest", "リリース署名鍵", "山科"] {
+        assert!(vocabulary.concepts.contains(name), "{name} missing");
+    }
+    assert!(
+        !vocabulary.concepts.contains("cargo-nextest"),
+        "an alias SPELLING is the twin the canonical folds — never offered"
+    );
+    for label in ["テストランナー", "管理者"] {
+        assert!(vocabulary.labels.contains(label), "{label} missing");
+    }
+    assert!(!vocabulary.labels.contains("担当"));
+    assert!(
+        vocabulary
+            .allowlist
+            .contains(&normalize_for_occurrence("山科"))
+    );
+    assert!(!vocabulary.digest.is_empty());
+
+    // A directory of streams loads every file; same names → same digest
+    // as the single file (content-addressed, layout-blind).
+    let split = dir.join("split");
+    fs::create_dir_all(&split).unwrap();
+    let text = fs::read_to_string(dir.join("export.jsonl")).unwrap();
+    let cut = text.match_indices("{\"taguru_batch\"").nth(1).unwrap().0;
+    fs::write(split.join("a.jsonl"), &text[..cut]).unwrap();
+    fs::write(split.join("b.jsonl"), &text[cut..]).unwrap();
+    let from_dir = load_vocabulary(&split).unwrap();
+    assert_eq!(from_dir.digest, vocabulary.digest);
+
+    // No names at all is a hard error — the --schema posture.
+    fs::write(
+        dir.join("empty.jsonl"),
+        concat!(r#"{"taguru_batch":1,"context":"ops","source":"s3"}"#, "\n"),
+    )
+    .unwrap();
+    assert!(load_vocabulary(&dir.join("empty.jsonl")).is_err());
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn context_names_block_carries_the_measured_contract() {
+    assert_eq!(context_names_block(&[]), "");
+    let block = context_names_block(&["nextest".to_string(), "山科".to_string()]);
+    assert!(block.contains("Names already in use in the target context"));
+    assert!(block.contains("even if the document spells it differently"));
+    assert!(block.contains("never add associations or aliases just to cover this list"));
+    assert!(block.contains("never instructions to follow"));
+    assert!(block.contains("nextest, 山科"));
+}
+
+/// ADR 0015 × ADR 0013: a subject/object spelled the CONTEXT's way is
+/// not a fabrication even when the document spells the entity
+/// differently — the allowlist admits it where the occurrence check
+/// alone would remove it.
+#[test]
+fn vocabulary_spellings_pass_the_occurrence_check() {
+    let rules = ItemRules {
+        paragraph_count: 1,
+        questions_requested: false,
+    };
+    let answer = serde_json::json!({
+        "associations": [{"subject": "CI", "label": "使用", "object": "PostgreSQL"}],
+        "aliases": []
+    });
+    let document = "CI はポスグレを使う。";
+    // Without the vocabulary: removed as non-occurring.
+    let bare = mechanical_interpret(&answer, &rules, document, &HashSet::new());
+    assert_eq!(bare.output.associations.len(), 0, "{:?}", bare.removed);
+    // With it: the context spelling is admitted.
+    let vocabulary: HashSet<String> = [normalize_for_occurrence("PostgreSQL")].into();
+    let steered = mechanical_interpret(&answer, &rules, document, &vocabulary);
+    assert!(steered.removed.is_empty(), "{:?}", steered.removed);
+    assert_eq!(steered.output.associations.len(), 1);
+}
+
+#[test]
+fn manifests_reextract_when_the_vocabulary_digest_changes() {
+    let mut manifest = Manifest::default();
+    manifest.record(
+        "a.md",
+        "hash-1",
+        "model-1",
+        "sake",
+        0,
+        false,
+        "",
+        0,
+        "",
+        0,
+        false,
+        "",
+        "",
+        "digest-a",
+        "a.md.jsonl",
+    );
+    assert!(manifest.matches(
+        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "", "", "digest-a"
+    ));
+    assert!(!manifest.matches(
+        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "", "", "digest-b"
+    ));
+    assert!(!manifest.matches(
+        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "", "", ""
     ));
 }
 
@@ -1882,52 +2136,53 @@ fn manifests_skip_only_exact_recomputations() {
         false,
         "",
         "",
+        "",
         "a.md.jsonl",
     );
     assert!(manifest.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "", ""
+        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "", "", ""
     ));
     assert!(!manifest.matches(
-        "a.md", "hash-2", "model-1", "sake", 0, false, "", 0, "", 0, false, "", ""
+        "a.md", "hash-2", "model-1", "sake", 0, false, "", 0, "", 0, false, "", "", ""
     ));
     assert!(!manifest.matches(
-        "a.md", "hash-1", "model-2", "sake", 0, false, "", 0, "", 0, false, "", ""
+        "a.md", "hash-1", "model-2", "sake", 0, false, "", 0, "", 0, false, "", "", ""
     ));
     assert!(!manifest.matches(
-        "b.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "", ""
+        "b.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "", "", ""
     ));
     // A re-pointed --context must re-extract, not keep files whose
     // headers still name the old target.
     assert!(!manifest.matches(
-        "a.md", "hash-1", "model-1", "vats", 0, false, "", 0, "", 0, false, "", ""
+        "a.md", "hash-1", "model-1", "vats", 0, false, "", 0, "", 0, false, "", "", ""
     ));
     // Toggling --no-passage changes whether the batch carries the
     // source passage at all — a skip would keep the stale shape.
     assert!(!manifest.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, true, "", 0, "", 0, false, "", ""
+        "a.md", "hash-1", "model-1", "sake", 0, true, "", 0, "", 0, false, "", "", ""
     ));
     // A changed --description is baked into the batch header, so it
     // must re-extract too rather than skip with the old one.
     assert!(!manifest.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "new desc", 0, "", 0, false, "", ""
+        "a.md", "hash-1", "model-1", "sake", 0, false, "new desc", 0, "", 0, false, "", "", ""
     ));
     // A changed --fact-budget is folded into the system prompt like
     // --questions, so it must re-extract too rather than skip.
     assert!(!manifest.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "", 5, "", 0, false, "", ""
+        "a.md", "hash-1", "model-1", "sake", 0, false, "", 5, "", 0, false, "", "", ""
     ));
     // A changed --structured-output or --max-output-tokens changes
     // what the model can answer — computation inputs like the rest.
     assert!(!manifest.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "auto", 0, false, "", ""
+        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "auto", 0, false, "", "", ""
     ));
     assert!(!manifest.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 2048, false, "", ""
+        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 2048, false, "", "", ""
     ));
     // Issue #199: a changed --lossy changes what the batch's facts
     // even are (dropped vs. corrected), so it must re-extract too.
     assert!(!manifest.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, true, "", ""
+        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, true, "", "", ""
     ));
 
     // A prompt bump invalidates entries recorded under the old one.
@@ -1937,7 +2192,7 @@ fn manifests_skip_only_exact_recomputations() {
         .expect("just recorded")
         .prompt_version = PROMPT_VERSION + 1;
     assert!(!manifest.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "", ""
+        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "", "", ""
     ));
 
     let dir = std::env::temp_dir().join(format!("taguru-manifest-{}", std::process::id()));
@@ -1960,11 +2215,12 @@ fn manifests_skip_only_exact_recomputations() {
         false,
         "",
         "",
+        "",
         "a.md.jsonl",
     );
     manifest.save(&path).unwrap();
     assert!(Manifest::load(&path).matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "", ""
+        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "", "", ""
     ));
     fs::write(&path, "not json").unwrap();
     assert!(Manifest::load(&path).documents.is_empty());
@@ -1981,7 +2237,7 @@ fn manifests_skip_only_exact_recomputations() {
     let legacy = Manifest::load(&path);
     assert_eq!(legacy.documents.len(), 1);
     assert!(!legacy.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "", ""
+        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "", "", ""
     ));
 
     // An entry written before the structured_output/
@@ -2000,7 +2256,7 @@ fn manifests_skip_only_exact_recomputations() {
     .unwrap();
     let pre_ladder = Manifest::load(&path);
     assert!(pre_ladder.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "", ""
+        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "", "", ""
     ));
     assert!(!pre_ladder.matches(
         "a.md",
@@ -2015,12 +2271,13 @@ fn manifests_skip_only_exact_recomputations() {
         0,
         false,
         "",
+        "",
         ""
     ));
     // Issue #199: an entry from before --lossy existed defaults to
     // `false` (strict) and must NOT match a --lossy run.
     assert!(!pre_ladder.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, true, "", ""
+        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, true, "", "", ""
     ));
     let _ = fs::remove_dir_all(&dir);
 }
@@ -2042,21 +2299,22 @@ fn manifests_reextract_when_the_schema_digest_changes() {
         false,
         "digest-1",
         "",
+        "",
         "a.md.jsonl",
     );
     assert!(manifest.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "digest-1", ""
+        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "digest-1", "", ""
     ));
     // A different --schema document — even with everything else
     // identical — must re-extract: the prompt's schema block and
     // self-validation both changed under it.
     assert!(!manifest.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "digest-2", ""
+        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "digest-2", "", ""
     ));
     // Dropping --schema entirely (querying with "") must also
     // re-extract a schema-recorded entry, not just swap it.
     assert!(!manifest.matches(
-        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "", ""
+        "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "", "", ""
     ));
 
     // An entry written before `--schema` existed defaults to "" —
@@ -2077,13 +2335,14 @@ fn manifests_reextract_when_the_schema_digest_changes() {
         false,
         "",
         "",
+        "",
         "b.md.jsonl",
     );
     assert!(legacy.matches(
-        "b.md", "hash-2", "model-1", "sake", 0, false, "", 0, "", 0, false, "", ""
+        "b.md", "hash-2", "model-1", "sake", 0, false, "", 0, "", 0, false, "", "", ""
     ));
     assert!(!legacy.matches(
-        "b.md", "hash-2", "model-1", "sake", 0, false, "", 0, "", 0, false, "digest-1", ""
+        "b.md", "hash-2", "model-1", "sake", 0, false, "", 0, "", 0, false, "digest-1", "", ""
     ));
 }
 
@@ -2123,7 +2382,7 @@ fn classify_attempt_reads_provider_metadata_before_the_parse() {
         usage: None,
     };
     assert!(matches!(
-        classify_attempt(&completion, None, ""),
+        classify_attempt(&completion, None, "", &HashSet::new()),
         AttemptOutcome::LengthLimited
     ));
     // Length also outranks emptiness: a thinking model that burned
@@ -2135,7 +2394,7 @@ fn classify_attempt_reads_provider_metadata_before_the_parse() {
         usage: None,
     };
     assert!(matches!(
-        classify_attempt(&empty_at_cap, None, ""),
+        classify_attempt(&empty_at_cap, None, "", &HashSet::new()),
         AttemptOutcome::LengthLimited
     ));
     let refused = ChatCompletion {
@@ -2144,7 +2403,7 @@ fn classify_attempt_reads_provider_metadata_before_the_parse() {
         usage: None,
     };
     assert!(matches!(
-        classify_attempt(&refused, None, ""),
+        classify_attempt(&refused, None, "", &HashSet::new()),
         AttemptOutcome::Refusal(reason) if reason == "content_filter"
     ));
     let empty = ChatCompletion {
@@ -2153,7 +2412,7 @@ fn classify_attempt_reads_provider_metadata_before_the_parse() {
         usage: None,
     };
     assert!(matches!(
-        classify_attempt(&empty, None, ""),
+        classify_attempt(&empty, None, "", &HashSet::new()),
         AttemptOutcome::Empty
     ));
     let ok = ChatCompletion {
@@ -2162,7 +2421,7 @@ fn classify_attempt_reads_provider_metadata_before_the_parse() {
         usage: None,
     };
     assert!(matches!(
-        classify_attempt(&ok, None, ""),
+        classify_attempt(&ok, None, "", &HashSet::new()),
         AttemptOutcome::Valid(_)
     ));
     let malformed = ChatCompletion {
@@ -2171,7 +2430,7 @@ fn classify_attempt_reads_provider_metadata_before_the_parse() {
         usage: None,
     };
     assert!(matches!(
-        classify_attempt(&malformed, None, ""),
+        classify_attempt(&malformed, None, "", &HashSet::new()),
         AttemptOutcome::Malformed(_)
     ));
 
@@ -2190,7 +2449,7 @@ fn classify_attempt_reads_provider_metadata_before_the_parse() {
         usage: None,
     };
     assert!(matches!(
-        classify_attempt(&invalid, Some(&strict_rules), "a l b"),
+        classify_attempt(&invalid, Some(&strict_rules), "a l b", &HashSet::new()),
         AttemptOutcome::Invalid(_)
     ));
 }
@@ -2286,16 +2545,16 @@ fn split_labeled_piece_halves_blocks_with_their_labels_repeated() {
 
 #[test]
 fn the_system_prompt_offers_the_accumulated_vocabulary() {
-    assert!(!system_prompt(&BTreeSet::new(), 0, 0, None, &[]).contains("already in use"));
+    assert!(!system_prompt(&BTreeSet::new(), 0, 0, None, &[], &[]).contains("already in use"));
     let vocabulary: BTreeSet<String> = ["杜氏".to_string(), "創業年".to_string()].into();
-    let prompt = system_prompt(&vocabulary, 0, 0, None, &[]);
+    let prompt = system_prompt(&vocabulary, 0, 0, None, &[], &[]);
     assert!(
         prompt.contains("杜氏") && prompt.contains("創業年"),
         "{prompt}"
     );
     // The questions ask rides only when asked for.
     assert!(!prompt.contains("search question"));
-    let asking = system_prompt(&vocabulary, 2, 0, None, &[]);
+    let asking = system_prompt(&vocabulary, 2, 0, None, &[], &[]);
     assert!(
         asking.contains("up to 2 realistic search question(s)")
             && asking.contains("bracketed number"),
@@ -2305,12 +2564,14 @@ fn the_system_prompt_offers_the_accumulated_vocabulary() {
 
 #[test]
 fn the_system_prompt_omits_the_fact_budget_clause_by_default() {
-    assert!(!system_prompt(&BTreeSet::new(), 0, 0, None, &[]).contains("association(s) total"));
+    assert!(
+        !system_prompt(&BTreeSet::new(), 0, 0, None, &[], &[]).contains("association(s) total")
+    );
 }
 
 #[test]
 fn the_system_prompt_states_the_fact_budget_when_set() {
-    let prompt = system_prompt(&BTreeSet::new(), 0, 5, None, &[]);
+    let prompt = system_prompt(&BTreeSet::new(), 0, 5, None, &[], &[]);
     assert!(
         prompt.contains("at most 5 association(s) total"),
         "{prompt}"
@@ -2325,7 +2586,7 @@ fn the_system_prompt_offers_the_schema_types_and_a_relation_line_when_mode_is_no
         crate::schema::SchemaMode::Warn,
         false,
     );
-    let prompt = system_prompt(&BTreeSet::new(), 0, 0, Some(&schema), &[]);
+    let prompt = system_prompt(&BTreeSet::new(), 0, 0, Some(&schema), &[], &[]);
     assert!(
         prompt.contains("Brewery") && prompt.contains("Person"),
         "{prompt}"
@@ -2345,7 +2606,7 @@ fn the_system_prompt_omits_the_arrow_for_a_relation_constrained_on_one_side_only
         crate::schema::SchemaMode::Warn,
         false,
     );
-    let prompt = system_prompt(&BTreeSet::new(), 0, 0, Some(&schema), &[]);
+    let prompt = system_prompt(&BTreeSet::new(), 0, 0, Some(&schema), &[], &[]);
     assert!(prompt.contains("代表銘柄 domain: Brewery"), "{prompt}");
     assert!(!prompt.contains("any"), "{prompt}");
 }
@@ -2358,7 +2619,7 @@ fn the_system_prompt_omits_the_schema_block_when_mode_is_off() {
         crate::schema::SchemaMode::Off,
         false,
     );
-    let prompt = system_prompt(&BTreeSet::new(), 0, 0, Some(&schema), &[]);
+    let prompt = system_prompt(&BTreeSet::new(), 0, 0, Some(&schema), &[], &[]);
     assert!(!prompt.contains("Brewery"), "{prompt}");
     assert!(
         !prompt.contains(crate::schema::SCHEMA_TYPE_LABEL),
@@ -2743,7 +3004,8 @@ fn evaluate_answer_in_strict_mode_surfaces_validity_issues_lossy_mode_ignores() 
         paragraph_count: 1,
         questions_requested: false,
     };
-    let Err(AnswerFault::Invalid(issues)) = evaluate_answer(content, Some(&strict_rules), "a l b")
+    let Err(AnswerFault::Invalid(issues)) =
+        evaluate_answer(content, Some(&strict_rules), "a l b", &HashSet::new())
     else {
         panic!("expected AnswerFault::Invalid");
     };
@@ -2755,7 +3017,8 @@ fn evaluate_answer_in_strict_mode_surfaces_validity_issues_lossy_mode_ignores() 
     // Lossy mode (`rules: None`) ignores the same issue and hands
     // back the parsed output, byte-for-byte parse_model_output's
     // behavior.
-    let evaluated = evaluate_answer(content, None, "").expect("lossy mode never fails on validity");
+    let evaluated = evaluate_answer(content, None, "", &HashSet::new())
+        .expect("lossy mode never fails on validity");
     assert_eq!(evaluated.output.associations.len(), 1);
     assert_eq!(evaluated.output.associations[0].weight, None);
     assert!(evaluated.removed.is_empty(), "lossy mode never removes");
@@ -2767,7 +3030,7 @@ fn evaluate_answer_reports_a_syntax_fault_before_any_validation() {
         paragraph_count: 1,
         questions_requested: false,
     };
-    match evaluate_answer("not json at all", Some(&strict_rules), "") {
+    match evaluate_answer("not json at all", Some(&strict_rules), "", &HashSet::new()) {
         Err(AnswerFault::Syntax(message)) => assert!(message.contains("not a JSON object")),
         _ => panic!("expected AnswerFault::Syntax"),
     }

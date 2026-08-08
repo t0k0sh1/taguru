@@ -1032,6 +1032,124 @@ fn extract_candidates_flag_folds_the_document_names_into_the_system_prompt() {
     let _ = std::fs::remove_dir_all(&out);
 }
 
+/// ADR 0015 (#496 S3): `--vocabulary` loads an exported batch stream,
+/// offers its concept names and labels in the system prompt, admits a
+/// context spelling through the occurrence check, and re-extracts when
+/// the digest changes. A bad path is a hard startup error.
+#[test]
+fn extract_vocabulary_steers_spellings_and_is_a_computation_input() {
+    let docs = batch_dir("extract-vocab-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "CI のテストランナーは cargo-nextest。").unwrap();
+    let vocab = docs.join("export.jsonl");
+    std::fs::write(
+        &vocab,
+        concat!(
+            r#"{"taguru_batch":1,"context":"ops","source":"s0"}"#,
+            "\n",
+            r#"{"subject":"CI","label":"テストランナー","object":"nextest","weight":1.0}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    let out = batch_dir("extract-vocab-out");
+
+    // The model follows the steering: the CONTEXT spelling `nextest`
+    // for an entity the document spells `cargo-nextest` — kept only
+    // because the vocabulary allowlists it past the occurrence check.
+    let reply = json!({"associations": [
+        {"subject": "CI", "label": "テストランナー", "object": "nextest"}
+    ]})
+    .to_string();
+    let (url, requests) = stub_chat_server(vec![reply.clone()]);
+    let provider = [
+        ("TAGURU_EXTRACT_URL", url.as_str()),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &provider,
+        &[
+            "--context",
+            "c",
+            "--vocabulary",
+            vocab.to_str().unwrap(),
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("1 association(s)"), "{stdout}");
+    assert!(!stdout.contains("removed"), "{stdout}");
+
+    let requests = requests.join().unwrap();
+    let body_start = requests[0].find('{').unwrap();
+    let body: serde_json::Value = serde_json::from_str(&requests[0][body_start..]).unwrap();
+    let system = body["messages"][0]["content"].as_str().unwrap();
+    let block = system
+        .split("Names already in use in the target context")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no context-names block: {system}"));
+    assert!(block.contains("nextest"), "{block}");
+    // The exported labels seed the run vocabulary from document one.
+    assert!(
+        system.contains("Relation labels already in use"),
+        "{system}"
+    );
+    assert!(system.contains("テストランナー"), "{system}");
+
+    // A changed vocabulary is a computation input: same document, new
+    // name set → re-extract, not an "unchanged" skip.
+    std::fs::write(
+        &vocab,
+        concat!(
+            r#"{"taguru_batch":1,"context":"ops","source":"s0"}"#,
+            "\n",
+            r#"{"subject":"CI","label":"テストランナー","object":"cargo-nextest","weight":1.0}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    let (url, requests) = stub_chat_server(vec![reply]);
+    let provider = [
+        ("TAGURU_EXTRACT_URL", url.as_str()),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &provider,
+        &[
+            "--context",
+            "c",
+            "--vocabulary",
+            vocab.to_str().unwrap(),
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(!stdout.contains("unchanged, skipped"), "{stdout}");
+    assert_eq!(requests.join().unwrap().len(), 1);
+
+    // A path that loads nothing is a hard startup error.
+    let (code, _, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", "http://127.0.0.1:9"),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--vocabulary",
+            docs.join("missing.jsonl").to_str().unwrap(),
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("--vocabulary"), "{stderr}");
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
 /// TAGURU_EXTRACT_CANDIDATES engages the block without the flag, and a
 /// bad value is a hard usage error — the --lossy env conventions.
 #[test]

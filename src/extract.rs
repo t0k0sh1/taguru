@@ -100,6 +100,8 @@ mod structured_output;
 #[path = "extract/tests.rs"]
 #[cfg(test)]
 mod tests;
+#[path = "extract/vocabulary.rs"]
+mod vocabulary;
 
 use args::{Args, CorrectionPolicy, LadderConfig, Outcome};
 use diagnostics::DiagnosticsSink;
@@ -112,6 +114,7 @@ pub(crate) use chat_client::{ChatClient, RequestOptions};
 pub(crate) use documents::{ChunkDescriptor, chunk_plan, expand_documents, read_document};
 pub(crate) use signals::{StopSignal, block_stop_signals_on_this_thread};
 pub(crate) use structured_output::json_schema_response_format;
+pub(crate) use vocabulary::vocabulary_digest;
 
 // Cross-submodule wiring: each of these is private to the one
 // submodule that defines it, but at least one *other* submodule
@@ -129,7 +132,7 @@ use chunking::{
 };
 use diagnostics::DiagnosticsAttempt;
 use manifest::{CHECKPOINT_DIR_NAME, batch_file_name, checkpoint_file_name};
-use mechanical::{mechanical_interpret, prune_unresolvable_aliases};
+use mechanical::{mechanical_interpret, normalize_for_occurrence, prune_unresolvable_aliases};
 use parse::{
     ItemRules, ModelAlias, ModelAssociation, ModelOutput, candidate_json, describe_value,
     empty_answer_diagnosis, get_present, interpret_alias_item, interpret_association_item,
@@ -140,6 +143,7 @@ use prompt::{system_prompt, user_message, user_message_document};
 use render::{chunk, floor_char_boundary, render_batch, split_labeled_piece, split_oversized};
 use run::labeled_document;
 use structured_output::{jittered_backoff, parse_retry_after, read_capped_chat_body, snippet};
+use vocabulary::{ContextVocabulary, context_names_block, load_vocabulary};
 
 // Test-only cross-submodule access: production code never names these
 // at the hub level (each is private to the one submodule that both
@@ -159,7 +163,7 @@ use diagnostics::{AttemptRecord, ChunkRecord, DocumentRecord, ProviderMetadataRe
 #[cfg(test)]
 use documents::chunk_plan_with_cap;
 #[cfg(test)]
-use mechanical::{name_occurs, normalize_for_occurrence};
+use mechanical::name_occurs;
 #[cfg(test)]
 use parse::{ModelQuestion, parse_model_output};
 #[cfg(test)]
@@ -172,8 +176,8 @@ const USAGE: &str = "\
 usage: taguru extract [--dry-run] [--force] [--no-passage] [--questions N]
                       [--fact-budget N] [--config FILE] [--parallel N]
                       [--structured-output MODE] [--max-output-tokens N]
-                      [--lossy] [--candidates] [--diagnostics-out FILE]
-                      [--schema FILE]
+                      [--lossy] [--candidates] [--vocabulary PATH]
+                      [--diagnostics-out FILE] [--schema FILE]
                       --context NAME [--description TEXT] --out DIR FILE|DIR...
 
 Reads documents (.md/.txt; a directory expands to its files, sorted by
@@ -195,6 +199,7 @@ chat endpoint:
   TAGURU_EXTRACT_MAX_OUTPUT_TOKENS  default for --max-output-tokens (unset)
   TAGURU_EXTRACT_LOSSY  default for --lossy (0/false)
   TAGURU_EXTRACT_CANDIDATES  default for --candidates (0/false)
+  TAGURU_EXTRACT_VOCABULARY  default for --vocabulary (unset, off)
   TAGURU_EXTRACT_DIAGNOSTICS  default for --diagnostics-out (unset, off)
   TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
                       each diagnostics record, capped to this many bytes;
@@ -240,6 +245,13 @@ chat endpoint:
                       preferred subject/object spellings. Non-restrictive:
                       names outside the list stay allowed. Off by default;
                       toggling it re-extracts (a computation input)
+  --vocabulary PATH   steer spellings toward a target context's existing
+                      vocabulary: PATH is an exported batch stream (or a
+                      directory of them, e.g. taguru export --out DIR);
+                      its concept names and relation labels are offered
+                      to the model as preferred spellings, and a
+                      context spelling never fails the occurrence check.
+                      Off by default; changing the names re-extracts
   --diagnostics-out FILE  write a JSONL sidecar of tagged records (`kind`):
                       one \"chunk\" record per chunk with its provenance
                       (source, chunk_index/total, hash, paragraph range);
@@ -526,6 +538,26 @@ pub fn run(args: &[String]) -> i32 {
             Err(_) => false,
         },
     };
+    // Flag-over-env, same pattern as --schema below. ADR 0015: the
+    // named file/directory must load and yield names, or the run stops
+    // — silently extracting without the vocabulary the operator asked
+    // for would let every new document drift.
+    let vocabulary_path = args.vocabulary.or_else(|| {
+        std::env::var("TAGURU_EXTRACT_VOCABULARY")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    });
+    let context_vocabulary = match &vocabulary_path {
+        Some(path) => match load_vocabulary(path) {
+            Ok(vocabulary) => Some(vocabulary),
+            Err(message) => {
+                eprintln!("taguru: extract: --vocabulary: {message}");
+                return 1;
+            }
+        },
+        None => None,
+    };
     // Flag-over-env, same pattern as --parallel above. Unlike a parsed
     // knob, any nonempty path is a valid value, so there is no "bad env
     // value" usage error here.
@@ -647,11 +679,30 @@ pub fn run(args: &[String]) -> i32 {
         client,
         model_name,
         manifest: Manifest::load(&manifest_path),
-        vocabulary: BTreeSet::new(),
+        // ADR 0015: the exported context's label spellings seed the
+        // run vocabulary, so the existing "relation labels already in
+        // use" block carries them from the first document — no new
+        // prompt machinery for labels.
+        vocabulary: context_vocabulary
+            .as_ref()
+            .map(|vocabulary| vocabulary.labels.clone())
+            .unwrap_or_default(),
         claimed: BTreeMap::new(),
         parallel,
         lossy,
         candidates: candidates_on,
+        vocabulary_names: context_vocabulary
+            .as_ref()
+            .map(ContextVocabulary::prompt_names)
+            .unwrap_or_default(),
+        vocabulary_allowlist: context_vocabulary
+            .as_ref()
+            .map(|vocabulary| vocabulary.allowlist.clone())
+            .unwrap_or_default(),
+        vocabulary_digest: context_vocabulary
+            .as_ref()
+            .map(|vocabulary| vocabulary.digest.clone())
+            .unwrap_or_default(),
         diagnostics,
         schema,
         schema_digest,

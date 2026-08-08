@@ -111,6 +111,7 @@ TAGURU_EXTRACT_STRUCTURED_OUTPUT  default for --structured-output (default off)
 TAGURU_EXTRACT_MAX_OUTPUT_TOKENS  default for --max-output-tokens (default unset)
 TAGURU_EXTRACT_LOSSY  default for --lossy (default 0/false)
 TAGURU_EXTRACT_CANDIDATES  default for --candidates (default 0/false)
+TAGURU_EXTRACT_VOCABULARY  default for --vocabulary (default unset, off)
 TAGURU_EXTRACT_DIAGNOSTICS  default for --diagnostics-out (default unset, off)
 TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
                     each diagnostics record, capped to this many bytes;
@@ -143,6 +144,13 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
                     dictionary) as preferred subject/object spellings;
                     non-restrictive, off by default; toggling re-extracts
                     (ADR 0014)
+--vocabulary PATH   steer spellings toward a target context's existing
+                    vocabulary: PATH is an exported batch stream or a
+                    directory of them (taguru export --out DIR); concept
+                    names and labels are offered as preferred spellings,
+                    and a context spelling never fails the occurrence
+                    check; off by default, content-digest re-extracts
+                    (ADR 0015)
 --diagnostics-out FILE  write a JSONL sidecar of tagged records (see below):
                     one per chunk (provenance), one per LLM attempt (source,
                     chunk, attempt, terminal state, finish_reason, token
@@ -264,6 +272,25 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       block, a mid-size model was measured emitting the offered spellings as unquoted JSON
       values — a syntax failure class constrained decoding removes structurally, which is
       exactly the syntax/naming role split the two controls are designed around.
+    </p>
+    <p>
+      <code>--vocabulary</code> (ADR 0015, #496 S3) is the cross-document half of the same
+      idea: point it at an exported batch stream of the target context (<code>taguru export
+      --out DIR</code>, or <code>GET /contexts/{name}/export</code> saved to disk — a file or
+      a directory of files) and the context's own concept names and relation labels are
+      offered as preferred spellings, with one extra instruction: use the context's exact
+      spelling <i>even when the document spells the same entity differently</i>. That is the
+      <code>cargo-nextest</code>/<code>nextest</code> twin being prevented at answer time
+      instead of detected by the <a href="promotion.html">consolidation audit</a> after
+      import. Alias spellings are never offered (they are the variants a canonical exists to
+      fold), harvested labels seed the "relation labels already in use" block from the first
+      document, and a context spelling never fails the mechanical occurrence check — the
+      steering and the validation agree by construction. The harvested name set is
+      content-digested into the manifest, so refreshing the export re-extracts exactly when
+      the names actually changed. Prompt-side the concept list caps at 200 names
+      (alphabetical, deterministic); relevance-ranked selection is ADR 0015 §4's measured
+      upgrade path. Re-export the context periodically — a stale vocabulary still steers
+      correctly toward every name it knows and simply misses newer ones.
     </p>
     <p>
       A model that answers with anything but the JSON object gets a corrective turn: its own bad

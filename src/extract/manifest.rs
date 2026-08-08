@@ -87,6 +87,12 @@ pub(super) struct ManifestEntry {
     /// the control (or revising the segmentation algorithm) re-extracts.
     #[serde(default)]
     pub(super) candidates: String,
+    /// `--vocabulary`'s content digest (`""` = off) — ADR 0015: the
+    /// offered name set changes what the prompt asks for and what the
+    /// occurrence check admits, so it re-extracts like any other
+    /// computation input.
+    #[serde(default)]
+    pub(super) vocabulary_digest: String,
     pub(super) output: String,
 }
 
@@ -123,6 +129,7 @@ impl Manifest {
         lossy: bool,
         schema_digest: &str,
         candidates: &str,
+        vocabulary_digest: &str,
     ) -> bool {
         self.documents.get(source).is_some_and(|entry| {
             entry.sha256 == sha256
@@ -138,6 +145,7 @@ impl Manifest {
                 && entry.lossy == lossy
                 && entry.schema_digest == schema_digest
                 && entry.candidates == candidates
+                && entry.vocabulary_digest == vocabulary_digest
         })
     }
 
@@ -157,6 +165,7 @@ impl Manifest {
         lossy: bool,
         schema_digest: &str,
         candidates: &str,
+        vocabulary_digest: &str,
         output: &str,
     ) {
         self.documents.insert(
@@ -175,6 +184,7 @@ impl Manifest {
                 lossy,
                 schema_digest: schema_digest.to_string(),
                 candidates: candidates.to_string(),
+                vocabulary_digest: vocabulary_digest.to_string(),
                 output: output.to_string(),
             },
         );
