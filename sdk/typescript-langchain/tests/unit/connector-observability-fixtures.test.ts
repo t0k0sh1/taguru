@@ -6,21 +6,17 @@
  *
  * The Python suite pins three golden scenarios — `s3_sync`,
  * `references_dry_run`, `references_run` — produced by
- * `sync_object_storage`/`sync_references`. `syncReferences` (issue #415's
- * own `references.ts` port) has now landed in this SDK, so this file adds
- * its two golden scenarios (`references_dry_run`, `references_run`) below,
- * alongside the driver-independent machinery this file always carried:
+ * `sync_object_storage`/`sync_references`. This file now carries all
+ * three (`syncObjectStorage`'s `s3.ts` port and `syncReferences`'s
+ * `references.ts` port have both landed in this SDK), alongside the
+ * driver-independent machinery this file always carried:
  *
  * - The stable summary key set every golden must share
  *   (`test_summary_key_set_matches_every_golden`).
  * - The normalization/compare machinery
  *   (`_normalize_events_jsonl`/`_normalize_summary`/`_compare_or_write`),
- *   proven against a synthetic run below and reused verbatim by the two
- *   `syncReferences` goldens.
- *
- * `s3_sync` — `syncObjectStorage` has not yet been ported to TypeScript
- * (issue #415 tracks this module pair only: `bridge.ts`/`references.ts`) —
- * is left for that future port to add here, alongside these two.
+ *   proven against a synthetic run below and reused verbatim by every
+ *   golden.
  */
 
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -40,9 +36,17 @@ import {
   RunReport,
   SourceEvent,
 } from "../../src/ingest-connectors/observability.js";
+import {
+  ObjectMeta,
+  ObjectNotFoundError,
+  type ObjectStore,
+  objectFingerprint,
+} from "../../src/ingest-connectors/objectstore.js";
 import { syncReferences } from "../../src/ingest-connectors/references.js";
+import { S3ObjectCheckpoint, syncObjectStorage } from "../../src/ingest-connectors/s3.js";
 import { TextFileConnector } from "../../src/ingest-connectors/text.js";
 import { type Route, serve } from "../httpd.js";
+import { FakeObjectStore } from "../s3.js";
 import { RecordingCheckpointStore } from "./checkpoints.test.js";
 import { FakeServer } from "./stub.js";
 
@@ -253,13 +257,6 @@ test("compareOrWrite regenerates a golden and then matches it byte for byte", ()
   }
 });
 
-// ---------------------------------------------------------------------------
-// Golden 2: syncReferences({ dryRun: true }) — the per-kind dry-run table:
-// local unchanged (matching probe), local parsed (no probe), unsupported
-// extension (skipped), missing file (skipped), URL (always parsed, no
-// network).
-// ---------------------------------------------------------------------------
-
 const EMPTY_ANSWER = JSON.stringify({ associations: [], aliases: [], questions: [] });
 
 function goldenIngester(server: FakeServer): TaguruIngester {
@@ -269,6 +266,97 @@ function goldenIngester(server: FakeServer): TaguruIngester {
     client: server.client(),
   });
 }
+
+// ---------------------------------------------------------------------------
+// Golden 1: syncObjectStorage — imported, unchanged (pre-seeded
+// fingerprint), failed (unsupported extension), skipped (vanished object),
+// a duplicate listing key, and tagsDropped.
+// ---------------------------------------------------------------------------
+
+/** Wraps a real `FakeObjectStore`, yielding its `"a.md"` object TWICE from
+ * `list()` — simulating a store bug/quirk (ADR 0007 §11.1); a real
+ * S3-compatible listing should never do this, but the driver must not
+ * corrupt its own tally if one does. Mirrors the Python golden's own
+ * `list_with_one_duplicate` monkeypatch, expressed as a wrapper class here
+ * since `FakeObjectStore.list` (tests/s3.ts) is an async-generator method,
+ * not a reassignable property the way `.get` is. */
+class DuplicateListingStore implements ObjectStore {
+  constructor(private readonly inner: FakeObjectStore) {}
+
+  get baseUri(): string {
+    return this.inner.baseUri;
+  }
+
+  async *list(prefix: string): AsyncGenerator<ObjectMeta> {
+    const metas: ObjectMeta[] = [];
+    for await (const meta of this.inner.list(prefix)) {
+      metas.push(meta);
+    }
+    const duplicate = metas.find((meta) => meta.key === "a.md")!;
+    yield duplicate;
+    for (const meta of metas) {
+      yield meta;
+    }
+  }
+
+  get(key: string, options?: { versionId?: string }) {
+    return this.inner.get(key, options);
+  }
+
+  objectTags(key: string) {
+    return this.inner.objectTags(key);
+  }
+}
+
+test("s3_sync golden", async () => {
+  const store = new FakeObjectStore("golden-bucket");
+  const sameWhen = new Date("2026-01-01T00:00:00Z");
+
+  store.put("a.md", new TextEncoder().encode("alpha content"));
+  store.put("b.md", new TextEncoder().encode("beta content"), { lastModified: sameWhen }); // pre-seeded -> unchanged
+  store.put("c.zip", new TextEncoder().encode("PK\x03\x04...")); // no installed connector -> failed
+  store.put("vanished.md", new TextEncoder().encode("gone by fetch time"));
+  const manyTags: Record<string, string> = {};
+  for (let i = 0; i < 40; i += 1) {
+    manyTags[`t${String(i).padStart(2, "0")}`] = "v";
+  }
+  store.put("many-tags.md", new TextEncoder().encode("tagged content"), { tags: manyTags });
+
+  const checkpoints = new RecordingCheckpointStore();
+  let metaB: ObjectMeta | null = null;
+  for await (const meta of store.list("")) {
+    if (meta.key === "b.md") {
+      metaB = meta;
+    }
+  }
+  const fingerprintB = objectFingerprint(metaB!);
+  await new S3ObjectCheckpoint(checkpoints).save(`${store.baseUri}/b.md`, fingerprintB!);
+
+  const realGet = store.get.bind(store);
+  store.get = async (key, options) => {
+    if (key === "vanished.md") {
+      throw new ObjectNotFoundError("gone by fetch time");
+    }
+    return realGet(key, options);
+  };
+
+  const report = await syncObjectStorage(new DuplicateListingStore(store), "", {
+    ingester: goldenIngester(new FakeServer()),
+    checkpoints,
+  });
+
+  const replacements: Array<[string, string]> = [[store.baseUri, "s3://<bucket>"]];
+  const jsonl = normalizeEventsJsonl(report.eventsJsonl(), replacements);
+  const summary = normalizeSummary(report.toDict());
+  compareOrWrite("s3_sync", { jsonl, summary });
+});
+
+// ---------------------------------------------------------------------------
+// Golden 2: syncReferences({ dryRun: true }) — the per-kind dry-run table:
+// local unchanged (matching probe), local parsed (no probe), unsupported
+// extension (skipped), missing file (skipped), URL (always parsed, no
+// network).
+// ---------------------------------------------------------------------------
 
 test("references_dry_run golden", async () => {
   const tmpPath = mkdtempSync(join(tmpdir(), "taguru-references-dry-run-golden-"));

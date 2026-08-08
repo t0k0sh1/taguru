@@ -4,15 +4,16 @@
  * (node:fs only — needs no optional peer dependency at all), and
  * `openObjectStore`'s scheme dispatch. TypeScript parity: issue #415.
  *
- * The Python original's `S3ObjectStore` suite (real `boto3`, stubbed at
- * the HTTP layer with `botocore.stub.Stubber`) is out of this file's
+ * The Python original's full `S3ObjectStore` suite (real `boto3`, stubbed
+ * at the HTTP layer with `botocore.stub.Stubber`) is out of this file's
  * scope — `S3ObjectStore` (`objectstore-s3.ts`, the `@aws-sdk/client-s3`
- * backend) is ported under this same issue by a separate module owner and
- * does not exist in this workspace yet. `openObjectStore`'s own `s3://`
- * dispatch branch is still exercised wherever it doesn't require that
- * module to exist (bucket-name validation happens before the dynamic
- * import); the one Python test that dispatches a real `s3://` URL end to
- * end is deferred below with `test.skip`.
+ * backend) is exercised via its own injectable `client` seam in
+ * `s3-connector.test.ts`'s "credentials never appear" test, mirroring
+ * gcs-object-store.test.ts/azure-object-store.test.ts's own established
+ * convention (a network-free fake standing in for the optional, not
+ * installed, cloud SDK). The one test below that dispatches a real
+ * `s3://` URL end to end needed only `objectstore-s3.ts` to exist — it no
+ * longer needs `test.skip` now that it does.
  */
 
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -229,11 +230,13 @@ test("openObjectStore rejects an unsupported scheme", async () => {
 // The Python original's `test_open_object_store_returns_the_urls_own_path_as_prefix`
 // dispatches a real `s3://` URL end to end (skipped there too, via
 // `pytest.importorskip("boto3")`, when the optional dependency isn't
-// installed). `objectstore-s3.ts` — the `@aws-sdk/client-s3` backend this
-// dispatch branch dynamic-imports — is ported under this same issue by a
-// separate module owner and does not exist in this workspace yet; this
-// test is deferred until it does.
-test.skip("openObjectStore returns the url's own path as prefix (s3)", async () => {
+// installed). `S3ObjectStore` (objectstore-s3.ts) defers its own
+// `@aws-sdk/client-s3` presence check to first `list`/`get`/`objectTags`
+// call rather than to construction (mirroring `GCSObjectStore`/
+// `AzureBlobObjectStore`'s own documented deviation) — so dispatching this
+// URL through `openObjectStore` and reading `baseUri`/the returned prefix
+// alone never touches the optional, not-installed package.
+test("openObjectStore returns the url's own path as prefix (s3)", async () => {
   const [store, prefix] = await openObjectStore("s3://my-bucket/reports/2026/", {
     regionName: "us-east-1",
   });
