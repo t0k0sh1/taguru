@@ -106,8 +106,18 @@ jobs:
           # Exit 2 (missed found) and 3 (timeouts found) are the
           # check's normal yield, reported below — never a red job.
           # Anything else (baseline failure, internal error) is real.
+          #
+          # --jobs 3 (#518): public-repo ubuntu-latest is 4 vCPU, and
+          # one tree leaves cores idle — mutant builds tail into a
+          # single-threaded link and the e2e tests spend real time
+          # polling. Disk stays comfortable: incremental is off in the
+          # mutants profile, so three scratch trees are ~3.3 GiB. If
+          # contention starts pushing runs past the 3x-baseline
+          # timeout (spurious `timeout` outcomes on mutants that pass
+          # locally), drop back to --jobs 2 before touching
+          # timeout_multiplier.
           set +e
-          cargo mutants --profile=mutants --in-diff pr.diff --jobs 1
+          cargo mutants --profile=mutants --in-diff pr.diff --jobs 3
           code=$?
           set -e
           case "$code" in

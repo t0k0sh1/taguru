@@ -164,7 +164,11 @@ debug = true
 # Incremental compilation is off for the same reason disk is the scarce
 # resource on sweep runners: its cache was 60% of the scratch tree
 # (1.5 GiB of 2.5 GiB measured), and every parallel cargo-mutants job
-# carries its own copy of the tree.
+# carries its own copy of the tree. That is a CI-disk constraint, not a
+# speed preference — the same measurement put a mutant rebuild at 5.6s
+# with the cache vs 23s without — so the local gate (CLAUDE.md, #518)
+# overrides it with CARGO_INCREMENTAL=1, which takes precedence over
+# this profile setting.
 [profile.mutants]
 inherits = "test"
 debug = "none"
