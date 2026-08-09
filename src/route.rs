@@ -270,6 +270,11 @@ mod tests {
         for line in [
             "sake = http://user:hunter2@a:1\n",
             "sake = https://token@a:1/base\n",
+            // Single-character userinfo puts the '@' right at the
+            // start of the authority — the check must anchor there,
+            // not a few bytes past it.
+            "sake = http://u@h:1\n",
+            "sake = https://u@h:1\n",
         ] {
             let refused = RouteMap::parse(line).expect_err("userinfo must be refused");
             assert!(refused.contains("userinfo"), "{refused}");
