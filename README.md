@@ -311,12 +311,14 @@ Full contracts:
 
 A special case of bulk loading is your own repository:
 [`taguru-code`](https://t0k0sh1.github.io/taguru/taguru-code.html) (a
-third binary in the same crate) turns a git work tree into an offline
-code map — `sync`/`watch` ingest it through the same batch contract
-into `$REPO/.taguru`, and `find`/`tree` answer "where is this symbol,
-what does this file contain" in milliseconds with no server running,
-with a built-in accuracy gate (`evalset`/`eval`, exit 3 on
-regression).
+third binary in the same crate) turns a git work tree into a code map
+— `sync`/`watch` ingest it through the same batch contract into
+`$REPO/.taguru`, and `find`/`tree` answer "where is this symbol, what
+does this file contain" in milliseconds with no server running, with
+a built-in accuracy gate (`evalset`/`eval`, exit 3 on regression).
+Fully offline by default — the one opt-in network path is a remote
+`TAGURU_EMBED_URL`, which sends symbol signature lines to that
+endpoint during `sync`.
 
 ## Configuration
 

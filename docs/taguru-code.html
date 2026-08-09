@@ -76,8 +76,11 @@
     <h1>Code map (taguru-code)</h1>
     <p class="lede">
       <code>taguru-code</code> is a standalone binary that turns a git repository into a
-      queryable code map — <i>where is this symbol, what does this file contain</i> — fully
-      offline, no server, no LLM, no configuration (ADR 0010). It answers in milliseconds what
+      queryable code map — <i>where is this symbol, what does this file contain</i> — with no
+      server, no LLM, and no configuration (ADR 0010). By default it is fully offline; the one
+      opt-in network path is pointing <code>TAGURU_EMBED_URL</code> at a remote embeddings
+      endpoint (see <a href="#environment">Environment</a>) — unset, or set to
+      <code>local</code>, nothing ever leaves the host. It answers in milliseconds what
       an agent would otherwise grep for, and ships its own accuracy gate so "does <code>find</code>
       still find things" is a CI check, not a hope.
     </p>
@@ -106,9 +109,11 @@ taguru-code watch                   <span class="c"># keep syncing as the tree c
   <section id="verbs">
     <h2>The verbs</h2>
     <p class="section-sub">
-      Every verb also accepts <code>--context NAME</code> (default <code>code</code>) and
-      <code>--data-dir PATH</code> (default <code>$REPO/.taguru</code>) — several maps can share
-      one directory, or one map can live somewhere else entirely.
+      <code>sync</code>, <code>watch</code>, <code>find</code>, <code>tree</code>,
+      <code>status</code>, <code>evalset</code>, and <code>eval</code> all accept
+      <code>--context NAME</code> (default <code>code</code>) and <code>--data-dir PATH</code>
+      (default <code>$REPO/.taguru</code>) — several maps can share one directory, or one map
+      can live somewhere else entirely. <code>models</code> takes only <code>--json</code>.
     </p>
     <ul>
       <li><code>sync [PATH] [--dry-run]</code> — ingest the repo at <code>PATH</code> (default
@@ -246,11 +251,14 @@ taguru-code watch                   <span class="c"># keep syncing as the tree c
   <section id="environment">
     <h2>Environment</h2>
     <ul>
-      <li><code>TAGURU_EMBED_URL</code> / <code>TAGURU_EMBED_MODEL</code> — <code>local</code>
-        embeds symbol signatures in-process during <code>sync</code> (default builds carry the
-        models; slim <code>--no-default-features</code> builds warn and keep the semantic lane
-        off); any other URL is an OpenAI-compatible <code>/embeddings</code> endpoint. Pick a
-        model from <code>taguru-code models</code>.</li>
+      <li><code>TAGURU_EMBED_URL</code> / <code>TAGURU_EMBED_MODEL</code> — unset, the
+        semantic lane is off and nothing touches the network. <code>local</code> embeds symbol
+        signatures in-process during <code>sync</code>, still fully offline (default builds
+        carry the models; slim <code>--no-default-features</code> builds warn and keep the lane
+        off). Any other URL is an OpenAI-compatible <code>/embeddings</code> endpoint —
+        <b>with a remote URL, <code>sync</code> sends each symbol's one-line signature (its
+        identifier-dense source line) to that endpoint</b>; do not point it at a third party
+        you would not paste code to. Pick a model from <code>taguru-code models</code>.</li>
       <li><code>TAGURU_USAGE_LOG</code> — <code>0</code>/<code>false</code>/<code>off</code>
         disables the per-invocation usage log. On by default: one JSONL record per invocation
         (verb, arguments, hit count, output bytes) so "is the map actually getting used, and
