@@ -166,6 +166,21 @@ fn sections_detect_join_and_fingerprint_their_candidates() {
         Some(json!({"checks": ["typo"]})),
     );
     assert_eq!(status, 400, "{body}");
+    // Past the shared list ceiling: `dedup` folds only consecutive
+    // repeats, so an alternating list this long would otherwise pass
+    // both selector guards.
+    let alternating: Vec<&str> = ["merge", "contradiction"]
+        .into_iter()
+        .cycle()
+        .take(1001)
+        .collect();
+    let (status, body) = server.call(
+        "POST",
+        "/contexts/sake/consolidation/audit",
+        Some(json!({"checks": alternating})),
+    );
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["code"], json!("over_limit"), "{body}");
     let (status, _) = server.call(
         "POST",
         "/contexts/nope/consolidation/audit",

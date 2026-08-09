@@ -276,19 +276,20 @@ impl Context {
             // pathological image whose every edge points at one long shared
             // chain walks that chain once per edge — O(edges × chain) —
             // during a migration that holds the write lock and never yields.
-            let mut chains: HashMap<AttributionId, (u64, f64)> = HashMap::new();
+            let mut chains: HashMap<AttributionId, (u64, f64, f64)> = HashMap::new();
             for legacy in &legacy_edges {
-                let (chain_len, attributed_sum) = match chains.get(&legacy.first_attribution) {
-                    Some(&cached) => cached,
-                    None => {
-                        let computed = legacy_attribution_chain_len(
-                            &legacy_attributions,
-                            legacy.first_attribution,
-                        )?;
-                        chains.insert(legacy.first_attribution, computed);
-                        computed
-                    }
-                };
+                let (chain_len, attributed_sum, attributed_magnitude) =
+                    match chains.get(&legacy.first_attribution) {
+                        Some(&cached) => cached,
+                        None => {
+                            let computed = legacy_attribution_chain_len(
+                                &legacy_attributions,
+                                legacy.first_attribution,
+                            )?;
+                            chains.insert(legacy.first_attribution, computed);
+                            computed
+                        }
+                    };
                 // An empty chain (first_attribution == NIL) is ambiguous in
                 // the legacy format: it means either an edge that was always
                 // sourceless or one that was fully retracted (weight zeroed
@@ -325,7 +326,12 @@ impl Context {
                 // in context.rs.
                 let count = if chain_len == 0 && legacy.weight == 0.0 {
                     0
-                } else if legacy.weight != attributed_sum {
+                } else if summation_gap_is_real(
+                    legacy.weight - attributed_sum,
+                    chain_len,
+                    attributed_magnitude,
+                    legacy.weight,
+                ) {
                     chain_len + 1
                 } else {
                     chain_len.max(1)
@@ -731,12 +737,39 @@ fn checked_arena_str(arena: &[u8], offset: u32, len: u32) -> Result<&str, Corrup
 /// trusting: this runs before `index_attributions` has ever looked at the
 /// chain, so a hostile or truncated pre-v5 image must not send it out of
 /// bounds or looping forever on a cycle.
+/// Whether a gap between a legacy edge's cumulative weight and its
+/// chain's re-summed total proves a sourceless call, or is only
+/// summation rounding. Not an exact `!=`: the edge accumulated its
+/// calls in chronological order, the chain re-adds the same values in
+/// chain order, and two orderings of the same f64 additions can differ
+/// by rounding alone (a large-magnitude cancellation makes it
+/// visible). An exact comparison would read that noise as proof of a
+/// phantom sourceless call — weight `retract_source` can then never
+/// remove. The bound is first-order naive-summation error for both
+/// orders; a REAL sourceless call under it goes uncredited, the same
+/// accepted false negative as the migration's zero-weight case.
+/// Residual limitation, also accepted: a magnitude that vanished from
+/// BOTH sides before migration (a large weight asserted then
+/// retracted — its record unlinked, its rounding footprint still in
+/// the edge weight) leaves nothing here to bound against, so that
+/// shape can still credit a phantom; no tolerance derivable from the
+/// image can tell it from a real sourceless call.
+fn summation_gap_is_real(gap: f64, chain_len: u64, magnitude: f64, edge_weight: f64) -> bool {
+    let tolerance = 2.0 * (chain_len as f64 + 1.0) * f64::EPSILON * (magnitude + edge_weight.abs());
+    gap.abs() > tolerance
+}
+
 fn legacy_attribution_chain_len(
     attributions: &[LegacyAttributionRecord],
     mut cursor: AttributionId,
-) -> Result<(u64, f64), CorruptImage> {
+) -> Result<(u64, f64, f64), CorruptImage> {
     let mut len = 0u64;
     let mut sum = 0.0f64;
+    // Magnitude alongside the sum: the caller's sourceless-gap test
+    // needs an error bound for the two accumulation orders it
+    // compares, and first-order summation error scales with Σ|w|,
+    // not with the (possibly cancelled-to-nothing) net sum.
+    let mut magnitude = 0.0f64;
     let mut steps: usize = 0;
     while cursor != NIL {
         steps += 1;
@@ -750,9 +783,10 @@ fn legacy_attribution_chain_len(
             .ok_or(CorruptImage("legacy attribution link is out of range"))?;
         len += 1;
         accumulate_saturating(&mut sum, record.weight);
+        accumulate_saturating(&mut magnitude, record.weight.abs());
         cursor = record.next;
     }
-    Ok((len, sum))
+    Ok((len, sum, magnitude))
 }
 
 /// Checks that one linked chain of edges is exactly `count` records long,
@@ -1456,6 +1490,76 @@ mod tests {
         assert_eq!(after.count, 1);
         assert_eq!(after.weight, 1.0);
         assert!(after.attributions.is_empty());
+    }
+
+    /// Pins the tolerance formula itself, `2·(chain_len+1)·ε·(magnitude
+    /// plus |edge_weight|)` under a strict `>`, against hardcoded
+    /// boundary values, so no factor can silently change scale: for
+    /// chain_len 2, magnitude 1.0, weight −0.5 the bound is exactly
+    /// 1.9984014443252818e-15, and the gap must EXCEED it (the bound
+    /// itself is still attributable to rounding).
+    #[test]
+    fn the_summation_gap_bound_sits_exactly_at_first_order_rounding_error() {
+        let bound = 1.9984014443252818e-15;
+        assert!(!summation_gap_is_real(bound, 2, 1.0, -0.5));
+        assert!(!summation_gap_is_real(-bound, 2, 1.0, -0.5));
+        assert!(summation_gap_is_real(
+            1.998_401_444_325_282e-15,
+            2,
+            1.0,
+            -0.5
+        ));
+        assert!(summation_gap_is_real(
+            -1.998_401_444_325_282e-15,
+            2,
+            1.0,
+            -0.5
+        ));
+        // Well clear of the bound on both sides.
+        assert!(!summation_gap_is_real(bound / 2.0, 2, 1.0, -0.5));
+        assert!(summation_gap_is_real(bound * 2.0, 2, 1.0, -0.5));
+        // An empty chain still tolerates rounding on the edge weight
+        // alone (2·1·ε·|w|), rather than collapsing to zero width.
+        assert!(!summation_gap_is_real(f64::EPSILON, 0, 0.0, 1.0));
+        assert!(summation_gap_is_real(3.0 * f64::EPSILON, 0, 0.0, 1.0));
+    }
+
+    /// A fully sourced edge whose chain regroups the same additions
+    /// differently than the edge's own chronological accumulation
+    /// (`(0.1⊕0.3)⊕0.1⊕0.1 = 0.6` vs `(0.1⊕0.1⊕0.1)⊕0.3 =
+    /// 0.6000000000000001`) must NOT read that 1-ulp gap as a phantom
+    /// sourceless call: the phantom's count can never be retracted, so
+    /// it would keep this edge alive after every real source retracts.
+    #[test]
+    fn migrating_a_pre_v5_image_does_not_read_summation_rounding_as_a_phantom_sourceless_call() {
+        let mut context = Context::default();
+        context
+            .associate_from("私", "好き", "りんご", 0.1, "A", None)
+            .unwrap();
+        context
+            .associate_from("私", "好き", "りんご", 0.3, "B", None)
+            .unwrap();
+        context
+            .associate_from("私", "好き", "りんご", 0.1, "A", None)
+            .unwrap();
+        context
+            .associate_from("私", "好き", "りんご", 0.1, "A", None)
+            .unwrap();
+
+        let v4 = context.to_bytes_as_version(4);
+        let mut restored = Context::from_bytes(&v4).expect("v4 image must load");
+
+        // One record per source in the downgraded chain — no phantom
+        // third contribution from the rounding gap.
+        assert_eq!(restored.recall("私")[0].count, 2);
+        assert_eq!(restored.retract_source("A"), Some(1));
+        assert_eq!(restored.retract_source("B"), Some(1));
+        assert_eq!(
+            restored.dead_edges(),
+            1,
+            "with every real source retracted the edge must die — a phantom \
+             credit would hold it alive on rounding noise alone"
+        );
     }
 
     #[test]

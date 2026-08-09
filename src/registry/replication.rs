@@ -105,6 +105,25 @@ impl AppState {
         // old bytes unreachable (see `EntryInner::cache_identity`).
         inner.invalidate_cache_identity();
         inner.load_failure = None;
+        // Re-stat both WAL gauges: on a replica the bytes arrive as
+        // tailed file copies, never through the writer's live
+        // increments, and `ensure_hot`'s own re-stat runs only for
+        // pinned entries below (or on the next local read) — without
+        // this, a cold unpinned context the tailer keeps growing
+        // understates `taguru_wal_bytes` indefinitely. `NotFound` is
+        // the one honest zero (no WAL shipped for this lane yet); any
+        // other stat failure keeps the last-known value rather than
+        // walking a live gauge down to nothing on a transient error.
+        let restat = |path: &std::path::Path, last: u64| match std::fs::metadata(path) {
+            Ok(meta) => meta.len(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(_) => last,
+        };
+        inner.wal_bytes = restat(&wal_path(&self.0.data_dir, &stem), inner.wal_bytes);
+        inner.passages_wal_bytes = restat(
+            &passages_wal_path(&self.0.data_dir, &stem),
+            inner.passages_wal_bytes,
+        );
         if matches!(inner.slot, Slot::Hot(_)) {
             inner.slot = Slot::Cold;
             // The same bump eviction does: a flush that staged this
@@ -237,6 +256,66 @@ mod tests {
             before.targets[0].identity, after.targets[0].identity,
             "the identity is re-minted, so the old key can never hit again"
         );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// On a replica the WAL grows by tailed file copies, never through
+    /// the writer's live byte accounting — the refresh must re-stat
+    /// both WAL gauges itself, or a cold unpinned context the tailer
+    /// keeps growing understates `taguru_wal_bytes` until some local
+    /// read happens to run `ensure_hot`.
+    #[test]
+    fn a_replica_refresh_restats_both_wal_gauges() {
+        let dir = scratch_dir("replica-refresh-wal-bytes");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state.create("sake", ContextMeta::default()).unwrap();
+        let stem = file_stem("sake");
+        // The tailer's shape: bytes land as plain file writes.
+        fs::write(wal_path(&dir, &stem), b"{\"tailed\":1}\n").unwrap();
+        fs::write(passages_wal_path(&dir, &stem), b"{\"tailed\":2}\n").unwrap();
+        state.replica_refresh("sake");
+        let entry = state.lookup("sake").unwrap();
+        {
+            let inner = entry.inner.read();
+            assert_eq!(
+                inner.wal_bytes,
+                fs::metadata(wal_path(&dir, &stem)).unwrap().len()
+            );
+            assert_eq!(
+                inner.passages_wal_bytes,
+                fs::metadata(passages_wal_path(&dir, &stem)).unwrap().len()
+            );
+        }
+
+        // A vanished WAL is the one honest zero.
+        fs::remove_file(wal_path(&dir, &stem)).unwrap();
+        fs::remove_file(passages_wal_path(&dir, &stem)).unwrap();
+        state.replica_refresh("sake");
+        {
+            let inner = entry.inner.read();
+            assert_eq!(inner.wal_bytes, 0);
+            assert_eq!(inner.passages_wal_bytes, 0);
+        }
+
+        // Any OTHER stat failure keeps the last-known value instead of
+        // walking a live gauge down to nothing on a transient error.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::write(wal_path(&dir, &stem), b"{\"tailed\":3}\n").unwrap();
+            fs::write(passages_wal_path(&dir, &stem), b"{\"tailed\":4}\n").unwrap();
+            state.replica_refresh("sake");
+            let before = {
+                let inner = entry.inner.read();
+                (inner.wal_bytes, inner.passages_wal_bytes)
+            };
+            assert_ne!(before, (0, 0));
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o000)).unwrap();
+            state.replica_refresh("sake");
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+            let inner = entry.inner.read();
+            assert_eq!((inner.wal_bytes, inner.passages_wal_bytes), before);
+        }
         let _ = fs::remove_dir_all(dir);
     }
 

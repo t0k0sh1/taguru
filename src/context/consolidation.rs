@@ -276,8 +276,16 @@ impl Context {
                             object: self.concept_name(edge.object).to_string(),
                             weight: edge.sum / edge.count as f64,
                             count: edge.count,
+                            // Zero-sum records stay chain-linked (only a
+                            // retraction unlinks) but attest nothing —
+                            // the same posture `sign_conflicts` takes,
+                            // whose zero-sum sources sit on neither side
+                            // of a dispute. Listing one here would hand
+                            // the judge a source that never net-asserted
+                            // the triple.
                             sources: self
                                 .attribution_chain(edge.first_attribution)
+                                .filter(|(_, record)| record.sum != 0.0)
                                 .map(|(_, record)| self.source_name(record.source).to_string())
                                 .collect(),
                         }
@@ -505,6 +513,45 @@ mod tests {
         context.retract_source("new");
         let after = context.contradiction_groups(Deadline::unbounded()).unwrap();
         assert!(after.iter().all(|g| g.label != "杜氏"), "{after:?}");
+    }
+
+    /// A source that asserted a triple and then cancelled its own
+    /// assertion (net sum exactly zero, record still chain-linked —
+    /// only a retraction unlinks) attests nothing: the evidence rows
+    /// handed to the judge must not list it, the same posture
+    /// `sign_conflicts` already takes for its zero-sum records.
+    #[test]
+    fn contradiction_group_sources_exclude_a_source_whose_own_sum_cancelled_to_zero() {
+        let mut context = Context::default();
+        context
+            .associate_from("蔵A", "杜氏", "高瀬", 1.0, "old", None)
+            .unwrap();
+        context
+            .associate_from("蔵A", "杜氏", "青山", 1.0, "new", None)
+            .unwrap();
+        // 撤回記事 asserts 高瀬, then cancels itself with the exact
+        // negative — chain-linked at sum 0.0, attesting nothing.
+        context
+            .associate_from("蔵A", "杜氏", "高瀬", 2.0, "撤回記事", None)
+            .unwrap();
+        context
+            .associate_from("蔵A", "杜氏", "高瀬", -2.0, "撤回記事", None)
+            .unwrap();
+        // Tendency needs company to make 杜氏 a candidate.
+        context.associate("蔵B", "杜氏", "田中", 1.0).unwrap();
+
+        let groups = context.contradiction_groups(Deadline::unbounded()).unwrap();
+        let toji = groups.iter().find(|g| g.label == "杜氏").unwrap();
+        let takase = toji
+            .objects
+            .iter()
+            .find(|row| row.object == "高瀬")
+            .unwrap();
+        assert_eq!(
+            takase.sources,
+            vec!["old"],
+            "the cancelled-out source must not read as attesting: {takase:?}"
+        );
     }
 
     #[test]

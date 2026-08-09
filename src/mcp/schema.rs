@@ -620,8 +620,8 @@ pub(super) fn tool_definitions() -> Vec<Value> {
                     "limit": { "type": "integer", "minimum": 0, "description": "default 5" },
                     "semantic_floor": { "type": "number", "description": "one-call override of the vector lane's cosine floor (0-1); floors only the semantic lane — BM25-only hits still return" },
                     "tags": { "type": "array", "items": { "type": "string" }, "description": "only sources carrying at least one of these tags may answer" },
-                    "since": { "type": "integer", "description": "only sources whose date ?? stored_at is at or after this (epoch seconds)" },
-                    "until": { "type": "integer", "description": "only sources whose date ?? stored_at is strictly before this (epoch seconds)" }
+                    "since": { "type": "integer", "minimum": 0, "description": "only sources whose date ?? stored_at is at or after this (epoch seconds)" },
+                    "until": { "type": "integer", "minimum": 0, "description": "only sources whose date ?? stored_at is strictly before this (epoch seconds)" }
                 }),
                 &["query"],
             ),
@@ -696,8 +696,8 @@ pub(super) fn tool_definitions() -> Vec<Value> {
                     "limit": { "type": "integer", "minimum": 0, "description": "the search call being explained (default 5)" },
                     "semantic_floor": { "type": "number", "description": "the floor override of the search call being explained — pass the same value" },
                     "tags": { "type": "array", "items": { "type": "string" }, "description": "the tag filter of the search call being explained — pass the same values" },
-                    "since": { "type": "integer", "description": "the time window's inclusive start (epoch seconds) of the search call being explained" },
-                    "until": { "type": "integer", "description": "the time window's exclusive end (epoch seconds) of the search call being explained" }
+                    "since": { "type": "integer", "minimum": 0, "description": "the time window's inclusive start (epoch seconds) of the search call being explained" },
+                    "until": { "type": "integer", "minimum": 0, "description": "the time window's exclusive end (epoch seconds) of the search call being explained" }
                 }),
                 &["context", "query", "source"],
             ),

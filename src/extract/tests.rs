@@ -3699,6 +3699,10 @@ fn runbook_flags_parse_and_their_contradictions_are_usage_errors() {
     let mut empty = base.to_vec();
     empty.extend(["--source-id", "", "doc.md"]);
     assert!(matches!(parse(&empty), Err(2)));
+    // Whitespace-only is the same emptiness — trimmed like --tag's.
+    let mut blank = base.to_vec();
+    blank.extend(["--source-id", "   ", "doc.md"]);
+    assert!(matches!(parse(&blank), Err(2)));
     let mut bad_date = base.to_vec();
     bad_date.extend(["--date", "yesterday", "doc.md"]);
     assert!(matches!(parse(&bad_date), Err(2)));

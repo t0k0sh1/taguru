@@ -175,6 +175,7 @@ pub(crate) fn spawn(
                 stop: stopping,
                 manifest_stamp: None,
                 fence_seen: None,
+                pending_refresh: Default::default(),
             };
             loop {
                 match runtime.block_on(tailer.poll_once()) {
@@ -216,6 +217,16 @@ struct Tailer {
     /// The newest fence generation whose body was fetched (one GET
     /// per new claimant, for the refusal's holder string).
     fence_seen: Option<u64>,
+    /// Stems owed a [`AppState::replica_refresh`]: added when
+    /// `retarget` reports them stale, removed only once a poll
+    /// actually refreshes them. The debt outlives the staleness
+    /// signal — when this tailer's own hydration attempt fails and a
+    /// per-request loader (`ensure_hot`, the passage first touch)
+    /// completes the same stem before the next poll, `retarget` sees
+    /// the family signature already current and never reports the
+    /// stem stale again, yet the entry's in-memory meta (pinned,
+    /// description, revision/cache bookkeeping) was never re-read.
+    pending_refresh: std::collections::BTreeSet<String>,
 }
 
 impl Tailer {
@@ -293,6 +304,16 @@ impl Tailer {
             // Applied seqs are per-lineage: see `reset_replica_lanes`.
             self.state.metrics().reset_replica_lanes();
         }
+        // Stale stems join the refresh debt BEFORE anything below can
+        // fail the poll; the worklist is the whole debt, not this
+        // retarget's report — a stem whose hydration a per-request
+        // loader completed after this tailer's own failed attempt (a
+        // family fetch below, or `hydrate_shared` erroring out of the
+        // whole poll) never turns stale again, but its refresh is
+        // still owed (`ensure_context` on a settled stem is O(1), so
+        // paying the debt late costs one meta re-read, not a
+        // re-hydration).
+        self.pending_refresh.extend(report.stale.iter().cloned());
         for stem in &report.vanished {
             let Some(name) = crate::registry::name_from_stem(stem) else {
                 continue;
@@ -300,6 +321,7 @@ impl Tailer {
             tracing::info!(context = %name, "the lineage no longer carries this context; dropping it");
             self.state.replica_deregister(&name);
             self.state.metrics().forget_replica_context(&name);
+            self.pending_refresh.remove(stem);
         }
         // Shared files (groups, the grant store, every sidecar meta)
         // next, so the per-family passes below see fresh metas and the
@@ -307,8 +329,9 @@ impl Tailer {
         self.hydrator.hydrate_shared().await?;
         self.state.replica_reload_groups();
 
+        let worklist: Vec<String> = self.pending_refresh.iter().cloned().collect();
         let mut failed: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
-        for stem in &report.stale {
+        for stem in &worklist {
             if self.stop.load(Ordering::Relaxed) {
                 return Ok(());
             }
@@ -331,6 +354,7 @@ impl Tailer {
                 continue;
             }
             self.state.replica_refresh(&name);
+            self.pending_refresh.remove(stem);
         }
         // Lag rows for every lane the manifest carries. A family that
         // landed (this pass or any earlier one — retarget reported
@@ -463,6 +487,7 @@ mod tests {
             stop: Arc::new(AtomicBool::new(false)),
             manifest_stamp: None,
             fence_seen: None,
+            pending_refresh: Default::default(),
         }
     }
 
@@ -543,6 +568,207 @@ mod tests {
         assert!(
             text.contains("taguru_replica_behind_seconds{context=\"ctx_a\",lane=\"graph\"} 0"),
             "{text}"
+        );
+
+        for dir in [bucket, writer, target] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    /// The refresh debt outlives the staleness signal: when the
+    /// tailer's own hydration attempt fails and a per-request loader
+    /// completes the same stem before the next poll, `retarget` sees
+    /// the family signature already current and never reports the stem
+    /// stale again — without the remembered debt, the entry's
+    /// in-memory meta (description, pinned) would stay frozen at the
+    /// pre-failure state indefinitely while the served data is fresh.
+    #[tokio::test]
+    async fn a_refresh_owed_from_a_failed_poll_lands_even_when_a_reader_hydrates_first() {
+        let bucket = scratch("owed-bucket");
+        let writer = scratch("owed-writer");
+        std::fs::write(writer.join("ctx_a.ctx"), b"image-v1").unwrap();
+        std::fs::write(
+            writer.join("ctx_a.meta.json"),
+            br#"{"description":"old","pinned":false}"#,
+        )
+        .unwrap();
+        wal::append_batch(&writer.join("ctx_a.wal.jsonl"), 1, &[associate("a")]).unwrap();
+        let writer_state = AppState::boot(writer.clone(), 64 * 1024 * 1024, None).unwrap();
+        let mut shipper = Shipper::claim(
+            local_store(&bucket),
+            StorePath::default(),
+            url_of("owed"),
+            writer.clone(),
+            Arc::new(ShipProgress::new()),
+            writer_state,
+            None,
+        )
+        .await
+        .unwrap();
+        shipper.cycle().await.unwrap();
+
+        let url = url_of("owed");
+        let store = local_store(&bucket);
+        let target = scratch("owed-target");
+        let hydrator =
+            crate::hydrate::prepare_replica(&store, &StorePath::default(), &url, &target)
+                .await
+                .expect("hydrates");
+        let state = AppState::boot(target.clone(), 64 * 1024 * 1024, None).unwrap();
+        state.metrics().set_replica_mode();
+        let mut tailer = tailer_for(
+            &bucket,
+            url.clone(),
+            target.clone(),
+            state.clone(),
+            hydrator.clone(),
+        );
+        tailer.poll_once().await.expect("the first manifest lands");
+        assert_eq!(state.directory_entry("ctx_a").unwrap().description, "old");
+
+        // The writer moves the meta and ships a second segment.
+        std::fs::write(
+            writer.join("ctx_a.meta.json"),
+            br#"{"description":"new","pinned":false}"#,
+        )
+        .unwrap();
+        wal::append_batch(&writer.join("ctx_a.wal.jsonl"), 2, &[associate("b")]).unwrap();
+        shipper.cycle().await.unwrap();
+        shipper.retire_generation().await;
+
+        // Tear the new segment: the tailer's own attempt fails, the
+        // refresh is skipped, and the manifest stamp does not advance.
+        let lane_dir = bucket
+            .join("gen-00000000000000000001")
+            .join("wal")
+            .join("ctx_a.wal.jsonl");
+        let segments: Vec<_> = std::fs::read_dir(&lane_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        let torn = lane_dir.join("torn-aside");
+        std::fs::rename(segments.iter().max().unwrap(), &torn).unwrap();
+        tailer
+            .poll_once()
+            .await
+            .expect_err("the torn lane fails this poll");
+
+        // The transient clears and a per-request loader (ensure_hot's
+        // shape) hydrates the stem first: the family signature is now
+        // current, so the next retarget will not report it stale.
+        std::fs::rename(&torn, segments.iter().max().unwrap()).unwrap();
+        hydrator
+            .ensure_context("ctx_a")
+            .expect("the reader's own hydration lands");
+        assert_eq!(
+            state.directory_entry("ctx_a").unwrap().description,
+            "old",
+            "hydration alone re-reads no meta — the refresh is still owed"
+        );
+
+        tailer.poll_once().await.expect("the owed refresh lands");
+        assert_eq!(
+            state.directory_entry("ctx_a").unwrap().description,
+            "new",
+            "the remembered debt must pay out even though retarget \
+             reported nothing stale"
+        );
+
+        for dir in [bucket, writer, target] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    /// The debt must be recorded before `hydrate_shared` can fail the
+    /// poll: a torn shared object (here the published meta.json)
+    /// aborts the poll before any family applies — and if a
+    /// per-request loader hydrates the stem before the next poll,
+    /// retarget never reports it stale again, so a debt recorded only
+    /// after the shared pass would have been lost with the error.
+    #[tokio::test]
+    async fn a_refresh_owed_survives_a_shared_hydration_failure() {
+        let bucket = scratch("shared-owed-bucket");
+        let writer = scratch("shared-owed-writer");
+        std::fs::write(writer.join("ctx_a.ctx"), b"image-v1").unwrap();
+        std::fs::write(
+            writer.join("ctx_a.meta.json"),
+            br#"{"description":"old","pinned":false}"#,
+        )
+        .unwrap();
+        wal::append_batch(&writer.join("ctx_a.wal.jsonl"), 1, &[associate("a")]).unwrap();
+        let writer_state = AppState::boot(writer.clone(), 64 * 1024 * 1024, None).unwrap();
+        let mut shipper = Shipper::claim(
+            local_store(&bucket),
+            StorePath::default(),
+            url_of("shared-owed"),
+            writer.clone(),
+            Arc::new(ShipProgress::new()),
+            writer_state,
+            None,
+        )
+        .await
+        .unwrap();
+        shipper.cycle().await.unwrap();
+
+        let url = url_of("shared-owed");
+        let store = local_store(&bucket);
+        let target = scratch("shared-owed-target");
+        let hydrator =
+            crate::hydrate::prepare_replica(&store, &StorePath::default(), &url, &target)
+                .await
+                .expect("hydrates");
+        let state = AppState::boot(target.clone(), 64 * 1024 * 1024, None).unwrap();
+        state.metrics().set_replica_mode();
+        let mut tailer = tailer_for(
+            &bucket,
+            url.clone(),
+            target.clone(),
+            state.clone(),
+            hydrator.clone(),
+        );
+        tailer.poll_once().await.expect("the first manifest lands");
+        assert_eq!(state.directory_entry("ctx_a").unwrap().description, "old");
+
+        std::fs::write(
+            writer.join("ctx_a.meta.json"),
+            br#"{"description":"new","pinned":false}"#,
+        )
+        .unwrap();
+        wal::append_batch(&writer.join("ctx_a.wal.jsonl"), 2, &[associate("b")]).unwrap();
+        shipper.cycle().await.unwrap();
+        shipper.retire_generation().await;
+
+        // Tear the published meta object: the shared pass fails the
+        // whole poll before any family is even attempted.
+        let meta_object = bucket
+            .join("gen-00000000000000000001")
+            .join("files")
+            .join("ctx_a.meta.json");
+        let torn = meta_object.with_extension("torn-aside");
+        std::fs::rename(&meta_object, &torn).unwrap();
+        tailer
+            .poll_once()
+            .await
+            .expect_err("a torn shared object fails the poll");
+
+        // The transient clears and a reader hydrates the family first:
+        // the next retarget will not report the stem stale.
+        std::fs::rename(&torn, &meta_object).unwrap();
+        hydrator
+            .ensure_context("ctx_a")
+            .expect("the reader's own hydration lands");
+        assert_eq!(
+            state.directory_entry("ctx_a").unwrap().description,
+            "old",
+            "hydration alone re-reads no meta — the refresh is still owed"
+        );
+
+        tailer.poll_once().await.expect("the owed refresh lands");
+        assert_eq!(
+            state.directory_entry("ctx_a").unwrap().description,
+            "new",
+            "a debt recorded only after the shared pass would have been \
+             lost with the error"
         );
 
         for dir in [bucket, writer, target] {
