@@ -34,8 +34,13 @@ pub(super) async fn render_metrics(State(state): State<RouterState>) -> Response
     out.push_str("# TYPE taguru_router_shard_requests_total counter\n");
     for ((shard, outcome), count) in state.inner.metrics.shard.lock().iter() {
         out.push_str(&format!(
-            "taguru_router_shard_requests_total{{shard=\"{}\",outcome=\"{outcome}\"}} {count}\n",
-            state.map().url(*shard)
+            "taguru_router_shard_requests_total{{shard=\"{shard}\",outcome=\"{outcome}\"}} {count}\n"
+        ));
+    }
+    out.push_str("# TYPE taguru_router_map_reloads_total counter\n");
+    for (outcome, count) in state.inner.metrics.map_reloads.lock().iter() {
+        out.push_str(&format!(
+            "taguru_router_map_reloads_total{{outcome=\"{outcome}\"}} {count}\n"
         ));
     }
     (
@@ -57,10 +62,12 @@ pub(super) async fn proxy_protocol(
     axum::Extension(deadline): axum::Extension<Deadline>,
 ) -> Response {
     let started_at = Instant::now();
+    let map = state.map();
     let mut unreached = Vec::new();
-    for shard in state.map().all() {
+    for shard in map.all() {
         match state
             .call_shard(
+                &map,
                 shard,
                 Method::GET,
                 "/protocol",
@@ -87,7 +94,7 @@ pub(super) async fn proxy_protocol(
                     .into_response();
             }
             Err(error) => unreached.push(Unreached {
-                shard: state.map().url(shard).to_string(),
+                shard: map.url(shard).to_string(),
                 contexts: Vec::new(),
                 error,
             }),

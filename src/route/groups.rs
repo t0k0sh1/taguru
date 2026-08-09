@@ -13,9 +13,18 @@ pub(super) async fn merge_groups(
 ) -> Response {
     let started_at = Instant::now();
     let path = full_path(&request);
-    let shards: Vec<usize> = state.map().all().collect();
+    let map = state.map();
+    let shards: Vec<usize> = map.all().collect();
     let outcomes = state
-        .fan_out(&shards, Method::GET, &path, &headers, |_| None, deadline)
+        .fan_out(
+            &map,
+            &shards,
+            Method::GET,
+            &path,
+            &headers,
+            |_| None,
+            deadline,
+        )
         .await;
     let mut rows: BTreeMap<String, api::GroupEntry> = BTreeMap::new();
     let mut total = 0usize;
@@ -37,7 +46,7 @@ pub(super) async fn merge_groups(
                             ErrorCode::Internal,
                             format!(
                                 "shard {} answered an unreadable page: {error}",
-                                state.map().url(shard)
+                                map.url(shard)
                             ),
                             started_at,
                         );
@@ -57,7 +66,7 @@ pub(super) async fn merge_groups(
                 // the group surfaces refuse rather than thin out.
                 return unreachable_refusal(
                     &[Unreached {
-                        shard: state.map().url(shard).to_string(),
+                        shard: map.url(shard).to_string(),
                         contexts: Vec::new(),
                         error,
                     }],
@@ -120,8 +129,10 @@ pub(super) fn full_path(request: &Request) -> String {
 /// member lists projected per shard by the map. The first refusal
 /// stops the broadcast and passes through as-is — shards before it
 /// have applied (deltas converge on retry; documented divergence).
+#[allow(clippy::too_many_arguments)]
 async fn broadcast_group_write<F>(
     state: &RouterState,
+    map: &RouteMap,
     method: Method,
     path: &str,
     headers: &HeaderMap,
@@ -133,9 +144,10 @@ where
     F: Fn(usize) -> Option<Bytes>,
 {
     let mut answers = Vec::new();
-    for shard in state.map().all() {
+    for shard in map.all() {
         match state
             .call_shard(
+                map,
                 shard,
                 method.clone(),
                 path,
@@ -159,7 +171,7 @@ where
             Err(error) => {
                 return Err(Box::new(unreachable_refusal(
                     &[Unreached {
-                        shard: state.map().url(shard).to_string(),
+                        shard: map.url(shard).to_string(),
                         contexts: Vec::new(),
                         error,
                     }],
@@ -176,7 +188,7 @@ where
 /// single-instance nonexistent-member message, since a context no
 /// shard owns cannot exist on any of them.
 fn project_body(
-    state: &RouterState,
+    map: &RouteMap,
     base: &Value,
     fields: &[&str],
     started_at: Instant,
@@ -195,7 +207,7 @@ fn project_body(
             })
             .unwrap_or_default();
         for member in &members {
-            if state.map().shard_of(member).is_none() {
+            if map.shard_of(member).is_none() {
                 return Err(Box::new(api::error(
                     ErrorCode::NoContext,
                     format!("context '{member}' not found; nothing was applied"),
@@ -206,8 +218,7 @@ fn project_body(
         lists.insert((*field).to_string(), members);
     }
     let base = base.clone();
-    let shards_projection: Vec<BTreeMap<String, Vec<String>>> = state
-        .map()
+    let shards_projection: Vec<BTreeMap<String, Vec<String>>> = map
         .all()
         .map(|shard| {
             lists
@@ -215,9 +226,7 @@ fn project_body(
                 .map(|(field, members)| {
                     (
                         field.clone(),
-                        state
-                            .map()
-                            .project(members.iter().map(String::as_str), shard),
+                        map.project(members.iter().map(String::as_str), shard),
                     )
                 })
                 .collect()
@@ -240,6 +249,7 @@ pub(super) async fn create_group_broadcast(
     body: Bytes,
 ) -> Response {
     let started_at = Instant::now();
+    let map = state.map();
     let base: Value = if body.is_empty() {
         json!({})
     } else {
@@ -248,18 +258,27 @@ pub(super) async fn create_group_broadcast(
             Err(_) => {
                 // Malformed bodies go to one shard untouched so the
                 // refusal is the shard's own extractor shape.
-                return forward_group_probe(&state, Method::PUT, &name, headers, body, deadline)
-                    .await;
+                return forward_group_probe(
+                    &state,
+                    &map,
+                    Method::PUT,
+                    &name,
+                    headers,
+                    body,
+                    deadline,
+                )
+                .await;
             }
         }
     };
     let path = format!("/groups/{}", urlencode(&name));
-    let body_for = match project_body(&state, &base, &["contexts"], started_at) {
+    let body_for = match project_body(&map, &base, &["contexts"], started_at) {
         Ok(body_for) => body_for,
         Err(refusal) => return *refusal,
     };
     match broadcast_group_write(
         &state,
+        &map,
         Method::PUT,
         &path,
         &headers,
@@ -282,16 +301,25 @@ pub(super) async fn update_group_broadcast(
     body: Bytes,
 ) -> Response {
     let started_at = Instant::now();
+    let map = state.map();
     let base: Value = match serde_json::from_slice(&body) {
         Ok(base) => base,
         Err(_) => {
-            return forward_group_probe(&state, Method::PATCH, &name, headers, body, deadline)
-                .await;
+            return forward_group_probe(
+                &state,
+                &map,
+                Method::PATCH,
+                &name,
+                headers,
+                body,
+                deadline,
+            )
+            .await;
         }
     };
     let path = format!("/groups/{}", urlencode(&name));
     let body_for = match project_body(
-        &state,
+        &map,
         &base,
         &["add_contexts", "remove_contexts"],
         started_at,
@@ -301,6 +329,7 @@ pub(super) async fn update_group_broadcast(
     };
     match broadcast_group_write(
         &state,
+        &map,
         Method::PATCH,
         &path,
         &headers,
@@ -335,8 +364,10 @@ pub(super) async fn update_group_broadcast(
 /// Sends an unparseable body to the group's first shard verbatim, so
 /// the refusal (shape, status, message) is the single-instance
 /// extractor's own.
+#[allow(clippy::too_many_arguments)]
 async fn forward_group_probe(
     state: &RouterState,
+    map: &RouteMap,
     method: Method,
     name: &str,
     headers: HeaderMap,
@@ -346,7 +377,7 @@ async fn forward_group_probe(
     let started_at = Instant::now();
     let path = format!("/groups/{}", urlencode(name));
     match state
-        .call_shard(0, method, &path, &headers, Some(body), deadline)
+        .call_shard(map, 0, method, &path, &headers, Some(body), deadline)
         .await
     {
         Ok(answer) => (
@@ -357,7 +388,7 @@ async fn forward_group_probe(
             .into_response(),
         Err(error) => unreachable_refusal(
             &[Unreached {
-                shard: state.map().url(0).to_string(),
+                shard: map.url(0).to_string(),
                 contexts: Vec::new(),
                 error,
             }],
@@ -410,11 +441,13 @@ async fn group_broadcast_simple(
         None => (urlencode(&name_path), String::new()),
     };
     let path = format!("/groups/{encoded_name}{suffix}");
+    let map = state.map();
     let mut not_found: Option<ShardAnswer> = None;
     let mut succeeded = false;
-    for shard in state.map().all() {
+    for shard in map.all() {
         match state
             .call_shard(
+                &map,
                 shard,
                 method.clone(),
                 &path,
@@ -437,7 +470,7 @@ async fn group_broadcast_simple(
             Err(error) => {
                 return unreachable_refusal(
                     &[Unreached {
-                        shard: state.map().url(shard).to_string(),
+                        shard: map.url(shard).to_string(),
                         contexts: Vec::new(),
                         error,
                     }],
@@ -466,9 +499,18 @@ pub(super) async fn union_group(
 ) -> Response {
     let started_at = Instant::now();
     let path = format!("/groups/{}", urlencode(&name));
-    let shards: Vec<usize> = state.map().all().collect();
+    let map = state.map();
+    let shards: Vec<usize> = map.all().collect();
     let outcomes = state
-        .fan_out(&shards, Method::GET, &path, &headers, |_| None, deadline)
+        .fan_out(
+            &map,
+            &shards,
+            Method::GET,
+            &path,
+            &headers,
+            |_| None,
+            deadline,
+        )
         .await;
     let mut rows: BTreeMap<String, api::GroupEntry> = BTreeMap::new();
     let mut not_found: Option<ShardAnswer> = None;
@@ -482,7 +524,7 @@ pub(super) async fn union_group(
                             ErrorCode::Internal,
                             format!(
                                 "shard {} answered an unreadable group: {error}",
-                                state.map().url(shard)
+                                map.url(shard)
                             ),
                             started_at,
                         );
@@ -501,7 +543,7 @@ pub(super) async fn union_group(
             Err(error) => {
                 return unreachable_refusal(
                     &[Unreached {
-                        shard: state.map().url(shard).to_string(),
+                        shard: map.url(shard).to_string(),
                         contexts: Vec::new(),
                         error,
                     }],
@@ -537,9 +579,18 @@ pub(super) async fn export_group_union(
 ) -> Response {
     let started_at = Instant::now();
     let path = format!("/groups/{}/export", urlencode(&name));
-    let shards: Vec<usize> = state.map().all().collect();
+    let map = state.map();
+    let shards: Vec<usize> = map.all().collect();
     let outcomes = state
-        .fan_out(&shards, Method::GET, &path, &headers, |_| None, deadline)
+        .fan_out(
+            &map,
+            &shards,
+            Method::GET,
+            &path,
+            &headers,
+            |_| None,
+            deadline,
+        )
         .await;
     let mut merged: Option<crate::groups::GroupRecord> = None;
     let mut not_found: Option<ShardAnswer> = None;
@@ -551,7 +602,7 @@ pub(super) async fn export_group_union(
                         ErrorCode::Internal,
                         format!(
                             "shard {} answered an unreadable group record",
-                            state.map().url(shard)
+                            map.url(shard)
                         ),
                         started_at,
                     );
@@ -576,7 +627,7 @@ pub(super) async fn export_group_union(
             Err(error) => {
                 return unreachable_refusal(
                     &[Unreached {
-                        shard: state.map().url(shard).to_string(),
+                        shard: map.url(shard).to_string(),
                         contexts: Vec::new(),
                         error,
                     }],

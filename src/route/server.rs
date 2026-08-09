@@ -93,12 +93,15 @@ pub(crate) async fn run(config: Option<PathBuf>) {
 
     let state = RouterState {
         inner: Arc::new(RouterInner {
-            map,
+            map: parking_lot::RwLock::new(Arc::new(map)),
             client,
             metrics: RouterMetrics::default(),
             instructions: OnceLock::new(),
         }),
     };
+    // Editing the map no longer takes a router restart (issue #515):
+    // SIGHUP and the map-file watch swap it at runtime, keyring-style.
+    spawn_route_map_reload_tasks(state.clone(), map_path);
 
     let app = routes(state.clone()).with_state(state.clone());
     // The same in-process dispatch trick serve() uses for POST /mcp:
@@ -184,10 +187,11 @@ pub(crate) async fn run(config: Option<PathBuf>) {
     };
     // The same stdout contract line serve() prints; spawners read it.
     println!("listening on {}", listener.local_addr().unwrap());
+    let booted_map = state.map();
     info!(
         addr = %listener.local_addr().unwrap(),
-        shards = state.map().shards.len(),
-        mapped_contexts = state.map().contexts.len(),
+        shards = booted_map.shards.len(),
+        mapped_contexts = booted_map.contexts.len(),
         timeout_secs,
         max_body_mib = max_body_bytes / (1024 * 1024),
         "router ready — stateless; auth, scopes, and rate limits are enforced by the shards",
@@ -205,6 +209,122 @@ pub(crate) async fn run(config: Option<PathBuf>) {
     {
         warn!(error = %error, "trace export flush on shutdown failed");
     }
+}
+
+/// One reload attempt from the map file's bytes: parse whole, swap on
+/// success, refuse on failure — the old map keeps serving, exactly as
+/// a boot-time refusal keeps the process from serving a broken one.
+/// The keyring's reload semantics (issue #134), applied to the route
+/// map (issue #515). Returns whether the swap happened.
+pub(super) fn reload_route_map(state: &RouterState, bytes: &[u8], trigger: &str) -> bool {
+    let parsed = std::str::from_utf8(bytes)
+        .map_err(|error| format!("not UTF-8: {error}"))
+        .and_then(RouteMap::parse);
+    match parsed {
+        Ok(map) => {
+            info!(
+                trigger,
+                shards = map.shards.len(),
+                contexts = map.contexts.len(),
+                fallback = map.fallback.map(|index| map.shards[index].clone()),
+                "route map reloaded"
+            );
+            state.swap_map(map);
+            state.inner.metrics.record_map_reload(true);
+            true
+        }
+        Err(error) => {
+            warn!(
+                trigger,
+                %error,
+                "route map reload refused — the map already serving stays in effect"
+            );
+            state.inner.metrics.record_map_reload(false);
+            false
+        }
+    }
+}
+
+/// Arms the route-map hot-reload triggers (issue #515) — the same two
+/// triggers, same swap discipline, as the keyring's
+/// `spawn_keyring_reload_tasks`:
+///
+/// - **SIGHUP** (unix only; a failed registration degrades to "no
+///   signal reload" with a warning, never a crash): for an operator
+///   who wants the new shard assignment NOW.
+/// - **The map-file watch** (every platform): a poll of the file's
+///   content digest every `CONFIG_WATCH_INTERVAL` — a digest, not
+///   `(mtime, len)`, for the same reasons the keyring watch hashes
+///   (issue #309: same-length rewrites, symlink swaps inside one
+///   filesystem-clock tick). A ConfigMap-style atomic symlink swap is
+///   picked up with no signal delivered.
+///
+/// Requests already in flight keep the snapshot they took at entry
+/// ([`RouterState::map`]); only new requests see a swapped map.
+fn spawn_route_map_reload_tasks(state: RouterState, path: PathBuf) {
+    // Off the async workers, exactly like the keyring watch: the map
+    // can live on a network mount, and a stalled read must not stall
+    // the HTTP workers. `None` is "unreadable this tick" either way.
+    async fn read_off_worker(path: PathBuf) -> Option<Vec<u8>> {
+        tokio::task::spawn_blocking(move || std::fs::read(path).ok())
+            .await
+            .ok()
+            .flatten()
+    }
+    #[cfg(unix)]
+    {
+        let state = state.clone();
+        let path = path.clone();
+        tokio::spawn(async move {
+            use tokio::signal::unix::{SignalKind, signal};
+            let mut hangup = match signal(SignalKind::hangup()) {
+                Ok(stream) => stream,
+                Err(error) => {
+                    warn!(%error, "could not register the SIGHUP route-map-reload handler");
+                    return;
+                }
+            };
+            while hangup.recv().await.is_some() {
+                match read_off_worker(path.clone()).await {
+                    Some(bytes) => {
+                        reload_route_map(&state, &bytes, "sighup");
+                    }
+                    None => warn!(
+                        path = %path.display(),
+                        "route map unreadable on SIGHUP — the map already serving stays in effect"
+                    ),
+                }
+            }
+        });
+    }
+    tokio::spawn(async move {
+        // This read is THE read the reload uses — its bytes go
+        // straight into `reload_route_map`, so change detection and
+        // the reload can never disagree about what the file said
+        // (the same single-read discipline as the keyring watch).
+        let mut last: Option<String> = read_off_worker(path.clone())
+            .await
+            .map(|bytes| crate::sha256::sha256_hex(&bytes));
+        let mut ticker = tokio::time::interval(crate::CONFIG_WATCH_INTERVAL);
+        ticker.tick().await; // fires immediately; boot already read the file
+        loop {
+            ticker.tick().await;
+            // An unreadable file is NOT a change: transient volume
+            // states must neither trigger a reload nor poison `last`.
+            let Some(bytes) = read_off_worker(path.clone()).await else {
+                continue;
+            };
+            let current = crate::sha256::sha256_hex(&bytes);
+            if last.as_ref() != Some(&current) {
+                // Remember the state we ATTEMPTED, refusal included:
+                // one loud line per change, not one per tick. A
+                // reverted file hashes differently again and
+                // re-triggers.
+                last = Some(current);
+                reload_route_map(&state, &bytes, "map-watch");
+            }
+        }
+    });
 }
 
 /// Every route the router answers. The two `/contexts/{name}` entries

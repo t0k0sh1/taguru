@@ -9,6 +9,8 @@
 //! analog: a shard dying mid-fleet (labeled partials, pass-through
 //! refusals, recovery), and bearer auth passing through untouched.
 
+use std::time::{Duration, Instant};
+
 use serde_json::{Value, json};
 
 use crate::support::*;
@@ -712,4 +714,110 @@ fn a_router_rewrap_keeps_structured_refusal_detail() {
     // "durable_prefix" claim is true, not just structurally present.
     let installed = router.ok("GET", "/contexts/ctx_ok/schema", None);
     assert_eq!(installed["mode"], "warn", "{installed}");
+}
+
+// ---------------------------------------------------------------------------
+// Route-map hot reload (issue #515)
+
+/// Polls until `check` passes or the budget elapses — reloads are
+/// asynchronous with respect to the signal / file write that asks for
+/// them (same discipline as reload.rs's keyring tests).
+fn eventually(budget: Duration, what: &str, mut check: impl FnMut() -> bool) {
+    let deadline = Instant::now() + budget;
+    while Instant::now() < deadline {
+        if check() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    panic!("timed out waiting for {what}");
+}
+
+/// One outcome's count out of the router's
+/// `taguru_router_map_reloads_total` metric; 0 when the series has
+/// not appeared yet.
+fn map_reload_count(router: &Server, outcome: &str) -> u64 {
+    let (_, body) = router.call("GET", "/metrics", None);
+    let prefix = format!("taguru_router_map_reloads_total{{outcome=\"{outcome}\"}} ");
+    body.as_str()
+        .unwrap_or_default()
+        .lines()
+        .find_map(|line| line.strip_prefix(prefix.as_str()))
+        .and_then(|count| count.parse().ok())
+        .unwrap_or(0)
+}
+
+/// SIGHUP swaps a rewritten map without a restart: the context's
+/// verbs re-route to the shard the new map names. A broken rewrite
+/// first: refused whole (counted on /metrics), the old map keeps
+/// serving — the same fail-closed shape as the keyring reload. The
+/// map-file watch polls every ~5s, so it may fire alongside any
+/// SIGHUP these tests send after a rewrite; counter assertions are
+/// therefore `>=`, never `==`.
+#[cfg(unix)]
+#[test]
+fn sighup_swaps_the_route_map_and_a_broken_edit_keeps_the_old_map() {
+    let shard_a = Server::start("map-hup-a");
+    let shard_b = Server::start("map-hup-b");
+    let router = Server::start_router("map-hup", &format!("moved = {}\n", shard_a.base), &[]);
+    router.ok(
+        "PUT",
+        "/contexts/moved",
+        Some(json!({"description": "hot-reload target"})),
+    );
+
+    // The broken edit: refused whole, old map still routing.
+    let map_path = router.data_dir.join("route-map");
+    std::fs::write(&map_path, "moved http://no-equals\n").unwrap();
+    router.signal("-HUP");
+    eventually(
+        Duration::from_secs(10),
+        "the refused reload to be counted",
+        || map_reload_count(&router, "refused") >= 1,
+    );
+    let (status, body) = router.call("GET", "/contexts/moved", None);
+    assert_eq!(
+        status, 200,
+        "a refused reload must keep the old map serving: {body}"
+    );
+
+    // The real edit: 'moved' now routes to shard B, which never held
+    // it — the router answers B's own 404 — while shard A still holds
+    // the data, addressed directly.
+    std::fs::write(&map_path, format!("moved = {}\n", shard_b.base)).unwrap();
+    router.signal("-HUP");
+    eventually(
+        Duration::from_secs(10),
+        "the rewritten map to take over routing",
+        || router.call("GET", "/contexts/moved", None).0 == 404,
+    );
+    assert_eq!(shard_a.call("GET", "/contexts/moved", None).0, 200);
+    assert!(map_reload_count(&router, "applied") >= 1);
+}
+
+/// The map-file watch alone — no signal anywhere — picks up a
+/// rewrite, mirroring the ConfigMap/secret-volume flow where nothing
+/// can send SIGHUP into the pod.
+#[test]
+fn the_map_file_watch_swaps_routing_with_no_signal() {
+    let shard_a = Server::start("map-watch-a");
+    let shard_b = Server::start("map-watch-b");
+    let router = Server::start_router("map-watch", &format!("moved = {}\n", shard_a.base), &[]);
+    router.ok(
+        "PUT",
+        "/contexts/moved",
+        Some(json!({"description": "watch target"})),
+    );
+    std::fs::write(
+        router.data_dir.join("route-map"),
+        format!("moved = {}\n", shard_b.base),
+    )
+    .unwrap();
+    // The watch polls every ~5s; the budget gives it two cycles plus
+    // scheduling slack.
+    eventually(
+        Duration::from_secs(15),
+        "the watch to swap the map with no signal",
+        || router.call("GET", "/contexts/moved", None).0 == 404,
+    );
 }

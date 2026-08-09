@@ -13,6 +13,7 @@ pub(super) async fn route_import(
     api::AppBytes(body): api::AppBytes,
 ) -> Response {
     let started_at = Instant::now();
+    let map = state.map();
     // The same whole-stream validation a shard would run, so a
     // malformed stream refuses here with the same message and the same
     // stream-level line numbers.
@@ -26,7 +27,7 @@ pub(super) async fn route_import(
     // unroutable context refuses whole, like any other invalid stream.
     let mut chunks: Vec<(usize, Vec<std::ops::Range<usize>>)> = Vec::new();
     for (batch, range) in stream.batches.iter().zip(slices) {
-        let Some(shard) = state.map().shard_of(&batch.context) else {
+        let Some(shard) = map.shard_of(&batch.context) else {
             return api::error(
                 ErrorCode::NoContext,
                 format!(
@@ -56,7 +57,7 @@ pub(super) async fn route_import(
     // §13).
     let mut schema_shards: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for (index, (context, _)) in stream.schemas.iter().enumerate() {
-        let Some(shard) = state.map().shard_of(context) else {
+        let Some(shard) = map.shard_of(context) else {
             return api::error(
                 ErrorCode::NoContext,
                 format!(
@@ -90,7 +91,7 @@ pub(super) async fn route_import(
                 contexts: record
                     .contexts
                     .iter()
-                    .filter(|member| state.map().shard_of(member) == Some(shard))
+                    .filter(|member| map.shard_of(member) == Some(shard))
                     .cloned()
                     .collect(),
                 groups: record.groups.clone(),
@@ -117,7 +118,7 @@ pub(super) async fn route_import(
         let group_shards: Vec<usize> = if stream.groups.is_empty() {
             Vec::new()
         } else {
-            state.map().all().collect()
+            map.all().collect()
         };
         let preflights = chunks
             .iter()
@@ -135,6 +136,7 @@ pub(super) async fn route_import(
         for (shard, chunk) in preflights {
             match state
                 .call_shard(
+                    &map,
                     shard,
                     Method::POST,
                     preflight_query,
@@ -156,7 +158,7 @@ pub(super) async fn route_import(
                 Err(error) => {
                     return unreachable_refusal(
                         &[Unreached {
-                            shard: state.map().url(shard).to_string(),
+                            shard: map.url(shard).to_string(),
                             contexts: Vec::new(),
                             error,
                         }],
@@ -174,6 +176,7 @@ pub(super) async fn route_import(
     for (index, (shard, ranges)) in chunks.iter().enumerate() {
         match state
             .call_shard(
+                &map,
                 *shard,
                 Method::POST,
                 real_query,
@@ -202,7 +205,7 @@ pub(super) async fn route_import(
             Err(error) => {
                 return unreachable_refusal(
                     &[Unreached {
-                        shard: state.map().url(*shard).to_string(),
+                        shard: map.url(*shard).to_string(),
                         contexts: Vec::new(),
                         error,
                     }],
@@ -229,6 +232,7 @@ pub(super) async fn route_import(
     for (&shard, indices) in &schema_shards {
         match state
             .call_shard(
+                &map,
                 shard,
                 Method::POST,
                 real_query,
@@ -262,7 +266,7 @@ pub(super) async fn route_import(
             Err(error) => {
                 return unreachable_refusal(
                     &[Unreached {
-                        shard: state.map().url(shard).to_string(),
+                        shard: map.url(shard).to_string(),
                         contexts: Vec::new(),
                         error,
                     }],
@@ -281,9 +285,10 @@ pub(super) async fn route_import(
     let mut groups: Vec<Value> = Vec::new();
     if !stream.groups.is_empty() {
         let mut per_group: BTreeMap<usize, Vec<GroupOutcomeWire>> = BTreeMap::new();
-        for shard in state.map().all() {
+        for shard in map.all() {
             match state
                 .call_shard(
+                    &map,
                     shard,
                     Method::POST,
                     real_query,
@@ -314,7 +319,7 @@ pub(super) async fn route_import(
                 Err(error) => {
                     return unreachable_refusal(
                         &[Unreached {
-                            shard: state.map().url(shard).to_string(),
+                            shard: map.url(shard).to_string(),
                             contexts: Vec::new(),
                             error,
                         }],
