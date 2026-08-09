@@ -251,6 +251,11 @@ fn promotion_refusals_name_their_cause_before_anything_applies() {
     assert_eq!(status, 404, "{refused}");
     assert_eq!(refused["code"], json!("no_context"), "{refused}");
     assert_eq!(refused["integrity"], json!("nothing_written"), "{refused}");
+    assert_eq!(
+        refused["retryable_after_correction"],
+        json!(true),
+        "{refused}"
+    );
 
     // The reserved export ids are stream artifacts, never promotable —
     // sourceless weight cannot travel with a promotion.
@@ -283,12 +288,35 @@ fn promotion_refusals_name_their_cause_before_anything_applies() {
         "{refused}"
     );
     assert_eq!(refused["integrity"], json!("nothing_written"), "{refused}");
+    assert_eq!(
+        refused["retryable_after_correction"],
+        json!(true),
+        "{refused}"
+    );
     let db = server.ok(
         "POST",
         "/contexts/perm/query",
         Some(json!({"subject": "DB"})),
     );
     assert_eq!(db["total"], json!(0), "nothing may have applied: {db}");
+
+    // A fully-retracted source is no longer promotable: its dead
+    // attribution rows (count 0) must not count as "exists here".
+    server.ok(
+        "POST",
+        "/contexts/scratch-claude/sources/retract",
+        Some(json!({"source": "session:claude:b"})),
+    );
+    let (status, refused) = server.call(
+        "POST",
+        "/contexts/scratch-claude/promote",
+        Some(json!({"into": "perm", "sources": ["session:claude:b"]})),
+    );
+    assert_eq!(
+        status, 404,
+        "a retracted source has nothing left to promote: {refused}"
+    );
+    assert_eq!(refused["code"], json!("no_source"), "{refused}");
 }
 
 #[test]
@@ -335,6 +363,162 @@ fn the_destination_schema_judges_the_promoted_batches() {
     );
     let schema = server.ok("GET", "/contexts/perm/schema", None);
     assert_eq!(schema["mode"], json!("strict"), "{schema}");
+}
+
+/// The destination lives in the body, out of the route check's reach:
+/// a context-scoped key needs `into` in its grant too, and a grant
+/// covering both contexts clears the gate.
+#[test]
+fn a_scoped_key_needs_the_destination_in_its_grant() {
+    let server = Server::start_with_env(
+        "promote-scopes",
+        &[
+            ("TAGURU_API_TOKENS", "boss:atok,pair:ptok,half:htok"),
+            (
+                "TAGURU_KEY_SCOPES",
+                r#"{"pair": {"role": "write", "contexts": ["scratch-claude", "perm"]},
+                    "half": {"role": "write", "contexts": ["scratch-claude"]}}"#,
+            ),
+        ],
+    );
+    let call = |method: &str, path: &str, body: Option<serde_json::Value>, token: &str| {
+        server.call_with_token(method, path, body, Some(token))
+    };
+    for (context, description) in [("scratch-claude", "notes"), ("perm", "permanent")] {
+        let (status, body) = call(
+            "PUT",
+            &format!("/contexts/{context}"),
+            Some(json!({"description": description})),
+            "atok",
+        );
+        assert_eq!(status, 200, "{body}");
+    }
+    let (status, body) = call(
+        "POST",
+        "/contexts/scratch-claude/associations",
+        Some(
+            json!([{"subject": "DB", "label": "採用", "object": "PostgreSQL 16",
+                     "weight": 1.0, "source": "session:claude:a"}]),
+        ),
+        "atok",
+    );
+    assert_eq!(status, 200, "{body}");
+
+    let request = json!({"into": "perm", "sources": ["session:claude:a"], "audit": false});
+    let (status, refused) = call(
+        "POST",
+        "/contexts/scratch-claude/promote",
+        Some(request.clone()),
+        "htok",
+    );
+    assert_eq!(status, 403, "{refused}");
+    assert!(
+        refused["error"].as_str().unwrap().contains("'into'"),
+        "the refusal names which grant is missing: {refused}"
+    );
+    assert_eq!(refused["integrity"], json!("nothing_written"), "{refused}");
+
+    let (status, promoted) = call(
+        "POST",
+        "/contexts/scratch-claude/promote",
+        Some(request),
+        "ptok",
+    );
+    assert_eq!(
+        status, 200,
+        "a grant covering both contexts clears the gate: {promoted}"
+    );
+}
+
+/// The destination's storage quota gates promoted growth exactly as
+/// `/import` gates a stream: batch-granular, checked before the batch
+/// is attempted, and never on a dry run (a preview writes nothing to
+/// gate — its capacity answers are advisory by documented contract).
+#[test]
+fn the_destination_quota_gates_growth_before_the_batch_is_attempted() {
+    let server = Server::start_with_env(
+        "promote-quota",
+        &[(
+            "TAGURU_CONTEXT_QUOTAS",
+            r#"{"perm": {"storage_bytes": 1, "cache_bytes": 1048576}}"#,
+        )],
+    );
+    seed(&server);
+    // Put the destination at its ceiling before the promotion — the
+    // quotas.rs pattern: the direct write's WAL bytes are what the
+    // live-lane pre-check reads.
+    server.ok(
+        "POST",
+        "/contexts/perm/associations",
+        Some(json!([{"subject": "蔵", "label": "杜氏", "object": "高瀬",
+                     "weight": 1.0, "source": "keep.md"}])),
+    );
+
+    // A preview writes nothing, so the ceiling has nothing to gate.
+    let preview = server.ok(
+        "POST",
+        "/contexts/scratch-claude/promote?dry_run=true",
+        Some(json!({
+            "into": "perm",
+            "sources": ["session:claude:a/note", "session:claude:b"]
+        })),
+    );
+    assert_eq!(preview["batches"].as_array().map(Vec::len), Some(2));
+
+    // For real: the first batch is stopped BEFORE it is attempted —
+    // nothing written, and the fields say so machine-readably.
+    let (status, refused) = server.call(
+        "POST",
+        "/contexts/scratch-claude/promote",
+        Some(json!({
+            "into": "perm",
+            "sources": ["session:claude:a/note", "session:claude:b"]
+        })),
+    );
+    assert_eq!(status, 507, "{refused}");
+    assert_eq!(refused["code"], json!("storage_full"), "{refused}");
+    assert_eq!(refused["integrity"], json!("nothing_written"), "{refused}");
+    let message = refused["error"].as_str().unwrap();
+    assert!(message.contains("not attempted"), "{message}");
+    assert!(message.contains("storage quota"), "{message}");
+}
+
+/// A `warn`-mode destination schema lets the promoted batches land and
+/// reports the violations in the success envelope, `/import`'s own
+/// accounting — the exact true count, not a truncation artifact.
+#[test]
+fn a_warn_mode_destination_reports_schema_violations_in_the_envelope() {
+    let server = Server::start("promote-warn-schema");
+    seed(&server);
+    server.ok(
+        "PUT",
+        "/contexts/perm/schema",
+        Some(json!({
+            "schema": 1, "mode": "warn", "closed_labels": true,
+            "types": {},
+            "relations": {"テストランナー": {"domain": [], "range": []}}
+        })),
+    );
+
+    let (status, body) = server.call(
+        "POST",
+        "/contexts/scratch-claude/promote",
+        Some(json!({"into": "perm", "sources": ["session:claude:a/note"], "audit": false})),
+    );
+    assert_eq!(status, 200, "warn lets the batch land: {body}");
+    assert_eq!(body["schema_violations"], json!(1), "{body}");
+    assert_eq!(
+        body["issues"][0]["path"]
+            .as_str()
+            .map(|path| path.starts_with("batches[0].")),
+        Some(true),
+        "{body}"
+    );
+    assert_eq!(
+        body["result"]["batches"][0]["schema_violations"],
+        json!(1),
+        "{body}"
+    );
 }
 
 /// The cross-batch preview fix the promote dry run exposed, pinned on

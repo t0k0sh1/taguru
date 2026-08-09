@@ -1551,12 +1551,14 @@ mod tests {
     fn filtering_to_sources_keeps_only_their_shares_and_no_residual() {
         let keep: BTreeSet<String> = ["a.md".to_string()].into();
         let shared = association(
-            3,
+            4,
             vec![
+                // Two assertions summing to 3.0: the recomputed weight
+                // must be the mean (1.5), never the product's shape.
                 Attribution {
                     source: "a.md".to_string(),
-                    weight: 2.0,
-                    count: 1,
+                    weight: 3.0,
+                    count: 2,
                     paragraph: Some(4),
                 },
                 Attribution {
@@ -1594,8 +1596,8 @@ mod tests {
         let filtered = filter_to_sources(snapshot, &keep);
         assert_eq!(filtered.associations.len(), 1, "b.md's own edge drops");
         let edge = &filtered.associations[0];
-        assert_eq!(edge.count, 1, "only a.md's live share remains");
-        assert_eq!(edge.weight, 2.0);
+        assert_eq!(edge.count, 2, "only a.md's live share remains");
+        assert_eq!(edge.weight, 1.5, "sum 3.0 over count 2 — the mean");
         assert_eq!(edge.attributions.len(), 1);
         assert_eq!(edge.attributions[0].source, "a.md");
         assert_eq!(

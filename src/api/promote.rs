@@ -235,10 +235,10 @@ pub async fn promote_sources(
         crate::export::render(&request.into, &filtered, deadline)
     }) {
         Ok(rendered) => rendered,
-        Err(_) if deadline.expired() => return deadline_exceeded(started_at),
-        // A scratch source colliding with a reserved export id — the
-        // one thing the slice can hold that the stream cannot say.
-        Err(message) => return error(ErrorCode::Conflict, message, started_at),
+        // The reserved-id refusal above leaves the deadline as
+        // render's only reachable error here; the fallback keeps a
+        // future render error honest rather than mislabeled.
+        Err(message) => return render_refusal(message, deadline, started_at),
     };
     let mut stream = match crate::ingest::parse_stream(rendered.stream.as_bytes()) {
         Ok(stream) => stream,
@@ -269,31 +269,12 @@ pub async fn promote_sources(
             // one — see [`crate::ingest::Batch::strip_create`].
             batch.strip_create();
             if deadline.expired() {
-                let note = import_batch_note(
+                return Err(Box::new(budget_refusal(
                     index,
                     total,
                     batch,
                     outcomes.len(),
                     query.dry_run,
-                    ("not previewed", "not attempted"),
-                    (
-                        "re-running the preview with more time or fewer sources is exact",
-                        "re-calling promote with the same sources is exact (each batch \
-                         replaces its own source)",
-                    ),
-                );
-                let (integrity, durable_batches) = stream_integrity(outcomes.len(), query.dry_run);
-                return Err(Box::new(validation_error(
-                    ErrorCode::Timeout,
-                    format!(
-                        "{note}request exceeded its budget partway through the promotion \
-                         (TAGURU_REQUEST_TIMEOUT_SECS tunes this)"
-                    ),
-                    RefusalDetail {
-                        integrity: Some(integrity),
-                        durable_batches,
-                        ..Default::default()
-                    },
                     started_at,
                 )));
             }
@@ -305,32 +286,13 @@ pub async fn promote_sources(
                 && let Some((used, ceiling)) = state.storage_quota_refusal(&batch.context)
             {
                 state.metrics().record_storage_quota_refusal();
-                let note = import_batch_note(
+                return Err(Box::new(quota_refusal(
                     index,
                     total,
                     batch,
                     outcomes.len(),
-                    query.dry_run,
-                    ("not previewed", "not attempted"),
-                    (
-                        "re-running the preview against a shrunk destination is exact",
-                        "retracting or compacting the destination (or raising its quota), \
-                         then re-calling promote is exact (each batch replaces its own \
-                         source)",
-                    ),
-                );
-                let (integrity, durable_batches) = stream_integrity(outcomes.len(), query.dry_run);
-                return Err(Box::new(validation_error(
-                    ErrorCode::StorageFull,
-                    format!(
-                        "{note}{}",
-                        crate::registry::storage_quota_message(&batch.context, used, ceiling)
-                    ),
-                    RefusalDetail {
-                        integrity: Some(integrity),
-                        durable_batches,
-                        ..Default::default()
-                    },
+                    used,
+                    ceiling,
                     started_at,
                 )));
             }
@@ -476,6 +438,106 @@ fn landing_audit(
         contradiction: Some(contradiction),
         staleness: Some(staleness),
     })
+}
+
+/// Maps a render failure onto the response. Reachable only when the
+/// budget dies inside the render (the reserved-id refusal runs before
+/// it, so the Conflict fallback is future-proofing, not a live path).
+#[mutants::skip] // both arms need a deadline that expires mid-render; timing cannot be pinned deterministically in tests
+fn render_refusal(message: String, deadline: Deadline, started_at: Instant) -> Response {
+    if deadline.expired() {
+        deadline_exceeded(started_at)
+    } else {
+        error(ErrorCode::Conflict, message, started_at)
+    }
+}
+
+/// The destination-over-quota refusal, `/import`'s own batch-granular
+/// pre-check report. Every promote batch targets ONE destination and
+/// always carries growth, so the deterministic firing shape is batch 1
+/// against a destination already over its ceiling (`landed` 0,
+/// `nothing_written` — tested); the `durable_prefix` shape needs the
+/// stream itself to cross the ceiling mid-loop, a live-lane timing no
+/// test can pin.
+#[mutants::skip]
+// the durable>0 half of stream_integrity's output is reachable only via mid-stream timing; the landed==0 half is asserted in tests
+#[allow(clippy::too_many_arguments)]
+fn quota_refusal(
+    index: usize,
+    total: usize,
+    batch: &crate::ingest::Batch,
+    landed: usize,
+    used: u64,
+    ceiling: u64,
+    started_at: Instant,
+) -> Response {
+    let note = import_batch_note(
+        index,
+        total,
+        batch,
+        landed,
+        false,
+        ("not previewed", "not attempted"),
+        (
+            "re-running the preview against a shrunk destination is exact",
+            "retracting or compacting the destination (or raising its quota), then \
+             re-calling promote is exact (each batch replaces its own source)",
+        ),
+    );
+    let (integrity, durable_batches) = stream_integrity(landed, false);
+    validation_error(
+        ErrorCode::StorageFull,
+        format!(
+            "{note}{}",
+            crate::registry::storage_quota_message(&batch.context, used, ceiling)
+        ),
+        RefusalDetail {
+            integrity: Some(integrity),
+            durable_batches,
+            ..Default::default()
+        },
+        started_at,
+    )
+}
+
+/// The refusal a budget spent partway through the apply loop answers —
+/// `/import`'s own resumable-prefix contract, promote's wording.
+#[mutants::skip] // reachable only when the budget dies mid-loop; timing cannot be pinned deterministically in tests
+fn budget_refusal(
+    index: usize,
+    total: usize,
+    batch: &crate::ingest::Batch,
+    landed: usize,
+    dry_run: bool,
+    started_at: Instant,
+) -> Response {
+    let note = import_batch_note(
+        index,
+        total,
+        batch,
+        landed,
+        dry_run,
+        ("not previewed", "not attempted"),
+        (
+            "re-running the preview with more time or fewer sources is exact",
+            "re-calling promote with the same sources is exact (each batch replaces its \
+             own source)",
+        ),
+    );
+    let (integrity, durable_batches) = stream_integrity(landed, dry_run);
+    validation_error(
+        ErrorCode::Timeout,
+        format!(
+            "{note}request exceeded its budget partway through the promotion \
+             (TAGURU_REQUEST_TIMEOUT_SECS tunes this)"
+        ),
+        RefusalDetail {
+            integrity: Some(integrity),
+            durable_batches,
+            ..Default::default()
+        },
+        started_at,
+    )
 }
 
 fn audit_skip_reason(failure: AccessError) -> &'static str {
