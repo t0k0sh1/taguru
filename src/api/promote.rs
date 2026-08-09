@@ -185,18 +185,7 @@ pub async fn promote_sources(
     // Every requested id must exist in the scratch — as a passage or a
     // live attribution — or the request refuses whole, naming the
     // absentees path-addressed. Nothing has been written yet.
-    let available: BTreeSet<&str> = snapshot
-        .passages
-        .iter()
-        .map(|(source, _)| source.as_str())
-        .chain(snapshot.associations.iter().flat_map(|association| {
-            association
-                .attributions
-                .iter()
-                .filter(|attribution| attribution.count > 0)
-                .map(|attribution| attribution.source.as_str())
-        }))
-        .collect();
+    let available = crate::export::available_sources(&snapshot);
     let issues: Vec<Issue> = request
         .sources
         .iter()

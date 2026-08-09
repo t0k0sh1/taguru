@@ -349,6 +349,26 @@ pub(crate) fn filter_to_sources(
     }
 }
 
+/// The source ids a snapshot actually holds — a passage, or a LIVE
+/// attribution (count-0 rows are retraction residue, not presence).
+/// The promote verb's existence check (ADR 0018): a requested id
+/// absent from this set refuses the request rather than silently
+/// no-opping under retract-then-apply.
+pub(crate) fn available_sources(snapshot: &ExportSnapshot) -> BTreeSet<&str> {
+    snapshot
+        .passages
+        .iter()
+        .map(|(source, _)| source.as_str())
+        .chain(snapshot.associations.iter().flat_map(|association| {
+            association
+                .attributions
+                .iter()
+                .filter(|attribution| attribution.count > 0)
+                .map(|attribution| attribution.source.as_str())
+        }))
+        .collect()
+}
+
 /// One source's share of the stream, accumulated before rendering.
 #[derive(Default)]
 struct Bucket<'a> {
@@ -1539,6 +1559,44 @@ mod tests {
             2,
             "one reserved header, one residual assertion: {}",
             rendered.stream
+        );
+    }
+
+    /// The promote verb's existence check (ADR 0018): a passage or a
+    /// LIVE attribution counts as presence; a count-0 attribution is
+    /// retraction residue and must not — an id present only that way
+    /// would promote as an empty no-op instead of refusing.
+    #[test]
+    fn available_sources_sees_passages_and_live_attributions_only() {
+        let edge = association(
+            1,
+            vec![
+                Attribution {
+                    source: "live.md".to_string(),
+                    weight: 1.0,
+                    count: 1,
+                    paragraph: None,
+                },
+                Attribution {
+                    source: "dead.md".to_string(),
+                    weight: 0.0,
+                    count: 0,
+                    paragraph: None,
+                },
+            ],
+        );
+        let mut snapshot = snapshot(vec![edge]);
+        snapshot.passages = vec![("note.md".to_string(), PassageRecord::for_tests("原文"))];
+
+        let available = available_sources(&snapshot);
+        assert!(available.contains("note.md"), "a passage is presence");
+        assert!(
+            available.contains("live.md"),
+            "a live attribution is presence"
+        );
+        assert!(
+            !available.contains("dead.md"),
+            "retraction residue is not presence: {available:?}"
         );
     }
 
