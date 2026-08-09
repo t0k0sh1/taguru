@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Code map (taguru-code) — Taguru</title>
+  <meta name="description" content="The complete reference for taguru-code: the offline codebase map for coding agents — sync, watch, find, tree, status, the evalset/eval accuracy gate, the .taguru data directory, the usage log, and what a source file becomes in the graph.">
+  <link rel="icon" type="image/png" href="favicon.png">
+  <link rel="stylesheet" href="style.css">
+  <script src="site.js"></script>
+</head>
+<body>
+
+<div class="topbar">
+  <button class="nav-toggle" id="nav-toggle" type="button" aria-label="Toggle menu">☰</button>
+  <a class="brand" href="index.html"><img class="brand-mark" src="logo.png" alt="">Taguru</a>
+  <button class="theme-toggle" type="button" aria-label="Toggle theme">◐</button>
+</div>
+<div class="scrim" id="scrim"></div>
+
+<div class="layout">
+<aside class="sidebar">
+  <a class="brand" href="index.html"><img class="brand-mark" src="logo.png" alt="">Taguru</a>
+  <nav class="side-nav">
+    <div class="side-group">
+      <a href="index.html">Home</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Guide</div>
+      <a href="getting-started.html">Getting started</a>
+      <a href="concepts.html">Concepts</a>
+      <a href="modeling.html">Modeling</a>
+      <a href="promotion.html">Memory promotion</a>
+      <a href="troubleshooting.html">Troubleshooting</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Reference</div>
+      <a href="schema.html">Context schema</a>
+      <a href="import.html">Batch import</a>
+      <a href="extract.html">Document extraction</a>
+      <a href="taguru-code.html" aria-current="page">Code map (taguru-code)</a>
+      <a href="connectors.html">Ingest connectors</a>
+      <a href="benchmark.html">Extraction benchmark</a>
+      <a href="evaluate.html">Retrieval quality gate</a>
+      <a href="evidence.html">Evidence assembly</a>
+      <a href="long-running.html">Long-running ingestion</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">Deploy</div>
+      <a href="docker-compose.html">Docker Compose</a>
+      <a href="kubernetes.html">Kubernetes</a>
+      <a href="aws.html">AWS</a>
+      <a href="azure.html">Azure</a>
+      <a href="gcp.html">Google Cloud</a>
+      <a href="bedrock.html">Amazon Bedrock</a>
+    </div>
+    <div class="side-group">
+      <div class="side-group-label">How it works</div>
+      <a href="architecture.html">Internal architecture</a>
+      <a href="tracing.html">Tracing</a>
+      <a href="mcp-rag-walkthrough.html">MCP walkthrough</a>
+      <a href="local-rag-walkthrough.html">Local RAG walkthrough</a>
+    </div>
+  </nav>
+  <div class="sidebar-footer">
+    <a href="https://github.com/t0k0sh1/taguru">GitHub ↗</a>
+    <button class="theme-toggle" type="button" aria-label="Toggle theme">◐</button>
+  </div>
+</aside>
+
+<main class="content">
+<div class="page">
+
+  <header class="hero">
+    <div class="eyebrow">reference · code map</div>
+    <h1>Code map (taguru-code)</h1>
+    <p class="lede">
+      <code>taguru-code</code> is a standalone binary that turns a git repository into a
+      queryable code map — <i>where is this symbol, what does this file contain</i> — fully
+      offline, no server, no LLM, no configuration (ADR 0010). It answers in milliseconds what
+      an agent would otherwise grep for, and ships its own accuracy gate so "does <code>find</code>
+      still find things" is a CI check, not a hope.
+    </p>
+    <div class="hero-meta">
+      <span><b>Binary:</b> taguru-code (same crate as the server)</span>
+      <span><b>Data:</b> $REPO/.taguru — a normal taguru data directory</span>
+      <span><b>Languages:</b> Rust today (the grammar table is per-extension)</span>
+    </div>
+  </header>
+
+  <section id="quickstart">
+    <h2>Quick start</h2>
+    <pre><code><span class="c"># inside any git work tree</span>
+taguru-code sync                    <span class="c"># ingest the repo (idempotent; re-run any time)</span>
+taguru-code find parse_batch        <span class="c"># kind, qualified name, file:line — best match first</span>
+taguru-code tree src/ingest.rs      <span class="c"># what a directory / file / symbol contains</span>
+taguru-code status                  <span class="c"># is the map current? pending commits + dirty files</span>
+taguru-code watch                   <span class="c"># keep syncing as the tree changes (default every 2s)</span></code></pre>
+    <p class="note">
+      Add <code>.taguru/</code> to your <code>.gitignore</code> — <code>sync</code> reminds you
+      until it is. The map never indexes its own storage either way; gitignoring it just keeps
+      <code>git status</code> quiet.
+    </p>
+  </section>
+
+  <section id="verbs">
+    <h2>The verbs</h2>
+    <p class="section-sub">
+      Every verb also accepts <code>--context NAME</code> (default <code>code</code>) and
+      <code>--data-dir PATH</code> (default <code>$REPO/.taguru</code>) — several maps can share
+      one directory, or one map can live somewhere else entirely.
+    </p>
+    <ul>
+      <li><code>sync [PATH] [--dry-run]</code> — ingest the repo at <code>PATH</code> (default
+        <code>.</code>). Incremental: only files changed since the last sync (committed churn
+        plus the dirty set) are re-parsed, and re-ingesting an unchanged file is a no-op by the
+        import contract's retract-then-apply. <code>--dry-run</code> reports what would change
+        and writes nothing. The passage log is compacted automatically once it outgrows the
+        snapshot, so a long-lived map does not grow without bound.</li>
+      <li><code>watch [PATH] [--interval-ms N]</code> — <code>sync</code> once, then keep
+        rescanning (default every 2000&nbsp;ms) until stopped. An edit racing the initial sync
+        is caught by the next pass — the map converges, it never wedges.</li>
+      <li><code>find &lt;cue&gt; [--json] [--limit N]</code> — locate a symbol: kind, qualified
+        name, <code>file:line</code>, best match first (default 10 rows). The cue can be a bare
+        tail (<code>parse_batch</code>), a qualified suffix (<code>Type::method</code>,
+        <code>file.rs::name</code>), a path fragment, or a near-miss typo — see
+        <a href="#lookup">lookup</a> for the exact tiers. <code>--json</code> emits one JSON
+        object per row for tooling.</li>
+      <li><code>tree [PATH]</code> — list what a directory, file, or symbol contains, one level
+        of the same <code>contains</code> edges <code>sync</code> wrote; with no
+        <code>PATH</code>, the roots (entries contained by nothing).</li>
+      <li><code>status</code> — the map's freshness, honestly: the last synced commit, pending
+        committed changes, and pending dirty files. The map is a snapshot as of the last sync;
+        <code>status</code> is how staleness stays visible instead of silent.</li>
+      <li><code>evalset --out FILE [--sample N]</code> — sample symbols from the synced map
+        (default 200) and emit labeled eval cases: tail cues, qualified cues, and path cues.
+        Tails shared by too many symbols sample as qualified cues — no tool can answer
+        <code>tests</code> from the bare name, and no agent would ask that way.</li>
+      <li><code>eval --eval FILE [--thresholds FILE]</code> — replay the cases through the same
+        <code>find</code> core the agent uses and score hit@1 / hit@10 / locator drift.
+        With <code>--thresholds</code>, a regression exits <b>3</b> (the ADR 0004 §5 CI
+        convention, offline); unknown threshold keys or mis-typed values hard-error, and the
+        run reports how many thresholds applied — a silently hollow gate is worse than none.</li>
+      <li><code>models [--json]</code> — list the local embedding models this build carries,
+        best pick first (the same catalog <code>TAGURU_EMBED_MODEL</code> accepts).</li>
+    </ul>
+  </section>
+
+  <section id="universe">
+    <h2>The universe: exactly what ripgrep sees</h2>
+    <p class="section-sub">
+      The map covers tracked plus untracked files, minus everything .gitignore excludes, read
+      as the bytes on disk — staged and unstaged edits included.
+    </p>
+    <ul>
+      <li><b>One authority for membership</b>:
+        <code>git ls-files --cached --others --exclude-standard</code>. There is no hand-rolled
+        walker — gitignored files (secrets, build output, local settings) never enter the map,
+        and a directory that is not a git work tree is a refusal, not a fallback.</li>
+      <li><b>The equivalence is the point</b>: the tool's visibility matches the agent's other
+        eyes, so "taguru-code knows everything <code>rg</code> would search" holds without
+        caveats — including the code the agent wrote this session, before any commit.</li>
+      <li><b>HEAD is only the incremental anchor</b>, never a content source: a sync touches the
+        committed churn since the last anchor plus both dirty sets (now and as of the last
+        sync), so reverts, deleted untracked files, and dirty-then-committed files all heal to
+        their real content. A gc-orphaned anchor degrades to a full re-sync with a warning —
+        idempotency is the recovery mechanism.</li>
+      <li><b><code>.taguru/</code> is excluded unconditionally</b> — correctness does not depend
+        on the .gitignore advice above.</li>
+    </ul>
+  </section>
+
+  <section id="data">
+    <h2>Where the map lives</h2>
+    <p>
+      <code>$REPO/.taguru</code> is a <b>normal taguru data directory</b> holding a context
+      named <code>code</code>: the same image, WAL, and passage-log formats the server uses,
+      written through the same batch/import contract a client could have sent. Nothing about it
+      is bespoke — point <code>taguru serve</code> at it and the map is queryable over HTTP and
+      MCP like any other context; delete it and the next <code>sync</code> rebuilds it whole.
+    </p>
+  </section>
+
+  <section id="facts">
+    <h2>What a file becomes</h2>
+    <p class="section-sub">
+      One file = one source (the retract-then-apply unit), carrying location and structure —
+      nothing cleverer (ADR 0010 §6).
+    </p>
+    <ul>
+      <li><b>Names</b>: a symbol is <code>&lt;repo-relative path&gt;::&lt;name path&gt;</code> —
+        the file path IS the namespace, so identity is language-agnostic and collision-free
+        without module-resolution cleverness. Files and directories are their bare paths.</li>
+      <li><b>Edges</b>: <code>defined_in</code> (symbol → file, the "where is X" product) and
+        <code>contains</code> (directory → file → symbol, one uniform chain). No call graph, no
+        module-dependency facts in v1 — coarse facts age slowly; fine-grained ones churn on
+        every edit and duplicate what LSP-shaped tools already do well.</li>
+      <li><b>Line ranges</b> ride as citation locators (<code>{"kind": "lines", "value":
+        "a-b"}</code>) — the open locator vocabulary of ADR 0007 §7, zero server change.</li>
+      <li><b>The passage is not the raw file</b>: each symbol contributes its one-line signature
+        as one paragraph, in source order — so paragraph <i>i</i> is symbol <i>i</i> by
+        construction, every symbol keeps its own locator, and BM25 indexes the
+        identifier-dense line that matters.</li>
+      <li><b>Extraction is AST-mechanical</b> (tree-sitter, one grammar per file extension —
+        Rust today; the extension table is the one place a language plugs in). No LLM anywhere
+        in the pipeline, which is what makes the map deterministic and the accuracy gate
+        cheap.</li>
+    </ul>
+  </section>
+
+  <section id="lookup">
+    <h2>Lookup without aliases</h2>
+    <p>
+      Short-name aliases were the obvious design and are rejected (ADR 0010 §7): the alias
+      store is append-only, and short names collide constantly in code (<code>new</code>,
+      <code>run</code>, <code>tests</code>) — a one-shot, irreversible claim is the wrong
+      primitive for names that churn. Instead <code>find</code> ranks at read time, over one
+      in-memory scan of the <code>defined_in</code> edges, tier by tier:
+    </p>
+    <ul>
+      <li>exact tail segment (<code>parse_batch</code>),</li>
+      <li>qualified suffix (<code>Type::method</code>, or <code>file.rs::name</code> across a
+        path boundary),</li>
+      <li>tail prefix / substring,</li>
+      <li>file/directory basename, for path-shaped cues,</li>
+      <li>tail-segment bigram-Dice as the typo fallback — with a floor. Below the floor the
+        honest answer is "no match, fall back to grep", never plausible-looking junk.</li>
+    </ul>
+    <p class="note">
+      A renamed file's old symbols are ghosts no source attests anymore — read paths filter
+      attribution-less edges, so <code>find</code> never serves them.
+    </p>
+  </section>
+
+  <section id="gate">
+    <h2>The accuracy gate</h2>
+    <p>
+      <code>evalset</code> samples labeled cases from the same parse; <code>eval</code> replays
+      them through the same <code>find</code> core and scores hit@1 / hit@10 / locator drift;
+      <code>--thresholds</code> turns a completed run into a pass/fail gate that exits 3 on
+      regression. Acceptance at merge on this repository's own 200-case set: hit@1 0.915,
+      hit@10 1.00, drift 0.
+    </p>
+  </section>
+
+  <section id="environment">
+    <h2>Environment</h2>
+    <ul>
+      <li><code>TAGURU_EMBED_URL</code> / <code>TAGURU_EMBED_MODEL</code> — <code>local</code>
+        embeds symbol signatures in-process during <code>sync</code> (default builds carry the
+        models; slim <code>--no-default-features</code> builds warn and keep the semantic lane
+        off); any other URL is an OpenAI-compatible <code>/embeddings</code> endpoint. Pick a
+        model from <code>taguru-code models</code>.</li>
+      <li><code>TAGURU_USAGE_LOG</code> — <code>0</code>/<code>false</code>/<code>off</code>
+        disables the per-invocation usage log. On by default: one JSONL record per invocation
+        (verb, arguments, hit count, output bytes) so "is the map actually getting used, and
+        does it answer" has data behind it.</li>
+      <li><code>TAGURU_USAGE_LOG_DIR</code> — where <code>usage-*.jsonl</code> records go
+        (default <code>$HOME/.taguru/logs</code>).</li>
+      <li><code>TAGURU_USAGE_LOG_MAX_BYTES</code> — total cap across the usage files; oldest
+        days are deleted first and today's file always survives (default 52428800 = 50 MiB,
+        <code>0</code> = uncapped).</li>
+    </ul>
+  </section>
+
+  <section id="limits">
+    <h2>Current limits</h2>
+    <ul>
+      <li><b>Rust only, today.</b> The grammar table routes by file extension and currently
+        claims <code>.rs</code> alone; other languages are the tracked follow-up (#443), and a
+        new language is one <code>Grammar</code> impl plus one table row.</li>
+      <li><b>The map is a snapshot as of the last sync.</b> A mid-edit file may parse partially
+        until the next pass — <code>status</code> shows the gap, <code>watch</code> closes it
+        continuously.</li>
+      <li><b>Location and structure only.</b> No call graph, no type resolution — by design;
+        pair the map with grep and LSP tools rather than expecting it to replace them.</li>
+    </ul>
+  </section>
+
+</div>
+</main>
+</div>
+
+</body>
+</html>
