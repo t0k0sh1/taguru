@@ -103,7 +103,7 @@
    ├─ taguru.query                         <span class="c"># absent unless `labels` pins facets</span>
    ├─ taguru.activate
    ├─ taguru.citations                     <span class="c"># absent if fetch_citations=false</span>
-   │  └─ taguru.citation_missing (event)   <span class="c"># one aggregate event, not one per miss</span>
+   │  └─ taguru.skip (event)               <span class="c"># reason=citation_passage_missing — one aggregate event carrying the miss count, not one per miss</span>
    └─ taguru.passage_fallback              <span class="c"># absent unless the text lane actually ran</span>
       └─ taguru.passage_search             <span class="c"># same span search_passages emits directly</span>
          ├─ taguru.search.bm25
@@ -159,10 +159,14 @@
       across a fleet:
     </p>
     <ul>
-      <li><code>taguru.skip</code> — a planned step didn't run. Reasons include
-        <code>describe_disabled</code>, <code>no_anchors</code>, <code>labels_absent</code>,
-        <code>citations_disabled</code>, <code>fallback_not_requested</code>,
-        <code>fallback_suppressed</code>, <code>zero_limit</code>, <code>no_query_terms</code>.</li>
+      <li><code>taguru.skip</code> — a planned step didn't run (or, aggregated, partially
+        didn't). Reasons include <code>describe_disabled</code>, <code>no_anchors</code>,
+        <code>labels_absent</code>, <code>citations_disabled</code>,
+        <code>citation_passage_missing</code> (the aggregate citation-miss event; carries the
+        count as <code>taguru.citation.missing</code>), <code>budget_exhausted</code> (the
+        composed result outgrew <code>TAGURU_MCP_MAX_RESULT_BYTES</code> mid-loop),
+        <code>fallback_not_requested</code>, <code>fallback_suppressed</code>,
+        <code>zero_limit</code>, <code>no_query_terms</code>.</li>
       <li><code>taguru.degrade</code> — a step ran, but in a reduced form. Reasons are the
         <code>vector_*</code> outcomes above, prefixed the same way.</li>
       <li><code>taguru.cache</code> — a cache tier decided the result. Reasons include
@@ -216,7 +220,8 @@
     </ul>
     <p>
       Per-item data follows one rule: <b>default to aggregate, never one span or event per item</b>
-      — not one event per citation miss (<code>taguru.citation_missing</code> carries a count),
+      — not one event per citation miss (one <code>taguru.skip</code> event whose
+      <code>taguru.citation.missing</code> attribute carries the count),
       not one span per resolved cue, not a context <i>name</i> anywhere (only counts — consistent
       with <code>taguru_searches_total</code> not carrying a context label either). The one
       exception is a router's shard list: shard identifiers are operator-controlled configuration,

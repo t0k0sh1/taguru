@@ -2,21 +2,38 @@
 
 ## Building and testing
 
-Every change must pass the same three checks CI's `check` job runs,
+Every change must pass the same four checks CI's `check` job runs,
 in order:
 
 ```sh
 cargo fmt --check
 cargo clippy --all-targets --locked -- -D warnings
-cargo test --locked
+cargo nextest run --locked
+cargo test --doc --locked
 ```
 
 `--all-targets` reaches the examples too (`cargo test` alone never
 builds them); `-D warnings` holds the tree at its current zero-warning
-baseline. `cargo test --locked` runs the unit tests (lib, server, MCP
-bridge), the HTTP integration tests (which spawn the real binary on a
-free port), and the QA recall floor — all against the committed
-`Cargo.lock`.
+baseline. `cargo nextest run --locked` runs the unit tests (lib,
+server, MCP bridge), the HTTP integration tests (which spawn the real
+binary on a free port), and the QA recall floor — all against the
+committed `Cargo.lock`, in one parallel pool with per-test process
+isolation and a stall-killing slow timeout (`.config/nextest.toml`);
+plain `cargo test --locked` runs the same tests serially if you don't
+have nextest installed (`cargo install cargo-nextest`). The doctest
+step exists because nextest never runs doctests — the tree has none
+that execute today, but the step keeps a future one from silently
+dropping out of CI.
+
+Two mutation-testing gates also watch changes: per-PR,
+[.github/workflows/mutants-diff.yml](.github/workflows/mutants-diff.yml)
+counts the mutants your diff generates and (within its budget) runs
+them, reporting missed mutants as a sticky PR comment — non-blocking,
+but treat a missed mutant as a missing test, not noise. Bigger ground
+is covered by dispatched module sweeps
+([.github/workflows/mutants-sweep.yml](.github/workflows/mutants-sweep.yml)).
+Running the same diff-scoped check locally before pushing
+(`cargo mutants --in-diff <diff>`) turns the CI job into confirmation.
 
 ## SDK surface parity
 

@@ -8,6 +8,12 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- `taguru router` hot-reloads `TAGURU_ROUTE_MAP` (#515): SIGHUP swaps
+  the map at runtime (unix; an unreadable file logs a warning and the
+  map already serving stays in effect) and a content-digest file
+  watch picks up edits with no signal at all — keyring-style, no
+  restart. In-flight requests keep the one map snapshot they started
+  with, so a swap never mixes two maps inside one fan-out.
 - `POST /contexts/{name}/promote` and the `promote` MCP tool (#466
   S2, ADR 0018): graph-path memory promotion — the named scratch
   sources move into an established destination context as the
@@ -88,6 +94,49 @@ Entries that change an on-disk format or a response shape say so.
   not gated, mirroring `sdk/python-langchain`.
 
 ### Fixed
+- Full-code audit, first pass (#520): `POST /import`'s group-restore
+  timeout refusal now carries `integrity`/`durable_batches`
+  machine-readably, like the batch loop's own timeout always did
+  (additive response-shape change; a resuming importer no longer has
+  to parse the durable count out of the message on this one arm), and
+  a golden wire fixture now pins the `/import` refusal envelope.
+  `promote` refuses over 1,000 `sources` with `over_limit` like every
+  other list-shaped input — previously the one uncapped list, buying
+  per-id validation work proportional to attacker-chosen size.
+- Also #520: the embeddings reads (`GET /contexts/{name}/embeddings`,
+  semantic twins/resolve/explain) now hold the entry's tombstone
+  fence over their sidecar loads — racing a `DELETE` answers the same
+  404 the context endpoint gives, never a 200 assembled from unlinked
+  (or a successor generation's) sidecar files. Smaller: `benchmark
+  compare` drops end-before-start wall-clock samples and lets a
+  re-processed document's LAST `end` record supersede the first;
+  evalset `case_id` emptiness is trimmed like every other field's;
+  the passage ANN index no longer has a latent empty-store panic; a
+  replica lane's behind-age clears on a shipped seq at or below the
+  applied one.
+- Full-code audit, second pass (#522): the consolidation audit's
+  `contradiction.objects[].sources` no longer lists a source whose
+  own accumulated sum cancelled to exactly zero (the posture
+  `contested` already took) — **behavior change**: evidence rows and
+  the fingerprints built over them move for groups that carried such
+  a source; standing judgments on those fingerprints re-judge once.
+  `checks` gains the shared 1,000-item `over_limit` cap.
+- Also #522, replica correctness: a tailed context's in-memory meta
+  (pinned, description, revision bookkeeping) can no longer freeze
+  indefinitely when a per-request load wins the hydration race
+  against a failed tailer poll — the tailer now carries the refresh
+  debt across polls (recorded before the shared pass can fail) and
+  pays it on the next poll. `replica_refresh` also re-stats
+  `taguru_wal_bytes`/`taguru_passages_wal_bytes` (tailed copies never
+  pass through the writer's live byte accounting; a cold unpinned
+  context understated both indefinitely), zeroing only on `NotFound`.
+  The pre-v5 image migration compares its two summation orders under
+  a first-order rounding bound instead of exact f64 equality, so
+  regrouping noise no longer credits a phantom attribution that
+  `retract_source` can never remove. `taguru extract --source-id`
+  refuses whitespace-only ids like `--tag`; `search_passages`/
+  `explain_search` declare `minimum: 0` on `since`/`until` like their
+  sibling tools.
 - `POST /import?dry_run=true` now seeds each batch's checks with what
   the batches before it would intern and create, so two spurious
   mid-stream refusals the real import never raises are gone: an

@@ -274,7 +274,7 @@
     <h2>Shipping and sizing</h2>
     <ul>
       <li><b>The Docker image is one binary on <code>scratch</code></b>: statically linked with musl, ~13 MB. No shell, no libc, no CA bundle (TLS roots are baked into the binary). The HEALTHCHECK is <code>taguru health</code> — the binary's self-probe. uid 65532, <code>--read-only</code> capable.</li>
-      <li><b>Sizing is measured, not guessed</b>: <code>taguru estimate --associations 1_000_000</code> actually builds a context of the target size and <b>measures</b> it. For latency, <code>cargo run --release --example benchmark</code> (per-operation timings at 100k/1M records; each example under examples/ has its own README).</li>
+      <li><b>Sizing is measured, not guessed</b>: <code>taguru estimate --associations 1_000_000</code> actually builds a context of the target size and <b>measures</b> it — the shape knobs are <code>--concepts</code> (default associations/2), <code>--labels</code> (50), <code>--sources</code> (associations/20), <code>--name-bytes</code> (24, per interned name), <code>--embedding-dims</code> (0 = semantic tier off; 3072 = text-embedding-3-large), and <code>--passage-bytes</code> (0 = no registered passage text). For latency, <code>cargo run --release --example benchmark</code> (per-operation timings at 100k/1M records; each example under examples/ has its own README).</li>
     </ul>
     <p class="note">
       The primary sources for each decision are the module comments:

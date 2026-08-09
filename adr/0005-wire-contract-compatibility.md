@@ -52,8 +52,8 @@ isn't.
 | `GET /health`'s `version` | `src/metrics.rs:2080-2084` | `{"status":"ok","version":"…"}` (ADR 0002 §10, #244) — a bare JSON body, not the `ApiResponse` envelope |
 | `route`'s own `/health` | `src/route.rs:2475-2481` | the same field plus `{"router":true,"shards":N}` |
 | CLI skew warning | `src/remote.rs:400-467` | one `/health` read, compares `major.minor` only, never blocks; a bare `"ok"` body reads as a pre-0.5 server |
-| stable HTTP error code | `src/api.rs:100-183` | `ErrorCode`, 25 variants; its own doc comment already declares a rename "a breaking change… like a response-shape change" |
-| batch format | `src/ingest.rs:113,118` | `BATCH_VERSION`/`GROUP_VERSION` = 1, checked for **equality** |
+| stable HTTP error code | `src/api.rs` (`enum ErrorCode`; 25 variants at decision time, since grown) | its own doc comment already declares a rename "a breaking change… like a response-shape change" |
+| batch format | `src/ingest.rs` (`BATCH_VERSION`/`GROUP_VERSION`) | both = 1, checked for **equality** |
 | image format | `src/context/image.rs:51,219` | `IMAGE_VERSION` = 6, checked as a **range** `1..=6` |
 | communities artifact | `src/api/communities.rs:106` | `COMMUNITIES_FORMAT` = 1 |
 | MCP protocol version | `src/mcp/protocol.rs:11,114-124` | `["2024-11-05","2025-03-26","2025-06-18"]`; the client's requested version is echoed back only if supported, otherwise the newest supported version is substituted |
@@ -66,9 +66,9 @@ whichever one the reader has in mind (#220's own stated goal).
 
 ### 2.3 HTTP surface
 
-`fn routes()` (`src/main.rs:744-900`) is the server-mode route table: 47
-routes, including the four probes (`/health`, `/live`, `/metrics`,
-`/protocol`). `src/oauth_http.rs:37-57` adds six OAuth/discovery paths
+`fn routes()` (`src/main.rs`) is the server-mode route table: 47
+routes at decision time (since grown), including the four probes
+(`/health`, `/live`, `/metrics`, `/protocol`). `src/oauth_http.rs:37-57` adds six OAuth/discovery paths
 (`.well-known/oauth-protected-resource[/mcp]`,
 `.well-known/oauth-authorization-server`, `/oauth/register`,
 `/oauth/authorize`, `/oauth/token`), and `POST /mcp` dispatches into a clone
