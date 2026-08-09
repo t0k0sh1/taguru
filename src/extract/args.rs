@@ -528,6 +528,13 @@ pub(super) fn parse_date(text: &str) -> Option<u64> {
     if parts.next().is_some() {
         return None;
     }
+    // The year cap is what keeps the civil arithmetic in-domain: an
+    // i64-scale year overflows `era * 146097` before the round-trip
+    // below could refuse it, and a panic on external input is not a
+    // rejection. Four digits is also simply the YYYY-MM-DD contract.
+    if !(1..=9999).contains(&year) {
+        return None;
+    }
     if !(1..=12).contains(&month) {
         return None;
     }

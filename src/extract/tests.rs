@@ -3812,13 +3812,17 @@ fn manifests_rewrite_when_the_runbook_metadata_changes() {
         "b.md.jsonl",
     );
     let json = serde_json::to_string(&legacy).unwrap();
-    let reloaded: Manifest = serde_json::from_str(
-        &json
-            .replace(r#""source_id":"","#, "")
-            .replace(r#""date":0,"#, "")
-            .replace(r#""tags":[],"#, ""),
-    )
-    .unwrap();
+    let stripped = json
+        .replace(r#""source_id":"","#, "")
+        .replace(r#""date":0,"#, "")
+        .replace(r#""tags":[],"#, "");
+    // The replaces must actually have removed the fields — a silent
+    // no-match would leave all three in place and this test would
+    // "pass" without exercising the legacy shape at all.
+    for key in [r#""source_id""#, r#""date""#, r#""tags""#] {
+        assert!(!stripped.contains(key), "{key} survived in: {stripped}");
+    }
+    let reloaded: Manifest = serde_json::from_str(&stripped).unwrap();
     assert!(reloaded.matches(
         "b.md",
         "hash-2",
@@ -3911,4 +3915,12 @@ fn runbook_flag_boundaries_hold_exactly() {
     // arithmetic ever sees it.
     assert_eq!(parse_date("2026-08-06-07"), None);
     assert_eq!(parse_date("2026-08-00"), None);
+    // The year cap keeps the civil arithmetic in-domain: an i64-scale
+    // year would overflow inside days_from_civil (a panic on external
+    // input, not a rejection), and five digits is outside the
+    // YYYY-MM-DD contract anyway.
+    assert_eq!(parse_date("9223372036854775807-01-01"), None);
+    assert_eq!(parse_date("10000-01-01"), None);
+    assert_eq!(parse_date("0000-01-01"), None);
+    assert_eq!(parse_date("-0001-01-01"), None);
 }
