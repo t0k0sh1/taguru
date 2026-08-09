@@ -1,0 +1,25 @@
+{
+  "contract": "http_contract",
+  "method": "POST",
+  "operation": "import_refusal_durable_prefix",
+  "request": "{\"taguru_batch\": 1, \"context\": \"corpus-h\", \"source\": \"doc-1\", \"create\": {\"description\": \"wire-contract refusal corpus\"}}\n{\"subject\": \"alpha\", \"label\": \"connects_to\", \"object\": \"beta\", \"weight\": 1.0}\n{\"taguru_batch\": 1, \"context\": \"corpus-h\", \"source\": \"doc-2\"}\n{\"alias\": \"Alpha\", \"canonical\": \"存在しない\", \"kind\": \"concept\"}\n",
+  "response": {
+    "code": "conflict",
+    "durable_batches": 1,
+    "error": "batch 2 of 2 (context 'corpus-h', source 'doc-2') refused — the 1 batch(es) before it landed durably; fixing the stream and re-POSTing it whole is exact (each batch replaces its own source): concept alias 'Alpha' → '存在しない': the canonical spelling is not interned; nothing was applied",
+    "integrity": "durable_prefix",
+    "issues": [
+      {
+        "actual": "not present in this request",
+        "expected": "'存在しない' already interned as a concept or label this batch's associations use",
+        "kind": "unknown_reference",
+        "path": "batches[1].concepts['Alpha']"
+      }
+    ],
+    "retryable_after_correction": true,
+    "status": "error",
+    "time": 0.0
+  },
+  "route": "/import",
+  "status": 409
+}

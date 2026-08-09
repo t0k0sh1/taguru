@@ -48,6 +48,7 @@
       "shard_unreachable",
       "stale_cursor"
     ],
+    "response.integrity": ["nothing_written", "durable_prefix"],
     "response.result.events[].kind": [
       "associations_added",
       "association_retracted",

@@ -510,6 +510,13 @@ mod tests {
         metrics.note_replica_shipped("sake", "graph", 5);
         let cleared = metrics.replica_lag.lock()[&key].behind_since_epoch;
         assert_eq!(cleared, 0, "no gap, no age");
+        // Strictly below, not just equal — the caught-up arm is `>=`,
+        // and a regressed shipped seq (a successor lineage's lower
+        // watermark) must clear the age the same way.
+        metrics.note_replica_shipped("sake", "graph", 7);
+        metrics.note_replica_shipped("sake", "graph", 4);
+        let cleared_below = metrics.replica_lag.lock()[&key].behind_since_epoch;
+        assert_eq!(cleared_below, 0, "a lower shipped seq also clears the age");
     }
 
     /// The in-flight counter: a ceiling refuses at capacity, zero means
