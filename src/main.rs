@@ -804,6 +804,16 @@ fn routes(
     // permit while its expensive branch actually runs.
     let drift_audit_route = Router::new()
         .route("/contexts/{name}/drift/audit", post(api::audit_drift))
+        // Promote (ADR 0018) is a write bundle whose default epilogue
+        // is the full consolidation audit — heavy only in that branch
+        // (`audit: false` and dry runs never touch it), so it carries
+        // the limiter as an extension like `audit_drift` rather than
+        // gating the write half behind the unconditional ceiling. At
+        // the ceiling the audit DEGRADES (`audit_skipped:
+        // "overloaded"`) instead of shedding: the batches are already
+        // durable by audit time, and a 503 would hide a completed
+        // write.
+        .route("/contexts/{name}/promote", post(api::promote_sources))
         .route_layer(axum::Extension(heavy_ops_limiter));
 
     Router::new()
@@ -901,7 +911,6 @@ fn routes(
             "/contexts/{name}/sources/retract",
             post(api::retract_source),
         )
-        .route("/contexts/{name}/promote", post(api::promote_sources))
         .route("/contexts/{name}/citations", post(api::citation))
         .route("/contexts/{name}/embeddings", get(api::embeddings_status))
         .route(

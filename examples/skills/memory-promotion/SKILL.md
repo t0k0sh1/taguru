@@ -48,15 +48,16 @@ re-asserting within one note inflates weight — don't.
 2. **Graph path — one call when the structure is already right**
    (ADR 0018): when the keepers are the scratch's own structured
    associations (you wrote them during the session; there is no prose
-   left to extract), call the `promote` MCP tool on the scratch
-   context with `{into: PERMANENT, sources: [the session ids]}`. Each
-   source moves whole — passage, `date`, tags, only its own share of
-   every edge — source ids survive (citations still name the
-   session), re-promotion is idempotent, and the landing-zone audit
-   comes back in the same response: jump straight to step 5's
-   judgments, then step 6. `dry_run: true` previews with nothing
-   written. Steps 3–4 are the TEXT path, for keepers that exist as
-   prose.
+   left to extract), call the `promote` MCP tool with
+   `{context: scratch-{agent}, into: PERMANENT, sources: [the session
+   ids]}`. Each source moves whole — passage, `date`, tags, only its
+   own share of every edge — source ids survive (citations still name
+   the session), re-promotion is idempotent, and the landing-zone
+   audit comes back in the same response: jump straight to step 5's
+   judgments, then step 6. `dry_run: true` previews the same
+   `batches` shape with nothing written and NO audit (step 5's
+   judgments need a real apply). Steps 3–4 are the TEXT path, for
+   keepers that exist as prose.
 3. **Extract the keepers**: `taguru extract` over the session passages
    into import batches targeting the PERMANENT context —
    `--source-id session:{agent}:{id}`, `--date`, and `--tag` bake the

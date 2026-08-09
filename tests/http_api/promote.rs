@@ -570,6 +570,44 @@ fn an_export_stream_dry_runs_clean_when_aliases_trail_their_canonicals() {
     assert_eq!(status, 404, "the preview must create nothing");
 }
 
+/// The per-context half of the same preview fix: a stream can
+/// interleave contexts, and a name interned into a SIBLING context
+/// vouches for nothing — the real import refuses the alias, so the
+/// dry run must refuse it identically instead of letting the sibling's
+/// vocabulary leak across.
+#[test]
+fn a_cross_context_stream_does_not_let_sibling_vocabulary_vouch() {
+    let server = Server::start("promote-preview-contexts");
+    // alpha interns Foo; beta's alias names Foo without interning it.
+    let stream = concat!(
+        "{\"taguru_batch\": 1, \"context\": \"alpha\", \"source\": \"a.md\", ",
+        "\"create\": {\"description\": \"a\"}}\n",
+        "{\"subject\": \"Foo\", \"label\": \"関連\", \"object\": \"Bar\", \"weight\": 1.0}\n",
+        "{\"taguru_batch\": 1, \"context\": \"beta\", \"source\": \"b.md\", ",
+        "\"create\": {\"description\": \"b\"}}\n",
+        "{\"subject\": \"X\", \"label\": \"関連\", \"object\": \"Y\", \"weight\": 1.0}\n",
+        "{\"alias\": \"ふー\", \"canonical\": \"Foo\", \"kind\": \"concept\"}\n",
+    );
+
+    let (status, previewed) = server.call_raw(
+        "POST",
+        "/import?dry_run=true",
+        Some(stream),
+        Some("application/x-ndjson"),
+    );
+    assert_eq!(
+        status, 409,
+        "the preview must refuse exactly what the real import refuses: {previewed}"
+    );
+    let (status, refused) = server.call_raw(
+        "POST",
+        "/import",
+        Some(stream),
+        Some("application/x-ndjson"),
+    );
+    assert_eq!(status, 409, "{refused}");
+}
+
 /// The advertised MCP tool drives the same endpoint through `/mcp` —
 /// the runbook's graph path is reachable without leaving the agent's
 /// tool surface.

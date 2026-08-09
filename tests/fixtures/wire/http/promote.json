@@ -1,0 +1,57 @@
+{
+  "contract": "http_contract",
+  "method": "POST",
+  "operation": "promote",
+  "request": {
+    "into": "corpus-p",
+    "sources": [
+      "session:w:a"
+    ]
+  },
+  "response": {
+    "result": {
+      "aliases_dropped": 1,
+      "audit": {
+        "contradiction": {
+          "candidates": [],
+          "total": 0
+        },
+        "detector": "consolidation/1",
+        "merge": {
+          "candidates": [],
+          "semantic_note": "ベクトル未生成のため意味的検出はスキップ (POST embeddings/refresh を実行)",
+          "total": 0
+        },
+        "staleness": {
+          "candidates": [],
+          "total": 0,
+          "undatable": 0
+        }
+      },
+      "batches": [
+        {
+          "aliases": 1,
+          "association_paragraphs_dropped": 0,
+          "associations": 1,
+          "context": "corpus-p",
+          "created": false,
+          "locators_dropped": 0,
+          "locators_stored": 0,
+          "passage_dropped": false,
+          "passage_stored": true,
+          "questions_dropped": 0,
+          "questions_stored": 0,
+          "retracted": 0,
+          "schema_violations": 0,
+          "sections_dropped": 0,
+          "sections_stored": 0,
+          "source": "session:w:a"
+        }
+      ]
+    },
+    "status": "ok",
+    "time": 0.0
+  },
+  "route": "/contexts/{name}/promote",
+  "status": 200
+}

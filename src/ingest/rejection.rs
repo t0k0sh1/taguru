@@ -271,17 +271,22 @@ fn predicted_alias_rejection(
     if batch.concepts.is_empty() && batch.labels.is_empty() {
         return None;
     }
+    // Only THIS context's seeds may vouch for a canonical: a stream
+    // can interleave contexts, and a name an earlier batch interned
+    // into a sibling context proves nothing about this one — the real
+    // apply would still refuse `UnknownCanonical` here.
+    let seeded = seeds.and_then(|seeds| seeds.interned_in(&batch.context));
     let concepts = batch
         .associations
         .iter()
         .flat_map(|op| [op.subject.as_str(), op.object.as_str()])
         .chain(
-            seeds
+            seeded
                 .into_iter()
                 .flat_map(|seeds| seeds.concepts.iter().map(String::as_str)),
         );
     let labels = batch.associations.iter().map(|op| op.label.as_str()).chain(
-        seeds
+        seeded
             .into_iter()
             .flat_map(|seeds| seeds.labels.iter().map(String::as_str)),
     );
@@ -322,39 +327,53 @@ fn predicted_alias_rejection(
 
 /// What earlier batches of the SAME previewed stream would intern —
 /// the dry run's stand-in for the batch-by-batch interning a real
-/// apply performs. Export puts every alias on the LAST batch while
-/// the canonicals are interned by earlier ones, so without this a
-/// dry run of a stream the real import applies cleanly refuses with
-/// a spurious `UnknownCanonical` — breaking "a dry run refuses
-/// exactly what the real import would". Cross-batch alias CONFLICTS
-/// remain un-predicted (a preview holds no simulated alias table);
-/// that gap only lets a preview pass what the real run would refuse,
-/// the same advisory direction as the capacity caps.
+/// apply performs, kept PER CONTEXT because a stream can interleave
+/// contexts and interning is per context. Export puts every alias on
+/// the LAST batch while the canonicals are interned by earlier ones,
+/// so without this a dry run of a stream the real import applies
+/// cleanly refuses with a spurious `UnknownCanonical` — breaking "a
+/// dry run refuses exactly what the real import would". Cross-batch
+/// alias CONFLICTS remain un-predicted (a preview holds no simulated
+/// alias table); that gap only lets a preview pass what the real run
+/// would refuse, the same advisory direction as the capacity caps.
 #[derive(Default)]
 pub(crate) struct PreviewSeeds {
+    /// Context → what this stream's earlier batches intern there. A
+    /// context's PRESENCE also stands in for its creation: a
+    /// restore's create block rides only the FIRST batch, so without
+    /// it every later batch of a fresh-name restore previews a
+    /// spurious `NoContext` the real import (whose first batch
+    /// actually creates) never raises.
+    contexts: BTreeMap<String, ContextSeeds>,
+}
+
+/// One context's share of a [`PreviewSeeds`]: the names its earlier
+/// batches would intern.
+#[derive(Default)]
+pub(crate) struct ContextSeeds {
     concepts: BTreeSet<String>,
     labels: BTreeSet<String>,
-    /// Contexts earlier batches of this stream reach — a restore's
-    /// create block rides only the FIRST batch, so without this every
-    /// later batch of a fresh-name restore previews a spurious
-    /// `NoContext` the real import (whose first batch actually
-    /// creates) never raises.
-    contexts: BTreeSet<String>,
 }
 
 impl PreviewSeeds {
     /// Records what `batch` would intern once applied — call after the
     /// batch previews clean, before the next batch previews.
     pub(crate) fn absorb(&mut self, batch: &Batch) {
-        self.concepts.extend(batch.concept_vocabulary());
-        self.labels.extend(batch.label_vocabulary());
-        self.contexts.insert(batch.context.clone());
+        let seeds = self.contexts.entry(batch.context.clone()).or_default();
+        seeds.concepts.extend(batch.concept_vocabulary());
+        seeds.labels.extend(batch.label_vocabulary());
     }
 
     /// Whether an earlier batch of this previewed stream already
     /// landed in `context` — creating it if it did not exist.
     fn reaches(&self, context: &str) -> bool {
-        self.contexts.contains(context)
+        self.contexts.contains_key(context)
+    }
+
+    /// What this stream's earlier batches intern in `context` — and
+    /// ONLY there; a sibling context's names never vouch here.
+    fn interned_in(&self, context: &str) -> Option<&ContextSeeds> {
+        self.contexts.get(context)
     }
 }
 

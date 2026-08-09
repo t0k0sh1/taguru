@@ -1131,6 +1131,89 @@ fn shapes_required_request_fields_are_present_in_every_matching_fixture() {
     }
 }
 
+// --- HTTP: graph-path promotion (#466 S2, ADR 0018) ---
+
+/// A fully-dated promotion corpus, one source promoted and one left
+/// behind — so the pinned response shows the alias accounting and an
+/// all-sections audit without a wall-clock value anywhere (the audit
+/// sections come back empty on this tiny corpus; their SHAPE is what
+/// the fixture pins).
+#[test]
+fn promote_applies_and_a_dry_run_previews() {
+    let server = Server::start("contract-promote");
+    server.ok(
+        "PUT",
+        "/contexts/scratch-w",
+        Some(json!({"description": "wire-contract session notes"})),
+    );
+    server.ok(
+        "PUT",
+        "/contexts/corpus-p",
+        Some(json!({"description": "wire-contract permanent corpus"})),
+    );
+    server.ok(
+        "POST",
+        "/contexts/scratch-w/associations",
+        Some(json!([
+            {"subject": "蔵", "label": "杜氏", "object": "高瀬", "weight": 1.0,
+             "source": "session:w:a", "paragraph": 0},
+            {"subject": "蔵", "label": "銘柄", "object": "青嶺", "weight": 1.0,
+             "source": "session:w:stay"},
+        ])),
+    );
+    server.ok(
+        "POST",
+        "/contexts/scratch-w/sources",
+        Some(json!({
+            "passages": {"session:w:a": "蔵の杜氏は高瀬。"},
+            "dates": {"session:w:a": 1000},
+            "tags": {"session:w:a": ["酒"]}
+        })),
+    );
+    server.ok(
+        "POST",
+        "/contexts/scratch-w/aliases",
+        Some(json!({"concepts": {"たかせ": "高瀬", "あおみね": "青嶺"}})),
+    );
+
+    let request = json!({"into": "corpus-p", "sources": ["session:w:a"]});
+    let (status, body) = server.call(
+        "POST",
+        "/contexts/scratch-w/promote?dry_run=true",
+        Some(request.clone()),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        body["result"].get("audit").is_none() && body["result"].get("audit_skipped").is_none(),
+        "a dry run omits the audit half entirely: {body}"
+    );
+    http_fixture(
+        "promote_dry_run",
+        "POST",
+        "/contexts/{name}/promote?dry_run=true",
+        Some(request.clone()),
+        status,
+        body,
+    );
+
+    let (status, body) = server.call("POST", "/contexts/scratch-w/promote", Some(request.clone()));
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["result"]["aliases_dropped"], json!(1), "{body}");
+    assert_eq!(
+        body["result"]["audit"]["detector"],
+        json!("consolidation/1"),
+        "{body}"
+    );
+    http_fixture(
+        "promote",
+        "POST",
+        "/contexts/{name}/promote",
+        Some(request),
+        status,
+        body,
+    );
+}
+
 // --- HTTP + MCP: consolidation audit (ADR 0012) ---
 
 /// A fully-dated seed — every effective time explicit, so the pinned

@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use taguru::deadline::Deadline;
 
+use crate::limits::HeavyOpsLimiter;
 use crate::metrics::ErrorKind;
 use crate::registry::{AccessError, AppState};
 
@@ -75,20 +76,25 @@ pub struct PromoteOutcome {
     /// could not run (`audit_skipped` says why).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub audit: Option<ConsolidationAudit>,
-    /// Why `audit` is absent when it was supposed to run — the writes
-    /// above are already durable by audit time, so an audit failure
-    /// degrades to this note instead of failing a request whose
-    /// batches landed. `audit_consolidation` re-runs it standalone.
+    /// Why `audit` is absent when it was supposed to run
+    /// (`"overloaded"` — the heavy-ops ceiling, `"deadline_exceeded"`,
+    /// `"no_context"`, `"metadata_unreadable"`, `"unavailable"`) — the
+    /// writes above are already durable by audit time, so an audit
+    /// failure degrades to this note instead of failing a request
+    /// whose batches landed. `audit_consolidation` re-runs it
+    /// standalone.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub audit_skipped: Option<&'static str>,
 }
 
+#[allow(clippy::too_many_arguments)] // one axum extractor per concern; the router supplies them all
 pub async fn promote_sources(
     State(state): State<AppState>,
     AppPath(name): AppPath<String>,
     key: Option<axum::Extension<crate::auth::AuthKey>>,
     scope: Option<axum::Extension<crate::auth::KeyScope>>,
     axum::Extension(deadline): axum::Extension<Deadline>,
+    axum::Extension(heavy_ops): axum::Extension<HeavyOpsLimiter>,
     AppQuery(query): AppQuery<PromoteQuery>,
     AppJson(request): AppJson<PromoteRequest>,
 ) -> Response {
@@ -361,12 +367,23 @@ pub async fn promote_sources(
     // applying judgments stay ordinary follow-up calls. By this point
     // every batch above is durable, so an audit failure degrades to
     // `audit_skipped` instead of failing a request that already wrote.
+    // The audit is the request's only heavy half (ADR 0012 §8: every
+    // consolidation section is O(edges) or worse), so it alone spends
+    // a heavy-ops permit — `audit_drift`'s conditional pattern — held
+    // for the whole `landing_audit` call; at the ceiling it degrades
+    // (`"overloaded"`) rather than shedding the completed write.
     let (audit, audit_skipped) = if query.dry_run || !request.audit.unwrap_or(true) {
         (None, None)
     } else {
-        match tokio::task::block_in_place(|| landing_audit(&state, &request.into, deadline)) {
-            Ok(audit) => (Some(audit), None),
-            Err(reason) => (None, Some(reason)),
+        match heavy_ops.try_acquire() {
+            Err(_shed) => (None, Some("overloaded")),
+            Ok(_permit) => {
+                match tokio::task::block_in_place(|| landing_audit(&state, &request.into, deadline))
+                {
+                    Ok(audit) => (Some(audit), None),
+                    Err(reason) => (None, Some(reason)),
+                }
+            }
         }
     };
     ok_with_issues_total(

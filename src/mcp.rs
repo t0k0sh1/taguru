@@ -230,6 +230,18 @@ mod tests {
             ),
             Err("missing required argument 'sources'".to_string())
         );
+
+        // The advertised schema matches the handler's own refusal of
+        // an empty list: schema-validating hosts stop `[]` client-side
+        // instead of paying a round trip for the same refusal.
+        let promote = tool_definitions()
+            .into_iter()
+            .find(|tool| tool["name"] == "promote")
+            .expect("promote is advertised");
+        assert_eq!(
+            promote["inputSchema"]["properties"]["sources"]["minItems"],
+            json!(1)
+        );
     }
 
     #[test]
