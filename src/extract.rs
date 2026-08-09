@@ -158,6 +158,8 @@ use vocabulary::{ContextVocabulary, context_names_block, load_vocabulary};
 #[cfg(test)]
 use aggregate::{cross_output_issues, schema_output_issues};
 #[cfg(test)]
+use args::parse_date;
+#[cfg(test)]
 use candidates::{CANDIDATE_CAP, CANDIDATE_MAX_BYTES};
 #[cfg(test)]
 use chat_client::build_chat_body;
@@ -183,6 +185,7 @@ usage: taguru extract [--dry-run] [--force] [--no-passage] [--questions N]
                       [--structured-output MODE] [--max-output-tokens N]
                       [--lossy] [--candidates] [--vocabulary PATH] [--coverage]
                       [--diagnostics-out FILE] [--schema FILE]
+                      [--source-id ID] [--date WHEN] [--tag TAG]...
                       --context NAME [--description TEXT] --out DIR FILE|DIR...
 
 Reads documents (.md/.txt; a directory expands to its files, sorted by
@@ -280,6 +283,21 @@ chat endpoint:
                       across runs. Default (unset): no sidecar, stdout/
                       stderr unchanged. Ignored under --dry-run, which
                       calls nothing to record.
+  --source-id ID      write ID as the batch header's source instead of the
+                      document path — the promotion runbook's
+                      session:{agent}:{id} convention (docs/promotion.html).
+                      With several documents, each gets ID/{file stem}; two
+                      documents landing on one source id is an error (import
+                      retracts-then-applies per source id). Changing it
+                      rewrites the batch but reuses cached chunk answers
+  --date WHEN         the session's own date, written on the batch's passage
+                      line (the assertion time windowed reads and the
+                      staleness audit run on): YYYY-MM-DD (UTC midnight) or
+                      positive epoch seconds. Needs the passage
+  --tag TAG           tag the batch's source (repeatable, deduplicated) —
+                      written on the passage line; how a later session finds
+                      its trail via passage search's tags filter. Needs the
+                      passage
   --context NAME      the context every batch file targets
   --description TEXT  add a create block (used only if the context is absent)
   --schema FILE       the target context's schema document (same shape as
@@ -718,6 +736,11 @@ pub fn run(args: &[String]) -> i32 {
             .as_ref()
             .map(|vocabulary| vocabulary.labels.clone())
             .unwrap_or_default(),
+        source_id: args.source_id,
+        date: args.date,
+        tags: args.tags,
+        multi_document: files.len() > 1,
+        claimed_source_ids: BTreeMap::new(),
         claimed: BTreeMap::new(),
         parallel,
         lossy,

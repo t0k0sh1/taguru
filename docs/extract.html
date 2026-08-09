@@ -163,6 +163,18 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
                     usage, latency, parse/validation issues), one per
                     document written (association/alias/duplicate/dropped/
                     uncovered counts); off by default, ignored under --dry-run
+--source-id ID      write ID as the batch header's source instead of the
+                    document path — the promotion runbook's
+                    session:{agent}:{id} convention; several documents each
+                    get ID/{file stem}, and a collision fails (import
+                    retracts-then-applies per source id). Changing it
+                    rewrites the batch but reuses cached chunk answers
+                    (ADR 0017)
+--date WHEN         the session's own date, written on the passage line:
+                    YYYY-MM-DD (UTC midnight) or positive epoch seconds;
+                    needs the passage
+--tag TAG           tag the batch's source (repeatable, deduplicated),
+                    written on the passage line; needs the passage
 --context NAME      the context every batch file targets
 --description TEXT  attach a create block (used only when the context is absent)
 --schema FILE       a context schema document (see below) — the same shape
