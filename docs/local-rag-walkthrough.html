@@ -191,15 +191,15 @@ services:
     <h2>Pin every layer to the same minor version</h2>
     <p class="section-sub">Server, SDK, and <code>langchain-taguru</code> ship from one repository in lockstep — read all three before trusting a shape.</p>
     <pre><code><span class="c"># the running server answers its own pin</span>
-curl -s localhost:8248/version   <span class="c"># {"server":"0.8.0","http_contract":1,"mcp_contract":1,...}</span>
-grep <span class="s">'image:'</span> deploy/docker-compose.yml   <span class="c"># ghcr.io/t0k0sh1/taguru:0.8.0 — the deployed pin</span>
+curl -s localhost:8248/version   <span class="c"># {"server":"0.9.0","http_contract":1,"mcp_contract":1,...}</span>
+grep <span class="s">'image:'</span> deploy/docker-compose.yml   <span class="c"># ghcr.io/t0k0sh1/taguru:0.9.0 — the deployed pin</span>
 
 <span class="c"># pin the Python side to the matching minor</span>
-pip install <span class="s">'taguru==0.8.*'</span> <span class="s">'langchain-taguru==0.8.*'</span>
+pip install <span class="s">'taguru==0.9.*'</span> <span class="s">'langchain-taguru==0.9.*'</span>
 
 <span class="c"># fail loudly at startup rather than silently on the first odd response shape</span>
 python -c <span class="s">"import taguru, taguru_langchain as tl; \
-assert taguru.__version__.startswith('0.8.') and tl.__version__.startswith('0.8.'); \
+assert taguru.__version__.startswith('0.9.') and tl.__version__.startswith('0.9.'); \
 print(taguru.__version__, tl.__version__)"</span></code></pre>
     <p>
       <code>GET /version</code> also names the wire-contract versions
@@ -207,7 +207,7 @@ print(taguru.__version__, tl.__version__)"</span></code></pre>
       and it answers without auth — the first probe when versions are in doubt. The same build
       identity rides <code>/metrics</code> too:
       <code>curl -s localhost:8248/metrics | grep taguru_build_info</code>. Full triage for a
-      mismatch (a 0.7.x client against a 0.8.x server, or the reverse) is
+      mismatch (a 0.8.x client against a 0.9.x server, or the reverse) is
       <a href="troubleshooting.html#compatibility">Troubleshooting — version skew</a>.
     </p>
   </section>
