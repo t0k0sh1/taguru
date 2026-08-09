@@ -66,7 +66,7 @@ resources:
   - ../deploy/kustomize/base        # path from YOUR repo to this one
 images:
   - name: ghcr.io/t0k0sh1/taguru
-    newTag: "0.8.0"                 # releases move the in-repo pin; you can too
+    newTag: "0.9.0"                 # releases move the in-repo pin; you can too
     # digest: "sha256:…"           # from `cosign verify` — a digest pin is a
     #                              # guarantee where a tag pin is a convention
     #                              # (../README.md has the how and the why)

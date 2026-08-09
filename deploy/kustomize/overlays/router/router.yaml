@@ -38,7 +38,7 @@ spec:
       terminationGracePeriodSeconds: 35
       containers:
         - name: taguru
-          image: ghcr.io/t0k0sh1/taguru:0.8.0 # pin; `latest` moves
+          image: ghcr.io/t0k0sh1/taguru:0.9.0 # pin; `latest` moves
           args: ["router"]
           ports:
             - containerPort: 8248
