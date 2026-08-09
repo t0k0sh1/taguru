@@ -8,6 +8,25 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- `POST /contexts/{name}/promote` and the `promote` MCP tool (#466
+  S2, ADR 0018): graph-path memory promotion — the named scratch
+  sources move into an established destination context as the
+  export/import round trip in one call, no LLM anywhere in the path.
+  Each source moves whole (passage, `date`, tags, only its own share
+  of every edge's weight; aliases exactly when their canonical is
+  live in the promoted slice, the rest counted in `aliases_dropped`),
+  source ids survive so promoted citations still name the session,
+  and applying is per-source retract-then-apply — re-promotion is
+  idempotent. The destination is never created and its own schema
+  judges the incoming batches; a missing source id refuses the whole
+  request path-addressed. After a real apply the destination's
+  consolidation audit (all three checks, default ceilings) rides back
+  under `audit` — candidates to judge, never applied — and
+  `?dry_run=true` previews the same `batches` shape with nothing
+  written. Write role, `retract_source`'s classification; the
+  destination named in the body is scope-checked like `/import`'s
+  body contexts.
+
 - `taguru extract --source-id ID`, `--date WHEN`, `--tag TAG` (#466
   S1, ADR 0017): bake the promotion runbook's source conventions into
   the written batch — the `session:{agent}:{id}` header source (with
@@ -69,6 +88,16 @@ Entries that change an on-disk format or a response shape say so.
   not gated, mirroring `sdk/python-langchain`.
 
 ### Fixed
+- `POST /import?dry_run=true` now seeds each batch's checks with what
+  the batches before it would intern and create, so two spurious
+  mid-stream refusals the real import never raises are gone: an
+  `UnknownCanonical` alias rejection when a stream's aliases trail
+  their canonicals (every export — aliases ride the last batch), and
+  a `no_context` refusal on every post-first batch of a restore into
+  a fresh context name (the create block rides only the first batch).
+  Cross-batch alias conflicts remain un-predicted — that direction
+  only lets a preview pass what the real run would refuse, like the
+  capacity caps the preview contract already documents as advisory.
 - TypeScript SDK: ported the Python SDK hardening that had not reached
   the TypeScript twin — `contexts.delete`/`groups.delete` no longer
   auto-retry after an ambiguous transport failure (the retry turned an

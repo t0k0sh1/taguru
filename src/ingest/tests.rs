@@ -1154,7 +1154,7 @@ fn apply_and_preview_agree_that_a_replaced_passage_is_not_dropped() {
     )
     .unwrap();
 
-    let previewed = preview_batch(&state, &reimport).unwrap();
+    let previewed = preview_batch(&state, &reimport, &PreviewSeeds::default()).unwrap();
     assert!(
         !previewed.passage_dropped,
         "preview: a replacement passage was carried, so nothing was dropped"

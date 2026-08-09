@@ -62,6 +62,15 @@ impl Batch {
         self.associations.len() + self.concepts.len() + self.labels.len()
     }
 
+    /// Drops the header's create block. The promote verb (ADR 0018)
+    /// strips it from every batch of its re-headed stream so a
+    /// destination deleted mid-request refuses (`NoContext`) instead
+    /// of being resurrected under the scratch's meta — promotion lands
+    /// in an established context, never mints one.
+    pub(crate) fn strip_create(&mut self) {
+        self.create = None;
+    }
+
     /// Whether applying this batch can grow the context: any passage
     /// or graph payload counts (questions/sections/locators ride the
     /// passage).

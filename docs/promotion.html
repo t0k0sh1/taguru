@@ -113,6 +113,20 @@
       <li><b>Review</b> the scratch context: <code>recall</code>/<code>query</code>, or
         <code>taguru communities --context scratch-…</code> for a themed overview once the
         scratch has grown.</li>
+      <li><b>Graph path — one call when the structure is already right</b> (ADR 0018):
+        when the keepers are the scratch's own structured associations (written by the
+        session itself, nothing left to extract), the <code>promote</code> MCP tool
+        (<code>POST /contexts/{scratch}/promote</code> — <code>{into, sources}</code>)
+        bundles steps 4–5: each named source moves whole — passage, <code>date</code>,
+        tags, and only its <em>own</em> share of every edge's weight — with no LLM
+        anywhere in the path. Source ids survive, so promoted citations still name the
+        session; per-source retract-then-apply makes re-promotion idempotent; the
+        destination must already exist and its own schema judges the incoming batches;
+        the landing-zone audit rides back in the response, and <code>dry_run</code>
+        previews it all with nothing written. What stays yours is exactly the judgment:
+        which sources (step 1's review), the audit's candidates (step 5's rubric),
+        and retirement (step 6). Steps 3–4 below are the <b>text path</b>, needed only
+        when the keepers exist as prose that still wants extraction.</li>
       <li><b>Extract the keepers</b> with <code>taguru extract</code> over the session
         passages (or hand-write the batch), targeting the <b>permanent</b> context — keeping
         the <code>session:{agent}:{id}</code> source ids and the <code>date</code>s:
@@ -143,8 +157,9 @@
   <section>
     <h2 id="pitfalls">What not to do</h2>
     <ul>
-      <li>Don't promote into a fresh spelling universe — the resolve-first rule in step 2 is
-        what keeps one referent one spelling.</li>
+      <li>Don't promote into a fresh spelling universe — the resolve-first rule in step 3
+        (and, on the graph path, the landing-zone audit's merge candidates) is what keeps
+        one referent one spelling.</li>
       <li>Don't invent an end date for a superseded fact: assert the new fact with its own
         date; as-of queries (<code>until</code>) and the audit's dated rows sort the regimes
         out (ADR 0011 §6).</li>

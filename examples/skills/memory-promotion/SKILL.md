@@ -1,6 +1,6 @@
 ---
 name: memory-promotion
-description: "Promote session notes (episodic memory) into a permanent Taguru context (semantic memory): scratch-context conventions, the extract→import→audit→retract procedure, and the rules that keep provenance and time intact. Use when ending a working session whose notes are worth keeping, or when asked to consolidate scratch knowledge."
+description: "Promote session notes (episodic memory) into a permanent Taguru context (semantic memory): scratch-context conventions, the one-call promote tool for already-structured scratch, the extract→import→audit→retract procedure for prose, and the rules that keep provenance and time intact. Use when ending a working session whose notes are worth keeping, or when asked to consolidate scratch knowledge."
 ---
 
 # memory-promotion
@@ -45,21 +45,36 @@ re-asserting within one note inflates weight — don't.
 1. **Review what the scratch holds**: `recall`/`query` the scratch
    context, or `taguru communities --context scratch-...` for a themed
    overview when the scratch has grown.
-2. **Extract the keepers**: `taguru extract` over the session passages
-   (or hand-write the batch) into import batches targeting the
-   PERMANENT context — keep the `session:{agent}:{id}` source ids and the
-   `date`s. Check spellings against the permanent context first
-   (`resolve` / `resolve_label`); reuse its vocabulary, never fork it.
-3. **Import**: `POST /import` / `taguru import` — retract-then-apply
+2. **Graph path — one call when the structure is already right**
+   (ADR 0018): when the keepers are the scratch's own structured
+   associations (you wrote them during the session; there is no prose
+   left to extract), call the `promote` MCP tool on the scratch
+   context with `{into: PERMANENT, sources: [the session ids]}`. Each
+   source moves whole — passage, `date`, tags, only its own share of
+   every edge — source ids survive (citations still name the
+   session), re-promotion is idempotent, and the landing-zone audit
+   comes back in the same response: jump straight to step 5's
+   judgments, then step 6. `dry_run: true` previews with nothing
+   written. Steps 3–4 are the TEXT path, for keepers that exist as
+   prose.
+3. **Extract the keepers**: `taguru extract` over the session passages
+   into import batches targeting the PERMANENT context —
+   `--source-id session:{agent}:{id}`, `--date`, and `--tag` bake the
+   conventions into the batch (ADR 0017); `--vocabulary` (over a
+   `taguru export` of the permanent context) steers spellings to the
+   ones the graph already uses, and `--coverage` reports what the
+   extraction left behind, sentence by sentence (ADR 0015/0016).
+4. **Import**: `POST /import` / `taguru import` — retract-then-apply
    per source, so re-promoting the same session is idempotent, not
    duplicated.
-4. **Audit the landing zone**: run the consolidation audit on the
-   permanent context (`taguru consolidation --context NAME`, or the
+5. **Audit the landing zone**: judge the consolidation audit on the
+   permanent context (bundled in `promote`'s response on the graph
+   path; standalone via `taguru consolidation --context NAME` or the
    `audit_consolidation` MCP tool) — promotion is exactly when merge
    twins and contradictions appear. Judgments are proposals; apply the
    accepted ones through ordinary writes (alias / retract / negative
    weight / re-import).
-5. **Retire the promoted scratch**: `retract_source` the promoted
+6. **Retire the promoted scratch**: `retract_source` the promoted
    session sources from the scratch context (or delete the whole
    scratch context when everything promoted). Unpromoted scratch stays
    until someone decides otherwise — that is the posture, not a gap.
@@ -67,7 +82,8 @@ re-asserting within one note inflates weight — don't.
 ## What NOT to do
 
 - Don't promote by copying text into a new spelling universe — step
-  2's resolve-first rule is what keeps one referent one spelling.
+  3's vocabulary steering (and, on the graph path, the audit's merge
+  candidates) is what keeps one referent one spelling.
 - Don't invent an end date for a superseded fact: assert the new fact
   with its own date and let as-of queries and the audit sort the
   regimes out (ADR 0011 §6).

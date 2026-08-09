@@ -901,6 +901,7 @@ fn routes(
             "/contexts/{name}/sources/retract",
             post(api::retract_source),
         )
+        .route("/contexts/{name}/promote", post(api::promote_sources))
         .route("/contexts/{name}/citations", post(api::citation))
         .route("/contexts/{name}/embeddings", get(api::embeddings_status))
         .route(

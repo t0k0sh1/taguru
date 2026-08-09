@@ -100,7 +100,9 @@ use remote::{expand, run_remote};
 use report::report;
 
 pub(crate) use model::{Batch, parse_batch, parse_stream, split_batches};
-pub(crate) use rejection::{AliasRejection, Applied, ApplyRefusal, apply_batch, preview_batch};
+pub(crate) use rejection::{
+    AliasRejection, Applied, ApplyRefusal, PreviewSeeds, apply_batch, preview_batch,
+};
 pub(crate) use report::init_logging;
 pub(crate) use schema_apply::{SchemaApplyError, apply_schema_record};
 

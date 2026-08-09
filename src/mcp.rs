@@ -63,7 +63,7 @@ mod tests {
             "name": "ctx", "context": "ctx", "cue": "x", "concept": "x",
             "origins": ["x"], "targets": ["y"], "associations": [], "passages": {},
             "sources": ["s"], "source": "s", "query": "q", "paragraph": 0,
-            "stream": "{}", "to": "ctx2", "expected": "x",
+            "stream": "{}", "to": "ctx2", "into": "ctx2", "expected": "x",
             "subject": "s", "label": "l", "object": "o",
             "checks": ["merge"],
             "schema": 1, "mode": "strict", "closed_labels": false,
@@ -192,6 +192,43 @@ mod tests {
                 &json!({"context": null, "contexts": null, "cue": "x"})
             ),
             Err(missing.to_string())
+        );
+    }
+
+    /// The promote tool (ADR 0018): `dry_run` rides the query string
+    /// like its `import`/`retract_source` siblings, the rest the body;
+    /// both required arguments refuse by name when omitted.
+    #[test]
+    fn promote_routes_with_dry_run_in_the_query_and_the_rest_in_the_body() {
+        let (method, path, body) = route_tool(
+            "promote",
+            &json!({
+                "context": "scratch-claude",
+                "into": "perm",
+                "sources": ["session:claude:a"],
+                "audit": false,
+                "dry_run": true
+            }),
+        )
+        .unwrap();
+        assert_eq!(method, "POST");
+        assert_eq!(path, "/contexts/scratch-claude/promote?dry_run=true");
+        let body = body.unwrap();
+        assert_eq!(body["into"], json!("perm"));
+        assert_eq!(body["sources"], json!(["session:claude:a"]));
+        assert_eq!(body["audit"], json!(false));
+        assert!(body.get("dry_run").is_none(), "{body}");
+
+        assert_eq!(
+            route_tool("promote", &json!({"context": "s", "sources": ["a"]})),
+            Err("missing required argument 'into'".to_string())
+        );
+        assert_eq!(
+            route_tool(
+                "promote",
+                &json!({"context": "s", "into": "p", "sources": null})
+            ),
+            Err("missing required argument 'sources'".to_string())
         );
     }
 
