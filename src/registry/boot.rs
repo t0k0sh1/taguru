@@ -302,7 +302,9 @@ fn remove_persisted_file_quietly(path: &Path, what: &str) {
     if let Err(error) = remove_persisted_file(path)
         && error.kind() != io::ErrorKind::NotFound
     {
-        tracing::warn!(path = %path.display(), %error, "{what}");
+        // Never a bare `error` field — see the same note on
+        // `rename_context`'s `Stuck` arm in `lifecycle.rs`.
+        tracing::warn!(path = %path.display(), removal_error = %error, "{what}");
     }
 }
 
@@ -355,11 +357,22 @@ fn scan_data_dir(
                 &renaming_marker_path(data_dir, &stem),
                 "unfinished deletion: stale rename marker still held",
             );
-            for stale in rename_markers_targeting(data_dir, &stem, "renaming") {
-                remove_persisted_file_quietly(
-                    &stale,
-                    "unfinished deletion: stale rename marker still held",
-                );
+            // `rename_markers_targeting` matches a marker's `to` field
+            // against the DECODED context name, not the file stem
+            // (`RenameMarker` is written from the names `rename_context`
+            // was called with, before `file_stem`'s percent-encoding) —
+            // `delete`'s own equivalent scan (`lifecycle.rs`) passes
+            // `name` for the same reason. A name that needed encoding
+            // would otherwise never match here, leaving its stale
+            // targeting marker behind for the next boot's resume to
+            // move a deleted family back to life.
+            if let Some(name) = name_from_stem(&stem) {
+                for stale in rename_markers_targeting(data_dir, &name, "renaming") {
+                    remove_persisted_file_quietly(
+                        &stale,
+                        "unfinished deletion: stale rename marker still held",
+                    );
+                }
             }
             // The marker goes last: it only leaves once the family did.
             if remove_persisted_file(&path).is_err() {
@@ -388,8 +401,23 @@ fn scan_data_dir(
             // reasoning. The returned undo token is dropped: unlike the
             // live path, a resume that fails here just leaves the
             // marker for the next boot to retry, no rollback needed.
+            //
+            // Logged (like `preload_pinned`'s own timing line) because
+            // this runs inside `scan_data_dir`, before the listener
+            // binds and while the data-directory lock is held: a
+            // permanently unreachable object turns every boot into a
+            // multi-round fetch-retry wait, once per stale marker, and
+            // an operator staring at a slow boot needs to see why.
             if let Some(hydrator) = hydrator {
-                hydrator.evict_stem(from_stem)?;
+                let hydrate_started = std::time::Instant::now();
+                let result = hydrator.evict_stem(from_stem);
+                tracing::info!(
+                    from_stem,
+                    ms = hydrate_started.elapsed().as_millis() as u64,
+                    ok = result.is_ok(),
+                    "boot resume: hydrated a renamed family before moving it"
+                );
+                result?;
             }
             move_context_files(data_dir, from_stem, to_stem)
         },
@@ -728,6 +756,51 @@ mod tests {
             state.directory_entry("beer").is_some(),
             "the untouched, unrelated source context must survive"
         );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Regression: the destination-targeting scan above must compare
+    /// against the DECODED context name, not the file stem —
+    /// `RenameMarker.to` is written from the name `rename_context` was
+    /// called with, before `file_stem`'s percent-encoding. A deleted
+    /// context whose name needed encoding (anything outside
+    /// `[A-Za-z0-9_-]`) previously never matched here, leaving its
+    /// stale targeting marker behind for the next boot's resume to
+    /// move a family onto a name that no longer exists.
+    #[test]
+    fn an_unfinished_deletion_clears_a_targeting_marker_whose_name_needed_encoding() {
+        let dir = scratch_dir("deleted-sweep-encoded-targeting-marker");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake!", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .create("beer", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+        }
+        fs::write(dir.join(format!("{}.deleted", file_stem("sake!"))), b"").unwrap();
+        fs::write(
+            renaming_marker_path(&dir, &file_stem("beer")),
+            serde_json::to_vec(&RenameMarker {
+                from: "beer".to_string(),
+                to: "sake!".to_string(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        assert!(state.directory_entry("sake!").is_none());
+        assert!(
+            !renaming_marker_path(&dir, &file_stem("beer")).exists(),
+            "the deletion sweep must clear a targeting marker even when \
+             the deleted context's name needed percent-encoding"
+        );
+        assert!(state.directory_entry("beer").is_some());
 
         let _ = fs::remove_dir_all(&dir);
     }

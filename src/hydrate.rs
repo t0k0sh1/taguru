@@ -1875,6 +1875,14 @@ mod tests {
         );
         assert!(!target.join("ctx_a.ctx").exists());
         assert!(state.directory_entry("ctx_b").is_some());
+        // `evict_stem`'s veto half, not just its hydrate half: the
+        // vacated source stem must not re-materialize. Same check as
+        // `an_unfinished_deletion_resume_vetoes_the_hydrator`'s.
+        hydrator.ensure_context("ctx_a").unwrap();
+        assert!(
+            !target.join("ctx_a.ctx").exists(),
+            "the source stem must stay vetoed, not resurrect from the bucket"
+        );
 
         let _ = std::fs::remove_dir_all(&bucket);
         let _ = std::fs::remove_dir_all(&writer);
@@ -2123,6 +2131,88 @@ mod tests {
             "the rollback must undo its veto back to Done, or this stem \
              was already Vetoed going in and retarget silently skips \
              reporting it as vanished"
+        );
+
+        let _ = std::fs::remove_dir_all(&bucket);
+        let _ = std::fs::remove_dir_all(&writer);
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    /// The opposite outcome of the same fixture, with a hydrator
+    /// attached: a rollback that cannot retract its own marker
+    /// (`RenameOutcome::Stuck`, `lifecycle.rs`'s own
+    /// `a_rollback_that_cannot_retract_its_marker_stays_stuck` covers
+    /// this WITHOUT a hydrator) must leave the veto standing, not undo
+    /// it — the marker's durable promise ("boot resumes this") and the
+    /// veto's own promise ("do not re-materialize this stem") must
+    /// stay consistent with each other.
+    ///
+    /// Proven the same way the RolledBack case above proves the
+    /// opposite: `retarget` only reports a stem as newly `vanished` the
+    /// FIRST time it disappears from the manifest — one already
+    /// `Vetoed` is skipped. Pre-warming the hydrate (landing "ctx_a"
+    /// and settling it at `Done` before the injector arms) makes
+    /// `rename_context_locked`'s own `ensure_context` call a free
+    /// no-op, so every persistence op from the marker write onward is
+    /// deterministic and countable — the same three ops
+    /// `a_rollback_that_cannot_retract_its_marker_stays_stuck` counts.
+    #[tokio::test]
+    async fn a_stuck_rollback_leaves_its_veto_in_place() {
+        let (bucket, writer) = shipped_bucket("rollback-veto-stuck", true).await;
+        let store = local_store(&bucket);
+        let root = ship::gen_root(&StorePath::default(), 1);
+        let manifest = ship::read_manifest(store.as_ref(), &root)
+            .await
+            .unwrap()
+            .unwrap();
+        let target = scratch("rollback-veto-stuck-target");
+
+        std::fs::create_dir_all(target.join("ctx_b.wal.jsonl")).unwrap();
+
+        let hydrator = Arc::new(Hydrator::new(
+            Arc::clone(&store),
+            1,
+            root.clone(),
+            target.clone(),
+            manifest,
+            LanePolicy::KeepAckedTail,
+        ));
+        hydrator.ensure_context("ctx_a").unwrap();
+
+        let state = AppState::boot_with(
+            target.clone(),
+            64 * 1024 * 1024,
+            None,
+            crate::registry::BootOptions {
+                hydrator: Some(Arc::clone(&hydrator)),
+                ..crate::registry::BootOptions::default()
+            },
+        )
+        .unwrap();
+
+        crate::storage::fail_persistence_ops_after(3);
+        let error = state.rename_context("ctx_a", "ctx_b").unwrap_err();
+        let past_end = crate::storage::clear_persistence_fault();
+        assert!(
+            !past_end,
+            "the marker retraction itself must be what failed: {error:?}"
+        );
+        assert!(
+            matches!(error, crate::registry::RenameContextError::Io(_)),
+            "{error:?}"
+        );
+        assert!(
+            crate::registry::renaming_marker_path(&target, "ctx_a").exists(),
+            "a stuck rollback must leave the marker in place"
+        );
+
+        let report = hydrator.retarget(2, root, Manifest::default());
+        assert!(
+            report.vanished.is_empty(),
+            "a Stuck rollback must leave the veto standing, not undo it — \
+             reporting \"ctx_a\" as newly vanished here would mean the \
+             veto was incorrectly undone, matching the RolledBack case \
+             instead of Stuck's"
         );
 
         let _ = std::fs::remove_dir_all(&bucket);

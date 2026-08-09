@@ -461,8 +461,14 @@ impl AppState {
             // eventual retraction) can resolve this, so both
             // reservations outlive this call.
             RenameOutcome::Stuck(error) => {
+                // Never a bare `?error`/`error` field: `tracing-opentelemetry`
+                // maps a field literally named `error` to an exception
+                // event and (by default) an ERROR span status — ADR 0008
+                // §2.5(a)/§7 calls this out as a live defect elsewhere in
+                // the tree, not a naming choice this call site gets to
+                // repeat.
                 tracing::error!(
-                    from = %from, to = %to, ?error,
+                    from = %from, to = %to, rename_error = ?error,
                     "context rename failed after the point of no return; both names \
                      stay reserved until the next restart resumes it from the \
                      .renaming marker"
@@ -683,8 +689,10 @@ impl AppState {
             Ok(()) => true,
             Err(io_error) if io_error.kind() == io::ErrorKind::NotFound => true,
             Err(marker_error) => {
+                // See the same note in `rename_context`'s `Stuck` arm:
+                // never a bare `?error`/`error` field.
                 tracing::error!(
-                    from_stem, %marker_error, ?error,
+                    from_stem, %marker_error, rename_error = ?error,
                     "rename rollback could not retract its marker; the source name and \
                      the hydrator veto both stay in place until the next boot resumes it"
                 );
