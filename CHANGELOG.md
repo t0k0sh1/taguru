@@ -225,6 +225,16 @@ Entries that change an on-disk format or a response shape say so.
   and the async graph lane fetches citations concurrently.
 
 ### Changed
+- SDK client tracing (Python and TypeScript): the aggregate
+  citation-miss telemetry is now the same event shape the server
+  emits — one `taguru.skip` event with
+  `taguru.reason=citation_passage_missing` and the count in
+  `taguru.citation.missing`, on the `taguru.citations` phase span —
+  instead of the SDK-only `taguru.citation_missing` event name
+  (**telemetry shape change**: a dashboard or alert filtering on the
+  old event name needs the new filter; one query now reads both
+  producers). `citation_passage_missing` joins the shared skip-reason
+  vocabulary in `sdk/spec/tracing.yaml`.
 - Python LangChain ingest checkpoints are now written as JSON Lines
   and appended per chunk (**on-disk format change**; files from older
   versions still load, and a torn trailing line from a crash is

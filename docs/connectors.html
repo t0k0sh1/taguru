@@ -222,9 +222,11 @@ print(report.to_dict())  <span class="c"># one JSON object: counts, duration_ms,
         <code>region_name</code>, and <code>profile_name</code>; <code>GCSObjectStore</code>'s is
         <code>project</code>; <code>AzureBlobObjectStore</code>'s are <code>account</code> (the
         account <i>name</i>) and <code>endpoint_url</code> — plus, on all three, a pre-built
-        <code>client</code> escape hatch for callers that construct the SDK client themselves
-        (the credential still lives in that client's own chain, never in a string parameter
-        here). None of the named knobs is credential material,
+        <code>client</code> escape hatch for callers that construct the SDK client themselves.
+        With <code>client</code>, credential configuration and custody are entirely the
+        caller's: whatever that client was built with is what runs, and the guarantees below
+        apply only to the internally-constructed path. None of the named knobs is credential
+        material,
         and there is deliberately no parameter any of the three could accept an access key, a
         service-account key, or a SAS token through. Credentials always come from the cloud's own
         chain — <code>boto3</code>'s (environment, shared config, an EC2/ECS/Lambda role, …),

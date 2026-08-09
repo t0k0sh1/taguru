@@ -58,16 +58,20 @@ skip_reasons:
   - no_anchors              # no cue resolved to an anchor; describe/query/activate all skipped
   - labels_absent           # anchors resolved, but labels=None; query skipped (activate still runs)
   - citations_disabled      # fetch_citations=False
+  - citation_passage_missing # the aggregate citation-miss (see below) — the one reason whose event rides the `taguru.citations` PHASE span, not the root
   - fallback_not_requested  # text_fallback_query=None
   - fallback_suppressed     # text_fallback_query set, but text_fallback_only_if_empty and associations were non-empty
 
 # Citation lookups that 404 (a locator pointing at a passage that was
-# never stored, or was retracted) fold into ONE aggregate event on the
-# `taguru.citations` phase span per call, never one event per miss — a
+# never stored, or was retracted) fold into ONE aggregate `taguru.skip`
+# event with `taguru.reason=citation_passage_missing` on the
+# `taguru.citations` phase span per call — the miss count rides the
+# `citation_missing_field` attribute below — never one event per miss: a
 # citation locator is caller-shaped, unbounded data, so per-item events
 # would defeat the same cardinality discipline ADR 0008 §5 applies
-# server-side.
-citation_missing_event: taguru.citation_missing
+# server-side. The server's own retrieve composition emits the identical
+# event shape (src/mcp/retrieve.rs), so one dashboard query reads both
+# producers.
 citation_missing_field: taguru.citation.missing
 
 # Every outbound HTTP request the client issues carries the currently

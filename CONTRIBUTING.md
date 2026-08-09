@@ -32,8 +32,11 @@ them, reporting missed mutants as a sticky PR comment — non-blocking,
 but treat a missed mutant as a missing test, not noise. Bigger ground
 is covered by dispatched module sweeps
 ([.github/workflows/mutants-sweep.yml](.github/workflows/mutants-sweep.yml)).
-Running the same diff-scoped check locally before pushing
-(`cargo mutants --in-diff <diff>`) turns the CI job into confirmation.
+Running the same diff-scoped check locally before pushing turns the
+CI job into confirmation — CI's own conditions are
+`cargo mutants --profile=mutants --in-diff <diff> --jobs 3`; locally,
+add `CARGO_INCREMENTAL=1` (the profile disables incremental for CI's
+disk budget, at 4× per-mutant rebuild cost on a dev machine).
 
 ## SDK surface parity
 

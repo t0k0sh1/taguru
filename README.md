@@ -328,7 +328,7 @@ load-bearing ones:
 | `TAGURU_TAKEOVER` | off | `1` (or `serve --take-over`) acknowledges deposing the bucket's newest writer while it still looks alive — starting a writer against a bucket IS the promotion act |
 | `TAGURU_REPLICA` | off | `1` (or `serve --replica`) serves the bucket lineage read-only, tailing it continuously: reads scale across replicas, writes answer 403 `read_only_replica` naming the writer, per-context lag on `/metrics` |
 | `TAGURU_WRITER_URL` | — | Where a replica's write-refusal points clients (the writer's base URL / LB name); unset = the refusal names only the bucket's fence holder |
-| `TAGURU_ROUTE_MAP` | — | `taguru router` only: the context→shard map file (`context = shard-url` per line, optional `* = shard-url` fallback); edits hot-reload via the file watch, or immediately on SIGHUP — no restart |
+| `TAGURU_ROUTE_MAP` | — | `taguru router` only: the context→shard map file (`context = shard-url` per line, optional `* = shard-url` fallback); edits hot-reload via the file watch, or immediately on SIGHUP (unix) — no restart |
 | `TAGURU_CACHE_BYTES` | 512 MiB | Resident budget for unpinned contexts (LRU eviction) |
 | `TAGURU_RETRIEVAL_CACHE_BYTES` | 32 MiB | Exact-match result cache for recall/query/passage search — an identical request against an unchanged corpus answers without re-running the search; invalidated by the revision counters (`0` = off) |
 | `TAGURU_SEMANTIC_CACHE_THRESHOLD` | unset (off) | Semantic tier over the exact cache, passage search only: a paraphrased query whose embedding cosine clears this floor (`[0,1]`; start at `0.94`) AND passes a negation/number/entity guard serves the equivalent earlier query's cached result. Needs the exact cache and `TAGURU_EMBED_PASSAGES` |

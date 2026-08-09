@@ -403,8 +403,11 @@ an invariant (ADR 0006 §12).
   `GET /.well-known/oauth-authorization-server`,
   `POST /oauth/register`, `GET/POST /oauth/authorize` (the consent
   page and its approval), and `POST /oauth/token` (code exchange and
-  refresh). Tokens minted here ride `Authorization: Bearer` exactly
-  like `TAGURU_API_TOKEN`'s.
+  refresh). These six paths join the auth-exempt list (a client must
+  reach them before it has a token), and a token minted here rides
+  `Authorization: Bearer` but opens `POST /mcp` ONLY — every other
+  route still requires `TAGURU_API_TOKEN` (or a keyring key); an
+  OAuth token presented elsewhere is a plain `401`.
 - Keys may carry a scope (`TAGURU_KEY_SCOPES`): a role — read (the
   retrieval loop) ⊂ write (+ the ingest loop, group create/update) ⊂
   admin (+ context and group deletion and renaming, `/import`,

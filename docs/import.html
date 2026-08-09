@@ -440,7 +440,10 @@ curl -X POST localhost:8248/import \
         <code>nothing_written</code>) and, for correctable streams,
         <code>retryable_after_correction: true</code>. An automated importer resumes by skipping
         the durable prefix, or re-POSTs the corrected stream whole — retract-then-apply makes
-        either exact. Timeouts (<code>408</code>, budget spent partway) carry the same fields.</li>
+        either exact. Timeouts (<code>408</code>, budget spent partway) carry
+        <code>integrity</code> and <code>durable_batches</code> too but omit
+        <code>retryable_after_correction</code> — there is nothing to correct; resume (or
+        re-POST as-is) with more budget.</li>
       <li>Embeddings are not refreshed within the request. With <code>TAGURU_EMBED_AUTO</code> on, they ride the next flush, same as live writes.</li>
     </ul>
     <p class="note warn">
