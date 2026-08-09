@@ -35,7 +35,8 @@ impl AppState {
         // server) would each cache and flush independently — last
         // writer wins, silently.
         let dir_lock = lock_data_dir(&data_dir)?;
-        let (mut registry, resumed_context_renames) = scan_data_dir(&data_dir)?;
+        let (mut registry, resumed_context_renames) =
+            scan_data_dir(&data_dir, options.hydrator.as_deref())?;
         // A lazy bucket boot: the manifest's contexts are real even
         // though their images are not local yet — register them cold
         // from the sidecar metas the shared hydration already landed,
@@ -100,26 +101,49 @@ impl AppState {
         // retry). See `ResumedRename` for why these must not be one
         // condition.
         for rename in &resumed_context_renames {
-            if rename.landed {
+            // `true` when there was nothing to rewrite (`!landed`): a
+            // marker resumed that far is still cleared by `complete`
+            // alone, same as before this field existed.
+            let membership_persisted = if rename.landed {
                 rename_in_membership(&data_dir, &mut groups, &rename.from, &rename.to, |record| {
                     &mut record.contexts
-                });
-            }
+                })
+            } else {
+                true
+            };
+            // Removing the marker unconditionally on `complete` — the
+            // move alone — is the bug `rename_in_membership`'s own doc
+            // warns about; see `retire_rename_marker`'s doc for why
+            // `complete` alone is not enough. Only reached once the
+            // move is complete: a straggler still needs the next boot
+            // to retry regardless of membership, so nothing runs here
+            // at all otherwise.
             if rename.complete {
-                let _ = fs::remove_file(renaming_marker_path(&data_dir, &file_stem(&rename.from)));
+                retire_rename_marker(
+                    &renaming_marker_path(&data_dir, &file_stem(&rename.from)),
+                    membership_persisted,
+                    &rename.from,
+                    &rename.to,
+                    "context rename's group membership rewrite",
+                );
             }
         }
         for rename in &resumed_group_renames {
-            if rename.landed {
+            let membership_persisted = if rename.landed {
                 rename_in_membership(&data_dir, &mut groups, &rename.from, &rename.to, |record| {
                     &mut record.groups
-                });
-            }
+                })
+            } else {
+                true
+            };
             if rename.complete {
-                let _ = fs::remove_file(groups::group_renaming_marker_path(
-                    &data_dir,
-                    &file_stem(&rename.from),
-                ));
+                retire_rename_marker(
+                    &groups::group_renaming_marker_path(&data_dir, &file_stem(&rename.from)),
+                    membership_persisted,
+                    &rename.from,
+                    &rename.to,
+                    "group rename's nesting rewrite",
+                );
             }
         }
         // Reconcile unconditionally: whatever put a dangling member, a
@@ -261,11 +285,37 @@ impl AppState {
     }
 }
 
+/// Unlinks `path`, warning only if the removal failed for a reason
+/// worth an operator's attention — `NotFound` just means nothing was
+/// there to begin with, the unremarkable common case every one of the
+/// `.deleted` resume sweep's removals expects on a healthy boot.
+/// Shared by the sweep's file, own-marker, and targeting-marker
+/// removals so the three cannot drift on wording or on which errors
+/// they consider worth a log line.
+///
+/// Which branch runs has no bearing on program behavior — both attempt
+/// the same unlink — so a mutated condition here can never be caught
+/// by a behavioral test; the difference is purely how noisy the logs
+/// are for the routine "no marker to begin with" case.
+#[mutants::skip]
+fn remove_persisted_file_quietly(path: &Path, what: &str) {
+    if let Err(error) = remove_persisted_file(path)
+        && error.kind() != io::ErrorKind::NotFound
+    {
+        // Never a bare `error` field — see the same note on
+        // `rename_context`'s `Stuck` arm in `lifecycle.rs`.
+        tracing::warn!(path = %path.display(), removal_error = %error, "{what}");
+    }
+}
+
 /// One boot-time pass over the data directory: crash leftovers of
 /// staged writes are deleted (never published, and nothing may linger
 /// as unbounded disk litter), and every context image found is
 /// registered cold, described by its sidecar snapshot.
-fn scan_data_dir(data_dir: &Path) -> io::Result<(BTreeMap<String, Arc<Entry>>, ResumedRenames)> {
+fn scan_data_dir(
+    data_dir: &Path,
+    hydrator: Option<&crate::hydrate::Hydrator>,
+) -> io::Result<(BTreeMap<String, Arc<Entry>>, ResumedRenames)> {
     // Unfinished deletions first: a `.deleted` marker means delete()
     // acknowledged the removal but could not unlink the whole family —
     // without this sweep, a surviving `.ctx` would RESURRECT a context
@@ -280,12 +330,48 @@ fn scan_data_dir(data_dir: &Path) -> io::Result<(BTreeMap<String, Arc<Entry>>, R
         {
             tracing::warn!(stem, "resuming an unfinished context deletion");
             let stem = stem.to_string();
+            // A lazy bucket boot: the bucket's copy of this family must
+            // not re-materialize after the unlinks below — the same
+            // veto `delete()` itself takes (`lifecycle.rs`'s own
+            // `AppState::delete`) before its unlink loop. Without this,
+            // `Hydrator::spawn_background_fill` could re-fetch a
+            // `Pending` stem this acknowledged delete is still tearing
+            // down, and the next boot would find a resurrected family
+            // sitting behind a marker that has not yet been removed.
+            if let Some(hydrator) = hydrator {
+                hydrator.veto(&stem);
+            }
             for file in context_files(&stem) {
-                let target = data_dir.join(file);
-                if let Err(error) = remove_persisted_file(&target)
-                    && error.kind() != io::ErrorKind::NotFound
-                {
-                    tracing::warn!(path = %target.display(), %error, "unfinished deletion: file still held");
+                remove_persisted_file_quietly(
+                    &data_dir.join(file),
+                    "unfinished deletion: file still held",
+                );
+            }
+            // A stuck rename naming this stem as its SOURCE or
+            // DESTINATION goes with the family too — the boot-time
+            // counterpart of `AppState::delete`'s own sweep (see that
+            // function's doc for why a survivor would otherwise have
+            // the rename-resume pass below try to move a family that
+            // no longer exists).
+            remove_persisted_file_quietly(
+                &renaming_marker_path(data_dir, &stem),
+                "unfinished deletion: stale rename marker still held",
+            );
+            // `rename_markers_targeting` matches a marker's `to` field
+            // against the DECODED context name, not the file stem
+            // (`RenameMarker` is written from the names `rename_context`
+            // was called with, before `file_stem`'s percent-encoding) —
+            // `delete`'s own equivalent scan (`lifecycle.rs`) passes
+            // `name` for the same reason. A name that needed encoding
+            // would otherwise never match here, leaving its stale
+            // targeting marker behind for the next boot's resume to
+            // move a deleted family back to life.
+            if let Some(name) = name_from_stem(&stem) {
+                for stale in rename_markers_targeting(data_dir, &name, "renaming") {
+                    remove_persisted_file_quietly(
+                        &stale,
+                        "unfinished deletion: stale rename marker still held",
+                    );
                 }
             }
             // The marker goes last: it only leaves once the family did.
@@ -307,10 +393,37 @@ fn scan_data_dir(data_dir: &Path) -> io::Result<(BTreeMap<String, Arc<Entry>>, R
         data_dir,
         "renaming",
         "context",
-        |from_stem, to_stem| move_context_files(data_dir, from_stem, to_stem),
+        |from_stem, to_stem| {
+            // `evict_stem` hydrates the family before vetoing its
+            // re-materialization — the same primitive the live path
+            // uses in `AppState::rename_context_locked` before moving
+            // files, so the two can never drift on the order or the
+            // reasoning. The returned undo token is dropped: unlike the
+            // live path, a resume that fails here just leaves the
+            // marker for the next boot to retry, no rollback needed.
+            //
+            // Logged (like `preload_pinned`'s own timing line) because
+            // this runs inside `scan_data_dir`, before the listener
+            // binds and while the data-directory lock is held: a
+            // permanently unreachable object turns every boot into a
+            // multi-round fetch-retry wait, once per stale marker, and
+            // an operator staring at a slow boot needs to see why.
+            if let Some(hydrator) = hydrator {
+                let hydrate_started = std::time::Instant::now();
+                let result = hydrator.evict_stem(from_stem);
+                tracing::info!(
+                    from_stem,
+                    ms = hydrate_started.elapsed().as_millis() as u64,
+                    ok = result.is_ok(),
+                    "boot resume: hydrated a renamed family before moving it"
+                );
+                result?;
+            }
+            move_context_files(data_dir, from_stem, to_stem)
+        },
         // The pivot is `.ctx` — its arrival is what lets the `.ctx` scan
         // below register the context under `to`.
-        |to_stem| data_dir.join(format!("{to_stem}.ctx")).exists(),
+        |to_stem| image_path(data_dir, to_stem).exists(),
     )?;
     let mut candidates: Vec<(String, String)> = Vec::new();
     let mut import_markers: Vec<PathBuf> = Vec::new();
@@ -517,6 +630,7 @@ fn reconcile_groups(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::paths::RenameMarker;
     use crate::registry::test_support::{assoc_op, loaded_map, scratch_dir};
 
     #[test]
@@ -577,6 +691,117 @@ mod tests {
             !dir.join("sake.deleted").exists(),
             "the marker leaves once the family did"
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The boot-time counterpart of `AppState::delete`'s own rename
+    /// marker sweep: a `.deleted` marker means the ORIGINAL `delete`
+    /// call died before finishing (this is what the resume above is
+    /// for), so it never had the chance to clear a stuck rename's
+    /// marker sitting at (or naming) this stem either. Boot's own
+    /// resume must do it, or a stale marker survives an acknowledged
+    /// deletion and has the NEXT boot try to move a family that no
+    /// longer exists onto a destination stem.
+    #[test]
+    fn an_unfinished_deletion_clears_stray_rename_markers_too() {
+        let dir = scratch_dir("deleted-sweep-rename-markers");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .create("beer", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+        }
+        // The crash-shaped state: `sake`'s own delete died mid-unlink
+        // (the marker survives), while it ALSO happens to sit at the
+        // source stem of one stuck rename (naming "shochu" as `to`) and
+        // the destination of another (from "beer"). Neither marker's
+        // family is this test's concern — only that both are gone once
+        // the deletion sweep finishes with "sake".
+        fs::write(dir.join("sake.deleted"), b"").unwrap();
+        fs::write(
+            renaming_marker_path(&dir, &file_stem("sake")),
+            serde_json::to_vec(&RenameMarker {
+                from: "sake".to_string(),
+                to: "shochu".to_string(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            renaming_marker_path(&dir, &file_stem("beer")),
+            serde_json::to_vec(&RenameMarker {
+                from: "beer".to_string(),
+                to: "sake".to_string(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        assert!(state.directory_entry("sake").is_none());
+        assert!(
+            !renaming_marker_path(&dir, &file_stem("sake")).exists(),
+            "the deletion sweep must clear a stuck rename marker at its own stem"
+        );
+        assert!(
+            !renaming_marker_path(&dir, &file_stem("beer")).exists(),
+            "the deletion sweep must clear a stuck rename marker naming it as destination"
+        );
+        assert!(
+            state.directory_entry("beer").is_some(),
+            "the untouched, unrelated source context must survive"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Regression: the destination-targeting scan above must compare
+    /// against the DECODED context name, not the file stem —
+    /// `RenameMarker.to` is written from the name `rename_context` was
+    /// called with, before `file_stem`'s percent-encoding. A deleted
+    /// context whose name needed encoding (anything outside
+    /// `[A-Za-z0-9_-]`) previously never matched here, leaving its
+    /// stale targeting marker behind for the next boot's resume to
+    /// move a family onto a name that no longer exists.
+    #[test]
+    fn an_unfinished_deletion_clears_a_targeting_marker_whose_name_needed_encoding() {
+        let dir = scratch_dir("deleted-sweep-encoded-targeting-marker");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake!", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .create("beer", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+        }
+        fs::write(dir.join(format!("{}.deleted", file_stem("sake!"))), b"").unwrap();
+        fs::write(
+            renaming_marker_path(&dir, &file_stem("beer")),
+            serde_json::to_vec(&RenameMarker {
+                from: "beer".to_string(),
+                to: "sake!".to_string(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        assert!(state.directory_entry("sake!").is_none());
+        assert!(
+            !renaming_marker_path(&dir, &file_stem("beer")).exists(),
+            "the deletion sweep must clear a targeting marker even when \
+             the deleted context's name needed percent-encoding"
+        );
+        assert!(state.directory_entry("beer").is_some());
+
         let _ = fs::remove_dir_all(&dir);
     }
 
