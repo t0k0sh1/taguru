@@ -1439,6 +1439,17 @@ impl PassageAnnIndex {
     /// index only ever costs recall, never correctness.
     fn build(store: &PassageVectorStore, deadline: Deadline) -> Self {
         let n = store.len();
+        // `centroid_count(0)` is still 1, so without this gate the
+        // seed row below would slice an empty `data` and panic —
+        // today's only caller sits behind the ANN threshold and can't
+        // pass 0 rows, but this function's contract shouldn't lean on
+        // that.
+        if n == 0 {
+            return Self {
+                centroids: Vec::new(),
+                lists: Vec::new(),
+            };
+        }
         let dim = store.dim.max(1);
         let target = Self::centroid_count(n);
         let row = |i: usize| -> &[f32] { &store.data[i * dim..i * dim + dim] };
@@ -2436,6 +2447,14 @@ mod tests {
         assert_eq!(PassageAnnIndex::centroid_count(1), 1);
         assert_eq!(PassageAnnIndex::centroid_count(100), 10);
         assert_eq!(PassageAnnIndex::centroid_count(PASSAGE_ANN_THRESHOLD), 100);
+    }
+
+    #[test]
+    fn passage_ann_index_build_on_an_empty_store_is_empty_not_a_panic() {
+        let store = synthetic_passage_store(0, 6);
+        let index = PassageAnnIndex::build(&store, Deadline::unbounded());
+        assert!(index.centroids.is_empty());
+        assert!(index.lists.is_empty());
     }
 
     #[test]

@@ -517,24 +517,32 @@ fn load_results(dir: &Path, manifest: &super::BenchManifest) -> Result<LoadedRes
                         Some("start") => {
                             starts.entry(document_id).or_insert(ts);
                         }
+                        // The mirror image: a re-processed document
+                        // logs a fresh `end`, and the LAST one is the
+                        // state the cell finished in — keeping the
+                        // first would freeze a superseded outcome
+                        // while the per-line counters move on.
                         Some("end") => {
-                            ends.entry(document_id).or_insert_with(|| DocumentEndRaw {
-                                ts,
-                                outcome: value
-                                    .get("outcome")
-                                    .and_then(Value::as_str)
-                                    .map(str::to_string),
-                                associations: value.get("associations").and_then(Value::as_u64),
-                                concepts: value.get("concepts").and_then(Value::as_u64),
-                                labels: value.get("labels").and_then(Value::as_u64),
-                                questions: value.get("questions").and_then(Value::as_u64),
-                                duplicates: value.get("duplicates").and_then(Value::as_u64),
-                                dropped: value.get("dropped").and_then(Value::as_u64),
-                                batch_path: value
-                                    .get("batch_path")
-                                    .and_then(Value::as_str)
-                                    .map(str::to_string),
-                            });
+                            ends.insert(
+                                document_id,
+                                DocumentEndRaw {
+                                    ts,
+                                    outcome: value
+                                        .get("outcome")
+                                        .and_then(Value::as_str)
+                                        .map(str::to_string),
+                                    associations: value.get("associations").and_then(Value::as_u64),
+                                    concepts: value.get("concepts").and_then(Value::as_u64),
+                                    labels: value.get("labels").and_then(Value::as_u64),
+                                    questions: value.get("questions").and_then(Value::as_u64),
+                                    duplicates: value.get("duplicates").and_then(Value::as_u64),
+                                    dropped: value.get("dropped").and_then(Value::as_u64),
+                                    batch_path: value
+                                        .get("batch_path")
+                                        .and_then(Value::as_str)
+                                        .map(str::to_string),
+                                },
+                            );
                         }
                         _ => {}
                     }
@@ -852,7 +860,11 @@ fn attempt_distribution_metrics(attempts: &[&AttemptRow]) -> MetricsMap {
 
 fn wall_seconds(doc: &DocRow) -> Option<f64> {
     match (doc.start_ts, doc.end_ts) {
-        (Some(start), Some(end)) => Some(end - start),
+        // An end stamped before its start (a clock stepped mid-run, a
+        // resumed log's mismatched records) is a broken sample, not a
+        // negative duration — dropped like the degenerate inputs the
+        // per-attempt metrics below refuse.
+        (Some(start), Some(end)) if end >= start => Some(end - start),
         _ => None,
     }
 }

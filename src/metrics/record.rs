@@ -464,9 +464,16 @@ impl Metrics {
         let mut lag = self.replica_lag.lock();
         let entry = lag.entry((context.to_string(), lane)).or_default();
         entry.shipped_seq = shipped_seq;
-        if entry.applied_seq < shipped_seq && entry.behind_since_epoch == 0 {
-            entry.behind_since_epoch = Self::unix_now();
-        }
+        // Same three-way move as `note_replica_lane`: today shipped
+        // seqs only grow within a lineage, so the caught-up arm can't
+        // fire here — but the reset must not silently depend on that.
+        entry.behind_since_epoch = if entry.applied_seq >= shipped_seq {
+            0
+        } else if entry.behind_since_epoch == 0 {
+            Self::unix_now()
+        } else {
+            entry.behind_since_epoch
+        };
     }
 
     /// Drops a vanished context's replica lag rows (both lanes).

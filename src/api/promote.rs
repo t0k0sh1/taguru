@@ -32,7 +32,7 @@ use super::import::{
 };
 use super::{
     AppJson, AppPath, AppQuery, ErrorCode, Issue, RefusalDetail, access_error, deadline_exceeded,
-    error, key_name, ok_with_issues_total, validation_error,
+    error, key_name, ok_with_issues_total, overlong, validation_error,
 };
 
 #[derive(Debug, Deserialize)]
@@ -106,6 +106,9 @@ pub async fn promote_sources(
              sources are the keepers is the caller's judgment, never a default",
             started_at,
         );
+    }
+    if let Some(refusal) = overlong("sources", request.sources.len(), started_at) {
+        return refusal;
     }
     if request.into == name {
         return error(

@@ -433,7 +433,7 @@ pub(crate) fn load_eval_file(path: &Path, mode: Extensions) -> Result<LoadedEval
 
         let wire: WireCase = serde_json::from_value(value)
             .map_err(|error| format!("{label}: line {number}: not a valid eval case: {error}"))?;
-        if wire.case_id.is_empty() {
+        if wire.case_id.trim().is_empty() {
             return Err(format!("{label}: line {number}: case_id must not be empty"));
         }
         if wire.query.trim().is_empty() {
@@ -813,6 +813,17 @@ mod tests {
         );
         let error = load_eval_file(&path, Extensions::Interpret).unwrap_err();
         assert!(error.contains("duplicate case_id 'c1'"), "{error}");
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_whitespace_only_case_id_is_refused_like_an_empty_one() {
+        let path = write_temp(
+            "blank-case-id",
+            &format!("{HEADER}\n{{\"case_id\":\"  \",\"query\":\"q\"}}\n"),
+        );
+        let error = load_eval_file(&path, Extensions::Interpret).unwrap_err();
+        assert!(error.contains("case_id must not be empty"), "{error}");
         let _ = fs::remove_file(&path);
     }
 

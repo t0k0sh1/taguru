@@ -2652,6 +2652,11 @@ mod tests {
             message.contains("group restore exceeded its budget with 2 batch(es) durable"),
             "{message}"
         );
+        // The same machine-readable claim the batch loop's own timeout
+        // makes: an importer resuming on `durable_batches` must not
+        // have to parse it out of the message on this arm alone.
+        assert_eq!(body["integrity"], "durable_prefix", "{body}");
+        assert_eq!(body["durable_batches"], 2, "{body}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
