@@ -25,7 +25,7 @@ use crate::registry::{AccessError, AppState};
 use super::vocabulary::vocabulary_audit;
 use super::{
     AppJson, AppPath, ErrorCode, MAX_MATCH_LIMIT, access_error, clamp, deadline_exceeded, error,
-    not_found, ok,
+    not_found, ok, overlong,
 };
 
 /// The detector stamp (the `louvain-cc/1` precedent): fingerprints are
@@ -185,6 +185,12 @@ pub async fn audit_consolidation(
     AppJson(request): AppJson<ConsolidationAuditRequest>,
 ) -> Response {
     let started_at = Instant::now();
+    // Before the dedup: `dedup` folds only CONSECUTIVE repeats, so an
+    // alternating list would otherwise pass both guards below at any
+    // length the body cap admits.
+    if let Some(refusal) = overlong("checks", request.checks.len(), started_at) {
+        return refusal;
+    }
     let mut checks: Vec<&str> = request.checks.iter().map(String::as_str).collect();
     checks.dedup();
     if checks.is_empty() {

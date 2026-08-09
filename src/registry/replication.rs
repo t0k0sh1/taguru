@@ -105,6 +105,18 @@ impl AppState {
         // old bytes unreachable (see `EntryInner::cache_identity`).
         inner.invalidate_cache_identity();
         inner.load_failure = None;
+        // Re-stat both WAL gauges: on a replica the bytes arrive as
+        // tailed file copies, never through the writer's live
+        // increments, and `ensure_hot`'s own re-stat runs only for
+        // pinned entries below (or on the next local read) — without
+        // this, a cold unpinned context the tailer keeps growing
+        // understates `taguru_wal_bytes` indefinitely.
+        inner.wal_bytes = std::fs::metadata(wal_path(&self.0.data_dir, &stem))
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+        inner.passages_wal_bytes = std::fs::metadata(passages_wal_path(&self.0.data_dir, &stem))
+            .map(|meta| meta.len())
+            .unwrap_or(0);
         if matches!(inner.slot, Slot::Hot(_)) {
             inner.slot = Slot::Cold;
             // The same bump eviction does: a flush that staged this
@@ -237,6 +249,35 @@ mod tests {
             before.targets[0].identity, after.targets[0].identity,
             "the identity is re-minted, so the old key can never hit again"
         );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// On a replica the WAL grows by tailed file copies, never through
+    /// the writer's live byte accounting — the refresh must re-stat
+    /// both WAL gauges itself, or a cold unpinned context the tailer
+    /// keeps growing understates `taguru_wal_bytes` until some local
+    /// read happens to run `ensure_hot`.
+    #[test]
+    fn a_replica_refresh_restats_both_wal_gauges() {
+        let dir = scratch_dir("replica-refresh-wal-bytes");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state.create("sake", ContextMeta::default()).unwrap();
+        let stem = file_stem("sake");
+        // The tailer's shape: bytes land as plain file writes.
+        fs::write(wal_path(&dir, &stem), b"{\"tailed\":1}\n").unwrap();
+        fs::write(passages_wal_path(&dir, &stem), b"{\"tailed\":2}\n").unwrap();
+        state.replica_refresh("sake");
+        let entry = state.lookup("sake").unwrap();
+        let inner = entry.inner.read();
+        assert_eq!(
+            inner.wal_bytes,
+            fs::metadata(wal_path(&dir, &stem)).unwrap().len()
+        );
+        assert_eq!(
+            inner.passages_wal_bytes,
+            fs::metadata(passages_wal_path(&dir, &stem)).unwrap().len()
+        );
+        drop(inner);
         let _ = fs::remove_dir_all(dir);
     }
 

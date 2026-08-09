@@ -300,10 +300,10 @@ impl Args {
                     }
                 },
                 "--source-id" => match rest.next() {
-                    Some(id) if source_id.is_none() && !id.is_empty() => {
+                    Some(id) if source_id.is_none() && !id.trim().is_empty() => {
                         source_id = Some(id.clone());
                     }
-                    Some(id) if id.is_empty() => {
+                    Some(id) if id.trim().is_empty() => {
                         return Err(crate::config::subcommand_usage_error(
                             "extract",
                             "--source-id must not be empty",
