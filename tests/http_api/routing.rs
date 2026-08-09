@@ -828,8 +828,9 @@ fn the_map_file_watch_swaps_routing_with_no_signal() {
 /// only stable identity); 0 when the series has not appeared yet.
 fn shard_request_count(router: &Server, shard_url: &str, outcome: &str) -> u64 {
     let (_, body) = router.call("GET", "/metrics", None);
-    let prefix =
-        format!("taguru_router_shard_requests_total{{shard=\"{shard_url}\",outcome=\"{outcome}\"}} ");
+    let prefix = format!(
+        "taguru_router_shard_requests_total{{shard=\"{shard_url}\",outcome=\"{outcome}\"}} "
+    );
     body.as_str()
         .unwrap_or_default()
         .lines()
@@ -898,7 +899,11 @@ fn operator_verbs_broadcast_and_shard_metrics_key_on_the_url() {
         &format!("sake = {}\n* = {}\n", shard_a.base, shard_b.base),
         &[],
     );
-    router.ok("PUT", "/contexts/sake", Some(json!({"description": "銘柄"})));
+    router.ok(
+        "PUT",
+        "/contexts/sake",
+        Some(json!({"description": "銘柄"})),
+    );
 
     let (status, manual) = router.call("GET", "/protocol", None);
     assert_eq!(status, 200);
