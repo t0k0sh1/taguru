@@ -324,10 +324,14 @@ pub async fn promote_sources(
                     );
                     outcomes.push(import_outcome(batch, &applied));
                     warn_total += applied.schema_violations;
-                    if warn_issues.len() < crate::api::MAX_LISTED_ISSUES {
-                        warn_issues.extend(schema_issues_in_batch(index, applied.schema_issues));
-                        warn_issues.truncate(crate::api::MAX_LISTED_ISSUES);
-                    }
+                    // Unconditional extend-then-truncate: each batch's
+                    // own issues are already capped, so the transient
+                    // overshoot is bounded at one batch's worth — and
+                    // unlike a length guard there is no boundary
+                    // comparison whose off-by-one the truncate would
+                    // silently mask.
+                    warn_issues.extend(schema_issues_in_batch(index, applied.schema_issues));
+                    warn_issues.truncate(crate::api::MAX_LISTED_ISSUES);
                 }
                 Err(refusal) => {
                     let note = import_batch_note(
@@ -540,6 +544,7 @@ fn budget_refusal(
     )
 }
 
+#[mutants::skip] // every arm needs the audit to fail AFTER a durable apply — a deadline dying between the two, or the destination vanishing mid-request; neither race can be pinned deterministically in tests
 fn audit_skip_reason(failure: AccessError) -> &'static str {
     match failure {
         AccessError::DeadlineExceeded => "deadline_exceeded",

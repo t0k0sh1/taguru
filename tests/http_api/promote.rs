@@ -205,6 +205,13 @@ fn a_dry_run_previews_the_same_shape_and_writes_nothing() {
         preview.get("audit").is_none() && preview.get("audit_skipped").is_none(),
         "nothing landed, so there is nothing to audit: {preview}"
     );
+    // A passage-less source into a destination that never stored one:
+    // the preview must not report a phantom passage drop.
+    assert_eq!(
+        preview["batches"][1]["passage_dropped"],
+        json!(false),
+        "{preview}"
+    );
 
     let sources = server.ok("GET", "/contexts/perm/sources", None);
     assert_eq!(sources["total"], json!(0), "{sources}");

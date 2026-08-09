@@ -931,6 +931,31 @@ fn empty_subject_label_or_object_is_refused() {
     assert_eq!(batch.associations.len(), 1);
 }
 
+/// `strip_create` is what lets promote guarantee "never mints the
+/// destination" (ADR 0018): the stripped batch must refuse a missing
+/// context outright where the unstripped one would create it.
+#[test]
+fn a_stripped_create_block_downgrades_creation_to_a_no_context_refusal() {
+    let dir = std::env::temp_dir().join(format!("taguru-ingest-strip-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+
+    let mut batch = parse(
+        "{\"taguru_batch\": 1, \"context\": \"perm\", \"source\": \"doc-1\", \"create\": {}}\n\
+         {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n",
+    )
+    .unwrap();
+    batch.strip_create();
+    assert!(batch.create.is_none());
+    let refusal = apply_batch(&state, &batch).unwrap_err();
+    assert!(
+        matches!(refusal, ApplyRefusal::NoContext(ref context) if context == "perm"),
+        "{refusal:?}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_line_that_is_no_known_shape_names_the_known_shapes() {
     let error = parse(&format!("{HEADER}\n{{\"foo\": 1}}\n")).unwrap_err();
