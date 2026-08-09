@@ -262,6 +262,28 @@ mod tests {
         assert_eq!(map.shard_of("unmapped"), None);
     }
 
+    /// Shard URLs surface in logs and /metrics labels, so userinfo is
+    /// refused at parse — and the refusal itself must not echo the
+    /// credential it is refusing.
+    #[test]
+    fn the_route_map_refuses_shard_urls_carrying_credentials() {
+        for line in [
+            "sake = http://user:hunter2@a:1\n",
+            "sake = https://token@a:1/base\n",
+        ] {
+            let refused = RouteMap::parse(line).expect_err("userinfo must be refused");
+            assert!(refused.contains("userinfo"), "{refused}");
+            assert!(
+                !refused.contains("hunter2") && !refused.contains("token@"),
+                "the refusal must not leak the credential: {refused}"
+            );
+        }
+        // '@' PAST the authority is data, not userinfo — a path or
+        // query mentioning one must still parse.
+        let map = RouteMap::parse("sake = http://a:1/base@v2\n").unwrap();
+        assert_eq!(map.url(0), "http://a:1/base@v2");
+    }
+
     #[test]
     fn the_projection_splits_members_by_owner_and_keeps_children_whole() {
         let map = RouteMap::parse("a = http://a:1\nb = http://b:1\n").unwrap();

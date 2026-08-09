@@ -52,10 +52,14 @@ pub(crate) async fn run(config: Option<PathBuf>) {
             std::process::exit(1);
         }
     };
-    let map = match std::fs::read_to_string(&map_path)
-        .map_err(|error| error.to_string())
-        .and_then(|text| RouteMap::parse(&text))
-    {
+    let map_text = match std::fs::read_to_string(&map_path) {
+        Ok(text) => text,
+        Err(error) => {
+            tracing::error!(path = %map_path.display(), %error, "TAGURU_ROUTE_MAP is not usable");
+            std::process::exit(1);
+        }
+    };
+    let map = match RouteMap::parse(&map_text) {
         Ok(map) => map,
         Err(error) => {
             tracing::error!(path = %map_path.display(), %error, "TAGURU_ROUTE_MAP is not usable");
@@ -101,7 +105,15 @@ pub(crate) async fn run(config: Option<PathBuf>) {
     };
     // Editing the map no longer takes a router restart (issue #515):
     // SIGHUP and the map-file watch swap it at runtime, keyring-style.
-    spawn_route_map_reload_tasks(state.clone(), map_path);
+    // The watch's change baseline is the digest of the bytes boot just
+    // APPLIED — not a fresh read of the file: a rewrite landing in the
+    // gap between boot's read and the watch task's first read would
+    // otherwise be recorded as already-seen without ever being applied.
+    spawn_route_map_reload_tasks(
+        state.clone(),
+        map_path,
+        crate::sha256::sha256_hex(map_text.as_bytes()),
+    );
 
     let app = routes(state.clone()).with_state(state.clone());
     // The same in-process dispatch trick serve() uses for POST /mcp:
@@ -261,7 +273,10 @@ pub(super) fn reload_route_map(state: &RouterState, bytes: &[u8], trigger: &str)
 ///
 /// Requests already in flight keep the snapshot they took at entry
 /// ([`RouterState::map`]); only new requests see a swapped map.
-fn spawn_route_map_reload_tasks(state: RouterState, path: PathBuf) {
+/// `boot_digest` is the sha256 of the bytes boot applied — the
+/// watch's baseline, so an edit racing the task's startup still
+/// registers as a change.
+fn spawn_route_map_reload_tasks(state: RouterState, path: PathBuf, boot_digest: String) {
     // Off the async workers, exactly like the keyring watch: the map
     // can live on a network mount, and a stalled read must not stall
     // the HTTP workers. `None` is "unreadable this tick" either way.
@@ -298,13 +313,11 @@ fn spawn_route_map_reload_tasks(state: RouterState, path: PathBuf) {
         });
     }
     tokio::spawn(async move {
-        // This read is THE read the reload uses — its bytes go
+        // Each tick's read is THE read the reload uses — its bytes go
         // straight into `reload_route_map`, so change detection and
         // the reload can never disagree about what the file said
         // (the same single-read discipline as the keyring watch).
-        let mut last: Option<String> = read_off_worker(path.clone())
-            .await
-            .map(|bytes| crate::sha256::sha256_hex(&bytes));
+        let mut last: Option<String> = Some(boot_digest);
         let mut ticker = tokio::time::interval(crate::CONFIG_WATCH_INTERVAL);
         ticker.tick().await; // fires immediately; boot already read the file
         loop {

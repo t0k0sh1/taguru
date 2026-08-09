@@ -820,6 +820,14 @@ fn the_map_file_watch_swaps_routing_with_no_signal() {
         "the watch to swap the map with no signal",
         || router.call("GET", "/contexts/moved", None).0 == 404,
     );
+    // Exactly the one edit reloaded: the watch's baseline is the
+    // digest of the bytes boot applied, so startup itself must never
+    // count as a change and re-apply the same map.
+    assert_eq!(
+        map_reload_count(&router, "applied"),
+        1,
+        "one edit, one reload — a boot-time self-reload means the baseline digest is wrong"
+    );
 }
 
 /// One shard-outcome count out of the router's
