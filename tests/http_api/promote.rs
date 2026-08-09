@@ -252,6 +252,19 @@ fn promotion_refusals_name_their_cause_before_anything_applies() {
     assert_eq!(refused["code"], json!("no_context"), "{refused}");
     assert_eq!(refused["integrity"], json!("nothing_written"), "{refused}");
 
+    // The reserved export ids are stream artifacts, never promotable —
+    // sourceless weight cannot travel with a promotion.
+    let (status, refused) = server.call(
+        "POST",
+        "/contexts/scratch-claude/promote",
+        Some(json!({"into": "perm", "sources": ["export:unsourced"]})),
+    );
+    assert_eq!(status, 400, "{refused}");
+    assert!(
+        refused["error"].as_str().unwrap().contains("reserved"),
+        "{refused}"
+    );
+
     // A mistyped source id refuses whole, path-addressed — under
     // retract-then-apply it would otherwise no-op silently.
     let (status, refused) = server.call(

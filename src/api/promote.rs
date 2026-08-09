@@ -111,6 +111,29 @@ pub async fn promote_sources(
             started_at,
         );
     }
+    // The reserved export ids are stream artifacts, not sources: the
+    // unsourced residual deliberately cannot travel with a promotion
+    // (only NAMED sources' shares move), and the empty sentinel labels
+    // a header-only batch. Naming either is refused rather than left
+    // to surprise — without this, a literal `export:unsourced`
+    // attribution (a prior import round trip's residue) would slip
+    // through the filter as sourceless weight.
+    if let Some(reserved) = [
+        taguru::context::UNSOURCED_SOURCE,
+        crate::export::EMPTY_SOURCE,
+    ]
+    .iter()
+    .find(|id| request.sources.iter().any(|source| source == *id))
+    {
+        return error(
+            ErrorCode::InvalidArgument,
+            format!(
+                "source id '{reserved}' is reserved by export — promotion moves named \
+                 sources' own shares; sourceless weight cannot travel"
+            ),
+            started_at,
+        );
+    }
     // The destination lives in the BODY, out of the route-level
     // authorization check's reach — a context-scoped key is judged
     // here instead, before anything applies (`/import`'s discipline).
