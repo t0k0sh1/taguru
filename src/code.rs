@@ -45,12 +45,15 @@ taguru-code: offline codebase map for coding agents
 USAGE:
   taguru-code sync [PATH] [--dry-run]   ingest the repo at PATH (default .)
   taguru-code watch [PATH] [--interval-ms N]  keep syncing as the tree changes
-  taguru-code find <cue> [--json]       locate a symbol: kind, name, file:line
+  taguru-code find <cue> [--json] [--limit N]  locate a symbol: kind, name, file:line (default 10 rows)
   taguru-code tree [PATH]               list what a directory/file/symbol contains
   taguru-code status                    show sync state
-  taguru-code evalset --out FILE        generate an eval set from the synced repo
-  taguru-code eval --eval FILE          measure find accuracy (exit 3 on regression)
+  taguru-code evalset --out FILE [--sample N]  generate an eval set (default 200 cases)
+  taguru-code eval --eval FILE [--thresholds FILE]  measure find accuracy (exit 3 on regression)
   taguru-code models [--json]           list local embedding models, best pick first
+
+  Every verb except models also takes --context NAME (default 'code')
+  and --data-dir PATH (default: the repo root's .taguru).
 
 ENVIRONMENT:
   TAGURU_USAGE_LOG            0/false/off disables the per-invocation usage log
@@ -66,11 +69,21 @@ ENVIRONMENT:
 
 /// Dispatches one invocation; returns the process exit code.
 pub(crate) fn run(args: &[String]) -> i32 {
+    // `help`, `--help`, or `-h` — bare or after a verb — answers the
+    // usage and exits 0, checked once before dispatch so every verb
+    // behaves identically and no per-verb parser can forget it
+    // (`--help` used to fall into each parser as an unknown flag).
+    // Scanning the whole argv is safe: no flag takes a value that
+    // could legitimately be "-h" (cues and paths starting with '-'
+    // are refused as unknown flags), so the conventional reading
+    // always wins.
+    if args.first().map(String::as_str) == Some("help")
+        || args.iter().any(|arg| arg == "--help" || arg == "-h")
+    {
+        print!("{USAGE}");
+        return 0;
+    }
     match args.first().map(String::as_str) {
-        Some("help") | Some("--help") | Some("-h") => {
-            print!("{USAGE}");
-            0
-        }
         Some("sync") => usage_log::record("sync", &args[1..], || sync::run(&args[1..])),
         Some("watch") => usage_log::record("watch", &args[1..], || watch::run(&args[1..])),
         Some("status") => usage_log::record("status", &args[1..], || sync::status(&args[1..])),

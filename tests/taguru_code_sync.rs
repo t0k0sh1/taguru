@@ -667,6 +667,51 @@ fn usage_log_cap_deletes_oldest_days_but_keeps_today() {
 /// order, feature or no feature — the default build must still teach
 /// what a `--features local-embed` build could run.
 #[test]
+fn every_verb_answers_help_with_the_full_usage_and_exit_zero() {
+    let repo = Repo::new();
+    // `--help` used to fall into each verb's own parser as an unknown
+    // flag (exit 2) — the most natural question an agent asks a CLI
+    // was the one it refused. `watch --help` doubly so: without the
+    // intercept it would loop forever instead of answering.
+    for verb in [
+        "sync", "watch", "find", "tree", "status", "evalset", "eval", "models",
+    ] {
+        let (code, out) = repo.run(&[verb, "--help"]);
+        assert_eq!(code, 0, "{verb} --help: {out}");
+        assert!(out.contains("USAGE:"), "{verb} --help: {out}");
+    }
+    // The bare spellings answer identically…
+    for bare in [&["help"][..], &["--help"][..], &["-h"][..]] {
+        let (code, out) = repo.run(bare);
+        assert_eq!(code, 0, "{bare:?}: {out}");
+        assert!(out.contains("USAGE:"), "{bare:?}: {out}");
+    }
+    // …while NO arguments at all is still the exit-2 nudge.
+    let (code, out) = repo.run(&[]);
+    assert_eq!(code, 2, "{out}");
+    assert!(out.contains("USAGE:"), "{out}");
+
+    let (code, out) = repo.run(&["find", "-h"]);
+    assert_eq!(code, 0, "{out}");
+    // The usage names every flag the verbs accept — the doc page and
+    // --help must not disagree about what exists.
+    for flag in [
+        "--dry-run",
+        "--interval-ms",
+        "--json",
+        "--limit",
+        "--out",
+        "--sample",
+        "--eval",
+        "--thresholds",
+        "--context",
+        "--data-dir",
+    ] {
+        assert!(out.contains(flag), "usage omits {flag}: {out}");
+    }
+}
+
+#[test]
 fn models_lists_the_catalog_best_first_and_speaks_json() {
     let repo = Repo::new();
     let (code, out) = repo.run(&["models"]);
