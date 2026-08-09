@@ -29,7 +29,6 @@ def test_names_and_reason_vocabulary_match_the_shared_spec() -> None:
     assert _tracing.ROOT_SPAN == spec["root_span"]
     assert _tracing.SKIP_EVENT == spec["skip_event"]
     assert _tracing.REASON_FIELD == spec["reason_field"]
-    assert _tracing.CITATION_MISSING_EVENT == spec["citation_missing_event"]
     assert _tracing.CITATION_MISSING_FIELD == spec["citation_missing_field"]
     assert set(get_args(_tracing.Reason)) == set(spec["skip_reasons"])
 

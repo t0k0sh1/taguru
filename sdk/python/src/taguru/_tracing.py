@@ -51,7 +51,6 @@ TRACER_NAME = "taguru"
 ROOT_SPAN = "taguru.retrieve"
 SKIP_EVENT = "taguru.skip"
 REASON_FIELD = "taguru.reason"
-CITATION_MISSING_EVENT = "taguru.citation_missing"
 CITATION_MISSING_FIELD = "taguru.citation.missing"
 
 # `retrieve()`'s phase spans, in the order it may open them — named here
@@ -81,6 +80,7 @@ Reason = Literal[
     "no_anchors",
     "labels_absent",
     "citations_disabled",
+    "citation_passage_missing",
     "fallback_not_requested",
     "fallback_suppressed",
 ]
@@ -125,13 +125,21 @@ class Span:
             self._otel_span.add_event(SKIP_EVENT, {REASON_FIELD: reason})  # type: ignore[attr-defined]
 
     def citation_missing(self, count: int) -> None:
-        """One aggregate event for every citation lookup that 404'd during
-        this call — never one event per miss (ADR 0008's per-item
-        aggregation rule: a citation locator is not attacker-controlled,
-        but it is still unbounded, caller-shaped data)."""
+        """One aggregate ``taguru.skip`` event (reason
+        ``citation_passage_missing``, the count in
+        ``taguru.citation.missing``) for every citation lookup that
+        404'd during this call — never one event per miss (ADR 0008's
+        per-item aggregation rule: a citation locator is not
+        attacker-controlled, but it is still unbounded, caller-shaped
+        data). The identical shape the server's own retrieve
+        composition emits, so one dashboard query reads both."""
         if count and self._otel_span is not None:
             self._otel_span.add_event(  # type: ignore[attr-defined]
-                CITATION_MISSING_EVENT, {CITATION_MISSING_FIELD: count}
+                SKIP_EVENT,
+                {
+                    REASON_FIELD: "citation_passage_missing",
+                    CITATION_MISSING_FIELD: count,
+                },
             )
 
 

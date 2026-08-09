@@ -210,7 +210,9 @@ describe("retrieve() tracing", () => {
 
     const citationsSpan = one("taguru.citations");
     const missing = citationsSpan.events.filter(
-      (event) => event.name === tracing.CITATION_MISSING_EVENT,
+      (event) =>
+        event.name === tracing.SKIP_EVENT &&
+        event.attributes?.[tracing.REASON_FIELD] === "citation_passage_missing",
     );
     expect(missing).toHaveLength(1);
     expect(missing[0]!.attributes?.[tracing.CITATION_MISSING_FIELD]).toBe(1);
@@ -249,7 +251,9 @@ describe("retrieve() tracing", () => {
 
     const citationsSpan = one("taguru.citations");
     const missing = citationsSpan.events.filter(
-      (event) => event.name === tracing.CITATION_MISSING_EVENT,
+      (event) =>
+        event.name === tracing.SKIP_EVENT &&
+        event.attributes?.[tracing.REASON_FIELD] === "citation_passage_missing",
     );
     expect(missing).toHaveLength(0);
   });

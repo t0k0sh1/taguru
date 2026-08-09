@@ -29,7 +29,6 @@ export const TRACER_NAME = "taguru";
 export const ROOT_SPAN = "taguru.retrieve";
 export const SKIP_EVENT = "taguru.skip";
 export const REASON_FIELD = "taguru.reason";
-export const CITATION_MISSING_EVENT = "taguru.citation_missing";
 export const CITATION_MISSING_FIELD = "taguru.citation.missing";
 
 /** `retrieve()`'s phase spans, in the order it may open them — named here
@@ -58,6 +57,7 @@ export type Reason =
   | "no_anchors"
   | "labels_absent"
   | "citations_disabled"
+  | "citation_passage_missing"
   | "fallback_not_requested"
   | "fallback_suppressed";
 
@@ -92,8 +92,15 @@ function wrap(otelSpan: OtelSpan): SpanHandle {
       otelSpan.addEvent(SKIP_EVENT, { [REASON_FIELD]: reason });
     },
     citationMissing(count) {
+      // One aggregate `taguru.skip` event (reason
+      // citation_passage_missing, the count in taguru.citation.missing)
+      // — the identical shape the server's own retrieve composition
+      // emits, so one dashboard query reads both producers.
       if (count > 0) {
-        otelSpan.addEvent(CITATION_MISSING_EVENT, { [CITATION_MISSING_FIELD]: count });
+        otelSpan.addEvent(SKIP_EVENT, {
+          [REASON_FIELD]: "citation_passage_missing",
+          [CITATION_MISSING_FIELD]: count,
+        });
       }
     },
   };

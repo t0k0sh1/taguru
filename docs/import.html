@@ -433,6 +433,17 @@ curl -X POST localhost:8248/import \
       <li>Validation first (a malformed line is a 400 with its line number, and nothing applies), then retract-then-apply — re-POSTing the same batch replaces the source exactly, just like re-running the CLI. The response carries the same numbers the CLI prints.</li>
       <li>It obeys everything every endpoint obeys: Bearer auth, the body cap (<code>TAGURU_MAX_BODY_BYTES</code>, default 8 MiB — larger batches go through the offline CLI or a raised cap), the request timeout, per-key rate limits.</li>
       <li>Statuses follow the API's dialect: <code>400</code> malformed batch (with line number) · <code>404</code> absent context and no create block · <code>409</code>/<code>507</code> partial write (conflict / capacity; the message names what landed, and the retraction makes the corrected retry exact) · <code>500</code> a write the WAL or disk refused.</li>
+      <li>A mid-stream refusal also says what landed <b>machine-readably</b>: the error body
+        carries <code>integrity</code> (<code>"nothing_written"</code>, or
+        <code>"durable_prefix"</code> with <code>durable_batches</code> naming exactly how many
+        batches before the refused one are durable — a dry run is always
+        <code>nothing_written</code>) and, for correctable streams,
+        <code>retryable_after_correction: true</code>. An automated importer resumes by skipping
+        the durable prefix, or re-POSTs the corrected stream whole — retract-then-apply makes
+        either exact. Timeouts (<code>408</code>, budget spent partway) carry
+        <code>integrity</code> and <code>durable_batches</code> too but omit
+        <code>retryable_after_correction</code> — there is nothing to correct; resume (or
+        re-POST as-is) with more budget.</li>
       <li>Embeddings are not refreshed within the request. With <code>TAGURU_EMBED_AUTO</code> on, they ride the next flush, same as live writes.</li>
     </ul>
     <p class="note warn">

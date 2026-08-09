@@ -265,7 +265,8 @@
     <h2>The optional reranker</h2>
     <p>
       Absent <code>rerank</code>, or no <code>TAGURU_RERANK_URL</code>/<code>TAGURU_RERANK_MODEL</code>
-      configured on the server, selection is fully deterministic (the reciprocal-rank-fusion order)
+      configured on the server (<code>TAGURU_RERANK_API_KEY</code> optionally rides the calls as a
+      bearer token for hosted providers), selection is fully deterministic (the reciprocal-rank-fusion order)
       at no network or credential cost — <code>plan.reranker = {"configured": false, "ran": false}</code>.
       A reranker may only <b>reorder</b> the pool it is handed, after dedup/contradiction-grouping/
       near-duplicate-suppression — it can never add, drop, or edit a candidate, and every degrade

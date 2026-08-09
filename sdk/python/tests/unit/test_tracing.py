@@ -216,7 +216,10 @@ def test_citation_misses_aggregate_to_one_event(exporter: InMemorySpanExporter) 
 
     citations_span = one(exporter, "taguru.citations")
     missing = [
-        event for event in citations_span.events if event.name == tracing.CITATION_MISSING_EVENT
+        event
+        for event in citations_span.events
+        if event.name == tracing.SKIP_EVENT
+        and event.attributes[tracing.REASON_FIELD] == "citation_passage_missing"
     ]
     assert len(missing) == 1, missing
     assert missing[0].attributes[tracing.CITATION_MISSING_FIELD] == 1

@@ -189,21 +189,24 @@ services:
   <section id="versions">
     <h2>Pin every layer to the same minor version</h2>
     <p class="section-sub">Server, SDK, and <code>langchain-taguru</code> ship from one repository in lockstep — read all three before trusting a shape.</p>
-    <pre><code><span class="c"># the image tag IS the server's pin — there is no HTTP /version endpoint</span>
-grep <span class="s">'image:'</span> deploy/docker-compose.yml   <span class="c"># ghcr.io/t0k0sh1/taguru:0.4.0</span>
+    <pre><code><span class="c"># the running server answers its own pin</span>
+curl -s localhost:8248/version   <span class="c"># {"server":"0.8.0","http_contract":1,"mcp_contract":1,...}</span>
+grep <span class="s">'image:'</span> deploy/docker-compose.yml   <span class="c"># ghcr.io/t0k0sh1/taguru:0.8.0 — the deployed pin</span>
 
 <span class="c"># pin the Python side to the matching minor</span>
-pip install <span class="s">'taguru==0.4.*'</span> <span class="s">'langchain-taguru==0.4.*'</span>
+pip install <span class="s">'taguru==0.8.*'</span> <span class="s">'langchain-taguru==0.8.*'</span>
 
 <span class="c"># fail loudly at startup rather than silently on the first odd response shape</span>
 python -c <span class="s">"import taguru, taguru_langchain as tl; \
-assert taguru.__version__.startswith('0.4.') and tl.__version__.startswith('0.4.'); \
+assert taguru.__version__.startswith('0.8.') and tl.__version__.startswith('0.8.'); \
 print(taguru.__version__, tl.__version__)"</span></code></pre>
     <p>
-      A shell-less container has no <code>taguru version</code> to run inside it — read
-      <code>/metrics</code> instead:
+      <code>GET /version</code> also names the wire-contract versions
+      (<code>http_contract</code>/<code>mcp_contract</code>) and the accepted batch/image formats,
+      and it answers without auth — the first probe when versions are in doubt. The same build
+      identity rides <code>/metrics</code> too:
       <code>curl -s localhost:8248/metrics | grep taguru_build_info</code>. Full triage for a
-      mismatch (a 0.3.x client against a 0.4.x server, or the reverse) is
+      mismatch (a 0.7.x client against a 0.8.x server, or the reverse) is
       <a href="troubleshooting.html#compatibility">Troubleshooting — version skew</a>.
     </p>
   </section>

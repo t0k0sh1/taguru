@@ -47,7 +47,15 @@ def test_citation_missing_records_one_aggregate_event_and_none_for_zero() -> Non
     span.citation_missing(0)
     assert fake.events == []
     span.citation_missing(2)
-    assert fake.events == [(tracing.CITATION_MISSING_EVENT, {tracing.CITATION_MISSING_FIELD: 2})]
+    assert fake.events == [
+        (
+            tracing.SKIP_EVENT,
+            {
+                tracing.REASON_FIELD: "citation_passage_missing",
+                tracing.CITATION_MISSING_FIELD: 2,
+            },
+        )
+    ]
 
 
 def test_tracer_is_named_and_honors_the_provider_override(

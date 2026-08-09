@@ -34,7 +34,7 @@ directory.
   name that's really in `src/metrics.rs`.
 
 When several writers each own a disjoint set of contexts, `taguru
-route` puts one front door on the fleet: a stateless router (no
+router` puts one front door on the fleet: a stateless router (no
 volume, no keys — shards enforce auth) whose `TAGURU_ROUTE_MAP` file
 says which shard owns which context, with groups and cross-context
 search spanning every shard under the single-instance merge

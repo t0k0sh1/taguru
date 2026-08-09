@@ -167,9 +167,11 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
                     document path — the promotion runbook's
                     session:{agent}:{id} convention; several documents each
                     get ID/{file stem}, and a collision fails (import
-                    retracts-then-applies per source id). Changing it
-                    rewrites the batch but reuses cached chunk answers
-                    (ADR 0017)
+                    retracts-then-applies per source id). Empty or
+                    whitespace-only IDs are refused, and IDs over 1024
+                    bytes (the server's source-name cap) fail up front
+                    rather than at import. Changing it rewrites the batch
+                    but reuses cached chunk answers (ADR 0017)
 --date WHEN         the session's own date, written on the passage line:
                     YYYY-MM-DD (UTC midnight) or positive epoch seconds;
                     needs the passage
@@ -617,7 +619,10 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       the same issue vocabulary <a href="schema.html#write-time">the server's own write-time
       check</a> uses), <code>removed_items</code> (path-addressed, on a <code>stop_valid</code>
       attempt whose accepted answer had items mechanically removed — ADR 0013; omitted when
-      nothing was), <code>elapsed_seconds</code>, and a nested
+      nothing was), <code>piece_bytes</code> and <code>requested_max_tokens</code> (escalation
+      ladder only, omitted otherwise: the byte length of the split sub-piece this round asked
+      about — sub-pieces share one <code>chunk_index</code> — and the <code>max_tokens</code>
+      the round sent, when one was), <code>elapsed_seconds</code>, and a nested
       <code>provider_metadata</code> (<code>finish_reason</code> as received,
       <code>input_tokens</code>/<code>output_tokens</code>/<code>total_tokens</code> when the
       backend reports usage — <code>null</code> for <code>timeout</code>/<code>transport</code>,

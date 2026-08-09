@@ -44,7 +44,6 @@ interface TracingSpec {
   root_span: string;
   skip_event: string;
   reason_field: string;
-  citation_missing_event: string;
   citation_missing_field: string;
   skip_reasons: string[];
   phase_spans: string[];
@@ -58,13 +57,15 @@ function loadSpec(): TracingSpec {
 
 // `Reason` is a type, erased at compile time — there is nothing to
 // reflect at runtime, so every skip-reason string this SDK actually
-// emits lives here once, and `client.ts`'s `retrieve()` is the thing
-// that has to keep using exactly these six literals.
+// emits lives here once, and `client.ts`'s `retrieve()` (plus
+// `tracing.ts`'s own `citationMissing`) is the thing that has to keep
+// using exactly these seven literals.
 const REASON_VALUES = [
   "describe_disabled",
   "no_anchors",
   "labels_absent",
   "citations_disabled",
+  "citation_passage_missing",
   "fallback_not_requested",
   "fallback_suppressed",
 ] as const satisfies readonly tracing.Reason[];
@@ -76,7 +77,6 @@ describe("tracing.ts vocabulary vs. the shared spec", () => {
     expect(tracing.ROOT_SPAN).toBe(spec.root_span);
     expect(tracing.SKIP_EVENT).toBe(spec.skip_event);
     expect(tracing.REASON_FIELD).toBe(spec.reason_field);
-    expect(tracing.CITATION_MISSING_EVENT).toBe(spec.citation_missing_event);
     expect(tracing.CITATION_MISSING_FIELD).toBe(spec.citation_missing_field);
     expect(new Set(REASON_VALUES)).toEqual(new Set(spec.skip_reasons));
   });
