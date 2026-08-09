@@ -2622,13 +2622,21 @@ pub(crate) fn scanned_stem_and_name(path: &Path) -> Option<(String, String)> {
 /// otherwise see `from` as a dangling reference (nothing registered
 /// under that name any more) and drop it instead of carrying it
 /// forward.
+///
+/// Returns whether EVERY touched record persisted. This is not a
+/// suggestion: "the next boot's resume retries it" is only true if the
+/// caller acts on a `false` by keeping the rename marker alive instead
+/// of deleting it unconditionally — see [`AppState::rename_context_locked`]
+/// and `boot_with`'s two resume loops, which is why this used to warn
+/// without a way for either caller to tell.
 fn rename_in_membership(
     data_dir: &Path,
     groups: &mut BTreeMap<String, GroupRecord>,
     from: &str,
     to: &str,
     field: impl Fn(&mut GroupRecord) -> &mut BTreeSet<String>,
-) {
+) -> bool {
+    let mut all_persisted = true;
     for (group_name, record) in groups.iter_mut() {
         let set = field(record);
         if !set.remove(from) {
@@ -2636,14 +2644,39 @@ fn rename_in_membership(
         }
         set.insert(to.to_string());
         if let Err(error) = groups::write_group(data_dir, &file_stem(group_name), record) {
+            all_persisted = false;
             tracing::warn!(
                 group = %group_name,
                 from = %from,
                 to = %to,
                 %error,
-                "group membership rename not persisted; the next boot's resume retries it"
+                "group membership rename not persisted; the caller keeps the rename marker so the next boot's resume retries it"
             );
         }
+    }
+    all_persisted
+}
+
+/// Retires a rename's durable marker once its membership rewrite is
+/// known to be settled, one way or the other — the single policy every
+/// [`rename_in_membership`] caller must apply, shared here so it is
+/// not reimplemented at each of the four call sites (a live context
+/// rename, a live group rename, and boot's own resume of each):
+/// `persisted` removes the marker (through the same
+/// [`remove_persisted_file`] choke point every other unlink in the
+/// registry goes through, so a test's fault injector sees it); not
+/// persisted keeps it and warns, so the next boot's resume — not
+/// `reconcile_groups`, which has no notion of a rename in flight and
+/// would drop `from` as a plain dangling reference — gets the chance
+/// to retry the rewrite.
+fn retire_rename_marker(marker: &Path, persisted: bool, from: &str, to: &str, what: &str) {
+    if persisted {
+        let _ = remove_persisted_file(marker);
+    } else {
+        tracing::warn!(
+            from = %from, to = %to,
+            "{what} not fully persisted; the rename marker stays so the next boot resumes it"
+        );
     }
 }
 

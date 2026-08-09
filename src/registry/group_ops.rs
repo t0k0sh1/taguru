@@ -1,5 +1,6 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
+#[cfg(test)]
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -12,7 +13,7 @@ use crate::storage::{commit_staged, remove_persisted_file};
 use super::{
     AppState, CreateGroupError, GroupRestoreOutcome, RenameGroupError, RestoreGroupsError,
     UpdateGroupError, file_stem, rename_in_membership, rename_markers_targeting,
-    write_rename_marker,
+    retire_rename_marker, write_rename_marker,
 };
 
 impl AppState {
@@ -461,15 +462,27 @@ impl AppState {
             &groups::group_path(&self.0.data_dir, &from_stem),
             &groups::group_path(&self.0.data_dir, &to_stem),
         ) {
-            let _ = fs::remove_file(&marker);
+            let _ = remove_persisted_file(&marker);
             return Err(RenameGroupError::Io(error));
         }
         let record = groups.remove(from).expect("checked contains_key above");
         groups.insert(to.to_string(), record);
-        rename_in_membership(&self.0.data_dir, &mut groups, from, to, |record| {
-            &mut record.groups
-        });
-        let _ = fs::remove_file(&marker);
+        let membership_persisted =
+            rename_in_membership(&self.0.data_dir, &mut groups, from, to, |record| {
+                &mut record.groups
+            });
+        // Same discipline as `AppState::rename_context_locked`: see
+        // `retire_rename_marker`'s doc for why an unconditional removal
+        // here would have the next boot's `reconcile_groups` see
+        // `from` as a plain dangling child reference and drop it
+        // instead of resuming the rewrite.
+        retire_rename_marker(
+            &marker,
+            membership_persisted,
+            from,
+            to,
+            "group's nesting rewrite",
+        );
         Ok(())
     }
 
@@ -1558,6 +1571,80 @@ mod tests {
     }
 
     /// The group twin of
+    /// `a_rename_whose_membership_rewrite_cannot_persist_keeps_its_marker`:
+    /// `rename_group` must keep its `.grouprenaming` marker whenever
+    /// the parent's nesting rewrite (`rename_in_membership` on
+    /// "drinks") does not persist, or the next boot's
+    /// `reconcile_groups` sees "liquor" as a plain dangling child
+    /// reference and drops it instead of resuming the rewrite to
+    /// "spirits". Swept exhaustively, same shape as
+    /// `every_group_write_persistence_failure_rolls_back_and_retries`.
+    #[test]
+    fn a_group_renames_membership_rewrite_that_cannot_persist_keeps_its_marker() {
+        let mut exhausted = false;
+        for failure in 0..16 {
+            let dir = scratch_dir(&format!("rename-group-membership-fault-{failure}"));
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state.create("sake", ContextMeta::default()).unwrap();
+            state
+                .create_group(
+                    "liquor",
+                    String::new(),
+                    BTreeSet::from(["sake".to_string()]),
+                    BTreeSet::new(),
+                )
+                .unwrap();
+            state
+                .create_group(
+                    "drinks",
+                    String::new(),
+                    BTreeSet::new(),
+                    BTreeSet::from(["liquor".to_string()]),
+                )
+                .unwrap();
+
+            fail_persistence_ops_after(failure);
+            let outcome = state.rename_group("liquor", "spirits");
+            let past_end = clear_persistence_fault();
+            drop(state);
+
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            let liquor = state.group("liquor");
+            let spirits = state.group("spirits");
+            let parent_children = state.group("drinks").unwrap().groups;
+            match (liquor.is_some(), spirits.is_some()) {
+                (true, false) => assert_eq!(
+                    parent_children,
+                    BTreeSet::from(["liquor".to_string()]),
+                    "failure at persistence step {failure} ({outcome:?}): the \
+                     rename never landed, so nesting must be untouched"
+                ),
+                (false, true) => assert_eq!(
+                    parent_children,
+                    BTreeSet::from(["spirits".to_string()]),
+                    "failure at persistence step {failure} ({outcome:?}): the \
+                     rename landed, so a boot resume must have finished the \
+                     nesting rewrite — an empty set means the marker was \
+                     removed before the rewrite could be retried"
+                ),
+                other => panic!(
+                    "failure at persistence step {failure}: exactly one name \
+                     must survive, not {other:?}"
+                ),
+            }
+            drop(state);
+            let _ = fs::remove_dir_all(&dir);
+
+            if past_end {
+                assert!(outcome.is_ok());
+                exhausted = true;
+                break;
+            }
+        }
+        assert!(exhausted, "group rename exceeded the sweep bound");
+    }
+
+    /// The group twin of
     /// `creating_a_context_abandons_a_rename_marker_at_its_own_stem`: a
     /// `.grouprenaming` marker at the created group's own stem must be
     /// abandoned so boot does not resume-move the fresh group onto the
@@ -1939,6 +2026,79 @@ mod tests {
         assert!(!groups::group_renaming_marker_path(&dir, &file_stem("liquor")).exists());
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The boot-resume twin of
+    /// `a_group_renames_membership_rewrite_that_cannot_persist_keeps_its_marker`:
+    /// `boot_with`'s OWN resume loop for group renames must keep the
+    /// marker whenever the parent's nesting rewrite fails DURING that
+    /// resume, not just when a live `rename_group` call hits the same
+    /// fault.
+    #[test]
+    fn a_resumed_group_renames_nesting_rewrite_that_cannot_persist_keeps_the_marker() {
+        let dir = scratch_dir("rename-group-resume-membership-fault");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state.create("sake", ContextMeta::default()).unwrap();
+            state
+                .create_group(
+                    "liquor",
+                    String::new(),
+                    BTreeSet::from(["sake".to_string()]),
+                    BTreeSet::new(),
+                )
+                .unwrap();
+            state
+                .create_group(
+                    "drinks",
+                    String::new(),
+                    BTreeSet::new(),
+                    BTreeSet::from(["liquor".to_string()]),
+                )
+                .unwrap();
+        }
+        // The crash-shaped state: the marker survives, nothing has
+        // moved yet.
+        fs::write(
+            groups::group_renaming_marker_path(&dir, &file_stem("liquor")),
+            serde_json::to_vec(&RenameMarker {
+                from: "liquor".to_string(),
+                to: "spirits".to_string(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        // The group file's own move (`commit_staged`) is the first
+        // persistence op this boot performs; fail the very next one —
+        // the parent's own `write_group` — so the move lands but the
+        // nesting rewrite does not.
+        fail_persistence_ops_after(1);
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let past_end = clear_persistence_fault();
+        assert!(!past_end, "the group write itself must be what failed");
+
+        assert!(
+            state.group("spirits").is_some(),
+            "the move must still land even though the nesting rewrite failed"
+        );
+        assert!(
+            groups::group_renaming_marker_path(&dir, &file_stem("liquor")).exists(),
+            "a boot-time nesting rewrite failure must keep the marker, or \
+             the NEXT boot's reconcile_groups sees \"liquor\" as a plain \
+             dangling child reference and drops it instead of resuming the rewrite"
+        );
+        drop(state);
+
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        assert_eq!(
+            state.group("drinks").unwrap().groups,
+            BTreeSet::from(["spirits".to_string()]),
+            "the retried resume must finish what the first boot could not"
+        );
+        assert!(!groups::group_renaming_marker_path(&dir, &file_stem("liquor")).exists());
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The member cap admits EXACTLY the cap and refuses one past it —

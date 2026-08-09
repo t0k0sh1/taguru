@@ -609,6 +609,13 @@ enum StemState {
     Vetoed,
 }
 
+/// What [`Hydrator::veto`] overwrote, for [`Hydrator::undo_veto`] to
+/// restore. Opaque on purpose — `StemState` stays private, and nothing
+/// outside this module has any business inspecting what a stem's prior
+/// state was, only handing it back unexamined.
+#[derive(Debug)]
+pub(crate) struct VetoUndo(Option<StemState>);
+
 /// The generation a hydrator is currently materializing. The writer
 /// path provisions it once at boot and never moves it; the replica
 /// tailer swaps it on every manifest change ([`Hydrator::retarget`]).
@@ -750,13 +757,65 @@ impl Hydrator {
     /// server just removed. Waits out an in-flight hydration first so
     /// the caller's deletion cannot interleave with a half-landed
     /// download.
-    pub(crate) fn veto(&self, stem: &str) {
+    ///
+    /// The returned [`VetoUndo`] carries the state this call
+    /// overwrote, for a caller whose deletion is itself rollback-able
+    /// (a rename that fails before its point of no return —
+    /// `AppState::rename_context_locked`). A caller whose removal is
+    /// unconditional once started (`AppState::delete`, the boot-time
+    /// deletion sweep) is free to drop it — the veto is meant to
+    /// outlive the process either way.
+    pub(crate) fn veto(&self, stem: &str) -> VetoUndo {
         let mut inner = self.inner.lock();
         while matches!(inner.states.get(stem), Some(StemState::InFlight)) {
             self.settled.wait(&mut inner);
         }
-        if inner.states.contains_key(stem) {
+        let previous = inner.states.get(stem).cloned();
+        if previous.is_some() {
             inner.states.insert(stem.to_string(), StemState::Vetoed);
+        }
+        VetoUndo(previous)
+    }
+
+    /// [`Self::ensure_context`] then [`Self::veto`] in one call — the
+    /// sequence every caller about to move or otherwise vacate `stem`
+    /// needs, in this order: the pivot-based move treats a missing
+    /// source file as already-moved, which for an un-hydrated family
+    /// would "move" nothing and leave the bucket copy to resurrect
+    /// under the old name, so the family must be made LOCAL before it
+    /// is vetoed against re-materializing. Shared by the live rename
+    /// path (`AppState::rename_context_locked`) and boot's own resume
+    /// of a `.renaming` marker, so the two can never drift on the
+    /// order or the reasoning behind it.
+    pub(crate) fn evict_stem(&self, stem: &str) -> io::Result<VetoUndo> {
+        self.ensure_context(stem)?;
+        Ok(self.veto(stem))
+    }
+
+    /// Reverses a [`Self::veto`] call after the operation it guarded
+    /// rolled back — `ensure_context` treats `Vetoed` as success
+    /// (nothing local to load, and correctly so for a veto that
+    /// stands), so a veto left in place after its own caller failed
+    /// would have every future read of `stem` silently answer "this
+    /// context has no data" until the next restart or a manifest
+    /// `retarget` happens to carry the stem again.
+    ///
+    /// Only restores `previous` if the state is STILL `Vetoed`: a
+    /// retarget landing in between (which vetoes vanished stems of its
+    /// own, or revives one a newer manifest carries again) is a more
+    /// current truth than this undo, and must win.
+    pub(crate) fn undo_veto(&self, stem: &str, undo: VetoUndo) {
+        let mut inner = self.inner.lock();
+        if !matches!(inner.states.get(stem), Some(StemState::Vetoed)) {
+            return;
+        }
+        match undo.0 {
+            Some(previous) => {
+                inner.states.insert(stem.to_string(), previous);
+            }
+            None => {
+                inner.states.remove(stem);
+            }
         }
     }
 
@@ -1734,6 +1793,340 @@ mod tests {
         hydrator.veto("ctx_a");
         assert!(hydrator.drained());
         let _ = std::fs::remove_dir_all(&bucket);
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    /// Builds the `{from}.renaming` marker `write_rename_marker` would
+    /// have written, without reaching into `registry::paths` (private
+    /// outside the `registry` module) for the `RenameMarker` type
+    /// itself — the JSON shape is the whole contract.
+    fn write_rename_marker_at(path: &FsPath, from: &str, to: &str) {
+        std::fs::write(
+            path,
+            serde_json::to_vec(&serde_json::json!({"from": from, "to": to})).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// Regression for the boot-time counterpart of
+    /// `AppState::rename_context_locked`'s own hydrate-then-veto
+    /// sequence (issue #561, item 2): resuming a `.renaming` marker
+    /// under a lazy bucket boot must hydrate the source family BEFORE
+    /// moving it. Before the fix, `scan_data_dir` called
+    /// `move_context_files` directly with nothing local — every file
+    /// in the family came back `NotFound`, `move_context_files`
+    /// returned `Ok(())` with `moved_any = false`, and that was
+    /// mistaken for "already moved," silently abandoning the rename:
+    /// the marker was deleted, but the family was never registered
+    /// under either name.
+    #[tokio::test]
+    async fn a_boot_resume_hydrates_before_moving_a_renamed_family() {
+        let (bucket, writer) = shipped_bucket("rename-resume", true).await;
+        let store = local_store(&bucket);
+        let root = ship::gen_root(&StorePath::default(), 1);
+        let manifest = ship::read_manifest(store.as_ref(), &root)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let target = scratch("rename-resume-target");
+        // The crash-shaped state: a live rename from "ctx_a" to "ctx_b"
+        // got as far as its durable marker and no further. Nothing in
+        // this lazy bucket boot's family is local yet — the marker is
+        // all there is to resume from.
+        write_rename_marker_at(
+            &crate::registry::renaming_marker_path(&target, "ctx_a"),
+            "ctx_a",
+            "ctx_b",
+        );
+
+        let hydrator = Arc::new(Hydrator::new(
+            Arc::clone(&store),
+            1,
+            root,
+            target.clone(),
+            manifest,
+            LanePolicy::KeepAckedTail,
+        ));
+
+        let state = AppState::boot_with(
+            target.clone(),
+            64 * 1024 * 1024,
+            None,
+            crate::registry::BootOptions {
+                hydrator: Some(Arc::clone(&hydrator)),
+                ..crate::registry::BootOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert!(
+            !crate::registry::renaming_marker_path(&target, "ctx_a").exists(),
+            "the resumed move must complete and clear the marker"
+        );
+        assert!(
+            target.join("ctx_b.ctx").exists(),
+            "the family must be hydrated THEN moved, not abandoned as \
+             though every file were already gone"
+        );
+        assert_eq!(
+            std::fs::read(target.join("ctx_b.ctx")).unwrap(),
+            b"image-v1"
+        );
+        assert!(!target.join("ctx_a.ctx").exists());
+        assert!(state.directory_entry("ctx_b").is_some());
+
+        let _ = std::fs::remove_dir_all(&bucket);
+        let _ = std::fs::remove_dir_all(&writer);
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    /// The other half of the same fix: a rename resume that CANNOT
+    /// hydrate its source (the bucket lost the object, a permanent
+    /// failure — not the transient window the fetch's own retry
+    /// arbitration is built to heal) must keep the marker for the next
+    /// boot to retry, exactly like a straggler sidecar already does for
+    /// a local-disk-only boot.
+    #[tokio::test]
+    async fn a_boot_resume_that_cannot_hydrate_keeps_the_marker() {
+        let (bucket, writer) = shipped_bucket("rename-resume-fail", true).await;
+        let store = local_store(&bucket);
+        let root = ship::gen_root(&StorePath::default(), 1);
+        let manifest = ship::read_manifest(store.as_ref(), &root)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let object_path = bucket
+            .join("gen-00000000000000000001")
+            .join("files")
+            .join("ctx_a.ctx");
+        assert!(object_path.is_file(), "the shipper published this object");
+        std::fs::remove_file(&object_path).unwrap();
+
+        let target = scratch("rename-resume-fail-target");
+        write_rename_marker_at(
+            &crate::registry::renaming_marker_path(&target, "ctx_a"),
+            "ctx_a",
+            "ctx_b",
+        );
+
+        let hydrator = Arc::new(Hydrator::new(
+            Arc::clone(&store),
+            1,
+            root,
+            target.clone(),
+            manifest,
+            LanePolicy::KeepAckedTail,
+        ));
+
+        let _state = AppState::boot_with(
+            target.clone(),
+            64 * 1024 * 1024,
+            None,
+            crate::registry::BootOptions {
+                hydrator: Some(Arc::clone(&hydrator)),
+                ..crate::registry::BootOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert!(
+            crate::registry::renaming_marker_path(&target, "ctx_a").exists(),
+            "a rename resume that cannot hydrate its source must keep the \
+             marker for the next boot to retry, not silently abandon it"
+        );
+        assert!(!target.join("ctx_b.ctx").exists());
+
+        let _ = std::fs::remove_dir_all(&bucket);
+        let _ = std::fs::remove_dir_all(&writer);
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    /// Regression for issue #561's item 10: boot's own `.deleted`
+    /// resume sweep must veto the hydrator before its unlink loop runs,
+    /// exactly like `AppState::delete` already does live. Without it, a
+    /// later `ensure_context` (the background fill, or any first touch
+    /// racing right behind boot) would re-fetch the family the deletion
+    /// just tore down, resurrecting it on disk.
+    #[tokio::test]
+    async fn an_unfinished_deletion_resume_vetoes_the_hydrator() {
+        let (bucket, writer) = shipped_bucket("delete-resume-veto", true).await;
+        let store = local_store(&bucket);
+        let root = ship::gen_root(&StorePath::default(), 1);
+        let manifest = ship::read_manifest(store.as_ref(), &root)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let target = scratch("delete-resume-veto-target");
+        std::fs::write(target.join("ctx_a.deleted"), b"").unwrap();
+
+        let hydrator = Arc::new(Hydrator::new(
+            Arc::clone(&store),
+            1,
+            root,
+            target.clone(),
+            manifest,
+            LanePolicy::KeepAckedTail,
+        ));
+
+        let _state = AppState::boot_with(
+            target.clone(),
+            64 * 1024 * 1024,
+            None,
+            crate::registry::BootOptions {
+                hydrator: Some(Arc::clone(&hydrator)),
+                ..crate::registry::BootOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert!(!target.join("ctx_a.deleted").exists());
+        hydrator.ensure_context("ctx_a").unwrap();
+        assert!(
+            !target.join("ctx_a.ctx").exists(),
+            "a boot-resumed deletion must veto the hydrator, or a later \
+             ensure_context (the background fill, or any first touch) \
+             re-fetches the family the deletion just tore down"
+        );
+
+        let _ = std::fs::remove_dir_all(&bucket);
+        let _ = std::fs::remove_dir_all(&writer);
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    /// [`Hydrator::undo_veto`]'s one hazard, spelled out in its own
+    /// doc: a retarget that lands WHILE a rollback is unwinding is more
+    /// current truth than the rollback's own undo, and must win. Before
+    /// this guard existed (`undo_veto` unconditionally restoring
+    /// `undo`), a rollback racing a retarget could clobber a freshly
+    /// revived `Pending` back to the stale `Done` it replaced —
+    /// `ensure_context` would then treat newer upstream content as
+    /// already fetched and never pick it up.
+    #[tokio::test]
+    async fn undo_veto_does_not_clobber_a_retarget_that_landed_in_between() {
+        let (bucket, writer) = shipped_bucket("veto-undo", true).await;
+        let store = local_store(&bucket);
+        let root = ship::gen_root(&StorePath::default(), 1);
+        let manifest = ship::read_manifest(store.as_ref(), &root)
+            .await
+            .unwrap()
+            .unwrap();
+        let target = scratch("veto-undo-target");
+
+        let hydrator = Hydrator::new(
+            Arc::clone(&store),
+            1,
+            root.clone(),
+            target.clone(),
+            manifest.clone(),
+            LanePolicy::ShippedExact,
+        );
+        hydrator.ensure_context("ctx_a").unwrap();
+        assert!(
+            hydrator.drained(),
+            "a fully hydrated stem counts as drained"
+        );
+
+        let undo = hydrator.veto("ctx_a");
+
+        // A newer manifest disagrees with what was already hydrated —
+        // as if the writer shipped again while this veto was in
+        // flight. The CURRENT state is `Vetoed`, not the `Done(sig)`
+        // retarget would need to recognize as still fresh, so it
+        // revives the stem as `Pending` and reports it stale.
+        let mut newer = manifest;
+        newer.files.get_mut("ctx_a.ctx").unwrap().crc =
+            newer.files["ctx_a.ctx"].crc.wrapping_add(1);
+        let report = hydrator.retarget(2, root, newer);
+        assert_eq!(report.stale, vec!["ctx_a".to_string()]);
+
+        hydrator.undo_veto("ctx_a", undo);
+        assert!(
+            !hydrator.drained(),
+            "the retargeted Pending state must survive the undo, not be \
+             clobbered back to the stale Done it would otherwise restore"
+        );
+
+        let _ = std::fs::remove_dir_all(&bucket);
+        let _ = std::fs::remove_dir_all(&writer);
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    /// Regression for issue #561's item 3, exercised through
+    /// `AppState::rename_context` itself rather than the state machine
+    /// directly: a rollback before the point of no return must UNDO the
+    /// veto it took on the source stem, not just have `undo_veto` exist
+    /// as a mechanism nothing calls.
+    ///
+    /// Observed through `retarget`'s own asymmetry between `Done` and
+    /// `Vetoed`: `retarget`'s vanish pass only reports a stem as newly
+    /// `vanished` the FIRST time it disappears from the manifest — one
+    /// already `Vetoed` is skipped (`hydrate.rs`'s own guard against
+    /// double-reporting). So if the rollback left "ctx_a" stuck
+    /// `Vetoed` (the pre-fix bug), a manifest that drops "ctx_a" would
+    /// report nothing vanished; the fix restores it to `Done` first, so
+    /// the SAME retarget call reports it vanished exactly once.
+    #[tokio::test]
+    async fn a_rolled_back_rename_undoes_its_own_veto() {
+        let (bucket, writer) = shipped_bucket("rollback-veto", true).await;
+        let store = local_store(&bucket);
+        let root = ship::gen_root(&StorePath::default(), 1);
+        let manifest = ship::read_manifest(store.as_ref(), &root)
+            .await
+            .unwrap()
+            .unwrap();
+        let target = scratch("rollback-veto-target");
+
+        // Block the DESTINATION stem's sweep — not the pivot — so the
+        // failure lands before the point of no return and the outcome
+        // is `RolledBack`, not `Stuck`. Same technique as
+        // `a_marker_that_cannot_be_removed_fails_the_stem_sweep`: a
+        // directory where `remove_persisted_file` expects a plain file.
+        std::fs::create_dir_all(target.join("ctx_b.wal.jsonl")).unwrap();
+
+        let hydrator = Arc::new(Hydrator::new(
+            Arc::clone(&store),
+            1,
+            root.clone(),
+            target.clone(),
+            manifest,
+            LanePolicy::KeepAckedTail,
+        ));
+
+        let state = AppState::boot_with(
+            target.clone(),
+            64 * 1024 * 1024,
+            None,
+            crate::registry::BootOptions {
+                hydrator: Some(Arc::clone(&hydrator)),
+                ..crate::registry::BootOptions::default()
+            },
+        )
+        .unwrap();
+
+        let error = state.rename_context("ctx_a", "ctx_b").unwrap_err();
+        assert!(
+            matches!(error, crate::registry::RenameContextError::Io(_)),
+            "the destination sweep must fail: {error:?}"
+        );
+        assert!(
+            state.directory_entry("ctx_a").is_some(),
+            "a rollback before the point of no return must leave the source in place"
+        );
+
+        let report = hydrator.retarget(2, root, Manifest::default());
+        assert_eq!(
+            report.vanished,
+            vec!["ctx_a".to_string()],
+            "the rollback must undo its veto back to Done, or this stem \
+             was already Vetoed going in and retarget silently skips \
+             reporting it as vanished"
+        );
+
+        let _ = std::fs::remove_dir_all(&bucket);
+        let _ = std::fs::remove_dir_all(&writer);
         let _ = std::fs::remove_dir_all(&target);
     }
 
