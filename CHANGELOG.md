@@ -101,6 +101,13 @@ Entries that change an on-disk format or a response shape say so.
   not gated, mirroring `sdk/python-langchain`.
 
 ### Fixed
+- `taguru-code <verb> --help` (and `-h`) now answers the usage and
+  exits 0 for every verb — it used to fall into each verb's own
+  parser as `unknown flag '--help'` (exit 2), and `watch --help`
+  would have looped instead of answering. The usage text also now
+  names every flag the verbs accept: the shared
+  `--context`/`--data-dir`, plus `find --limit`, `evalset --sample`,
+  and `eval --thresholds` were all undocumented in `--help`.
 - Full-code audit, first pass (#520): `POST /import`'s group-restore
   timeout refusal now carries `integrity`/`durable_batches`
   machine-readably, like the batch loop's own timeout always did
