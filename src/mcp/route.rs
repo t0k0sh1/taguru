@@ -369,6 +369,20 @@ pub fn route_tool(
                 )),
             )
         }
+        "promote" => {
+            let path = format!(
+                "{}/promote{}",
+                context_path("context")?,
+                query_string(arguments, &["dry_run"])?
+            );
+            need(arguments, "into")?;
+            need_present(arguments, "sources")?;
+            (
+                "POST",
+                path,
+                Some(pick(arguments, &["into", "sources", "audit"])),
+            )
+        }
         "retract_source" => {
             let path = format!(
                 "{}/sources/retract{}",

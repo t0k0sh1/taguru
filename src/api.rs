@@ -53,6 +53,8 @@ mod explore;
 mod groups;
 #[path = "api/import.rs"]
 mod import;
+#[path = "api/promote.rs"]
+mod promote;
 #[path = "api/recall.rs"]
 mod recall;
 #[path = "api/schema.rs"]
@@ -92,6 +94,7 @@ pub use import::{
 // handler's helper — everything else in this module is `pub` for the
 // handler wiring above).
 pub(crate) use import::{import_outcome, schema_import_outcome};
+pub use promote::promote_sources;
 pub use recall::{cross_query, cross_recall, query, recall};
 pub use resolve::{explain_resolve, explain_resolve_label, resolve, resolve_label};
 pub use schema::{audit_schema, get_schema, put_schema, validate_schema};

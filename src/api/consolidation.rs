@@ -36,7 +36,7 @@ pub(crate) const CONSOLIDATION_DETECTOR: &str = "consolidation/1";
 
 /// Per-list ceiling on merge evidence facts when the caller does not
 /// choose one — totals stay exact either way (no silent caps).
-const DEFAULT_EVIDENCE_CAP: usize = 20;
+pub(super) const DEFAULT_EVIDENCE_CAP: usize = 20;
 
 #[derive(Debug, Deserialize)]
 pub struct ConsolidationAuditRequest {
@@ -302,7 +302,7 @@ pub async fn audit_consolidation(
 /// lexical tier (deterministic, and the lexical score is the
 /// explainable one).
 #[allow(clippy::too_many_arguments)]
-fn merge_section(
+pub(super) fn merge_section(
     state: &AppState,
     name: &str,
     dice_floor: f64,
@@ -387,7 +387,7 @@ fn merge_section(
 /// groups ranked by measured functional tendency with contested edges
 /// after them (a dispute is already ordered evidence; the grouped kind
 /// is where ranking earns its keep).
-fn contradiction_section(
+pub(super) fn contradiction_section(
     context: &Context,
     effective: &HashMap<String, u64>,
     limit: usize,
@@ -456,7 +456,7 @@ fn contradiction_section(
 /// The staleness section: edges left behind by their own subject's
 /// neighborhood, the gap measured in assertion time (ADR 0012 §4).
 /// Undated edges are counted, never guessed at.
-fn staleness_section(
+pub(super) fn staleness_section(
     context: &Context,
     effective: &HashMap<String, u64>,
     floor_secs: u64,

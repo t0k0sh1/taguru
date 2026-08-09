@@ -827,6 +827,12 @@ pub(crate) fn required_role(method: &Method, route: &str) -> Role {
         | (&Method::DELETE, "/contexts/{name}/aliases")
         | (&Method::POST, "/contexts/{name}/sources")
         | (&Method::POST, "/contexts/{name}/sources/retract")
+        // Promotion (ADR 0018) is per-source re-sync between two
+        // established contexts — retract_source's classification, not
+        // `/import`'s Admin: it cannot create contexts and carries no
+        // group or schema records. The destination named in the body
+        // is checked against the key's scope in the handler.
+        | (&Method::POST, "/contexts/{name}/promote")
         | (&Method::POST, "/contexts/{name}/embeddings/refresh") => Role::Write,
         // Operator verbs — and everything unclassified.
         _ => Role::Admin,
@@ -1644,6 +1650,13 @@ mod tests {
         );
         assert_eq!(
             required_role(&Method::POST, "/contexts/{name}/sources/retract"),
+            Role::Write
+        );
+        // Promotion (ADR 0018) shares retract_source's classification —
+        // per-source re-sync between established contexts, not the
+        // context-creating, group-carrying `/import`.
+        assert_eq!(
+            required_role(&Method::POST, "/contexts/{name}/promote"),
             Role::Write
         );
         assert_eq!(required_role(&Method::POST, "/import"), Role::Admin);

@@ -34,6 +34,7 @@ mod metrics;
 mod observability;
 mod offline_import;
 mod passages;
+mod promote;
 mod quotas;
 mod reload;
 mod remote_compact;

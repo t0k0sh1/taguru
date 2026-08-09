@@ -293,6 +293,82 @@ pub(crate) fn render_group(name: &str, record: &GroupRecord) -> String {
     line
 }
 
+/// Filters a snapshot down to the named sources — the promote verb's
+/// half of "export → filter → re-head → import" (ADR 0018). Each
+/// association keeps only the named sources' live attributions, its
+/// `count`/`weight` recomputed from what is kept so [`render`]'s
+/// residual arithmetic finds nothing unsourced (the reserved
+/// `export:unsourced` batch cannot travel with a promotion); edges
+/// left with no attribution drop. Passages filter by source id.
+/// Aliases pass through untouched — [`render`]'s own live-canonical
+/// rule already drops the ones the kept slice no longer interns, with
+/// the dropped count reported, not silent. The schema is cleared: a
+/// promotion must never install the scratch's schema into the
+/// destination, whose own installed schema judges the incoming
+/// batches instead.
+pub(crate) fn filter_to_sources(
+    snapshot: ExportSnapshot,
+    sources: &BTreeSet<String>,
+) -> ExportSnapshot {
+    let associations = snapshot
+        .associations
+        .into_iter()
+        .filter_map(|mut association| {
+            association.attributions.retain(|attribution| {
+                attribution.count > 0 && sources.contains(&attribution.source)
+            });
+            let count: u64 = association
+                .attributions
+                .iter()
+                .map(|attribution| attribution.count)
+                .sum();
+            if count == 0 {
+                return None;
+            }
+            let sum: f64 = association
+                .attributions
+                .iter()
+                .map(|attribution| attribution.weight)
+                .sum();
+            association.count = count;
+            association.weight = sum / count as f64;
+            Some(association)
+        })
+        .collect();
+    ExportSnapshot {
+        meta: snapshot.meta,
+        associations,
+        concept_aliases: snapshot.concept_aliases,
+        label_aliases: snapshot.label_aliases,
+        passages: snapshot
+            .passages
+            .into_iter()
+            .filter(|(source, _)| sources.contains(source))
+            .collect(),
+        schema: None,
+    }
+}
+
+/// The source ids a snapshot actually holds — a passage, or a LIVE
+/// attribution (count-0 rows are retraction residue, not presence).
+/// The promote verb's existence check (ADR 0018): a requested id
+/// absent from this set refuses the request rather than silently
+/// no-opping under retract-then-apply.
+pub(crate) fn available_sources(snapshot: &ExportSnapshot) -> BTreeSet<&str> {
+    snapshot
+        .passages
+        .iter()
+        .map(|(source, _)| source.as_str())
+        .chain(snapshot.associations.iter().flat_map(|association| {
+            association
+                .attributions
+                .iter()
+                .filter(|attribution| attribution.count > 0)
+                .map(|attribution| attribution.source.as_str())
+        }))
+        .collect()
+}
+
 /// One source's share of the stream, accumulated before rendering.
 #[derive(Default)]
 struct Bucket<'a> {
@@ -1482,6 +1558,126 @@ mod tests {
             unsourced.len(),
             2,
             "one reserved header, one residual assertion: {}",
+            rendered.stream
+        );
+    }
+
+    /// The promote verb's existence check (ADR 0018): a passage or a
+    /// LIVE attribution counts as presence; a count-0 attribution is
+    /// retraction residue and must not — an id present only that way
+    /// would promote as an empty no-op instead of refusing.
+    #[test]
+    fn available_sources_sees_passages_and_live_attributions_only() {
+        let edge = association(
+            1,
+            vec![
+                Attribution {
+                    source: "live.md".to_string(),
+                    weight: 1.0,
+                    count: 1,
+                    paragraph: None,
+                },
+                Attribution {
+                    source: "dead.md".to_string(),
+                    weight: 0.0,
+                    count: 0,
+                    paragraph: None,
+                },
+            ],
+        );
+        let mut snapshot = snapshot(vec![edge]);
+        snapshot.passages = vec![("note.md".to_string(), PassageRecord::for_tests("原文"))];
+
+        let available = available_sources(&snapshot);
+        assert!(available.contains("note.md"), "a passage is presence");
+        assert!(
+            available.contains("live.md"),
+            "a live attribution is presence"
+        );
+        assert!(
+            !available.contains("dead.md"),
+            "retraction residue is not presence: {available:?}"
+        );
+    }
+
+    /// The promote verb's filter (ADR 0018): each edge keeps only the
+    /// named sources' live shares with count/weight recomputed from
+    /// what is kept, edges left with nothing drop, and — because
+    /// attributed count now equals total by construction — the
+    /// rendered stream carries no `export:unsourced` residual batch.
+    #[test]
+    fn filtering_to_sources_keeps_only_their_shares_and_no_residual() {
+        let keep: BTreeSet<String> = ["a.md".to_string()].into();
+        let shared = association(
+            4,
+            vec![
+                // Two assertions summing to 3.0: the recomputed weight
+                // must be the mean (1.5), never the product's shape.
+                Attribution {
+                    source: "a.md".to_string(),
+                    weight: 3.0,
+                    count: 2,
+                    paragraph: Some(4),
+                },
+                Attribution {
+                    source: "b.md".to_string(),
+                    weight: 1.0,
+                    count: 1,
+                    paragraph: None,
+                },
+                // The retracted share of the kept source stays dead.
+                Attribution {
+                    source: "a.md".to_string(),
+                    weight: 0.0,
+                    count: 0,
+                    paragraph: None,
+                },
+            ],
+        );
+        let mut theirs = association(
+            1,
+            vec![Attribution {
+                source: "b.md".to_string(),
+                weight: 1.0,
+                count: 1,
+                paragraph: None,
+            }],
+        );
+        theirs.object = "別件".to_string();
+        let mut snapshot = snapshot(vec![shared, theirs]);
+        snapshot.passages = vec![
+            ("a.md".to_string(), PassageRecord::for_tests("甲")),
+            ("b.md".to_string(), PassageRecord::for_tests("乙")),
+        ];
+        snapshot.schema = Some(warn_schema_document());
+
+        let filtered = filter_to_sources(snapshot, &keep);
+        assert_eq!(filtered.associations.len(), 1, "b.md's own edge drops");
+        let edge = &filtered.associations[0];
+        assert_eq!(edge.count, 2, "only a.md's live share remains");
+        assert_eq!(edge.weight, 1.5, "sum 3.0 over count 2 — the mean");
+        assert_eq!(edge.attributions.len(), 1);
+        assert_eq!(edge.attributions[0].source, "a.md");
+        assert_eq!(
+            filtered.passages.len(),
+            1,
+            "passages filter by source id too"
+        );
+        assert!(
+            filtered.schema.is_none(),
+            "a promotion never carries the scratch's schema"
+        );
+
+        let rendered = render("perm", &filtered, Deadline::unbounded()).unwrap();
+        assert_eq!(rendered.batches, 1, "{}", rendered.stream);
+        assert!(
+            !rendered.stream.contains(UNSOURCED_SOURCE),
+            "no residual may travel with a promotion: {}",
+            rendered.stream
+        );
+        assert!(
+            rendered.stream.contains("\"paragraph\":4"),
+            "the kept share's locator survives: {}",
             rendered.stream
         );
     }

@@ -88,6 +88,11 @@
 //! - `/metrics` is router-shaped (`taguru_router_*`), not server-shaped.
 //! - Renaming a context through the router works but leaves the map
 //!   pointing at the old name until the operator edits it.
+//! - `/contexts/{name}/promote` (ADR 0018) proxies whole to the shard
+//!   owning the scratch `{name}`, so a destination mapped to another
+//!   shard refuses there (`no_context`) — promotion through the
+//!   router requires the pair on one shard. Cross-shard moves stay
+//!   what they were: export, delete, remap, re-import.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;

@@ -192,7 +192,7 @@ fn alias_rejection_issue(batch_index: usize, rejection: &AliasRejection) -> Issu
 /// both the strict-refusal arm below and the warn-mode success path, so
 /// the two present identical `Issue` values for the same violation (ADR
 /// 0009 §8.3).
-fn schema_issues_in_batch(batch_index: usize, issues: Vec<Issue>) -> Vec<Issue> {
+pub(super) fn schema_issues_in_batch(batch_index: usize, issues: Vec<Issue>) -> Vec<Issue> {
     issues
         .into_iter()
         .map(|issue| Issue {
@@ -209,7 +209,10 @@ fn schema_issues_in_batch(batch_index: usize, issues: Vec<Issue>) -> Vec<Issue> 
 /// `durable_prefix` naming exactly how many did — never implying a
 /// subset of THIS batch's own writes was accepted, since every batch
 /// is all-or-nothing.
-fn stream_integrity(previewed_or_landed: usize, dry_run: bool) -> (&'static str, Option<usize>) {
+pub(super) fn stream_integrity(
+    previewed_or_landed: usize,
+    dry_run: bool,
+) -> (&'static str, Option<usize>) {
     if dry_run || previewed_or_landed == 0 {
         ("nothing_written", None)
     } else {
@@ -267,7 +270,7 @@ pub(super) fn import_budget_refusal(
 /// `Partial`/`Io`/`Access` cannot prove how much of THIS batch landed,
 /// so their prose stays the only account, as before.
 #[allow(clippy::too_many_arguments)] // the batch's stream position, spread flat like call_inner's outer context
-fn import_refusal(
+pub(super) fn import_refusal(
     state: &AppState,
     batch: &crate::ingest::Batch,
     refusal: crate::ingest::ApplyRefusal,
@@ -550,7 +553,7 @@ pub(super) fn schema_import_refusal(
 /// refused-batch cases in [`import_batch`]'s loop, which differ only in
 /// the verb for THIS batch and the exact fix to name. A single-batch
 /// stream has nothing before it to report, so the note is empty.
-fn import_batch_note(
+pub(super) fn import_batch_note(
     index: usize,
     total: usize,
     batch: &crate::ingest::Batch,
@@ -618,8 +621,12 @@ fn import_batch_note(
 /// `?dry_run=true` reports the same `{batches: [...]}` shape without
 /// writing anything — parsing and scope checks still run in full, so a
 /// malformed or forbidden stream is refused exactly as it would be for
-/// real. Two counts per batch, `associations` and `aliases`, are
-/// optimistic (see [`crate::ingest::preview_batch`]); every other
+/// real. Each batch's checks are seeded with what the batches before
+/// it would intern and create ([`crate::ingest::PreviewSeeds`]), so a
+/// restore whose aliases trail their canonicals — every export — and
+/// a fresh-name restore's post-first batches preview clean, exactly
+/// as they apply. Two counts per batch, `associations` and `aliases`,
+/// are optimistic (see [`crate::ingest::preview_batch`]); every other
 /// field is exact. `taguru_schema` and `taguru_group` records are both
 /// a known gap: they apply through a path (`put_schema`,
 /// `restore_groups`) that dry-run does not preview, so a stream
@@ -741,6 +748,10 @@ pub async fn import_batch(
         // carries its individual count regardless of either total.
         let mut warn_issues: Vec<Issue> = Vec::new();
         let mut warn_total: usize = 0;
+        // Dry run only: what earlier batches of this stream would have
+        // interned by the time each batch applies for real — see
+        // [`crate::ingest::PreviewSeeds`].
+        let mut seeds = crate::ingest::PreviewSeeds::default();
         for (index, batch) in stream.batches.iter().enumerate() {
             // Each landed batch is durable (retract-then-apply), so a
             // budget that runs out partway is safe to report as a
@@ -804,7 +815,11 @@ pub async fn import_batch(
                 )));
             }
             let applied = if query.dry_run {
-                crate::ingest::preview_batch(&state, batch)
+                let previewed = crate::ingest::preview_batch(&state, batch, &seeds);
+                if previewed.is_ok() {
+                    seeds.absorb(batch);
+                }
+                previewed
             } else {
                 crate::ingest::apply_batch(&state, batch)
             };

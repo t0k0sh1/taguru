@@ -263,15 +263,33 @@ fn corrected_associations(batch: &Batch, paragraph_count: Option<usize>) -> (Vec
 /// the value `AppState::create` seeds a new context with. A context
 /// that does not exist and brings no `create` block is left to the
 /// ordinary `NoContext` refusal that follows this check.
-fn predicted_alias_rejection(state: &AppState, batch: &Batch) -> Option<AliasRejection> {
+fn predicted_alias_rejection(
+    state: &AppState,
+    batch: &Batch,
+    seeds: Option<&PreviewSeeds>,
+) -> Option<AliasRejection> {
     if batch.concepts.is_empty() && batch.labels.is_empty() {
         return None;
     }
+    // Only THIS context's seeds may vouch for a canonical: a stream
+    // can interleave contexts, and a name an earlier batch interned
+    // into a sibling context proves nothing about this one — the real
+    // apply would still refuse `UnknownCanonical` here.
+    let seeded = seeds.and_then(|seeds| seeds.interned_in(&batch.context));
     let concepts = batch
         .associations
         .iter()
-        .flat_map(|op| [op.subject.as_str(), op.object.as_str()]);
-    let labels = batch.associations.iter().map(|op| op.label.as_str());
+        .flat_map(|op| [op.subject.as_str(), op.object.as_str()])
+        .chain(
+            seeded
+                .into_iter()
+                .flat_map(|seeds| seeds.concepts.iter().map(String::as_str)),
+        );
+    let labels = batch.associations.iter().map(|op| op.label.as_str()).chain(
+        seeded
+            .into_iter()
+            .flat_map(|seeds| seeds.labels.iter().map(String::as_str)),
+    );
     let check = move |context: &Context| -> Option<AliasRejection> {
         if let Err((alias, canonical, error)) =
             context.check_concept_aliases(&batch.concepts, concepts)
@@ -295,13 +313,68 @@ fn predicted_alias_rejection(state: &AppState, batch: &Batch) -> Option<AliasRej
     };
 
     if state.directory_entry(&batch.context).is_none() {
-        return if batch.create.is_some() {
+        // An earlier previewed batch reaching this context stands in
+        // for the create block the real stream's first batch carries.
+        return if batch.create.is_some() || seeds.is_some_and(|seeds| seeds.reaches(&batch.context))
+        {
             check(&Context::default())
         } else {
             None
         };
     }
     state.read_context(&batch.context, check).ok().flatten()
+}
+
+/// What earlier batches of the SAME previewed stream would intern —
+/// the dry run's stand-in for the batch-by-batch interning a real
+/// apply performs, kept PER CONTEXT because a stream can interleave
+/// contexts and interning is per context. Export puts every alias on
+/// the LAST batch while the canonicals are interned by earlier ones,
+/// so without this a dry run of a stream the real import applies
+/// cleanly refuses with a spurious `UnknownCanonical` — breaking "a
+/// dry run refuses exactly what the real import would". Cross-batch
+/// alias CONFLICTS remain un-predicted (a preview holds no simulated
+/// alias table); that gap only lets a preview pass what the real run
+/// would refuse, the same advisory direction as the capacity caps.
+#[derive(Default)]
+pub(crate) struct PreviewSeeds {
+    /// Context → what this stream's earlier batches intern there. A
+    /// context's PRESENCE also stands in for its creation: a
+    /// restore's create block rides only the FIRST batch, so without
+    /// it every later batch of a fresh-name restore previews a
+    /// spurious `NoContext` the real import (whose first batch
+    /// actually creates) never raises.
+    contexts: BTreeMap<String, ContextSeeds>,
+}
+
+/// One context's share of a [`PreviewSeeds`]: the names its earlier
+/// batches would intern.
+#[derive(Default)]
+pub(crate) struct ContextSeeds {
+    concepts: BTreeSet<String>,
+    labels: BTreeSet<String>,
+}
+
+impl PreviewSeeds {
+    /// Records what `batch` would intern once applied — call after the
+    /// batch previews clean, before the next batch previews.
+    pub(crate) fn absorb(&mut self, batch: &Batch) {
+        let seeds = self.contexts.entry(batch.context.clone()).or_default();
+        seeds.concepts.extend(batch.concept_vocabulary());
+        seeds.labels.extend(batch.label_vocabulary());
+    }
+
+    /// Whether an earlier batch of this previewed stream already
+    /// landed in `context` — creating it if it did not exist.
+    fn reaches(&self, context: &str) -> bool {
+        self.contexts.contains_key(context)
+    }
+
+    /// What this stream's earlier batches intern in `context` — and
+    /// ONLY there; a sibling context's names never vouch here.
+    fn interned_in(&self, context: &str) -> Option<&ContextSeeds> {
+        self.contexts.get(context)
+    }
 }
 
 /// `warn`-mode schema violations this batch's own associations raised
@@ -489,7 +562,9 @@ fn predicted_schema_rejection(
 /// retract-then-apply idempotency already makes the repair exact, so
 /// detection is the remaining gap.
 pub(crate) fn apply_batch(state: &AppState, batch: &Batch) -> Result<Applied, ApplyRefusal> {
-    if let Some(rejection) = predicted_alias_rejection(state, batch) {
+    // No seeds: earlier batches of a real stream have actually landed,
+    // so the live context already holds whatever they interned.
+    if let Some(rejection) = predicted_alias_rejection(state, batch, None) {
         return Err(ApplyRefusal::Rejected(rejection));
     }
     let schema_warnings = predicted_schema_rejection(state, batch, CheckPurpose::Apply)?;
@@ -705,32 +780,43 @@ pub(crate) fn apply_batch(state: &AppState, batch: &Batch) -> Result<Applied, Ap
 /// associations or aliases than previewed. Every other field
 /// (`retracted`, the drop counts, `schema_violations`) reads through to
 /// the same state a real batch would query, so it matches exactly.
-pub(crate) fn preview_batch(state: &AppState, batch: &Batch) -> Result<Applied, ApplyRefusal> {
-    if let Some(rejection) = predicted_alias_rejection(state, batch) {
+pub(crate) fn preview_batch(
+    state: &AppState,
+    batch: &Batch,
+    seeds: &PreviewSeeds,
+) -> Result<Applied, ApplyRefusal> {
+    if let Some(rejection) = predicted_alias_rejection(state, batch, Some(seeds)) {
         return Err(ApplyRefusal::Rejected(rejection));
     }
     let schema_warnings = predicted_schema_rejection(state, batch, CheckPurpose::Preview)?;
 
-    let created = state.directory_entry(&batch.context).is_none();
+    let exists = state.directory_entry(&batch.context).is_some();
+    // An earlier batch of this previewed stream reaching the context
+    // stands in for its create — the real stream's first batch will
+    // have created it by the time this one applies.
+    let seeded = !exists && seeds.reaches(&batch.context);
+    let created = !exists && !seeded;
     if created && batch.create.is_none() {
         return Err(ApplyRefusal::NoContext(batch.context.clone()));
     }
 
-    // A context about to be created has nothing to retract from yet.
-    let retracted = if created {
-        0
-    } else {
+    // A context about to be created — by this batch or an earlier one
+    // of the same previewed stream — has nothing to retract from yet.
+    let retracted = if exists {
         state
             .count_source_edges(&batch.context, &batch.source)
             .map_err(ApplyRefusal::Access)?
+    } else {
+        0
     };
     // Mirrors apply_batch's tolerance for a passage-store read that
     // fails: retract_source warns and reports no removal rather than
     // failing the whole batch, so the preview falls back the same way.
-    let had_passage = state
-        .passage_sources(&batch.context)
-        .and_then(Result::ok)
-        .is_some_and(|sources| sources.contains(&batch.source));
+    let had_passage = exists
+        && state
+            .passage_sources(&batch.context)
+            .and_then(Result::ok)
+            .is_some_and(|sources| sources.contains(&batch.source));
     let passage_dropped = had_passage && batch.passage.is_none();
 
     let paragraph_count = batch

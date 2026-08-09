@@ -573,6 +573,20 @@ pub(super) fn tool_definitions() -> Vec<Value> {
             ),
         ),
         (
+            "promote",
+            "Graph-path memory promotion (docs/promotion.html, ADR 0018): move the named source ids from this (scratch) context into an established destination context, WITHOUT re-extraction — the transfer is the export/import round trip in one call. Each source moves whole (passage, date, tags, its share of every association's weight; aliases ride exactly when their canonical is live in the promoted slice, and aliases_dropped counts the rest), source ids survive so promoted citations still name the originating session, and applying is per-source retract-then-apply — re-promoting the same sources is idempotent. The destination must already exist (never created here) and its own schema judges the incoming batches. Every named source must exist in the scratch or the request refuses whole, path-addressed, nothing written. After a real apply the destination's consolidation audit (all three checks, default ceilings) rides back under `audit` — CANDIDATES to judge, never applied; `audit: false` skips it, and `audit_skipped` names why when it could not run (the batches are already durable by then). dry_run=true previews the same batches shape with nothing written and no audit. What stays yours: choosing WHICH sources to promote (review first), judging the audit's candidates, and retiring the promoted scratch afterwards (retract_source) — forgetting is always explicit.",
+            object_schema(
+                json!({
+                    "context": context,
+                    "into": { "type": "string", "description": "the destination context (from list_contexts) — must already exist" },
+                    "sources": { "type": "array", "minItems": 1, "items": { "type": "string" }, "description": "the scratch source ids to promote — every one must exist here" },
+                    "audit": { "type": "boolean", "description": "run the destination's consolidation audit after the apply (default true; dry_run never audits)" },
+                    "dry_run": { "type": "boolean", "description": "preview only — report the same batches shape, write nothing, no audit" }
+                }),
+                &["context", "into", "sources"],
+            ),
+        ),
+        (
             "retract_source",
             "Withdraw one source's (document's) contributions from graph and passage store. Diff sync for updated documents: retract the old version, then re-ingest the new. Concepts and edges remain; only weights come down. dry_run=true previews the same {associations_touched, passage_removed} with nothing written. Full erasure (the withdrawn bytes physically off disk) is retract, then compact.",
             object_schema(
