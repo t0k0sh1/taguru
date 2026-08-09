@@ -440,6 +440,40 @@ fn wall_seconds_needs_both_start_and_end() {
 }
 
 #[test]
+fn wall_seconds_drops_an_end_stamped_before_its_start() {
+    let backwards = DocRow {
+        cell_id: "m.run01".into(),
+        model_id: "m".into(),
+        run_index: 1,
+        document_id: "doc".into(),
+        start_ts: Some(10.0),
+        end_ts: Some(9.0),
+        outcome: None,
+        associations: None,
+        concepts: None,
+        labels: None,
+        questions: None,
+        duplicates: None,
+        dropped: None,
+        elapsed_seconds_sum: 0.0,
+        input_tokens_sum: None,
+        batch: None,
+    };
+    assert_eq!(
+        wall_seconds(&backwards),
+        None,
+        "a clock-stepped sample must not sink the distribution's min"
+    );
+    // A zero-length span is a real (if instant) measurement, not a
+    // broken one.
+    let instant = DocRow {
+        end_ts: Some(10.0),
+        ..backwards
+    };
+    assert_eq!(wall_seconds(&instant), Some(0.0));
+}
+
+#[test]
 fn document_outcome_rates_counts_interrupted_in_the_denominator_only() {
     fn doc(outcome: Option<&str>) -> DocRow {
         DocRow {
@@ -1214,6 +1248,37 @@ fn compute_measurements_over_a_synthetic_results_directory() {
         "sake failed — no associations"
     );
     assert_eq!(sake_associations.n(), 0);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_reprocessed_documents_second_end_record_supersedes_the_first() {
+    let dir = synthetic_results_dir("duplicate-end");
+    // A resumed cell that re-processed `brewery` logs a fresh `end`;
+    // the cell finished in THAT state, so the later record must win —
+    // mirroring `start`'s keep-the-earliest, not repeating it.
+    let runs_path = dir.join("runs/m.run01.jsonl");
+    let mut runs = fs::read_to_string(&runs_path).unwrap();
+    runs.push_str(
+        &serde_json::json!({
+            "kind": "document", "ts": 120.0, "cell_id": "m.run01",
+            "document_id": "brewery", "source": "corpus/brewery.md",
+            "document_sha256": "sha-brewery", "phase": "end", "outcome": "written",
+            "associations": 5, "concepts": 1, "labels": 0, "questions": 0,
+            "duplicates": 0, "dropped": 0, "batch_path": "cells/m/run01/brewery.jsonl",
+        })
+        .to_string(),
+    );
+    runs.push('\n');
+    fs::write(&runs_path, runs).unwrap();
+
+    let measurements = compute_measurements(&dir).expect("computes");
+    let brewery_run01 = &measurements.documents["m"]["brewery"]["run01"];
+    let MetricValue::Count(associations) = &brewery_run01["extraction.associations"] else {
+        panic!()
+    };
+    assert_eq!(associations.value(), Some(5.0));
 
     let _ = fs::remove_dir_all(&dir);
 }

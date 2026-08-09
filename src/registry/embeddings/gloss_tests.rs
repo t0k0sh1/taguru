@@ -56,6 +56,49 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
+    /// The mid-race view a delete leaves behind: the entry still
+    /// reachable (a status request's `lookup` won the race) but its
+    /// tombstone already planted. Every embeddings read must answer
+    /// "no such context" — the same 404 the context endpoint gives —
+    /// not a status built from unlinked (or a successor's) sidecars.
+    #[test]
+    fn a_tombstoned_entry_answers_none_on_every_embeddings_read() {
+        let dir = scratch_dir("tombstone-fence");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let embedder = Some(Arc::new(MockEmbeddings::fruity(&calls)) as Arc<dyn EmbeddingProvider>);
+        let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
+        state.create("sake", ContextMeta::default()).unwrap();
+        let entry = state.lookup("sake").unwrap();
+        {
+            let mut inner = entry.inner.write();
+            state.tombstone_locked(&mut inner, &entry);
+        }
+        assert!(state.embeddings_status("sake").is_none());
+        assert!(
+            state
+                .semantic_twins("sake", 0.5, Deadline::unbounded())
+                .is_none()
+        );
+        assert!(
+            state
+                .semantic_resolve("sake", "りんご", false, None, Deadline::unbounded())
+                .is_none()
+        );
+        assert!(
+            state
+                .explain_semantic_resolve(
+                    "sake",
+                    "りんご",
+                    "果物",
+                    false,
+                    None,
+                    Deadline::unbounded()
+                )
+                .is_none()
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn embedding_calls_record_success_and_failure() {
         /// Same model name as the mock, so stored vectors stay usable,

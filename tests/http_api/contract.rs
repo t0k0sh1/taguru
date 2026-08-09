@@ -559,6 +559,38 @@ fn import_reports_locator_bookkeeping() {
     );
 }
 
+/// The `/import` refusal envelope's machine-readable resume fields
+/// (issue #182): `integrity` + `durable_batches`, which an importer
+/// keys on to skip the landed prefix instead of re-sending the whole
+/// stream. Pinned via the deterministic mid-stream rejection — the
+/// group-restore budget refusal carries the same field set (see
+/// `restore_refusal_frames_a_spent_budget_as_a_resumable_timeout` in
+/// src/api.rs), but its arm only fires when the deadline dies between
+/// the batch loop and the group phase, a window no knob can hit
+/// reliably enough for a recorded fixture.
+#[test]
+fn import_refusal_pins_the_durable_prefix_fields() {
+    let server = Server::start("contract-import-refusal");
+    let stream = "{\"taguru_batch\": 1, \"context\": \"corpus-h\", \"source\": \"doc-1\", \
+                   \"create\": {\"description\": \"wire-contract refusal corpus\"}}\n\
+                  {\"subject\": \"alpha\", \"label\": \"connects_to\", \"object\": \"beta\", \
+                  \"weight\": 1.0}\n\
+                  {\"taguru_batch\": 1, \"context\": \"corpus-h\", \"source\": \"doc-2\"}\n\
+                  {\"alias\": \"Alpha\", \"canonical\": \"存在しない\", \"kind\": \"concept\"}\n";
+    let (status, body) = post_import(&server, stream, None);
+    assert_eq!(status, 409, "{body}");
+    assert_eq!(body["integrity"], json!("durable_prefix"), "{body}");
+    assert_eq!(body["durable_batches"], json!(1), "{body}");
+    http_fixture(
+        "import_refusal_durable_prefix",
+        "POST",
+        "/import",
+        Some(json!(stream)),
+        status,
+        body,
+    );
+}
+
 /// The `taguru_schema` record's own wire shape (#384, ADR 0009 §13) —
 /// `import.json` above never carries one, so this pins
 /// `response.result.schemas[]`'s exact fields (`context`/`mode`/

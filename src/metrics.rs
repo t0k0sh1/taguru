@@ -495,6 +495,30 @@ mod tests {
         );
     }
 
+    /// A shipped-only report that no longer outruns the applied seq
+    /// clears the age — the same three-way move `note_replica_lane`
+    /// makes, so a lineage whose shipped seqs regress can never leave
+    /// a stale behind-since stamp on a lane that is in fact caught up.
+    #[test]
+    fn a_shipped_report_at_or_below_applied_clears_the_behind_age() {
+        let metrics = Metrics::default();
+        let key = ("sake".to_string(), "graph");
+        metrics.note_replica_lane("sake", "graph", 5, 5);
+        metrics.note_replica_shipped("sake", "graph", 7);
+        let stamped = metrics.replica_lag.lock()[&key].behind_since_epoch;
+        assert_ne!(stamped, 0, "a real gap starts the age");
+        metrics.note_replica_shipped("sake", "graph", 5);
+        let cleared = metrics.replica_lag.lock()[&key].behind_since_epoch;
+        assert_eq!(cleared, 0, "no gap, no age");
+        // Strictly below, not just equal — the caught-up arm is `>=`,
+        // and a regressed shipped seq (a successor lineage's lower
+        // watermark) must clear the age the same way.
+        metrics.note_replica_shipped("sake", "graph", 7);
+        metrics.note_replica_shipped("sake", "graph", 4);
+        let cleared_below = metrics.replica_lag.lock()[&key].behind_since_epoch;
+        assert_eq!(cleared_below, 0, "a lower shipped seq also clears the age");
+    }
+
     /// The in-flight counter: a ceiling refuses at capacity, zero means
     /// count-only, release always returns the slot — and both series
     /// render on /metrics.

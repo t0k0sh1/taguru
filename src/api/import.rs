@@ -413,15 +413,27 @@ pub(super) fn restore_refusal(
     // partial group write of its own (`restore_groups` validates the
     // whole set before applying any of it).
     match &refusal {
-        RestoreGroupsError::Timeout { .. } => error(
-            code,
-            format!(
-                "group restore exceeded its budget with {batches_landed} batch(es) durable \
-                 (TAGURU_REQUEST_TIMEOUT_SECS tunes this); {}",
-                refusal.text()
-            ),
-            started_at,
-        ),
+        RestoreGroupsError::Timeout { .. } => {
+            // Same machine-readable claim `import_budget_refusal` makes
+            // for the batch loop: the fields speak for the BATCHES (all
+            // durable), which is what a resuming importer keys on — the
+            // group phase itself stays a re-POST, as the note says.
+            let (integrity, durable_batches) = stream_integrity(batches_landed, false);
+            validation_error(
+                code,
+                format!(
+                    "group restore exceeded its budget with {batches_landed} batch(es) durable \
+                     (TAGURU_REQUEST_TIMEOUT_SECS tunes this); {}",
+                    refusal.text()
+                ),
+                RefusalDetail {
+                    integrity: Some(integrity),
+                    durable_batches,
+                    ..Default::default()
+                },
+                started_at,
+            )
+        }
         _ => {
             let (integrity, durable_batches) = stream_integrity(batches_landed, false);
             validation_error(

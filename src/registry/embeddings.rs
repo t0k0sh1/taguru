@@ -30,7 +30,17 @@ impl AppState {
     pub fn embeddings_status(&self, name: &str) -> Option<EmbeddingsStatus> {
         let entry = self.lookup(name)?;
         let stem = file_stem(name);
-        let store = self.entry_vectors(&entry, &stem);
+        // Both sidecar loads sit under the entry's tombstone fence: a
+        // delete that won the race must read as the same 404 the
+        // context endpoint gives, not a 200 built from unlinked files'
+        // empty defaults (or a successor generation's sidecars).
+        let (store, passages) = {
+            let _fence = entry.read_unless_deleted()?;
+            (
+                self.entry_vectors(&entry, &stem),
+                self.entry_passage_vectors(&entry, &stem),
+            )
+        };
         // width() is Some exactly when anything is stored, so it doubles
         // as the emptiness gate.
         let glosses = store.width().map(|width| GlossSidecarStatus {
@@ -39,7 +49,6 @@ impl AppState {
             concepts: store.concepts.len(),
             labels: store.labels.len(),
         });
-        let passages = self.entry_passage_vectors(&entry, &stem);
         let passages = (!passages.is_empty()).then(|| PassageSidecarStatus {
             model: passages.model.clone(),
             width: passages.dim(),
@@ -81,7 +90,14 @@ impl AppState {
 
         let entry = self.lookup(name)?;
         let floor = cosine_floor.clamp(0.0, 1.0);
-        let store = self.entry_vectors(&entry, &file_stem(name));
+        // Scoped tombstone fence: it covers the sidecar load (a lost
+        // race with delete must answer `None`, not sweep a stale or
+        // successor sidecar) and is dropped before the O(N²) sweep so
+        // a delete never waits on it.
+        let store = {
+            let _fence = entry.read_unless_deleted()?;
+            self.entry_vectors(&entry, &file_stem(name))
+        };
         if store.concepts.is_empty() && store.labels.is_empty() {
             return Some((
                 Vec::new(),
@@ -858,14 +874,24 @@ impl AppState {
             return Some(Ok(Vec::new()));
         };
         let entry = self.lookup(name)?;
+        // Floor read and sidecar load share one scoped tombstone fence
+        // (the guard doubles as the `meta` read — a second
+        // `inner.read()` under it could deadlock behind a queued
+        // writer). Dropped before the provider round trip below, which
+        // must never make a delete wait on the network.
+        let (context_floor, store) = {
+            let fence = entry.read_unless_deleted()?;
+            (
+                fence.meta.semantic_floor,
+                self.entry_vectors(&entry, &file_stem(name)),
+            )
+        };
         // One-call override beats the context setting beats the server
         // default (see [`DEFAULT_SEMANTIC_FLOOR`] for the calibration).
-        let context_floor = entry.inner.read().meta.semantic_floor;
         let floor = floor_override
             .or(context_floor)
             .unwrap_or(self.0.default_semantic_floor)
             .clamp(0.0, 1.0);
-        let store = self.entry_vectors(&entry, &file_stem(name));
         if store.model != embedder.model() {
             return Some(Ok(Vec::new()));
         }
@@ -923,12 +949,19 @@ impl AppState {
             return Some(GlossLaneReport::Off);
         };
         let entry = self.lookup(name)?;
-        let context_floor = entry.inner.read().meta.semantic_floor;
+        // Same scoped fence as `semantic_resolve` — floor and sidecar
+        // under one guard, dropped before any provider call.
+        let (context_floor, store) = {
+            let fence = entry.read_unless_deleted()?;
+            (
+                fence.meta.semantic_floor,
+                self.entry_vectors(&entry, &file_stem(name)),
+            )
+        };
         let floor = floor_override
             .or(context_floor)
             .unwrap_or(self.0.default_semantic_floor)
             .clamp(0.0, 1.0);
-        let store = self.entry_vectors(&entry, &file_stem(name));
         // A never-refreshed sidecar is empty, whatever model string it
         // carries — report the missing refresh, not a model change.
         if store.concepts.is_empty() && store.labels.is_empty() {

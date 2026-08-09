@@ -237,6 +237,24 @@ fn promotion_refusals_name_their_cause_before_anything_applies() {
     assert_eq!(status, 400, "{refused}");
     assert_eq!(refused["code"], json!("invalid_argument"), "{refused}");
 
+    // Past the shared list ceiling the request refuses up front —
+    // before the per-id validation work its size would otherwise buy.
+    let over_cap: Vec<String> = (0..1001).map(|i| format!("session:claude:{i}")).collect();
+    let (status, refused) = server.call(
+        "POST",
+        "/contexts/scratch-claude/promote",
+        Some(json!({"into": "perm", "sources": over_cap})),
+    );
+    assert_eq!(status, 400, "{refused}");
+    assert_eq!(refused["code"], json!("over_limit"), "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("split the request"),
+        "{refused}"
+    );
+
     // Promoting into itself moves nothing anywhere.
     let (status, refused) = server.call(
         "POST",
