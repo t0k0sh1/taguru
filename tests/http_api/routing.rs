@@ -821,3 +821,137 @@ fn the_map_file_watch_swaps_routing_with_no_signal() {
         || router.call("GET", "/contexts/moved", None).0 == 404,
     );
 }
+
+/// One shard-outcome count out of the router's
+/// `taguru_router_shard_requests_total` metric — keyed by shard URL
+/// (issue #515: a map reload renumbers indices, so the URL is the
+/// only stable identity); 0 when the series has not appeared yet.
+fn shard_request_count(router: &Server, shard_url: &str, outcome: &str) -> u64 {
+    let (_, body) = router.call("GET", "/metrics", None);
+    let prefix =
+        format!("taguru_router_shard_requests_total{{shard=\"{shard_url}\",outcome=\"{outcome}\"}} ");
+    body.as_str()
+        .unwrap_or_default()
+        .lines()
+        .find_map(|line| line.strip_prefix(prefix.as_str()))
+        .and_then(|count| count.parse().ok())
+        .unwrap_or(0)
+}
+
+/// A context answered by two shards is a mid-move stray: the map's
+/// owner must win the merged directory row whichever shard answered
+/// first, and the duplicate must leave the total. Both orders are
+/// exercised — ctx-a's owner answers before its stray, ctx-b's after
+/// — because keep-vs-replace are different arms of the same guard.
+#[test]
+fn merge_contexts_dedups_a_mid_move_stray_by_map_ownership() {
+    let shard_a = Server::start("stray-a");
+    let shard_b = Server::start("stray-b");
+    let router = Server::start_router(
+        "stray",
+        &format!("ctx-a = {}\nctx-b = {}\n", shard_a.base, shard_b.base),
+        &[],
+    );
+    // Each context exists on BOTH shards (a mid-move leftover), with
+    // descriptions naming the copy so the winner is observable.
+    for (shard, tag) in [(&shard_a, "A"), (&shard_b, "B")] {
+        for name in ["ctx-a", "ctx-b"] {
+            shard.ok(
+                "PUT",
+                &format!("/contexts/{name}"),
+                Some(json!({"description": format!("{name}@{tag}")})),
+            );
+        }
+    }
+    let listing = router.ok("GET", "/contexts", None);
+    assert_eq!(
+        listing["total"],
+        json!(2),
+        "each stray must leave the total: {listing}"
+    );
+    let description_of = |name: &str| -> String {
+        listing["contexts"]
+            .as_array()
+            .expect("directory rows")
+            .iter()
+            .find(|entry| entry["name"] == json!(name))
+            .unwrap_or_else(|| panic!("{name} missing from {listing}"))["description"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(description_of("ctx-a"), "ctx-a@A");
+    assert_eq!(description_of("ctx-b"), "ctx-b@B");
+}
+
+/// The operator surface through the router: `/protocol` proxies the
+/// first shard's manual, `/flush` and `/maintenance/compact`
+/// broadcast and merge, and the per-shard counters key on the shard
+/// URL. Thin assertions on purpose — each answer's SHAPE proves the
+/// handler ran rather than defaulting to an empty 200.
+#[test]
+fn operator_verbs_broadcast_and_shard_metrics_key_on_the_url() {
+    let shard_a = Server::start("operator-a");
+    let shard_b = Server::start("operator-b");
+    let router = Server::start_router(
+        "operator",
+        &format!("sake = {}\n* = {}\n", shard_a.base, shard_b.base),
+        &[],
+    );
+    router.ok("PUT", "/contexts/sake", Some(json!({"description": "銘柄"})));
+
+    let (status, manual) = router.call("GET", "/protocol", None);
+    assert_eq!(status, 200);
+    assert!(
+        manual.as_str().is_some_and(|text| text.contains("taguru")),
+        "the proxied manual must be the shard's own text: {manual}"
+    );
+
+    let flushed = router.ok("POST", "/flush", None);
+    assert!(
+        flushed.is_array(),
+        "flush merges the shard lists: {flushed}"
+    );
+
+    let swept = router.ok("POST", "/maintenance/compact", None);
+    assert!(
+        swept["contexts"].is_array(),
+        "compact merges per-context outcomes: {swept}"
+    );
+
+    assert!(
+        shard_request_count(&router, &shard_a.base, "ok") >= 1,
+        "the sake shard's successes must count under its URL"
+    );
+}
+
+/// Group delete broadcasts through the router and answers the
+/// single-instance `result: true`; a body no JSON parser accepts goes
+/// to one shard verbatim so the refusal is the shard's own extractor
+/// shape, not a router-invented one.
+#[test]
+fn group_delete_broadcasts_and_a_malformed_body_gets_the_shards_refusal() {
+    let shard_a = Server::start("gdel-a");
+    let shard_b = Server::start("gdel-b");
+    let router = Server::start_router(
+        "gdel",
+        &format!("sake = {}\n* = {}\n", shard_a.base, shard_b.base),
+        &[],
+    );
+    router.ok("PUT", "/groups/g", Some(json!({"description": "対象"})));
+    let deleted = router.ok("DELETE", "/groups/g", None);
+    assert_eq!(deleted, json!(true), "{deleted}");
+    assert_eq!(router.call("GET", "/groups/g", None).0, 404);
+
+    let (status, refusal) = router.call_raw(
+        "PUT",
+        "/groups/probe",
+        Some("not json"),
+        Some("application/json"),
+    );
+    assert_eq!(status, 400, "{refusal}");
+    assert!(
+        refusal["code"].is_string(),
+        "the shard's own refusal shape must pass through: {refusal}"
+    );
+}
