@@ -8,6 +8,13 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Added
+- docs: `taguru-code` now has its own reference page
+  (docs/taguru-code.html) — the full verb surface
+  (`sync`/`watch`/`find`/`tree`/`status`/`evalset`/`eval`/`models`
+  with every flag and default), the ripgrep-equivalent universe, the
+  `.taguru` data directory, ranked lookup without aliases, the
+  accuracy gate, and the `TAGURU_USAGE_LOG*` knobs. Previously only
+  `taguru-code models` appeared anywhere outside `--help`.
 - `taguru router` hot-reloads `TAGURU_ROUTE_MAP` (#515): SIGHUP swaps
   the map at runtime (unix; an unreadable file logs a warning and the
   map already serving stays in effect) and a content-digest file
