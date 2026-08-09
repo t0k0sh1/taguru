@@ -9,18 +9,20 @@
 //! directory, no lock, and no durable state of any kind — run as many
 //! as the load balancer wants. Config is one file (`TAGURU_ROUTE_MAP`):
 //! `context = shard-url` lines plus an optional `* = shard-url`
-//! fallback for contexts the map does not name. Editing the map takes
-//! a router restart — restarts of a stateless process behind an LB
-//! are a rolling non-event. Moving a context between shards, in
-//! order: quiesce its writes, `taguru export` it, DELETE it through
-//! the router (the old shard drops it — and sweeps it from its group
-//! projections), edit the map and roll the routers, then re-import
-//! through the router (which now routes it to the new shard). The
-//! delete must precede the re-import (a copy left on the old shard
-//! keeps answering that shard's slice of every group fan-out —
-//! duplicate hits, not just a stale listing), and the restart must
-//! finish first too: a router still holding the old map would route
-//! the re-import back to the old shard.
+//! fallback for contexts the map does not name. The map hot-reloads
+//! (issue #515) exactly like the keyring: SIGHUP, or the map file's
+//! own content-digest watch (~5s), swaps it at runtime — a broken
+//! edit is refused whole and the old map keeps serving; requests
+//! already in flight finish on the snapshot they started with.
+//! Moving a context between shards, in order: quiesce its writes,
+//! `taguru export` it, DELETE it through the router (the old shard
+//! drops it — and sweeps it from its group projections), edit the
+//! map, then re-import through the router (which now routes it to
+//! the new shard). The delete must precede the re-import (a copy
+//! left on the old shard keeps answering that shard's slice of every
+//! group fan-out — duplicate hits, not just a stale listing), and
+//! EVERY router must have reloaded first too: one still holding the
+//! old map would route the re-import back to the old shard.
 //!
 //! **Routing.** Context-scoped verbs proxy verbatim (streamed both
 //! ways) to the owning shard, so their responses — including error
@@ -260,6 +262,33 @@ mod tests {
         assert_eq!(map.shard_of("unmapped"), None);
     }
 
+    /// Shard URLs surface in logs and /metrics labels, so userinfo is
+    /// refused at parse — and the refusal itself must not echo the
+    /// credential it is refusing.
+    #[test]
+    fn the_route_map_refuses_shard_urls_carrying_credentials() {
+        for line in [
+            "sake = http://user:hunter2@a:1\n",
+            "sake = https://token@a:1/base\n",
+            // Single-character userinfo puts the '@' right at the
+            // start of the authority — the check must anchor there,
+            // not a few bytes past it.
+            "sake = http://u@h:1\n",
+            "sake = https://u@h:1\n",
+        ] {
+            let refused = RouteMap::parse(line).expect_err("userinfo must be refused");
+            assert!(refused.contains("userinfo"), "{refused}");
+            assert!(
+                !refused.contains("hunter2") && !refused.contains("token@"),
+                "the refusal must not leak the credential: {refused}"
+            );
+        }
+        // '@' PAST the authority is data, not userinfo — a path or
+        // query mentioning one must still parse.
+        let map = RouteMap::parse("sake = http://a:1/base@v2\n").unwrap();
+        assert_eq!(map.url(0), "http://a:1/base@v2");
+    }
+
     #[test]
     fn the_projection_splits_members_by_owner_and_keeps_children_whole() {
         let map = RouteMap::parse("a = http://a:1\nb = http://b:1\n").unwrap();
@@ -283,5 +312,53 @@ mod tests {
         assert_eq!(urlencode("sake"), "sake");
         assert_eq!(urlencode("日本酒"), "%E6%97%A5%E6%9C%AC%E9%85%92");
         assert_eq!(urlencode("a b/c"), "a%20b%2Fc");
+    }
+
+    fn state_over(map_text: &str) -> RouterState {
+        RouterState {
+            inner: Arc::new(RouterInner {
+                map: parking_lot::RwLock::new(Arc::new(RouteMap::parse(map_text).unwrap())),
+                client: reqwest::Client::new(),
+                metrics: RouterMetrics::default(),
+                instructions: OnceLock::new(),
+            }),
+        }
+    }
+
+    /// The hot-reload contract (issue #515): a valid rewrite swaps the
+    /// whole map for NEW requests only — a snapshot already taken
+    /// keeps answering the old shard list, which is what makes shard
+    /// indices safe across a swap — and a broken rewrite is refused
+    /// whole, old map still serving, both outcomes counted.
+    #[test]
+    fn a_route_map_reload_swaps_whole_or_not_at_all() {
+        let state = state_over("sake = http://a:1\n");
+        let in_flight = state.map();
+        assert!(server::reload_route_map(
+            &state,
+            b"sake = http://b:2\n* = http://c:3\n",
+            "test",
+        ));
+        let fresh = state.map();
+        assert_eq!(
+            in_flight.url(in_flight.shard_of("sake").unwrap()),
+            "http://a:1"
+        );
+        assert_eq!(fresh.url(fresh.shard_of("sake").unwrap()), "http://b:2");
+        assert_eq!(fresh.url(fresh.shard_of("unmapped").unwrap()), "http://c:3");
+
+        // Refused: a malformed line, then bytes that are not UTF-8.
+        assert!(!server::reload_route_map(
+            &state,
+            b"sake http://no-equals\n",
+            "test",
+        ));
+        assert!(!server::reload_route_map(&state, &[0xff, 0xfe], "test"));
+        let kept = state.map();
+        assert_eq!(kept.url(kept.shard_of("sake").unwrap()), "http://b:2");
+
+        let reloads = state.inner.metrics.map_reloads.lock();
+        assert_eq!(reloads.get("applied"), Some(&1));
+        assert_eq!(reloads.get("refused"), Some(&2));
     }
 }

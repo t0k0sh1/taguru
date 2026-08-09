@@ -51,6 +51,22 @@ impl RouteMap {
                     "line {number}: '{url}' is not an http(s) shard URL"
                 ));
             }
+            // Shard URLs surface verbatim in logs, error messages, and
+            // /metrics labels, so a URL carrying userinfo would leak
+            // its credentials there — refused at the door instead.
+            // The message deliberately does NOT echo the URL: the boot
+            // and reload paths print this error.
+            let authority = &url[url.find("//").expect("scheme checked above") + 2..];
+            if authority
+                .split(['/', '?', '#'])
+                .next()
+                .is_some_and(|host| host.contains('@'))
+            {
+                return Err(format!(
+                    "line {number}: the shard URL carries userinfo ('user@host') — shard \
+                     URLs appear in logs and metrics labels, so credentials are refused"
+                ));
+            }
             if name == "*" {
                 if fallback.is_some() {
                     return Err(format!("line {number}: '*' fallback given twice"));

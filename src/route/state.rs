@@ -7,10 +7,14 @@ use super::*;
 /// Router-mode counters, rendered at `GET /metrics` as
 /// `taguru_router_*` — deliberately router-shaped, not server-shaped:
 /// a stateless proxy has no flusher, no WAL, no cache to report on.
+/// Per-shard counters key on the shard URL, not its map index: a map
+/// reload renumbers indices, and a counter that silently switched
+/// shards mid-series would misattribute every request before the swap.
 #[derive(Default)]
 pub(super) struct RouterMetrics {
     pub(super) http: Mutex<BTreeMap<(String, u16), u64>>,
-    pub(super) shard: Mutex<BTreeMap<(usize, &'static str), u64>>,
+    pub(super) shard: Mutex<BTreeMap<(String, &'static str), u64>>,
+    pub(super) map_reloads: Mutex<BTreeMap<&'static str, u64>>,
 }
 
 impl RouterMetrics {
@@ -22,19 +26,33 @@ impl RouterMetrics {
             .or_insert(0) += 1;
     }
 
-    pub(super) fn record_shard(&self, shard: usize, outcome: &'static str) {
-        *self.shard.lock().entry((shard, outcome)).or_insert(0) += 1;
+    pub(super) fn record_shard(&self, url: &str, outcome: &'static str) {
+        *self
+            .shard
+            .lock()
+            .entry((url.to_string(), outcome))
+            .or_insert(0) += 1;
+    }
+
+    pub(super) fn record_map_reload(&self, applied: bool) {
+        let outcome = if applied { "applied" } else { "refused" };
+        *self.map_reloads.lock().entry(outcome).or_insert(0) += 1;
     }
 }
 
 pub(super) struct RouterInner {
-    pub(super) map: RouteMap,
+    /// Swapped whole by a hot reload (SIGHUP, or the map-file watch —
+    /// issue #515); read as one `Arc` snapshot per request via
+    /// [`RouterState::map`].
+    pub(super) map: parking_lot::RwLock<Arc<RouteMap>>,
     pub(super) client: reqwest::Client,
     pub(super) metrics: RouterMetrics,
     /// The MCP `initialize` manual, fetched once from the first shard
     /// that answers `GET /protocol` — a cache of immutable-per-deploy
-    /// text, not state. Until a shard answers, initialize falls back
-    /// to the local manual without the shard's configuration trailer.
+    /// text, not state (shards are homogeneous, so a map reload does
+    /// not invalidate it). Until a shard answers, initialize falls
+    /// back to the local manual without the shard's configuration
+    /// trailer.
     pub(super) instructions: OnceLock<Arc<String>>,
 }
 
@@ -44,8 +62,19 @@ pub(crate) struct RouterState {
 }
 
 impl RouterState {
-    pub(super) fn map(&self) -> &RouteMap {
-        &self.inner.map
+    /// The current map, as a snapshot. Take it ONCE at the top of a
+    /// request and thread it through everything that request does:
+    /// shard indices are positions in one map's shard list, so mixing
+    /// two snapshots inside one request could route a resolved index
+    /// to a different shard's URL after a hot reload swaps the map.
+    pub(super) fn map(&self) -> Arc<RouteMap> {
+        Arc::clone(&self.inner.map.read())
+    }
+
+    /// The hot-reload swap: requests already in flight keep the
+    /// snapshot they took; new requests see the new map.
+    pub(super) fn swap_map(&self, map: RouteMap) {
+        *self.inner.map.write() = Arc::new(map);
     }
 }
 
@@ -93,9 +122,13 @@ fn forward_headers(headers: &HeaderMap) -> HeaderMap {
 impl RouterState {
     /// One buffered round trip to a shard — the fan-out building
     /// block. `Err` is TRANSPORT failure only (connect, timeout, torn
-    /// body); an HTTP error status is an answer, not an `Err`.
+    /// body); an HTTP error status is an answer, not an `Err`. `map`
+    /// is the caller's request-scoped snapshot — `shard` indexes into
+    /// IT, not into whatever the live map has become.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn call_shard(
         &self,
+        map: &RouteMap,
         shard: usize,
         method: Method,
         path_and_query: &str,
@@ -118,7 +151,7 @@ impl RouterState {
             taguru.shard.outcome = tracing::field::Empty,
             otel.status_code = tracing::field::Empty,
         );
-        let url = format!("{}{}", self.map().url(shard), path_and_query);
+        let url = format!("{}{}", map.url(shard), path_and_query);
         // Header injection has to see `span`, and building the request
         // is synchronous — so it happens inside `in_scope`, while the
         // round trip below rides `.instrument` instead (a thread-local
@@ -152,7 +185,9 @@ impl RouterState {
                 } else {
                     "http_error"
                 };
-                self.inner.metrics.record_shard(shard, shard_outcome);
+                self.inner
+                    .metrics
+                    .record_shard(map.url(shard), shard_outcome);
                 span.record(
                     "http.response.status_code",
                     i64::from(answer.status.as_u16()),
@@ -164,7 +199,7 @@ impl RouterState {
                 Ok(answer)
             }
             Err(error) => {
-                self.inner.metrics.record_shard(shard, "unreached");
+                self.inner.metrics.record_shard(map.url(shard), "unreached");
                 span.record("taguru.shard.outcome", "unreached");
                 span.record("otel.status_code", "ERROR");
                 Err(error.to_string())
@@ -173,9 +208,12 @@ impl RouterState {
     }
 
     /// [`Self::call_shard`] across a shard set, concurrently; answers
-    /// come back labeled by shard index.
+    /// come back labeled by shard index (into `map`, the caller's
+    /// request-scoped snapshot).
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn fan_out<F>(
         &self,
+        map: &RouteMap,
         shards: &[usize],
         method: Method,
         path_and_query: &str,
@@ -192,7 +230,7 @@ impl RouterState {
             async move {
                 (
                     shard,
-                    self.call_shard(shard, method, path_and_query, headers, body, deadline)
+                    self.call_shard(map, shard, method, path_and_query, headers, body, deadline)
                         .await,
                 )
             }
@@ -207,9 +245,11 @@ impl RouterState {
         if let Some(cached) = self.inner.instructions.get() {
             return Arc::clone(cached);
         }
-        for shard in self.map().all() {
+        let map = self.map();
+        for shard in map.all() {
             let fetch = self
                 .call_shard(
+                    &map,
                     shard,
                     Method::GET,
                     "/protocol",

@@ -17,7 +17,7 @@ pub(super) struct Scatter {
 }
 
 pub(super) fn plan_scatter(
-    state: &RouterState,
+    map: &RouteMap,
     contexts: &[String],
     groups: &[String],
     started_at: Instant,
@@ -42,7 +42,7 @@ pub(super) fn plan_scatter(
         .collect();
     let mut per_shard: BTreeMap<usize, Vec<String>> = BTreeMap::new();
     for name in &direct {
-        let Some(shard) = state.map().shard_of(name) else {
+        let Some(shard) = map.shard_of(name) else {
             // Unmapped with no fallback cannot exist anywhere the
             // router reaches — the same first-missing-name refusal a
             // single instance gives, in the same list order.
@@ -59,7 +59,7 @@ pub(super) fn plan_scatter(
     } else {
         // Groups live on every shard (the projected-broadcast
         // invariant), so naming one fans out everywhere.
-        state.map().all().collect()
+        map.all().collect()
     };
     Ok(Scatter {
         direct,
@@ -92,7 +92,7 @@ pub(super) struct Gathered {
 }
 
 pub(super) fn gather(
-    state: &RouterState,
+    map: &RouteMap,
     scatter: &Scatter,
     outcomes: Vec<(usize, Result<ShardAnswer, String>)>,
     started_at: Instant,
@@ -116,7 +116,7 @@ pub(super) fn gather(
                 aborts.push((abort_rank(code.as_deref()), first_direct, shard, answer));
             }
             Err(error) => unreached.push(Unreached {
-                shard: state.map().url(shard).to_string(),
+                shard: map.url(shard).to_string(),
                 contexts: scatter.per_shard.get(&shard).cloned().unwrap_or_default(),
                 error,
             }),

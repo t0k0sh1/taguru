@@ -72,12 +72,14 @@ async fn merge_matches(
     base: Value,
 ) -> Response {
     let started_at = Instant::now();
-    let scatter = match plan_scatter(&state, &contexts, &groups, started_at) {
+    let map = state.map();
+    let scatter = match plan_scatter(&map, &contexts, &groups, started_at) {
         Ok(scatter) => scatter,
         Err(refusal) => return *refusal,
     };
     let outcomes = state
         .fan_out(
+            &map,
             &scatter.shards,
             Method::POST,
             path,
@@ -86,7 +88,7 @@ async fn merge_matches(
             deadline,
         )
         .await;
-    let gathered = match gather(&state, &scatter, outcomes, started_at) {
+    let gathered = match gather(&map, &scatter, outcomes, started_at) {
         Ok(gathered) => gathered,
         Err(refusal) => return *refusal,
     };
@@ -107,7 +109,7 @@ async fn merge_matches(
                     ErrorCode::Internal,
                     format!(
                         "shard {} answered an unreadable page: {error}",
-                        state.map().url(shard)
+                        map.url(shard)
                     ),
                     started_at,
                 );
@@ -178,12 +180,14 @@ pub(super) async fn cross_search_passages(
             );
         }
     };
-    let scatter = match plan_scatter(&state, &request.contexts, &request.groups, started_at) {
+    let map = state.map();
+    let scatter = match plan_scatter(&map, &request.contexts, &request.groups, started_at) {
         Ok(scatter) => scatter,
         Err(refusal) => return *refusal,
     };
     let outcomes = state
         .fan_out(
+            &map,
             &scatter.shards,
             Method::POST,
             "/sources/search",
@@ -192,7 +196,7 @@ pub(super) async fn cross_search_passages(
             deadline,
         )
         .await;
-    let gathered = match gather(&state, &scatter, outcomes, started_at) {
+    let gathered = match gather(&map, &scatter, outcomes, started_at) {
         Ok(gathered) => gathered,
         Err(refusal) => return *refusal,
     };
@@ -225,7 +229,7 @@ pub(super) async fn cross_search_passages(
                     ErrorCode::Internal,
                     format!(
                         "shard {} answered an unreadable page: {error}",
-                        state.map().url(shard)
+                        map.url(shard)
                     ),
                     started_at,
                 );
@@ -270,9 +274,18 @@ pub(super) async fn merge_contexts(
 ) -> Response {
     let started_at = Instant::now();
     let path = full_path(&request);
-    let shards: Vec<usize> = state.map().all().collect();
+    let map = state.map();
+    let shards: Vec<usize> = map.all().collect();
     let outcomes = state
-        .fan_out(&shards, Method::GET, &path, &headers, |_| None, deadline)
+        .fan_out(
+            &map,
+            &shards,
+            Method::GET,
+            &path,
+            &headers,
+            |_| None,
+            deadline,
+        )
         .await;
     let mut unreached = Vec::new();
     let mut rows: BTreeMap<String, (usize, crate::registry::DirectoryEntry)> = BTreeMap::new();
@@ -289,7 +302,7 @@ pub(super) async fn merge_contexts(
                                 // mid-move stray: the map's owner wins the
                                 // row, and the duplicate leaves the total.
                                 Some((held_shard, _))
-                                    if state.map().shard_of(&entry.name) != Some(shard)
+                                    if map.shard_of(&entry.name) != Some(shard)
                                         || *held_shard == shard =>
                                 {
                                     total = total.saturating_sub(1);
@@ -319,7 +332,7 @@ pub(super) async fn merge_contexts(
                             ErrorCode::Internal,
                             format!(
                                 "shard {} answered an unreadable page: {error}",
-                                state.map().url(shard)
+                                map.url(shard)
                             ),
                             started_at,
                         );
@@ -335,7 +348,7 @@ pub(super) async fn merge_contexts(
                     .into_response();
             }
             Err(error) => unreached.push(Unreached {
-                shard: state.map().url(shard).to_string(),
+                shard: map.url(shard).to_string(),
                 contexts: Vec::new(),
                 error,
             }),

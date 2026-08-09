@@ -9,9 +9,11 @@ pub(super) async fn broadcast_flush(
     axum::Extension(deadline): axum::Extension<Deadline>,
 ) -> Response {
     let started_at = Instant::now();
-    let shards: Vec<usize> = state.map().all().collect();
+    let map = state.map();
+    let shards: Vec<usize> = map.all().collect();
     let outcomes = state
         .fan_out(
+            &map,
             &shards,
             Method::POST,
             "/flush",
@@ -40,7 +42,7 @@ pub(super) async fn broadcast_flush(
                     .into_response();
             }
             Err(error) => unreached.push(Unreached {
-                shard: state.map().url(shard).to_string(),
+                shard: map.url(shard).to_string(),
                 contexts: Vec::new(),
                 error,
             }),
@@ -60,7 +62,8 @@ pub(super) async fn broadcast_maintenance(
 ) -> Response {
     let started_at = Instant::now();
     let path = full_path(&request);
-    let shards: Vec<usize> = state.map().all().collect();
+    let map = state.map();
+    let shards: Vec<usize> = map.all().collect();
     // Sequential on purpose: each shard's sweep drains its own
     // traffic; running them one at a time keeps the fleet from
     // pausing everywhere at once.
@@ -69,7 +72,7 @@ pub(super) async fn broadcast_maintenance(
     let mut unreached = Vec::new();
     for shard in shards {
         match state
-            .call_shard(shard, Method::POST, &path, &headers, None, deadline)
+            .call_shard(&map, shard, Method::POST, &path, &headers, None, deadline)
             .await
         {
             Ok(answer) if answer.status.is_success() => {
@@ -93,7 +96,7 @@ pub(super) async fn broadcast_maintenance(
                     .into_response();
             }
             Err(error) => unreached.push(Unreached {
-                shard: state.map().url(shard).to_string(),
+                shard: map.url(shard).to_string(),
                 contexts: Vec::new(),
                 error,
             }),

@@ -240,7 +240,9 @@ ENVIRONMENT (every knob; unset = the shown default):
   TAGURU_ROUTE_MAP             router mode only: the context→shard map file,
                                'context = shard-url' per line, # comments,
                                optional '* = shard-url' for contexts the map
-                               does not name; edits take a router restart
+                               does not name; edits hot-reload like the auth
+                               table (SIGHUP, or the file's own watch, ~5s)
+                               — a broken edit keeps the previous map
   TAGURU_API_TOKEN             bearer token; unset = UNAUTHENTICATED
   TAGURU_API_TOKENS            named keys 'ci:tokA,laptop:tokB' — the access
                                log carries the key name; rotate by overlap

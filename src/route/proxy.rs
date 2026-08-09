@@ -56,7 +56,8 @@ async fn proxy_context(
     request: Request,
 ) -> Response {
     let started_at = Instant::now();
-    let Some(shard) = state.map().shard_of(&name) else {
+    let map = state.map();
+    let Some(shard) = map.shard_of(&name) else {
         // No entry and no fallback: for a read this context cannot
         // exist anywhere the router routes — the single-instance
         // not-found, byte for byte. A PUT is asking to CREATE it, and
@@ -85,7 +86,7 @@ async fn proxy_context(
         .path_and_query()
         .map(|paq| paq.as_str().to_string())
         .unwrap_or_else(|| parts.uri.path().to_string());
-    let url = format!("{}{}", state.map().url(shard), path_and_query);
+    let url = format!("{}{}", map.url(shard), path_and_query);
     let mut outbound = state
         .inner
         .client
@@ -98,7 +99,7 @@ async fn proxy_context(
     match outbound.send().await {
         Ok(answer) => {
             state.inner.metrics.record_shard(
-                shard,
+                map.url(shard),
                 if answer.status().is_success() {
                     "ok"
                 } else {
@@ -122,12 +123,15 @@ async fn proxy_context(
                 })
         }
         Err(error) => {
-            state.inner.metrics.record_shard(shard, "unreached");
+            state
+                .inner
+                .metrics
+                .record_shard(map.url(shard), "unreached");
             api::error(
                 ErrorCode::ShardUnreachable,
                 format!(
                     "shard {} (owning context '{name}') is unreachable: {error}",
-                    state.map().url(shard)
+                    map.url(shard)
                 ),
                 started_at,
             )

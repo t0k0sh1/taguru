@@ -246,14 +246,19 @@ kubectl -n taguru apply -f kubernetes.yaml</code></pre>
       config is a context→shard map file mounted from a ConfigMap.
       <a href="https://github.com/t0k0sh1/taguru/tree/main/deploy/kustomize/overlays/router">The
       router kustomize overlay</a> is this section worked out: two writer shards, the
-      route-map ConfigMap (content-hashed, so a map edit rolls the routers on apply), and
-      the front-door Deployment and Service.
+      route-map ConfigMap (content-hashed, so a map edit rolls the routers on apply — the
+      belt over the router's own hot reload below), and the front-door Deployment and
+      Service.
     </p>
     <p>
       The map is boring on purpose: <code>context = shard-url</code> per line (point each URL
       at that shard's writer Service), plus an optional <code>* = shard-url</code> fallback
       for contexts the map does not name. Set <code>TAGURU_ROUTE_MAP</code> to the mounted
-      path. Context verbs proxy to the owning shard byte-for-byte; cross-context
+      path. The map hot-reloads exactly like the auth table (issue #515): SIGHUP, or the
+      file's own content-digest watch (~5s — it sees the kubelet's atomic symlink swap, so
+      a plain non-hashed ConfigMap propagates by itself, no roll), with a broken edit
+      refused whole while the old map keeps serving
+      (<code>taguru_router_map_reloads_total</code> counts both outcomes). Context verbs proxy to the owning shard byte-for-byte; cross-context
       <code>recall</code>/<code>query</code>/<code>sources/search</code> and groups span every
       shard with the exact single-instance merge semantics (cursors forward verbatim — they
       anchor on the last match, not on a per-instance position), and <code>POST /mcp</code>
@@ -272,11 +277,12 @@ kubectl -n taguru apply -f kubernetes.yaml</code></pre>
       <code>/metrics</code> (<code>taguru_router_shard_requests_total</code>). Moving a
       context between shards is a runbook, not a protocol — in order: quiesce its writes →
       <code>taguru export</code> → DELETE it through the router (the old shard drops it,
-      group projections included) → edit the ConfigMap and roll the routers (stateless, a
-      non-event) → re-import through the router, which now routes it to the new shard.
+      group projections included) → edit the ConfigMap → re-import through the router,
+      which now routes it to the new shard.
       Delete before re-import: a leftover copy keeps answering the old shard's slice of
-      every group fan-out. And finish the roll before re-importing — a router still on the
-      old ConfigMap would route the stream back to the old shard. Each shard can keep its own bucket
+      every group fan-out. And let the reload land everywhere before re-importing — a
+      router still holding the old map would route the stream back to the old shard
+      (watch the reload counter, or roll the fleet if you want a hard barrier). Each shard can keep its own bucket
       (<code>TAGURU_REPLICATE_URL</code>) and read pool — the rungs compose.
     </p>
   </section>
