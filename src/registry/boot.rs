@@ -1055,6 +1055,46 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// The other branch of the same hazard as the test above:
+    /// `read_meta_file`'s `fs::read` failing (no sidecar at all) hits
+    /// its lenient `Err(_) => MetaFile::default()` fallback exactly the
+    /// same way a corrupt-but-present sidecar hits its `from_slice`
+    /// fallback — same zeroed digest, same digest-mismatch refusal,
+    /// same hint.
+    #[test]
+    fn a_missing_sidecar_alongside_a_live_schema_hints_at_the_real_cause() {
+        let dir = scratch_dir("schema-mismatch-missing-sidecar");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state.flush_dirty();
+        }
+        let document =
+            br#"{"schema":1,"mode":"off","closed_labels":false,"types":{},"relations":{}}"#;
+        fs::write(schema_path(&dir, "sake"), document).unwrap();
+        record_schema_digest(&dir, "sake", &crate::sha256::sha256_hex(document));
+        // Remove the sidecar entirely, keeping the schema file: unlike
+        // the corrupt-content case above, this exercises `fs::read`
+        // itself failing rather than `serde_json::from_slice`.
+        fs::remove_file(meta_path(&dir, "sake")).unwrap();
+
+        let error = AppState::boot(dir.clone(), usize::MAX, None)
+            .map(|_| ())
+            .unwrap_err();
+        assert!(error.to_string().contains("does not match"), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("sidecar itself is corrupt or missing"),
+            "the message must point at the sidecar as the likely cause: {error}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// The other direction of §5.2's mismatch: a digest recorded with
     /// no corresponding file (the schema was deleted, or the write that
     /// should have landed it never reached disk).

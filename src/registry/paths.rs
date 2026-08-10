@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -261,17 +261,19 @@ pub(super) fn write_rename_marker(path: &Path, from: &str, to: &str) -> io::Resu
 /// Ok, because a move can fail on a straggler AFTER the pivot arrived.
 /// That is `landed`; `move_files` returning Ok is `complete`.
 ///
-/// A marker naming a name that is ALSO another marker's `from` or `to`
-/// — a chain (`a→b`, `b→c`) or a cycle (`a→b`, `b→a`) — is refused
-/// rather than resumed: nothing in this codebase ever produces one on
-/// a live server (`rename_context`/`rename_group` each reserve both
-/// names for the whole call, so two markers can never share an
-/// endpoint from ordinary operation), so one can only mean hand-edited
-/// files or a corruption this function has no business inventing
-/// multi-hop semantics for. Every marker touching the chain/cycle is
-/// left on disk, untouched, for a human to resolve — moving SOME of
-/// them and not others would make the eventual manual fix harder, not
-/// easier. Markers are read and parsed in full BEFORE any of them acts
+/// A marker whose `from` or `to` also names another marker's `from` or
+/// `to` — a chain (`a→b`, `b→c`), a cycle (`a→b`, `b→a`), or two
+/// markers merely colliding on one shared endpoint (`a→b`, `a→c`; or
+/// `a→c`, `b→c`) — is refused rather than resumed: nothing in this
+/// codebase ever produces one on a live server (`rename_context`/
+/// `rename_group` each reserve both names for the whole call, so two
+/// markers can never share an endpoint from ordinary operation), so
+/// one can only mean hand-edited files or a corruption this function
+/// has no business inventing multi-hop or last-write-wins semantics
+/// for. Every marker touching a shared endpoint is left on disk,
+/// untouched, for a human to resolve — moving SOME of them and not
+/// others would make the eventual manual fix harder, not easier.
+/// Markers are read and parsed in full BEFORE any of them acts
 /// (detecting the collision needs the whole set at once), then acted
 /// on in `from`-sorted order — deterministic, unlike `read_dir`'s own
 /// platform-dependent iteration order.
@@ -300,20 +302,35 @@ pub(crate) fn resume_rename_markers(
     }
     markers.sort_by(|a, b| a.from.cmp(&b.from));
 
-    let froms: BTreeSet<&String> = markers.iter().map(|marker| &marker.from).collect();
-    let tos: BTreeSet<&String> = markers.iter().map(|marker| &marker.to).collect();
-    let chained: BTreeSet<String> = froms
-        .intersection(&tos)
-        .map(|name| (*name).clone())
+    // Every marker contributes both its endpoints to this count, so an
+    // endpoint occurring twice catches all three hazards uniformly: a
+    // chain/cycle (one marker's `to` is another's `from`), and two
+    // markers merely colliding on the same `from` or the same `to`.
+    let mut endpoint_counts: HashMap<&str, usize> = HashMap::new();
+    for marker in &markers {
+        *endpoint_counts.entry(marker.from.as_str()).or_insert(0) += 1;
+        *endpoint_counts.entry(marker.to.as_str()).or_insert(0) += 1;
+    }
+    let conflicted: BTreeSet<String> = endpoint_counts
+        .into_iter()
+        .filter(|&(_, count)| count >= 2)
+        .map(|(name, _)| name.to_string())
         .collect();
 
     let mut resumed = Vec::new();
     for marker in markers {
-        if chained.contains(&marker.from) || chained.contains(&marker.to) {
-            tracing::error!(
+        if conflicted.contains(&marker.from) || conflicted.contains(&marker.to) {
+            // Not a failed operation — the marker is left exactly as
+            // it was, and the boot that found it still succeeds. `warn`
+            // matches that: `error` is reserved for outcomes the
+            // caller must actually contend with (e.g. `RenameOutcome::
+            // Stuck`'s real I/O failure), not a degraded-but-handled
+            // refusal like this one.
+            tracing::warn!(
                 from = %marker.from, to = %marker.to, entity,
-                "rename marker is part of a multi-hop chain or cycle; refusing to \
-                 resume it automatically — resolve the data directory by hand"
+                "a rename marker collides with another on a shared endpoint; \
+                 refusing to resume it automatically — resolve the data \
+                 directory by hand"
             );
             continue;
         }
@@ -517,6 +534,59 @@ mod tests {
         assert!(
             resumed.is_empty(),
             "a cyclic pair must resume neither marker"
+        );
+        assert!(renaming_marker_path(&dir, &file_stem("a")).exists());
+        assert!(renaming_marker_path(&dir, &file_stem("b")).exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A shape the chain/cycle check alone would miss: two markers
+    /// sharing a `from` (`a→b`, `a→c`) rather than one's `to` feeding
+    /// the other's `from`. Resuming either first would move "a"'s
+    /// family out from under the other marker's own claim on the same
+    /// source, so both must be refused.
+    #[test]
+    fn markers_sharing_a_from_are_both_refused() {
+        let dir = scratch_dir("resume-shared-from");
+        fs::create_dir_all(&dir).unwrap();
+        write_marker(&dir, &file_stem("a"), "a", "b");
+        // A second marker also claiming "a" as its source can only
+        // exist via hand-editing or corruption — ordinary code never
+        // writes two markers for the same `from` — so it lands at an
+        // unrelated file stem rather than the one `from: "a"` would
+        // normally use.
+        write_marker(&dir, &file_stem("z"), "a", "c");
+
+        let (resumed, moved) = resume_and_record(&dir);
+
+        assert!(resumed.is_empty(), "neither marker may resume");
+        assert!(
+            moved.is_empty(),
+            "neither marker's move may even be attempted"
+        );
+        assert!(renaming_marker_path(&dir, &file_stem("a")).exists());
+        assert!(renaming_marker_path(&dir, &file_stem("z")).exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The mirror shape: two markers sharing a `to` (`a→c`, `b→c`)
+    /// instead of a `from`. Both would land at "c", so both are
+    /// refused.
+    #[test]
+    fn markers_sharing_a_to_are_both_refused() {
+        let dir = scratch_dir("resume-shared-to");
+        fs::create_dir_all(&dir).unwrap();
+        write_marker(&dir, &file_stem("a"), "a", "c");
+        write_marker(&dir, &file_stem("b"), "b", "c");
+
+        let (resumed, moved) = resume_and_record(&dir);
+
+        assert!(resumed.is_empty(), "neither marker may resume");
+        assert!(
+            moved.is_empty(),
+            "neither marker's move may even be attempted"
         );
         assert!(renaming_marker_path(&dir, &file_stem("a")).exists());
         assert!(renaming_marker_path(&dir, &file_stem("b")).exists());
