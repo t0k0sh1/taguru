@@ -589,27 +589,57 @@ impl AppState {
     /// thrash. Dirty contexts are persisted before eviction; if that
     /// save fails they stay resident rather than losing writes.
     pub(crate) fn enforce_budget(&self, except: &str) {
-        // Cheap gate in front of the O(contexts) sweep below: one
-        // atomic load of the graph estimate, which per-entry recounts
-        // keep exact, PLUS `budget_saturated` — set below when a sweep
-        // ran out of evictable candidates while still over budget (a
-        // context bigger than the whole cache alone, or one whose save
-        // keeps failing). Without that flag, such a sweep leaves
-        // `total > cache_bytes` forever: the gate above would stay
-        // permanently false and every request would pay the full
-        // O(contexts) sweep. Vector-store residency is NOT tracked
-        // between sweeps either, so every 64th operation forces a real
-        // sweep regardless — its reconciling store below bounds any
+        // Cheap gate in front of the O(contexts) sweep below, off the
+        // every-64th forced-sweep beat: skip it when EITHER the atomic
+        // graph estimate (which per-entry recounts keep exact) already
+        // fits the budget, OR the sweep is known-saturated FOR THIS
+        // SAME `except` — set at the bottom of this function when a
+        // sweep ran out of evictable candidates while still over
+        // budget (a context bigger than the whole cache alone, or one
+        // whose save keeps failing). The `except`-name check matters:
+        // saturation is specific to whichever context the sweep just
+        // had to protect, and a DIFFERENT `except` on the very next
+        // call can trivially evict what this one couldn't — an
+        // ordinary "just wrote to a context bigger than the whole
+        // budget, then read a different one" must still evict
+        // promptly, not wait out a 64-operation staleness window meant
+        // for a genuinely stuck situation. The two checks are separate
+        // `if`s, not one boolean expression, so the first can self-heal
+        // a stale `budget_saturated` (from THIS or an earlier `except`)
+        // the moment the estimate alone reports under budget — a
+        // residency change outside this function's own sweep (e.g.
+        // `evict_entry` called directly) can bring the estimate back
+        // down without ever re-running the loop below that would
+        // otherwise be the only place clearing the flag. Both mutex
+        // locks behind `budget_saturated_except` only run once
+        // `budget_saturated` is already true (short-circuited), so the
+        // ordinary fast path stays lock-free atomic loads throughout.
+        // Vector-store residency is NOT tracked between sweeps either,
+        // so every 64th operation forces a real sweep regardless of
+        // either arm — its reconciling store below bounds any
         // staleness or drift (estimate, or saturation) at 64
         // operations. Before this gate the full sweep (snapshot, two
         // lock acquisitions per context) ran on every request.
         let ops = self.0.budget_ops.fetch_add(1, Ordering::Relaxed);
         let budget = i64::try_from(self.0.cache_bytes).unwrap_or(i64::MAX);
-        if !ops.is_multiple_of(64)
-            && self.0.resident_estimate.load(Ordering::Relaxed) <= budget
-            && !self.0.budget_saturated.load(Ordering::Relaxed)
-        {
-            return;
+        if !ops.is_multiple_of(64) {
+            if self.0.resident_estimate.load(Ordering::Relaxed) <= budget {
+                // The estimate alone already says the fleet fits —
+                // true regardless of `except`, so any saturation this
+                // (or an earlier) call recorded no longer applies to
+                // ANY caller. Self-heal it now instead of waiting for
+                // the next forced sweep: cheap, since the lock only
+                // runs when `swap` finds something to clear.
+                if self.0.budget_saturated.swap(false, Ordering::Relaxed) {
+                    *self.0.budget_saturated_except.lock() = None;
+                }
+                return;
+            }
+            if self.0.budget_saturated.load(Ordering::Relaxed)
+                && self.0.budget_saturated_except.lock().as_deref() == Some(except)
+            {
+                return;
+            }
         }
 
         let mut candidates: Vec<(bool, u64, usize, String, Arc<Entry>)> = Vec::new();
@@ -663,6 +693,7 @@ impl AppState {
             .store(i64::try_from(total).unwrap_or(i64::MAX), Ordering::Relaxed);
         if total <= self.0.cache_bytes {
             self.0.budget_saturated.store(false, Ordering::Relaxed);
+            *self.0.budget_saturated_except.lock() = None;
             return;
         }
 
@@ -684,14 +715,14 @@ impl AppState {
             .resident_estimate
             .store(i64::try_from(total).unwrap_or(i64::MAX), Ordering::Relaxed);
         // Every candidate has now been through the loop: if the total
-        // is still over, nothing left in this sweep can bring it down
-        // (`except`, a save failure, or a single context larger than
-        // the whole cache) — set the flag so the cheap gate above
-        // stops trusting a `resident_estimate` that can never self-heal
-        // and keeps forcing a real sweep until something changes.
-        self.0
-            .budget_saturated
-            .store(total > self.0.cache_bytes, Ordering::Relaxed);
+        // is still over, nothing left in THIS sweep (with THIS
+        // `except`) can bring it down — set the flag, keyed to
+        // `except`, so the cheap gate above stops re-deriving the same
+        // stuck conclusion on every call for the same `except`, while
+        // still giving any other `except` its own immediate sweep.
+        let saturated = total > self.0.cache_bytes;
+        self.0.budget_saturated.store(saturated, Ordering::Relaxed);
+        *self.0.budget_saturated_except.lock() = saturated.then(|| except.to_string());
     }
 
     /// Test-only window into [`Self::enforce_budget`]'s saturation
@@ -1248,6 +1279,73 @@ mod tests {
         assert!(
             !state.budget_saturated(),
             "an empty sweep must clear the saturation flag"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// CodeRabbit catch on #572: the gate's saturated arm must SKIP the
+    /// full sweep on an off-beat call, the same as the
+    /// estimate-under-budget arm — not force one on every call while
+    /// saturated, which would just relocate the "full sweep on every
+    /// request" bug `budget_saturated` exists to fix onto a different
+    /// condition. Proven by corrupting the estimate to a value only a
+    /// real sweep's reconciling store would touch, then showing an
+    /// off-beat call while saturated leaves it exactly as corrupted.
+    #[test]
+    fn a_saturated_sweep_skips_the_full_recount_off_the_reconciliation_beat() {
+        let dir = scratch_dir("budget-saturation-off-beat");
+        let footprint = {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("big", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .add_associations(
+                    "big",
+                    vec![
+                        assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md")),
+                        assoc_op("蔵", "銘柄", "青嶺", 1.0, Some("keep.md")),
+                    ],
+                    Deadline::unbounded(),
+                )
+                .unwrap()
+                .unwrap();
+            state
+                .read_context("big", |context| context.footprint())
+                .map_err(|_| "read")
+                .unwrap()
+        };
+
+        let state =
+            AppState::boot_with(dir.clone(), footprint / 2, None, BootOptions::default()).unwrap();
+        // This write's own `enforce_budget` call is the first
+        // (`budget_ops == 0`, itself a forced multiple-of-64 sweep) —
+        // `big` is `except` and can never be evicted, so it saturates.
+        state
+            .add_associations(
+                "big",
+                vec![assoc_op("蔵", "産地", "灘", 1.0, Some("keep.md"))],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        assert!(state.budget_saturated());
+
+        // A value only a real sweep's reconciling store would ever
+        // produce — and deliberately still OVER budget, so the only
+        // way this call could skip is the saturated-same-`except`
+        // branch, not the (separate) under-budget self-heal one.
+        let stale = i64::MAX;
+        state.0.resident_estimate.store(stale, Ordering::Relaxed);
+        // `budget_ops` is now 1 — off-beat, and `except` is still
+        // "big" — the exact same name the sweep above saturated on.
+        state.enforce_budget("big");
+        assert_eq!(
+            state.0.resident_estimate.load(Ordering::Relaxed),
+            stale,
+            "an off-beat call while saturated must not re-sweep and correct the estimate"
         );
 
         let _ = fs::remove_dir_all(dir);

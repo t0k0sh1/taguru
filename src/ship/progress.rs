@@ -210,5 +210,19 @@ mod tests {
         let progress = ShipProgress::new(10 * 1024 * 1024);
         assert_eq!(progress.defer_cap_bytes, 5 * 1024 * 1024);
         assert!(progress.defer_cap_bytes < DEFAULT_DEFER_CAP_BYTES);
+
+        // `allows_reset` itself, not just the stored field: an
+        // unshipped lane (nothing in `lanes` for this path) defers
+        // below the cap and proceeds at or past it — the integer
+        // division and the `>=` boundary both land where computed.
+        let log = FsPath::new("/data/x.wal.jsonl");
+        assert!(
+            !progress.allows_reset(log, 1, 5 * 1024 * 1024 - 1),
+            "one byte under the cap must still defer"
+        );
+        assert!(
+            progress.allows_reset(log, 1, 5 * 1024 * 1024),
+            "at the cap must proceed"
+        );
     }
 }
