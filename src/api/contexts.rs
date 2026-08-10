@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use taguru::deadline::Deadline;
 
 use crate::metrics::ErrorKind;
-use crate::registry::{AppState, ContextMeta, CreateError, RenameContextError};
+use crate::registry::{AppState, ContextMeta, CreateError, DeleteError, RenameContextError};
 
 use super::groups::scope_refusal;
 use super::{
@@ -427,12 +427,24 @@ pub async fn delete_context(
     // keep it off the async worker like every other mutating endpoint.
     match tokio::task::block_in_place(|| state.delete(&name)) {
         None => not_found(&name, started_at),
+        // A mid-rename refusal never touches the context — no audit
+        // line here, unlike every other arm below where a removal
+        // (partial or complete) genuinely happened. Same status code
+        // as `RenameContextError::Busy`: a name currently claimed by
+        // another in-flight operation.
+        Some(Err(DeleteError::MidRename)) => error(
+            ErrorCode::Conflict,
+            format!("context '{name}' is mid-rename; retry after it completes"),
+            started_at,
+        ),
         Some(outcome) => {
             // Every destructive operation leaves one self-contained
             // `taguru::audit` line — who, what, to which object — so an
             // incident review greps one target instead of reconstructing
             // objects from route templates. Logged on the failed-unlink
-            // arm too: the context is gone from the API either way.
+            // arm too: the context is gone from the API either way (a
+            // mid-rename refusal, which never touches the context, is
+            // handled above and never reaches this line).
             tracing::info!(
                 target: "taguru::audit",
                 key = %key_name(&key),
@@ -442,7 +454,7 @@ pub async fn delete_context(
             );
             match outcome {
                 Ok(()) => ok(true, started_at),
-                Err(io_error) => {
+                Err(DeleteError::Io(io_error)) => {
                     state.metrics().record_error(ErrorKind::Io);
                     error(
                         ErrorCode::Internal,
@@ -452,6 +464,9 @@ pub async fn delete_context(
                         ),
                         started_at,
                     )
+                }
+                Err(DeleteError::MidRename) => {
+                    unreachable!("handled by the outer match arm above")
                 }
             }
         }

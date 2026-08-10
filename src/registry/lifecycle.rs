@@ -253,7 +253,7 @@ impl AppState {
     /// concurrent create() the name stays taken for the delete's whole
     /// run, so no new generation of files can appear under the tail of
     /// this one's removals.
-    pub fn delete(&self, name: &str) -> Option<io::Result<()>> {
+    pub fn delete(&self, name: &str) -> Option<Result<(), DeleteError>> {
         let entry = {
             let mut registry = self.0.registry.write();
             if !registry.contains_key(name) {
@@ -265,14 +265,14 @@ impl AppState {
             // the files the rename is about to move (as `from`) or the
             // files it just landed (as `to`), leaving the marker to
             // resume a rename with nothing left to finish at boot.
-            // Reported through the same `Option<io::Result<()>>` a
-            // live name already uses — the caller sees a name that
-            // exists but cannot be deleted right now, not "no such
-            // context".
+            // Reported through the same `Option<Result<...>>` a live
+            // name already uses — the caller sees a name that exists
+            // but cannot be deleted right now, not "no such context".
+            // `MidRename` is its own variant, not `Io`: nothing was
+            // touched, so the API layer must not report this as a
+            // completed (if partial) deletion the way `Io` does.
             if self.0.pending.lock().renames.contains(name) {
-                return Some(Err(io::Error::other(format!(
-                    "context '{name}' is mid-rename; retry after it completes"
-                ))));
+                return Some(Err(DeleteError::MidRename));
             }
             let entry = registry.remove(name)?;
             self.0.pending.lock().deletes.insert(name.to_string());
@@ -364,7 +364,7 @@ impl AppState {
             let _ = remove_persisted_file(&marker);
         }
         self.0.pending.lock().deletes.remove(name);
-        Some(outcome)
+        Some(outcome.map_err(DeleteError::Io))
     }
 
     /// Renames a context: its whole file family moves under the new
@@ -2160,7 +2160,7 @@ mod tests {
         fs::create_dir_all(renaming_marker_path(&dir, &file_stem("sake"))).unwrap();
 
         assert!(
-            matches!(state.delete("sake"), Some(Err(_))),
+            matches!(state.delete("sake"), Some(Err(DeleteError::Io(_)))),
             "an unremovable rename marker must surface through the delete"
         );
 
@@ -2204,7 +2204,7 @@ mod tests {
             if marker_survived {
                 hit_the_targeting_marker = true;
                 assert!(
-                    matches!(outcome, Some(Err(_))),
+                    matches!(outcome, Some(Err(DeleteError::Io(_)))),
                     "failure at persistence step {failure}: the destination \
                      marker survived unremoved, so the delete must report it, \
                      not silently succeed"
@@ -2813,7 +2813,7 @@ mod tests {
         ));
         fs::create_dir_all(&marker).unwrap();
         assert!(
-            matches!(state.delete("sake"), Some(Err(_))),
+            matches!(state.delete("sake"), Some(Err(DeleteError::Io(_)))),
             "an unremovable marker must surface through the delete"
         );
         let _ = fs::remove_dir_all(&dir);
@@ -2853,6 +2853,38 @@ mod tests {
             pick(&mut state.0.pending.lock()).remove(name);
         }
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Regression for issue #561's item 8: a name mid-rename is a
+    /// refusal, not a failure — the context is untouched, so `delete`
+    /// must report [`DeleteError::MidRename`] distinctly from
+    /// [`DeleteError::Io`] (the API layer maps the two very
+    /// differently: a 409 with no audit line, versus a 500 with one —
+    /// see `api::contexts::delete_context`).
+    #[test]
+    fn a_mid_rename_delete_reports_mid_rename_not_io() {
+        let dir = scratch_dir("delete-mid-rename");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state.create("sake", ContextMeta::default()).unwrap();
+
+        // Same direct-seed technique as
+        // `any_pending_membership_alone_makes_a_rename_busy`: a real
+        // concurrent rename would hold this for a window too narrow to
+        // land a second request on reliably, so this is the
+        // deterministic way to exercise the exact same in-memory guard
+        // `rename_context` itself takes.
+        state.0.pending.lock().renames.insert("sake".to_string());
+        assert!(
+            matches!(state.delete("sake"), Some(Err(DeleteError::MidRename))),
+            "a mid-rename delete must be refused as MidRename, not attempted"
+        );
+        assert!(
+            state.directory_entry("sake").is_some(),
+            "the refused delete must not have touched the context"
+        );
+
+        state.0.pending.lock().renames.remove("sake");
         let _ = fs::remove_dir_all(&dir);
     }
 
