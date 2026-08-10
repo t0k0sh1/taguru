@@ -5343,6 +5343,23 @@ fn cooperative_sigint_stops_between_chunks_and_a_rerun_resumes() {
 /// while the process is permanently blocked inside a chunk's request
 /// (a stub that never answers at all) — mirroring the server's own
 /// `shutdown_signal` two-stage semantics exactly.
+///
+/// Issue #570: the stop-signal-handlers marker (awaited by
+/// `wait_for_stop_signal_handlers`) is printed before the file loop
+/// even starts — same as issue #213's race in
+/// `cooperative_sigint_stops_between_chunks_and_a_rerun_resumes`
+/// above. Sending the first SIGINT right after that marker leaves a
+/// window where, on a loaded CI runner, the signal can beat the main
+/// thread to its first stop check (`extract.rs`'s per-document check,
+/// `run.rs`'s post-checkpoint-load check, or its per-chunk check) —
+/// the cooperative stop then succeeds on the FIRST signal instead of
+/// requiring a second one, so the process exits before the 500ms
+/// `try_wait` assertion, which is a flake, not a bug. This is the
+/// same fix as #213: the mock listener signals over a channel once it
+/// has actually read chunk 0's full HTTP request, and the test waits
+/// on that before sending the first SIGINT — chunk 0 is then
+/// guaranteed in flight (blocked awaiting a response that never
+/// comes) no matter how the two processes are scheduled.
 #[test]
 fn a_second_sigint_forces_an_immediate_exit_even_while_permanently_blocked() {
     use std::time::Duration;
@@ -5354,13 +5371,28 @@ fn a_second_sigint_forces_an_immediate_exit_even_while_permanently_blocked() {
     let out = batch_dir("extract-checkpoint-doublesigint-out");
 
     // Accepts every connection and never answers any of them — the
-    // one (and only) chunk's request blocks forever.
+    // one (and only) chunk's request blocks forever. The first
+    // connection's request is read in full (and only then reported
+    // over `chunk0_received_tx`) so the test knows the chunk is
+    // actually in flight before it sends SIGINT; every stream is kept
+    // open in `held` (never closed, never answered) so ureq has
+    // nothing to reconnect over.
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
+    let (chunk0_received_tx, chunk0_received_rx) = std::sync::mpsc::channel::<()>();
     std::thread::spawn(move || {
         let mut held = Vec::new();
-        for stream in listener.incoming() {
-            let Ok(stream) = stream else { continue };
+        for (index, stream) in listener.incoming().enumerate() {
+            let Ok(mut stream) = stream else { continue };
+            if index == 0 {
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+                let request = read_http_request(&mut stream);
+                assert!(
+                    request.is_some(),
+                    "chunk 0's connection must carry a complete HTTP request within 10s"
+                );
+                let _ = chunk0_received_tx.send(());
+            }
             held.push(stream);
         }
     });
@@ -5376,6 +5408,9 @@ fn a_second_sigint_forces_an_immediate_exit_even_while_permanently_blocked() {
         .stderr(Stdio::piped());
     let mut child = command.spawn().expect("extract must spawn");
     wait_for_stop_signal_handlers(child.stderr.take().unwrap());
+    chunk0_received_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("chunk 0's request must reach the mock server before SIGINT is sent");
 
     let pid = child.id().to_string();
     // The first signal only sets the cooperative flag — the process
@@ -5395,10 +5430,12 @@ fn a_second_sigint_forces_an_immediate_exit_even_while_permanently_blocked() {
         .args(["-INT", &pid])
         .status()
         .expect("kill must run");
-    let output = child
-        .wait_with_output()
-        .expect("extract must exit after the second SIGINT");
-    assert_eq!(output.status.code(), Some(130), "{output:?}");
+    let output = wait_with_deadline(child, Duration::from_secs(30));
+    assert_eq!(
+        output.status.code(),
+        Some(130),
+        "extract must exit after the second SIGINT: {output:?}"
+    );
     assert_eq!(
         checkpoint_units_count(&out, &doc_src),
         0,
