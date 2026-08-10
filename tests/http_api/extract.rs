@@ -5382,9 +5382,11 @@ fn a_second_sigint_forces_an_immediate_exit_even_while_permanently_blocked() {
     let (chunk0_received_tx, chunk0_received_rx) = std::sync::mpsc::channel::<()>();
     std::thread::spawn(move || {
         let mut held = Vec::new();
-        for (index, stream) in listener.incoming().enumerate() {
+        let mut first_connection = true;
+        for stream in listener.incoming() {
             let Ok(mut stream) = stream else { continue };
-            if index == 0 {
+            if first_connection {
+                first_connection = false;
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
                 let request = read_http_request(&mut stream);
                 assert!(
