@@ -166,6 +166,96 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
+    /// Issue #563 item 1: a provider answering `Ok(vec![])` for a cue
+    /// must never poison the process-lifetime cue cache. Before the
+    /// fix, `cue_vector` cached the empty vector unconditionally —
+    /// every later resolve for this exact cue would then hit the
+    /// cache and silently score 0.0 forever, with no way to
+    /// invalidate it short of a restart. This pins both halves: the
+    /// call is reported as a failure, not a hit with nothing in it,
+    /// and — the part a naive `is_err()` check alone would miss — the
+    /// provider is called again on the very next resolve for the same
+    /// cue, proving nothing landed in the cache.
+    #[test]
+    fn cue_vector_rejects_an_empty_embedding_and_never_caches_it() {
+        /// Same model name as the mock so the gloss sidecar stays
+        /// usable, but every round trip answers an empty vector per
+        /// text — the malformed-provider shape this guards against.
+        struct EmptyEmbeddings {
+            calls: Arc<AtomicUsize>,
+        }
+        impl EmbeddingProvider for EmptyEmbeddings {
+            fn model(&self) -> &str {
+                "mock"
+            }
+            fn embed(
+                &self,
+                texts: &[&str],
+                _purpose: EmbedPurpose,
+                _deadline: Deadline,
+            ) -> Result<Vec<Vec<f32>>, String> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                Ok(texts.iter().map(|_| Vec::new()).collect())
+            }
+        }
+
+        let dir = scratch_dir("empty-cue");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let embedder = Some(Arc::new(EmptyEmbeddings {
+            calls: Arc::clone(&calls),
+        }) as Arc<dyn EmbeddingProvider>);
+        let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
+        state.create("fruit", ContextMeta::default()).unwrap();
+        state
+            .write_context("fruit", |context| {
+                context.associate("りんご", "分類", "果物", 1.0).unwrap();
+            })
+            .map_err(|_| "write")
+            .unwrap();
+        state
+            .refresh_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        let baseline = calls.load(Ordering::Relaxed);
+
+        assert!(
+            state
+                .semantic_resolve("fruit", "アップル", false, None, Deadline::unbounded())
+                .unwrap()
+                .is_err(),
+            "an empty provider vector must resolve as a failure, not an empty-but-ok answer"
+        );
+        let after_first = calls.load(Ordering::Relaxed);
+        assert_eq!(
+            after_first,
+            baseline + 1,
+            "the first resolve for a new cue must call the provider"
+        );
+
+        assert!(
+            state
+                .semantic_resolve("fruit", "アップル", false, None, Deadline::unbounded())
+                .unwrap()
+                .is_err()
+        );
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            after_first + 1,
+            "a cached empty vector would answer this without a round trip; the provider \
+             must be called again every time"
+        );
+
+        let body = rendered(&state);
+        assert!(
+            body.contains(
+                "taguru_embedding_requests_total{operation=\"resolve\",outcome=\"failed\"} 2"
+            ),
+            "{body}"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
     /// `semantic_resolve` deliberately folds provider-off, model-changed,
     /// and nothing-embedded into one empty answer; its explain twin must
     /// hold them apart, and must place an expected name in exactly the
@@ -1196,6 +1286,57 @@ mod tests {
              embed_parallel=2 concurrent provider calls process-wide, not \
              the 4 a per-pool-only ceiling would allow"
         );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// Issue #563 item 5: `BootOptions { embed_parallel: 0 }` built
+    /// directly (bypassing the env-boundary floor in
+    /// `resolve_embed_parallel`) must not construct a permanently
+    /// starved `embed_provider_slots` — `boot_with` normalizes it to 1
+    /// itself now (see the field's own doc). Before that normalization
+    /// was shared between the field and the semaphore's construction,
+    /// this exact `BootOptions` value would have zero-sized the
+    /// semaphore and hung every refresh forever.
+    #[test]
+    fn a_zero_embed_parallel_boot_option_does_not_starve_the_refresh_semaphore() {
+        let dir = scratch_dir("embed-parallel-zero");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let embedder = Some(Arc::new(MockEmbeddings::fruity(&calls)) as Arc<dyn EmbeddingProvider>);
+        let state = AppState::boot_with(
+            dir.clone(),
+            usize::MAX,
+            embedder,
+            BootOptions {
+                embed_parallel: 0,
+                ..BootOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            state.embed_parallel(),
+            1,
+            "boot_with must floor a zero embed_parallel the same way the env \
+             boundary does, not carry it through unchanged"
+        );
+        state
+            .create("fruit", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .write_context("fruit", |context| {
+                context.associate("りんご", "分類", "果物", 1.0).unwrap();
+            })
+            .map_err(|_| "write")
+            .unwrap();
+        // A hang here (the pre-fix behavior) would time out the test
+        // binary itself rather than fail an assertion — the point of
+        // this test is that it completes at all.
+        let embedded = state
+            .refresh_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        assert!(embedded.0 > 0, "the one stale concept must actually embed");
 
         let _ = fs::remove_dir_all(dir);
     }

@@ -473,6 +473,13 @@ impl Metrics {
         );
         push_value(
             &mut out,
+            "taguru_embed_slot_waiters",
+            "gauge",
+            "Threads currently queued for a permit on the process-wide embedding-provider concurrency cap (TAGURU_EMBED_PARALLEL).",
+            gauges.embed_slot_waiters,
+        );
+        push_value(
+            &mut out,
             "taguru_wal_bytes",
             "gauge",
             "Total bytes across all write-ahead logs; sustained growth means image flushes are failing.",
@@ -706,6 +713,20 @@ impl Metrics {
             "counter",
             "Per-context disk-usage stats that failed for a reason other than the file being absent — the entry's disk gauges and storage-quota accounting stay on their last known snapshot until this heals.",
             self.disk_stat_failures.load(Ordering::Relaxed),
+        );
+        push_value(
+            &mut out,
+            "taguru_embed_slot_waits_total",
+            "counter",
+            "Acquires of the process-wide embedding-provider concurrency permit that found none free and had to queue.",
+            self.embed_slot_waits.load(Ordering::Relaxed),
+        );
+        push_value(
+            &mut out,
+            "taguru_embed_slot_timeouts_total",
+            "counter",
+            "Acquires of the process-wide embedding-provider concurrency permit abandoned after the request deadline passed while still queued.",
+            self.embed_slot_timeouts.load(Ordering::Relaxed),
         );
         push_value(
             &mut out,

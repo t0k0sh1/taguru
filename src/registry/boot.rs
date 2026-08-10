@@ -175,6 +175,12 @@ impl AppState {
             .reranker
             .as_ref()
             .and_then(|provider| provider.breaker().cloned());
+        // Normalized once, fed to both the field below and
+        // `embed_provider_slots`'s construction, so a `BootOptions`
+        // built directly (bypassing `resolve_embed_parallel` at the
+        // env boundary — issue #563 item 5) can never leave the two
+        // ceilings disagreeing with each other.
+        let embed_parallel = options.embed_parallel.max(1);
         let state = Self(Arc::new(StateInner {
             data_dir,
             _dir_lock: dir_lock,
@@ -207,8 +213,8 @@ impl AppState {
             passages_wal_max_bytes: options.passages_wal_max_bytes,
             embed_passages: options.embed_passages,
             passage_vector_limit: options.passage_vector_limit,
-            embed_parallel: options.embed_parallel,
-            embed_provider_slots: Semaphore::new(options.embed_parallel),
+            embed_parallel,
+            embed_provider_slots: Semaphore::new(embed_parallel),
             per_context_metrics: options.per_context_metrics,
             auto_compact: options.auto_compact,
             context_quotas: options.context_quotas,

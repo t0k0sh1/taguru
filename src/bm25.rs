@@ -178,9 +178,18 @@ impl Bm25Index {
     /// lexical mirror of the vector lane's question rows, so a
     /// question-shaped query lands on its answer-shaped paragraph even
     /// on a deployment with no embedding provider at all.
-    pub(crate) fn upsert_source(&mut self, source: &str, record: &PassageRecord) {
+    ///
+    /// Returns whether this call actually changed the index — a real
+    /// tombstone, a paragraph appended, or both. `false` only for the
+    /// otherwise-inert case CodeRabbit caught on #574 (issue #563 item
+    /// 2's own review): an empty or whitespace-only `record` upserted
+    /// for a source with nothing live to tombstone either — `intern`
+    /// still registers the source name, but nothing search-observable
+    /// moved, so callers deciding whether to mark the index dirty must
+    /// not read this as a change.
+    pub(crate) fn upsert_source(&mut self, source: &str, record: &PassageRecord) -> bool {
         let source_id = self.intern(source);
-        self.tombstone(source_id);
+        let mut changed = self.tombstone(source_id);
         let slot_list = self.by_source.entry(source_id).or_default();
         // The record's questions are sorted by paragraph, so one cursor
         // walks them in lockstep with the paragraphs — O(paragraphs +
@@ -188,6 +197,7 @@ impl Bm25Index {
         // the same pass.
         let mut questions = record.questions.iter().peekable();
         for (span, text) in record.paragraph_texts() {
+            changed = true;
             let slot = self.slots.len() as u32;
             let mut frequencies: HashMap<u64, f32> = HashMap::new();
             let mut length = 0f32;
@@ -222,17 +232,27 @@ impl Bm25Index {
             self.live_total_length += f64::from(length);
         }
         self.reclaim_if_due();
+        changed
     }
 
-    /// Tombstones one source's paragraphs (a retraction).
-    pub(crate) fn remove_source(&mut self, source: &str) {
-        if let Some(&source_id) = self.source_ids.get(source) {
-            self.tombstone(source_id);
-            self.reclaim_if_due();
-        }
+    /// Tombstones one source's paragraphs (a retraction). Returns
+    /// whether any slot was actually live to tombstone — false for a
+    /// never-interned source or one already fully dead, which callers
+    /// (`AppState::refresh_bm25`, issue #563 item 2) need to tell apart
+    /// from a real change: retracting a source this index never held
+    /// anything for must not mark the index dirty.
+    pub(crate) fn remove_source(&mut self, source: &str) -> bool {
+        let Some(&source_id) = self.source_ids.get(source) else {
+            return false;
+        };
+        let changed = self.tombstone(source_id);
+        self.reclaim_if_due();
+        changed
     }
 
-    fn tombstone(&mut self, source_id: u32) {
+    /// Returns whether any slot flipped from alive to dead.
+    fn tombstone(&mut self, source_id: u32) -> bool {
+        let mut changed = false;
         if let Some(slot_list) = self.by_source.get_mut(&source_id) {
             for &slot in slot_list.iter() {
                 let slot = &mut self.slots[slot as usize];
@@ -241,10 +261,12 @@ impl Bm25Index {
                     self.live_count -= 1;
                     self.live_total_length -= f64::from(slot.length);
                     self.dead_count += 1;
+                    changed = true;
                 }
             }
             slot_list.clear();
         }
+        changed
     }
 
     /// In-place tombstone reclamation: rebuild the whole structure from
@@ -1010,6 +1032,61 @@ mod tests {
                 .iter()
                 .all(|(source, ..)| source != "docs/takase.md"),
             "the old paragraph is gone with the upsert"
+        );
+    }
+
+    /// Issue #563 item 2: `AppState::refresh_bm25` uses this return to
+    /// decide whether a retraction actually changed the resident index
+    /// — wrong here means the sidecar gets rewritten on every flush
+    /// tick even when nothing moved. Three shapes: a source never
+    /// interned, a source already fully tombstoned, and a source with
+    /// live paragraphs still to kill.
+    #[test]
+    fn remove_source_reports_whether_it_actually_tombstoned_anything() {
+        let records = vec![("a".to_string(), record("霧沢町の湧き水。"))];
+        let mut index = Bm25Index::build(&records);
+
+        assert!(
+            !index.remove_source("never-interned"),
+            "a source this index never saw must report no change"
+        );
+        assert!(
+            index.remove_source("a"),
+            "a source with live paragraphs must report a change"
+        );
+        assert!(
+            !index.remove_source("a"),
+            "retracting an already-tombstoned source a second time must report no change"
+        );
+    }
+
+    /// Caught in review on #574 (issue #563 item 2 itself): an empty
+    /// or whitespace-only `PassageRecord` — a legitimate submission,
+    /// `PassageStore` accepts one — has zero paragraphs, so upserting
+    /// it for a source with nothing live to tombstone either leaves
+    /// the index untouched. `AppState::refresh_bm25`'s dirty gate
+    /// trusts this return now instead of assuming every `Some(record)`
+    /// arm is a change.
+    #[test]
+    fn upsert_source_reports_no_change_for_an_empty_record_with_nothing_to_tombstone() {
+        let mut index = Bm25Index::empty();
+
+        assert!(
+            !index.upsert_source("empty", &record("")),
+            "a brand-new source with zero paragraphs and nothing to tombstone \
+             must report no change"
+        );
+        assert!(
+            index.upsert_source("real", &record("霧沢町の湧き水。")),
+            "a record with actual paragraphs is a real change"
+        );
+        assert!(
+            index.upsert_source("real", &record("")),
+            "replacing it with an empty record still tombstones what was live"
+        );
+        assert!(
+            !index.upsert_source("real", &record("")),
+            "and once nothing is left live, upserting empty again is inert"
         );
     }
 

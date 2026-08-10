@@ -444,6 +444,11 @@ pub struct GaugeSnapshot {
     /// Equivalence claims resident in the semantic cache (slots, not
     /// bytes — payloads live in the exact tier).
     pub semantic_cache_entries: u64,
+    /// Threads currently queued on `embed_provider_slots` waiting for
+    /// a permit (issue #563 item 4) — read live at scrape time, unlike
+    /// the wait/timeout counters in [`crate::metrics::Metrics`], which
+    /// accumulate across scrapes.
+    pub embed_slot_waiters: u64,
     /// Per-context rows, empty unless `TAGURU_METRICS_PER_CONTEXT`
     /// asked for them — the one other sanctioned exception (after the
     /// replication lag maps) to this file's no-context-labels rule,

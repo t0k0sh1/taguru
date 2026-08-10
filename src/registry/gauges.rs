@@ -334,6 +334,7 @@ impl AppState {
         }
         let (retrieval_cache_entries, retrieval_cache_bytes) = self.retrieval_cache_gauges();
         let semantic_cache_entries = self.semantic_cache_entries();
+        let embed_slot_waiters = self.embed_slot_waiters();
         GaugeSnapshot {
             contexts_registered,
             groups_registered: self.0.groups.read().len() as u64,
@@ -359,6 +360,7 @@ impl AppState {
             retrieval_cache_entries,
             retrieval_cache_bytes,
             semantic_cache_entries,
+            embed_slot_waiters,
             per_context,
         }
     }
@@ -988,6 +990,107 @@ mod tests {
         assert!(
             rendered(&state).contains("taguru_disk_stat_failures_total 1"),
             "a stat failure other than NotFound must be counted"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// End-to-end wiring for issue #563 item 4's three signals, through
+    /// the real refresh path rather than the semaphore in isolation
+    /// (`concurrency.rs`'s own tests cover the mechanism). `embed_parallel:
+    /// 1` leaves exactly one slot: context "a" occupies it for the
+    /// whole of `SlowEmbeddings`'s 150ms, so context "b" — starting
+    /// 30ms in, on its own thread with only a 100ms budget — is
+    /// provably queued (`_waits_total`, and the live `embed_slot_waiters`
+    /// gauge sampled while "b" is still blocked) and provably still
+    /// queued when its own deadline passes (`_timeouts_total`), both
+    /// well before "a" would ever release. By the time both calls have
+    /// returned,
+    /// nothing is left queued, so the live gauge reads back to zero.
+    #[test]
+    fn embed_slot_metrics_render_a_queued_wait_and_a_forced_timeout() {
+        let dir = scratch_dir("gauges-embed-slot");
+        let in_flight = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let peak = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let embedder = Some(
+            std::sync::Arc::new(crate::registry::test_support::SlowEmbeddings {
+                in_flight: std::sync::Arc::clone(&in_flight),
+                peak: std::sync::Arc::clone(&peak),
+            }) as std::sync::Arc<dyn crate::embedding::EmbeddingProvider>,
+        );
+        let state = AppState::boot_with(
+            dir.clone(),
+            usize::MAX,
+            embedder,
+            BootOptions {
+                embed_parallel: 1,
+                ..BootOptions::default()
+            },
+        )
+        .unwrap();
+        for name in ["a", "b"] {
+            state
+                .create(name, ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .add_associations(
+                    name,
+                    vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, None)],
+                    Deadline::unbounded(),
+                )
+                .unwrap()
+                .unwrap();
+        }
+
+        let holder = state.clone();
+        let handle =
+            std::thread::spawn(move || holder.refresh_embeddings("a", Deadline::unbounded()));
+        // Long enough that "a" has certainly acquired the only permit
+        // (a near-instant fast-path grant) before "b" ever tries.
+        std::thread::sleep(std::time::Duration::from_millis(30));
+
+        // "b" also runs on its own thread: sampling the live gauge only
+        // after this call RETURNS would pass even if
+        // `embed_slot_waiters` were hardcoded to 0, since by then
+        // nothing is queued either way. A 100ms budget still expires
+        // well before "a" releases at ~150ms.
+        let waiter = state.clone();
+        let b_handle = std::thread::spawn(move || {
+            waiter.refresh_embeddings("b", Deadline::after(std::time::Duration::from_millis(100)))
+        });
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert_eq!(
+            state.embed_slot_waiters(),
+            1,
+            "\"b\" must show up as queued while it is still blocked on the one slot \"a\" holds"
+        );
+
+        let timed_out = b_handle.join().unwrap();
+        assert!(
+            matches!(timed_out, Some(Err(_))),
+            "\"b\" must give up once its own deadline passes, long before \"a\" \
+             releases the only slot at ~150ms: {timed_out:?}"
+        );
+
+        handle
+            .join()
+            .unwrap()
+            .expect("\"a\" held the fast-path permit and must still succeed")
+            .expect("\"a\"'s refresh itself must succeed");
+
+        let body = rendered(&state);
+        assert!(
+            body.contains("taguru_embed_slot_waits_total 1"),
+            "\"b\" missed the fast path and had to queue: {body}"
+        );
+        assert!(
+            body.contains("taguru_embed_slot_timeouts_total 1"),
+            "\"b\" never got a permit before its deadline: {body}"
+        );
+        assert!(
+            body.contains("taguru_embed_slot_waiters 0"),
+            "both calls have returned; nothing should still read as queued: {body}"
         );
 
         let _ = fs::remove_dir_all(dir);

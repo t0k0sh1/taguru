@@ -47,11 +47,17 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # Starting value, to be recalibrated once a few PRs have run. The
-  # issue's sizing: a normal PR is a handful to a few dozen mutants;
-  # anything bigger is new-module territory that a dispatched sweep
-  # covers in shards.
-  MUTANT_BUDGET: 60
+  # Recalibrated from the original 60 after PR #574: at this job's
+  # actual rate (non-incremental, --jobs 3 — see the mutants profile
+  # note in Cargo.toml), 21-22 mutants took 32min, but 56 mutants blew
+  # past the 60min job ceiling and got cancelled mid-run with 13 still
+  # untested (an infrastructure timeout, not a missed-mutant finding —
+  # see the header note on what turns this job red). ~1.6min/mutant
+  # plus ~5min of fixed baseline/setup/report overhead puts 25 mutants
+  # at ~45min, comfortably inside the 60min ceiling with headroom for
+  # a slower/noisier runner. Anything bigger is new-module territory
+  # that a dispatched sweep covers in shards.
+  MUTANT_BUDGET: 25
 
 jobs:
   mutants:

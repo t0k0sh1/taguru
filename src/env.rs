@@ -124,6 +124,26 @@ pub(crate) fn resolve_flush_secs(requested: usize) -> usize {
     }
 }
 
+/// `TAGURU_EMBED_PARALLEL=0` would zero-size both the outer
+/// per-context worker pool AND `embed_provider_slots`
+/// ([`crate::registry::concurrency::Semaphore`]) — the refresh loop
+/// spins up no workers, and any earlier `Semaphore::new` construction
+/// would have needed to `.max(1)` its own way out of a permanently
+/// starved semaphore. Floor to 1 here instead, loudly, so the
+/// constructor never has to guess an operator's zero was a typo for
+/// "off" (there is no "off"; unset already means strictly sequential).
+pub(crate) fn resolve_embed_parallel(requested: usize) -> usize {
+    if requested == 0 {
+        warn!(
+            "TAGURU_EMBED_PARALLEL=0 would starve the embedding refresh workers; using 1 \
+             (the same strictly-sequential behavior as leaving it unset)"
+        );
+        1
+    } else {
+        requested
+    }
+}
+
 /// The limiter holds its budget in a u32; a bigger env value would be
 /// silently clamped inside the constructor while the boot line logged
 /// the raw number — the logged limit and the enforced limit must be
@@ -243,6 +263,12 @@ mod tests {
     fn flush_secs_zero_is_floored_to_one_instead_of_panicking_the_flusher() {
         assert_eq!(resolve_flush_secs(0), 1);
         assert_eq!(resolve_flush_secs(5), 5);
+    }
+
+    #[test]
+    fn embed_parallel_zero_is_floored_to_one_instead_of_starving_the_semaphore() {
+        assert_eq!(resolve_embed_parallel(0), 1);
+        assert_eq!(resolve_embed_parallel(3), 3);
     }
 
     /// The knob's three shapes — and the deliberate reading of `1` as

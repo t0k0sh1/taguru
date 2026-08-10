@@ -186,6 +186,16 @@ pub struct Metrics {
     /// signal that a context's disk gauges and quota accounting are
     /// running on stale data.
     disk_stat_failures: AtomicU64,
+    /// `embed_provider_slots` (the process-wide cap on concurrent
+    /// embedding-provider round trips, issue #563 item 4) acquires
+    /// that had to queue behind a full semaphore — a rising rate says
+    /// the provider is the bottleneck, not disk or lock contention.
+    /// `_timeouts` is its alertable half: an acquire that queued past
+    /// its request deadline and gave up, which surfaces as a refresh
+    /// failure the operator otherwise has no way to distinguish from a
+    /// provider error.
+    embed_slot_waits: AtomicU64,
+    embed_slot_timeouts: AtomicU64,
     /// Keyring hot reloads (issue #134): applied swaps (unchanged
     /// no-ops included — the reload RAN) and refusals that kept the
     /// previous table armed. The refusal counter is the alertable
@@ -260,6 +270,7 @@ mod tests {
             retrieval_cache_entries: 0,
             retrieval_cache_bytes: 0,
             semantic_cache_entries: 0,
+            embed_slot_waiters: 0,
             per_context: Vec::new(),
         }
     }
@@ -1057,6 +1068,7 @@ mod tests {
             retrieval_cache_entries: 3,
             retrieval_cache_bytes: 4096,
             semantic_cache_entries: 5,
+            embed_slot_waiters: 2,
             // One row so the per-context families render — their
             // HELP/TYPE discipline is checked here like everyone
             // else's.

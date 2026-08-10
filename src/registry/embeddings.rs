@@ -570,6 +570,14 @@ impl AppState {
         self.0.embed_parallel
     }
 
+    /// The scrape-time gauge behind `taguru_embed_slot_waiters`:
+    /// threads currently queued for a permit on `embed_provider_slots`
+    /// (issue #563 item 4) — read lock-free, the same shape as
+    /// `retrieval_cache_gauges`/`semantic_cache_entries`.
+    pub fn embed_slot_waiters(&self) -> u64 {
+        self.0.embed_provider_slots.waiting() as u64
+    }
+
     /// Contexts whose passages changed since their last embedding
     /// refresh — the auto-refresh ticker's work list. Claiming is the
     /// caller's job via [`AppState::refresh_passage_embeddings`].
