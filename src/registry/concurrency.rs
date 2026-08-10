@@ -340,26 +340,44 @@ mod tests {
     /// waiter still behind it.
     #[test]
     fn acquire_until_times_out_when_no_permit_frees_up() {
+        use std::thread;
         use std::time::Instant;
 
-        let sem = Semaphore::new(1);
+        let sem = Arc::new(Semaphore::new(1));
         let held = sem
             .acquire_until(Deadline::unbounded())
             .permit
             .expect("the only permit is free at the start");
 
+        // Run the blocked acquire on its own thread so this thread can
+        // observe `waiting()` mid-block — sampling it only after the
+        // call returns would pass even if `waiting()` were hardcoded
+        // to 0.
+        let waiter_sem = Arc::clone(&sem);
         let started = Instant::now();
-        let acquisition = sem.acquire_until(Deadline::after(Duration::from_millis(50)));
-        assert!(
-            acquisition.permit.is_none(),
-            "no permit ever freed up, so this must time out"
+        let waiter = thread::spawn(move || {
+            // Extracted to plain values, not the `Acquisition` itself
+            // — its `SemaphorePermit` borrows `&waiter_sem`, which
+            // does not outlive this closure.
+            let acquisition = waiter_sem.acquire_until(Deadline::after(Duration::from_millis(150)));
+            (acquisition.permit.is_none(), acquisition.queued)
+        });
+
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(
+            sem.waiting(),
+            1,
+            "the blocked thread must show up as queued while it is still waiting"
         );
+
+        let (timed_out, queued) = waiter.join().unwrap();
+        assert!(timed_out, "no permit ever freed up, so this must time out");
         assert!(
-            acquisition.queued,
+            queued,
             "it missed the fast path and had to enter the wait queue"
         );
         assert!(
-            started.elapsed() >= Duration::from_millis(45),
+            started.elapsed() >= Duration::from_millis(145),
             "must actually wait out close to the full deadline, not return early"
         );
         assert_eq!(

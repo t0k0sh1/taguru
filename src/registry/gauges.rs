@@ -1000,10 +1000,12 @@ mod tests {
     /// (`concurrency.rs`'s own tests cover the mechanism). `embed_parallel:
     /// 1` leaves exactly one slot: context "a" occupies it for the
     /// whole of `SlowEmbeddings`'s 150ms, so context "b" — starting
-    /// 30ms in, given only 50ms of its own budget — is provably queued
-    /// (`_waits_total`) and provably still queued when its short
-    /// deadline passes (`_timeouts_total`), both well before "a"
-    /// would ever release. By the time both calls have returned,
+    /// 30ms in, on its own thread with only a 100ms budget — is
+    /// provably queued (`_waits_total`, and the live `embed_slot_waiters`
+    /// gauge sampled while "b" is still blocked) and provably still
+    /// queued when its own deadline passes (`_timeouts_total`), both
+    /// well before "a" would ever release. By the time both calls have
+    /// returned,
     /// nothing is left queued, so the live gauge reads back to zero.
     #[test]
     fn embed_slot_metrics_render_a_queued_wait_and_a_forced_timeout() {
@@ -1048,8 +1050,23 @@ mod tests {
         // (a near-instant fast-path grant) before "b" ever tries.
         std::thread::sleep(std::time::Duration::from_millis(30));
 
-        let timed_out =
-            state.refresh_embeddings("b", Deadline::after(std::time::Duration::from_millis(50)));
+        // "b" also runs on its own thread: sampling the live gauge only
+        // after this call RETURNS would pass even if
+        // `embed_slot_waiters` were hardcoded to 0, since by then
+        // nothing is queued either way. A 100ms budget still expires
+        // well before "a" releases at ~150ms.
+        let waiter = state.clone();
+        let b_handle = std::thread::spawn(move || {
+            waiter.refresh_embeddings("b", Deadline::after(std::time::Duration::from_millis(100)))
+        });
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert_eq!(
+            state.embed_slot_waiters(),
+            1,
+            "\"b\" must show up as queued while it is still blocked on the one slot \"a\" holds"
+        );
+
+        let timed_out = b_handle.join().unwrap();
         assert!(
             matches!(timed_out, Some(Err(_))),
             "\"b\" must give up once its own deadline passes, long before \"a\" \
