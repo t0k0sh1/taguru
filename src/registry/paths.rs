@@ -445,6 +445,25 @@ mod tests {
         .unwrap();
     }
 
+    /// Resumes markers in `dir` and records every attempted move, for
+    /// tests that need to assert on both the returned `ResumedRenames`
+    /// and which moves were (or weren't) attempted.
+    fn resume_and_record(dir: &Path) -> (ResumedRenames, Vec<(String, String)>) {
+        let mut moved = Vec::new();
+        let resumed = resume_rename_markers(
+            dir,
+            "renaming",
+            "context",
+            |from_stem, to_stem| {
+                moved.push((from_stem.to_string(), to_stem.to_string()));
+                Ok(())
+            },
+            |_| true,
+        )
+        .unwrap();
+        (resumed, moved)
+    }
+
     /// Regression for issue #561's item 9: a chain (`a→b`, `b→c`) is
     /// refused wholesale rather than resumed in whatever order
     /// `read_dir` happens to return — resuming a→b before b→c would
@@ -458,18 +477,7 @@ mod tests {
         write_marker(&dir, &file_stem("a"), "a", "b");
         write_marker(&dir, &file_stem("b"), "b", "c");
 
-        let mut moved = Vec::new();
-        let resumed = resume_rename_markers(
-            &dir,
-            "renaming",
-            "context",
-            |from_stem, to_stem| {
-                moved.push((from_stem.to_string(), to_stem.to_string()));
-                Ok(())
-            },
-            |_| true,
-        )
-        .unwrap();
+        let (resumed, moved) = resume_and_record(&dir);
 
         assert!(
             resumed.is_empty(),
@@ -526,18 +534,7 @@ mod tests {
         write_marker(&dir, &file_stem("x"), "x", "y");
         write_marker(&dir, &file_stem("p"), "p", "q");
 
-        let mut moved = Vec::new();
-        let resumed = resume_rename_markers(
-            &dir,
-            "renaming",
-            "context",
-            |from_stem, to_stem| {
-                moved.push((from_stem.to_string(), to_stem.to_string()));
-                Ok(())
-            },
-            |_| true,
-        )
-        .unwrap();
+        let (resumed, moved) = resume_and_record(&dir);
 
         assert_eq!(resumed.len(), 2, "both unrelated markers must resume");
         assert!(
