@@ -377,7 +377,7 @@ async fn serve(serve_args: cli::ServeArgs, auth_source: auth::AuthSource) {
         .then(|| {
             replicate
                 .as_ref()
-                .map(|_| Arc::new(ship::ShipProgress::new()))
+                .map(|_| Arc::new(ship::ShipProgress::new(config.wal_max_bytes)))
         })
         .flatten();
 

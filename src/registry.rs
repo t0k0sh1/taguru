@@ -2110,6 +2110,15 @@ struct StateInner {
     /// Operation counter behind the every-64th forced sweep — the
     /// bound on how stale the estimate can get.
     budget_ops: AtomicU64,
+    /// Set when the last full sweep ran out of unpinned, non-`except`
+    /// candidates before `total` fit under `cache_bytes` — an
+    /// over-budget context too big to evict alone (or one whose save
+    /// keeps failing), not measurement drift. Left set, it would pin
+    /// the cheap gate open forever (`total` never comes back down on
+    /// its own): the every-64th forced sweep re-evaluates it exactly
+    /// like `resident_estimate`, so staleness here is bounded the same
+    /// 64-operation way.
+    budget_saturated: AtomicBool,
 }
 
 /// An LRU-bounded map of cue → embedding: an LLM client repeats query
