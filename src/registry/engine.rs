@@ -1253,6 +1253,70 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
+    /// The boundary `a_context_bigger_than_the_cache_...` above does
+    /// not reach: `budget_saturated` must read `total > cache_bytes`,
+    /// not `total >= cache_bytes` — the early return above it already
+    /// handles every `total <= cache_bytes` case except the one where
+    /// the eviction loop brings `total` down to EXACTLY `cache_bytes`,
+    /// which only the final check at the end of the sweep sees.
+    #[test]
+    fn budget_saturated_is_false_when_the_sweep_lands_exactly_on_the_ceiling() {
+        let dir = scratch_dir("budget-saturation-boundary");
+        let footprint = {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            for name in ["a", "b"] {
+                state
+                    .create(name, ContextMeta::default())
+                    .map_err(|_| "create")
+                    .unwrap();
+                state
+                    .add_associations(
+                        name,
+                        vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md"))],
+                        Deadline::unbounded(),
+                    )
+                    .unwrap()
+                    .unwrap();
+            }
+            state.flush_dirty();
+            state
+                .read_context("a", |context| context.footprint())
+                .map_err(|_| "read")
+                .unwrap()
+        };
+
+        // A budget of exactly one same-shaped context's worth: loading
+        // both back — `a` first, `b` second — means `b`'s own read
+        // (its `except`) evicts `a` (the LRU non-except candidate),
+        // landing `total` exactly on `cache_bytes`, not under it.
+        let state =
+            AppState::boot_with(dir.clone(), footprint, None, BootOptions::default()).unwrap();
+        state
+            .read_context("a", |context| context.association_count())
+            .map_err(|_| "read")
+            .unwrap();
+        state
+            .read_context("b", |context| context.association_count())
+            .map_err(|_| "read")
+            .unwrap();
+
+        assert!(
+            !state.budget_saturated(),
+            "landing exactly on the ceiling is not saturation"
+        );
+        let loaded = loaded_map(&state);
+        assert!(
+            !loaded["a"],
+            "a must have been evicted to reach the ceiling exactly: {loaded:?}"
+        );
+        assert!(
+            loaded["b"],
+            "b is except for the triggering read and must stay resident: {loaded:?}"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
     /// The cache ceiling's provability claim (issue #136): under
     /// pressure, a context past its declared ceiling is evicted before
     /// the LRU victim — so the eviction damage a saturating context
