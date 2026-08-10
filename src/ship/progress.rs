@@ -45,10 +45,27 @@ pub(crate) struct ShipProgress {
 pub(super) const DEFAULT_DEFER_CAP_BYTES: u64 = 64 * 1024 * 1024;
 
 impl ShipProgress {
-    pub(crate) fn new() -> Self {
+    /// `wal_max_bytes` is `TAGURU_WAL_MAX_BYTES` (0 = unlimited): the
+    /// per-context ceiling `logged_write`'s backstop refuses writes
+    /// past (`engine.rs`'s `wal_max_bytes` check). Below the default
+    /// deferral budget, deferring by the full [`DEFAULT_DEFER_CAP_BYTES`]
+    /// would let this reset's own wait grow a log past THAT ceiling
+    /// first — the deferral would then be the thing refusing writes,
+    /// under a message that blames a failing flush. Capping the
+    /// deferral at half the WAL ceiling leaves room for the writes a
+    /// server keeps taking while the reset waits; at or above the
+    /// default (every real deployment — `wal_max_bytes` defaults to
+    /// 256 MiB, `0` is unlimited) the cap is exactly
+    /// [`DEFAULT_DEFER_CAP_BYTES`], unchanged.
+    pub(crate) fn new(wal_max_bytes: usize) -> Self {
+        let defer_cap_bytes = match u64::try_from(wal_max_bytes) {
+            Ok(0) => DEFAULT_DEFER_CAP_BYTES,
+            Ok(cap) => DEFAULT_DEFER_CAP_BYTES.min(cap / 2),
+            Err(_) => DEFAULT_DEFER_CAP_BYTES,
+        };
         Self {
             lanes: Mutex::new(BTreeMap::new()),
-            defer_cap_bytes: DEFAULT_DEFER_CAP_BYTES,
+            defer_cap_bytes,
         }
     }
 
@@ -161,5 +178,51 @@ impl LaneState {
             last_seen_sig: None,
             local_seq: 0,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #562 item 6: at or above the default WAL ceiling (every real
+    /// deployment), the deferral budget is unaffected.
+    #[test]
+    fn defer_cap_stays_at_the_default_for_a_generous_wal_ceiling() {
+        assert_eq!(
+            ShipProgress::new(256 * 1024 * 1024).defer_cap_bytes,
+            DEFAULT_DEFER_CAP_BYTES
+        );
+        // Unlimited (0) is at least as generous as the default.
+        assert_eq!(
+            ShipProgress::new(0).defer_cap_bytes,
+            DEFAULT_DEFER_CAP_BYTES
+        );
+    }
+
+    /// A `TAGURU_WAL_MAX_BYTES` below `2 * DEFAULT_DEFER_CAP_BYTES`
+    /// used to let the deferred reset outgrow the WAL's own write-cap
+    /// backstop, refusing writes with a message that blames a failing
+    /// flush that never happened (#562 item 6). The deferral budget
+    /// must stay strictly under the ceiling it shares the log with.
+    #[test]
+    fn defer_cap_shrinks_to_half_a_tight_wal_ceiling() {
+        let progress = ShipProgress::new(10 * 1024 * 1024);
+        assert_eq!(progress.defer_cap_bytes, 5 * 1024 * 1024);
+        assert!(progress.defer_cap_bytes < DEFAULT_DEFER_CAP_BYTES);
+
+        // `allows_reset` itself, not just the stored field: an
+        // unshipped lane (nothing in `lanes` for this path) defers
+        // below the cap and proceeds at or past it — the integer
+        // division and the `>=` boundary both land where computed.
+        let log = FsPath::new("/data/x.wal.jsonl");
+        assert!(
+            !progress.allows_reset(log, 1, 5 * 1024 * 1024 - 1),
+            "one byte under the cap must still defer"
+        );
+        assert!(
+            progress.allows_reset(log, 1, 5 * 1024 * 1024),
+            "at the cap must proceed"
+        );
     }
 }

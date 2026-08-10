@@ -90,7 +90,7 @@ impl AppState {
                 return false;
             }
             entry.dirty.store(false, Ordering::Relaxed);
-            let watermark = inner.wal_seq - 1;
+            let watermark = inner.wal_seq.saturating_sub(1);
             // Cold has nothing to write; Deleted must write nothing —
             // that snapshot predates a delete and the files are gone
             // for good.
@@ -215,7 +215,7 @@ impl AppState {
                 // re-flush. Truncation is sound only when the image covers
                 // the whole log — a write that landed mid-stage sits past
                 // our watermark and its records must survive.
-                if inner.wal_seq - 1 == watermark {
+                if inner.wal_seq.saturating_sub(1) == watermark {
                     self.truncate_wal(name, inner);
                 }
                 true
@@ -249,7 +249,7 @@ impl AppState {
     fn truncate_wal(&self, name: &str, inner: &mut EntryInner) {
         let path = wal_path(&self.0.data_dir, &file_stem(name));
         if let Some(progress) = &self.0.ship_progress
-            && !progress.allows_reset(&path, inner.wal_seq - 1, inner.wal_bytes)
+            && !progress.allows_reset(&path, inner.wal_seq.saturating_sub(1), inner.wal_bytes)
         {
             return;
         }
@@ -369,7 +369,7 @@ impl AppState {
                 && let Some((used, ceiling)) = self.storage_quota_excess(name, &inner, &entry)
             {
                 self.0.metrics.record_storage_quota_refusal();
-                return Err(AccessError::QuotaExceeded(storage_quota_message(
+                break 'write Err(AccessError::QuotaExceeded(storage_quota_message(
                     name, used, ceiling,
                 )));
             }
@@ -387,7 +387,7 @@ impl AppState {
                         cap = self.0.wal_max_bytes,
                         "WAL over its cap with the image failing to flush; write refused"
                     );
-                    return Err(AccessError::Unpersisted(format!(
+                    break 'write Err(AccessError::Unpersisted(format!(
                         "the write-ahead log is at {} bytes (cap {}): the image has been \
                          failing to flush — check disk space and the server log",
                         inner.wal_bytes, self.0.wal_max_bytes
@@ -472,8 +472,13 @@ impl AppState {
             // modes — `wal_seq` cannot carry this: it does not move at
             // all with the WAL disabled, and the partial-apply
             // bookkeeping below rolls it back in states where the
-            // applied prefix stands in memory regardless.
-            let landed = applied(&result);
+            // applied prefix stands in memory regardless. Clamped once,
+            // here: every use below (`graph_revision`, the change-feed
+            // slice, the `landed < ops.len()` re-append branch) must
+            // agree on the same value, and `applied` is a caller-
+            // supplied closure with no contract capping it at
+            // `ops.len()`.
+            let landed = applied(&result).min(ops.len());
             inner.graph_revision += landed as u64;
             // The change feed records the same applied prefix the
             // revision just counted — never the refused tail (#422).
@@ -482,9 +487,7 @@ impl AppState {
             entry
                 .changes
                 .lock()
-                .extend(crate::registry::changes::events_of_ops(
-                    &ops[..landed.min(ops.len())],
-                ));
+                .extend(crate::registry::changes::events_of_ops(&ops[..landed]));
 
             if let Some((path, len_before)) = staged
                 && landed < ops.len()
@@ -586,17 +589,57 @@ impl AppState {
     /// thrash. Dirty contexts are persisted before eviction; if that
     /// save fails they stay resident rather than losing writes.
     pub(crate) fn enforce_budget(&self, except: &str) {
-        // Cheap gate in front of the O(contexts) sweep below: one
-        // atomic load of the graph estimate, which per-entry recounts
-        // keep exact. Vector-store residency is NOT tracked between
-        // sweeps, so every 64th operation forces a real sweep anyway —
-        // its reconciling store below bounds any staleness or drift at
-        // 64 operations. Before this gate the full sweep (snapshot,
-        // two lock acquisitions per context) ran on every request.
+        // Cheap gate in front of the O(contexts) sweep below, off the
+        // every-64th forced-sweep beat: skip it when EITHER the atomic
+        // graph estimate (which per-entry recounts keep exact) already
+        // fits the budget, OR the sweep is known-saturated FOR THIS
+        // SAME `except` — set at the bottom of this function when a
+        // sweep ran out of evictable candidates while still over
+        // budget (a context bigger than the whole cache alone, or one
+        // whose save keeps failing). The `except`-name check matters:
+        // saturation is specific to whichever context the sweep just
+        // had to protect, and a DIFFERENT `except` on the very next
+        // call can trivially evict what this one couldn't — an
+        // ordinary "just wrote to a context bigger than the whole
+        // budget, then read a different one" must still evict
+        // promptly, not wait out a 64-operation staleness window meant
+        // for a genuinely stuck situation. The two checks are separate
+        // `if`s, not one boolean expression, so the first can self-heal
+        // a stale `budget_saturated` (from THIS or an earlier `except`)
+        // the moment the estimate alone reports under budget — a
+        // residency change outside this function's own sweep (e.g.
+        // `evict_entry` called directly) can bring the estimate back
+        // down without ever re-running the loop below that would
+        // otherwise be the only place clearing the flag. Both mutex
+        // locks behind `budget_saturated_except` only run once
+        // `budget_saturated` is already true (short-circuited), so the
+        // ordinary fast path stays lock-free atomic loads throughout.
+        // Vector-store residency is NOT tracked between sweeps either,
+        // so every 64th operation forces a real sweep regardless of
+        // either arm — its reconciling store below bounds any
+        // staleness or drift (estimate, or saturation) at 64
+        // operations. Before this gate the full sweep (snapshot, two
+        // lock acquisitions per context) ran on every request.
         let ops = self.0.budget_ops.fetch_add(1, Ordering::Relaxed);
         let budget = i64::try_from(self.0.cache_bytes).unwrap_or(i64::MAX);
-        if !ops.is_multiple_of(64) && self.0.resident_estimate.load(Ordering::Relaxed) <= budget {
-            return;
+        if !ops.is_multiple_of(64) {
+            if self.0.resident_estimate.load(Ordering::Relaxed) <= budget {
+                // The estimate alone already says the fleet fits —
+                // true regardless of `except`, so any saturation this
+                // (or an earlier) call recorded no longer applies to
+                // ANY caller. Self-heal it now instead of waiting for
+                // the next forced sweep: cheap, since the lock only
+                // runs when `swap` finds something to clear.
+                if self.0.budget_saturated.swap(false, Ordering::Relaxed) {
+                    *self.0.budget_saturated_except.lock() = None;
+                }
+                return;
+            }
+            if self.0.budget_saturated.load(Ordering::Relaxed)
+                && self.0.budget_saturated_except.lock().as_deref() == Some(except)
+            {
+                return;
+            }
         }
 
         let mut candidates: Vec<(bool, u64, usize, String, Arc<Entry>)> = Vec::new();
@@ -647,8 +690,10 @@ impl AppState {
         // and any drift folded away.
         self.0
             .resident_estimate
-            .store(total as i64, Ordering::Relaxed);
+            .store(i64::try_from(total).unwrap_or(i64::MAX), Ordering::Relaxed);
         if total <= self.0.cache_bytes {
+            self.0.budget_saturated.store(false, Ordering::Relaxed);
+            *self.0.budget_saturated_except.lock() = None;
             return;
         }
 
@@ -668,7 +713,23 @@ impl AppState {
         }
         self.0
             .resident_estimate
-            .store(total as i64, Ordering::Relaxed);
+            .store(i64::try_from(total).unwrap_or(i64::MAX), Ordering::Relaxed);
+        // Every candidate has now been through the loop: if the total
+        // is still over, nothing left in THIS sweep (with THIS
+        // `except`) can bring it down — set the flag, keyed to
+        // `except`, so the cheap gate above stops re-deriving the same
+        // stuck conclusion on every call for the same `except`, while
+        // still giving any other `except` its own immediate sweep.
+        let saturated = total > self.0.cache_bytes;
+        self.0.budget_saturated.store(saturated, Ordering::Relaxed);
+        *self.0.budget_saturated_except.lock() = saturated.then(|| except.to_string());
+    }
+
+    /// Test-only window into [`Self::enforce_budget`]'s saturation
+    /// flag (#562 item 2).
+    #[cfg(test)]
+    pub(crate) fn budget_saturated(&self) -> bool {
+        self.0.budget_saturated.load(Ordering::Relaxed)
     }
 
     /// One entry's eviction: persist if dirty, drop the graph, clear
@@ -714,7 +775,7 @@ impl AppState {
             return false;
         }
         let mut freed = false;
-        let watermark = inner.wal_seq - 1;
+        let watermark = inner.wal_seq.saturating_sub(1);
         if let Slot::Hot(context) = &mut inner.slot {
             // Still dirty/flushing after the attempt above: either a
             // rival flush was already mid-flight (its own claim swap
@@ -761,9 +822,16 @@ impl AppState {
             // re-publish would otherwise resurrect a stale image over
             // whatever was written after the reload.
             inner.image_generation += 1;
-            // Local zero only: the caller's absolute store settles
-            // the global, so a recount's delta would double-count.
-            inner.counted_bytes = 0;
+            // Absolute, via the same path every other residency change
+            // uses (#562 item 11) — `counted_bytes = 0` directly had no
+            // type or visibility (`pub(crate)`) backstop keeping it in
+            // sync with `resident_estimate`, and `enforce_budget` is
+            // not its only caller (a direct `evict_entry` call, as
+            // tests make, must self-correct the global estimate too).
+            // `enforce_budget`'s own absolute store right after this
+            // returns makes the delta this applies here redundant but
+            // harmless for that caller.
+            self.recount_entry(inner);
             self.0.metrics.record_eviction(true);
             freed = true;
         }
@@ -992,6 +1060,357 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(state.storage_quota_refusal("free"), None);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// #562 item 1: a quota refusal must still `touch`/`enforce_budget`
+    /// on its way out. Before the fix, the two quantitative refusals in
+    /// `logged_write` returned early via a bare `return Err`, skipping
+    /// the tail of the function entirely — the promotion `ensure_hot`
+    /// just did (and `recount_entry` already counted) never reached the
+    /// budget sweep, and the entry's `last_touch` stayed frozen, so a
+    /// repeatedly-refused context would look like the LRU's oldest
+    /// victim on the next sweep despite being the most recently hit.
+    #[test]
+    fn storage_quota_refusal_still_touches_and_sweeps() {
+        let dir = scratch_dir("quota-refusal-touch");
+        let state = AppState::boot_with(
+            dir.clone(),
+            usize::MAX,
+            None,
+            BootOptions {
+                context_quotas: HashMap::from([(
+                    "capped".to_string(),
+                    ContextQuota {
+                        storage_bytes: Some(1),
+                        cache_bytes: None,
+                    },
+                )]),
+                ..BootOptions::default()
+            },
+        )
+        .unwrap();
+
+        state
+            .create("capped", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        // First write lands (nothing on disk yet) and carries the
+        // family past the one-byte ceiling; the entry is touched on
+        // the way out, as any successful write is.
+        state
+            .add_associations(
+                "capped",
+                vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md"))],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        let entry = state.lookup("capped").unwrap();
+        let touch_after_success = entry.last_touch.load(Ordering::Relaxed);
+        assert_ne!(touch_after_success, 0);
+
+        // Second write refuses on the quota — and must still touch.
+        let refused = state.add_associations(
+            "capped",
+            vec![assoc_op("蔵", "銘柄", "青嶺", 1.0, Some("keep.md"))],
+            Deadline::unbounded(),
+        );
+        assert!(matches!(refused, Err(AccessError::QuotaExceeded(_))));
+        let touch_after_refusal = entry.last_touch.load(Ordering::Relaxed);
+        assert!(
+            touch_after_refusal > touch_after_success,
+            "a quota refusal must still touch the entry: {touch_after_success} -> {touch_after_refusal}"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// Same claim as
+    /// [`storage_quota_refusal_still_touches_and_sweeps`], for the
+    /// other quantitative refusal in `logged_write`: the WAL-cap
+    /// backstop.
+    #[test]
+    fn wal_cap_refusal_still_touches_and_sweeps() {
+        let dir = scratch_dir("wal-cap-refusal-touch");
+        let state = AppState::boot_with(
+            dir.clone(),
+            usize::MAX,
+            None,
+            BootOptions {
+                // Small enough that one association batch's WAL record
+                // alone reaches it.
+                wal_max_bytes: 1,
+                ..BootOptions::default()
+            },
+        )
+        .unwrap();
+
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        // First write lands (the cap is only checked before an append,
+        // and `wal_bytes` starts at zero) — it alone carries the log
+        // past the one-byte cap.
+        state
+            .add_associations(
+                "sake",
+                vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md"))],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        let entry = state.lookup("sake").unwrap();
+        let touch_before = entry.last_touch.load(Ordering::Relaxed);
+
+        let refused = state.add_associations(
+            "sake",
+            vec![assoc_op("蔵", "銘柄", "青嶺", 1.0, Some("keep.md"))],
+            Deadline::unbounded(),
+        );
+        assert!(matches!(refused, Err(AccessError::Unpersisted(_))));
+        let touch_after = entry.last_touch.load(Ordering::Relaxed);
+        assert!(
+            touch_after > touch_before,
+            "a WAL-cap refusal must still touch the entry: {touch_before} -> {touch_after}"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// #562 item 8: `applied` is a caller-supplied closure with no
+    /// contract capping its return at `ops.len()`. Before the fix, only
+    /// the change-feed slice clamped it (`landed.min(ops.len())`) —
+    /// `graph_revision` used the raw, unclamped value, so a closure
+    /// that over-reports would inflate the revision past what the
+    /// batch could ever justify.
+    #[test]
+    fn logged_writes_applied_count_is_clamped_to_the_batch_len() {
+        let dir = scratch_dir("applied-clamp");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+
+        let wal_ops = vec![WalOp::Associate(assoc_op("蔵", "杜氏", "高瀬", 1.0, None))];
+        state
+            .logged_write(
+                "sake",
+                &wal_ops,
+                |context| apply_in_order(context, &wal_ops),
+                // Deliberately over-reports: claims 5 ops landed from a
+                // batch of 1.
+                |_| 5,
+            )
+            .unwrap()
+            .unwrap();
+
+        let entry = state.lookup("sake").unwrap();
+        let revision = entry.inner.read().graph_revision;
+        assert_eq!(
+            revision, 1,
+            "graph_revision must clamp to the batch length, not trust an over-report"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// #562 item 2: a single context bigger than the whole cache must
+    /// not wedge the cheap 1/64 gate open forever. Before the fix, once
+    /// the eviction loop ran out of candidates (the oversized context
+    /// is `except`, so the loop always skips it) while `total` was
+    /// still over budget, nothing ever brought `resident_estimate`
+    /// back under `cache_bytes` on its own — every subsequent write
+    /// paid the full O(contexts) sweep, forever.
+    #[test]
+    fn a_context_bigger_than_the_cache_sets_and_clears_saturation() {
+        let dir = scratch_dir("budget-saturation");
+        let footprint = {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("big", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .add_associations(
+                    "big",
+                    vec![
+                        assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md")),
+                        assoc_op("蔵", "銘柄", "青嶺", 1.0, Some("keep.md")),
+                    ],
+                    Deadline::unbounded(),
+                )
+                .unwrap()
+                .unwrap();
+            state
+                .read_context("big", |context| context.footprint())
+                .map_err(|_| "read")
+                .unwrap()
+        };
+
+        // A budget half the size of the one context that exists —
+        // `except` (the context this very write just touched) can
+        // never be evicted to close the gap.
+        let state =
+            AppState::boot_with(dir.clone(), footprint / 2, None, BootOptions::default()).unwrap();
+        state
+            .add_associations(
+                "big",
+                vec![assoc_op("蔵", "産地", "灘", 1.0, Some("keep.md"))],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        assert!(
+            state.budget_saturated(),
+            "a single over-budget `except` context must saturate the sweep"
+        );
+
+        // Free it directly (bypassing the `except` protection an
+        // ordinary sweep would give it) and sweep again under a
+        // different `except` name — with nothing left resident, the
+        // flag must clear rather than stay wedged.
+        let entry = state.lookup("big").unwrap();
+        assert!(state.evict_entry("big", &entry));
+        state.enforce_budget("unrelated");
+        assert!(
+            !state.budget_saturated(),
+            "an empty sweep must clear the saturation flag"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// CodeRabbit catch on #572: the gate's saturated arm must SKIP the
+    /// full sweep on an off-beat call, the same as the
+    /// estimate-under-budget arm — not force one on every call while
+    /// saturated, which would just relocate the "full sweep on every
+    /// request" bug `budget_saturated` exists to fix onto a different
+    /// condition. Proven by corrupting the estimate to a value only a
+    /// real sweep's reconciling store would touch, then showing an
+    /// off-beat call while saturated leaves it exactly as corrupted.
+    #[test]
+    fn a_saturated_sweep_skips_the_full_recount_off_the_reconciliation_beat() {
+        let dir = scratch_dir("budget-saturation-off-beat");
+        let footprint = {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("big", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .add_associations(
+                    "big",
+                    vec![
+                        assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md")),
+                        assoc_op("蔵", "銘柄", "青嶺", 1.0, Some("keep.md")),
+                    ],
+                    Deadline::unbounded(),
+                )
+                .unwrap()
+                .unwrap();
+            state
+                .read_context("big", |context| context.footprint())
+                .map_err(|_| "read")
+                .unwrap()
+        };
+
+        let state =
+            AppState::boot_with(dir.clone(), footprint / 2, None, BootOptions::default()).unwrap();
+        // This write's own `enforce_budget` call is the first
+        // (`budget_ops == 0`, itself a forced multiple-of-64 sweep) —
+        // `big` is `except` and can never be evicted, so it saturates.
+        state
+            .add_associations(
+                "big",
+                vec![assoc_op("蔵", "産地", "灘", 1.0, Some("keep.md"))],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        assert!(state.budget_saturated());
+
+        // A value only a real sweep's reconciling store would ever
+        // produce — and deliberately still OVER budget, so the only
+        // way this call could skip is the saturated-same-`except`
+        // branch, not the (separate) under-budget self-heal one.
+        let stale = i64::MAX;
+        state.0.resident_estimate.store(stale, Ordering::Relaxed);
+        // `budget_ops` is now 1 — off-beat, and `except` is still
+        // "big" — the exact same name the sweep above saturated on.
+        state.enforce_budget("big");
+        assert_eq!(
+            state.0.resident_estimate.load(Ordering::Relaxed),
+            stale,
+            "an off-beat call while saturated must not re-sweep and correct the estimate"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The boundary `a_context_bigger_than_the_cache_...` above does
+    /// not reach: `budget_saturated` must read `total > cache_bytes`,
+    /// not `total >= cache_bytes` — the early return above it already
+    /// handles every `total <= cache_bytes` case except the one where
+    /// the eviction loop brings `total` down to EXACTLY `cache_bytes`,
+    /// which only the final check at the end of the sweep sees.
+    #[test]
+    fn budget_saturated_is_false_when_the_sweep_lands_exactly_on_the_ceiling() {
+        let dir = scratch_dir("budget-saturation-boundary");
+        let footprint = {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            for name in ["a", "b"] {
+                state
+                    .create(name, ContextMeta::default())
+                    .map_err(|_| "create")
+                    .unwrap();
+                state
+                    .add_associations(
+                        name,
+                        vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md"))],
+                        Deadline::unbounded(),
+                    )
+                    .unwrap()
+                    .unwrap();
+            }
+            state.flush_dirty();
+            state
+                .read_context("a", |context| context.footprint())
+                .map_err(|_| "read")
+                .unwrap()
+        };
+
+        // A budget of exactly one same-shaped context's worth: loading
+        // both back — `a` first, `b` second — means `b`'s own read
+        // (its `except`) evicts `a` (the LRU non-except candidate),
+        // landing `total` exactly on `cache_bytes`, not under it.
+        let state =
+            AppState::boot_with(dir.clone(), footprint, None, BootOptions::default()).unwrap();
+        state
+            .read_context("a", |context| context.association_count())
+            .map_err(|_| "read")
+            .unwrap();
+        state
+            .read_context("b", |context| context.association_count())
+            .map_err(|_| "read")
+            .unwrap();
+
+        assert!(
+            !state.budget_saturated(),
+            "landing exactly on the ceiling is not saturation"
+        );
+        let loaded = loaded_map(&state);
+        assert!(
+            !loaded["a"],
+            "a must have been evicted to reach the ceiling exactly: {loaded:?}"
+        );
+        assert!(
+            loaded["b"],
+            "b is except for the triggering read and must stay resident: {loaded:?}"
+        );
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -1671,6 +2090,44 @@ mod tests {
 
         state.delete("sake").unwrap().unwrap();
         assert_eq!(state.0.resident_estimate.load(Ordering::Relaxed), 0);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// #562 item 11: `evict_entry`'s own zeroing of the freed entry's
+    /// contribution must go through the one absolute-recount path
+    /// every other residency change uses, not a direct
+    /// `counted_bytes = 0` — that direct write only stayed correct
+    /// because its sole production caller (`enforce_budget`) always
+    /// re-derives the global estimate right after, an invariant
+    /// nothing enforced. Calling `evict_entry` on its own, as this
+    /// test does, is exactly the case that invariant did not cover.
+    #[test]
+    fn evict_entry_self_corrects_the_resident_estimate_without_a_sweep() {
+        let dir = scratch_dir("evict-self-corrects");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .add_associations(
+                "sake",
+                vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        assert!(state.0.resident_estimate.load(Ordering::Relaxed) > 0);
+
+        let entry = state.lookup("sake").unwrap();
+        assert!(state.evict_entry("sake", &entry));
+        assert_eq!(
+            state.0.resident_estimate.load(Ordering::Relaxed),
+            0,
+            "an eviction called directly, outside enforce_budget's own absolute \
+             store, must still bring the global estimate down to zero"
+        );
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -2680,6 +3137,77 @@ mod tests {
             }
         }
         assert!(exhausted, "flush exceeded the sweep bound");
+    }
+
+    /// #562 item 10: the one step of the sweep above (`failure == 3`)
+    /// where `write_meta` has already landed a sidecar naming a NEW
+    /// `graph_revision`/stats, and only the image's own
+    /// `commit_staged` (the final rename) then fails — the exact
+    /// composition the audit flagged as asserted but untested. Beyond
+    /// what the sweep already checks (the write survives a reboot),
+    /// this also pins the two signals a failed flush must leave
+    /// behind: `record_flush(false)` (so `/health` reflects it) and
+    /// `dirty` re-marked (so the periodic flusher retries without
+    /// anyone asking it to).
+    #[test]
+    fn a_sidecar_published_ahead_of_a_failed_image_commit_still_replays_correctly() {
+        let dir = scratch_dir("meta-ok-image-commit-fails");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state.create("sake", ContextMeta::default()).unwrap();
+        state
+            .add_associations(
+                "sake",
+                vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("doc"))],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+
+        // Ops for this one dirty entry, in order: stage(image),
+        // stage(meta), commit(meta) — write_meta complete — then
+        // commit(image). Failing the 4th (index 3) hits exactly that
+        // last one.
+        fail_persistence_ops_after(3);
+        let flushed = state.flush_dirty();
+        let fault_was_reached = !clear_persistence_fault();
+        assert!(
+            fault_was_reached,
+            "this flush has fewer than 4 persistence ops; the sweep above changed shape"
+        );
+        assert!(
+            !flushed.contains(&"sake".to_string()),
+            "a failed image commit must not report the context as flushed"
+        );
+
+        let entry = state.lookup("sake").unwrap();
+        assert!(
+            entry.dirty.load(Ordering::Relaxed),
+            "a failed publish must re-mark the entry dirty for the next tick's retry"
+        );
+        assert!(
+            rendered(&state).contains("taguru_flush_total{outcome=\"failed\"} 1"),
+            "a failed publish must record_flush(false), the signal /health reads"
+        );
+
+        // No retry here — unlike the sweep above (which always
+        // retries once before rebooting), this drops immediately: the
+        // sidecar on disk already names the new `graph_revision` and
+        // stats, the image next to it is still the OLD one, and the
+        // WAL was never truncated (only the `Ok` branch does that).
+        // Replay on the next boot must still reconstruct exactly what
+        // the ahead-of-image sidecar already claims.
+        drop(state);
+
+        let reborn = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        assert_eq!(
+            reborn
+                .read_context("sake", |context| context.association_count())
+                .unwrap(),
+            1,
+            "WAL replay must reconstruct what the ahead-of-image sidecar already claimed"
+        );
+
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

@@ -1489,7 +1489,7 @@ mod tests {
             StorePath::default(),
             url_of(tag),
             writer.clone(),
-            Arc::new(ShipProgress::new()),
+            Arc::new(ShipProgress::new(crate::registry::DEFAULT_WAL_MAX_BYTES)),
             state,
             None,
         )
@@ -1529,7 +1529,7 @@ mod tests {
             StorePath::default(),
             url_of("race"),
             writer.clone(),
-            Arc::new(ShipProgress::new()),
+            Arc::new(ShipProgress::new(crate::registry::DEFAULT_WAL_MAX_BYTES)),
             state,
             None,
         )

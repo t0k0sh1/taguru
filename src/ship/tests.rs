@@ -192,7 +192,7 @@ impl ObjectStore for FlakyStore {
 async fn claims_are_monotonic_and_a_race_converges_on_distinct_generations() {
     let dir = scratch_dir("claim");
     let state = state_for(&dir);
-    let progress = Arc::new(ShipProgress::new());
+    let progress = Arc::new(ShipProgress::new(crate::registry::DEFAULT_WAL_MAX_BYTES));
     let store = Arc::new(InMemory::new());
 
     let first = claimed(&store, &dir, &state, &progress).await;
@@ -219,7 +219,7 @@ async fn claims_are_monotonic_and_a_race_converges_on_distinct_generations() {
 async fn ships_files_and_lane_segments_and_restore_round_trips() {
     let dir = scratch_dir("roundtrip");
     let state = state_for(&dir);
-    let progress = Arc::new(ShipProgress::new());
+    let progress = Arc::new(ShipProgress::new(crate::registry::DEFAULT_WAL_MAX_BYTES));
     let store = Arc::new(InMemory::new());
 
     // A hand-laid family: an image stand-in and a real WAL written
@@ -292,7 +292,7 @@ async fn ships_files_and_lane_segments_and_restore_round_trips() {
 async fn a_reset_lane_restarts_its_series_behind_a_fresh_parent_snapshot() {
     let dir = scratch_dir("series");
     let state = state_for(&dir);
-    let progress = Arc::new(ShipProgress::new());
+    let progress = Arc::new(ShipProgress::new(crate::registry::DEFAULT_WAL_MAX_BYTES));
     let store = Arc::new(InMemory::new());
 
     std::fs::write(dir.join("ctx_a.ctx"), b"image-v1").unwrap();
@@ -343,7 +343,7 @@ async fn a_reset_lane_restarts_its_series_behind_a_fresh_parent_snapshot() {
 async fn a_rewritten_prefix_diverges_the_lane_and_restarts_its_series() {
     let dir = scratch_dir("rewrite");
     let state = state_for(&dir);
-    let progress = Arc::new(ShipProgress::new());
+    let progress = Arc::new(ShipProgress::new(crate::registry::DEFAULT_WAL_MAX_BYTES));
     let store = Arc::new(InMemory::new());
 
     std::fs::write(dir.join("ctx_a.ctx"), b"image-v1").unwrap();
@@ -387,7 +387,7 @@ async fn a_rewritten_prefix_diverges_the_lane_and_restarts_its_series() {
 async fn a_newer_claim_fences_the_shipper_on_its_next_dirty_cycle() {
     let dir = scratch_dir("fence");
     let state = state_for(&dir);
-    let progress = Arc::new(ShipProgress::new());
+    let progress = Arc::new(ShipProgress::new(crate::registry::DEFAULT_WAL_MAX_BYTES));
     let store = Arc::new(InMemory::new());
 
     std::fs::write(dir.join("ctx_a.ctx"), b"image-v1").unwrap();
@@ -422,7 +422,7 @@ async fn a_newer_claim_fences_the_shipper_on_its_next_dirty_cycle() {
 async fn a_vanished_family_is_retired_remotely_including_its_segments() {
     let dir = scratch_dir("retire");
     let state = state_for(&dir);
-    let progress = Arc::new(ShipProgress::new());
+    let progress = Arc::new(ShipProgress::new(crate::registry::DEFAULT_WAL_MAX_BYTES));
     let store = Arc::new(InMemory::new());
 
     std::fs::write(dir.join("ctx_a.ctx"), b"image-v1").unwrap();
@@ -453,7 +453,7 @@ async fn a_vanished_family_is_retired_remotely_including_its_segments() {
 async fn a_failed_retire_delete_is_retried_not_orphaned() {
     let dir = scratch_dir("retire-flaky");
     let state = state_for(&dir);
-    let progress = Arc::new(ShipProgress::new());
+    let progress = Arc::new(ShipProgress::new(crate::registry::DEFAULT_WAL_MAX_BYTES));
     let inner = Arc::new(InMemory::new());
     let fail_deletes = Arc::new(Mutex::new(0usize));
     let store: Arc<dyn ObjectStore> = Arc::new(FlakyStore {
@@ -506,7 +506,7 @@ async fn a_failed_retire_delete_is_retried_not_orphaned() {
 async fn a_failed_lane_retire_delete_is_retried_not_orphaned() {
     let dir = scratch_dir("retire-lane-flaky");
     let state = state_for(&dir);
-    let progress = Arc::new(ShipProgress::new());
+    let progress = Arc::new(ShipProgress::new(crate::registry::DEFAULT_WAL_MAX_BYTES));
     let inner = Arc::new(InMemory::new());
     let fail_deletes = Arc::new(Mutex::new(0usize));
     let store: Arc<dyn ObjectStore> = Arc::new(FlakyStore {
@@ -561,7 +561,7 @@ async fn a_failed_lane_retire_delete_is_retried_not_orphaned() {
 async fn a_failed_manifest_put_is_retried_on_the_next_idle_cycle() {
     let dir = scratch_dir("manifest-flaky");
     let state = state_for(&dir);
-    let progress = Arc::new(ShipProgress::new());
+    let progress = Arc::new(ShipProgress::new(crate::registry::DEFAULT_WAL_MAX_BYTES));
     let inner = Arc::new(InMemory::new());
     let fail_puts = Arc::new(Mutex::new(0usize));
     let store: Arc<dyn ObjectStore> = Arc::new(FlakyStore {
@@ -618,7 +618,7 @@ async fn a_failed_manifest_put_is_retried_on_the_next_idle_cycle() {
 async fn restore_refuses_a_gapped_segment_run() {
     let dir = scratch_dir("gap");
     let state = state_for(&dir);
-    let progress = Arc::new(ShipProgress::new());
+    let progress = Arc::new(ShipProgress::new(crate::registry::DEFAULT_WAL_MAX_BYTES));
     let store = Arc::new(InMemory::new());
 
     std::fs::write(dir.join("ctx_a.ctx"), b"image-v1").unwrap();
@@ -655,7 +655,7 @@ async fn restore_refuses_a_gapped_segment_run() {
 async fn restore_picks_the_newest_complete_generation_not_the_newest_claim() {
     let dir = scratch_dir("newest");
     let state = state_for(&dir);
-    let progress = Arc::new(ShipProgress::new());
+    let progress = Arc::new(ShipProgress::new(crate::registry::DEFAULT_WAL_MAX_BYTES));
     let store = Arc::new(InMemory::new());
 
     std::fs::write(dir.join("ctx_a.ctx"), b"gen1-image").unwrap();
@@ -685,7 +685,7 @@ async fn restore_picks_the_newest_complete_generation_not_the_newest_claim() {
 
 #[test]
 fn allows_reset_defers_until_shipped_and_caps_the_deferral() {
-    let progress = ShipProgress::new();
+    let progress = ShipProgress::new(crate::registry::DEFAULT_WAL_MAX_BYTES);
     let log = FsPath::new("/data/x.wal.jsonl");
 
     // Nothing shipped yet: defer (the shipper will get there).
@@ -708,7 +708,7 @@ fn allows_reset_defers_until_shipped_and_caps_the_deferral() {
 async fn the_manifest_records_every_shipped_extent_and_restore_verifies_it() {
     let dir = scratch_dir("manifest");
     let state = state_for(&dir);
-    let progress = Arc::new(ShipProgress::new());
+    let progress = Arc::new(ShipProgress::new(crate::registry::DEFAULT_WAL_MAX_BYTES));
     let store = Arc::new(InMemory::new());
 
     std::fs::write(dir.join("ctx_a.ctx"), b"image-v1").unwrap();
@@ -768,7 +768,7 @@ async fn the_manifest_records_every_shipped_extent_and_restore_verifies_it() {
 async fn restore_refuses_a_manifest_naming_a_path_outside_the_target_directory() {
     let dir = scratch_dir("manifest-traversal");
     let state = state_for(&dir);
-    let progress = Arc::new(ShipProgress::new());
+    let progress = Arc::new(ShipProgress::new(crate::registry::DEFAULT_WAL_MAX_BYTES));
     let store = Arc::new(InMemory::new());
 
     std::fs::write(dir.join("ctx_a.ctx"), b"image-v1").unwrap();
@@ -834,7 +834,7 @@ async fn restore_refuses_a_manifest_naming_a_path_outside_the_target_directory()
 async fn a_claim_is_recorded_locally_and_liveness_markers_land() {
     let dir = scratch_dir("liveness");
     let state = state_for(&dir);
-    let progress = Arc::new(ShipProgress::new());
+    let progress = Arc::new(ShipProgress::new(crate::registry::DEFAULT_WAL_MAX_BYTES));
     let store = Arc::new(InMemory::new());
 
     let mut shipper = claimed(&store, &dir, &state, &progress).await;
@@ -925,7 +925,7 @@ mod proptests {
             let ops: Vec<WalOp> = generated.into_iter().map(WalOp::from).collect();
             let dir = scratch_dir("prop");
             let state = state_for(&dir);
-            let progress = Arc::new(ShipProgress::new());
+            let progress = Arc::new(ShipProgress::new(crate::registry::DEFAULT_WAL_MAX_BYTES));
             let store = Arc::new(InMemory::new());
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()

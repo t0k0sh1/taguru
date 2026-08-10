@@ -2110,6 +2110,27 @@ struct StateInner {
     /// Operation counter behind the every-64th forced sweep — the
     /// bound on how stale the estimate can get.
     budget_ops: AtomicU64,
+    /// Set when the last full sweep ran out of unpinned, non-`except`
+    /// candidates before `total` fit under `cache_bytes` — an
+    /// over-budget context too big to evict alongside `except` (or one
+    /// whose save keeps failing), not measurement drift. Paired with
+    /// `budget_saturated_except`: the cheap gate only treats this as a
+    /// reason to skip a later off-beat sweep when that later call's
+    /// `except` is the SAME name the saturated sweep recorded — a
+    /// DIFFERENT `except` gets its own full sweep immediately, because
+    /// excluding a different candidate can trivially resolve what
+    /// excluding this one could not (an ordinary "just wrote to a
+    /// context bigger than the whole budget" write followed by a read
+    /// of any OTHER context must still evict promptly). Left set for
+    /// the same `except` indefinitely, this would pin the cheap gate
+    /// open forever for that one caller: the every-64th forced sweep
+    /// re-evaluates it exactly like `resident_estimate`, so staleness
+    /// for a genuinely stuck `except` is bounded the same 64-operation
+    /// way.
+    budget_saturated: AtomicBool,
+    /// The `except` name the last saturated sweep recorded — `None`
+    /// exactly when `budget_saturated` is false. See its doc.
+    budget_saturated_except: Mutex<Option<String>>,
 }
 
 /// An LRU-bounded map of cue → embedding: an LLM client repeats query

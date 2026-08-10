@@ -218,6 +218,8 @@ impl AppState {
             pending: Mutex::new(PendingNames::default()),
             resident_estimate: AtomicI64::new(0),
             budget_ops: AtomicU64::new(0),
+            budget_saturated: AtomicBool::new(false),
+            budget_saturated_except: Mutex::new(None),
         }));
         state.preload_pinned();
         // Seed the per-context disk snapshot (a no-op while nothing
