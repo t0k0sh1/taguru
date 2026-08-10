@@ -2479,19 +2479,17 @@ impl AppState {
         // for a source `remove_source` had nothing live to tombstone
         // for (issue #563 item 2): the batch touched nothing, but the
         // sidecar still got rewritten on the next tick. `changed`
-        // tracks whether anything in the index actually moved instead.
+        // tracks whether anything in the index actually moved instead
+        // — including the upsert arm: an empty or whitespace-only
+        // record upserted for a source with nothing live to tombstone
+        // either is index-inert too (caught in review on #574), so
+        // `upsert_source`'s own return is trusted here, not assumed.
         let mut changed = false;
         for source in sources {
-            match store.get(source) {
-                Some(record) => {
-                    // A stored record always changes the index — it
-                    // just replaced whatever paragraphs (zero or more)
-                    // this source held before.
-                    index.upsert_source(source, &record);
-                    changed = true;
-                }
-                None => changed |= index.remove_source(source),
-            }
+            changed |= match store.get(source) {
+                Some(record) => index.upsert_source(source, &record),
+                None => index.remove_source(source),
+            };
         }
         if changed {
             entry.bm25_dirty.store(true, Ordering::Relaxed);

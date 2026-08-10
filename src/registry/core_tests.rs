@@ -410,6 +410,26 @@ mod tests {
             "retracting a source the index genuinely held must still mark it dirty"
         );
 
+        // Caught in review on #574: an empty (or whitespace-only)
+        // passage is a legitimate submission — `PassageStore` accepts
+        // it — and `store.get` answers `Some(record)` for it, so
+        // without `upsert_source`'s own return the `Some` arm looked
+        // unconditionally like a change. Storing one for a source
+        // the index never held anything for must still report clean.
+        let mut empty_passage = BTreeMap::new();
+        empty_passage.insert(
+            "brand-new-empty".to_string(),
+            crate::passages::PassageSubmission::plain(String::new()),
+        );
+        store.store(empty_passage).unwrap();
+        entry.bm25_dirty.store(false, Ordering::Relaxed);
+        state.refresh_bm25(&entry, &store, &["brand-new-empty".to_string()]);
+        assert!(
+            !entry.bm25_dirty.load(Ordering::Relaxed),
+            "an empty record with nothing live to tombstone either must not mark the \
+             sidecar dirty"
+        );
+
         let _ = fs::remove_dir_all(dir);
     }
 }
