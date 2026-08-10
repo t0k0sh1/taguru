@@ -810,16 +810,25 @@ mod tests {
             }
         }
 
-        // Measure a same-shaped context's disk footprint without a
-        // schema, in a throwaway directory: the quota below must be
-        // declared at boot, before this test installs a schema, so the
-        // ceiling has to come from a prediction rather than a
-        // mid-test reboot (which would mean writing a schema file
-        // without going through `put_schema`'s digest bookkeeping —
-        // exactly the corrupt-sidecar shape ADR 0009 §5.2's boot-time
-        // digest check refuses to boot through).
+        // Measure a same-shaped context's disk footprint WITH a schema
+        // installed, in a throwaway directory, then subtract exactly
+        // the schema file's own length: `put_schema` also grows the
+        // meta sidecar itself (the digest field, `schema_digest:
+        // Some(hex)`), so a ceiling derived from a plain
+        // before/after-`put_schema` comparison would cross even
+        // without item 3's fix — the digest growth alone could be
+        // enough. Subtracting the schema file's own bytes back out of
+        // the post-`put_schema` total isolates exactly what item 3
+        // adds to the sum, decoupled from the digest field's own
+        // growth. The quota below must be declared at boot, before
+        // this test installs a schema, so this has to come from a
+        // prediction in a throwaway probe rather than a mid-test
+        // reboot (which would mean writing a schema file without going
+        // through `put_schema`'s digest bookkeeping — exactly the
+        // corrupt-sidecar shape ADR 0009 §5.2's boot-time digest check
+        // refuses to boot through).
         let probe_dir = scratch_dir("gauges-schema-quota-probe");
-        let without_schema = {
+        let (baseline, schema_len) = {
             let state = AppState::boot_with(
                 probe_dir.clone(),
                 usize::MAX,
@@ -846,15 +855,29 @@ mod tests {
             // so `used` below is exactly image + sidecars — no live
             // WAL lane to muddy the before/after comparison.
             state.flush_dirty();
+            state
+                .put_schema("sake", schema::install(schema_document()).unwrap())
+                .unwrap()
+                .unwrap();
+            state.refresh_disk_usage();
             let entry = state.lookup("sake").unwrap();
             let disk = *entry.disk.lock();
-            disk.image_bytes + disk.passages_bytes + disk.sidecar_bytes
+            let total = disk.image_bytes + disk.passages_bytes + disk.sidecar_bytes;
+            let schema_len = fs::metadata(schema_path(&probe_dir, &file_stem("sake")))
+                .unwrap()
+                .len();
+            (total - schema_len, schema_len)
         };
         let _ = fs::remove_dir_all(&probe_dir);
+        assert!(
+            schema_len > 1,
+            "sanity: the installed schema document must be more than a byte"
+        );
 
-        // A ceiling only reachable by counting a schema file's bytes:
-        // strictly more than the pre-schema total.
-        let ceiling = without_schema + 1;
+        // A ceiling only reachable by counting the schema file's own
+        // bytes: strictly more than everything else (image, sidecars
+        // including the digest-inflated meta) combined.
+        let ceiling = baseline + 1;
         let dir = scratch_dir("gauges-schema-quota");
         let state = AppState::boot_with(
             dir.clone(),

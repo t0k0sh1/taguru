@@ -447,7 +447,7 @@ impl Metrics {
             &mut out,
             "taguru_resident_bytes",
             "gauge",
-            "Modeled resident estimate of loaded contexts and cached vector stores (graph and vector footprints, NOT process RSS).",
+            "Modeled resident estimate of loaded contexts and cached vector stores (graph and vector footprints, NOT process RSS). Includes pinned contexts; the cache budget (enforce_budget) does not count them, so this can read high relative to budget pressure on a pinned-heavy fleet — cross-reference the per-context resident-bytes and pinned families (TAGURU_METRICS_PER_CONTEXT) to isolate the gap.",
             gauges.resident_bytes,
         );
         push_value(
