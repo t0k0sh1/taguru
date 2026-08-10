@@ -76,13 +76,30 @@ impl Metrics {
             &self.evictions_ok,
             &self.evictions_failed,
         );
-        push_outcomes(
+        // Not `push_outcomes` (ok/failed only): a flush can also back
+        // off as a legitimate no-op — a rival flush already in flight,
+        // a racing delete, or a slot/generation that moved out from
+        // under it — counted as its own "skipped" outcome rather than
+        // folded into "failed", where it would wrongly degrade
+        // `/health` (issue #562 item 9).
+        push_header(
             &mut out,
             "taguru_flush_total",
-            "Dirty-context persistence attempts, by outcome.",
-            &self.flush_ok,
-            &self.flush_failed,
+            "counter",
+            "Dirty-context persistence attempts, by outcome. \"skipped\" is a legitimate no-op (a rival flush already in flight, a racing delete, or a slot/generation that moved) — unlike \"failed\", it does not degrade /health.",
         );
+        out.push_str(&format!(
+            "taguru_flush_total{{outcome=\"ok\"}} {}\n",
+            self.flush_ok.load(Ordering::Relaxed)
+        ));
+        out.push_str(&format!(
+            "taguru_flush_total{{outcome=\"failed\"}} {}\n",
+            self.flush_failed.load(Ordering::Relaxed)
+        ));
+        out.push_str(&format!(
+            "taguru_flush_total{{outcome=\"skipped\"}} {}\n",
+            self.flush_skipped.load(Ordering::Relaxed)
+        ));
         push_outcomes(
             &mut out,
             "taguru_wal_appends_total",
@@ -510,8 +527,8 @@ impl Metrics {
                 "gauge",
                 "On-disk bytes per context and file family: image, graph WAL, \
                  passages snapshot, passages WAL, and the sidecars (meta, \
-                 sources, gloss vectors, passage vectors, BM25) summed. The \
-                 WAL lanes are live bookkeeping; the rest refresh at each \
+                 sources, gloss vectors, passage vectors, BM25, schema) \
+                 summed. The WAL lanes are live bookkeeping; the rest refresh at each \
                  flush tick and POST /flush, so they lag up to one flush \
                  interval — a scrape never stats the data directory. Present \
                  only with TAGURU_METRICS_PER_CONTEXT.",
@@ -682,6 +699,13 @@ impl Metrics {
             "counter",
             "Growth writes refused at a declared per-context storage ceiling (TAGURU_CONTEXT_QUOTAS) — graph writes, passage stores, and the import loop's per-batch pre-check all count here.",
             self.storage_quota_refusals.load(Ordering::Relaxed),
+        );
+        push_value(
+            &mut out,
+            "taguru_disk_stat_failures_total",
+            "counter",
+            "Per-context disk-usage stats that failed for a reason other than the file being absent — the entry's disk gauges and storage-quota accounting stay on their last known snapshot until this heals.",
+            self.disk_stat_failures.load(Ordering::Relaxed),
         );
         push_value(
             &mut out,

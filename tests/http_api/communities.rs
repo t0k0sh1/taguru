@@ -195,6 +195,64 @@ fn search_refuses_without_an_artifact_and_verdicts_staleness_with_one() {
     assert!(refusal["error"].as_str().unwrap().contains("elsewhere"));
 }
 
+/// #562 item 7: one `search_communities` call must bump the aggregate
+/// `taguru_searches_total{op="search_communities"}` exactly once, even
+/// though it touches two contexts (the real source and the derived
+/// artifact) — each still gets its own per-context `usage.reads` row.
+#[test]
+fn a_single_search_counts_the_aggregate_once_and_both_contexts_reads() {
+    let server = Server::start("communities-search-counts");
+    seed_two_cliques(&server, "sci");
+
+    let revision = server.ok("GET", "/contexts/sci", None)["revision"].clone();
+    server.ok("PUT", "/contexts/sci::communities", None);
+    let manifest = json!({
+        "taguru_communities": 1,
+        "algorithm": "louvain-cc/1",
+        "source_context": "sci",
+        "revision": revision,
+        "levels": 1,
+        "communities": [
+            {"id": "L0-0", "level": 0, "fingerprint": "00aa00aa00aa00aa", "concept_count": 4},
+        ],
+    });
+    server.ok(
+        "POST",
+        "/contexts/sci::communities/sources",
+        Some(json!({"passages": {
+            "community:L0-0": "夏目漱石と明治の文学者たちの交流についての要約。",
+            "communities:manifest": manifest.to_string(),
+        }})),
+    );
+    server.ok(
+        "POST",
+        "/contexts/sci::communities/associations",
+        Some(json!([
+            {"subject": "community:L0-0", "label": "contains", "object": "a1", "weight": 6.0},
+            {"subject": "community:L0-0", "label": "contains", "object": "a2", "weight": 4.0},
+        ])),
+    );
+
+    server.ok(
+        "POST",
+        "/contexts/sci/communities/search",
+        Some(json!({"query": "夏目漱石"})),
+    );
+
+    let (status, body) = server.call("GET", "/metrics", None);
+    assert_eq!(status, 200);
+    let text = body.as_str().expect("metrics body is text, not JSON");
+    assert!(
+        text.contains("taguru_searches_total{op=\"search_communities\",outcome=\"hit\"} 1"),
+        "one search over two contexts must bump the aggregate exactly once: {text}"
+    );
+
+    let source = server.ok("GET", "/contexts/sci", None);
+    assert_eq!(source["usage"]["reads"], json!(1), "{source}");
+    let derived = server.ok("GET", "/contexts/sci::communities", None);
+    assert_eq!(derived["usage"]["reads"], json!(1), "{derived}");
+}
+
 #[test]
 fn the_search_communities_tool_routes_through_mcp() {
     let server = Server::start("communities-mcp");

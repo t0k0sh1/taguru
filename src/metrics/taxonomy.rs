@@ -355,7 +355,8 @@ pub struct ContextGaugeRow {
     pub disk_wal_bytes: u64,
     pub disk_passages_bytes: u64,
     pub disk_passages_wal_bytes: u64,
-    /// Meta + sources + gloss vectors + passage vectors + BM25, summed.
+    /// Meta + sources + gloss vectors + passage vectors + BM25 +
+    /// schema, summed.
     pub disk_sidecar_bytes: u64,
     /// Declared ceilings (`TAGURU_CONTEXT_QUOTAS`, issue #136), when
     /// this context has them — `None` renders no series at all, so an

@@ -163,6 +163,14 @@ impl Metrics {
         }
     }
 
+    /// Count one `flush_entry` attempt that backed off without either
+    /// publishing or failing (issue #562 item 9) — deliberately not
+    /// `record_flush(false)`: a legitimate no-op must not degrade
+    /// `/health`, which reads `flush_failing` alone.
+    pub fn record_flush_skipped(&self) {
+        self.flush_skipped.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Whether every context's most recent image flush succeeded (true
     /// when none has run yet — an idle server is a healthy server), AND
     /// the flusher loop itself is still making it to a tick's end rather
@@ -223,6 +231,12 @@ impl Metrics {
     /// it surfaces.
     pub fn record_storage_quota_refusal(&self) {
         self.storage_quota_refusals.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Count one per-context disk-usage stat that failed for a reason
+    /// other than the file being absent (issue #562 item 4).
+    pub fn record_disk_stat_failure(&self) {
+        self.disk_stat_failures.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Count one keyring reload attempt (issue #134) by whether a

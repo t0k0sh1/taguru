@@ -148,18 +148,50 @@ impl AppState {
             return;
         }
         let dir = &self.0.data_dir;
-        let len = |path: PathBuf| fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
         for (name, entry) in self.snapshot() {
             let stem = file_stem(&name);
+            // `NotFound` is normal (the lane's file has never been
+            // written, e.g. a context with no schema) and reads as
+            // zero; any other error — a permission problem, EIO, a
+            // rename racing the stat — leaves `ok` false so the whole
+            // entry keeps its last-known snapshot below rather than
+            // silently substituting zero for the failed lane, which
+            // would understate a storage quota's `used` and let growth
+            // through it should have refused (issue #562 item 4).
+            let mut ok = true;
+            let mut len = |path: PathBuf| match fs::metadata(&path) {
+                Ok(meta) => meta.len(),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => 0,
+                Err(error) => {
+                    tracing::warn!(
+                        context = %name,
+                        path = %path.display(),
+                        %error,
+                        "disk-usage stat failed; keeping the last known snapshot"
+                    );
+                    self.0.metrics.record_disk_stat_failure();
+                    ok = false;
+                    0
+                }
+            };
             let usage = ContextDiskUsage {
                 image_bytes: len(image_path(dir, &stem)),
                 passages_bytes: len(passages_path(dir, &stem)),
+                // Meta + sources + gloss vectors + passage vectors +
+                // BM25 + schema (ADR 0009 §5.1's optional per-context
+                // document, `schema.rs`'s `write_atomic` target) —
+                // every sidecar `context_files` names, image and
+                // passages aside (their own lanes above).
                 sidecar_bytes: len(meta_path(dir, &stem))
                     + len(sources_path(dir, &stem))
                     + len(vectors_path(dir, &stem))
                     + len(pvectors_path(dir, &stem))
-                    + len(bm25_path(dir, &stem)),
+                    + len(bm25_path(dir, &stem))
+                    + len(schema_path(dir, &stem)),
             };
+            if !ok {
+                continue;
+            }
             // No tombstone check: stats only read, and a racing delete
             // just leaves a snapshot nobody will render — the entry is
             // already out of the registry the next scrape reads.
@@ -169,9 +201,20 @@ impl AppState {
 
     /// Point-in-time gauges for a scrape, computed from the registry
     /// so they cannot drift: how many contexts exist, how many are
-    /// resident, and the resident-bytes estimate (loaded graphs plus
-    /// cached vector stores — the same accounting the cache budget
-    /// uses).
+    /// resident, and the resident-bytes estimate — the actual measured
+    /// footprint of every loaded graph plus its four cached stores
+    /// (vectors, passages, BM25, passage vectors), pinned contexts
+    /// included. This deliberately does NOT match `enforce_budget`'s
+    /// own accounting (issue #562 item 5): the budget sweep skips
+    /// pinned contexts entirely (`engine.rs`) and `recount_entry`
+    /// counts a pinned entry's contribution as zero
+    /// (`AppState::recount_entry`) — pinned residency is exactly the
+    /// gap between this gauge and `resident_estimate`/the budget's
+    /// notion of "what counts against the ceiling". A pinned-heavy
+    /// fleet can show a large `taguru_resident_bytes` while the budget
+    /// sees near-zero pressure; cross-referencing the per-context
+    /// `taguru_context_resident_bytes` against `taguru_context_pinned`
+    /// is what separates the two if that gap needs explaining.
     pub fn gauge_snapshot(&self) -> GaugeSnapshot {
         let snapshot = self.snapshot();
         let contexts_registered = snapshot.len() as u64;
@@ -649,11 +692,11 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    /// The sidecar lane is the exact five-file sum — meta, sources,
-    /// gloss vectors, paragraph vectors, BM25 — pinned against the
-    /// files' own sizes with every one present and nonzero.
+    /// The sidecar lane is the exact six-file sum — meta, sources,
+    /// gloss vectors, paragraph vectors, BM25, schema — pinned against
+    /// the files' own sizes with every one present and nonzero.
     #[test]
-    fn disk_usage_sums_the_five_sidecar_files_exactly() {
+    fn disk_usage_sums_the_six_sidecar_files_exactly() {
         let dir = scratch_dir("gauges-sidecar-sum");
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let embedder = std::sync::Arc::new(crate::registry::test_support::MockEmbeddings::fruity(
@@ -709,12 +752,19 @@ mod tests {
         // meta) on the way down.
         let entry = state.lookup("sake").unwrap();
         assert!(state.evict_entry("sake", &entry));
-        // The legacy sources file is cleanup-only in current code —
-        // planted directly, the way the sweep tests do, so the lane
-        // sum has all five files nonzero.
+        // The legacy sources file is cleanup-only in current code, and
+        // no schema was ever installed on this context — both planted
+        // directly, the way the sweep tests do, so the lane sum has
+        // all six files nonzero (#562 item 3: schema used to be
+        // missing from this sum entirely).
         fs::write(
             sources_path(&dir, &file_stem("sake")),
             br#"{"ghost":"legacy sources"}"#,
+        )
+        .unwrap();
+        fs::write(
+            schema_path(&dir, &file_stem("sake")),
+            br#"{"ghost":"legacy schema"}"#,
         )
         .unwrap();
 
@@ -727,6 +777,7 @@ mod tests {
             ("vectors", len(vectors_path(&dir, &stem))),
             ("pvectors", len(pvectors_path(&dir, &stem))),
             ("bm25", len(bm25_path(&dir, &stem))),
+            ("schema", len(schema_path(&dir, &stem))),
         ];
         for (part, bytes) in parts {
             assert!(bytes > 1, "the {part} sidecar must be nonzero for this pin");
@@ -735,7 +786,185 @@ mod tests {
         assert_eq!(
             entry.disk.lock().sidecar_bytes,
             expected,
-            "the sidecar lane must be the exact five-file sum"
+            "the sidecar lane must be the exact six-file sum"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// #562 item 3: a schema document's bytes must count toward a
+    /// declared storage quota's `used`, not just the disk gauge —
+    /// before the fix, `refresh_disk_usage` never stated the file, so
+    /// a tenant could grow past a ceiling that on-disk bytes alone
+    /// would have crossed, as long as a schema file accounted for the
+    /// difference.
+    #[test]
+    fn schema_bytes_count_toward_the_storage_quota() {
+        fn schema_document() -> schema::SchemaDocument {
+            schema::SchemaDocument {
+                schema: schema::SCHEMA_VERSION,
+                mode: schema::SchemaMode::Strict,
+                closed_labels: false,
+                types: BTreeMap::from([("Brewery".to_string(), schema::TypeDef::default())]),
+                relations: BTreeMap::new(),
+            }
+        }
+
+        // Measure a same-shaped context's disk footprint without a
+        // schema, in a throwaway directory: the quota below must be
+        // declared at boot, before this test installs a schema, so the
+        // ceiling has to come from a prediction rather than a
+        // mid-test reboot (which would mean writing a schema file
+        // without going through `put_schema`'s digest bookkeeping —
+        // exactly the corrupt-sidecar shape ADR 0009 §5.2's boot-time
+        // digest check refuses to boot through).
+        let probe_dir = scratch_dir("gauges-schema-quota-probe");
+        let without_schema = {
+            let state = AppState::boot_with(
+                probe_dir.clone(),
+                usize::MAX,
+                None,
+                BootOptions {
+                    per_context_metrics: PerContextMetrics::All,
+                    ..BootOptions::default()
+                },
+            )
+            .unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .add_associations(
+                    "sake",
+                    vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, None)],
+                    Deadline::unbounded(),
+                )
+                .unwrap()
+                .unwrap();
+            // Flush truncates the WAL and refreshes the disk snapshot,
+            // so `used` below is exactly image + sidecars — no live
+            // WAL lane to muddy the before/after comparison.
+            state.flush_dirty();
+            let entry = state.lookup("sake").unwrap();
+            let disk = *entry.disk.lock();
+            disk.image_bytes + disk.passages_bytes + disk.sidecar_bytes
+        };
+        let _ = fs::remove_dir_all(&probe_dir);
+
+        // A ceiling only reachable by counting a schema file's bytes:
+        // strictly more than the pre-schema total.
+        let ceiling = without_schema + 1;
+        let dir = scratch_dir("gauges-schema-quota");
+        let state = AppState::boot_with(
+            dir.clone(),
+            usize::MAX,
+            None,
+            BootOptions {
+                context_quotas: HashMap::from([(
+                    "sake".to_string(),
+                    ContextQuota {
+                        storage_bytes: Some(ceiling),
+                        cache_bytes: None,
+                    },
+                )]),
+                ..BootOptions::default()
+            },
+        )
+        .unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .add_associations(
+                "sake",
+                vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, None)],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        state.flush_dirty();
+        assert_eq!(
+            state.storage_quota_refusal("sake"),
+            None,
+            "the same content without a schema must stay under the ceiling"
+        );
+
+        state
+            .put_schema("sake", schema::install(schema_document()).unwrap())
+            .unwrap()
+            .unwrap();
+        state.refresh_disk_usage();
+        assert!(
+            state.storage_quota_refusal("sake").is_some(),
+            "the schema file's bytes must be enough to cross a ceiling \
+             set just above the pre-schema total"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// #562 item 4: a stat failure other than "file absent" — a
+    /// permission error, EIO, or (forced here) a symlink loop — must
+    /// not be silently treated as zero bytes. `.unwrap_or(0)` used to
+    /// do exactly that, letting a storage quota look like it still had
+    /// headroom on the lane that actually failed to stat. The fix
+    /// keeps the entry's last-known snapshot instead and counts the
+    /// failure, so a quota stays fail-closed rather than fail-open.
+    #[test]
+    #[cfg(unix)]
+    fn a_disk_stat_failure_keeps_the_last_snapshot_and_counts_it() {
+        let dir = scratch_dir("gauges-stat-failure");
+        let state = AppState::boot_with(
+            dir.clone(),
+            usize::MAX,
+            None,
+            BootOptions {
+                per_context_metrics: PerContextMetrics::All,
+                ..BootOptions::default()
+            },
+        )
+        .unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .add_associations(
+                "sake",
+                vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, None)],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        state.flush_dirty();
+        let entry = state.lookup("sake").unwrap();
+        let before = *entry.disk.lock();
+        assert!(
+            before.sidecar_bytes > 0,
+            "sanity: the meta sidecar must already be nonzero before the fault"
+        );
+
+        // A self-referencing symlink at the meta lane: `fs::metadata`
+        // reports ELOOP, not NotFound.
+        let meta = meta_path(&dir, &file_stem("sake"));
+        fs::remove_file(&meta).unwrap();
+        std::os::unix::fs::symlink(&meta, &meta).unwrap();
+
+        state.refresh_disk_usage();
+        let after = *entry.disk.lock();
+        assert_eq!(
+            after.image_bytes, before.image_bytes,
+            "a stat failure on one lane must not touch another lane's snapshot"
+        );
+        assert_eq!(
+            after.sidecar_bytes, before.sidecar_bytes,
+            "a stat failure must keep the entry's last-known snapshot, not zero the failed lane"
+        );
+        assert!(
+            rendered(&state).contains("taguru_disk_stat_failures_total 1"),
+            "a stat failure other than NotFound must be counted"
         );
 
         let _ = fs::remove_dir_all(dir);
