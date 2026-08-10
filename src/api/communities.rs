@@ -599,8 +599,16 @@ pub async fn search_communities(
     };
 
     let empty = found.hits.is_empty();
-    state.note_search(SearchOp::SearchCommunities, &derived, empty);
+    // One search, one aggregate count: `name` (the real, requested
+    // context) is what `note_search` bumps `taguru_searches_total`
+    // for. `derived` (the community-detection artifact) still gets its
+    // own per-context read row via `note_read` — same as `note_search`
+    // would give it — just without a second aggregate increment (#562
+    // item 7; the aggregate and per-context families are coupled in
+    // one call, `gauges.rs`'s `note_search`, so counting both contexts
+    // in it was the only way to update per-context for `derived` too).
     state.note_search(SearchOp::SearchCommunities, &name, empty);
+    state.note_read(&derived, empty);
     if search_log_enabled() {
         tracing::info!(
             target: "taguru::search",

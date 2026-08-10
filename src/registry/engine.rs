@@ -87,6 +87,7 @@ impl AppState {
             // re-sets `dirty`, so nothing is lost even with the WAL off,
             // where `wal_seq` does not move to flag the race.
             if entry.flushing.swap(true, Ordering::Relaxed) {
+                self.0.metrics.record_flush_skipped();
                 return false;
             }
             entry.dirty.store(false, Ordering::Relaxed);
@@ -148,6 +149,7 @@ impl AppState {
         let Some(mut guard) = entry.lock_unless_deleted() else {
             let _ = remove_persisted_file(&staged);
             entry.flushing.store(false, Ordering::Relaxed);
+            self.0.metrics.record_flush_skipped();
             return false;
         };
         let inner = &mut *guard;
@@ -170,6 +172,7 @@ impl AppState {
         if !matches!(inner.slot, Slot::Hot(_)) || inner.image_generation != generation {
             let _ = remove_persisted_file(&staged);
             entry.flushing.store(false, Ordering::Relaxed);
+            self.0.metrics.record_flush_skipped();
             return false;
         }
         // Claim the usage flag before snapshotting: an increment racing
@@ -565,11 +568,15 @@ impl AppState {
         // `flushing` first) — that path never touches `record_flush`, so
         // /health stays green even though this write is, for the moment,
         // relying on the periodic flusher rather than the WAL to survive
-        // a crash. `dirty` is already set (unconditionally, above)
-        // either way, so the next tick still retries it — but a crash in
-        // that window would replay a WAL that no longer matches memory,
-        // so the gap is worth its own loud signal rather than blending
-        // into an ordinary retry.
+        // a crash (this `tracing::warn!` is the loud signal for exactly
+        // that window; `record_flush_skipped` inside `flush_entry`
+        // itself is the quieter, always-on counter for the same no-op
+        // outside this narrow post-write-recovery path). `dirty` is
+        // already set (unconditionally, above) either way, so the next
+        // tick still retries it — but a crash in that window would
+        // replay a WAL that no longer matches memory, so the gap is
+        // worth its own loud signal rather than blending into an
+        // ordinary retry.
         if wal_behind && !self.flush_entry(name, &entry) {
             tracing::warn!(
                 context = %name,
@@ -2004,6 +2011,54 @@ mod tests {
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(state.flush_dirty(), vec!["sake".to_string()]);
         assert!(state.metrics().flush_is_healthy());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// #562 item 9: `flush_entry`'s early back-off for a rival flush
+    /// already in flight is a legitimate no-op, not a failure — it
+    /// must not touch `record_flush` (so `/health` stays green), but
+    /// it also must not go completely silent: `taguru_flush_total`'s
+    /// `skipped` outcome is the always-on counter for exactly this,
+    /// where the periodic flusher's own tick otherwise has no signal
+    /// that this entry's flush did not land this round.
+    #[test]
+    fn flush_entrys_flushing_backoff_is_skipped_not_failed() {
+        let dir = scratch_dir("flush-skipped");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .add_associations(
+                "sake",
+                vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+
+        let entry = state.lookup("sake").unwrap();
+        entry.flushing.store(true, Ordering::Relaxed);
+        assert!(
+            !state.flush_entry("sake", &entry),
+            "the backoff must report nothing published"
+        );
+        entry.flushing.store(false, Ordering::Relaxed);
+
+        assert!(
+            rendered(&state).contains("taguru_flush_total{outcome=\"skipped\"} 1"),
+            "the backoff must count as skipped"
+        );
+        assert!(
+            rendered(&state).contains("taguru_flush_total{outcome=\"failed\"} 0"),
+            "a legitimate no-op must never count as failed"
+        );
+        assert!(
+            state.metrics().flush_is_healthy(),
+            "a skipped flush must not degrade /health"
+        );
 
         let _ = fs::remove_dir_all(dir);
     }

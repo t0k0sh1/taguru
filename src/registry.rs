@@ -561,7 +561,8 @@ pub struct Entry {
 struct ContextDiskUsage {
     image_bytes: u64,
     passages_bytes: u64,
-    /// Meta + sources + gloss vectors + passage vectors + BM25, summed.
+    /// Meta + sources + gloss vectors + passage vectors + BM25 +
+    /// schema, summed.
     sidecar_bytes: u64,
 }
 

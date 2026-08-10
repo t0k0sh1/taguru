@@ -61,6 +61,14 @@ pub struct Metrics {
     evictions_failed: AtomicU64,
     flush_ok: AtomicU64,
     flush_failed: AtomicU64,
+    /// A `flush_entry` attempt that backed off — a rival flush already
+    /// mid-flight, a racing delete, or a slot/generation that moved
+    /// out from under it (issue #562 item 9) — every one a legitimate
+    /// no-op, never a `record_flush(false)`-worthy failure, but
+    /// invisible to `/health` and the periodic flusher's own tick
+    /// otherwise: nothing else here says "this entry's flush did not
+    /// land this round."
+    flush_skipped: AtomicU64,
     wal_appends_ok: AtomicU64,
     wal_appends_failed: AtomicU64,
     embed_refresh_ok: AtomicU64,
@@ -168,6 +176,16 @@ pub struct Metrics {
     /// tenant hammering a full context should read as its own signal,
     /// not as server trouble.
     storage_quota_refusals: AtomicU64,
+    /// A per-context disk-usage `fs::metadata` call (issue #562 item
+    /// 4) failing for a reason other than the file simply not existing
+    /// yet — a permission error, EIO, or a rename racing the stat.
+    /// `refresh_disk_usage` keeps the entry's last-known snapshot
+    /// rather than silently substituting zero for the failed lane
+    /// (which would understate a storage quota's `used` and let growth
+    /// through it should have refused), so this counter is the only
+    /// signal that a context's disk gauges and quota accounting are
+    /// running on stale data.
+    disk_stat_failures: AtomicU64,
     /// Keyring hot reloads (issue #134): applied swaps (unchanged
     /// no-ops included — the reload RAN) and refusals that kept the
     /// previous table armed. The refusal counter is the alertable
