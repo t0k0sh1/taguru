@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use taguru::deadline::Deadline;
 
 use crate::metrics::ErrorKind;
-use crate::registry::{AppState, ContextMeta, CreateError, RenameContextError};
+use crate::registry::{AppState, ContextMeta, CreateError, DeleteError, RenameContextError};
 
 use super::groups::scope_refusal;
 use super::{
@@ -425,35 +425,46 @@ pub async fn delete_context(
     }
     // Writes a durable marker (fsync) then unlinks every sidecar file;
     // keep it off the async worker like every other mutating endpoint.
+    //
+    // Every destructive operation leaves one self-contained
+    // `taguru::audit` line — who, what, to which object — so an
+    // incident review greps one target instead of reconstructing
+    // objects from route templates. Logged on the failed-unlink arm
+    // too: the context is gone from the API either way. Not logged on
+    // a mid-rename refusal, which never touches the context.
+    let audit = |files_removed: bool| {
+        tracing::info!(
+            target: "taguru::audit",
+            key = %key_name(&key),
+            context = %name,
+            files_removed,
+            "context deleted",
+        );
+    };
     match tokio::task::block_in_place(|| state.delete(&name)) {
         None => not_found(&name, started_at),
-        Some(outcome) => {
-            // Every destructive operation leaves one self-contained
-            // `taguru::audit` line — who, what, to which object — so an
-            // incident review greps one target instead of reconstructing
-            // objects from route templates. Logged on the failed-unlink
-            // arm too: the context is gone from the API either way.
-            tracing::info!(
-                target: "taguru::audit",
-                key = %key_name(&key),
-                context = %name,
-                files_removed = outcome.is_ok(),
-                "context deleted",
-            );
-            match outcome {
-                Ok(()) => ok(true, started_at),
-                Err(io_error) => {
-                    state.metrics().record_error(ErrorKind::Io);
-                    error(
-                        ErrorCode::Internal,
-                        format!(
-                            "context '{name}' removed but its files were not: {io_error} \
-                             (a deletion marker remains; the next boot resumes the removal)"
-                        ),
-                        started_at,
-                    )
-                }
-            }
+        // Same status code as `RenameContextError::Busy`: a name
+        // currently claimed by another in-flight operation.
+        Some(Err(DeleteError::MidRename)) => error(
+            ErrorCode::Conflict,
+            format!("context '{name}' is mid-rename; retry after it completes"),
+            started_at,
+        ),
+        Some(Ok(())) => {
+            audit(true);
+            ok(true, started_at)
+        }
+        Some(Err(DeleteError::Io(io_error))) => {
+            audit(false);
+            state.metrics().record_error(ErrorKind::Io);
+            error(
+                ErrorCode::Internal,
+                format!(
+                    "context '{name}' removed but its files were not: {io_error} \
+                     (a deletion marker remains; the next boot resumes the removal)"
+                ),
+                started_at,
+            )
         }
     }
 }

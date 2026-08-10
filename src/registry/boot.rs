@@ -489,6 +489,16 @@ fn scan_data_dir(
             // through; every other case is folded into the `?` below
             // and stops the boot for the whole directory, exactly as
             // an unreadable `.ctx` already does one candidate over.
+            //
+            // The two leniency postures interact: `read_meta_file`'s
+            // own fallback (see its doc) drops `schema_digest` to
+            // `None` for a corrupt sidecar, and a healthy
+            // `{stem}.schema.json` then reads here as a digest
+            // MISMATCH (recorded none, on disk something) rather than
+            // as "the sidecar is the actual problem." The operator
+            // symptom is a server that refuses to start at all over
+            // what looks like a schema fault; the fix is to repair
+            // `{stem}.meta.json`, not the schema file.
             let schema = match schema::load_schema(data_dir, stem, schema_digest.as_deref(), true) {
                 Ok(schema) => schema.map(Arc::new),
                 Err(error) => {
@@ -1001,6 +1011,86 @@ mod tests {
             .map(|_| ())
             .unwrap_err();
         assert!(error.to_string().contains("does not match"), "{error}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Regression for issue #561's item 7: a corrupt `.meta.json`
+    /// sidecar alongside a perfectly healthy schema file is the SAME
+    /// digest-mismatch refusal as the test above (`read_meta_file`'s
+    /// own lenient fallback zeroes `schema_digest` to `None`), but the
+    /// operator symptom and the actual fix are completely different —
+    /// the message must say so instead of pointing at the schema file.
+    #[test]
+    fn a_corrupt_sidecar_alongside_a_live_schema_hints_at_the_real_cause() {
+        let dir = scratch_dir("schema-mismatch-corrupt-sidecar");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state.flush_dirty();
+        }
+        let document =
+            br#"{"schema":1,"mode":"off","closed_labels":false,"types":{},"relations":{}}"#;
+        fs::write(schema_path(&dir, "sake"), document).unwrap();
+        record_schema_digest(&dir, "sake", &crate::sha256::sha256_hex(document));
+        // Corrupt the sidecar itself: `read_meta_file` falls back to
+        // `MetaFile::default()`, dropping the digest it just recorded
+        // — even though the schema file on disk never changed.
+        fs::write(meta_path(&dir, "sake"), b"not json").unwrap();
+
+        let error = AppState::boot(dir.clone(), usize::MAX, None)
+            .map(|_| ())
+            .unwrap_err();
+        assert!(error.to_string().contains("does not match"), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("sidecar itself is corrupt or missing"),
+            "the message must point at the sidecar as the likely cause: {error}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The other branch of the same hazard as the test above:
+    /// `read_meta_file`'s `fs::read` failing (no sidecar at all) hits
+    /// its lenient `Err(_) => MetaFile::default()` fallback exactly the
+    /// same way a corrupt-but-present sidecar hits its `from_slice`
+    /// fallback — same zeroed digest, same digest-mismatch refusal,
+    /// same hint.
+    #[test]
+    fn a_missing_sidecar_alongside_a_live_schema_hints_at_the_real_cause() {
+        let dir = scratch_dir("schema-mismatch-missing-sidecar");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state.flush_dirty();
+        }
+        let document =
+            br#"{"schema":1,"mode":"off","closed_labels":false,"types":{},"relations":{}}"#;
+        fs::write(schema_path(&dir, "sake"), document).unwrap();
+        record_schema_digest(&dir, "sake", &crate::sha256::sha256_hex(document));
+        // Remove the sidecar entirely, keeping the schema file: unlike
+        // the corrupt-content case above, this exercises `fs::read`
+        // itself failing rather than `serde_json::from_slice`.
+        fs::remove_file(meta_path(&dir, "sake")).unwrap();
+
+        let error = AppState::boot(dir.clone(), usize::MAX, None)
+            .map(|_| ())
+            .unwrap_err();
+        assert!(error.to_string().contains("does not match"), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("sidecar itself is corrupt or missing"),
+            "the message must point at the sidecar as the likely cause: {error}"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

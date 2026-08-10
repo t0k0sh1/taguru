@@ -1,3 +1,4 @@
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -259,6 +260,23 @@ pub(super) fn write_rename_marker(path: &Path, from: &str, to: &str) -> io::Resu
 /// file now in place?" — checked whether or not `move_files` returned
 /// Ok, because a move can fail on a straggler AFTER the pivot arrived.
 /// That is `landed`; `move_files` returning Ok is `complete`.
+///
+/// A marker whose `from` or `to` also names another marker's `from` or
+/// `to` — a chain (`a→b`, `b→c`), a cycle (`a→b`, `b→a`), or two
+/// markers merely colliding on one shared endpoint (`a→b`, `a→c`; or
+/// `a→c`, `b→c`) — is refused rather than resumed: nothing in this
+/// codebase ever produces one on a live server (`rename_context`/
+/// `rename_group` each reserve both names for the whole call, so two
+/// markers can never share an endpoint from ordinary operation), so
+/// one can only mean hand-edited files or a corruption this function
+/// has no business inventing multi-hop or last-write-wins semantics
+/// for. Every marker touching a shared endpoint is left on disk,
+/// untouched, for a human to resolve — moving SOME of them and not
+/// others would make the eventual manual fix harder, not easier.
+/// Markers are read and parsed in full BEFORE any of them acts
+/// (detecting the collision needs the whole set at once), then acted
+/// on in `from`-sorted order — deterministic, unlike `read_dir`'s own
+/// platform-dependent iteration order.
 pub(crate) fn resume_rename_markers(
     dir: &Path,
     extension: &str,
@@ -266,7 +284,7 @@ pub(crate) fn resume_rename_markers(
     mut move_files: impl FnMut(&str, &str) -> io::Result<()>,
     destination_landed: impl Fn(&str) -> bool,
 ) -> io::Result<ResumedRenames> {
-    let mut resumed = Vec::new();
+    let mut markers = Vec::new();
     for dir_entry in fs::read_dir(dir)? {
         let path = dir_entry?.path();
         if path.extension().and_then(|e| e.to_str()) != Some(extension) {
@@ -280,6 +298,42 @@ pub(crate) fn resume_rename_markers(
             tracing::warn!(path = %path.display(), entity, "rename marker does not parse; a rename may be stuck half-done");
             continue;
         };
+        markers.push(marker);
+    }
+    markers.sort_by(|a, b| a.from.cmp(&b.from));
+
+    // Every marker contributes both its endpoints to this count, so an
+    // endpoint occurring twice catches all three hazards uniformly: a
+    // chain/cycle (one marker's `to` is another's `from`), and two
+    // markers merely colliding on the same `from` or the same `to`.
+    let mut endpoint_counts: HashMap<&str, usize> = HashMap::new();
+    for marker in &markers {
+        *endpoint_counts.entry(marker.from.as_str()).or_insert(0) += 1;
+        *endpoint_counts.entry(marker.to.as_str()).or_insert(0) += 1;
+    }
+    let conflicted: BTreeSet<String> = endpoint_counts
+        .into_iter()
+        .filter(|&(_, count)| count >= 2)
+        .map(|(name, _)| name.to_string())
+        .collect();
+
+    let mut resumed = Vec::new();
+    for marker in markers {
+        if conflicted.contains(&marker.from) || conflicted.contains(&marker.to) {
+            // Not a failed operation — the marker is left exactly as
+            // it was, and the boot that found it still succeeds. `warn`
+            // matches that: `error` is reserved for outcomes the
+            // caller must actually contend with (e.g. `RenameOutcome::
+            // Stuck`'s real I/O failure), not a degraded-but-handled
+            // refusal like this one.
+            tracing::warn!(
+                from = %marker.from, to = %marker.to, entity,
+                "a rename marker collides with another on a shared endpoint; \
+                 refusing to resume it automatically — resolve the data \
+                 directory by hand"
+            );
+            continue;
+        }
         tracing::warn!(from = %marker.from, to = %marker.to, entity, "resuming an unfinished rename");
         let to_stem = file_stem(&marker.to);
         let complete = match move_files(&file_stem(&marker.from), &to_stem) {
@@ -394,5 +448,179 @@ mod tests {
         assert!(resumed[0].landed && resumed[0].complete);
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    fn write_marker(dir: &Path, at_stem: &str, from: &str, to: &str) {
+        fs::write(
+            renaming_marker_path(dir, at_stem),
+            serde_json::to_vec(&RenameMarker {
+                from: from.to_string(),
+                to: to.to_string(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// Resumes markers in `dir` and records every attempted move, for
+    /// tests that need to assert on both the returned `ResumedRenames`
+    /// and which moves were (or weren't) attempted.
+    fn resume_and_record(dir: &Path) -> (ResumedRenames, Vec<(String, String)>) {
+        let mut moved = Vec::new();
+        let resumed = resume_rename_markers(
+            dir,
+            "renaming",
+            "context",
+            |from_stem, to_stem| {
+                moved.push((from_stem.to_string(), to_stem.to_string()));
+                Ok(())
+            },
+            |_| true,
+        )
+        .unwrap();
+        (resumed, moved)
+    }
+
+    /// Regression for issue #561's item 9: a chain (`a→b`, `b→c`) is
+    /// refused wholesale rather than resumed in whatever order
+    /// `read_dir` happens to return — resuming a→b before b→c would
+    /// collapse the marker for the SAME intended a→c move into a
+    /// deterministic-looking (but never requested) two-step, and the
+    /// reverse order would strand a→b having moved nothing.
+    #[test]
+    fn a_chained_rename_marker_pair_is_refused_not_resumed() {
+        let dir = scratch_dir("resume-chain");
+        fs::create_dir_all(&dir).unwrap();
+        write_marker(&dir, &file_stem("a"), "a", "b");
+        write_marker(&dir, &file_stem("b"), "b", "c");
+
+        let (resumed, moved) = resume_and_record(&dir);
+
+        assert!(
+            resumed.is_empty(),
+            "a chained pair must resume neither marker: {:?}",
+            resumed.iter().map(|r| (&r.from, &r.to)).collect::<Vec<_>>()
+        );
+        assert!(
+            moved.is_empty(),
+            "neither marker's move may even be attempted"
+        );
+        assert!(
+            renaming_marker_path(&dir, &file_stem("a")).exists(),
+            "a→b's marker must survive for a human to resolve"
+        );
+        assert!(
+            renaming_marker_path(&dir, &file_stem("b")).exists(),
+            "b→c's marker must survive for a human to resolve"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The cyclic shape of the same hazard: `a→b`, `b→a`. Resuming
+    /// either alone would move one family onto the other's name while
+    /// the second marker still claims that exact pair, in either
+    /// order — refused wholesale, same as the chain.
+    #[test]
+    fn a_cyclic_rename_marker_pair_is_refused() {
+        let dir = scratch_dir("resume-cycle");
+        fs::create_dir_all(&dir).unwrap();
+        write_marker(&dir, &file_stem("a"), "a", "b");
+        write_marker(&dir, &file_stem("b"), "b", "a");
+
+        let resumed =
+            resume_rename_markers(&dir, "renaming", "context", |_, _| Ok(()), |_| true).unwrap();
+
+        assert!(
+            resumed.is_empty(),
+            "a cyclic pair must resume neither marker"
+        );
+        assert!(renaming_marker_path(&dir, &file_stem("a")).exists());
+        assert!(renaming_marker_path(&dir, &file_stem("b")).exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A shape the chain/cycle check alone would miss: two markers
+    /// sharing a `from` (`a→b`, `a→c`) rather than one's `to` feeding
+    /// the other's `from`. Resuming either first would move "a"'s
+    /// family out from under the other marker's own claim on the same
+    /// source, so both must be refused.
+    #[test]
+    fn markers_sharing_a_from_are_both_refused() {
+        let dir = scratch_dir("resume-shared-from");
+        fs::create_dir_all(&dir).unwrap();
+        write_marker(&dir, &file_stem("a"), "a", "b");
+        // A second marker also claiming "a" as its source can only
+        // exist via hand-editing or corruption — ordinary code never
+        // writes two markers for the same `from` — so it lands at an
+        // unrelated file stem rather than the one `from: "a"` would
+        // normally use.
+        write_marker(&dir, &file_stem("z"), "a", "c");
+
+        let (resumed, moved) = resume_and_record(&dir);
+
+        assert!(resumed.is_empty(), "neither marker may resume");
+        assert!(
+            moved.is_empty(),
+            "neither marker's move may even be attempted"
+        );
+        assert!(renaming_marker_path(&dir, &file_stem("a")).exists());
+        assert!(renaming_marker_path(&dir, &file_stem("z")).exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The mirror shape: two markers sharing a `to` (`a→c`, `b→c`)
+    /// instead of a `from`. Both would land at "c", so both are
+    /// refused.
+    #[test]
+    fn markers_sharing_a_to_are_both_refused() {
+        let dir = scratch_dir("resume-shared-to");
+        fs::create_dir_all(&dir).unwrap();
+        write_marker(&dir, &file_stem("a"), "a", "c");
+        write_marker(&dir, &file_stem("b"), "b", "c");
+
+        let (resumed, moved) = resume_and_record(&dir);
+
+        assert!(resumed.is_empty(), "neither marker may resume");
+        assert!(
+            moved.is_empty(),
+            "neither marker's move may even be attempted"
+        );
+        assert!(renaming_marker_path(&dir, &file_stem("a")).exists());
+        assert!(renaming_marker_path(&dir, &file_stem("b")).exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The refusal must not be broader than the hazard it guards
+    /// against: two markers that share no endpoint resume exactly as
+    /// they always have, in a deterministic (`from`-sorted) order.
+    #[test]
+    fn unrelated_markers_resume_in_a_deterministic_order() {
+        let dir = scratch_dir("resume-unrelated");
+        fs::create_dir_all(&dir).unwrap();
+        write_marker(&dir, &file_stem("x"), "x", "y");
+        write_marker(&dir, &file_stem("p"), "p", "q");
+
+        let (resumed, moved) = resume_and_record(&dir);
+
+        assert_eq!(resumed.len(), 2, "both unrelated markers must resume");
+        assert!(
+            resumed
+                .iter()
+                .all(|rename| rename.landed && rename.complete)
+        );
+        // Sorted by `from`: "p" < "x".
+        assert_eq!(
+            moved,
+            vec![
+                ("p".to_string(), "q".to_string()),
+                ("x".to_string(), "y".to_string()),
+            ]
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

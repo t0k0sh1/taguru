@@ -830,6 +830,18 @@ pub enum CreateError {
     Io(io::Error),
 }
 
+/// Why [`AppState::delete`] refused or could not fully complete —
+/// mirrors [`RenameContextError`]'s shape so the API layer can treat
+/// the two consistently. `MidRename` is a refusal, not a failure: the
+/// context still exists (an in-flight rename's marker still claims
+/// it), so the caller must not treat this the same as the disk trouble
+/// `Io` reports, nor log it as a completed deletion.
+#[derive(Debug)]
+pub enum DeleteError {
+    MidRename,
+    Io(io::Error),
+}
+
 #[derive(Debug)]
 pub enum CreateGroupError {
     AlreadyExists,

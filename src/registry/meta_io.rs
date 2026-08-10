@@ -84,6 +84,18 @@ pub(super) fn write_meta(
 
 /// Reads the sidecar, falling back to defaults on any problem — a
 /// missing or corrupt sidecar must not make the image unreachable.
+///
+/// That leniency has one sharp edge: the fallback also zeroes
+/// `schema_digest` to `None`, which for a context that DOES have a
+/// live `{stem}.schema.json` collides with `schema::load_schema`'s own
+/// fail-closed posture (ADR 0009 §5.1/§5.2, issue #561's audit) — a
+/// corrupt sidecar plus a healthy schema file turns into a
+/// digest-mismatch refusal that stops the WHOLE boot, not just this
+/// one candidate, and the resulting message names a mismatch rather
+/// than the sidecar that caused it. The fix for that case is the
+/// sidecar's, not the schema check's: restore `{stem}.meta.json` (or
+/// delete it if the context has no schema) so its recorded digest
+/// agrees with the file on disk again.
 pub(super) fn read_meta_file(dir: &Path, stem: &str) -> MetaFile {
     match fs::read(meta_path(dir, stem)) {
         Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|error| {

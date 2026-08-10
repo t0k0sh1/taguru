@@ -517,10 +517,28 @@ pub(crate) fn load_schema(
     };
     let actual_digest = sha256_hex(&bytes);
     if recorded_digest != Some(actual_digest.as_str()) {
+        // A `recorded` of literally "none" alongside a schema file
+        // that DOES exist on disk usually is not an interrupted schema
+        // write at all — it is `read_meta_file`'s own lenient fallback
+        // for a corrupt or missing `{stem}.meta.json` sidecar, which
+        // defaults `schema_digest` away along with everything else
+        // (see that function's doc). The distinct hint here saves an
+        // operator from chasing the schema file when the sidecar is
+        // the actual problem.
+        let likely_cause = if recorded_digest.is_none() {
+            format!(
+                " (a recorded digest of \"none\" alongside a schema file that exists usually \
+                  means the sidecar itself is corrupt or missing, not that this file changed \
+                  — check '{stem}.meta.json' first)"
+            )
+        } else {
+            String::new()
+        };
         return Err(io::Error::other(format!(
             "schema '{}' digest does not match what its context recorded (recorded {}, on \
-             disk {actual_digest}) — an update may have been interrupted mid-write; restore \
-             the intended file so the two agree, or clear both and start again",
+             disk {actual_digest}){likely_cause} — an update may have been interrupted \
+             mid-write; restore the intended file so the two agree, or clear both and start \
+             again",
             path.display(),
             recorded_digest.unwrap_or("none"),
         )));
