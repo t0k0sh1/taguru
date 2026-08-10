@@ -357,4 +357,59 @@ mod tests {
 
         let _ = fs::remove_dir_all(dir);
     }
+
+    /// Issue #563 item 2: `!sources.is_empty()` used to be
+    /// `refresh_bm25`'s dirty gate — wrong whenever every source in
+    /// the batch turned out to have nothing live in the resident
+    /// index to tombstone, which rewrites the sidecar on the next
+    /// flush tick for a batch that changed nothing. `changed` (the
+    /// fix) must track the index's own outcome per source instead.
+    #[test]
+    fn refresh_bm25_marks_dirty_only_when_the_index_actually_changed() {
+        use taguru::deadline::Deadline;
+
+        let dir = scratch_dir("bm25-noop-retract");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert("第1章".to_string(), "青嶺酒造の創業は1907年。".to_string());
+        state
+            .store_passages("sake", test_support::plain(passages))
+            .unwrap()
+            .unwrap();
+        // Force a resident BM25 index (the cold build itself marks
+        // dirty), then clear it — the assertions below are about the
+        // batches THIS test drives through `refresh_bm25` directly,
+        // not the build.
+        state
+            .search_passages("sake", "創業", 3, None, None, Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        let entry = state.lookup("sake").unwrap();
+        entry.bm25_dirty.store(false, Ordering::Relaxed);
+        let store = state.entry_passages(&entry, &file_stem("sake")).unwrap();
+
+        // A source this index never held anything for: `store.get`
+        // misses and `remove_source` is a genuine no-op.
+        state.refresh_bm25(&entry, &store, &["never-stored".to_string()]);
+        assert!(
+            !entry.bm25_dirty.load(Ordering::Relaxed),
+            "a retraction batch that tombstoned nothing must not mark the sidecar dirty"
+        );
+
+        // Retract "第1章" from the STORE only (bypassing refresh_bm25
+        // entirely, so the resident BM25 index still thinks it's
+        // live) — the setup for the next call to find a real change.
+        assert!(store.retract("第1章").unwrap());
+        state.refresh_bm25(&entry, &store, &["第1章".to_string()]);
+        assert!(
+            entry.bm25_dirty.load(Ordering::Relaxed),
+            "retracting a source the index genuinely held must still mark it dirty"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
 }

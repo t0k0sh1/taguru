@@ -50,7 +50,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use taguru::context::{AliasError, CompactionError, Context, LabelUsage, dead_ratio_of};
-use taguru::deadline::Deadline;
+use taguru::deadline::{Deadline, DeadlineExceeded as SlotDeadlineExceeded};
 
 use crate::api::evidence::rerank::{EvidenceReranker, RerankOutcome};
 use crate::embedding::{EmbedPurpose, EmbeddingProvider, PassageVectorStore, VectorStore};
@@ -1788,8 +1788,13 @@ impl BootConfig {
             // Worker threads dispatching each 128-item embedding chunk to
             // the provider concurrently; 1 keeps the old strictly-
             // sequential behavior. Raise to match the provider's rate
-            // limit, not the machine's core count.
-            embed_parallel: crate::env::env_number("TAGURU_EMBED_PARALLEL", 1),
+            // limit, not the machine's core count. `=0` is rejected
+            // loudly (issue #563 item 5) rather than silently
+            // rewritten — see `resolve_embed_parallel`'s doc.
+            embed_parallel: crate::env::resolve_embed_parallel(crate::env::env_number(
+                "TAGURU_EMBED_PARALLEL",
+                1,
+            )),
             // The right semantic floor is a property of the embedding
             // model (cosine bands differ per model), so its
             // recalibration lives beside TAGURU_EMBED_MODEL rather
@@ -2143,6 +2148,12 @@ struct StateInner {
 struct CueCache {
     vectors: HashMap<String, (Arc<Vec<f32>>, u64)>,
     tick: u64,
+    /// The dimension every resident vector was inserted at, `None`
+    /// while empty. Never an EMPTY vector's width — `cue_vector`
+    /// (issue #563 item 1) refuses to cache a provider's `Ok(vec![])`
+    /// answer at all, so `insert` never sees a zero-length vector to
+    /// begin with.
+    width: Option<usize>,
 }
 
 impl CueCache {
@@ -2156,10 +2167,34 @@ impl CueCache {
         Some(Arc::clone(&entry.0))
     }
 
+    /// A read AND a recency event either way: an existing key gets its
+    /// tick bumped in place (issue #563 item 3 — without this, a cue
+    /// repeatedly re-resolved after its provider call still reads as
+    /// "not recently touched" to the eviction below, and can be
+    /// evicted while genuinely hot); a new key is admitted, evicting
+    /// the least-recently-touched entry first if the cache is full.
     fn insert(&mut self, cue: String, vector: Arc<Vec<f32>>) {
-        if self.vectors.contains_key(&cue) {
+        self.tick += 1;
+        let tick = self.tick;
+        if let Some(entry) = self.vectors.get_mut(&cue) {
+            entry.1 = tick;
             return;
         }
+        // A stable width is what makes every resident vector
+        // comparable to the same gloss/paragraph table it scores
+        // against. A backend swap behind an unchanged model name (the
+        // same hazard `embeddings.rs`'s gloss refresh already guards
+        // against on the index side) would otherwise leave whichever
+        // cues embedded before the swap silently stuck at
+        // `similarity`'s width-mismatch 0.0 forever — invisible until
+        // every one happens to be re-queried. Clearing on drift makes
+        // the cache self-heal instead: every resident cue is forced to
+        // re-embed behind its next query, all agreeing with the new
+        // width from then on.
+        if self.width.is_some_and(|width| width != vector.len()) {
+            self.vectors.clear();
+        }
+        self.width = Some(vector.len());
         if self.vectors.len() >= Self::CAP
             && let Some(oldest) = self
                 .vectors
@@ -2169,8 +2204,7 @@ impl CueCache {
         {
             self.vectors.remove(&oldest);
         }
-        self.tick += 1;
-        self.vectors.insert(cue, (vector, self.tick));
+        self.vectors.insert(cue, (vector, tick));
     }
 }
 
@@ -2331,7 +2365,19 @@ impl AppState {
         // which context or which dispatch layer it came from, so it is
         // where the outer and inner worker pools' ceilings actually
         // become one global ceiling instead of two that multiply.
-        let _permit = self.0.embed_provider_slots.acquire();
+        let acquisition = self.0.embed_provider_slots.acquire_until(deadline);
+        if acquisition.queued {
+            self.0.metrics.record_embed_slot_wait();
+        }
+        let Some(_permit) = acquisition.permit else {
+            // The permit never came, so the provider was never called
+            // — this is a slot-queue timeout, not a provider failure,
+            // but a refresh caller has no other outcome to report it
+            // under than the deadline expiring (issue #563 item 4).
+            self.0.metrics.record_embed_slot_timeout();
+            self.0.metrics.record_embed_refresh(false);
+            return Err(SlotDeadlineExceeded.to_string());
+        };
         match self.timed_embed(embedder, texts, EmbedPurpose::Index, deadline) {
             Ok(vectors) => {
                 self.0.metrics.record_embed_refresh(true);
@@ -2364,8 +2410,26 @@ impl AppState {
         }
         match self.timed_embed(embedder, &[cue], EmbedPurpose::Query, deadline) {
             Ok(mut vectors) => {
+                let vector = vectors.pop().unwrap_or_default();
+                // `Ok` but zero-length (a malformed provider response,
+                // or an `unwrap_or_default` masking a shorter-than-
+                // requested batch) is not a resolved embedding — caching
+                // it here would be a PROCESS-LIFETIME poison: every
+                // future search for this exact cue would silently score
+                // 0.0 forever (`similarity`'s width-mismatch sentinel),
+                // with no way to invalidate it short of a restart
+                // (issue #563 item 1). Treat it as the resolve failure
+                // it actually is instead.
+                if vector.is_empty() {
+                    self.0.metrics.record_embed_resolve(false);
+                    return Err(format!(
+                        "embedding provider returned an empty vector for the query cue \
+                         (model {:?})",
+                        embedder.model()
+                    ));
+                }
                 self.0.metrics.record_embed_resolve(true);
-                let vector = Arc::new(vectors.pop().unwrap_or_default());
+                let vector = Arc::new(vector);
                 self.0
                     .cue_cache
                     .lock()
@@ -2410,13 +2474,26 @@ impl AppState {
         let Some(index) = guard.as_mut() else {
             return;
         };
+        // `!sources.is_empty()` used to be the dirty gate — wrong
+        // whenever every `store.get` in this batch came back `None`
+        // for a source `remove_source` had nothing live to tombstone
+        // for (issue #563 item 2): the batch touched nothing, but the
+        // sidecar still got rewritten on the next tick. `changed`
+        // tracks whether anything in the index actually moved instead.
+        let mut changed = false;
         for source in sources {
             match store.get(source) {
-                Some(record) => index.upsert_source(source, &record),
-                None => index.remove_source(source),
+                Some(record) => {
+                    // A stored record always changes the index — it
+                    // just replaced whatever paragraphs (zero or more)
+                    // this source held before.
+                    index.upsert_source(source, &record);
+                    changed = true;
+                }
+                None => changed |= index.remove_source(source),
             }
         }
-        if !sources.is_empty() {
+        if changed {
             entry.bm25_dirty.store(true, Ordering::Relaxed);
         }
     }

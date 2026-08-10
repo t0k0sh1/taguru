@@ -1,7 +1,11 @@
+use std::collections::VecDeque;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use parking_lot::{Condvar, Mutex};
+
+use taguru::deadline::Deadline;
 
 /// Runs `f` over `items` on up to `workers` threads pulling from one
 /// shared queue — the same divide-the-queue-not-the-slice shape
@@ -97,6 +101,13 @@ pub(crate) fn dispatch_chunks_concurrently<C: Sync, R: Send + Sync>(
     results.into_iter().map(OnceLock::into_inner).collect()
 }
 
+/// How long one wait leg blocks before re-checking the deadline — the
+/// ceiling on how stale `acquire_until`'s deadline check can get, and
+/// (since [`Semaphore::release`] wakes every waiter, never just one)
+/// the self-healing floor under a missed wakeup: a notification lost
+/// to a race is recovered within one poll, not forever.
+const SLOT_POLL: Duration = Duration::from_millis(50);
+
 /// A counting semaphore bounding actual concurrent work below however
 /// many independent dispatch layers each think they alone own the
 /// ceiling. `embed_parallel` sizes both the outer per-context
@@ -107,27 +118,139 @@ pub(crate) fn dispatch_chunks_concurrently<C: Sync, R: Send + Sync>(
 /// permit here around its provider call, so no matter how many
 /// threads across how many contexts attempt one at once, at most
 /// `embed_parallel` are ever in flight process-wide.
+///
+/// Two properties `Mutex<usize>` + `Condvar::notify_one` (the
+/// original shape) did not have, per issue #563 item 4: a bound on
+/// how long a caller waits, and fairness. Both come from the same
+/// ticket queue — a waiter blocks only while it holds the earliest
+/// outstanding ticket, so `parking_lot::Condvar`'s non-FIFO wakeup
+/// order can no longer let a late arrival repeatedly cut ahead of one
+/// that has been waiting since before it existed.
 pub(crate) struct Semaphore {
-    permits: Mutex<usize>,
+    inner: Mutex<SemaphoreInner>,
     available: Condvar,
+    /// Mirrors `inner.queue.len()` outside the lock — the scrape-time
+    /// gauge (`AppState::embed_slot_waiters`) reads this instead of
+    /// taking `inner`, so a slow metrics scrape can never itself
+    /// become a reason a refresh thread waits longer.
+    waiting: AtomicUsize,
+}
+
+struct SemaphoreInner {
+    permits: usize,
+    /// FIFO order of tickets not yet granted a permit. A waiter is
+    /// eligible to take a free permit only once its ticket reaches the
+    /// front — see `acquire_until`.
+    queue: VecDeque<u64>,
+    next_ticket: u64,
 }
 
 impl Semaphore {
+    /// `permits` is NOT floored here — issue #563 item 5 moved that
+    /// floor to the env boundary (`resolve_embed_parallel`) and to the
+    /// one call site that turns a raw `BootOptions` into both this and
+    /// the `embed_parallel` field (`boot_with`), so the two ceilings
+    /// can never read different numbers. A `Semaphore::new(0)` reached
+    /// any other way is a caller bug, not a runtime input to guard
+    /// against a second time — `acquire_until` on a zero-permit
+    /// semaphore just always times out, no hang.
     pub(crate) fn new(permits: usize) -> Self {
         Self {
-            permits: Mutex::new(permits.max(1)),
+            inner: Mutex::new(SemaphoreInner {
+                permits,
+                queue: VecDeque::new(),
+                next_ticket: 0,
+            }),
             available: Condvar::new(),
+            waiting: AtomicUsize::new(0),
         }
     }
 
-    pub(crate) fn acquire(&self) -> SemaphorePermit<'_> {
-        let mut permits = self.permits.lock();
-        while *permits == 0 {
-            self.available.wait(&mut permits);
-        }
-        *permits -= 1;
-        SemaphorePermit { semaphore: self }
+    /// Threads currently queued for a permit — read lock-free for the
+    /// scrape-time gauge.
+    pub(crate) fn waiting(&self) -> usize {
+        self.waiting.load(Ordering::Relaxed)
     }
+
+    /// Blocks for a permit until one is granted or `deadline` passes.
+    /// `permit` is `None` on timeout — the caller's provider round
+    /// trip never happened, so it should fail the same way a
+    /// `Deadline` expiring anywhere else in a refresh chunk does
+    /// (`DeadlineExceeded`). `queued` is true whenever the fast
+    /// (uncontended) path was missed, whether or not a permit was
+    /// eventually granted — the caller's `taguru_embed_slot_waits_total`
+    /// signal.
+    pub(crate) fn acquire_until(&self, deadline: Deadline) -> Acquisition<'_> {
+        let mut inner = self.inner.lock();
+        // Fast path: nobody ahead of us and a permit is free right
+        // now — skip the ticket queue entirely so the common
+        // (uncontended) case never pays for fairness bookkeeping.
+        if inner.queue.is_empty() && inner.permits > 0 {
+            inner.permits -= 1;
+            return Acquisition {
+                permit: Some(SemaphorePermit { semaphore: self }),
+                queued: false,
+            };
+        }
+        let ticket = inner.next_ticket;
+        inner.next_ticket += 1;
+        inner.queue.push_back(ticket);
+        self.waiting.fetch_add(1, Ordering::Relaxed);
+        let granted = loop {
+            if inner.permits > 0 && inner.queue.front() == Some(&ticket) {
+                inner.permits -= 1;
+                inner.queue.pop_front();
+                break true;
+            }
+            if deadline.expired() {
+                // Not necessarily still at the front — a slow-to-wake
+                // waiter behind us in the queue may have raced this
+                // check — so remove by value, not `pop_front`.
+                inner.queue.retain(|&queued| queued != ticket);
+                break false;
+            }
+            // Bounded by SLOT_POLL regardless of how far off `deadline`
+            // is — an unbounded deadline (Deadline::unbounded, used by
+            // the flush ticker's own refresh calls) must still re-check
+            // `expired()` on a heartbeat rather than blocking forever
+            // on one `wait_for`.
+            let slice = deadline.remaining().min(SLOT_POLL);
+            self.available.wait_for(&mut inner, slice);
+        };
+        self.waiting.fetch_sub(1, Ordering::Relaxed);
+        let permit = if granted {
+            Some(SemaphorePermit { semaphore: self })
+        } else {
+            // A timed-out waiter leaving the queue can move a
+            // different ticket to the front; wake everyone so the new
+            // front-of-line notices without waiting out its own poll.
+            self.available.notify_all();
+            None
+        };
+        Acquisition {
+            permit,
+            queued: true,
+        }
+    }
+
+    fn release(&self) {
+        self.inner.lock().permits += 1;
+        // notify_all, not notify_one: eligibility is "permits > 0 AND
+        // at the front of the queue", which only the front-of-line
+        // waiter can act on — but `available` is shared with the
+        // timeout path above, which also needs every waiter to
+        // re-check after a queue removal. One condvar, so every
+        // release wakes every waiter to re-test its own condition.
+        self.available.notify_all();
+    }
+}
+
+/// [`Semaphore::acquire_until`]'s result, split so the caller can
+/// record its two independent metrics signals (queued at all vs. gave
+/// up) without the semaphore itself depending on [`crate::metrics::Metrics`].
+pub(crate) struct Acquisition<'a> {
+    pub(crate) permit: Option<SemaphorePermit<'a>>,
+    pub(crate) queued: bool,
 }
 
 /// Returns its permit to [`Semaphore`] on drop — held across exactly
@@ -138,8 +261,7 @@ pub(crate) struct SemaphorePermit<'a> {
 
 impl Drop for SemaphorePermit<'_> {
     fn drop(&mut self) {
-        *self.semaphore.permits.lock() += 1;
-        self.semaphore.available.notify_one();
+        self.semaphore.release();
     }
 }
 
@@ -207,6 +329,106 @@ mod tests {
             );
         }
         assert!(matches!(&outcomes[FAILING_INDEX], Some(Err(message)) if message == "boom"));
+    }
+
+    /// Issue #563 item 4: the original `Semaphore` had no deadline at
+    /// all — a hung provider call could block a waiter (and everyone
+    /// behind it) forever, invisibly. `acquire_until` must actually
+    /// give up once the deadline passes, report it via `Acquisition`
+    /// rather than a bare bool, and leave no trace in `waiting()`
+    /// afterward — a lingering ticket would wedge the queue for every
+    /// waiter still behind it.
+    #[test]
+    fn acquire_until_times_out_when_no_permit_frees_up() {
+        use std::time::Instant;
+
+        let sem = Semaphore::new(1);
+        let held = sem
+            .acquire_until(Deadline::unbounded())
+            .permit
+            .expect("the only permit is free at the start");
+
+        let started = Instant::now();
+        let acquisition = sem.acquire_until(Deadline::after(Duration::from_millis(50)));
+        assert!(
+            acquisition.permit.is_none(),
+            "no permit ever freed up, so this must time out"
+        );
+        assert!(
+            acquisition.queued,
+            "it missed the fast path and had to enter the wait queue"
+        );
+        assert!(
+            started.elapsed() >= Duration::from_millis(45),
+            "must actually wait out close to the full deadline, not return early"
+        );
+        assert_eq!(
+            sem.waiting(),
+            0,
+            "a timed-out waiter must remove its own ticket, not linger in the queue"
+        );
+
+        drop(held);
+    }
+
+    /// The original `Mutex<usize>` + `Condvar::notify_one` shape had no
+    /// fairness guarantee — `parking_lot::Condvar` does not wake
+    /// waiters FIFO, so a late arrival could repeatedly cut ahead of
+    /// one waiting since before it existed (starvation). The ticket
+    /// queue fixes this: with exactly one permit held by the test and
+    /// three waiters queued strictly in order, permits must be granted
+    /// in that same order every time, not just on average.
+    #[test]
+    fn acquire_until_grants_permits_in_arrival_order() {
+        use std::thread;
+        use std::time::Instant;
+
+        let sem = Arc::new(Semaphore::new(1));
+        let held = sem
+            .acquire_until(Deadline::unbounded())
+            .permit
+            .expect("the only permit is free at the start");
+
+        let order: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut handles = Vec::new();
+        for id in 0..3u32 {
+            let sem = Arc::clone(&sem);
+            let order = Arc::clone(&order);
+            handles.push(thread::spawn(move || {
+                let acquisition = sem.acquire_until(Deadline::unbounded());
+                let permit = acquisition
+                    .permit
+                    .expect("unbounded deadline never times out");
+                order.lock().push(id);
+                // Held long enough that a waiter behind this one in
+                // the queue, if it woke at all, would still find the
+                // permit taken — proof the grant order is the queue
+                // order, not a race resolved by whoever wakes first.
+                thread::sleep(Duration::from_millis(20));
+                drop(permit);
+            }));
+            // Space out spawns so each thread's ticket lands in `id`
+            // order — the arrival order FIFO is required to honor.
+            thread::sleep(Duration::from_millis(20));
+        }
+        // Let all three settle into the wait queue before releasing.
+        thread::sleep(Duration::from_millis(20));
+        let released_at = Instant::now();
+        drop(held);
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        assert_eq!(
+            *order.lock(),
+            vec![0, 1, 2],
+            "permits must be granted in the order threads queued, not wakeup order"
+        );
+        assert!(
+            released_at.elapsed() >= Duration::from_millis(60),
+            "three permits held 20ms each in sequence must take at least that long \
+             serialized — a shorter elapsed time would mean more than one was ever \
+             granted at once"
+        );
     }
 
     #[test]

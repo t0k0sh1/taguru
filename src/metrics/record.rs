@@ -239,6 +239,18 @@ impl Metrics {
         self.disk_stat_failures.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Count one `embed_provider_slots` acquire that found every
+    /// permit taken and had to queue (issue #563 item 4).
+    pub fn record_embed_slot_wait(&self) {
+        self.embed_slot_waits.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Count one `embed_provider_slots` acquire that gave up after its
+    /// deadline passed while still queued.
+    pub fn record_embed_slot_timeout(&self) {
+        self.embed_slot_timeouts.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Count one keyring reload attempt (issue #134) by whether a
     /// table (possibly identical) was armed or the previous one kept.
     pub fn record_keyring_reload(&self, applied: bool) {

@@ -180,7 +180,12 @@ impl Bm25Index {
     /// on a deployment with no embedding provider at all.
     pub(crate) fn upsert_source(&mut self, source: &str, record: &PassageRecord) {
         let source_id = self.intern(source);
-        self.tombstone(source_id);
+        // The store's own record replaces the source unconditionally —
+        // whether or not anything was actually live to tombstone, at
+        // least one paragraph is about to be indexed below, so this
+        // call always changes the index. `tombstone`'s return is only
+        // meaningful to `remove_source`, which has no such guarantee.
+        let _ = self.tombstone(source_id);
         let slot_list = self.by_source.entry(source_id).or_default();
         // The record's questions are sorted by paragraph, so one cursor
         // walks them in lockstep with the paragraphs — O(paragraphs +
@@ -224,15 +229,24 @@ impl Bm25Index {
         self.reclaim_if_due();
     }
 
-    /// Tombstones one source's paragraphs (a retraction).
-    pub(crate) fn remove_source(&mut self, source: &str) {
-        if let Some(&source_id) = self.source_ids.get(source) {
-            self.tombstone(source_id);
-            self.reclaim_if_due();
-        }
+    /// Tombstones one source's paragraphs (a retraction). Returns
+    /// whether any slot was actually live to tombstone — false for a
+    /// never-interned source or one already fully dead, which callers
+    /// (`AppState::refresh_bm25`, issue #563 item 2) need to tell apart
+    /// from a real change: retracting a source this index never held
+    /// anything for must not mark the index dirty.
+    pub(crate) fn remove_source(&mut self, source: &str) -> bool {
+        let Some(&source_id) = self.source_ids.get(source) else {
+            return false;
+        };
+        let changed = self.tombstone(source_id);
+        self.reclaim_if_due();
+        changed
     }
 
-    fn tombstone(&mut self, source_id: u32) {
+    /// Returns whether any slot flipped from alive to dead.
+    fn tombstone(&mut self, source_id: u32) -> bool {
+        let mut changed = false;
         if let Some(slot_list) = self.by_source.get_mut(&source_id) {
             for &slot in slot_list.iter() {
                 let slot = &mut self.slots[slot as usize];
@@ -241,10 +255,12 @@ impl Bm25Index {
                     self.live_count -= 1;
                     self.live_total_length -= f64::from(slot.length);
                     self.dead_count += 1;
+                    changed = true;
                 }
             }
             slot_list.clear();
         }
+        changed
     }
 
     /// In-place tombstone reclamation: rebuild the whole structure from
@@ -1010,6 +1026,31 @@ mod tests {
                 .iter()
                 .all(|(source, ..)| source != "docs/takase.md"),
             "the old paragraph is gone with the upsert"
+        );
+    }
+
+    /// Issue #563 item 2: `AppState::refresh_bm25` uses this return to
+    /// decide whether a retraction actually changed the resident index
+    /// — wrong here means the sidecar gets rewritten on every flush
+    /// tick even when nothing moved. Three shapes: a source never
+    /// interned, a source already fully tombstoned, and a source with
+    /// live paragraphs still to kill.
+    #[test]
+    fn remove_source_reports_whether_it_actually_tombstoned_anything() {
+        let records = vec![("a".to_string(), record("霧沢町の湧き水。"))];
+        let mut index = Bm25Index::build(&records);
+
+        assert!(
+            !index.remove_source("never-interned"),
+            "a source this index never saw must report no change"
+        );
+        assert!(
+            index.remove_source("a"),
+            "a source with live paragraphs must report a change"
+        );
+        assert!(
+            !index.remove_source("a"),
+            "retracting an already-tombstoned source a second time must report no change"
         );
     }
 
