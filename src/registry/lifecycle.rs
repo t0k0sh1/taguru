@@ -33,11 +33,15 @@ impl AppState {
     /// existence (and description) survives a crash from the moment the
     /// create call returns. A persistence failure fails the create.
     ///
-    /// The registry lock is NOT held across the disk work (up to eight
-    /// unlinks plus save_files' fsyncs — seconds on slow storage,
-    /// behind which every operation on every context would otherwise
-    /// stall). The name is reserved in `pending.creates` under the
-    /// registry guard, the files are written unlocked, and the entry
+    /// The registry lock is NOT held across the disk work (an unlink
+    /// attempt for each candidate path `sweep_stale_stem_files` removes
+    /// — the stem's on-disk family minus `meta_path`, which
+    /// `save_files` overwrites instead — plus one per stale rename or
+    /// import marker it finds, plus save_files' fsyncs — seconds on
+    /// slow storage, behind which every operation on every context
+    /// would otherwise stall). The name is reserved in
+    /// `pending.creates` under the registry guard, the files are
+    /// written unlocked, and the entry
     /// lands in a second critical section — the create twin of
     /// delete's `pending.deletes` choreography.
     pub fn create(&self, name: &str, meta: ContextMeta) -> Result<(), CreateError> {
