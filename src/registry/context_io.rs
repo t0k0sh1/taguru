@@ -743,9 +743,18 @@ mod tests {
 
     /// `export_context`'s hot path (#585): a repeatedly-failing export
     /// against an already-resident context must not keep bumping its
-    /// LRU recency, exactly as the doc above the `Slot::Hot` arm and
-    /// the slow path's own comment both promise. Regression for the
-    /// gap where only the slow (cold-load) path actually honored it.
+    /// LRU recency OR run a budget sweep, exactly as the doc above the
+    /// `Slot::Hot` arm and the slow path's own comment both promise.
+    /// Regression for the gap where only the slow (cold-load) path
+    /// actually honored it.
+    ///
+    /// `enforce_budget`'s own skip (`if name == except { continue; }`)
+    /// means the exported context is NEVER a candidate for its own
+    /// call — watching "sake" stay resident would pass whether or not
+    /// `enforce_budget("sake")` actually ran, so it cannot witness the
+    /// skip. `budget_ops` is the one counter every `enforce_budget`
+    /// call bumps before its cheap gate even runs (`engine.rs`), so it
+    /// is checked directly instead.
     #[test]
     fn export_context_hot_path_skips_touch_and_enforce_budget_on_failure() {
         let dir = scratch_dir("export-hot-failure");
@@ -766,6 +775,7 @@ mod tests {
             "must exercise the hot path, not the cold-load one"
         );
         let before_touch = entry.last_touch.load(Ordering::Relaxed);
+        let before_budget_ops = state.0.budget_ops.load(Ordering::Relaxed);
 
         let already_expired = Deadline::after(std::time::Duration::ZERO);
         match state.export_context("sake", already_expired) {
@@ -776,6 +786,11 @@ mod tests {
             entry.last_touch.load(Ordering::Relaxed),
             before_touch,
             "a failed hot-path export must not touch the entry"
+        );
+        assert_eq!(
+            state.0.budget_ops.load(Ordering::Relaxed),
+            before_budget_ops,
+            "a failed hot-path export must not call enforce_budget either"
         );
 
         let _ = fs::remove_dir_all(dir);
