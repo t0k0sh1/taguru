@@ -324,6 +324,23 @@ impl Context {
             .collect()
     }
 
+    /// The first `limit` relation labels in insertion order — the
+    /// bounded half of [`Context::labels`], for a caller that only
+    /// wants a sample (`ContextStats::of`'s directory sample, capped
+    /// at `LABEL_SAMPLE`). Stops at `limit` instead of collecting the
+    /// whole vocabulary and truncating afterward: `ContextStats::of`
+    /// runs on every HOT entry of every `GET /contexts`, where a
+    /// context with a large label vocabulary would otherwise pay a
+    /// full-vocabulary allocation to keep the first 50. Same order and
+    /// the same first `limit` elements `labels()` would give.
+    pub fn label_sample(&self, limit: usize) -> Vec<&str> {
+        self.labels
+            .iter()
+            .take(limit)
+            .map(|record| self.arena_str(record.name_offset, record.name_len))
+            .collect()
+    }
+
     /// One name-ordered page of the relation-label vocabulary plus the
     /// cursor-independent total, seeked in O(log n + k) against
     /// [`Context::label_name_index`] instead of collecting and sorting
@@ -551,6 +568,29 @@ mod tests {
         context.associate("c", "r2", "d", 1.0).unwrap(); // reuse must not duplicate
 
         assert_eq!(context.labels(), vec!["r2", "r1"]);
+    }
+
+    #[test]
+    fn label_sample_is_the_bounded_prefix_labels_would_give() {
+        let mut context = Context::default();
+        context.associate("a", "r1", "b", 1.0).unwrap();
+        context.associate("b", "r2", "c", 1.0).unwrap();
+        context.associate("c", "r3", "d", 1.0).unwrap();
+
+        assert!(
+            context.label_sample(0).is_empty(),
+            "a zero-limit sample must be empty, not the whole vocabulary"
+        );
+        assert_eq!(
+            context.label_sample(2),
+            context.labels()[..2],
+            "a partial sample must be labels()'s own prefix"
+        );
+        assert_eq!(
+            context.label_sample(100),
+            context.labels(),
+            "a limit past the vocabulary size must answer the whole thing, not pad or panic"
+        );
     }
 
     /// Builds a small profile: 山田太郎 with two addresses' worth of
