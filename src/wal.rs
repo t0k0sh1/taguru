@@ -643,10 +643,36 @@ pub fn replay_readonly<Op: DeserializeOwned + Serialize>(
 /// interior checksum mismatch reports, so it is surfaced as an error
 /// rather than silently classified either way — a genuinely torn write
 /// never reaches a matching checksum.
+///
+/// Nor is a record whose bytes are syntactically complete JSON but
+/// whose `op` tag this binary does not recognize (a downgraded binary
+/// reading a log a newer one wrote). That is exactly the shape an
+/// interior record of the same kind treats as fatal corruption (the
+/// plain `serde_json::from_slice::<WalRecord<Op>>` a few lines up in
+/// [`parse_log`] errors immediately, regardless of position) — so the
+/// tail must refuse it the same way rather than silently classifying
+/// it `Discarded` and truncating an acknowledged write off the disk.
+/// The distinguishing test is whether the bytes parse as *some* JSON
+/// value at all: a genuinely torn write (a crash mid-`write_all`)
+/// almost never lands on valid JSON syntax by accident, so a
+/// value-parse success reliably means "complete record, unknown
+/// shape" rather than "fragment".
 fn tail_record_is_complete<Op: DeserializeOwned + Serialize>(tail: &[u8]) -> io::Result<bool> {
     let record: WalRecord<Op> = match serde_json::from_slice(tail) {
         Ok(record) => record,
-        Err(_) => return Ok(false),
+        Err(typed_error) => {
+            return if serde_json::from_slice::<serde_json::Value>(tail).is_ok() {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "a complete record whose op this binary does not recognize \
+                         cannot be safely discarded as a torn write: {typed_error}",
+                    ),
+                ))
+            } else {
+                Ok(false)
+            };
+        }
     };
     let Some(stored) = record.crc else {
         if line_has_a_field_the_op_cannot_explain(tail, &record.op)? {
@@ -928,6 +954,21 @@ pub(crate) fn shippable_records(bytes: &[u8]) -> io::Result<Vec<ShippableRecord<
 /// were never actually tried. Left on disk, that tail is
 /// indistinguishable from an applied record, and replay would try it
 /// independently next time this context goes cold.
+///
+/// Refuses `len` greater than the file's actual current length: every
+/// caller passes a byte count it tracked itself (never a fresh `stat`),
+/// so a caller whose tracking has drifted ahead of disk — the only way
+/// that can happen is a prior `reset`/`truncate_to` succeeding at
+/// `set_len` but failing its own `sync_all`, which leaves the file
+/// shorter than the caller still believes — would otherwise hit
+/// `set_len`'s POSIX zero-extend behavior and pad the log with NUL
+/// bytes instead of shrinking it. A subsequent append then fuses onto
+/// that NUL run with no delimiter between them, turning a harmless
+/// stale byte count into the fatal interior corruption `replay`'s doc
+/// describes this file as designed to prevent. Erroring here instead
+/// routes the caller through its existing failure handling (retry, or
+/// flush the image to retire the leaked tail) rather than corrupting
+/// silently.
 pub fn truncate_to(path: &Path, len: u64) -> io::Result<()> {
     #[cfg(test)]
     if let Some(error) = injected_truncate_failure() {
@@ -937,6 +978,17 @@ pub fn truncate_to(path: &Path, len: u64) -> io::Result<()> {
         return Err(error);
     }
     let file = fs::OpenOptions::new().write(true).open(path)?;
+    let current_len = file.metadata()?.len();
+    if len > current_len {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "refusing to truncate to {len} bytes: the file is only \
+                 {current_len} bytes (this would zero-extend it with NULs \
+                 instead of shrinking it)",
+            ),
+        ));
+    }
     file.set_len(len)?;
     file.sync_all()
 }
@@ -1349,6 +1401,37 @@ mod tests {
     }
 
     #[test]
+    fn an_unrecognized_op_in_the_tail_position_is_fatal_not_discarded() {
+        // A downgraded binary's log holds a newer op variant at the
+        // very end, missing its trailing newline (indistinguishable at
+        // a glance from a genuine torn write). Before the fix, ANY
+        // deserialize failure — a real fragment or a complete record
+        // this binary just can't name — was folded into `Discarded`
+        // and silently truncated off disk, deleting an acknowledged
+        // write. An interior record with the same unrecognized op
+        // already refuses to load (see the interior corruption tests
+        // above); the tail must refuse identically, not shrug.
+        let path = scratch_wal("unknown-op-tail");
+        append_batch(&path, 1, &[associate("a")]).unwrap();
+        let mut bytes = fs::read(&path).unwrap();
+        // Syntactically complete JSON, but no `WalOp` variant is named
+        // "some_future_op" — the exact shape a newer binary's log
+        // leaves for an older one to choke on.
+        bytes.extend_from_slice(br#"{"seq":2,"op":"some_future_op","detail":"x"}"#);
+        fs::write(&path, &bytes).unwrap();
+
+        let error = replay::<WalOp>(&path, 0).expect_err(
+            "a complete record with an unrecognized op must refuse to boot, not vanish silently",
+        );
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("does not recognize"), "{error}");
+        // Nothing is truncated on the error path — the bytes stay on
+        // disk exactly as an interior corrupt record would, for a
+        // human (or a newer binary) to recover.
+        assert_eq!(fs::metadata(&path).unwrap().len(), bytes.len() as u64);
+    }
+
+    #[test]
     fn a_recovered_tail_does_not_fuse_with_the_next_append() {
         // The Recovered twin of `a_torn_tail_does_not_fuse_with_the_next_append`:
         // healing must APPEND the missing newline, not merely accept the
@@ -1669,6 +1752,48 @@ mod tests {
             vec!["a"],
             "the rewound tail must not survive"
         );
+        assert_eq!(top, 1);
+    }
+
+    #[test]
+    fn truncate_to_refuses_to_grow_the_file() {
+        // `set_len` zero-extends a file with NULs when `len` exceeds
+        // the current length — every caller passes a byte count it
+        // tracked itself, not a fresh `stat`, so a caller whose
+        // tracking has drifted ahead of disk must be refused loudly
+        // rather than corrupted with a silent NUL pad that a later
+        // append would fuse onto.
+        let path = scratch_wal("truncate-grow");
+        append_batch(&path, 1, &[associate("a")]).unwrap();
+        let current_len = fs::metadata(&path).unwrap().len();
+
+        let error = truncate_to(&path, current_len + 64)
+            .expect_err("truncating past the current length must be refused, not zero-extended");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("zero-extend"), "{error}");
+        assert_eq!(
+            fs::metadata(&path).unwrap().len(),
+            current_len,
+            "a refused truncate must leave the file exactly as it was"
+        );
+    }
+
+    #[test]
+    fn truncate_to_the_exact_current_length_is_not_a_growth_refusal() {
+        // The guard must reject only `len > current_len`, not
+        // `len == current_len`: truncating a file to precisely the
+        // length it already is (a no-op on disk) is not growth and
+        // must succeed, exactly like `reset`'s `len == 0` case already
+        // does when the file is already empty.
+        let path = scratch_wal("truncate-exact");
+        append_batch(&path, 1, &[associate("a")]).unwrap();
+        let current_len = fs::metadata(&path).unwrap().len();
+
+        truncate_to(&path, current_len).unwrap();
+
+        assert_eq!(fs::metadata(&path).unwrap().len(), current_len);
+        let (ops, top) = replay(&path, 0).unwrap();
+        assert_eq!(ops.iter().map(subject_of).collect::<Vec<_>>(), vec!["a"]);
         assert_eq!(top, 1);
     }
 
