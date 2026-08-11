@@ -326,21 +326,20 @@ mod tests {
     /// contract: no matter how many chunks past the failure land (that
     /// count is explicitly NOT bounded by `workers`, per the doc on
     /// `dispatch_chunks_concurrently` above), every index at or below
-    /// the true minimum failing index is guaranteed a `Some` slot, and
-    /// the gate stops dispatch short of the full chunk count.
+    /// the true minimum failing index is guaranteed a `Some` slot.
     ///
-    /// This does not assert an upper bound on spillover past the
-    /// failure — that count depends on how promptly the failing
-    /// worker's `fetch_min` lands relative to the other workers'
-    /// claims, which is a scheduler timing race, not a contract this
-    /// function makes (see the doc above, `~66-69`). An earlier version
-    /// of this test asserted `past_failure <= WORKERS`, which is only
-    /// true when the failure is recorded before any of the `workers`
-    /// in-flight chunks finish; nothing prevents a preemption between
-    /// `calls.lock().push(index)` and the `first_failure.fetch_min`
-    /// call from letting the other workers claim and finish arbitrarily
-    /// many more indices first, so that assertion could flake under
-    /// load. See `dispatch_chunks_concurrently_workers_1_stops_at_the_failure`
+    /// Deliberately asserts nothing about how many chunks landed past
+    /// the failure, nor how many were claimed overall — both depend on
+    /// how promptly the failing worker's `fetch_min` lands relative to
+    /// the other workers' claims, a scheduler timing race, not a
+    /// contract this function makes (see the doc above, `~66-69`). An
+    /// earlier version of this test asserted `past_failure <= WORKERS`,
+    /// and a later revision asserted `called.len() < chunks.len()` —
+    /// both flake under the same race: nothing prevents a preemption
+    /// between `calls.lock().push(index)` and the `first_failure.fetch_min`
+    /// call from letting the other workers claim and finish every
+    /// remaining chunk first. See
+    /// `dispatch_chunks_concurrently_workers_1_stops_at_the_failure`
     /// below for a deterministic (non-flaky) bound on spillover.
     #[test]
     fn dispatch_chunks_concurrently_bounds_spillover_past_a_promptly_recorded_failure() {
@@ -349,10 +348,8 @@ mod tests {
         const FAILING_INDEX: usize = 20;
         const WORKERS: usize = 4;
         let chunks: Vec<usize> = (0..50).collect();
-        let calls: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(Vec::new()));
 
         let outcomes = dispatch_chunks_concurrently(&chunks, WORKERS, |&index| {
-            calls.lock().push(index);
             if index == FAILING_INDEX {
                 return Err("boom".to_string());
             }
@@ -360,12 +357,6 @@ mod tests {
             Ok(index)
         });
 
-        let called = calls.lock().clone();
-        assert!(
-            called.len() < chunks.len(),
-            "the gate must stop dispatch well short of all {} chunks; saw {called:?}",
-            chunks.len()
-        );
         for (index, outcome) in outcomes.iter().enumerate().take(FAILING_INDEX) {
             assert!(
                 matches!(outcome, Some(Ok(value)) if *value == index),
@@ -563,13 +554,24 @@ mod tests {
     /// finds a non-front ticket — nor that `notify_all` (`~227`) wakes
     /// the waiter still behind it so it does not sit out its own poll
     /// interval unnecessarily. Here two waiters queue behind one held
-    /// permit; the first (front) waiter times out early, and the
-    /// second (still queued behind it) must still be granted once the
-    /// permit is released.
+    /// permit; the SECOND (non-front) waiter times out early, and the
+    /// first (still ahead of it, unbounded) must still be granted once
+    /// the permit is released — the shape that actually needs `retain`
+    /// (remove by ticket value): the front waiter would be removable
+    /// by `pop_front` alone, which would not distinguish a mutated
+    /// `retain` from the real thing.
     #[test]
     fn acquire_until_timeout_of_a_non_front_waiter_does_not_wedge_the_queue() {
         use std::thread;
         use std::time::Instant;
+
+        fn wait_until(mut ready: impl FnMut() -> bool, what: &str) {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !ready() {
+                assert!(Instant::now() < deadline, "timed out waiting for {what}");
+                thread::sleep(Duration::from_millis(2));
+            }
+        }
 
         let sem = Arc::new(Semaphore::new(1));
         let held = sem
@@ -577,50 +579,50 @@ mod tests {
             .permit
             .expect("the only permit is free at the start");
 
-        // Front waiter: short deadline, must time out while the permit
-        // stays held.
+        // First queued — the true front of the queue: unbounded
+        // deadline, so it never times out on its own and stays parked
+        // ahead of the second waiter for the whole test.
         let front_sem = Arc::clone(&sem);
         let front = thread::spawn(move || {
             front_sem
-                .acquire_until(Deadline::after(Duration::from_millis(100)))
-                .permit
-                .is_none()
-        });
-        // Give the front waiter time to enter the queue before the
-        // second one joins behind it.
-        thread::sleep(Duration::from_millis(20));
-
-        // Second waiter: unbounded deadline, queued behind the front
-        // one, must still be granted after the front waiter times out
-        // and the held permit is released.
-        let back_sem = Arc::clone(&sem);
-        let back = thread::spawn(move || {
-            back_sem
                 .acquire_until(Deadline::unbounded())
                 .permit
                 .is_some()
         });
-        thread::sleep(Duration::from_millis(20));
+        wait_until(|| sem.waiting() == 1, "the front waiter to join the queue");
+
+        // Second queued — NOT the front, since the first waiter is
+        // already ahead of it: short deadline, so this is the one
+        // that times out.
+        let back_sem = Arc::clone(&sem);
+        let back = thread::spawn(move || {
+            back_sem
+                .acquire_until(Deadline::after(Duration::from_millis(100)))
+                .permit
+                .is_none()
+        });
+        wait_until(|| sem.waiting() == 2, "both waiters to join the queue");
+
+        let back_timed_out = back.join().unwrap();
+        assert!(back_timed_out, "the non-front waiter must time out");
         assert_eq!(
             sem.waiting(),
-            2,
-            "both waiters must be queued before the front one times out"
+            1,
+            "only the front waiter may remain queued after the other's timeout"
         );
-
-        let front_timed_out = front.join().unwrap();
-        assert!(front_timed_out, "the front waiter must time out first");
 
         let started = Instant::now();
         drop(held);
-        let back_granted = back.join().unwrap();
+        let front_granted = front.join().unwrap();
         assert!(
-            back_granted,
-            "the waiter behind the timed-out one must still be granted \
-             the permit, not left wedged in the queue"
+            front_granted,
+            "the front waiter must still be granted the permit — the \
+             non-front waiter's timeout must not have wedged the queue \
+             (e.g. by evicting the wrong ticket)"
         );
         assert!(
             started.elapsed() < Duration::from_secs(1),
-            "the back waiter must be woken promptly by notify_all, not \
+            "the front waiter must be woken promptly by notify_all, not \
              left waiting out its own poll interval"
         );
     }

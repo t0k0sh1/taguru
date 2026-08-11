@@ -56,12 +56,11 @@ impl AppState {
     /// Unknown names (a delete racing the response) drop the
     /// per-context half silently, same as `note_read`.
     ///
-    /// The `violations > 0` guard cannot be mutated to `>=` and caught
-    /// behaviorally: at `violations == 0` the guarded body's only
-    /// effect is `entry.schema_violations.fetch_add(0, ..)`, a no-op
-    /// regardless of whether it runs, and `lookup` itself is a pure
-    /// read with no side effect to observe either way.
-    #[mutants::skip]
+    /// No `violations > 0` guard: at `violations == 0` the fetch-add
+    /// below is a no-op regardless of whether it runs (`fetch_add(0,
+    /// ..)`), so a guard here would be redundant, not just untested —
+    /// same reasoning `engine.rs`'s `logged_write` applies to its own
+    /// `landed > 0` re-append guard.
     pub(crate) fn note_schema_check(
         &self,
         name: &str,
@@ -69,9 +68,7 @@ impl AppState {
         violations: usize,
     ) {
         self.0.metrics.record_schema_check(outcome);
-        if violations > 0
-            && let Some(entry) = self.lookup(name)
-        {
+        if let Some(entry) = self.lookup(name) {
             entry
                 .schema_violations
                 .fetch_add(violations as u64, Ordering::Relaxed);
