@@ -289,7 +289,12 @@ impl AppState {
         // A resident store knows its pending log; a cold one uses the
         // scan/eviction-seeded field — the same read `gauge_snapshot`
         // does, for the same reason.
-        let passages_wal = entry.pending_passages_wal_bytes(inner.passages_wal_bytes);
+        let passages_wal = entry
+            .passages
+            .lock()
+            .as_ref()
+            .map(|store| store.pending_log_bytes())
+            .unwrap_or(inner.passages_wal_bytes);
         let used = disk.image_bytes
             + disk.passages_bytes
             + disk.sidecar_bytes
@@ -664,7 +669,11 @@ impl AppState {
             // Cached vector stores, resident passages, the BM25 index,
             // and paragraph vectors count too — a cold entry can hold
             // plenty of each.
-            let bytes = resident + entry.cache_footprint();
+            let bytes = resident
+                + entry.vectors_footprint()
+                + entry.passages_footprint()
+                + entry.bm25_footprint()
+                + entry.passage_vectors_footprint();
             if bytes == 0 {
                 continue;
             }
