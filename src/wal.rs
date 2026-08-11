@@ -78,6 +78,22 @@ impl WalOp {
             WalOp::Associate(_) | WalOp::AliasConcept { .. } | WalOp::AliasLabel { .. }
         )
     }
+
+    /// The variant's own name, for a diagnostic that must name WHICH op
+    /// failed (`replay_wal_guarded`'s panic line, `replay_op`'s
+    /// rejection line) without dragging the op's own field values —
+    /// some hold user content — into a log line.
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            WalOp::Associate(_) => "Associate",
+            WalOp::AliasConcept { .. } => "AliasConcept",
+            WalOp::AliasLabel { .. } => "AliasLabel",
+            WalOp::UnaliasConcept { .. } => "UnaliasConcept",
+            WalOp::UnaliasLabel { .. } => "UnaliasLabel",
+            WalOp::RetractSource { .. } => "RetractSource",
+            WalOp::RetractAssociation { .. } => "RetractAssociation",
+        }
+    }
 }
 
 #[cfg(test)]
