@@ -645,9 +645,19 @@ impl Entry {
 
     /// The entry's write lock, or `None` if a delete beat the caller to
     /// it — a handle that predates the removal must not touch the files
-    /// the delete just removed, let alone recreate them. Every
-    /// post-lookup lock acquisition goes through here so no path can
-    /// forget the tombstone.
+    /// the delete just removed, let alone recreate them. This and its
+    /// read-only sibling [`Entry::read_unless_deleted`] are the two
+    /// sanctioned ways to fence a lookup against a concurrent delete;
+    /// most post-lookup call sites go through one of them. The rest
+    /// take `self.inner` directly and are responsible for their own
+    /// tombstone-safety, which in every current caller comes from one
+    /// of: matching `Slot` inline and handling `Deleted` itself (e.g.
+    /// `read_context`, `describe_entry`, the eviction sweep), being the
+    /// side that plants the tombstone in the first place (`delete`,
+    /// replica deregistration), holding an entry the caller already
+    /// owns exclusively (a rename's freshly-inserted destination, a
+    /// drained rename source), or running at boot before the listener
+    /// binds (`preload_pinned`).
     #[allow(clippy::readonly_write_lock)] // some callers lock purely for exclusion
     fn lock_unless_deleted(&self) -> Option<parking_lot::RwLockWriteGuard<'_, EntryInner>> {
         let guard = self.inner.write();
@@ -922,7 +932,8 @@ pub enum PutSchemaError {
     /// [`schema::SCHEMA_TYPE_LABEL`] — ADR 0009 §6.3 guard 3's
     /// migration-boundary counterpart. Carries the offending alias so
     /// the caller can name it and instruct a rename, mirroring
-    /// `EMPTY_SOURCE`'s own collision wording (`src/export.rs:315`).
+    /// `EMPTY_SOURCE`'s own collision wording in [`crate::export::render`]'s
+    /// reserved-source-id refusals.
     ReservedAlias(String),
     /// Loading the context to inspect its live label-alias table
     /// failed — mirrors `update_meta`'s own `ensure_hot` failure arm.
@@ -2141,9 +2152,14 @@ struct StateInner {
 
 /// An LRU-bounded map of cue → embedding: an LLM client repeats query
 /// wording, and recency (not insertion order) is what predicts the next
-/// hit. At the cap it holds ~12 MB of vectors. Recency is tracked by a
-/// counter dedicated to this cache rather than `AppState::clock`
-/// (documented for a different purpose) to keep the two concerns apart.
+/// hit. `CAP` bounds vector *count*, not bytes: at the cap it holds
+/// `CAP` × dimensions × 4 bytes of vectors — ~12 MiB at 3072
+/// dimensions (the largest first-party model), ~6 MiB at 1536 — plus
+/// the cue strings themselves and `HashMap` overhead; dimension comes
+/// from whatever the embedding provider returns, not a fixed constant.
+/// Recency is tracked by a counter dedicated to this cache rather than
+/// `AppState::clock` (documented for a different purpose) to keep the
+/// two concerns apart.
 #[derive(Default)]
 struct CueCache {
     vectors: HashMap<String, (Arc<Vec<f32>>, u64)>,

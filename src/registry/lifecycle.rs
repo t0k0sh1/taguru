@@ -33,10 +33,12 @@ impl AppState {
     /// existence (and description) survives a crash from the moment the
     /// create call returns. A persistence failure fails the create.
     ///
-    /// The registry lock is NOT held across the disk work (up to eight
-    /// unlinks plus save_files' fsyncs — seconds on slow storage,
-    /// behind which every operation on every context would otherwise
-    /// stall). The name is reserved in `pending.creates` under the
+    /// The registry lock is NOT held across the disk work (an unlink
+    /// per file in the stem's on-disk family, plus one per stale
+    /// rename or import marker `sweep_stale_stem_files` finds, plus
+    /// save_files' fsyncs — seconds on slow storage, behind which every
+    /// operation on every context would otherwise stall). The name is
+    /// reserved in `pending.creates` under the
     /// registry guard, the files are written unlocked, and the entry
     /// lands in a second critical section — the create twin of
     /// delete's `pending.deletes` choreography.

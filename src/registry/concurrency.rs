@@ -14,7 +14,9 @@ use taguru::deadline::Deadline;
 /// into the shared result once at the end, so contention is limited to
 /// the queue itself; results come back in arrival order, not input
 /// order — callers that need input order carry an index through `T`/`R`
-/// and sort afterward.
+/// and sort afterward. A panic inside `f` is not caught: `thread::scope`
+/// re-raises it after every worker joins, so the caller gets the unwind
+/// instead of the partial `results` this function was building.
 pub(crate) fn parallel_map<T, R>(items: Vec<T>, workers: usize, f: impl Fn(T) -> R + Sync) -> Vec<R>
 where
     T: Send,
@@ -47,14 +49,17 @@ where
 /// indices in order. Unlike `parallel_map` above — arrival-order
 /// results, no notion of failure — this preserves input order and
 /// stops claiming new work once a chunk's failure has been recorded.
-/// Every caller (`extract_chunks_concurrently` in src/extract.rs, and
-/// `embed_stale` / `refresh_passage_embeddings` below) needs both: an
-/// input-order-preserving result to fold correctly, and best-effort
-/// early termination once a failure surfaces, so a batch that is going
-/// to fail stops enlisting new work. Fold-on-failure semantics differ
-/// per caller (fail the whole batch vs. keep whatever succeeded), so
-/// the fold itself is left to them — this returns the raw, unfolded
-/// per-index outcome.
+/// Every caller (`Run::extract_chunks_concurrently` in
+/// `src/extract/run.rs`, and `embed_stale` /
+/// `refresh_passage_embeddings` in `src/registry/embeddings.rs`) needs
+/// both: an input-order-preserving result to fold correctly, and
+/// best-effort early termination once a failure surfaces, so a batch
+/// that is going to fail stops enlisting new work. Fold-on-failure
+/// semantics differ per caller (fail the whole batch vs. keep whatever
+/// succeeded), so the fold itself is left to them — this returns the
+/// raw, unfolded per-index outcome. As with `parallel_map`, a panic
+/// inside `f` unwinds through `thread::scope` after every worker joins;
+/// no caller gets to see a partial `results` in that case.
 ///
 /// `next` and `first_failure` are independent atomics; SeqCst on both
 /// is required so a worker claiming an index past a just-recorded
@@ -66,7 +71,12 @@ where
 /// recorded. Their count is NOT bounded by `workers` — a failure slow
 /// to surface lets the other workers complete arbitrarily many later
 /// indices first — so callers fold on the prefix, never on a count of
-/// what landed past the failure.
+/// what landed past the failure. The `Err(String)` inside a `Some` slot
+/// does not distinguish a genuine per-item failure from a caller that
+/// folded a deadline expiry or a slot-queue timeout into the same
+/// `String` channel (both `embed_stale` and `refresh_passage_embeddings`
+/// do exactly that) — callers that need to tell those apart must encode
+/// it themselves before calling in, not after getting the result back.
 pub(crate) fn dispatch_chunks_concurrently<C: Sync, R: Send + Sync>(
     chunks: &[C],
     workers: usize,
@@ -115,9 +125,13 @@ const SLOT_POLL: Duration = Duration::from_millis(50);
 /// `dispatch_chunks_concurrently` fan-out inside one context's own
 /// refresh — nested, those two ceilings would multiply into P × P
 /// concurrent provider calls. Every refresh chunk instead acquires a
-/// permit here around its provider call, so no matter how many
-/// threads across how many contexts attempt one at once, at most
-/// `embed_parallel` are ever in flight process-wide.
+/// permit here before its provider call, so no matter how many threads
+/// across how many contexts attempt one at once, at most `embed_parallel`
+/// are ever in flight process-wide. The permit is taken before the
+/// circuit breaker's own refusal check, so a chunk that the breaker
+/// turns away still consumes — and promptly frees — a slot; the
+/// ceiling this bounds is "concurrent attempts", not "concurrent
+/// in-flight calls".
 ///
 /// Two properties `Mutex<usize>` + `Condvar::notify_one` (the
 /// original shape) did not have, per issue #563 item 4: a bound on
@@ -253,8 +267,12 @@ pub(crate) struct Acquisition<'a> {
     pub(crate) queued: bool,
 }
 
-/// Returns its permit to [`Semaphore`] on drop — held across exactly
-/// the provider call, never longer, so a panic mid-call still frees it.
+/// Returns its permit to [`Semaphore`] on drop — a panic mid-call still
+/// frees it. Held from just before the circuit-breaker refusal check
+/// through the provider call (or, if the breaker is open, through the
+/// refusal itself): a breaker-open chunk never reaches the provider,
+/// but it still occupies — briefly — the slot that bounds "concurrent
+/// attempts at this choke point", not "concurrent provider calls".
 pub(crate) struct SemaphorePermit<'a> {
     semaphore: &'a Semaphore,
 }
