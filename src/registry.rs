@@ -246,8 +246,9 @@ impl ContextStats {
                 })
                 .collect(),
             label_sample: context
-                .label_sample(Self::LABEL_SAMPLE)
+                .labels()
                 .into_iter()
+                .take(Self::LABEL_SAMPLE)
                 .map(String::from)
                 .collect(),
         }
@@ -2692,27 +2693,6 @@ impl AppState {
 
 /// One directory row, or `None` when the entry was deleted between the
 /// caller's snapshot/lookup and this lock.
-///
-/// The Hot arm recomputes [`ContextStats::of`] — an O(edges +
-/// concepts) walk (dominated by `Context::top_concepts`'s degree
-/// pass) — on every call rather than reading the cached `inner.stats`
-/// [`Slot::Cold`] uses, and that recompute is not just an unclosed
-/// optimization: `ContextStats::dead_ratio`'s own doc promises a hot
-/// context (recomputed live) and a cold one (this cached snapshot)
-/// never disagree, and `compact --dry-run`'s doc names the same
-/// "live-for-hot, snapshot-for-cold" contract as what `GET /contexts`
-/// serves — reading `inner.stats` for a Hot entry here would break
-/// that promise the moment a write landed since the last flush. A
-/// generation-stamped cache is the natural fix (`EntryInner` already
-/// carries `graph_revision`), but this function holds only the entry's
-/// READ lock, so it cannot memoize a fresh value back without either
-/// interior mutability beside `stats` or upgrading to the write lock —
-/// and upgrading would serialize `GET /contexts` against every graph
-/// writer, the opposite of this lock's point. [`Context::top_concepts`]
-/// and [`Context::label_sample`] each avoid the cheaper half of this
-/// cost on their own (bounded selection, not a full sort; a bounded
-/// take, not a full collect-then-truncate) without touching the
-/// caching question at all.
 fn describe_entry(name: String, entry: &Entry) -> Option<DirectoryEntry> {
     let inner = entry.inner.read();
     let (loaded, stats) = match &inner.slot {

@@ -92,20 +92,6 @@ impl Context {
     /// mechanical "what is this context about" signal: unlike a
     /// hand-written summary it cannot go stale, so a routing directory
     /// can show it next to the prose description.
-    ///
-    /// Degree computation below is unavoidably O(concepts + edges) —
-    /// every concept's chains have to be walked at least once — but
-    /// selecting the top `limit` out of that does not need a full
-    /// O(n log n) sort of the whole concept table: `select_nth_unstable_by`
-    /// partitions around the `limit`th element in O(n), and only the
-    /// kept prefix (usually `limit`, a small directory-display count)
-    /// pays the final O(limit log limit) sort. Exactly
-    /// result-equivalent to sorting-then-truncating, not merely
-    /// close: the comparator's `(id)` tiebreak makes it a total order
-    /// over `ranked`, so there are no ties left for
-    /// `select_nth_unstable_by` to resolve arbitrarily — the set of
-    /// elements it leaves in the front partition is the same set a
-    /// full sort's first `limit` would be.
     pub fn top_concepts(&self, limit: usize) -> Vec<(&str, usize)> {
         let mut ranked: Vec<(usize, ConceptId)> = self
             .concepts
@@ -131,17 +117,8 @@ impl Context {
                 (degree, id)
             })
             .collect();
-        let order = |a: &(usize, ConceptId), b: &(usize, ConceptId)| {
-            b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1))
-        };
-        if limit == 0 {
-            return Vec::new();
-        }
-        if limit < ranked.len() {
-            ranked.select_nth_unstable_by(limit - 1, order);
-            ranked.truncate(limit);
-        }
-        ranked.sort_unstable_by(order);
+        ranked.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        ranked.truncate(limit);
         ranked
             .into_iter()
             .map(|(degree, id)| (self.concept_name(id), degree))
@@ -249,44 +226,6 @@ mod tests {
         let top = context.top_concepts(4);
         assert_eq!(top.iter().find(|&&(n, _)| n == "私").unwrap().1, 3);
         assert_eq!(top.iter().find(|&&(n, _)| n == "りんご").unwrap().1, 1);
-    }
-
-    /// `top_concepts` selects its top `limit` with `select_nth_unstable_by`
-    /// plus a bounded final sort rather than sorting the whole concept
-    /// table — this pins that the cut is exactly what a full
-    /// sort-then-truncate would give, including the one case the two
-    /// could disagree on if the comparator's tiebreak were not a total
-    /// order: a `limit` that falls INSIDE a tied-degree group. c1, c2,
-    /// c3 all carry degree 2, inserted in that order (so their
-    /// `ConceptId` tiebreak is c1 < c2 < c3); `limit=2` cuts between
-    /// c2 and c3, keeping only the two lowest-id members of the tie.
-    #[test]
-    fn top_concepts_selects_the_same_prefix_as_a_full_sort_across_a_tied_boundary() {
-        let mut context = Context::default();
-        context.associate("c0", "r0", "p0", 1.0).unwrap();
-        context.associate("c0", "r1", "p1", 1.0).unwrap();
-        context.associate("c0", "r2", "p2", 1.0).unwrap();
-        for (name, a, b) in [("c1", "p3", "p4"), ("c2", "p5", "p6"), ("c3", "p7", "p8")] {
-            context.associate(name, "r3", a, 1.0).unwrap();
-            context.associate(name, "r4", b, 1.0).unwrap();
-        }
-
-        assert!(
-            context.top_concepts(0).is_empty(),
-            "a zero limit must be empty, not the whole table"
-        );
-
-        let full = context.top_concepts(100);
-        assert_eq!(
-            full[..4],
-            [("c0", 3), ("c1", 2), ("c2", 2), ("c3", 2)],
-            "sanity: the intended degree-3-then-tied-degree-2 shape"
-        );
-        assert_eq!(
-            context.top_concepts(2),
-            full[..2],
-            "a limit cutting inside a tied-degree group must match a full sort's own prefix"
-        );
     }
 
     #[test]
