@@ -712,6 +712,38 @@ impl Entry {
             .map(|store| store.footprint())
             .unwrap_or(0)
     }
+
+    /// Every non-graph cache lane this entry holds resident, summed —
+    /// the cached vector sidecar, the passage store, the BM25 index,
+    /// and the paragraph vectors. Always these four together:
+    /// [`AppState::enforce_budget`]'s eviction sweep and
+    /// `AppState::gauge_snapshot`'s residency gauge must agree on what
+    /// "cached bytes" means, or a context can read over budget to one
+    /// and under to the other. The graph footprint is deliberately NOT
+    /// folded in here — the two callers hold it differently (summed
+    /// into the sweep's threshold, reported as its own series by the
+    /// gauge). Zero for a fully cold entry.
+    fn cache_footprint(&self) -> usize {
+        self.vectors_footprint()
+            + self.passages_footprint()
+            + self.bm25_footprint()
+            + self.passage_vectors_footprint()
+    }
+
+    /// The passage log's pending bytes: read from the resident store
+    /// when one is loaded, `cold` otherwise — the value the boot scan
+    /// or the last eviction cached on the way down. `cold` is a plain
+    /// parameter rather than `&EntryInner` on purpose:
+    /// `AppState::gauge_snapshot` drops its `inner` guard before it
+    /// reaches this call, and taking `&EntryInner` would silently
+    /// re-extend that guard across the `passages` lock below.
+    fn pending_passages_wal_bytes(&self, cold: u64) -> u64 {
+        self.passages
+            .lock()
+            .as_ref()
+            .map(|store| store.pending_log_bytes())
+            .unwrap_or(cold)
+    }
 }
 
 struct EntryInner {
