@@ -278,6 +278,14 @@ impl AppState {
     /// lands in the live lanes, so a burst inside one flush interval
     /// cannot outrun this check; the snapshot lanes lag at most one
     /// flush interval and refresh the moment images land.
+    ///
+    /// The five-lane sum below and
+    /// [`crate::metrics::ContextGaugeRow::disk_total_bytes`] are the
+    /// same total computed twice from two different operand types
+    /// (this function's `ContextDiskUsage` plus the two live WAL
+    /// fields, vs. `ContextGaugeRow`'s own five fields) — see
+    /// `ContextDiskUsage`'s doc for why that duplication is not
+    /// folded into one helper.
     pub(super) fn storage_quota_excess(
         &self,
         name: &str,
@@ -594,21 +602,22 @@ impl AppState {
     /// comment below) rather than spinning, and a later call with a
     /// different `except` still evicts promptly.
     pub(crate) fn enforce_budget(&self, except: &str) {
-        // Cheap gate in front of the O(contexts) sweep below, off the
-        // every-64th forced-sweep beat: skip it when EITHER the atomic
-        // graph estimate (which per-entry recounts keep exact) already
-        // fits the budget, OR the sweep is known-saturated FOR THIS
-        // SAME `except` — set at the bottom of this function when a
-        // sweep ran out of evictable candidates while still over
-        // budget (a context bigger than the whole cache alone, or one
-        // whose save keeps failing). The `except`-name check matters:
-        // saturation is specific to whichever context the sweep just
-        // had to protect, and a DIFFERENT `except` on the very next
-        // call can trivially evict what this one couldn't — an
-        // ordinary "just wrote to a context bigger than the whole
-        // budget, then read a different one" must still evict
-        // promptly, not wait out a 64-operation staleness window meant
-        // for a genuinely stuck situation. The two checks are separate
+        // Cheap gate in front of the O(contexts) sweep below, off
+        // [`BUDGET_SWEEP_PERIOD`]'s forced-sweep beat: skip it when
+        // EITHER the atomic graph estimate (which per-entry recounts
+        // keep exact) already fits the budget, OR the sweep is
+        // known-saturated FOR THIS SAME `except` — set at the bottom
+        // of this function when a sweep ran out of evictable
+        // candidates while still over budget (a context bigger than
+        // the whole cache alone, or one whose save keeps failing). The
+        // `except`-name check matters: saturation is specific to
+        // whichever context the sweep just had to protect, and a
+        // DIFFERENT `except` on the very next call can trivially evict
+        // what this one couldn't — an ordinary "just wrote to a
+        // context bigger than the whole budget, then read a different
+        // one" must still evict promptly, not wait out a
+        // `BUDGET_SWEEP_PERIOD`-operation staleness window meant for a
+        // genuinely stuck situation. The two checks are separate
         // `if`s, not one boolean expression, so the first can self-heal
         // a stale `budget_saturated` (from THIS or an earlier `except`)
         // the moment the estimate alone reports under budget — a
@@ -620,14 +629,15 @@ impl AppState {
         // `budget_saturated` is already true (short-circuited), so the
         // ordinary fast path stays lock-free atomic loads throughout.
         // Vector-store residency is NOT tracked between sweeps either,
-        // so every 64th operation forces a real sweep regardless of
-        // either arm — its reconciling store below bounds any
-        // staleness or drift (estimate, or saturation) at 64
-        // operations. Before this gate the full sweep (snapshot, two
-        // lock acquisitions per context) ran on every request.
+        // so every `BUDGET_SWEEP_PERIOD`th operation forces a real
+        // sweep regardless of either arm — its reconciling store below
+        // bounds any staleness or drift (estimate, or saturation) at
+        // `BUDGET_SWEEP_PERIOD` operations. Before this gate the full
+        // sweep (snapshot, five lock acquisitions per context) ran on
+        // every request.
         let ops = self.0.budget_ops.fetch_add(1, Ordering::Relaxed);
         let budget = i64::try_from(self.0.cache_bytes).unwrap_or(i64::MAX);
-        if !ops.is_multiple_of(64) {
+        if !ops.is_multiple_of(BUDGET_SWEEP_PERIOD) {
             if self.0.resident_estimate.load(Ordering::Relaxed) <= budget {
                 // The estimate alone already says the fleet fits —
                 // true regardless of `except`, so any saturation this
@@ -1400,8 +1410,9 @@ mod tests {
         let state =
             AppState::boot_with(dir.clone(), footprint / 2, None, BootOptions::default()).unwrap();
         // This write's own `enforce_budget` call is the first
-        // (`budget_ops == 0`, itself a forced multiple-of-64 sweep) —
-        // `big` is `except` and can never be evicted, so it saturates.
+        // (`budget_ops == 0`, itself a forced `BUDGET_SWEEP_PERIOD`
+        // sweep) — `big` is `except` and can never be evicted, so it
+        // saturates.
         state
             .add_associations(
                 "big",
@@ -3777,6 +3788,11 @@ mod tests {
     /// passages snapshot, sidecars, graph WAL, passages log — pinned
     /// here with every lane nonzero against a hand-computed total, so
     /// no term can silently drop out of (or multiply into) the gate.
+    /// Also pins that `ContextGaugeRow::disk_total_bytes` (the
+    /// `crate::metrics` copy of the same five-lane sum,
+    /// `ContextDiskUsage`'s doc explains why it's a second
+    /// independent computation, not a shared helper) agrees with this
+    /// one exactly, for the same context.
     #[test]
     fn storage_quota_used_is_the_exact_five_lane_sum() {
         let dir = scratch_dir("quota-five-lanes");
@@ -3840,6 +3856,7 @@ mod tests {
                         cache_bytes: None,
                     },
                 )]),
+                per_context_metrics: PerContextMetrics::All,
                 ..BootOptions::default()
             },
         )
@@ -3872,6 +3889,19 @@ mod tests {
             state.storage_quota_refusal("sake"),
             Some((expected, 1)),
             "used must be the exact five-lane sum"
+        );
+
+        let row = state
+            .gauge_snapshot()
+            .per_context
+            .into_iter()
+            .find(|row| row.name == "sake")
+            .expect("per-context rows are on");
+        assert_eq!(
+            row.disk_total_bytes(),
+            expected,
+            "the gauge row's independently-summed five-lane total must \
+             agree with the quota gate's"
         );
 
         let _ = fs::remove_dir_all(dir);
@@ -4214,11 +4244,12 @@ mod tests {
         }
         let expected: usize = terms.iter().map(|&(_, bytes)| bytes).sum();
 
-        // 64 consecutive calls cross the reconciliation beat exactly
-        // once, whatever phase the op counter is in — the sweep on
-        // that beat stores the measured total, and the off-beat calls
-        // after it leave the stored value alone.
-        for _ in 0..64 {
+        // BUDGET_SWEEP_PERIOD consecutive calls cross the
+        // reconciliation beat exactly once, whatever phase the op
+        // counter is in — the sweep on that beat stores the measured
+        // total, and the off-beat calls after it leave the stored
+        // value alone.
+        for _ in 0..BUDGET_SWEEP_PERIOD {
             state.enforce_budget("sake");
         }
         assert_eq!(
@@ -4279,9 +4310,21 @@ mod tests {
     fn documented_defaults_and_helpers_hold_their_values() {
         assert_eq!(DEFAULT_WAL_MAX_BYTES, 256 * 1024 * 1024);
         assert_eq!(DEFAULT_PASSAGES_WAL_MAX_BYTES, 1024 * 1024 * 1024);
-        // No test in this binary sets TAGURU_CACHE_BYTES, so from_env
-        // answers the documented 512 MiB default.
-        assert_eq!(BootConfig::from_env().cache_bytes, 512 * 1024 * 1024);
+        assert_eq!(DEFAULT_CACHE_BYTES, 512 * 1024 * 1024);
+        // TAGURU_CACHE_BYTES is a real deployment knob a developer's
+        // shell (or CI) might already have set — scope it out for this
+        // one assertion rather than assume it's absent, then restore
+        // whatever was there.
+        let cache_bytes_var = std::env::var("TAGURU_CACHE_BYTES").ok();
+        unsafe { std::env::remove_var("TAGURU_CACHE_BYTES") };
+        assert_eq!(BootConfig::from_env().cache_bytes, DEFAULT_CACHE_BYTES);
+        if let Some(value) = cache_bytes_var {
+            unsafe { std::env::set_var("TAGURU_CACHE_BYTES", value) };
+        }
+        assert_eq!(BUDGET_SWEEP_PERIOD, 64);
+        assert_eq!(ContextStats::TOP_CONCEPTS, 10);
+        assert_eq!(ContextStats::LABEL_SAMPLE, 50);
+        assert_eq!(CueCache::CAP, 1024);
         assert!(
             unix_now() > 1_700_000_000,
             "the epoch clock must answer real seconds"
