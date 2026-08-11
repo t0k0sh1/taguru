@@ -592,11 +592,12 @@ impl AppState {
     /// used) is never evicted, so a single oversized context cannot
     /// thrash. Dirty contexts are persisted before eviction; if that
     /// save fails they stay resident rather than losing writes. When
-    /// `except` alone is bigger than the whole budget — or its own
-    /// save keeps failing — eviction runs out of candidates before the
-    /// estimate ever fits: the sweep marks itself saturated for that
-    /// `except` (see the gate comment below) rather than spinning, and
-    /// a later call with a different `except` still evicts promptly.
+    /// `except` alone is bigger than the whole budget — or an eligible
+    /// dirty candidate's save keeps failing and it stays resident —
+    /// eviction runs out of candidates before the estimate ever fits:
+    /// the sweep marks itself saturated for that `except` (see the gate
+    /// comment below) rather than spinning, and a later call with a
+    /// different `except` still evicts promptly.
     pub(crate) fn enforce_budget(&self, except: &str) {
         // Cheap gate in front of the O(contexts) sweep below, off the
         // every-64th forced-sweep beat: skip it when EITHER the atomic
