@@ -276,15 +276,71 @@ mod tests {
     use crate::registry::{AppState, ContextMeta};
     use taguru::deadline::Deadline;
 
+    #[test]
+    fn parallel_map_on_empty_input_returns_empty_without_spawning() {
+        let out: Vec<i32> = parallel_map(Vec::<i32>::new(), 4, |item| item * 2);
+        assert!(out.is_empty());
+    }
+
+    /// `workers = 0` must not mean "no work happens" — the `.max(1)`
+    /// clamp (line ~26) guarantees at least one worker runs the queue
+    /// to completion.
+    #[test]
+    fn parallel_map_with_zero_workers_still_processes_everything() {
+        let items: Vec<i32> = (0..20).collect();
+        let mut out = parallel_map(items, 0, |item| item * 2);
+        out.sort_unstable();
+        let expected: Vec<i32> = (0..20).map(|item| item * 2).collect();
+        assert_eq!(out, expected);
+    }
+
+    /// `workers` exceeding the item count must clamp to the item count
+    /// (line ~26) rather than spawning idle threads that never claim
+    /// anything — a correctness-neutral case in principle, but worth
+    /// pinning since nothing else in the repo drives this ratio.
+    #[test]
+    fn parallel_map_with_more_workers_than_items_processes_everything_once() {
+        let items: Vec<i32> = (0..3).collect();
+        let mut out = parallel_map(items, 50, |item| item + 1);
+        out.sort_unstable();
+        assert_eq!(out, vec![1, 2, 3]);
+    }
+
+    /// `parallel_map` explicitly does not preserve input order (doc
+    /// `~15-17`) — callers that need it sort afterward. What it must
+    /// preserve is the multiset: every item processed exactly once, no
+    /// duplicates or drops from a worker's local `Vec` failing to merge.
+    #[test]
+    fn parallel_map_merges_every_worker_with_no_loss_or_duplication() {
+        let items: Vec<i32> = (0..200).collect();
+        let mut out = parallel_map(items, 8, |item| item);
+        out.sort_unstable();
+        let expected: Vec<i32> = (0..200).collect();
+        assert_eq!(
+            out, expected,
+            "the merged result must be exactly the input multiset"
+        );
+    }
+
     /// Pins down the early-stop half of `dispatch_chunks_concurrently`'s
-    /// contract on the schedule where it bites: when the failure is
-    /// recorded PROMPTLY (here the failing chunk returns instantly while
-    /// every success sleeps), no worker claims a new index past it once
-    /// the record lands, so only the `workers` chunks already in flight
-    /// at that moment can spill past the failure. A failure slow to
-    /// surface would let the other workers run far ahead first — which is
-    /// why callers fold on the guaranteed prefix (asserted below), never
-    /// on a count of what landed past the failure.
+    /// contract: no matter how many chunks past the failure land (that
+    /// count is explicitly NOT bounded by `workers`, per the doc on
+    /// `dispatch_chunks_concurrently` above), every index at or below
+    /// the true minimum failing index is guaranteed a `Some` slot.
+    ///
+    /// Deliberately asserts nothing about how many chunks landed past
+    /// the failure, nor how many were claimed overall — both depend on
+    /// how promptly the failing worker's `fetch_min` lands relative to
+    /// the other workers' claims, a scheduler timing race, not a
+    /// contract this function makes (see the doc above, `~66-69`). An
+    /// earlier version of this test asserted `past_failure <= WORKERS`,
+    /// and a later revision asserted `called.len() < chunks.len()` —
+    /// both flake under the same race: nothing prevents a preemption
+    /// between `calls.lock().push(index)` and the `first_failure.fetch_min`
+    /// call from letting the other workers claim and finish every
+    /// remaining chunk first. See
+    /// `dispatch_chunks_concurrently_workers_1_stops_at_the_failure`
+    /// below for a deterministic (non-flaky) bound on spillover.
     #[test]
     fn dispatch_chunks_concurrently_bounds_spillover_past_a_promptly_recorded_failure() {
         use std::time::Duration;
@@ -292,36 +348,15 @@ mod tests {
         const FAILING_INDEX: usize = 20;
         const WORKERS: usize = 4;
         let chunks: Vec<usize> = (0..50).collect();
-        let calls: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(Vec::new()));
 
         let outcomes = dispatch_chunks_concurrently(&chunks, WORKERS, |&index| {
-            calls.lock().push(index);
             if index == FAILING_INDEX {
                 return Err("boom".to_string());
             }
-            // Slow enough that a chunk claimed after the failure lands
-            // would have ample time to observe it before finishing and
-            // going to claim another — if the gate were broken, this
-            // sleep is what would let the assertions below catch it.
             std::thread::sleep(Duration::from_millis(20));
             Ok(index)
         });
 
-        let called = calls.lock().clone();
-        assert!(
-            called.len() < chunks.len(),
-            "the gate must stop dispatch well short of all {} chunks; saw {called:?}",
-            chunks.len()
-        );
-        let past_failure = called
-            .iter()
-            .filter(|&&index| index > FAILING_INDEX)
-            .count();
-        assert!(
-            past_failure <= WORKERS,
-            "at most `workers` chunks can already be in flight when the failure \
-             lands; saw {past_failure} claimed past index {FAILING_INDEX}: {called:?}"
-        );
         for (index, outcome) in outcomes.iter().enumerate().take(FAILING_INDEX) {
             assert!(
                 matches!(outcome, Some(Ok(value)) if *value == index),
@@ -329,6 +364,40 @@ mod tests {
             );
         }
         assert!(matches!(&outcomes[FAILING_INDEX], Some(Err(message)) if message == "boom"));
+    }
+
+    /// Deterministic companion to the test above: with exactly one
+    /// worker, the single thread that claims the failing index is the
+    /// same thread that will next check `first_failure` before claiming
+    /// another — so the gate at `next.fetch_add`/`first_failure.load`
+    /// (lines ~88-90) is guaranteed to see its own just-recorded
+    /// failure with no scheduler race involved. This pins the exact
+    /// claimed set with no timing dependency at all.
+    #[test]
+    fn dispatch_chunks_concurrently_workers_1_stops_at_the_failure() {
+        const FAILING_INDEX: usize = 5;
+        let chunks: Vec<usize> = (0..10).collect();
+
+        let outcomes = dispatch_chunks_concurrently(&chunks, 1, |&index| {
+            if index == FAILING_INDEX {
+                return Err("boom".to_string());
+            }
+            Ok(index)
+        });
+
+        for (index, outcome) in outcomes.iter().enumerate().take(FAILING_INDEX) {
+            assert!(
+                matches!(outcome, Some(Ok(value)) if *value == index),
+                "index {index} below the failure must succeed"
+            );
+        }
+        assert!(matches!(&outcomes[FAILING_INDEX], Some(Err(message)) if message == "boom"));
+        for outcome in &outcomes[FAILING_INDEX + 1..] {
+            assert!(
+                outcome.is_none(),
+                "a single worker must never claim past its own recorded failure: {outcomes:?}"
+            );
+        }
     }
 
     /// Issue #563 item 4: the original `Semaphore` had no deadline at
@@ -449,11 +518,120 @@ mod tests {
         );
     }
 
+    /// `Semaphore::new(0)`'s doc (`~149-156`) claims it "just always
+    /// times out, no hang" rather than blocking forever. Pin that down
+    /// directly: a bounded deadline against a zero-permit semaphore
+    /// must return within the deadline, report no permit, and leave no
+    /// ticket behind.
+    #[test]
+    fn acquire_until_on_a_zero_permit_semaphore_always_times_out() {
+        use std::time::Instant;
+
+        let sem = Semaphore::new(0);
+        let started = Instant::now();
+        let acquisition = sem.acquire_until(Deadline::after(Duration::from_millis(100)));
+
+        assert!(
+            acquisition.permit.is_none(),
+            "a zero-permit semaphore must never grant one"
+        );
+        assert!(acquisition.queued, "it must have entered the wait queue");
+        assert!(
+            started.elapsed() >= Duration::from_millis(95),
+            "must wait out close to the deadline, not return immediately"
+        );
+        assert_eq!(
+            sem.waiting(),
+            0,
+            "the timed-out waiter must not linger in the queue"
+        );
+    }
+
+    /// The timeout path's queue removal (`retain`, not `pop_front`,
+    /// `~209`) exists for exactly this shape: a waiter behind the one
+    /// that times out. `acquire_until_times_out_when_no_permit_frees_up`
+    /// above only ever has a single waiter, so it never proves `retain`
+    /// finds a non-front ticket — nor that `notify_all` (`~227`) wakes
+    /// the waiter still behind it so it does not sit out its own poll
+    /// interval unnecessarily. Here two waiters queue behind one held
+    /// permit; the SECOND (non-front) waiter times out early, and the
+    /// first (still ahead of it, unbounded) must still be granted once
+    /// the permit is released — the shape that actually needs `retain`
+    /// (remove by ticket value): the front waiter would be removable
+    /// by `pop_front` alone, which would not distinguish a mutated
+    /// `retain` from the real thing.
+    #[test]
+    fn acquire_until_timeout_of_a_non_front_waiter_does_not_wedge_the_queue() {
+        use std::thread;
+        use std::time::Instant;
+
+        fn wait_until(mut ready: impl FnMut() -> bool, what: &str) {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !ready() {
+                assert!(Instant::now() < deadline, "timed out waiting for {what}");
+                thread::sleep(Duration::from_millis(2));
+            }
+        }
+
+        let sem = Arc::new(Semaphore::new(1));
+        let held = sem
+            .acquire_until(Deadline::unbounded())
+            .permit
+            .expect("the only permit is free at the start");
+
+        // First queued — the true front of the queue: unbounded
+        // deadline, so it never times out on its own and stays parked
+        // ahead of the second waiter for the whole test.
+        let front_sem = Arc::clone(&sem);
+        let front = thread::spawn(move || {
+            front_sem
+                .acquire_until(Deadline::unbounded())
+                .permit
+                .is_some()
+        });
+        wait_until(|| sem.waiting() == 1, "the front waiter to join the queue");
+
+        // Second queued — NOT the front, since the first waiter is
+        // already ahead of it: short deadline, so this is the one
+        // that times out.
+        let back_sem = Arc::clone(&sem);
+        let back = thread::spawn(move || {
+            back_sem
+                .acquire_until(Deadline::after(Duration::from_millis(100)))
+                .permit
+                .is_none()
+        });
+        wait_until(|| sem.waiting() == 2, "both waiters to join the queue");
+
+        let back_timed_out = back.join().unwrap();
+        assert!(back_timed_out, "the non-front waiter must time out");
+        assert_eq!(
+            sem.waiting(),
+            1,
+            "only the front waiter may remain queued after the other's timeout"
+        );
+
+        let started = Instant::now();
+        drop(held);
+        let front_granted = front.join().unwrap();
+        assert!(
+            front_granted,
+            "the front waiter must still be granted the permit — the \
+             non-front waiter's timeout must not have wedged the queue \
+             (e.g. by evicting the wrong ticket)"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "the front waiter must be woken promptly by notify_all, not \
+             left waiting out its own poll interval"
+        );
+    }
+
     #[test]
     fn concurrent_reads_of_one_hot_context_do_not_serialize() {
         use std::sync::atomic::AtomicUsize;
         use std::thread;
-        use std::time::Duration;
+        use std::time::{Duration, Instant};
 
         let dir = scratch_dir("read-parallel");
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
@@ -482,9 +660,17 @@ mod tests {
                     .read_context("sake", |context| {
                         let now = in_read.fetch_add(1, Ordering::SeqCst) + 1;
                         peak.fetch_max(now, Ordering::SeqCst);
-                        // Long enough that the two readers MUST overlap
-                        // unless one lock is excluding the other.
-                        thread::sleep(Duration::from_millis(150));
+                        // Wait for the other reader to show up (or give
+                        // up after a generous deadline) instead of a
+                        // fixed sleep — a fixed sleep races the second
+                        // thread's spawn under load: if it hasn't
+                        // entered `read_context` yet when the first
+                        // exits, `peak` stays at 1 even though nothing
+                        // is actually serializing the two reads.
+                        let deadline = Instant::now() + Duration::from_secs(5);
+                        while in_read.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
+                            thread::sleep(Duration::from_millis(5));
+                        }
                         in_read.fetch_sub(1, Ordering::SeqCst);
                         context.association_count()
                     })
