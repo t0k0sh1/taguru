@@ -447,31 +447,29 @@ impl AppState {
                 }
                 staged = Some((path, len_before));
             }
-            let Slot::Hot(context) = &mut inner.slot else {
-                unreachable!("ensure_hot leaves the slot hot");
+            let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                operate(hot_context_mut(&mut inner))
+            })) {
+                Ok(result) => result,
+                Err(payload) => {
+                    // The WAL append above already landed, but `operate`
+                    // panicked before the in-memory apply it durably
+                    // promises could finish, and before `dirty` below
+                    // could cover it. Left Hot, this half-mutated
+                    // Context would keep serving reads and accepting
+                    // further writes forever — parking_lot doesn't
+                    // poison. Forcing the slot back to Cold makes the
+                    // next access rebuild Hot from the image plus a
+                    // full WAL replay instead, which reapplies the very
+                    // op that just panicked through the same validated
+                    // path replay always uses. recount_entry reflects
+                    // the entry's now-zero resident footprint right
+                    // away, matching the promotion it counted above.
+                    inner.slot = Slot::Cold;
+                    self.recount_entry(&mut inner);
+                    std::panic::resume_unwind(payload);
+                }
             };
-            let result =
-                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operate(context))) {
-                    Ok(result) => result,
-                    Err(payload) => {
-                        // The WAL append above already landed, but `operate`
-                        // panicked before the in-memory apply it durably
-                        // promises could finish, and before `dirty` below
-                        // could cover it. Left Hot, this half-mutated
-                        // Context would keep serving reads and accepting
-                        // further writes forever — parking_lot doesn't
-                        // poison. Forcing the slot back to Cold makes the
-                        // next access rebuild Hot from the image plus a
-                        // full WAL replay instead, which reapplies the very
-                        // op that just panicked through the same validated
-                        // path replay always uses. recount_entry reflects
-                        // the entry's now-zero resident footprint right
-                        // away, matching the promotion it counted above.
-                        inner.slot = Slot::Cold;
-                        self.recount_entry(&mut inner);
-                        std::panic::resume_unwind(payload);
-                    }
-                };
             entry.dirty.store(true, Ordering::Relaxed);
             self.recount_entry(&mut inner);
             // The graph revision counts what APPLIED, in both WAL

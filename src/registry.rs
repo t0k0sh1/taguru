@@ -2767,10 +2767,7 @@ impl AppState {
             )
             .map_err(AccessError::Load)?;
             self.recount_entry(&mut inner);
-            let Slot::Hot(context) = &inner.slot else {
-                unreachable!("ensure_hot leaves the slot hot");
-            };
-            Ok(operate(context))
+            Ok(operate(hot_context(&inner)))
         })?;
         self.touch(&entry);
         self.enforce_budget(name);
@@ -2818,10 +2815,7 @@ impl AppState {
                 self.0.hydrator.as_deref(),
             )
             .map_err(AccessError::Load)?;
-            let Slot::Hot(context) = &mut inner.slot else {
-                unreachable!("ensure_hot leaves the slot hot");
-            };
-            let result = operate(context);
+            let result = operate(hot_context_mut(&mut inner));
             entry.dirty.store(true, Ordering::Relaxed);
             self.recount_entry(&mut inner);
             result
@@ -3114,6 +3108,34 @@ fn ensure_hot(
         .map(|meta| meta.len())
         .unwrap_or(0);
     Ok(())
+}
+
+/// The `Context` behind a slot [`ensure_hot`] just returned `Ok` for.
+/// Panicking rather than returning an error is the point: `ensure_hot`
+/// has exactly two `Ok` returns — the `matches!(inner.slot,
+/// Slot::Hot(_))` fast path at its top, and falling off its end after
+/// `inner.slot = Slot::Hot(...)` — and every caller holds the entry's
+/// exclusive lock across both the `ensure_hot` call and this read, so
+/// nothing else can demote the slot in between. A `Cold` or `Deleted`
+/// slot here means that invariant has been broken inside this module
+/// — a bug to surface loudly at the offending request, not a runtime
+/// condition six call sites would each have to handle. Every
+/// `ensure_hot` caller reads its result through this pair (or
+/// [`hot_context_mut`]) so they cannot drift on the wording or on
+/// which lock they hold.
+fn hot_context(inner: &EntryInner) -> &Context {
+    let Slot::Hot(context) = &inner.slot else {
+        unreachable!("ensure_hot leaves the slot hot");
+    };
+    context
+}
+
+/// [`hot_context`], mutably — same invariant, same justification.
+fn hot_context_mut(inner: &mut EntryInner) -> &mut Context {
+    let Slot::Hot(context) = &mut inner.slot else {
+        unreachable!("ensure_hot leaves the slot hot");
+    };
+    context
 }
 
 #[cfg(test)]

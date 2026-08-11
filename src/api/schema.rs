@@ -376,12 +376,10 @@ fn schema_audit(
             // alias created before this context ever had a schema could
             // resolve to the reserved label without ever having been
             // caught by `add_label_alias`'s or a batch's own guard.
-            let reserved_alias_conflicts: BTreeMap<String, String> = context
-                .label_aliases()
-                .into_iter()
-                .filter(|(_, canonical)| *canonical == SCHEMA_TYPE_LABEL)
-                .map(|(alias, canonical)| (alias.to_string(), canonical.to_string()))
-                .collect();
+            let reserved_alias_conflicts: BTreeMap<String, String> =
+                schema::reserved_aliases(context.label_aliases())
+                    .map(|alias| (alias.to_string(), SCHEMA_TYPE_LABEL.to_string()))
+                    .collect();
 
             // `SchemaEnv::build` runs its own live `query_any` sweep
             // (scoped to the concepts `fact_ops` mentions) on top of the

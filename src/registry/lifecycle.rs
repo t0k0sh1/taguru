@@ -956,10 +956,13 @@ impl AppState {
         labels: &BTreeMap<String, String>,
     ) -> Option<String> {
         self.hidden_label(name)?;
-        labels
-            .iter()
-            .find(|(_, canonical)| canonical.as_str() == schema::SCHEMA_TYPE_LABEL)
-            .map(|(alias, _)| alias.clone())
+        schema::reserved_aliases(
+            labels
+                .iter()
+                .map(|(alias, canonical)| (alias.as_str(), canonical.as_str())),
+        )
+        .next()
+        .map(str::to_string)
     }
 
     /// `PUT /contexts/{name}/schema` (#380): installs `installed` as
@@ -1013,13 +1016,7 @@ impl AppState {
             // is the one place a violating alias predating them could
             // still slip through, and it stays on every `PUT` (not only
             // the off-to-installed transition) for exactly that reason.
-            let Slot::Hot(context) = &inner.slot else {
-                unreachable!("ensure_hot leaves the slot hot");
-            };
-            if let Some((alias, _)) = context
-                .label_aliases()
-                .into_iter()
-                .find(|(_, canonical)| *canonical == schema::SCHEMA_TYPE_LABEL)
+            if let Some(alias) = schema::reserved_aliases(hot_context(inner).label_aliases()).next()
             {
                 return Some(Err(PutSchemaError::ReservedAlias(alias.to_string())));
             }

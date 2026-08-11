@@ -152,14 +152,11 @@ impl AppState {
             )
             .map_err(AccessError::Load)?;
             self.recount_entry(&mut inner);
-            let Slot::Hot(context) = &inner.slot else {
-                unreachable!("ensure_hot leaves the slot hot");
-            };
             self.export_snapshot(
                 &entry,
                 &stem,
                 &inner.meta,
-                context,
+                hot_context(&inner),
                 inner.schema.as_deref(),
                 deadline,
             )
@@ -236,9 +233,7 @@ impl AppState {
                 self.0.hydrator.as_deref(),
             )
             .map_err(AccessError::Load)?;
-            let Slot::Hot(context) = &inner.slot else {
-                unreachable!("ensure_hot leaves the slot hot");
-            };
+            let context = hot_context(&inner);
             let bytes_before = context.footprint();
             let (mut fresh, stats) =
                 context

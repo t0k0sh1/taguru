@@ -74,6 +74,27 @@ pub(crate) const SCHEMA_VERSION: u64 = 1;
 /// label is inert in a schema-free context).
 pub(crate) const SCHEMA_TYPE_LABEL: &str = "schema:type";
 
+/// Every alias in `aliases` that resolves to [`SCHEMA_TYPE_LABEL`] —
+/// ADR 0009 §6.3 guard 2's single test, stated once for all four
+/// entrances that apply it: `PUT /schema`'s migration-boundary check
+/// and the schema audit scan the LIVE table (`Context::label_aliases`);
+/// `AppState::reserved_alias_conflict` and
+/// [`crate::schema::check::schema_issues`] scan a caller-supplied map
+/// of DECLARED labels instead (a batch's own inline aliases, not yet
+/// applied to any context). Lazy and borrowing so a caller that only
+/// needs the first hit (`.next()`) does not pay to filter the rest,
+/// and so no caller has to pick an owning collection shape just to
+/// hand it to this function.
+pub(crate) fn reserved_aliases<'a, I>(aliases: I) -> impl Iterator<Item = &'a str>
+where
+    I: IntoIterator<Item = (&'a str, &'a str)>,
+{
+    aliases
+        .into_iter()
+        .filter(|(_, canonical)| *canonical == SCHEMA_TYPE_LABEL)
+        .map(|(alias, _)| alias)
+}
+
 /// Ceiling on the number of declared types — a schema is meant to be a
 /// small, hand-authored vocabulary, not an import target; this bounds
 /// `PUT`-time validation work and every `GET`'s response size.

@@ -476,12 +476,13 @@ impl IssuePath<'_> {
 /// `ops` slice — [`SchemaEnv`]'s maps only cover the spellings those
 /// ops mention.
 pub(crate) fn schema_issues(env: &SchemaEnv, ops: &[AssocOp], path: IssuePath<'_>) -> SchemaCheck {
-    let reserved = env
-        .declared_labels
-        .iter()
-        .filter(|(_, canonical)| canonical.as_str() == SCHEMA_TYPE_LABEL)
-        .map(|(alias, _)| reserved_alias_issue(&path, alias))
-        .collect();
+    let reserved = crate::schema::reserved_aliases(
+        env.declared_labels
+            .iter()
+            .map(|(alias, canonical)| (alias.as_str(), canonical.as_str())),
+    )
+    .map(|alias| reserved_alias_issue(&path, alias))
+    .collect();
 
     let document = env.schema.document();
     if document.mode == SchemaMode::Off {
