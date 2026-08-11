@@ -2252,7 +2252,7 @@ impl AppState {
         {
             let failure = entry.passages_load_failure.lock();
             if let Some((failed_at, refusal)) = &*failure
-                && failed_at.elapsed() < LOAD_FAILURE_RETRY
+                && still_quarantined(failed_at)
             {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -2795,6 +2795,21 @@ fn retire_rename_marker(marker: &Path, persisted: bool, from: &str, to: &str, wh
 /// restoring the files heals the context without a restart.
 const LOAD_FAILURE_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Whether a remembered load failure (graph or passages) is still
+/// within its quarantine window. Shared by `ensure_hot` and
+/// `entry_passages` so the two can never drift on the boundary.
+///
+/// The `<` vs `<=` edge is not a gap a behavioral test can close: with
+/// a real, unmocked clock, `elapsed()` at the call is always strictly
+/// on one side of `LOAD_FAILURE_RETRY` or the other — hitting the
+/// exact instant they're equal would take zero wall-clock time between
+/// recording (or a test's `age_load_failures` aging) the failure and
+/// checking it, which no code path here can produce.
+#[mutants::skip]
+fn still_quarantined(failed_at: &std::time::Instant) -> bool {
+    failed_at.elapsed() < LOAD_FAILURE_RETRY
+}
+
 /// Loads the image behind a cold slot and replays whatever the WAL
 /// holds above the image's watermark; hot slots pass through. On
 /// success the slot is hot, the stats are fresh, and `wal_seq`
@@ -2824,7 +2839,7 @@ fn ensure_hot(
         return Err(format!("context '{name}' is deleted"));
     }
     if let Some((failed_at, refusal)) = &inner.load_failure
-        && failed_at.elapsed() < LOAD_FAILURE_RETRY
+        && still_quarantined(failed_at)
     {
         return Err(format!(
             "{refusal} (quarantined after the failed load; the disk is retried at \

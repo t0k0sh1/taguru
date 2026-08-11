@@ -2,7 +2,7 @@ use super::*;
 
 #[cfg(test)]
 mod tests {
-    use super::test_support::scratch_dir;
+    use super::test_support::{assoc_op, scratch_dir};
     use super::*;
     use crate::context_proptest::{config as proptest_config, wal_op_strategy};
     use proptest::prelude::*;
@@ -428,6 +428,198 @@ mod tests {
             !entry.bm25_dirty.load(Ordering::Relaxed),
             "an empty record with nothing live to tombstone either must not mark the \
              sidecar dirty"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// `bump_config_revision`'s replica early-return has no test — its
+    /// only callers (`embeddings.rs`'s gloss and passage-vector
+    /// refreshes) never run against a replica boot in the embedding
+    /// test suites. Called directly, since it is a private method in
+    /// this same module.
+    #[test]
+    fn bump_config_revision_on_a_replica_bumps_memory_but_skips_the_sidecar() {
+        let dir = scratch_dir("bump-config-revision-replica");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state.flush_dirty();
+        }
+        let before = fs::read(meta_path(&dir, &file_stem("sake"))).unwrap();
+
+        let state = AppState::boot_with(
+            dir.clone(),
+            usize::MAX,
+            None,
+            BootOptions {
+                replica: Some(std::sync::Arc::new(crate::replica::ReplicaInfo::new(None))),
+                ..BootOptions::default()
+            },
+        )
+        .unwrap();
+        let entry = state.lookup("sake").unwrap();
+        let before_revision = entry.inner.read().config_revision;
+
+        state.bump_config_revision("sake", &entry);
+
+        let after_revision = entry.inner.read().config_revision;
+        assert_eq!(
+            after_revision,
+            before_revision + 1,
+            "memory still bumps on a replica"
+        );
+        let after_bytes = fs::read(meta_path(&dir, &file_stem("sake"))).unwrap();
+        assert_eq!(
+            before, after_bytes,
+            "a replica must never persist the sidecar for this bump"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// `bump_config_revision`'s `write_meta` failure warn arm has no
+    /// test either — the in-memory bump must land regardless of
+    /// whether the sidecar write succeeds (the next flush's own
+    /// `write_meta` call catches it up).
+    #[test]
+    fn bump_config_revision_bumps_memory_even_when_the_sidecar_write_fails() {
+        let dir = scratch_dir("bump-config-revision-write-fail");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let entry = state.lookup("sake").unwrap();
+        let before_revision = entry.inner.read().config_revision;
+
+        fail_persistence_ops_after(0);
+        state.bump_config_revision("sake", &entry);
+        assert!(
+            !clear_persistence_fault(),
+            "sanity: the injected failure must fire on this call's write_meta"
+        );
+
+        let after_revision = entry.inner.read().config_revision;
+        assert_eq!(
+            after_revision,
+            before_revision + 1,
+            "the in-memory bump must land regardless of the sidecar outcome"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    fn valid_schema_document() -> schema::SchemaDocument {
+        schema::SchemaDocument {
+            schema: schema::SCHEMA_VERSION,
+            mode: schema::SchemaMode::Strict,
+            closed_labels: false,
+            types: BTreeMap::from([("Brewery".to_string(), schema::TypeDef::default())]),
+            relations: BTreeMap::new(),
+        }
+    }
+
+    /// `ensure_hot`'s own copy of ADR 0009 §5.2's schema check
+    /// (`registry.rs:2858-2866`) has no failure test — the one test
+    /// that reaches this call at all
+    /// (`schema_of_lazily_resolves_after_a_rename_carried_the_digest_but_not_the_schema`
+    /// in `lifecycle.rs`) only exercises the success arm. Reuses the
+    /// same fixture (a rename carries the digest but not the schema,
+    /// so the entry's own `ensure_hot` call is the only place this
+    /// check can run) and corrupts the schema file at the new stem
+    /// instead of the image, so THIS check — not the later image
+    /// load — is what fails.
+    #[test]
+    fn ensure_hot_refuses_to_load_when_its_own_schema_check_fails() {
+        let dir = scratch_dir("ensure-hot-schema-check-fails");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state.create("sake", ContextMeta::default()).unwrap();
+        let installed = schema::install(valid_schema_document()).unwrap();
+        state.put_schema("sake", installed).unwrap().unwrap();
+
+        state.rename_context("sake", "shochu").unwrap();
+        assert!(
+            state
+                .lookup("shochu")
+                .unwrap()
+                .inner
+                .read()
+                .schema
+                .is_none(),
+            "sanity: the freshly registered entry must not resolve the schema up front"
+        );
+
+        fs::write(schema_path(&dir, &file_stem("shochu")), b"not json").unwrap();
+
+        let error = state
+            .read_context("shochu", |context| context.association_count())
+            .unwrap_err();
+        match error {
+            AccessError::Load(message) => {
+                assert!(
+                    message.contains("digest does not match"),
+                    "must fail on the schema digest check specifically, not some \
+                     other load step: {message}"
+                );
+            }
+            other => panic!("expected a Load error, got {other:?}"),
+        }
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// `ContextStats::dead_ratio`'s doc claims a hot context (recomputed
+    /// live via `Context::dead_ratio`) and a cold one (this cached
+    /// snapshot) "can never disagree about it" — pinned by the shared
+    /// formula (`documented_defaults_and_helpers_hold_their_values` in
+    /// `engine.rs`) and exercised end-to-end by
+    /// `run_maintenance_compaction_selects_a_cold_candidate_from_its_saved_stats`,
+    /// but nothing captures the SAME context's hot value and its own
+    /// cold value side by side to prove the claimed agreement directly.
+    #[test]
+    fn dead_ratio_agrees_between_a_hot_context_and_its_own_cold_snapshot() {
+        use taguru::deadline::Deadline;
+
+        let dir = scratch_dir("dead-ratio-hot-cold-agreement");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .add_associations(
+                "sake",
+                vec![
+                    assoc_op("蔵", "廃", "旧", 1.0, Some("x.md")),
+                    assoc_op("蔵", "銘柄", "青嶺", 1.0, Some("x.md")),
+                ],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        state.retract_association("sake", "蔵", "廃", "旧").unwrap();
+
+        let hot_ratio = state
+            .read_context("sake", |context| context.dead_ratio())
+            .map_err(|_| "read")
+            .unwrap();
+        assert!(
+            hot_ratio > 0.0,
+            "sanity: retracting one of two edges must leave real dead weight"
+        );
+
+        let entry = state.lookup("sake").unwrap();
+        assert!(state.evict_entry("sake", &entry));
+        let cold_ratio = entry.inner.read().stats.dead_ratio();
+
+        assert_eq!(
+            hot_ratio, cold_ratio,
+            "a hot context's live dead_ratio and its own cold cached \
+             snapshot must agree exactly"
         );
 
         let _ = fs::remove_dir_all(dir);
