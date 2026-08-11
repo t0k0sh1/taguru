@@ -168,21 +168,35 @@ pub(super) fn replay_wal_guarded(
                 total,
                 kind: op.kind(),
             });
-            if replay_op(context, op) {
-                capacity_losses.set(capacity_losses.get() + 1);
-            }
+            let is_capacity_loss = replay_op(context, op);
+            capacity_losses.set(tally_capacity_loss(capacity_losses.get(), is_capacity_loss));
         }
         Ok(top)
     }))
     .unwrap_or_else(|payload| Err(io::Error::other(replay_panic_line(&*payload, stage.get()))));
     let losses = capacity_losses.get();
-    if losses > 0 {
+    if should_report_capacity_losses(losses) {
         tracing::error!(
             losses,
             "WAL replay permanently lost {losses} acknowledged write(s) to capacity refusals"
         );
     }
     result.map_err(|error| error.to_string())
+}
+
+/// [`replay_wal_guarded`]'s running capacity-loss count, one op at a
+/// time — split out as a pure function so the tally itself is
+/// unit-testable without ever having to drive a real `Context` to its
+/// (multi-billion-record) capacity ceiling just to make `replay_op`
+/// return `true` once.
+fn tally_capacity_loss(losses: usize, is_capacity_loss: bool) -> usize {
+    if is_capacity_loss { losses + 1 } else { losses }
+}
+
+/// [`replay_wal_guarded`]'s report-or-not decision, split out for the
+/// same testability reason as [`tally_capacity_loss`].
+fn should_report_capacity_losses(losses: usize) -> bool {
+    losses > 0
 }
 
 /// Applies one op to the graph; `Err` carries the human message each
@@ -340,5 +354,25 @@ mod tests {
         assert!(line.contains("permanently lost"), "{line}");
         assert!(line.contains("AliasConcept"), "{line}");
         assert!(line.contains("alias table full"), "{line}");
+    }
+
+    /// The running tally moves only on a capacity loss — a benign
+    /// rejection (`is_capacity_loss: false`) must never nudge it, and
+    /// consecutive losses must accumulate rather than reset.
+    #[test]
+    fn tally_capacity_loss_counts_only_true_flags_and_accumulates() {
+        assert_eq!(tally_capacity_loss(0, false), 0);
+        assert_eq!(tally_capacity_loss(0, true), 1);
+        assert_eq!(tally_capacity_loss(5, true), 6);
+        assert_eq!(tally_capacity_loss(5, false), 5);
+    }
+
+    /// The report threshold is exactly zero: no losses means no
+    /// summary line, any losses at all means one.
+    #[test]
+    fn should_report_capacity_losses_is_false_only_at_zero() {
+        assert!(!should_report_capacity_losses(0));
+        assert!(should_report_capacity_losses(1));
+        assert!(should_report_capacity_losses(5));
     }
 }
