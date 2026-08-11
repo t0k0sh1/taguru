@@ -159,9 +159,10 @@ impl AppState {
         // configuration every semantic sweep is the exact scan, and an
         // operator wondering why the ANN index never engages should
         // not have to read the source to learn the relationship.
-        if options.embed_passages
-            && options.passage_vector_limit < crate::embedding::PASSAGE_ANN_THRESHOLD
-        {
+        if passage_vector_limit_leaves_ann_dormant(
+            options.embed_passages,
+            options.passage_vector_limit,
+        ) {
             tracing::info!(
                 limit = options.passage_vector_limit,
                 threshold = crate::embedding::PASSAGE_ANN_THRESHOLD,
@@ -314,6 +315,20 @@ fn remove_persisted_file_quietly(path: &Path, what: &str) {
         // `rename_context`'s `Stuck` arm in `lifecycle.rs`.
         tracing::warn!(path = %path.display(), removal_error = %error, "{what}");
     }
+}
+
+/// `boot_with`'s gate for the passage-vector ANN heads-up log line —
+/// pulled out on its own so the condition can be `#[mutants::skip]`ped
+/// without also skipping mutation coverage on the rest of `boot_with`.
+/// The only thing this condition controls is whether one `info!` fires;
+/// a mutated `&&`/`<` here changes nothing a test can observe short of
+/// capturing log output, which nothing else in this codebase does.
+#[mutants::skip]
+fn passage_vector_limit_leaves_ann_dormant(
+    embed_passages: bool,
+    passage_vector_limit: usize,
+) -> bool {
+    embed_passages && passage_vector_limit < crate::embedding::PASSAGE_ANN_THRESHOLD
 }
 
 /// One boot-time pass over the data directory: crash leftovers of
@@ -855,6 +870,187 @@ mod tests {
         );
         drop(state);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Every existing boot-resume test plants exactly one marker kind
+    /// (`renaming_marker_path` OR `group_renaming_marker_path`), so
+    /// neither exercises the interleaving between the two resume loops
+    /// in `boot_with` (`resumed_context_renames` runs before
+    /// `resumed_group_renames`, both before `reconcile_groups`). Here a
+    /// group is itself mid-rename AND names, as a member, a context
+    /// that is also mid-rename in the same crash — both must land in
+    /// one boot, with the group's `contexts` set carrying the
+    /// context's NEW name, not the stale one and not dropped as
+    /// dangling.
+    #[test]
+    fn a_context_rename_and_its_containing_group_s_rename_both_resume_in_one_boot() {
+        let dir = scratch_dir("interleaved-context-and-group-rename-resume");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .create_group(
+                    "liquor",
+                    String::new(),
+                    BTreeSet::from(["sake".to_string()]),
+                    BTreeSet::new(),
+                )
+                .unwrap();
+        }
+        // No manual file move for either: `scan_data_dir` and
+        // `groups::scan_groups` perform them once they see the
+        // markers, exactly as a real crash resume would.
+        fs::write(
+            renaming_marker_path(&dir, &file_stem("sake")),
+            serde_json::to_vec(&RenameMarker {
+                from: "sake".to_string(),
+                to: "shochu".to_string(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            groups::group_renaming_marker_path(&dir, &file_stem("liquor")),
+            serde_json::to_vec(&RenameMarker {
+                from: "liquor".to_string(),
+                to: "spirits".to_string(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        assert!(state.directory_entry("sake").is_none());
+        assert!(state.directory_entry("shochu").is_some());
+        assert!(state.group("liquor").is_none());
+        let spirits = state
+            .group("spirits")
+            .expect("the renamed group must exist");
+        assert_eq!(
+            spirits.contexts,
+            BTreeSet::from(["shochu".to_string()]),
+            "the group's own rename and its member context's rename \
+             must both resolve within one boot, membership pointing at \
+             the context's new name"
+        );
+        assert!(!renaming_marker_path(&dir, &file_stem("sake")).exists());
+        assert!(!groups::group_renaming_marker_path(&dir, &file_stem("liquor")).exists());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// `reconcile_groups`'s `write_group` failure arm (warn-only: the
+    /// in-memory fix is correct, only the on-disk file stays stale
+    /// until the next successful group write) has no test — the two
+    /// existing boot-time faults (`a_resumed_renames_membership_rewrite_that_cannot_persist_keeps_the_marker`
+    /// and its group twin) each arm a SINGLE-shot injector on their own
+    /// membership rewrite earlier in the same boot, which consumes the
+    /// fault before `reconcile_groups` ever runs. Here the group needs
+    /// no rename at all — a plain dangling reference reconcile itself
+    /// must drop and persist — so the injector can be aimed squarely at
+    /// `reconcile_groups`'s own `write_group` call.
+    #[test]
+    fn reconcile_groups_keeps_the_dangling_reference_in_memory_when_its_write_fails() {
+        let dir = scratch_dir("reconcile-write-group-fault");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .create_group(
+                    "drinks",
+                    String::new(),
+                    BTreeSet::from(["sake".to_string()]),
+                    BTreeSet::new(),
+                )
+                .unwrap();
+        }
+        // A hand-edited-looking directory: the context is gone, but the
+        // group file still names it — exactly what reconcile exists to
+        // drop and persist.
+        fs::remove_file(dir.join("sake.ctx")).unwrap();
+        fs::remove_file(dir.join("sake.meta.json")).unwrap();
+
+        fail_persistence_ops_after(0);
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        assert!(
+            !clear_persistence_fault(),
+            "sanity: the injected failure must actually have fired \
+             during reconcile_groups's own write_group call"
+        );
+        assert_eq!(
+            state.group("drinks").unwrap().contexts,
+            BTreeSet::new(),
+            "memory must be reconciled even though the write failed"
+        );
+        let on_disk: groups::GroupRecord = serde_json::from_slice(
+            &fs::read(groups::group_path(&dir, &file_stem("drinks"))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            on_disk.contexts,
+            BTreeSet::from(["sake".to_string()]),
+            "the on-disk file stays stale until the next successful write"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// `preload_pinned`'s worker-pool path (`workers =
+    /// available_parallelism().min(pinned.len())`) is only exercised at
+    /// `workers == 1` by every other pinned test in the suite (each
+    /// boots with a single pinned context). Two pinned contexts push
+    /// `workers` to at least 2 whenever more than one core is
+    /// available, and a corrupt image on one of them exercises the
+    /// `Err` warn arm (`boot.rs:285-287`) alongside a healthy load on
+    /// the other — proving one worker's failure never blocks another's
+    /// success.
+    #[test]
+    fn preload_pinned_with_multiple_contexts_loads_the_healthy_one_despite_the_others_failure() {
+        let dir = scratch_dir("preload-pinned-multi-worker");
+        let pinned = ContextMeta {
+            pinned: true,
+            ..ContextMeta::default()
+        };
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", pinned.clone())
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .create("shochu", pinned)
+                .map_err(|_| "create")
+                .unwrap();
+        }
+        // Corrupt only "sake"'s image (flip the version byte, same
+        // technique `engine.rs`'s own load-failure tests use) so its
+        // preload fails while "shochu" stays healthy.
+        let image = image_path(&dir, &file_stem("sake"));
+        let mut bytes = fs::read(&image).unwrap();
+        assert!(bytes.len() > 8, "sanity: the version byte must exist");
+        bytes[8] = 0xFF;
+        fs::write(&image, bytes).unwrap();
+
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let loaded = loaded_map(&state);
+        assert_eq!(
+            loaded.get("shochu"),
+            Some(&true),
+            "the healthy pinned context must still preload despite a sibling worker's failure"
+        );
+        assert_eq!(
+            loaded.get("sake"),
+            Some(&false),
+            "the corrupt pinned context stays cold with a warning, not down the whole boot"
+        );
+
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

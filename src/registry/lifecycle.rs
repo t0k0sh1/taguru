@@ -1129,7 +1129,7 @@ fn rollback_meta(inner: &mut EntryInner, previous: ContextMeta) {
 mod tests {
     use super::*;
     use crate::registry::paths::RenameMarker;
-    use crate::registry::test_support::{assoc_op, scratch_dir};
+    use crate::registry::test_support::{assoc_op, loaded_map, scratch_dir};
 
     /// An empty context name is refused at the registry boundary — the
     /// last guard against a bare `.ctx` file that `scan_data_dir` (which
@@ -1572,6 +1572,97 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
+    /// `update_meta`'s `dice_floor`/`semantic_floor` clamps
+    /// (`floor.clamp(0.0, 1.0)`) have no test: every call site in the
+    /// suite already passes an in-range value, so the clamp never
+    /// actually clamps anything. It is also the ONLY guard on the PATCH
+    /// path — `api/contexts.rs`'s create handler clamps up front, but
+    /// its PATCH handler forwards `dice_floor`/`semantic_floor` raw.
+    #[test]
+    fn update_meta_clamps_out_of_range_floors_into_zero_to_one() {
+        let dir = scratch_dir("update-meta-floor-clamp");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+
+        state
+            .update_meta("sake", None, None, Some(2.5), Some(-1.0))
+            .unwrap()
+            .unwrap();
+
+        let entry = state.directory_entry("sake").unwrap();
+        assert_eq!(
+            entry.dice_floor,
+            Some(1.0),
+            "an over-range dice_floor must clamp to the ceiling"
+        );
+        assert_eq!(
+            entry.semantic_floor,
+            Some(0.0),
+            "an under-range semantic_floor must clamp to the floor"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// `update_meta`'s pinned-`ensure_hot`-failure rollback
+    /// (`rollback_meta` + `recount_entry`, then `Err`) has no test —
+    /// the only existing rollback test targets the sibling `write_meta`
+    /// failure arm instead, with its `pinned` call made AFTER
+    /// permissions are restored so `ensure_hot` there always succeeds.
+    /// Here a cold context with a corrupted image is pinned: the
+    /// attempt must fail closed, `meta.pinned` must roll back to
+    /// `false` (not strand the context pinned-but-unloadable), and the
+    /// budget's `resident_estimate` must stay in sync with that
+    /// rollback rather than the failed intermediate state.
+    #[test]
+    fn update_meta_rolls_back_pinning_when_the_forced_preload_fails() {
+        let dir = scratch_dir("update-meta-pin-rollback");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .add_associations(
+                "sake",
+                vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("a.md"))],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        state.flush_dirty();
+        let entry = state.lookup("sake").unwrap();
+        assert!(
+            state.evict_entry("sake", &entry),
+            "sanity: an unpinned context must evict cleanly"
+        );
+
+        let image = image_path(&dir, &file_stem("sake"));
+        let mut bytes = fs::read(&image).unwrap();
+        assert!(bytes.len() > 8, "sanity: the version byte must exist");
+        bytes[8] = 0xFF;
+        fs::write(&image, &bytes).unwrap();
+
+        let error = state
+            .update_meta("sake", None, Some(true), None, None)
+            .expect("the context still exists")
+            .expect_err("the forced preload must fail on the corrupt image");
+        assert!(!error.to_string().is_empty());
+
+        let after = state.directory_entry("sake").unwrap();
+        assert!(
+            !after.pinned,
+            "a failed forced preload must roll `pinned` back to false, \
+             not strand the context pinned yet cold and unloadable"
+        );
+        assert!(!after.loaded, "it must stay cold, not half-applied");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn rename_context_moves_the_family_and_rewrites_group_membership() {
         let dir = scratch_dir("rename-context-happy");
@@ -1638,6 +1729,79 @@ mod tests {
             state.group("drinks").unwrap().contexts,
             BTreeSet::from(["shochu".to_string()])
         );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The pinned re-preload's `Err` arm (`lifecycle.rs`, inside
+    /// `rename_context_locked`'s tail: `Err(error) => { tracing::warn!
+    /// ..."renamed context not preloaded; it stays cold until first
+    /// use" }`) has no test — the happy-path test above only proves
+    /// the `Ok` arm. Corrupting the image between two boots (rather
+    /// than while the context is hot) is required: `drain_entry_for_rename`
+    /// re-saves a HOT source's current in-memory state before the
+    /// move, which would silently heal an in-place corruption.
+    /// Preloading fails at boot instead, leaving "sake" cold with the
+    /// corruption intact, so the rename's own re-preload attempt at
+    /// the new name hits the same failure.
+    #[test]
+    fn a_pinned_context_s_rename_survives_a_re_preload_failure_and_stays_cold() {
+        let dir = scratch_dir("rename-pinned-repreload-failure");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create(
+                    "sake",
+                    ContextMeta {
+                        pinned: true,
+                        ..ContextMeta::default()
+                    },
+                )
+                .unwrap();
+            state
+                .add_associations(
+                    "sake",
+                    vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("a.md"))],
+                    Deadline::unbounded(),
+                )
+                .unwrap()
+                .unwrap();
+            state.flush_dirty();
+        }
+        // The version byte — same technique `engine.rs`'s own
+        // load-failure tests use.
+        let image = image_path(&dir, &file_stem("sake"));
+        let mut bytes = fs::read(&image).unwrap();
+        assert!(bytes.len() > 8, "sanity: the version byte must exist");
+        bytes[8] = 0xFF;
+        fs::write(&image, &bytes).unwrap();
+
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        assert_eq!(
+            loaded_map(&state).get("sake"),
+            Some(&false),
+            "sanity: the corrupt pinned image must fail to preload at boot"
+        );
+
+        state
+            .rename_context("sake", "shochu")
+            .expect("the rename itself must still succeed despite the re-preload failure");
+
+        assert!(state.directory_entry("sake").is_none());
+        let shochu = state
+            .directory_entry("shochu")
+            .expect("the new name must answer");
+        assert!(
+            shochu.pinned,
+            "pinned carries over even though it stays cold"
+        );
+        assert!(
+            !shochu.loaded,
+            "a pinned context whose re-preload fails must stay cold, \
+             not take the whole rename down"
+        );
+        assert!(!dir.join("sake.ctx").exists());
+        assert!(dir.join("shochu.ctx").exists());
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -2058,6 +2222,129 @@ mod tests {
         );
         assert!(dir.join("beer.ctx").exists());
         assert!(dir.join("sake.ctx").exists());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The counterpart to the happy path above: a destination-targeting
+    /// marker that FAILS to unlink for a real reason (not `NotFound`)
+    /// must fail the whole sweep, not be silently swallowed. Every
+    /// other sweep-failure test targets a different loop in
+    /// `sweep_stale_stem_files` (`a_marker_that_cannot_be_removed_fails_the_stem_sweep`
+    /// hits the stale-paths loop; the import-marker tests hit the
+    /// third loop) — none exercises THIS one. Calls
+    /// `sweep_stale_stem_files` directly rather than through `create`
+    /// so the injected fault can be counted precisely: `FreshCreate`
+    /// mode's eleven always-checked stale paths (none of which exist
+    /// for a brand new "sake" stem) must all resolve as ordinary
+    /// `NotFound` no-ops before the twelfth call — the planted
+    /// targeting marker — is the one made to fail.
+    #[test]
+    fn sweep_stale_stem_files_reports_a_real_removal_failure_on_a_destination_targeting_marker() {
+        let dir = scratch_dir("sweep-targeting-marker-removal-fault");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state.create("beer", ContextMeta::default()).unwrap();
+        fs::write(
+            renaming_marker_path(&dir, &file_stem("beer")),
+            serde_json::to_vec(&RenameMarker {
+                from: "beer".to_string(),
+                to: "sake".to_string(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        fail_persistence_ops_after(11);
+        let error = state
+            .sweep_stale_stem_files("sake", &file_stem("sake"), StemSweep::FreshCreate)
+            .unwrap_err();
+        assert!(
+            !clear_persistence_fault(),
+            "sanity: the injected failure must land on the targeting-marker \
+             removal, not somewhere earlier or never at all: {error:?}"
+        );
+        assert!(
+            renaming_marker_path(&dir, &file_stem("beer")).exists(),
+            "the marker must still be there — the injected failure stood \
+             in for the real unlink, so nothing actually removed it"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// Boot's straggler contract, isolated: `ResumedRename`'s `landed`
+    /// (the pivot moved) and `complete` (the WHOLE move finished) are
+    /// deliberately independent booleans (`paths.rs`'s own doc), and
+    /// `boot_with`'s resume loop keys membership on `landed` alone
+    /// while keying marker retraction on `complete` alone. Every other
+    /// boot-resume test either has no group to rewrite
+    /// (`delete_clears_a_stuck_rename_marker_at_its_own_stem`, pivot
+    /// blocked so `landed` is false too) or completes cleanly (the
+    /// happy-path resume tests). Here the pivot moves but a sidecar
+    /// (`wal_path`) stays blocked: membership must still follow the
+    /// pivot's new name, and the marker must still survive for the
+    /// next boot to finish the straggler.
+    #[test]
+    fn a_boot_resume_whose_pivot_lands_but_a_sidecar_sticks_still_rewrites_membership() {
+        let dir = scratch_dir("boot-resume-straggler-membership");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state.create("sake", ContextMeta::default()).unwrap();
+            state
+                .add_associations(
+                    "sake",
+                    vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("a.md"))],
+                    Deadline::unbounded(),
+                )
+                .unwrap()
+                .unwrap();
+            state.flush_dirty();
+            state
+                .create_group(
+                    "drinks",
+                    String::new(),
+                    BTreeSet::from(["sake".to_string()]),
+                    BTreeSet::new(),
+                )
+                .unwrap();
+        }
+        // Block the DESTINATION's wal lane — a post-pivot sidecar
+        // (`context_files`'s index 8, not 0) — so the resume's own
+        // `move_context_files` moves the pivot and every earlier file
+        // successfully, then fails here and stops treating the rest as
+        // best-effort. No manual pivot move: the resume performs it.
+        fs::create_dir_all(wal_path(&dir, &file_stem("shochu"))).unwrap();
+        fs::write(
+            renaming_marker_path(&dir, &file_stem("sake")),
+            serde_json::to_vec(&RenameMarker {
+                from: "sake".to_string(),
+                to: "shochu".to_string(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+
+        assert!(
+            dir.join("shochu.ctx").exists(),
+            "sanity: the pivot must have landed"
+        );
+        assert!(
+            dir.join("sake.wal.jsonl").exists(),
+            "sanity: the blocked sidecar must still sit at the old stem"
+        );
+        assert_eq!(
+            state.group("drinks").unwrap().contexts,
+            BTreeSet::from(["shochu".to_string()]),
+            "membership must follow the pivot's new name even though \
+             the move as a whole is incomplete"
+        );
+        assert!(
+            renaming_marker_path(&dir, &file_stem("sake")).exists(),
+            "the marker must survive for the next boot to finish the \
+             straggling sidecar — only `complete`, not `landed`, retires it"
+        );
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -2664,6 +2951,55 @@ mod tests {
             .unwrap()
             .expect("the schema must resolve, not read as absent");
         assert_eq!(resolved.document().mode, schema::SchemaMode::Strict);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `hidden_label`'s `Err` arm (`Err(_) => Some(SCHEMA_TYPE_LABEL)`)
+    /// has no test — `hidden_label` is never called from any test in
+    /// the suite. Reusing the fixture above (a rename carries the
+    /// digest but not the schema, so `schema_of` must call
+    /// `ensure_hot` to resolve it), a corrupted image makes that
+    /// `ensure_hot` call fail, and `schema_of` itself returns `Err`.
+    /// `hidden_label` must fail CLOSED on that — report hidden, the
+    /// same as a schema actually present — rather than let a
+    /// resolution failure silently unhide a schema-gated context.
+    #[test]
+    fn hidden_label_fails_closed_when_schema_resolution_errors() {
+        let dir = scratch_dir("hidden-label-schema-err");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state.create("sake", ContextMeta::default()).unwrap();
+        let installed = schema::install(valid_schema_document()).unwrap();
+        state.put_schema("sake", installed).unwrap().unwrap();
+
+        state.rename_context("sake", "shochu").unwrap();
+        assert!(
+            state
+                .lookup("shochu")
+                .unwrap()
+                .inner
+                .read()
+                .schema
+                .is_none(),
+            "sanity: the freshly registered entry must not resolve the schema up front"
+        );
+
+        let image = image_path(&dir, &file_stem("shochu"));
+        let mut bytes = fs::read(&image).unwrap();
+        assert!(bytes.len() > 8, "sanity: the version byte must exist");
+        bytes[8] = 0xFF;
+        fs::write(&image, &bytes).unwrap();
+
+        assert!(
+            matches!(state.schema_of("shochu"), Some(Err(_))),
+            "sanity: the corrupt image must make schema_of itself fail"
+        );
+        assert_eq!(
+            state.hidden_label("shochu"),
+            Some(schema::SCHEMA_TYPE_LABEL),
+            "a schema-resolution failure must report hidden, not \
+             silently unhide a schema-gated context"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
