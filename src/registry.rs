@@ -57,6 +57,9 @@ use crate::embedding::{EmbedPurpose, EmbeddingProvider, PassageVectorStore, Vect
 use crate::groups::{self, GroupRecord};
 use crate::metrics::{ContextGaugeRow, GaugeSnapshot, Metrics, PerContextMetrics};
 use crate::schema;
+// Unused-looking from this file alone: hoisted here (rather than into
+// each consumer) so `core_tests.rs`, `lifecycle.rs`, and `boot.rs`
+// pick them up through their `use super::*`.
 #[cfg(test)]
 use crate::storage::{clear_persistence_fault, fail_persistence_ops_after, write_atomic_private};
 use crate::storage::{
@@ -127,6 +130,8 @@ pub(crate) use retrieval_cache::{CachedRetrieval, RetrievalKey};
 pub(crate) use semantic_cache::SemanticFill;
 pub(crate) use terms::{passage_terms, spelled_passage_terms};
 use wal_replay::{applied_count, apply_in_order, replay_ops_guarded};
+// Unused-looking from this file alone: hoisted here so `core_tests.rs`
+// and `engine.rs`'s `mod tests` pick them up through `use super::*`.
 #[cfg(test)]
 use wal_replay::{apply_op, replay_op};
 
@@ -221,7 +226,26 @@ where
 }
 
 impl ContextStats {
+    /// How many concepts the mechanical "what is this context about"
+    /// summary carries into the routing directory and the
+    /// `.meta.json` sidecar. Enough to characterise a context at a
+    /// glance without turning the directory response into a second
+    /// graph dump — the directory is a routing aid, not a query
+    /// surface. NOT freely retunable: this value rides the PERSISTED
+    /// sidecar (`top_concepts`, above), so raising it leaves every
+    /// context written before the change reporting the old count
+    /// until its next flush, and lowering it silently truncates on
+    /// the next save. A change here is a sidecar-format change, not a
+    /// tuning knob.
     const TOP_CONCEPTS: usize = 10;
+    /// How much of the relation-label vocabulary the directory
+    /// samples. A sample, not the vocabulary: `GET
+    /// /contexts/{name}/labels` is the complete, authoritative view
+    /// (`label_sample`'s own field doc says as much), and this exists
+    /// so an ingester can eyeball spelling drift without a second
+    /// request. Rides the persisted sidecar exactly like
+    /// `TOP_CONCEPTS` above, with the same consequence for changing
+    /// it.
     const LABEL_SAMPLE: usize = 50;
 
     fn of(context: &Context) -> Self {
@@ -557,6 +581,22 @@ pub struct Entry {
 /// them. The WAL lanes are deliberately absent: `EntryInner::wal_bytes`
 /// and `passages_wal_bytes` already track those live, and a second
 /// bookkeeper for the same number would drift from the first.
+///
+/// [`AppState::storage_quota_excess`] (`engine.rs`) folds this
+/// struct's three lanes back together with the two live WAL fields
+/// into the same five-lane total
+/// [`crate::metrics::ContextGaugeRow::disk_total_bytes`] computes
+/// from `ContextGaugeRow`'s own five separately-named fields.
+/// Deliberately two independent operand types, not one
+/// shared helper: this struct is private to `registry` and omits the
+/// WAL lanes by design (see above), while `ContextGaugeRow` is a
+/// public metrics type that carries all five as its own fields; a
+/// shared sum would either leak this struct's shape across the
+/// module boundary or make `crate::metrics` depend on registry
+/// internals. `gauges.rs`'s
+/// `the_quota_used_total_and_the_gauge_row_disk_total_agree_for_the_same_context`
+/// test is the enforced cross-check that the two independent
+/// five-term sums cannot silently drift apart.
 #[derive(Debug, Clone, Copy, Default)]
 struct ContextDiskUsage {
     image_bytes: u64,
@@ -1211,6 +1251,19 @@ pub const DEFAULT_PASSAGES_WAL_MAX_BYTES: usize = 1024 * 1024 * 1024;
 /// already drew the operational line on the same scale.
 pub const DEFAULT_AUTO_COMPACT_RATIO: f64 = 0.5;
 
+/// Default resident cache budget (`TAGURU_CACHE_BYTES`) — the ceiling
+/// [`AppState::enforce_budget`] evicts unpinned contexts down to.
+/// Sized so an ordinary single-node deploy never touches the eviction
+/// path at all: the sweep's cost (an O(contexts) snapshot plus two
+/// lock acquisitions per candidate) is only paid by a fleet that
+/// genuinely outgrows it, while 512 MiB still fits comfortably beside
+/// the process's other allocations on the smallest container shape
+/// the README's rollout note assumes. Pinned contexts live OUTSIDE
+/// this budget (they are never eviction candidates), so a deployment
+/// that pins everything is not bounded by it and should size the host
+/// by the sum of its pinned footprints instead.
+pub const DEFAULT_CACHE_BYTES: usize = 512 * 1024 * 1024;
+
 /// One context's declared ceilings (issue #136), parsed from the
 /// `TAGURU_CONTEXT_QUOTAS` JSON env. Both fields optional — a
 /// declaration may cap disk, cache share, or both — but never neither
@@ -1481,7 +1534,7 @@ pub(crate) struct Markers {
 /// paragraph hash) it actually scored, so staleness settles per lane
 /// against the store's current text.
 #[derive(Default)]
-pub(super) struct FusedHit {
+struct FusedHit {
     bm25: Option<(usize, f32, u64)>,
     vector: Option<(usize, f32, u64)>,
 }
@@ -1585,7 +1638,7 @@ pub(crate) enum VectorLaneReport {
 /// search takes the `Ready` arm and silently skips the rest; explain
 /// names them in its [`VectorLaneReport`] (which carries the
 /// provider-configured distinction itself).
-pub(super) enum PassageVectorGate {
+enum PassageVectorGate {
     Disabled,
     Empty,
     ModelChanged { stored: String, current: String },
@@ -1768,7 +1821,7 @@ impl BootConfig {
             data_dir: PathBuf::from(
                 std::env::var("TAGURU_DATA_DIR").unwrap_or_else(|_| "data".into()),
             ),
-            cache_bytes: crate::env::env_number("TAGURU_CACHE_BYTES", 512 * 1024 * 1024),
+            cache_bytes: crate::env::env_number("TAGURU_CACHE_BYTES", DEFAULT_CACHE_BYTES),
             // The WAL closes the flush-interval loss window; opting out
             // (TAGURU_WAL=0) restores the old posture for benchmarks or
             // explicit risk acceptance.
@@ -1861,6 +1914,23 @@ impl BootConfig {
         )
     }
 }
+
+/// How often [`AppState::enforce_budget`] forces a real sweep
+/// regardless of its cheap gate — every Nth budget operation. This
+/// bounds how stale two independent things may get between forced
+/// sweeps: `StateInner::resident_estimate` (vector/passage/BM25
+/// residency drifts between per-entry recounts, which only keep the
+/// GRAPH term exact) and `StateInner::budget_saturated`. 64 buys back
+/// the O(contexts) sweep — a snapshot plus two lock acquisitions per
+/// context — that ran on EVERY request before the gate existed, while
+/// keeping the worst-case unbudgeted cache overshoot to one sweep
+/// period of growth. It is wrong in either direction if the workload's
+/// shape changes: a deployment whose contexts each hold hundreds of
+/// MiB of untracked vector bytes wants it smaller (64 ops of drift can
+/// itself exceed the whole budget), and one with tens of thousands of
+/// registered contexts wants it larger (the sweep itself becomes the
+/// cost being amortized).
+const BUDGET_SWEEP_PERIOD: u64 = 64;
 
 /// Shared server state: the data directory, the cache budget, and the
 /// context registry.
@@ -2124,8 +2194,8 @@ struct StateInner {
     /// (folding in vector stores, which are not tracked between
     /// sweeps). Signed so a transient over-subtraction cannot wrap.
     resident_estimate: AtomicI64,
-    /// Operation counter behind the every-64th forced sweep — the
-    /// bound on how stale the estimate can get.
+    /// Operation counter behind [`BUDGET_SWEEP_PERIOD`]'s forced
+    /// sweep — the bound on how stale the estimate can get.
     budget_ops: AtomicU64,
     /// Set when the last full sweep ran out of unpinned, non-`except`
     /// candidates before `total` fit under `cache_bytes` — an
@@ -2140,9 +2210,9 @@ struct StateInner {
     /// context bigger than the whole budget" write followed by a read
     /// of any OTHER context must still evict promptly). Left set for
     /// the same `except` indefinitely, this would pin the cheap gate
-    /// open forever for that one caller: the every-64th forced sweep
-    /// re-evaluates it exactly like `resident_estimate`, so staleness
-    /// for a genuinely stuck `except` is bounded the same 64-operation
+    /// open forever for that one caller: [`BUDGET_SWEEP_PERIOD`]'s
+    /// forced sweep re-evaluates it exactly like `resident_estimate`,
+    /// so staleness for a genuinely stuck `except` is bounded the same
     /// way.
     budget_saturated: AtomicBool,
     /// The `except` name the last saturated sweep recorded — `None`
@@ -2160,6 +2230,17 @@ struct StateInner {
 /// Recency is tracked by a counter dedicated to this cache rather than
 /// `AppState::clock` (documented for a different purpose) to keep the
 /// two concerns apart.
+///
+/// 1024 separates "one client session's working set of distinct cue
+/// wordings" (a few dozen to a few hundred phrasings, empirically,
+/// across a resolve/explain session) from "every cue this process has
+/// ever seen" — the former is what recency actually predicts, the
+/// latter would just grow unboundedly and pay embedding-provider-sized
+/// memory for entries that will never be asked again. It is too small
+/// once a deployment's distinct cue vocabulary itself exceeds it: a
+/// steady rise in embedding-provider call volume against a flat cache
+/// hit rate is that symptom, and the fix is a larger `CAP`, not a
+/// wider vector width.
 #[derive(Default)]
 struct CueCache {
     vectors: HashMap<String, (Arc<Vec<f32>>, u64)>,
@@ -2237,6 +2318,30 @@ impl AppState {
     /// Lock order: `inner` before `passages` before `vectors`, as
     /// documented on Entry — the caller holds `inner` across this
     /// call.
+    ///
+    /// Only `dirty` is cleared here — `flushing`, `vectors_save_pending`,
+    /// `bm25_dirty`, `passages_embed_dirty`, and `usage_dirty` are left
+    /// exactly as they were. Every current reader of those flags is
+    /// safe regardless: each one either runs under this SAME write
+    /// lock (which every caller already holds across this call, so
+    /// nothing else can observe the in-between state), or re-checks
+    /// the slot through [`Entry::lock_unless_deleted`]/
+    /// [`Entry::read_unless_deleted`] before acting on the flag — and
+    /// once this function has set the slot `Deleted`, those return
+    /// `None`. In particular, a flush already mid-flight when this
+    /// runs (past its unlocked staging window, `flushing` still true)
+    /// re-locks via `lock_unless_deleted` to publish, finds `Deleted`,
+    /// and resets `flushing` itself in its own backoff branch — this
+    /// function does not need to race it. Do NOT "tidy" this by
+    /// clearing the other flags too: nothing here needs it, and
+    /// clearing `flushing` specifically, before that racing flush has
+    /// actually reached its own re-lock, would advertise "no flush in
+    /// flight" while its unlocked fsync is still genuinely running.
+    ///
+    /// `drain_entry_for_rename` additionally clears `usage_dirty`
+    /// itself right after calling this — that is rename-specific (the
+    /// usage counters are being carried to the new name's fresh
+    /// entry, not discarded), not a gap in this function.
     fn tombstone_locked(&self, inner: &mut EntryInner, entry: &Entry) {
         inner.slot = Slot::Deleted;
         self.recount_entry(inner);

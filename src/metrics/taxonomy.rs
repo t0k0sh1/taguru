@@ -381,6 +381,11 @@ pub struct ContextGaugeRow {
 impl ContextGaugeRow {
     /// Total on-disk bytes across every family — what a restore would
     /// move, and the ranking key for [`PerContextMetrics::Top`].
+    ///
+    /// The same five lanes `AppState::storage_quota_excess`
+    /// (`src/registry/engine.rs`) sums independently from
+    /// `ContextDiskUsage` plus the two live WAL fields — see that
+    /// struct's doc for why the two sums are not one shared helper.
     pub fn disk_total_bytes(&self) -> u64 {
         self.disk_image_bytes
             + self.disk_wal_bytes
