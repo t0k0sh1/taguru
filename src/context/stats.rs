@@ -134,13 +134,22 @@ impl Context {
         let order = |a: &(usize, ConceptId), b: &(usize, ConceptId)| {
             b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1))
         };
+        // Clamped rather than guarded separately for "limit past the
+        // table": `select_nth_unstable_by(limit - 1, ..)` at exactly
+        // `limit == ranked.len()` is valid (index `limit - 1` is the
+        // last one) and harmless — the truncate below is then a no-op
+        // and the final sort re-derives the same order regardless —
+        // so a SEPARATE `limit < ranked.len()` branch would only ever
+        // skip a redundant call, never change the answer; folding the
+        // "past the table" case into `.min()` here means every path
+        // through this function calls `select_nth_unstable_by` at
+        // most once, uniformly.
+        let limit = limit.min(ranked.len());
         if limit == 0 {
             return Vec::new();
         }
-        if limit < ranked.len() {
-            ranked.select_nth_unstable_by(limit - 1, order);
-            ranked.truncate(limit);
-        }
+        ranked.select_nth_unstable_by(limit - 1, order);
+        ranked.truncate(limit);
         ranked.sort_unstable_by(order);
         ranked
             .into_iter()
@@ -287,6 +296,49 @@ mod tests {
             full[..2],
             "a limit cutting inside a tied-degree group must match a full sort's own prefix"
         );
+    }
+
+    /// `select_nth_unstable_by(limit - 1, ..)` — a boundary an
+    /// off-by-one (`limit` instead of `limit - 1`) would not visibly
+    /// break on a small table: Rust's unstable sort/select falls back
+    /// to a full sort for small slices, so a handful of concepts stays
+    /// correctly ordered even under the wrong index. This builds 25
+    /// concepts with distinct, unique degrees — comfortably past that
+    /// small-slice threshold — and checks several `limit`s against a
+    /// full sort's own prefix, so an off-by-one has nowhere to hide
+    /// behind an accidentally-still-sorted small array.
+    #[test]
+    fn top_concepts_matches_a_full_sort_prefix_at_a_scale_past_the_small_array_fallback() {
+        let mut context = Context::default();
+        const CONCEPTS: usize = 25;
+        for degree in 1..=CONCEPTS {
+            let name = format!("c{degree}");
+            for partner in 0..degree {
+                context
+                    .associate(&name, "r", format!("c{degree}p{partner}"), 1.0)
+                    .unwrap();
+            }
+        }
+
+        // Each partner concept ("cDpP") has degree exactly 1 — degree
+        // ties with "c1" itself, but every limit checked below stays
+        // above that tie: ranks 1..24 are exactly the 24 named
+        // concepts of degree 2..25, so no partner (or "c1") is in
+        // play yet.
+        let full = context.top_concepts(CONCEPTS + 100);
+        assert_eq!(
+            full[0],
+            (format!("c{CONCEPTS}").as_str(), CONCEPTS),
+            "sanity: the highest-degree concept must lead"
+        );
+
+        for limit in [1, 5, 12, 13, 20, 24] {
+            assert_eq!(
+                context.top_concepts(limit),
+                full[..limit],
+                "limit={limit} must match a full sort's own prefix exactly"
+            );
+        }
     }
 
     #[test]
