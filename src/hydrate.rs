@@ -1561,6 +1561,63 @@ mod tests {
         let _ = std::fs::remove_dir_all(&target);
     }
 
+    /// The boot-time hydrator manifest registration loop's
+    /// `name_from_stem` `None` arm (`registry/boot.rs`) has no test —
+    /// every hydrator-boot test elsewhere in this file uses manifest
+    /// stems that decode cleanly. No ship/hydrate machinery needed
+    /// here either, same as the test above: `Hydrator::new` only reads
+    /// the manifest's own `.ctx` keys to seed `context_stems()`, so a
+    /// hand-built manifest with one well-formed stem and one that
+    /// cannot decode is enough to prove the loop skips the latter
+    /// instead of registering it under no name or panicking the boot.
+    #[test]
+    fn hydrator_registration_skips_a_manifest_stem_that_fails_to_decode() {
+        let bucket = scratch("bad-stem-bucket");
+        let target = scratch("bad-stem-target");
+        let mut manifest = Manifest::default();
+        manifest
+            .files
+            .insert("sake.ctx".to_string(), ManifestFile { len: 1, crc: 1 });
+        // `%ZZ` is not a valid percent-escape (`Z` is not hex) — the
+        // one way `name_from_stem` (`registry/paths.rs`) returns `None`.
+        manifest
+            .files
+            .insert("%ZZ.ctx".to_string(), ManifestFile { len: 1, crc: 1 });
+
+        let hydrator = Arc::new(Hydrator::new(
+            local_store(&bucket),
+            1,
+            StorePath::default(),
+            target.clone(),
+            manifest,
+            LanePolicy::KeepAckedTail,
+        ));
+
+        let state = AppState::boot_with(
+            target.clone(),
+            usize::MAX,
+            None,
+            crate::registry::BootOptions {
+                hydrator: Some(Arc::clone(&hydrator)),
+                ..crate::registry::BootOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert!(
+            state.directory_entry("sake").is_some(),
+            "a well-formed manifest stem must still register"
+        );
+        assert_eq!(
+            state.context_count(),
+            1,
+            "the undecodable stem must be skipped, not registered under any name"
+        );
+
+        let _ = std::fs::remove_dir_all(&bucket);
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
     /// Rewinds a bucket object's `last_modified` (LocalFileSystem
     /// reads the file's mtime), to age a claim past the guard's grace.
     fn age(path: &FsPath, secs: u64) {
