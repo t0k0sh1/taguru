@@ -283,21 +283,14 @@ impl AppState {
             let cold_passages_wal_bytes = inner.passages_wal_bytes;
             let pinned = inner.meta.pinned;
             drop(inner);
-            let cache_footprint = entry.vectors_footprint() as u64
-                + entry.passages_footprint() as u64
-                + entry.bm25_footprint() as u64
-                + entry.passage_vectors_footprint() as u64;
+            let cache_footprint = entry.cache_footprint() as u64;
             resident_bytes += cache_footprint;
             // A resident store knows its pending log; a cold one uses
             // the value `evict_entry` cached on the way down — the
             // gauge must not go blind just because a context was
             // evicted, nor re-`stat` the log on every scrape.
-            let entry_passages_wal_bytes = entry
-                .passages
-                .lock()
-                .as_ref()
-                .map(|store| store.pending_log_bytes())
-                .unwrap_or(cold_passages_wal_bytes);
+            let entry_passages_wal_bytes =
+                entry.pending_passages_wal_bytes(cold_passages_wal_bytes);
             passages_wal_bytes += entry_passages_wal_bytes;
             if collect_rows {
                 let disk = *entry.disk.lock();

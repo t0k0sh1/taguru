@@ -57,26 +57,14 @@ impl AppState {
                     continue;
                 };
                 registry.entry(name).or_insert_with(|| {
-                    let MetaFile {
-                        meta,
-                        stats,
-                        usage,
-                        revision,
-                        schema_digest,
-                    } = read_meta_file(&data_dir, &stem);
-                    Arc::new(Entry::new(
-                        meta,
-                        stats,
-                        Slot::Cold,
+                    // Not schema-verified here (see the comment
+                    // above): the family is not local yet, so there
+                    // is nothing to resolve. `ensure_hot` populates
+                    // this once hydration lands it.
+                    Arc::new(Entry::cold_from_meta(
+                        read_meta_file(&data_dir, &stem),
                         0,
                         0,
-                        usage,
-                        revision,
-                        schema_digest,
-                        // Not schema-verified here (see the comment
-                        // above): the family is not local yet, so
-                        // there is nothing to resolve. `ensure_hot`
-                        // populates this once hydration lands it.
                         None,
                     ))
                 });
@@ -244,51 +232,38 @@ impl AppState {
     /// rollout note), and chatty on purpose: a boot that spends
     /// seconds loading should say what it is loading, not sit silent
     /// until "server ready". Entries have independent locks, so the
-    /// workers never contend with each other.
+    /// workers never contend with each other. Uses [`parallel_map`],
+    /// which generalizes exactly this divide-the-queue shape.
     fn preload_pinned(&self) {
         let pinned: Vec<(String, Arc<Entry>)> = self
             .snapshot()
             .into_iter()
             .filter(|(_, entry)| entry.inner.read().meta.pinned)
             .collect();
-        if pinned.is_empty() {
-            return;
-        }
         let workers = std::thread::available_parallelism()
             .map(|n| n.get())
-            .unwrap_or(1)
-            .min(pinned.len());
-        let queue = Mutex::new(pinned.into_iter());
-        std::thread::scope(|scope| {
-            for _ in 0..workers {
-                scope.spawn(|| {
-                    loop {
-                        let Some((name, entry)) = queue.lock().next() else {
-                            break;
-                        };
-                        let mut inner = entry.inner.write();
-                        if !inner.meta.pinned {
-                            continue;
-                        }
-                        let preload_started = std::time::Instant::now();
-                        match ensure_hot(
-                            &self.0.data_dir,
-                            &name,
-                            &mut inner,
-                            &self.0.metrics,
-                            self.0.hydrator.as_deref(),
-                        ) {
-                            Ok(()) => tracing::info!(
-                                context = %name,
-                                ms = preload_started.elapsed().as_millis() as u64,
-                                "preloaded pinned context"
-                            ),
-                            Err(error) => {
-                                tracing::warn!("pinned context '{name}' not preloaded: {error}");
-                            }
-                        }
-                    }
-                });
+            .unwrap_or(1);
+        parallel_map(pinned, workers, |(name, entry)| {
+            let mut inner = entry.inner.write();
+            if !inner.meta.pinned {
+                return;
+            }
+            let preload_started = std::time::Instant::now();
+            match ensure_hot(
+                &self.0.data_dir,
+                &name,
+                &mut inner,
+                &self.0.metrics,
+                self.0.hydrator.as_deref(),
+            ) {
+                Ok(()) => tracing::info!(
+                    context = %name,
+                    ms = preload_started.elapsed().as_millis() as u64,
+                    "preloaded pinned context"
+                ),
+                Err(error) => {
+                    tracing::warn!("pinned context '{name}' not preloaded: {error}");
+                }
             }
         });
     }
@@ -494,13 +469,8 @@ fn scan_data_dir(
         workers,
         |(index, (stem, name))| {
             let stem = stem.as_str();
-            let MetaFile {
-                meta,
-                stats,
-                usage,
-                revision,
-                schema_digest,
-            } = read_meta_file(data_dir, stem);
+            let meta_file = read_meta_file(data_dir, stem);
+            let schema_digest = meta_file.schema_digest.clone();
             // ADR 0009 §5.1/§5.2: an unreadable, malformed, invalid, or
             // digest-mismatched schema file refuses the WHOLE boot — a
             // schema is never allowed to fall back to "as if absent"
@@ -536,25 +506,15 @@ fn scan_data_dir(
             };
             // The gauge must see leftover logs from the first scrape,
             // not only after each context's first touch.
-            let wal_bytes = fs::metadata(wal_path(data_dir, stem))
-                .map(|meta| meta.len())
-                .unwrap_or(0);
-            let passages_wal_bytes = fs::metadata(passages_wal_path(data_dir, stem))
-                .map(|meta| meta.len())
-                .unwrap_or(0);
+            let (wal_bytes, passages_wal_bytes) = wal_lane_bytes(data_dir, stem);
             (
                 index,
                 Ok((
                     name,
-                    Arc::new(Entry::new(
-                        meta,
-                        stats,
-                        Slot::Cold,
+                    Arc::new(Entry::cold_from_meta(
+                        meta_file,
                         wal_bytes,
                         passages_wal_bytes,
-                        usage,
-                        revision,
-                        schema_digest,
                         schema,
                     )),
                 )),

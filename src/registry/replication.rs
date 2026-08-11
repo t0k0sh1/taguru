@@ -21,27 +21,15 @@ impl AppState {
         };
         let mut registry = self.0.registry.write();
         registry.entry(name).or_insert_with(|| {
-            let MetaFile {
-                meta,
-                stats,
-                usage,
-                revision,
-                schema_digest,
-            } = read_meta_file(&self.0.data_dir, stem);
             // Not schema-verified here, same asymmetry as boot's
             // hydrator registration (`boot_with`): the family this
             // digest describes is not necessarily local yet, only the
             // meta is. `ensure_hot`'s own copy of ADR 0009 §5.2's check
             // runs once a load actually needs the bytes.
-            Arc::new(Entry::new(
-                meta,
-                stats,
-                Slot::Cold,
+            Arc::new(Entry::cold_from_meta(
+                read_meta_file(&self.0.data_dir, stem),
                 0,
                 0,
-                usage,
-                revision,
-                schema_digest,
                 None,
             ))
         });

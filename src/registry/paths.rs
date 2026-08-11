@@ -93,6 +93,27 @@ pub(crate) fn wal_path(dir: &Path, stem: &str) -> PathBuf {
     dir.join(format!("{stem}.wal.jsonl"))
 }
 
+/// Both WAL lanes' on-disk sizes for `stem` — `0` for a lane with no
+/// file yet, not an error: a missing log is the healthy common case
+/// (a freshly created or never-written context), not one worth
+/// failing a boot or a rename over. The boot scan and a rename's
+/// re-register both seed a Cold entry with these so the residency
+/// gauge sees a leftover log from the first scrape, not only after
+/// the context's first touch post-restart. Order is `(graph, passages)`
+/// — the same order [`Entry::new`] takes `wal_bytes` /
+/// `passages_wal_bytes` in.
+pub(super) fn wal_lane_bytes(data_dir: &Path, stem: &str) -> (u64, u64) {
+    let lane_bytes = |path: PathBuf| {
+        fs::metadata(path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0)
+    };
+    (
+        lane_bytes(wal_path(data_dir, stem)),
+        lane_bytes(passages_wal_path(data_dir, stem)),
+    )
+}
+
 /// The optional per-context schema document (ADR 0009 §5.1). Built with
 /// `format!`, not `path.with_extension`, on purpose: `{stem}.schema.json`
 /// is two dot segments, and `with_extension` would replace only the

@@ -116,7 +116,7 @@ pub use passages::PassagesWriteError;
 pub(crate) use concurrency::{Semaphore, dispatch_chunks_concurrently, parallel_map};
 use meta_io::{MetaFile, move_context_files, read_meta_file, save_files, write_meta};
 pub(crate) use meta_io::{context_files, schema_digest_of};
-use paths::{FNV_OFFSET, FNV_PRIME, rename_markers_targeting, write_rename_marker};
+use paths::{FNV_OFFSET, FNV_PRIME, rename_markers_targeting, wal_lane_bytes, write_rename_marker};
 pub(crate) use paths::{
     IMPORT_MARKER_EXTENSION, ImportMarker, ResumedRenames, bm25_path, deleted_marker_path,
     file_stem, image_path, import_marker_path, import_marker_paths, meta_path, name_from_stem,
@@ -619,6 +619,44 @@ impl Entry {
         }
     }
 
+    /// The Cold-slot constructor every register-from-sidecar path
+    /// shares: boot's hydrator registration and `scan_data_dir`
+    /// (`boot.rs`), `replica_register` (`replication.rs`), and the
+    /// rename's re-register (`lifecycle.rs`). All four land a `Cold`
+    /// slot seeded straight from [`read_meta_file`]'s [`MetaFile`], so
+    /// they cannot disagree about which sidecar field feeds which
+    /// entry field. `wal_bytes`/`passages_wal_bytes` are the caller's
+    /// own measurement ([`wal_lane_bytes`] for the two that stat, `0`
+    /// for the two that register from a meta alone with no family
+    /// local yet), and `schema` is `None` for every path whose family
+    /// is not yet known to be local — `ensure_hot` resolves it lazily
+    /// on first load.
+    fn cold_from_meta(
+        meta_file: MetaFile,
+        wal_bytes: u64,
+        passages_wal_bytes: u64,
+        schema: Option<Arc<crate::schema::InstalledSchema>>,
+    ) -> Self {
+        let MetaFile {
+            meta,
+            stats,
+            usage,
+            revision,
+            schema_digest,
+        } = meta_file;
+        Self::new(
+            meta,
+            stats,
+            Slot::Cold,
+            wal_bytes,
+            passages_wal_bytes,
+            usage,
+            revision,
+            schema_digest,
+            schema,
+        )
+    }
+
     /// The three revision counters as one [`ContextRevision`] — the
     /// shape the directory serves and the sidecar persists. Takes the
     /// caller's `inner` guard (read or write) so every snapshot is
@@ -711,6 +749,38 @@ impl Entry {
             .as_ref()
             .map(|store| store.footprint())
             .unwrap_or(0)
+    }
+
+    /// Every non-graph cache lane this entry holds resident, summed —
+    /// the cached vector sidecar, the passage store, the BM25 index,
+    /// and the paragraph vectors. Always these four together:
+    /// [`AppState::enforce_budget`]'s eviction sweep and
+    /// `AppState::gauge_snapshot`'s residency gauge must agree on what
+    /// "cached bytes" means, or a context can read over budget to one
+    /// and under to the other. The graph footprint is deliberately NOT
+    /// folded in here — the two callers hold it differently (summed
+    /// into the sweep's threshold, reported as its own series by the
+    /// gauge). Zero for a fully cold entry.
+    fn cache_footprint(&self) -> usize {
+        self.vectors_footprint()
+            + self.passages_footprint()
+            + self.bm25_footprint()
+            + self.passage_vectors_footprint()
+    }
+
+    /// The passage log's pending bytes: read from the resident store
+    /// when one is loaded, `cold` otherwise — the value the boot scan
+    /// or the last eviction cached on the way down. `cold` is a plain
+    /// parameter rather than `&EntryInner` on purpose:
+    /// `AppState::gauge_snapshot` drops its `inner` guard before it
+    /// reaches this call, and taking `&EntryInner` would silently
+    /// re-extend that guard across the `passages` lock below.
+    fn pending_passages_wal_bytes(&self, cold: u64) -> u64 {
+        self.passages
+            .lock()
+            .as_ref()
+            .map(|store| store.pending_log_bytes())
+            .unwrap_or(cold)
     }
 }
 
