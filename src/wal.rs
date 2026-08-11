@@ -1778,6 +1778,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn truncate_to_the_exact_current_length_is_not_a_growth_refusal() {
+        // The guard must reject only `len > current_len`, not
+        // `len == current_len`: truncating a file to precisely the
+        // length it already is (a no-op on disk) is not growth and
+        // must succeed, exactly like `reset`'s `len == 0` case already
+        // does when the file is already empty.
+        let path = scratch_wal("truncate-exact");
+        append_batch(&path, 1, &[associate("a")]).unwrap();
+        let current_len = fs::metadata(&path).unwrap().len();
+
+        truncate_to(&path, current_len).unwrap();
+
+        assert_eq!(fs::metadata(&path).unwrap().len(), current_len);
+        let (ops, top) = replay(&path, 0).unwrap();
+        assert_eq!(ops.iter().map(subject_of).collect::<Vec<_>>(), vec!["a"]);
+        assert_eq!(top, 1);
+    }
+
     mod proptests {
         use super::*;
         use crate::context_proptest::wal_op_strategy as generated_op_strategy;
