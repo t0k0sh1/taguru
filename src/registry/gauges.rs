@@ -55,6 +55,13 @@ impl AppState {
     /// can never disagree with what actually happened to the write.
     /// Unknown names (a delete racing the response) drop the
     /// per-context half silently, same as `note_read`.
+    ///
+    /// The `violations > 0` guard cannot be mutated to `>=` and caught
+    /// behaviorally: at `violations == 0` the guarded body's only
+    /// effect is `entry.schema_violations.fetch_add(0, ..)`, a no-op
+    /// regardless of whether it runs, and `lookup` itself is a pure
+    /// read with no side effect to observe either way.
+    #[mutants::skip]
     pub(crate) fn note_schema_check(
         &self,
         name: &str,
@@ -427,6 +434,299 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
+    /// `violations == 0` (the ordinary "OK" write) must bump only the
+    /// aggregate `taguru_schema_checks_total` family — the per-context
+    /// `schema_violations` row stays untouched, since it exists to
+    /// track failures, not every check.
+    #[test]
+    fn note_schema_check_with_no_violations_only_bumps_the_aggregate() {
+        let dir = scratch_dir("schema-check-no-violations");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+
+        state.note_schema_check("sake", crate::metrics::SchemaOutcome::Warned, 0);
+
+        let entry = state.lookup("sake").unwrap();
+        assert_eq!(
+            entry.schema_violations.load(Ordering::Relaxed),
+            0,
+            "the violations>0 gate must skip the per-context row entirely"
+        );
+        let text = rendered(&state);
+        assert!(text.contains("taguru_schema_checks_total{outcome=\"warned\"} 1"));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A delete racing the response leaves `name` unknown to `lookup` —
+    /// the same silent-skip contract `note_read`/`note_write` have. The
+    /// aggregate counter (recorded first, unconditionally) must still
+    /// land even though the per-context half has nothing to update.
+    #[test]
+    fn note_schema_check_on_an_unknown_context_still_bumps_the_aggregate() {
+        let dir = scratch_dir("schema-check-unknown-context");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+
+        state.note_schema_check("ghost", crate::metrics::SchemaOutcome::Refused, 3);
+
+        assert!(
+            state.lookup("ghost").is_none(),
+            "sanity: the context must not exist"
+        );
+        let text = rendered(&state);
+        assert!(text.contains("taguru_schema_checks_total{outcome=\"refused\"} 1"));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A replica's usage counters are its own ephemeral view (issue
+    /// #564): `persist_usage` must return before touching the sidecar
+    /// or clearing `usage_dirty`, so a diff from the writer is never
+    /// clobbered by locally-accumulated read/write counts.
+    #[test]
+    fn persist_usage_on_a_replica_leaves_sidecar_and_dirty_flag_untouched() {
+        let dir = scratch_dir("persist-usage-replica");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state.note_write("sake");
+            state.persist_usage();
+        }
+        let before = fs::read(meta_path(&dir, &file_stem("sake"))).unwrap();
+
+        let state = AppState::boot_with(
+            dir.clone(),
+            usize::MAX,
+            None,
+            BootOptions {
+                replica: Some(std::sync::Arc::new(crate::replica::ReplicaInfo::new(None))),
+                ..BootOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(state.is_replica(), "sanity: the reopened boot is a replica");
+
+        state.note_write("sake");
+        let entry = state.lookup("sake").unwrap();
+        assert!(
+            entry.usage_dirty.load(Ordering::Relaxed),
+            "note_write still marks dirty on a replica — only the sweep refuses"
+        );
+
+        state.persist_usage();
+
+        assert!(
+            entry.usage_dirty.load(Ordering::Relaxed),
+            "persist_usage must return before clearing usage_dirty on a replica"
+        );
+        let after = fs::read(meta_path(&dir, &file_stem("sake"))).unwrap();
+        assert_eq!(
+            before, after,
+            "a replica must never persist its own usage counters to the sidecar"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The write-failure re-mark (`gauges.rs:117-120`) exists so a
+    /// failed persist is retried by the next sweep instead of silently
+    /// losing the counters. Prove both halves: the failed attempt puts
+    /// `usage_dirty` back to `true`, and a later, unfaulted sweep
+    /// actually heals it.
+    #[test]
+    fn persist_usage_write_failure_re_marks_dirty_and_a_later_sweep_heals_it() {
+        let dir = scratch_dir("persist-usage-write-fail");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state.note_write("sake");
+        let entry = state.lookup("sake").unwrap();
+        assert!(entry.usage_dirty.load(Ordering::Relaxed));
+
+        fail_persistence_ops_after(0);
+        state.persist_usage();
+        assert!(
+            !clear_persistence_fault(),
+            "sanity: the injected failure must actually have fired"
+        );
+        assert!(
+            entry.usage_dirty.load(Ordering::Relaxed),
+            "a failed persist must re-mark the entry dirty so the next sweep retries it"
+        );
+
+        state.persist_usage();
+        assert!(
+            !entry.usage_dirty.load(Ordering::Relaxed),
+            "the retried, unfaulted sweep must clear the dirty flag once it succeeds"
+        );
+        let usage = state.directory_entry("sake").unwrap().usage;
+        assert_eq!(usage.writes, 1);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// `refresh_disk_usage`'s early return (`gauges.rs:147-149`) fires
+    /// only when NEITHER a per-context metrics collection NOR a
+    /// declared storage quota needs the numbers — with per-context
+    /// metrics off and no quota, the sweep must not touch the disk at
+    /// all, leaving the entry's cached usage at its zero default.
+    #[test]
+    fn refresh_disk_usage_skips_the_sweep_when_nothing_needs_disk_numbers() {
+        let dir = scratch_dir("quotas-not-needed");
+        let state = AppState::boot_with(
+            dir.clone(),
+            usize::MAX,
+            None,
+            BootOptions {
+                per_context_metrics: PerContextMetrics::Off,
+                ..BootOptions::default()
+            },
+        )
+        .unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .add_associations(
+                "sake",
+                vec![assoc_op("蔵", "銘柄", "青嶺", 1.0, None)],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        state.flush_dirty();
+
+        let entry = state.lookup("sake").unwrap();
+        assert_eq!(
+            entry.disk.lock().sidecar_bytes,
+            0,
+            "sanity: unmeasured so far"
+        );
+
+        state.refresh_disk_usage();
+
+        assert_eq!(
+            entry.disk.lock().sidecar_bytes,
+            0,
+            "with per-context metrics off and no storage quota declared, \
+             the sweep must not run at all"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The flip side of the test above: a declared storage quota keeps
+    /// the sweep alive even with per-context metrics off, because a
+    /// growth-write's quota gate reads these same disk numbers
+    /// (`gauges.rs:138-142`'s claim).
+    #[test]
+    fn refresh_disk_usage_runs_when_a_storage_quota_needs_it_even_with_metrics_off() {
+        let dir = scratch_dir("quotas-need-disk");
+        let state = AppState::boot_with(
+            dir.clone(),
+            usize::MAX,
+            None,
+            BootOptions {
+                per_context_metrics: PerContextMetrics::Off,
+                context_quotas: HashMap::from([(
+                    "sake".to_string(),
+                    ContextQuota {
+                        storage_bytes: Some(u64::MAX),
+                        cache_bytes: None,
+                    },
+                )]),
+                ..BootOptions::default()
+            },
+        )
+        .unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .add_associations(
+                "sake",
+                vec![assoc_op("蔵", "銘柄", "青嶺", 1.0, None)],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        let entry = state.lookup("sake").unwrap();
+        assert_eq!(
+            entry.disk.lock().sidecar_bytes,
+            0,
+            "sanity: nothing has swept the disk yet"
+        );
+
+        // `flush_dirty`'s own trailing `refresh_disk_usage` call
+        // (`engine.rs:54`) is what must not be skipped here — the
+        // sidecar it just wrote is only visible on the next sweep.
+        state.flush_dirty();
+
+        assert!(
+            entry.disk.lock().sidecar_bytes > 0,
+            "a declared storage quota must keep the disk sweep alive \
+             even with per-context metrics off"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// `gauge_snapshot`'s doc (`gauges.rs:202-217`) documents a
+    /// deliberate divergence: a pinned context's bytes count toward the
+    /// fleet-wide `taguru_resident_bytes` gauge, but `recount_entry`
+    /// (`registry.rs:2671`) zeroes a pinned entry's contribution to the
+    /// budget it never competes for. Pin down both halves of that gap
+    /// directly, since nothing else asserts it.
+    #[test]
+    fn gauge_snapshot_counts_a_pinned_context_while_the_budget_sees_none() {
+        let dir = scratch_dir("pinned-accounting-gap");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create(
+                "sake",
+                ContextMeta {
+                    pinned: true,
+                    ..ContextMeta::default()
+                },
+            )
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .add_associations(
+                "sake",
+                vec![assoc_op("蔵", "銘柄", "青嶺", 1.0, None)],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+
+        let snapshot = state.gauge_snapshot();
+        assert!(
+            snapshot.resident_bytes > 0,
+            "a pinned context's graph footprint must still count toward \
+             the fleet-wide taguru_resident_bytes gauge"
+        );
+        assert_eq!(
+            state.0.resident_estimate.load(Ordering::Relaxed),
+            0,
+            "recount_entry zeroes a pinned entry's contribution to the \
+             budget — the documented gap between this gauge and the \
+             budget's own notion of residency"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn dead_weight_gauges_track_hot_and_cold_contexts() {
         let dir = scratch_dir("dead-weight-gauges");
@@ -435,6 +735,7 @@ mod tests {
             .create("sake", ContextMeta::default())
             .map_err(|_| "create")
             .unwrap();
+        assert_eq!(state.context_count(), 1, "one context registered so far");
 
         let baseline = state.gauge_snapshot();
         assert_eq!(baseline.dead_edges_total, 0);
