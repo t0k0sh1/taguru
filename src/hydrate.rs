@@ -1459,6 +1459,108 @@ mod tests {
         );
     }
 
+    /// `entry_passages`'s own hydrate-on-first-touch hook
+    /// (`registry.rs`) has no test — the ordinary quarantine/reload
+    /// path (`passages.rs`'s `a_failed_passage_load_is_quarantined_like_the_image`)
+    /// boots without a hydrator, so it never reaches this branch. Same
+    /// no-store-machinery-needed trick as the manifest-stem test
+    /// above: a manifest naming a stem the bucket never actually
+    /// shipped anything for makes the real fetch fail deterministically.
+    #[test]
+    fn entry_passages_first_touch_reports_a_hydrate_failure() {
+        let bucket = scratch("passages-hydrate-fail-bucket");
+        let target = scratch("passages-hydrate-fail-target");
+        let mut manifest = Manifest::default();
+        manifest
+            .files
+            .insert("sake.ctx".to_string(), ManifestFile { len: 1, crc: 1 });
+
+        let hydrator = Arc::new(Hydrator::new(
+            local_store(&bucket),
+            1,
+            StorePath::default(),
+            target.clone(),
+            manifest,
+            LanePolicy::KeepAckedTail,
+        ));
+
+        let state = AppState::boot_with(
+            target.clone(),
+            usize::MAX,
+            None,
+            crate::registry::BootOptions {
+                hydrator: Some(Arc::clone(&hydrator)),
+                ..crate::registry::BootOptions::default()
+            },
+        )
+        .unwrap();
+
+        // "sake" is registered cold from the manifest's own stem
+        // (boot's hydrator-registration loop), but the bucket never
+        // actually shipped anything for it — the first passages touch
+        // must fail hydrating rather than treat a missing local file
+        // as "empty".
+        let outcome = state
+            .source_effective_times("sake")
+            .expect("the manifest-registered stem must exist");
+        assert!(
+            outcome.is_err(),
+            "a hydrate failure on the first passages touch must \
+             surface as Err, not read as an empty context"
+        );
+
+        let _ = std::fs::remove_dir_all(&bucket);
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    /// `ensure_hot`'s own hydrate-on-first-load hook
+    /// (`registry.rs:2840-2847`) has no test — the `Hydrator` unit
+    /// tests elsewhere in this file exercise `hydrate_shared`/
+    /// `ensure_context` directly, never through a graph read/write
+    /// that reaches `ensure_hot`. Same manifest-stem trick as the
+    /// passages-touch test above, aimed at a graph read instead.
+    #[test]
+    fn ensure_hot_reports_a_hydrate_failure_on_first_graph_touch() {
+        let bucket = scratch("ensure-hot-hydrate-fail-bucket");
+        let target = scratch("ensure-hot-hydrate-fail-target");
+        let mut manifest = Manifest::default();
+        manifest
+            .files
+            .insert("sake.ctx".to_string(), ManifestFile { len: 1, crc: 1 });
+
+        let hydrator = Arc::new(Hydrator::new(
+            local_store(&bucket),
+            1,
+            StorePath::default(),
+            target.clone(),
+            manifest,
+            LanePolicy::KeepAckedTail,
+        ));
+
+        let state = AppState::boot_with(
+            target.clone(),
+            usize::MAX,
+            None,
+            crate::registry::BootOptions {
+                hydrator: Some(Arc::clone(&hydrator)),
+                ..crate::registry::BootOptions::default()
+            },
+        )
+        .unwrap();
+
+        let error = state
+            .read_context("sake", |context| context.association_count())
+            .unwrap_err();
+        assert!(
+            matches!(error, crate::registry::AccessError::Load(_)),
+            "a hydrate failure on first graph touch must surface as a \
+             Load error, not read as an empty context: {error:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&bucket);
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
     /// Rewinds a bucket object's `last_modified` (LocalFileSystem
     /// reads the file's mtime), to age a claim past the guard's grace.
     fn age(path: &FsPath, secs: u64) {

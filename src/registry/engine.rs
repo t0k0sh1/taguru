@@ -496,37 +496,39 @@ impl AppState {
                 && landed < ops.len()
             {
                 match wal::truncate_to(&path, len_before) {
-                    Ok(()) if landed > 0 => {
-                        match wal::append_batch(&path, first_seq, &ops[..landed]) {
-                            Ok(appended) => {
-                                inner.wal_bytes = len_before + appended;
-                                inner.wal_seq = first_seq + landed as u64;
-                            }
-                            Err(error) => {
-                                // The applied prefix already happened
-                                // in memory and will not be undone —
-                                // and the truncate above already threw
-                                // its records off the disk, so the
-                                // caller now holds an acknowledgment
-                                // the log cannot replay. Flush the
-                                // image below (out of this lock) to
-                                // close that crash window now rather
-                                // than waiting out the flush interval.
-                                tracing::warn!(
-                                    context = %name, %error,
-                                    "WAL re-append after a partial apply failed; \
-                                     flushing the image now to re-cover memory"
-                                );
-                                inner.wal_bytes = len_before;
-                                inner.wal_seq = first_seq;
-                                wal_behind = true;
-                            }
+                    // `landed == 0` is not special-cased here:
+                    // `wal::append_batch`'s own empty-batch short
+                    // circuit (`wal.rs`) already returns `Ok(0)`
+                    // before any I/O, which lands `inner.wal_bytes`/
+                    // `wal_seq` at exactly `len_before`/`first_seq` —
+                    // the same values a dedicated `landed == 0` arm
+                    // would set by hand. A separate guard here would
+                    // be redundant, not just untested.
+                    Ok(()) => match wal::append_batch(&path, first_seq, &ops[..landed]) {
+                        Ok(appended) => {
+                            inner.wal_bytes = len_before + appended;
+                            inner.wal_seq = first_seq + landed as u64;
                         }
-                    }
-                    Ok(()) => {
-                        inner.wal_bytes = len_before;
-                        inner.wal_seq = first_seq;
-                    }
+                        Err(error) => {
+                            // The applied prefix already happened
+                            // in memory and will not be undone —
+                            // and the truncate above already threw
+                            // its records off the disk, so the
+                            // caller now holds an acknowledgment
+                            // the log cannot replay. Flush the
+                            // image below (out of this lock) to
+                            // close that crash window now rather
+                            // than waiting out the flush interval.
+                            tracing::warn!(
+                                context = %name, %error,
+                                "WAL re-append after a partial apply failed; \
+                                 flushing the image now to re-cover memory"
+                            );
+                            inner.wal_bytes = len_before;
+                            inner.wal_seq = first_seq;
+                            wal_behind = true;
+                        }
+                    },
                     Err(error) => {
                         // The untried tail is still on disk looking
                         // exactly like applied records, and replay
@@ -577,13 +579,8 @@ impl AppState {
         // replay a WAL that no longer matches memory, so the gap is
         // worth its own loud signal rather than blending into an
         // ordinary retry.
-        if wal_behind && !self.flush_entry(name, &entry) {
-            tracing::warn!(
-                context = %name,
-                "post-write recovery flush did not land immediately; the WAL for this \
-                 write is no longer trustworthy and durability now depends on the next \
-                 periodic flush landing before a crash"
-            );
+        if wal_behind {
+            warn_if_recovery_flush_missed(name, self.flush_entry(name, &entry));
         }
         self.touch(&entry);
         self.enforce_budget(name);
@@ -901,6 +898,24 @@ impl AppState {
     }
 }
 
+/// `logged_write`'s post-write recovery flush: whether it landed
+/// changes nothing else observable — `flush_entry` itself always runs
+/// once `wal_behind` is set, regardless of its own success, and every
+/// real persistence effect happens inside that call. This warn is the
+/// ONLY thing gated on the outcome, so a mutated `!` here has no
+/// behavioral test that can catch it.
+#[mutants::skip]
+fn warn_if_recovery_flush_missed(name: &str, flushed: bool) {
+    if !flushed {
+        tracing::warn!(
+            context = %name,
+            "post-write recovery flush did not land immediately; the WAL for this \
+             write is no longer trustworthy and durability now depends on the next \
+             periodic flush landing before a crash"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1182,6 +1197,67 @@ mod tests {
         assert!(
             touch_after > touch_before,
             "a WAL-cap refusal must still touch the entry: {touch_before} -> {touch_after}"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// Both refusal tests above boot with `cache_bytes = usize::MAX`,
+    /// which structurally excludes any real interaction between the
+    /// refusal's `touch`/`enforce_budget` call and the budget sweep
+    /// itself — `enforce_budget`'s own cheap gate (`resident_estimate
+    /// <= budget`) always short-circuits before the sweep loop runs.
+    /// Here the ceiling is a real, impossibly tiny 1 byte: the refused
+    /// write's own `enforce_budget(except = "capped")` call must run
+    /// the genuine sweep, and since "capped" alone (excepted, holding
+    /// real data) already exceeds the ceiling, the sweep must end
+    /// saturated rather than silently no-op.
+    #[test]
+    fn a_quota_refusal_still_runs_a_real_budget_sweep_under_a_finite_ceiling() {
+        let dir = scratch_dir("quota-refusal-real-budget-interaction");
+        let state = AppState::boot_with(
+            dir.clone(),
+            1,
+            None,
+            BootOptions {
+                context_quotas: HashMap::from([(
+                    "capped".to_string(),
+                    ContextQuota {
+                        storage_bytes: Some(1),
+                        cache_bytes: None,
+                    },
+                )]),
+                ..BootOptions::default()
+            },
+        )
+        .unwrap();
+
+        state
+            .create("capped", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        // First write lands (nothing on disk yet) and carries the
+        // family past the one-byte storage ceiling.
+        state
+            .add_associations(
+                "capped",
+                vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md"))],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+
+        let refused = state.add_associations(
+            "capped",
+            vec![assoc_op("蔵", "銘柄", "青嶺", 1.0, Some("keep.md"))],
+            Deadline::unbounded(),
+        );
+        assert!(matches!(refused, Err(AccessError::QuotaExceeded(_))));
+        assert!(
+            state.budget_saturated(),
+            "the refusal's own enforce_budget call must run a real sweep \
+             under the finite ceiling, not the usize::MAX no-op #562's \
+             existing tests are structurally limited to"
         );
 
         let _ = fs::remove_dir_all(dir);
@@ -1492,6 +1568,157 @@ mod tests {
         assert!(
             loaded["old"],
             "plain LRU would have evicted old — the ceiling reordered it: {loaded:?}"
+        );
+        assert!(loaded["fresh"], "{loaded:?}");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The counterpart to the test above: a context with a
+    /// STORAGE-only quota (`cache_bytes: None`) must read as
+    /// `over_ceiling == false` and behave as an ordinary LRU
+    /// candidate, not get reordered ahead of the true LRU victim.
+    /// Every existing `cache_bytes: None` quota test boots with
+    /// `cache_bytes = usize::MAX`, so the sweep's sort/eviction never
+    /// actually runs under real pressure to prove this either way —
+    /// same three-context LRU shape, but under a real, tight budget.
+    #[test]
+    fn a_storage_only_quota_context_is_not_prioritized_for_eviction() {
+        let dir = scratch_dir("cache-ceiling-storage-only");
+        let footprint = {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            for name in ["old", "quota_no_cache", "fresh"] {
+                state
+                    .create(name, ContextMeta::default())
+                    .map_err(|_| "create")
+                    .unwrap();
+                state
+                    .add_associations(
+                        name,
+                        vec![
+                            assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md")),
+                            assoc_op("蔵", "銘柄", "青嶺", 1.0, Some("keep.md")),
+                        ],
+                        Deadline::unbounded(),
+                    )
+                    .unwrap()
+                    .unwrap();
+            }
+            state.flush_dirty();
+            state
+                .read_context("old", |context| context.footprint())
+                .map_err(|_| "read")
+                .unwrap()
+        };
+
+        let state = AppState::boot_with(
+            dir.clone(),
+            footprint * 5 / 2,
+            None,
+            BootOptions {
+                context_quotas: HashMap::from([(
+                    "quota_no_cache".to_string(),
+                    ContextQuota {
+                        storage_bytes: Some(u64::MAX),
+                        cache_bytes: None,
+                    },
+                )]),
+                ..BootOptions::default()
+            },
+        )
+        .unwrap();
+        // old first (the true LRU victim), quota_no_cache second
+        // (storage-only quota, no cache ceiling), fresh last (its load
+        // pushes the total past the budget and triggers the sweep).
+        for name in ["old", "quota_no_cache", "fresh"] {
+            state
+                .read_context(name, |context| context.association_count())
+                .map_err(|_| "read")
+                .unwrap();
+        }
+        let loaded = loaded_map(&state);
+        assert!(
+            !loaded["old"],
+            "plain LRU must evict old — a storage-only quota must not \
+             shield or reorder \"quota_no_cache\" ahead of it: {loaded:?}"
+        );
+        assert!(
+            loaded["quota_no_cache"],
+            "cache_bytes: None must read as \"not over ceiling\", not \
+             silently prioritize this context for eviction: {loaded:?}"
+        );
+        assert!(loaded["fresh"], "{loaded:?}");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// `over_ceiling`'s own comment calls the check "strictly over"
+    /// (`engine.rs:677`): a context sitting exactly AT its declared
+    /// `cache_bytes` ceiling must not be prioritized ahead of a plain
+    /// LRU victim. Neither existing ceiling test pins this boundary —
+    /// one is comfortably over (`cache_bytes: Some(1)`), the other has
+    /// no ceiling at all.
+    #[test]
+    fn a_context_exactly_at_its_cache_ceiling_is_not_prioritized_for_eviction() {
+        let dir = scratch_dir("cache-ceiling-exact-boundary");
+        let footprint = {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            for name in ["old", "at_ceiling", "fresh"] {
+                state
+                    .create(name, ContextMeta::default())
+                    .map_err(|_| "create")
+                    .unwrap();
+                state
+                    .add_associations(
+                        name,
+                        vec![
+                            assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md")),
+                            assoc_op("蔵", "銘柄", "青嶺", 1.0, Some("keep.md")),
+                        ],
+                        Deadline::unbounded(),
+                    )
+                    .unwrap()
+                    .unwrap();
+            }
+            state.flush_dirty();
+            state
+                .read_context("old", |context| context.footprint())
+                .map_err(|_| "read")
+                .unwrap()
+        };
+
+        let state = AppState::boot_with(
+            dir.clone(),
+            footprint * 5 / 2,
+            None,
+            BootOptions {
+                context_quotas: HashMap::from([(
+                    "at_ceiling".to_string(),
+                    ContextQuota {
+                        storage_bytes: None,
+                        cache_bytes: Some(footprint as u64),
+                    },
+                )]),
+                ..BootOptions::default()
+            },
+        )
+        .unwrap();
+        for name in ["old", "at_ceiling", "fresh"] {
+            state
+                .read_context(name, |context| context.association_count())
+                .map_err(|_| "read")
+                .unwrap();
+        }
+        let loaded = loaded_map(&state);
+        assert!(
+            !loaded["old"],
+            "plain LRU must evict old — exactly AT the ceiling must not \
+             count as over it: {loaded:?}"
+        );
+        assert!(
+            loaded["at_ceiling"],
+            "\"strictly over\" means AT the ceiling is not prioritized \
+             for eviction: {loaded:?}"
         );
         assert!(loaded["fresh"], "{loaded:?}");
 
@@ -3756,6 +3983,99 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
+    /// `evict_entry`'s pinned re-check under its own lock (`inner.meta.pinned`,
+    /// distinct from the sweep-level filter in `enforce_budget`) has no
+    /// test: a caller's snapshot can predate a pin that lands before
+    /// `evict_entry` actually takes the lock. Simulated directly —
+    /// grab the handle first, pin afterward, then call `evict_entry`.
+    #[test]
+    fn evict_entry_re_checks_pinned_under_its_own_lock() {
+        let dir = scratch_dir("evict-pinned-race");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .add_associations(
+                "sake",
+                vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, None)],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+
+        let entry = state.lookup("sake").unwrap();
+        state
+            .update_meta("sake", None, Some(true), None, None)
+            .unwrap()
+            .unwrap();
+
+        assert!(
+            !state.evict_entry("sake", &entry),
+            "a pin recorded after the caller's own snapshot must still be honored"
+        );
+        assert!(
+            state.directory_entry("sake").unwrap().loaded,
+            "the re-checked pin must leave the context resident"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// `evict_entry`'s lock-held fallback save (reached when a rival
+    /// flush is already mid-flight, per the function's own doc) has no
+    /// failure test — `a_write_after_an_eviction_save_survives_a_restart`
+    /// above reaches the same fallback but its save always succeeds.
+    /// Same `entry.flushing` trick to force the fallback, plus the
+    /// persistence fault injector aimed at the very first op it
+    /// reaches: with nothing else dirty (no BM25 index), the
+    /// out-of-lock `flush_bm25`/`flush_entry` attempts consume no
+    /// persistence ops at all, so `fail_persistence_ops_after(0)`
+    /// lands squarely inside the lock-held `save_files` call.
+    #[test]
+    fn evict_entry_stays_resident_when_the_lock_held_fallback_save_fails() {
+        let dir = scratch_dir("evict-lock-held-save-fault");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .add_associations(
+                "sake",
+                vec![assoc_op("青嶺酒造", "代表銘柄", "青嶺", 1.0, None)],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+
+        let entry = state.lookup("sake").unwrap();
+        entry.flushing.store(true, Ordering::Relaxed);
+
+        fail_persistence_ops_after(0);
+        let freed = state.evict_entry("sake", &entry);
+        entry.flushing.store(false, Ordering::Relaxed);
+        assert!(
+            !clear_persistence_fault(),
+            "sanity: the injected failure must land inside the lock-held save_files call"
+        );
+        assert!(
+            !freed,
+            "a failed eviction save must keep the context resident"
+        );
+        assert!(
+            state.directory_entry("sake").unwrap().loaded,
+            "the context must stay hot, not lose its writes"
+        );
+        assert!(
+            rendered(&state).contains("taguru_cache_evictions_total{outcome=\"failed\"} 1"),
+            "the failure must be counted"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
     /// On a replica the tailer owns every on-disk file: an eviction
     /// that finds a locally-built (dirty) BM25 index must drop it
     /// WITHOUT persisting — writing the sidecar would race the files
@@ -4067,6 +4387,154 @@ mod tests {
         assert!(
             entry.bm25_dirty.load(Ordering::Relaxed),
             "an in-place update must re-dirty the sidecar"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// `flush_bm25`'s `None` arm (`Dropped since (eviction): its own
+    /// save path ran`) has no test — the only direct caller
+    /// (`an_in_place_bm25_update_re_dirties_the_sidecar` above) always
+    /// has a live index. Forces the documented race directly: dirty,
+    /// but nothing in memory to serialize.
+    #[test]
+    fn flush_bm25_skips_a_dirty_flag_with_no_index_to_persist() {
+        let dir = scratch_dir("flush-bm25-none-index");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let entry = state.lookup("sake").unwrap();
+
+        entry.bm25_dirty.store(true, Ordering::Relaxed);
+        *entry.bm25.write() = None;
+
+        state.flush_bm25("sake", &entry);
+
+        assert!(
+            !entry.bm25_dirty.load(Ordering::Relaxed),
+            "the dirty flag is swapped off unconditionally before the None check"
+        );
+        assert!(
+            !bm25_path(&dir, &file_stem("sake")).exists(),
+            "nothing must be written when there is no index to persist"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// `flush_bm25`'s tombstone fence (`read_unless_deleted`) has no
+    /// test either — it exists to stop a stalled flusher from
+    /// recreating a sidecar a racing delete just removed. Reached
+    /// directly (no race needed): tombstone the entry, then call
+    /// `flush_bm25` on the stale handle a caller like `flush_dirty`
+    /// would still be holding.
+    #[test]
+    fn flush_bm25_refuses_to_recreate_a_sidecar_beside_a_tombstone() {
+        let dir = scratch_dir("flush-bm25-tombstone");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert("doc-a".to_string(), "杜氏は高瀬である。".to_string());
+        state
+            .store_passages("sake", plain(passages))
+            .unwrap()
+            .unwrap();
+        state
+            .search_passages("sake", "杜氏", 3, None, None, Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        let entry = state.lookup("sake").unwrap();
+        state.flush_bm25("sake", &entry);
+        assert!(bm25_path(&dir, &file_stem("sake")).exists());
+
+        state.delete("sake").unwrap().unwrap();
+        assert!(
+            !bm25_path(&dir, &file_stem("sake")).exists(),
+            "sanity: delete must have removed the sidecar already"
+        );
+
+        // The entry's own index is still live in memory (`delete` does
+        // not touch it) — only the tombstone fence stands between this
+        // call and recreating the file `delete` just removed.
+        entry.bm25_dirty.store(true, Ordering::Relaxed);
+        state.flush_bm25("sake", &entry);
+
+        assert!(
+            !bm25_path(&dir, &file_stem("sake")).exists(),
+            "the fence must stop a stale handle from resurrecting a \
+             deleted context's sidecar"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// `truncate_wal`'s `ship_progress` deferral (`engine.rs:254-258`)
+    /// has no test anywhere in the registry-level suite —
+    /// `BootOptions.ship_progress` is never set to `Some(..)` outside
+    /// `src/ship/tests.rs` (which exercises `ShipProgress::allows_reset`
+    /// directly, never through a live flush) and a few production
+    /// wiring sites. A shipper that has shipped nothing yet must defer
+    /// the housekeeping reset rather than open a gap in the shipped
+    /// stream.
+    #[test]
+    fn truncate_wal_defers_the_reset_while_shipping_progress_lags() {
+        let dir = scratch_dir("truncate-wal-ship-defer");
+        let ship_progress = Arc::new(crate::ship::ShipProgress::new(0));
+        let state = AppState::boot_with(
+            dir.clone(),
+            usize::MAX,
+            None,
+            BootOptions {
+                ship_progress: Some(Arc::clone(&ship_progress)),
+                ..BootOptions::default()
+            },
+        )
+        .unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        // Two separate batches so `wal_seq` (and so the flush's
+        // watermark, `wal_seq - 1`) is > 0 — at exactly 0 an empty
+        // shipped-lane map already reads as "caught up" (`0 >= 0`) and
+        // the deferral never engages.
+        state
+            .add_associations(
+                "sake",
+                vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, None)],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        state
+            .add_associations(
+                "sake",
+                vec![assoc_op("蔵", "銘柄", "青嶺", 1.0, None)],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+
+        let wal = wal_path(&dir, &file_stem("sake"));
+        let before = fs::metadata(&wal).unwrap().len();
+        assert!(
+            before > 0,
+            "sanity: the log must hold both batches before the flush"
+        );
+
+        state.flush_dirty();
+
+        let after = fs::metadata(&wal).unwrap().len();
+        assert_eq!(
+            after, before,
+            "a shipper that has shipped nothing yet must defer the \
+             reset, not truncate a log the shipped stream has not \
+             caught up to"
         );
 
         let _ = fs::remove_dir_all(dir);
