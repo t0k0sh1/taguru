@@ -63,8 +63,8 @@ use crate::schema;
 #[cfg(test)]
 use crate::storage::{clear_persistence_fault, fail_persistence_ops_after, write_atomic_private};
 use crate::storage::{
-    commit_staged, fsync_dir, lock_data_dir, offload, remove_persisted_file, stage_bytes,
-    write_atomic,
+    commit_staged, fsync_dir, lock_data_dir, offload, remove_persisted_file, rename_persisted_file,
+    stage_bytes, write_atomic,
 };
 use crate::wal::{self, WalOp};
 

@@ -33,11 +33,20 @@ pub(crate) fn write_atomic_private(path: &Path, bytes: &[u8]) -> io::Result<()> 
 /// Test-only deterministic fault injection for registry persistence.
 ///
 /// The calling thread fails exactly one persistence operation after
-/// `successes` stage, commit, unlink, WAL append, or WAL truncate
-/// operations have run normally.
+/// `successes` stage, commit (a publish rename OR a same-directory
+/// move — the registry's whole-family context rename included, since
+/// it routes every one of its ten renames through
+/// [`rename_persisted_file`] like every other rename in the crate),
+/// unlink, WAL append, or WAL truncate operations have run normally.
 /// Keeping the counter thread-local makes parallel tests independent,
-/// and routing every operation through shared choke points avoids a
-/// flag for each call site.
+/// and routing every MUTATING operation through shared choke points
+/// avoids a flag for each call site. Two things are deliberately
+/// outside this net: [`fsync_dir`] (durability, not mutation — a
+/// dropped fsync loses nothing a crash-consistency test can observe
+/// without also modeling real fsync failures, which this harness does
+/// not attempt) and any plain read (`fs::read` — a read has no
+/// write-ordering story to get wrong, so injecting into it would only
+/// test the reader's own error handling, not persistence ordering).
 #[cfg(test)]
 pub(crate) fn fail_persistence_ops_after(successes: u32) {
     PERSISTENCE_FAULT.with(|cell| cell.set(Some(successes)));
