@@ -116,7 +116,7 @@ pub use passages::PassagesWriteError;
 pub(crate) use concurrency::{Semaphore, dispatch_chunks_concurrently, parallel_map};
 use meta_io::{MetaFile, move_context_files, read_meta_file, save_files, write_meta};
 pub(crate) use meta_io::{context_files, schema_digest_of};
-use paths::{FNV_OFFSET, FNV_PRIME, rename_markers_targeting, write_rename_marker};
+use paths::{FNV_OFFSET, FNV_PRIME, rename_markers_targeting, wal_lane_bytes, write_rename_marker};
 pub(crate) use paths::{
     IMPORT_MARKER_EXTENSION, ImportMarker, ResumedRenames, bm25_path, deleted_marker_path,
     file_stem, image_path, import_marker_path, import_marker_paths, meta_path, name_from_stem,
@@ -617,6 +617,44 @@ impl Entry {
             schema_violations: AtomicU64::new(0),
             changes: Mutex::new(changes::ChangeRing::default()),
         }
+    }
+
+    /// The Cold-slot constructor every register-from-sidecar path
+    /// shares: boot's hydrator registration and `scan_data_dir`
+    /// (`boot.rs`), `replica_register` (`replication.rs`), and the
+    /// rename's re-register (`lifecycle.rs`). All four land a `Cold`
+    /// slot seeded straight from [`read_meta_file`]'s [`MetaFile`], so
+    /// they cannot disagree about which sidecar field feeds which
+    /// entry field. `wal_bytes`/`passages_wal_bytes` are the caller's
+    /// own measurement ([`wal_lane_bytes`] for the two that stat, `0`
+    /// for the two that register from a meta alone with no family
+    /// local yet), and `schema` is `None` for every path whose family
+    /// is not yet known to be local — `ensure_hot` resolves it lazily
+    /// on first load.
+    fn cold_from_meta(
+        meta_file: MetaFile,
+        wal_bytes: u64,
+        passages_wal_bytes: u64,
+        schema: Option<Arc<crate::schema::InstalledSchema>>,
+    ) -> Self {
+        let MetaFile {
+            meta,
+            stats,
+            usage,
+            revision,
+            schema_digest,
+        } = meta_file;
+        Self::new(
+            meta,
+            stats,
+            Slot::Cold,
+            wal_bytes,
+            passages_wal_bytes,
+            usage,
+            revision,
+            schema_digest,
+            schema,
+        )
     }
 
     /// The three revision counters as one [`ContextRevision`] — the

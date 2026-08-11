@@ -576,40 +576,30 @@ impl AppState {
         if let Err(error) = move_context_files(&self.0.data_dir, &from_stem, &to_stem) {
             return RenameOutcome::Stuck(RenameContextError::Io(error));
         }
-        let MetaFile {
-            meta,
-            stats,
-            usage,
-            revision,
-            schema_digest,
-        } = read_meta_file(&self.0.data_dir, &to_stem);
-        let usage = ContextUsage {
-            reads: usage.reads.max(final_usage.reads),
-            empty_reads: usage.empty_reads.max(final_usage.empty_reads),
-            writes: usage.writes.max(final_usage.writes),
-            last_read_epoch: usage.last_read_epoch.max(final_usage.last_read_epoch),
-            last_write_epoch: usage.last_write_epoch.max(final_usage.last_write_epoch),
+        let mut meta_file = read_meta_file(&self.0.data_dir, &to_stem);
+        meta_file.usage = ContextUsage {
+            reads: meta_file.usage.reads.max(final_usage.reads),
+            empty_reads: meta_file.usage.empty_reads.max(final_usage.empty_reads),
+            writes: meta_file.usage.writes.max(final_usage.writes),
+            last_read_epoch: meta_file
+                .usage
+                .last_read_epoch
+                .max(final_usage.last_read_epoch),
+            last_write_epoch: meta_file
+                .usage
+                .last_write_epoch
+                .max(final_usage.last_write_epoch),
         };
-        let pinned = meta.pinned;
-        let wal_bytes = fs::metadata(wal_path(&self.0.data_dir, &to_stem))
-            .map(|metadata| metadata.len())
-            .unwrap_or(0);
-        let passages_wal_bytes = fs::metadata(passages_wal_path(&self.0.data_dir, &to_stem))
-            .map(|metadata| metadata.len())
-            .unwrap_or(0);
+        let pinned = meta_file.meta.pinned;
+        let (wal_bytes, passages_wal_bytes) = wal_lane_bytes(&self.0.data_dir, &to_stem);
         // The revision moves with the sidecar: a rename is the same
         // content under a new name, so the counters carry over intact
         // (the group fingerprint still changes — the member NAME is
         // part of its hash).
-        let new_entry = Arc::new(Entry::new(
-            meta,
-            stats,
-            Slot::Cold,
+        let new_entry = Arc::new(Entry::cold_from_meta(
+            meta_file,
             wal_bytes,
             passages_wal_bytes,
-            usage,
-            revision,
-            schema_digest,
             // Not resolved here even though the schema file (if any)
             // moved with the rest of the family a few lines up: this
             // mirrors the hydrator-registration case above rather than
