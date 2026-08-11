@@ -13,7 +13,7 @@ use crate::registry::{AppState, ContextMeta, CreateError, DeleteError, RenameCon
 use super::groups::scope_refusal;
 use super::{
     AppBytes, AppJson, AppPath, AppQuery, ErrorCode, MAX_CONTEXT_NAME_BYTES, MAX_DESCRIPTION_BYTES,
-    MAX_MATCH_LIMIT, clamp, deadline_exceeded, error, key_name, not_found, ok, optional_body,
+    MAX_MATCH_LIMIT, clamp_page, deadline_exceeded, error, key_name, not_found, ok, optional_body,
     oversized,
 };
 
@@ -56,7 +56,7 @@ pub async fn list_contexts(
     AppQuery(query): AppQuery<ListContextsQuery>,
 ) -> Response {
     let started_at = Instant::now();
-    let limit = clamp(query.limit, MAX_MATCH_LIMIT, MAX_MATCH_LIMIT);
+    let limit = clamp_page(query.limit, MAX_MATCH_LIMIT, MAX_MATCH_LIMIT);
     let after = query.after.as_deref();
     // world so pagination stays coherent for that caller. An explicit
     // allow-list has no relation to name order, so seeking a page of

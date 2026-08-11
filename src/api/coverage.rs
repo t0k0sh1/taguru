@@ -12,7 +12,7 @@ use crate::registry::{AccessError, AppState};
 use super::aliases::KeysetQuery;
 use super::{
     AppJson, AppPath, AppQuery, ErrorCode, MAX_MATCH_LIMIT, MatchCursor, MatchPage, access_error,
-    associations_out, clamp, deadline_exceeded, error, not_found, ok, overlong, page,
+    associations_out, clamp_page, deadline_exceeded, error, not_found, ok, overlong, page,
 };
 
 /// What one embedding refresh accomplished. `embedded`/`total` stay
@@ -161,7 +161,7 @@ pub async fn labels(
     AppQuery(query): AppQuery<KeysetQuery>,
 ) -> Response {
     let started_at = Instant::now();
-    let limit = clamp(query.limit, MAX_MATCH_LIMIT, MAX_MATCH_LIMIT);
+    let limit = clamp_page(query.limit, MAX_MATCH_LIMIT, MAX_MATCH_LIMIT);
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }
