@@ -593,10 +593,10 @@ pub struct Entry {
 /// public metrics type that carries all five as its own fields; a
 /// shared sum would either leak this struct's shape across the
 /// module boundary or make `crate::metrics` depend on registry
-/// internals. `gauges.rs`'s
-/// `the_quota_used_total_and_the_gauge_row_disk_total_agree_for_the_same_context`
-/// test is the enforced cross-check that the two independent
-/// five-term sums cannot silently drift apart.
+/// internals. `engine.rs`'s
+/// `storage_quota_used_is_the_exact_five_lane_sum` test is the
+/// enforced cross-check that the two independent five-term sums
+/// cannot silently drift apart.
 #[derive(Debug, Clone, Copy, Default)]
 struct ContextDiskUsage {
     image_bytes: u64,
@@ -1254,7 +1254,7 @@ pub const DEFAULT_AUTO_COMPACT_RATIO: f64 = 0.5;
 /// Default resident cache budget (`TAGURU_CACHE_BYTES`) — the ceiling
 /// [`AppState::enforce_budget`] evicts unpinned contexts down to.
 /// Sized so an ordinary single-node deploy never touches the eviction
-/// path at all: the sweep's cost (an O(contexts) snapshot plus two
+/// path at all: the sweep's cost (an O(contexts) snapshot plus five
 /// lock acquisitions per candidate) is only paid by a fleet that
 /// genuinely outgrows it, while 512 MiB still fits comfortably beside
 /// the process's other allocations on the smallest container shape
@@ -1921,7 +1921,7 @@ impl BootConfig {
 /// sweeps: `StateInner::resident_estimate` (vector/passage/BM25
 /// residency drifts between per-entry recounts, which only keep the
 /// GRAPH term exact) and `StateInner::budget_saturated`. 64 buys back
-/// the O(contexts) sweep — a snapshot plus two lock acquisitions per
+/// the O(contexts) sweep — a snapshot plus five lock acquisitions per
 /// context — that ran on EVERY request before the gate existed, while
 /// keeping the worst-case unbudgeted cache overshoot to one sweep
 /// period of growth. It is wrong in either direction if the workload's

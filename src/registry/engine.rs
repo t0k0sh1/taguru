@@ -638,7 +638,7 @@ impl AppState {
         // sweep regardless of either arm — its reconciling store below
         // bounds any staleness or drift (estimate, or saturation) at
         // `BUDGET_SWEEP_PERIOD` operations. Before this gate the full
-        // sweep (snapshot, two lock acquisitions per context) ran on
+        // sweep (snapshot, five lock acquisitions per context) ran on
         // every request.
         let ops = self.0.budget_ops.fetch_add(1, Ordering::Relaxed);
         let budget = i64::try_from(self.0.cache_bytes).unwrap_or(i64::MAX);
@@ -4320,9 +4320,16 @@ mod tests {
         assert_eq!(DEFAULT_WAL_MAX_BYTES, 256 * 1024 * 1024);
         assert_eq!(DEFAULT_PASSAGES_WAL_MAX_BYTES, 1024 * 1024 * 1024);
         assert_eq!(DEFAULT_CACHE_BYTES, 512 * 1024 * 1024);
-        // No test in this binary sets TAGURU_CACHE_BYTES, so from_env
-        // answers the documented default.
+        // TAGURU_CACHE_BYTES is a real deployment knob a developer's
+        // shell (or CI) might already have set — scope it out for this
+        // one assertion rather than assume it's absent, then restore
+        // whatever was there.
+        let cache_bytes_var = std::env::var("TAGURU_CACHE_BYTES").ok();
+        unsafe { std::env::remove_var("TAGURU_CACHE_BYTES") };
         assert_eq!(BootConfig::from_env().cache_bytes, DEFAULT_CACHE_BYTES);
+        if let Some(value) = cache_bytes_var {
+            unsafe { std::env::set_var("TAGURU_CACHE_BYTES", value) };
+        }
         assert_eq!(BUDGET_SWEEP_PERIOD, 64);
         assert_eq!(ContextStats::TOP_CONCEPTS, 10);
         assert_eq!(ContextStats::LABEL_SAMPLE, 50);
