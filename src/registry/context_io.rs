@@ -286,12 +286,27 @@ impl AppState {
                 dead_edges: stats.dead_edges,
                 aliases_dropped: stats.aliases_dropped,
                 passages_compacted: false,
+                image_persisted: false,
             })
         })?;
         // Persist the shrunken image now (flush_entry takes its own
         // locks); a failure leaves the entry dirty for the next tick,
-        // which is the flusher's ordinary retry story.
-        self.flush_entry(name, &entry);
+        // which is the flusher's ordinary retry story — but unlike a
+        // routine flush, THIS caller asked specifically for a smaller
+        // durable image and must be told when what it got back is only
+        // a smaller in-memory one. `flush_entry` reports `false` both
+        // for a genuine stage/commit failure and for a benign back-off
+        // (a racing eviction or compaction already published something
+        // newer) — either way `entry.dirty` stays set, so the honest
+        // answer is the same: not durably reflected by THIS call, the
+        // next flush tick will pick it up.
+        let image_persisted = self.flush_entry(name, &entry);
+        if !image_persisted {
+            tracing::warn!(
+                context = %name,
+                "compacted image not yet persisted to disk; the next flush tick will retry"
+            );
+        }
         // The passage log's own dead weight (#437): a retracted
         // source's text lives on in the log as bytes behind a
         // tombstone until the log's size-triggered compaction happens
@@ -331,6 +346,7 @@ impl AppState {
             )
             .unwrap_or(false);
         let outcome = CompactOutcome {
+            image_persisted,
             passages_compacted,
             ..outcome
         };
@@ -457,6 +473,7 @@ impl AppState {
     ) -> MaintenanceCompactionOutcome {
         let candidates = self.compaction_candidates(min_dead_ratio);
         let mut contexts = Vec::with_capacity(candidates.len());
+        let mut skipped = Vec::new();
         let mut deadline_exceeded = false;
         for (name, _) in candidates {
             if deadline.expired() {
@@ -470,17 +487,35 @@ impl AppState {
                     break;
                 }
                 Err(error) => {
+                    // The message a plain client-facing string, not
+                    // `{error:?}`: `skipped` is meant to be read by an
+                    // operator off the sweep's own JSON response, not
+                    // only found by grepping this warn line.
+                    let message = match &error {
+                        AccessError::NotFound => "no such context".to_string(),
+                        AccessError::Load(message) => message.clone(),
+                        AccessError::Unpersisted(message) => message.clone(),
+                        AccessError::QuotaExceeded(message) => message.clone(),
+                        // Handled above; unreachable here, kept for
+                        // exhaustiveness against a future variant.
+                        AccessError::DeadlineExceeded => "deadline exceeded".to_string(),
+                    };
                     tracing::warn!(
                         context = %name,
                         ?error,
                         "maintenance sweep skipped a context"
                     );
+                    skipped.push(MaintenanceCompactionSkip {
+                        name,
+                        error: message,
+                    });
                 }
             }
         }
         MaintenanceCompactionOutcome {
             contexts,
             deadline_exceeded,
+            skipped,
         }
     }
 }
@@ -855,6 +890,10 @@ mod tests {
                 "{outcome:?} must shrink"
             );
             assert_eq!(outcome.dead_edges, 1, "{outcome:?}");
+            assert!(
+                outcome.image_persisted,
+                "an ordinary compact must publish its rebuilt image: {outcome:?}"
+            );
             assert_eq!(live_facts(&state), before, "live content must survive");
 
             // A write AFTER the compact must replay across a crash —
@@ -879,6 +918,63 @@ mod tests {
                 .any(|(_, label, object, _)| label == "創業年" && object == "1907年"),
             "the post-compact write must replay: {after:?}"
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// #586: the graph rebuild inside `compact_context` runs entirely
+    /// in memory — only the trailing `flush_entry` call actually
+    /// touches disk. When that publish cannot land (a full disk being
+    /// the realistic cause), the call must still answer 200 with the
+    /// real shed-bytes numbers (the compaction itself is not a lie),
+    /// but `image_persisted: false` must say the smaller image is not
+    /// durable yet, and the entry must stay `dirty` so the next flush
+    /// tick retries the exact same publish.
+    #[test]
+    fn compact_context_reports_image_persisted_false_when_the_flush_cannot_publish() {
+        let dir = scratch_dir("compact-unpersisted");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .add_associations(
+                "sake",
+                vec![
+                    assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md")),
+                    assoc_op("蔵", "廃止銘柄", "旧銘", 1.0, Some("gone.md")),
+                ],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        state.retract_source("sake", "gone.md").unwrap();
+
+        // The rebuild itself does no persistence I/O — only the
+        // trailing `flush_entry` does, staging the image as its very
+        // first op. Failing op #0 lands squarely on that stage.
+        fail_persistence_ops_after(0);
+        let outcome = state
+            .compact_context("sake", Deadline::unbounded())
+            .expect("the rebuild succeeds even though its publish will fail");
+        let past_end = clear_persistence_fault();
+        assert!(!past_end, "the flush's own stage must be what failed");
+
+        assert!(
+            outcome.bytes_after < outcome.bytes_before,
+            "the in-memory rebuild is real even though publishing it failed: {outcome:?}"
+        );
+        assert!(
+            !outcome.image_persisted,
+            "the rebuilt image never reached disk: {outcome:?}"
+        );
+
+        let entry = state.lookup("sake").expect("still registered");
+        assert!(
+            entry.dirty.load(Ordering::Relaxed),
+            "a failed publish must leave the entry dirty for the next flush tick to retry"
+        );
+
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1315,6 +1411,73 @@ mod tests {
         let outcome = state.run_maintenance_compaction(0.0, Deadline::unbounded());
         assert!(outcome.contexts.is_empty(), "{outcome:?}");
         assert!(!outcome.deadline_exceeded);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// #586: before this, a candidate the sweep selected but then
+    /// failed to compact (a load failure here — a `Cold` entry whose
+    /// on-disk image cannot be read) vanished from the response with
+    /// nothing but a `warn!` line to explain it; `contexts: []` alone
+    /// is indistinguishable from a fleet that had nothing left to
+    /// compact. `skipped` must name it and carry the same message a
+    /// caller of `compact_context` directly would have gotten.
+    #[test]
+    fn run_maintenance_compaction_reports_a_load_failure_as_a_skip_not_silence() {
+        let dir = scratch_dir("maint-skip-load-failure");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .add_associations(
+                "sake",
+                vec![
+                    assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("keep.md")),
+                    assoc_op("蔵", "廃止銘柄", "旧銘", 1.0, Some("gone.md")),
+                ],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        state.retract_source("sake", "gone.md").unwrap();
+
+        // Flush so the cached `inner.stats` snapshot `evict_entry`
+        // caches on the way down actually reflects the retraction
+        // (only a flush or an eviction refreshes it — a plain
+        // `logged_write` like `retract_source` does not), then evict
+        // for real: `compaction_candidates` reads that cached snapshot
+        // for a `Cold` entry, and `ensure_hot` inside `compact_context`
+        // will actually try to load it from disk rather than short-
+        // circuiting on an already-hot slot.
+        state.flush_dirty();
+        let entry = state.lookup("sake").expect("just created");
+        assert!(
+            state.evict_entry("sake", &entry),
+            "sanity: an unpinned context must evict cleanly"
+        );
+
+        // A directory where the image file should be: `ensure_hot`'s
+        // `fs::read` fails without ever reaching the parser, the same
+        // technique the rename/sweep tests elsewhere in this crate use
+        // to force a deterministic, real (not injected) I/O failure.
+        let image = image_path(&dir, &file_stem("sake"));
+        fs::remove_file(&image).unwrap();
+        fs::create_dir_all(&image).unwrap();
+
+        let outcome = state.run_maintenance_compaction(0.0, Deadline::unbounded());
+        assert!(
+            outcome.contexts.is_empty(),
+            "a candidate that failed outright must not appear as compacted: {outcome:?}"
+        );
+        assert!(!outcome.deadline_exceeded);
+        assert_eq!(outcome.skipped.len(), 1, "{outcome:?}");
+        assert_eq!(outcome.skipped[0].name, "sake");
+        assert!(
+            outcome.skipped[0].error.contains("image unreadable"),
+            "{outcome:?}"
+        );
 
         let _ = fs::remove_dir_all(dir);
     }

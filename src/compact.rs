@@ -352,16 +352,25 @@ fn report_outcome(
 
 /// One context's report line — shared by the sequential path, the
 /// `--parallel` path, and both `--url` paths (per-context and the
-/// maintenance sweep), so the four can never drift apart.
+/// maintenance sweep), so the four can never drift apart. `#[586]`:
+/// when the rebuilt image did not actually make it to disk (the
+/// caller already succeeded — the graph itself is compacted, only the
+/// durable copy is still the old, larger one), the line says so rather
+/// than letting `bytes_after` imply a shrink that has not landed yet.
 fn success_line(name: &str, outcome: &CompactOutcome) -> String {
     format!(
-        "context '{name}': {} → {} ({} dead edge(s) shed{})",
+        "context '{name}': {} → {} ({} dead edge(s) shed{}){}",
         crate::config::fmt_bytes(outcome.bytes_before as u64),
         crate::config::fmt_bytes(outcome.bytes_after as u64),
         outcome.dead_edges,
         match outcome.aliases_dropped {
             0 => String::new(),
             dropped => format!(", {dropped} alias(es) dropped (canonical has no live association)"),
+        },
+        if outcome.image_persisted {
+            String::new()
+        } else {
+            " [not yet persisted to disk; the next flush will retry]".to_string()
         },
     )
 }
@@ -586,11 +595,25 @@ fn run_remote_sweep(api: &Api, as_json: bool) -> i32 {
                         outcome.contexts.len()
                     );
                 }
+                // #586: a candidate the sweep selected but could not
+                // compact at all used to vanish — `contexts` only ever
+                // names what landed, so a sweep that failed on every
+                // single candidate answered a clean-looking empty list.
+                // `skipped` names what got left behind and why.
+                for skip in &outcome.skipped {
+                    eprintln!(
+                        "taguru: compact: context '{}' was skipped: {}",
+                        skip.name, skip.error
+                    );
+                }
                 if outcome.deadline_exceeded {
                     eprintln!(
                         "taguru: compact: the sweep's deadline expired before every candidate \
                          was compacted — re-run to continue (compaction is safe to repeat)"
                     );
+                    return 1;
+                }
+                if !outcome.skipped.is_empty() {
                     return 1;
                 }
                 if ok { 0 } else { 1 }
@@ -703,6 +726,7 @@ mod tests {
                     dead_edges: 3,
                     aliases_dropped: 1,
                     passages_compacted: false,
+                    image_persisted: true,
                 }
             ),
         );
@@ -711,5 +735,55 @@ mod tests {
             "{}",
             success_line(&entry.name, &entry.outcome)
         );
+    }
+
+    /// #586: a response from a server predating `image_persisted` (no
+    /// such key at all) must decode as `true` — the field's own
+    /// `serde(default)` — since a pre-#586 server never lied about
+    /// this, it simply never said. `skipped` must default to empty
+    /// the same way for a `MaintenanceCompactionOutcome` missing it.
+    #[test]
+    fn an_older_servers_response_with_no_image_persisted_key_decodes_as_true() {
+        let outcome: MaintenanceCompactionOutcome = serde_json::from_value(serde_json::json!({
+            "contexts": [
+                {
+                    "name": "sake",
+                    "bytes_before": 1000,
+                    "bytes_after": 400,
+                    "dead_edges": 3,
+                    "aliases_dropped": 1,
+                }
+            ],
+            "deadline_exceeded": false,
+        }))
+        .expect("an older server's response must still decode");
+        assert!(outcome.contexts[0].outcome.image_persisted);
+        assert!(outcome.skipped.is_empty());
+    }
+
+    /// The current wire shape's own round trip: `image_persisted: false`
+    /// and a non-empty `skipped` must survive decoding unchanged, not
+    /// get swallowed by the compatibility default above.
+    #[test]
+    fn a_current_response_reporting_an_unpersisted_image_and_a_skip_round_trips() {
+        let outcome: MaintenanceCompactionOutcome = serde_json::from_value(serde_json::json!({
+            "contexts": [
+                {
+                    "name": "sake",
+                    "bytes_before": 1000,
+                    "bytes_after": 400,
+                    "dead_edges": 3,
+                    "aliases_dropped": 1,
+                    "image_persisted": false,
+                }
+            ],
+            "deadline_exceeded": false,
+            "skipped": [{"name": "beer", "error": "disk full"}],
+        }))
+        .expect("the current wire shape must decode");
+        assert!(!outcome.contexts[0].outcome.image_persisted);
+        assert_eq!(outcome.skipped.len(), 1);
+        assert_eq!(outcome.skipped[0].name, "beer");
+        assert_eq!(outcome.skipped[0].error, "disk full");
     }
 }
