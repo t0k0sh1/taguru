@@ -1,6 +1,6 @@
 //! Applying WAL ops to a live graph — the write path's batch
 //! semantics (`apply_in_order`) and replay's logged-skip/guarded
-//! variants (`replay_op`, `replay_ops_guarded`), all built on the one
+//! variants (`replay_op`, `replay_wal_guarded`), all built on the one
 //! op-to-graph interpreter (`apply_op`) so a replayed op can never
 //! mean something different than it did when first applied.
 
@@ -45,21 +45,38 @@ pub(super) fn replay_op(context: &mut Context, op: &WalOp) {
     }
 }
 
-/// Runs the whole replay loop behind `catch_unwind`, turning a panic
-/// (an actual bug tripped by some op's content, not a library
-/// rejection — `replay_op` already turns those into a log line) into
-/// the same `Err` shape a corrupt image or unreadable WAL produces.
-/// Without this, a poisoned op would panic `ensure_hot` itself on
-/// every subsequent access — this context can never come back Hot, so
-/// every caller touching it crash-loops forever instead of hitting
-/// the existing quarantine-and-retry path ([`LOAD_FAILURE_RETRY`]).
-pub(super) fn replay_ops_guarded(context: &mut Context, ops: &[WalOp]) -> Result<(), String> {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        for op in ops {
+/// Runs the whole WAL load — reading and parsing the log, then
+/// applying every recovered op — behind one `catch_unwind`. Parsing is
+/// as much bug surface as applying: a panic from either half (a bug in
+/// `wal::replay`'s parser tripped by adversarial bytes, or a bug in
+/// some op's own application logic — a deterministic library
+/// rejection is not this, `replay_op` already turns those into a log
+/// line) must become the same `Err` shape a corrupt image or
+/// unreadable WAL produces. Without this, a poisoned log would panic
+/// `ensure_hot` itself on every subsequent access — this context can
+/// never come back Hot, so every caller touching it crash-loops
+/// forever instead of hitting the existing quarantine-and-retry path
+/// ([`LOAD_FAILURE_RETRY`]). Returns the WAL's top seq on success, so
+/// the caller can seed `wal_seq`/`graph_revision` from it exactly as
+/// `wal::replay` itself would.
+pub(super) fn replay_wal_guarded(
+    path: &Path,
+    watermark: u64,
+    context: &mut Context,
+) -> Result<u64, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> io::Result<u64> {
+        let (ops, top) = wal::replay(path, watermark)?;
+        for op in &ops {
             replay_op(context, op);
         }
+        Ok(top)
     }))
-    .map_err(|_| "an op panicked reapplying against a fresh load".to_string())
+    .unwrap_or_else(|_| {
+        Err(io::Error::other(
+            "an op panicked reapplying against a fresh load",
+        ))
+    })
+    .map_err(|error| error.to_string())
 }
 
 /// Applies one op to the graph; `Err` carries the human message each

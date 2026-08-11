@@ -129,7 +129,7 @@ pub(crate) use paths::{
 pub(crate) use retrieval_cache::{CachedRetrieval, RetrievalKey};
 pub(crate) use semantic_cache::SemanticFill;
 pub(crate) use terms::{passage_terms, spelled_passage_terms};
-use wal_replay::{applied_count, apply_in_order, replay_ops_guarded};
+use wal_replay::{applied_count, apply_in_order, replay_wal_guarded};
 // Unused-looking from this file alone: hoisted here so `core_tests.rs`
 // and `engine.rs`'s `mod tests` pick them up through `use super::*`.
 #[cfg(test)]
@@ -3094,11 +3094,16 @@ fn ensure_hot(
             // a log left behind by an earlier run holds acknowledged
             // writes and must never be ignored. A corrupt log is the
             // image-corrupt severity, not a shrug — it holds writes
-            // that exist nowhere else.
-            let (ops, top) = wal::replay(&wal_path(data_dir, &stem), context.applied_seq())
-                .map_err(|e| format!("context '{name}' WAL unreadable: {e}"))?;
-            replay_ops_guarded(&mut context, &ops)
-                .map_err(|e| format!("context '{name}' WAL replay panicked: {e}"))?;
+            // that exist nowhere else. Parsing and applying are one
+            // `catch_unwind`-guarded unit (see `replay_wal_guarded`)
+            // so a panic in either half quarantines the context
+            // instead of crash-looping every subsequent access.
+            let top = replay_wal_guarded(
+                &wal_path(data_dir, &stem),
+                context.applied_seq(),
+                &mut context,
+            )
+            .map_err(|e| format!("context '{name}' WAL replay failed: {e}"))?;
             Ok((context, top))
         });
     let (mut context, top) = match loaded {

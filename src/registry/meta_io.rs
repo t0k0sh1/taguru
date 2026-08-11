@@ -155,7 +155,11 @@ pub(crate) fn context_files(stem: &str) -> [String; 10] {
 /// is returned so the caller knows the move is incomplete and keeps the
 /// rename marker. All ten share `data_dir` as their parent, so one
 /// fsync after every rename covers the whole family durably instead of
-/// paying for it (via `commit_staged`) up to ten times.
+/// paying for it (via `commit_staged`) up to ten times. The fsync's own
+/// failure is reported too, but only when there was no earlier
+/// straggler to report first — a rename error names the file that
+/// actually didn't move, which is more actionable than a directory
+/// fsync failure that names nothing.
 pub(super) fn move_context_files(
     data_dir: &Path,
     from_stem: &str,
@@ -181,8 +185,13 @@ pub(super) fn move_context_files(
             }
         }
     }
-    if moved_any {
-        fsync_dir(data_dir)?;
+    let fsync_result = if moved_any {
+        fsync_dir(data_dir)
+    } else {
+        Ok(())
+    };
+    match first_error {
+        Some(error) => Err(error),
+        None => fsync_result,
     }
-    first_error.map_or(Ok(()), Err)
 }
