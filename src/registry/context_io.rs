@@ -37,7 +37,13 @@ impl AppState {
     /// helpers among them) treat an empty page as the end of the
     /// directory, so returning one while later entries still exist
     /// would truncate the walk. Each retry's `after` strictly advances,
-    /// so this terminates in at most `total` iterations.
+    /// so this terminates in at most `total` iterations. `limit` is
+    /// assumed at least 1 for a related reason: `take(limit)` on `0`
+    /// yields an empty slice on the FIRST pass regardless of how many
+    /// entries exist past `after`, which is indistinguishable from the
+    /// real end of the directory to the very callers this paragraph
+    /// just described — callers page through `api::clamp_page`, never
+    /// the unfloored `api::clamp`, so that `0` never reaches here.
     pub fn directory_page(
         &self,
         after: Option<&str>,
@@ -129,9 +135,16 @@ impl AppState {
                         deadline,
                     );
                     drop(inner);
+                    // The `?` skips touch/enforce_budget on a failure
+                    // (an expired deadline, or the passage store's own
+                    // load failing), matching the slow path just below
+                    // — a repeatedly-failing export must not keep
+                    // bumping a broken entry's LRU recency merely
+                    // because it happened to already be hot.
+                    let snapshot = snapshot?;
                     self.touch(&entry);
                     self.enforce_budget(name);
-                    return snapshot;
+                    return Ok(snapshot);
                 }
                 Slot::Deleted => return Err(AccessError::NotFound),
                 Slot::Cold => {}
@@ -725,6 +738,61 @@ mod tests {
             ContextRevision::default(),
             "a recreate is a new lineage"
         );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// `export_context`'s hot path (#585): a repeatedly-failing export
+    /// against an already-resident context must not keep bumping its
+    /// LRU recency OR run a budget sweep, exactly as the doc above the
+    /// `Slot::Hot` arm and the slow path's own comment both promise.
+    /// Regression for the gap where only the slow (cold-load) path
+    /// actually honored it.
+    ///
+    /// `enforce_budget`'s own skip (`if name == except { continue; }`)
+    /// means the exported context is NEVER a candidate for its own
+    /// call — watching "sake" stay resident would pass whether or not
+    /// `enforce_budget("sake")` actually ran, so it cannot witness the
+    /// skip. `budget_ops` is the one counter every `enforce_budget`
+    /// call bumps before its cheap gate even runs (`engine.rs`), so it
+    /// is checked directly instead.
+    #[test]
+    fn export_context_hot_path_skips_touch_and_enforce_budget_on_failure() {
+        let dir = scratch_dir("export-hot-failure");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state.create("sake", ContextMeta::default()).unwrap();
+        state
+            .add_associations(
+                "sake",
+                vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, None)],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+
+        let entry = state.lookup("sake").unwrap();
+        assert!(
+            matches!(entry.inner.read().slot, Slot::Hot(_)),
+            "must exercise the hot path, not the cold-load one"
+        );
+        let before_touch = entry.last_touch.load(Ordering::Relaxed);
+        let before_budget_ops = state.0.budget_ops.load(Ordering::Relaxed);
+
+        let already_expired = Deadline::after(std::time::Duration::ZERO);
+        match state.export_context("sake", already_expired) {
+            Err(AccessError::DeadlineExceeded) => {}
+            other => panic!("expected DeadlineExceeded, got {}", other.is_ok()),
+        }
+        assert_eq!(
+            entry.last_touch.load(Ordering::Relaxed),
+            before_touch,
+            "a failed hot-path export must not touch the entry"
+        );
+        assert_eq!(
+            state.0.budget_ops.load(Ordering::Relaxed),
+            before_budget_ops,
+            "a failed hot-path export must not call enforce_budget either"
+        );
+
         let _ = fs::remove_dir_all(dir);
     }
 

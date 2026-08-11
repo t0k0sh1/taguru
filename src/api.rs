@@ -1433,8 +1433,24 @@ fn empty(what: &str, value: &str, started_at: Instant) -> Option<Response> {
 
 /// The one clamp every numeric cap in this file goes through: an
 /// omitted value takes the default, and nothing exceeds the ceiling.
+/// `?limit=0` is left alone here — a search endpoint's `0` is a
+/// legitimate "just tell me `total`" query, not a page request. Keyset
+/// listings want a floor instead; see [`clamp_page`].
 pub(crate) fn clamp(value: Option<usize>, default: usize, ceiling: usize) -> usize {
     value.unwrap_or(default).min(ceiling)
+}
+
+/// [`clamp`] with a floor of one, for every `KeysetQuery`-driven
+/// listing (`GET /contexts`, `/groups`, `/contexts/{name}/labels`,
+/// `/sources`, `/aliases`). Those endpoints define "no more pages" as
+/// an empty response, a contract the SDKs' `iter` helpers rely on
+/// (`AsyncIterator`/`Iterator` loops that stop the first time a page
+/// comes back empty) — so a page SIZE of zero must never look like the
+/// end of the collection. `directory_page`/`group_page`'s own paging
+/// loop only guarantees a non-empty page for a non-zero `limit`; the
+/// floor belongs here, before that promise is asked to keep.
+pub(crate) fn clamp_page(value: Option<usize>, default: usize, ceiling: usize) -> usize {
+    clamp(value, default, ceiling).max(1)
 }
 
 /// A bounded set of matches. `total` is the full match count before the
@@ -2329,6 +2345,25 @@ mod tests {
         assert_eq!(clamp(Some(1_000_000_000), 100, 1000), 1000);
         // explore's exact case: an UNBOUNDED default is itself capped.
         assert_eq!(clamp(None, usize::MAX, 10), 10);
+        // A search endpoint's `?limit=0` is a legitimate "total only"
+        // query — plain `clamp` must let it through unfloored.
+        assert_eq!(clamp(Some(0), 100, 1000), 0);
+    }
+
+    #[test]
+    fn clamp_page_floors_an_explicit_zero_to_one_but_otherwise_matches_clamp() {
+        assert_eq!(clamp_page(Some(0), 100, 1000), 1, "0 must not read as EOF");
+        assert_eq!(
+            clamp_page(None, 100, 1000),
+            100,
+            "omitted still takes the default"
+        );
+        assert_eq!(clamp_page(Some(5), 100, 1000), 5);
+        assert_eq!(
+            clamp_page(Some(1_000_000_000), 100, 1000),
+            1000,
+            "ceiling still applies"
+        );
     }
 
     #[test]

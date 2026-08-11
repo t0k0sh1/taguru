@@ -43,6 +43,33 @@ fn the_directory_pages_by_name_and_serves_single_contexts() {
     assert_eq!(body["status"], json!("error"));
 }
 
+/// #585 item 4: `?limit=0` must not read as the end of the directory.
+/// A page SIZE of zero, unfloored, would `take(0)` into an empty page
+/// while `total` still reports every context — indistinguishable from
+/// the real end of the directory to an SDK `iter` loop, which stops on
+/// the first empty page. `list_contexts` floors it to one instead.
+#[test]
+fn a_zero_limit_still_returns_one_context_rather_than_reading_as_the_end() {
+    let server = Server::start("dirpage-zero-limit");
+    for name in ["apple", "banana", "cherry"] {
+        server.ok(
+            "PUT",
+            &format!("/contexts/{name}"),
+            Some(json!({"description": name})),
+        );
+    }
+
+    let page = server.ok("GET", "/contexts?limit=0", None);
+    assert_eq!(page["total"], json!(3), "{page}");
+    let names: Vec<&str> = page["contexts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|context| context["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["apple"], "floored to one, not zero");
+}
+
 /// #62 item 6: `pinned` defines the population of interest, like a
 /// search query — so unlike `after`/`limit`, it counts toward `total`.
 #[test]

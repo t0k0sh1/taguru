@@ -12,8 +12,8 @@ use crate::registry::AppState;
 
 use super::{
     AppJson, AppPath, AppQuery, ErrorCode, MAX_ASSOCIATIONS_PER_REQUEST, MAX_MATCH_LIMIT,
-    MAX_NAME_BYTES, access_error, clamp, deadline_exceeded, empty, error, key_name, ok, overlong,
-    oversized, partial_write_error,
+    MAX_NAME_BYTES, access_error, clamp_page, deadline_exceeded, empty, error, key_name, ok,
+    overlong, oversized, partial_write_error,
 };
 
 /// One name or several: query positions accept `"住所"` and
@@ -336,7 +336,7 @@ pub async fn list_aliases(
             }
         },
     };
-    let limit = clamp(query.limit, MAX_MATCH_LIMIT, MAX_MATCH_LIMIT);
+    let limit = clamp_page(query.limit, MAX_MATCH_LIMIT, MAX_MATCH_LIMIT);
     // Namespace order is concepts-then-labels, same as the wire cursor's
     // `(is_label, alias)` ordering. A cursor already inside the label
     // namespace means every concept alias is behind it, so the concept

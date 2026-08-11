@@ -18,9 +18,9 @@ use super::{
     MAX_LOCATOR_VALUE_BYTES, MAX_MATCH_LIMIT, MAX_NAME_BYTES, MAX_PASSAGES_PER_REQUEST,
     MAX_QUESTION_BYTES, MAX_QUESTIONS_PER_PARAGRAPH, MAX_SECTION_BYTES, MAX_TAG_BYTES,
     MAX_TAGS_PER_SOURCE, RefusalDetail, access_error, bounded_parallel_map, cache_and_serve, clamp,
-    collected_validation_message, cross_search_concurrency, deadline_exceeded, empty, error,
-    not_found, ok, overlong, oversized, replay_cached_search, search_log_enabled, truncate_issues,
-    validation_error,
+    clamp_page, collected_validation_message, cross_search_concurrency, deadline_exceeded, empty,
+    error, not_found, ok, overlong, oversized, replay_cached_search, search_log_enabled,
+    truncate_issues, validation_error,
 };
 
 #[derive(Debug, Deserialize)]
@@ -197,7 +197,7 @@ pub async fn list_sources(
     AppQuery(query): AppQuery<KeysetQuery>,
 ) -> Response {
     let started_at = Instant::now();
-    let limit = clamp(query.limit, MAX_MATCH_LIMIT, MAX_MATCH_LIMIT);
+    let limit = clamp_page(query.limit, MAX_MATCH_LIMIT, MAX_MATCH_LIMIT);
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }

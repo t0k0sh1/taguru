@@ -526,6 +526,11 @@ impl AppState {
     /// which clones only `Arc` handles and can hand over the whole
     /// map, a group's record IS its data, so the page is cut here
     /// under the read lock and only the survivors are cloned.
+    /// `limit` is assumed at least 1: callers page through
+    /// `api::clamp_page`, never the unfloored `api::clamp`, so a `0`
+    /// that would otherwise `take(0)` into an empty page —
+    /// indistinguishable from "no more groups" to a client's paging
+    /// loop — never reaches here.
     pub fn group_page(
         &self,
         after: Option<&str>,

@@ -16,8 +16,8 @@ use super::aliases::KeysetQuery;
 use super::contexts::RenameRequest;
 use super::{
     AppBytes, AppJson, AppPath, AppQuery, ErrorCode, MAX_CONTEXT_NAME_BYTES, MAX_DESCRIPTION_BYTES,
-    MAX_MATCH_LIMIT, clamp, deadline_exceeded, error, group_not_found, key_name, nesting_refusal,
-    ok, optional_body, over_cap_refusal, overlong, oversized,
+    MAX_MATCH_LIMIT, clamp_page, deadline_exceeded, error, group_not_found, key_name,
+    nesting_refusal, ok, optional_body, over_cap_refusal, overlong, oversized,
 };
 
 /// A bounded group-directory page; `total` counts the whole directory,
@@ -296,7 +296,7 @@ pub async fn list_groups(
     let started_at = Instant::now();
     let (total, page) = state.group_page(
         query.after.as_deref(),
-        clamp(query.limit, MAX_MATCH_LIMIT, MAX_MATCH_LIMIT),
+        clamp_page(query.limit, MAX_MATCH_LIMIT, MAX_MATCH_LIMIT),
     );
     // Each row's fingerprint walks its transitive member closure and
     // takes a per-context revision lock — cost that scales with group

@@ -20,8 +20,11 @@ pub(super) struct MetaFile {
     pub(super) usage: ContextUsage,
     /// The revision counters as of this save — what a cold entry (and
     /// a replica's tailed refresh) seeds from. Defaulted for sidecars
-    /// from before the field existed: those report zeros until their
-    /// first load or flush catches them up.
+    /// from before the field existed, and for sidecars that simply do
+    /// not exist yet (a fresh context): those report zeros until their
+    /// first load or flush catches them up. A sidecar that DOES exist
+    /// but cannot be read or parsed is a different case — see
+    /// [`MetaFile::degraded`].
     pub(super) revision: ContextRevision,
     /// `sha256_hex` of `{stem}.schema.json`'s bytes as of this save,
     /// `None` for a schema-free context — ADR 0009 §5.2's boot-time
@@ -36,6 +39,38 @@ pub(super) struct MetaFile {
     /// no schema file either, so `None` is also the correct fact, not
     /// just a safe default.
     pub(super) schema_digest: Option<String>,
+}
+
+impl MetaFile {
+    /// [`MetaFile::default`], except `revision.config` is seeded from
+    /// the wall clock instead of left at zero — [`read_meta_file`]'s
+    /// fallback for a sidecar that exists but could not be read or
+    /// parsed (as opposed to one that simply is not there yet).
+    ///
+    /// `graph`/`revision.graph` and `revision.passages` stay zero on
+    /// purpose: both lanes have an independent source of truth that
+    /// floors them back up on the next load (`ensure_hot`'s WAL replay
+    /// top, `entry_passages`'s store watermark), so seeding them here
+    /// would only fight that floor. `config` has no such source — a
+    /// config change leaves no log, and the content it would have
+    /// restored from is the very sidecar that just failed to read — so
+    /// a time-based seed is the only way to guarantee this boot's value
+    /// never collides with one a fingerprint consumer (`group_fingerprint`,
+    /// `src/api/groups.rs`) saw served under the same counter before the
+    /// corruption. Monotonic re-seeds elsewhere (`replica_refresh`'s
+    /// `max()`) only ever pull a replica's counter forward from this
+    /// value, never back down to a primary's smaller one, so the skew
+    /// this introduces costs at most a spurious cache miss, never a
+    /// stale hit.
+    fn degraded() -> Self {
+        Self {
+            revision: ContextRevision {
+                config: crate::clock::now_unix_secs(),
+                ..ContextRevision::default()
+            },
+            ..Self::default()
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)] // every whole-family save call site, not an API
@@ -85,7 +120,19 @@ pub(super) fn write_meta(
 /// Reads the sidecar, falling back to defaults on any problem — a
 /// missing or corrupt sidecar must not make the image unreachable.
 ///
-/// That leniency has one sharp edge: the fallback also zeroes
+/// The fallback distinguishes two very different problems. A sidecar
+/// that simply is not there (`ErrorKind::NotFound` — a fresh context,
+/// or one from before the file existed) is the ordinary, silent case:
+/// [`MetaFile::default`], no log line. A sidecar that IS there but
+/// could not be read (`EACCES`, `EIO`, a directory where a file should
+/// be, ...) or could not be parsed is a real degradation with no other
+/// diagnostic — logged at `warn`, exactly like the parse-failure arm
+/// below always has been, and seeded via [`MetaFile::degraded`] rather
+/// than a plain default so the revision counters it hands back can
+/// never collide with a value some past, healthy save of this same
+/// sidecar already handed out (see `degraded`'s doc).
+///
+/// That leniency has one more sharp edge: the fallback also zeroes
 /// `schema_digest` to `None`, which for a context that DOES have a
 /// live `{stem}.schema.json` collides with `schema::load_schema`'s own
 /// fail-closed posture (ADR 0009 §5.1/§5.2, issue #561's audit) — a
@@ -100,9 +147,13 @@ pub(super) fn read_meta_file(dir: &Path, stem: &str) -> MetaFile {
     match fs::read(meta_path(dir, stem)) {
         Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|error| {
             tracing::warn!("ignoring corrupt sidecar for '{stem}': {error}");
-            MetaFile::default()
+            MetaFile::degraded()
         }),
-        Err(_) => MetaFile::default(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => MetaFile::default(),
+        Err(error) => {
+            tracing::warn!("sidecar for '{stem}' unreadable, falling back to defaults: {error}");
+            MetaFile::degraded()
+        }
     }
 }
 
@@ -193,5 +244,110 @@ pub(super) fn move_context_files(
     match first_error {
         Some(error) => Err(error),
         None => fsync_result,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::registry::test_support::scratch_dir;
+
+    /// The ordinary, silent case: no sidecar has ever existed for this
+    /// stem (a brand new context, or one from before the file existed).
+    /// `revision` stays all-zero — nothing here has degraded, so there
+    /// is nothing to shield a fingerprint consumer from.
+    #[test]
+    fn a_missing_sidecar_reports_a_plain_zeroed_default() {
+        let dir = scratch_dir("meta-io-missing");
+        fs::create_dir_all(&dir).unwrap();
+        let meta = read_meta_file(&dir, "sake");
+        assert_eq!(meta.revision, ContextRevision::default());
+        assert_eq!(meta.schema_digest, None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A sidecar that IS there but is not valid JSON (a torn write, a
+    /// hand edit gone wrong) is the degraded case: `revision.config` is
+    /// seeded from the wall clock instead of left at zero, so this
+    /// boot's fingerprint can never collide with one an earlier, healthy
+    /// save of the very same sidecar already handed a consumer like
+    /// `group_fingerprint` (#585).
+    #[test]
+    fn a_corrupt_sidecar_seeds_config_revision_from_the_clock_instead_of_zero() {
+        let dir = scratch_dir("meta-io-corrupt");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(meta_path(&dir, "sake"), b"not json").unwrap();
+
+        let before = crate::clock::now_unix_secs();
+        let meta = read_meta_file(&dir, "sake");
+        let after = crate::clock::now_unix_secs();
+
+        assert_eq!(meta.revision.graph, 0, "graph is floored by WAL replay");
+        assert_eq!(
+            meta.revision.passages, 0,
+            "passages is floored by the store watermark"
+        );
+        assert!(
+            (before..=after).contains(&meta.revision.config),
+            "config must be a fresh clock reading, not zero: {meta:?}"
+        );
+        assert_eq!(meta.schema_digest, None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The other degraded case: the sidecar exists but `fs::read`
+    /// itself fails with something other than `NotFound` — simulated
+    /// here by putting a directory where the sidecar file should be, so
+    /// the read fails without ever reaching `serde_json`. Same fallback
+    /// as the corrupt-content case, exercised through the other branch.
+    #[test]
+    fn an_unreadable_sidecar_seeds_config_revision_from_the_clock_instead_of_zero() {
+        let dir = scratch_dir("meta-io-unreadable");
+        fs::create_dir_all(meta_path(&dir, "sake")).unwrap();
+
+        let before = crate::clock::now_unix_secs();
+        let meta = read_meta_file(&dir, "sake");
+        let after = crate::clock::now_unix_secs();
+
+        assert_eq!(meta.revision.graph, 0);
+        assert_eq!(meta.revision.passages, 0);
+        assert!(
+            (before..=after).contains(&meta.revision.config),
+            "config must be a fresh clock reading, not zero: {meta:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A healthy sidecar's own recorded revision is never overridden —
+    /// the clock seed only ever applies to the degraded fallback.
+    #[test]
+    fn a_healthy_sidecar_reports_its_own_recorded_revision_unchanged() {
+        let dir = scratch_dir("meta-io-healthy");
+        fs::create_dir_all(&dir).unwrap();
+        write_meta(
+            &dir,
+            "sake",
+            &ContextMeta::default(),
+            &ContextStats::default(),
+            &ContextUsage::default(),
+            ContextRevision {
+                graph: 3,
+                passages: 2,
+                config: 1,
+            },
+            None,
+        )
+        .unwrap();
+
+        let meta = read_meta_file(&dir, "sake");
+        assert_eq!(
+            meta.revision,
+            ContextRevision {
+                graph: 3,
+                passages: 2,
+                config: 1
+            }
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 }
