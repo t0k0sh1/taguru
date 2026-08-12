@@ -5,6 +5,8 @@
 //! mean something different than it did when first applied.
 
 use super::*;
+use std::any::Any;
+use std::cell::Cell;
 
 /// Applies ops front to back, stopping at the first rejection — the
 /// batch endpoints' historic partial semantics: everything before the
@@ -35,13 +37,149 @@ pub(super) fn applied_count(result: &Result<usize, PartialWrite>) -> usize {
     }
 }
 
+// Test-only deterministic fault injection for `replay_wal_guarded` —
+// the same shape as `storage::fail_persistence_ops_after` applied to a
+// different subsystem.
+#[cfg(test)]
+thread_local! {
+    static FORCE_PANIC_AT_OP: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    static FORCE_CAPACITY_LOSS_AT_OP: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+/// A genuine panic mid-replay (a bug in some op's own application
+/// logic) needs conditions this crate cannot cheaply construct in a
+/// unit test — so this lets a test make [`replay_wal_guarded`] panic
+/// reapplying the op at `index`, on purpose, deterministically.
+#[cfg(test)]
+pub(super) fn force_panic_at_op(index: usize) {
+    FORCE_PANIC_AT_OP.with(|cell| cell.set(Some(index)));
+}
+
+/// A genuine capacity-`Full` rejection is a real trigger, just an
+/// impractical one to construct in a unit test (a `Context`'s real
+/// ceiling is a multi-billion-record affair) — this makes `replay_op`
+/// report the op at `index` as a capacity loss without needing one.
+#[cfg(test)]
+pub(super) fn force_capacity_loss_at_op(index: usize) {
+    FORCE_CAPACITY_LOSS_AT_OP.with(|cell| cell.set(Some(index)));
+}
+
+/// Resets both hooks — a test that armed either (whether or not it
+/// actually fired: the panic case never gets a chance to self-clear)
+/// must call this before returning, or the armed state bleeds into
+/// whatever later test happens to share this thread.
+#[cfg(test)]
+pub(super) fn clear_forced_replay_faults() {
+    FORCE_PANIC_AT_OP.with(|cell| cell.set(None));
+    FORCE_CAPACITY_LOSS_AT_OP.with(|cell| cell.set(None));
+}
+
+#[cfg(test)]
+fn take_forced_panic_at_op(index: usize) -> bool {
+    FORCE_PANIC_AT_OP.with(|cell| cell.get() == Some(index))
+}
+
+#[cfg(not(test))]
+fn take_forced_panic_at_op(_index: usize) -> bool {
+    false
+}
+
+#[cfg(test)]
+fn take_forced_capacity_loss_at_op(index: usize) -> bool {
+    FORCE_CAPACITY_LOSS_AT_OP.with(|cell| cell.get() == Some(index))
+}
+
+#[cfg(not(test))]
+fn take_forced_capacity_loss_at_op(_index: usize) -> bool {
+    false
+}
+
+/// Where a guarded replay currently stands — parsing the log, or
+/// partway through applying its recovered ops — so a panic in either
+/// half can name what it was doing ([`replay_panic_line`]) instead of
+/// the fixed "an op panicked" every prior replay failure reported
+/// alike, whatever op or line actually broke.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum ReplayStage {
+    Parsing,
+    Applying {
+        /// 0-based position within the recovered op slice.
+        index: usize,
+        total: usize,
+        kind: &'static str,
+    },
+}
+
+/// [`replay_wal_guarded`]'s panic message, split out as a pure
+/// function so the downcast logic (identical in shape to
+/// `api::panic_response`'s) and the stage-naming can be unit-tested
+/// without ever triggering a real panic.
+pub(super) fn replay_panic_line(payload: &(dyn Any + Send), stage: ReplayStage) -> String {
+    let message = if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else {
+        "panicked with a non-string payload".to_string()
+    };
+    match stage {
+        ReplayStage::Parsing => format!("WAL replay panicked parsing the log: {message}"),
+        ReplayStage::Applying { index, total, kind } => format!(
+            "WAL replay panicked applying op {}/{total} ({kind}): {message}",
+            index + 1
+        ),
+    }
+}
+
+/// [`replay_op`]'s rejection line, split out as a pure function so the
+/// severity split can be unit-tested without a real `Context`. `full`
+/// distinguishes two very different rejections that would otherwise
+/// read identically: an ordinary, benign one (the same rejection the
+/// original write already reported to its client — replay reruns the
+/// op on the exact state the original saw) versus a capacity refusal,
+/// where an ALREADY-ACKNOWLEDGED write is being permanently lost
+/// because the context is full on replay. Returns whether this was
+/// the capacity case, alongside the line to log it at the matching
+/// severity.
+pub(super) fn replay_rejection_line(op: &WalOp, message: &str, full: bool) -> (bool, String) {
+    if full {
+        (
+            true,
+            format!(
+                "WAL replay permanently lost an acknowledged write: the context is at \
+                 capacity and refused to reapply a replayed {} op: {message}",
+                op.kind()
+            ),
+        )
+    } else {
+        (
+            false,
+            format!("WAL replay skipped an op (same rejection as the original): {message}"),
+        )
+    }
+}
+
 /// Re-applies one replayed op. A deterministic library rejection here
-/// is the same rejection the original write already reported to its
-/// client — replay reruns the op on the exact state the original saw
-/// — so it is logged, never fatal.
-pub(super) fn replay_op(context: &mut Context, op: &WalOp) {
-    if let Err((message, _)) = apply_op(context, op) {
-        tracing::warn!("WAL replay skipped an op (same rejection as the original): {message}");
+/// is either the same rejection the original write already reported
+/// to its client (logged, never fatal — see [`replay_rejection_line`])
+/// or, when `full` is set, an acknowledged write silently and
+/// permanently disappearing — loud enough to stand out from the
+/// benign case, but still not fatal to the load: the graph itself
+/// stays healthy, only this one op's content is gone. Returns whether
+/// this rejection was the capacity case, so [`replay_wal_guarded`] can
+/// tally how many acknowledged writes a replay lost.
+pub(super) fn replay_op(context: &mut Context, op: &WalOp) -> bool {
+    match apply_op(context, op) {
+        Ok(()) => false,
+        Err((message, full)) => {
+            let (is_capacity, line) = replay_rejection_line(op, &message, full);
+            if is_capacity {
+                tracing::error!("{line}");
+            } else {
+                tracing::warn!("{line}");
+            }
+            is_capacity
+        }
     }
 }
 
@@ -59,24 +197,66 @@ pub(super) fn replay_op(context: &mut Context, op: &WalOp) {
 /// ([`LOAD_FAILURE_RETRY`]). Returns the WAL's top seq on success, so
 /// the caller can seed `wal_seq`/`graph_revision` from it exactly as
 /// `wal::replay` itself would.
+///
+/// A panic's payload used to be discarded outright — every replay
+/// panic reached `AppState::load_failure` as the same boilerplate
+/// string, naming neither the op nor where parsing or applying broke.
+/// `stage` (read after `catch_unwind` returns, written from inside the
+/// guarded closure) recovers that: [`replay_panic_line`] folds it and
+/// the panic payload into one diagnostic line. Likewise, a capacity
+/// rejection during replay used to log at the same `warn` level as an
+/// ordinary, harmless one; `capacity_losses` tallies how many of this
+/// replay's rejections were the acknowledged-write-lost kind
+/// ([`replay_rejection_line`]) so a summary can call it out at `error`
+/// once the pass completes.
 pub(super) fn replay_wal_guarded(
     path: &Path,
     watermark: u64,
     context: &mut Context,
 ) -> Result<u64, String> {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> io::Result<u64> {
-        let (ops, top) = wal::replay(path, watermark)?;
-        for op in &ops {
-            replay_op(context, op);
+    let stage = Cell::new(ReplayStage::Parsing);
+    let capacity_losses = Cell::new(0usize);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> io::Result<u64> {
+        let (ops, top) = wal::replay::<WalOp>(path, watermark)?;
+        let total = ops.len();
+        for (index, op) in ops.iter().enumerate() {
+            stage.set(ReplayStage::Applying {
+                index,
+                total,
+                kind: op.kind(),
+            });
+            if take_forced_panic_at_op(index) {
+                panic!("forced test panic reapplying op {index} ({})", op.kind());
+            }
+            let is_capacity_loss = take_forced_capacity_loss_at_op(index) || replay_op(context, op);
+            capacity_losses.set(tally_capacity_loss(capacity_losses.get(), is_capacity_loss));
         }
         Ok(top)
     }))
-    .unwrap_or_else(|_| {
-        Err(io::Error::other(
-            "an op panicked reapplying against a fresh load",
-        ))
-    })
-    .map_err(|error| error.to_string())
+    .unwrap_or_else(|payload| Err(io::Error::other(replay_panic_line(&*payload, stage.get()))));
+    let losses = capacity_losses.get();
+    if should_report_capacity_losses(losses) {
+        tracing::error!(
+            losses,
+            "WAL replay permanently lost {losses} acknowledged write(s) to capacity refusals"
+        );
+    }
+    result.map_err(|error| error.to_string())
+}
+
+/// [`replay_wal_guarded`]'s running capacity-loss count, one op at a
+/// time — split out as a pure function so the tally itself is
+/// unit-testable without ever having to drive a real `Context` to its
+/// (multi-billion-record) capacity ceiling just to make `replay_op`
+/// return `true` once.
+fn tally_capacity_loss(losses: usize, is_capacity_loss: bool) -> usize {
+    if is_capacity_loss { losses + 1 } else { losses }
+}
+
+/// [`replay_wal_guarded`]'s report-or-not decision, split out for the
+/// same testability reason as [`tally_capacity_loss`].
+fn should_report_capacity_losses(losses: usize) -> bool {
+    losses > 0
 }
 
 /// Applies one op to the graph; `Err` carries the human message each
@@ -156,5 +336,162 @@ pub(super) fn apply_op(context: &mut Context, op: &WalOp) -> Result<(), (String,
             context.retract_association(subject, label, object);
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::registry::test_support::scratch_dir;
+
+    fn sample_op() -> WalOp {
+        WalOp::AliasConcept {
+            alias: "sake".to_string(),
+            canonical: "日本酒".to_string(),
+        }
+    }
+
+    /// A `String` payload — what `panic!("{}", owned)` and most
+    /// library panics produce — is recovered verbatim, and the
+    /// `Parsing` stage names itself without an op index (there is no
+    /// op yet; parsing hasn't handed any back).
+    #[test]
+    fn replay_panic_line_recovers_a_string_payload_at_the_parsing_stage() {
+        let payload: Box<dyn Any + Send> = Box::new("log corrupt beyond repair".to_string());
+        let line = replay_panic_line(payload.as_ref(), ReplayStage::Parsing);
+        assert!(line.contains("parsing the log"), "{line}");
+        assert!(line.contains("log corrupt beyond repair"), "{line}");
+    }
+
+    /// A `&'static str` payload — what a bare `panic!("literal")`
+    /// produces — is recovered too, at the `Applying` stage this time,
+    /// which must name both the 1-based op position and its variant.
+    #[test]
+    fn replay_panic_line_recovers_a_str_payload_at_the_applying_stage() {
+        let payload: Box<dyn Any + Send> = Box::new("boom");
+        let stage = ReplayStage::Applying {
+            index: 2,
+            total: 5,
+            kind: "Associate",
+        };
+        let line = replay_panic_line(payload.as_ref(), stage);
+        assert!(line.contains("boom"), "{line}");
+        assert!(line.contains("3/5"), "1-based, not the raw index: {line}");
+        assert!(line.contains("Associate"), "{line}");
+    }
+
+    /// A panic payload that is neither `String` nor `&str` (a custom
+    /// panic type, `std::panic::panic_any(42)`) must not be silently
+    /// dropped — it still produces a line naming the stage, just
+    /// without a recovered message.
+    #[test]
+    fn replay_panic_line_handles_a_non_string_payload() {
+        let payload: Box<dyn Any + Send> = Box::new(42i32);
+        let line = replay_panic_line(payload.as_ref(), ReplayStage::Parsing);
+        assert!(line.contains("non-string payload"), "{line}");
+    }
+
+    /// The ordinary case — a rejection replay expected because it is
+    /// the exact rejection the live write already reported — logs at
+    /// the benign severity and says nothing about permanent loss.
+    #[test]
+    fn replay_rejection_line_is_benign_when_not_a_capacity_rejection() {
+        let (is_capacity, line) = replay_rejection_line(&sample_op(), "already aliased", false);
+        assert!(!is_capacity);
+        assert!(line.contains("skipped"), "{line}");
+        assert!(
+            !line.contains("permanently"),
+            "a benign rejection must not claim data loss: {line}"
+        );
+    }
+
+    /// A capacity rejection during replay means an ALREADY-ACKNOWLEDGED
+    /// write just vanished for good — this must read as data loss, not
+    /// a routine skip, and must name which op family it was.
+    #[test]
+    fn replay_rejection_line_calls_out_a_capacity_loss_as_permanent() {
+        let (is_capacity, line) = replay_rejection_line(&sample_op(), "alias table full", true);
+        assert!(is_capacity);
+        assert!(line.contains("permanently lost"), "{line}");
+        assert!(line.contains("AliasConcept"), "{line}");
+        assert!(line.contains("alias table full"), "{line}");
+    }
+
+    /// The running tally moves only on a capacity loss — a benign
+    /// rejection (`is_capacity_loss: false`) must never nudge it, and
+    /// consecutive losses must accumulate rather than reset.
+    #[test]
+    fn tally_capacity_loss_counts_only_true_flags_and_accumulates() {
+        assert_eq!(tally_capacity_loss(0, false), 0);
+        assert_eq!(tally_capacity_loss(0, true), 1);
+        assert_eq!(tally_capacity_loss(5, true), 6);
+        assert_eq!(tally_capacity_loss(5, false), 5);
+    }
+
+    /// The report threshold is exactly zero: no losses means no
+    /// summary line, any losses at all means one.
+    #[test]
+    fn should_report_capacity_losses_is_false_only_at_zero() {
+        assert!(!should_report_capacity_losses(0));
+        assert!(should_report_capacity_losses(1));
+        assert!(should_report_capacity_losses(5));
+    }
+
+    /// The wiring between the pure helpers above, not any one of them
+    /// in isolation: `stage` must name the op CURRENTLY being applied
+    /// when a panic hits it, not a stale one from an earlier iteration
+    /// — and it must do so even after an earlier op in the same replay
+    /// already recorded a capacity loss (`capacity_losses`, read only
+    /// after `catch_unwind` returns, must not be corrupted or lost by
+    /// the unwind). A genuine trigger for either (a bug in an op's own
+    /// apply logic; a real capacity-`Full` rejection) needs conditions
+    /// this crate cannot cheaply construct in a unit test, so this
+    /// drives the real function through `force_panic_at_op`/
+    /// `force_capacity_loss_at_op` instead — the fault-injection shape
+    /// `storage::fail_persistence_ops_after` already uses for an
+    /// unrelated subsystem.
+    ///
+    /// The `error!` summary line the survived `capacity_losses` count
+    /// would additionally emit is not asserted here: this crate has no
+    /// tracing-capture test harness, and building one is out of
+    /// proportion to what this covers — the counting math itself is
+    /// already pinned above by
+    /// `tally_capacity_loss_counts_only_true_flags_and_accumulates`.
+    #[test]
+    fn replay_wal_guarded_names_the_panicking_op_after_a_prior_capacity_loss() {
+        let dir = scratch_dir("wal-replay-guarded-wiring");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("replay.wal.jsonl");
+        let ops = vec![
+            WalOp::RetractSource {
+                source: "a.md".to_string(),
+            },
+            WalOp::RetractSource {
+                source: "b.md".to_string(),
+            },
+            WalOp::RetractSource {
+                source: "c.md".to_string(),
+            },
+        ];
+        wal::append_batch(&path, 1, &ops).unwrap();
+
+        force_capacity_loss_at_op(0);
+        force_panic_at_op(2);
+        let mut context = Context::default();
+        let error = replay_wal_guarded(&path, 0, &mut context);
+        clear_forced_replay_faults();
+        let message = error.expect_err("the forced panic at op 2 must surface");
+
+        assert!(
+            message.contains("op 3/3"),
+            "1-based, and naming the op that actually panicked, not op 1: {message}"
+        );
+        assert!(message.contains("RetractSource"), "{message}");
+        assert!(
+            message.contains("forced test panic"),
+            "the forced panic's own payload must reach the line: {message}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
