@@ -389,6 +389,27 @@ mod tests {
             .expect("an empty Path::parent() must resolve to the current directory, not ENOENT");
     }
 
+    /// A genuine (non-empty) parent that does not exist must surface
+    /// `fsync_dir`'s own open failure — the one observable way to tell
+    /// this apart from a no-op: a mutated `fsync_parent_dir` that
+    /// always returned `Ok(())`, or one whose `is_empty()` guard always
+    /// took the `"."` branch, would both silently succeed here instead.
+    #[cfg(unix)]
+    #[test]
+    fn fsync_parent_dir_propagates_a_real_parents_open_failure() {
+        let path = std::env::temp_dir()
+            .join(format!(
+                "taguru-storage-fsync-missing-parent-{}",
+                std::process::id()
+            ))
+            .join("nonexistent-dir")
+            .join("file.txt");
+
+        let error = fsync_parent_dir(&path)
+            .expect_err("fsyncing a nonexistent parent directory must fail, not silently succeed");
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    }
+
     /// `Path::extension()` only ever returns the bytes after the LAST
     /// dot — boot's resume-sweep (registry/boot.rs's `scan_data_dir`)
     /// matches leftover staging files by `extension().starts_with("tmp")`.
@@ -453,6 +474,50 @@ mod tests {
 
         let staged = stage_bytes(&path, b"my bytes", false)
             .expect("stage_bytes must retry past forced collisions, not fail the write");
+        assert_eq!(fs::read(&staged).unwrap(), b"my bytes");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The sibling above forces a collision through the test hook,
+    /// which short-circuits before `stage_bytes` ever calls the real
+    /// `OpenOptions::create_new` — the retry loop's actual match guard
+    /// on a GENUINE `AlreadyExists` (a real cross-process race, in
+    /// production) stays unexercised by every other test in this file.
+    /// This one predicts `staging_path`'s next nonce and pre-creates a
+    /// real file there, so the open call itself fails for real.
+    /// Reliable only because nextest gives every test its own process
+    /// — a fresh, zeroed `STAGING_NONCE` seen by nothing but this
+    /// test's own calls; the project's other collision tests all use
+    /// the forcing hook specifically to avoid depending on that.
+    #[test]
+    fn stage_bytes_retries_past_a_genuine_open_collision() {
+        let dir = std::env::temp_dir().join(format!(
+            "taguru-storage-real-collision-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("output.txt");
+
+        // `staging_path`'s own nonce only ever grows, so calling it
+        // ourselves to "peek" the next name would consume the very
+        // nonce stage_bytes's first attempt is about to draw, leaving
+        // our decoy at a name stage_bytes never touches — construct
+        // the same shape directly instead. Reliable because nextest
+        // gives every test its own process: this is the FIRST call
+        // that would ever touch STAGING_NONCE here, so it is
+        // guaranteed to be nonce 0.
+        let predicted = path.with_extension(format!("tmp{}-0", std::process::id()));
+        fs::write(&predicted, b"already here").unwrap();
+
+        let staged = stage_bytes(&path, b"my bytes", false)
+            .expect("a genuine AlreadyExists on one attempt must retry, not fail outright");
+        assert_ne!(staged, predicted, "must land on a distinct, unclaimed name");
+        assert_eq!(
+            fs::read(&predicted).unwrap(),
+            b"already here",
+            "the collided name must be left untouched"
+        );
         assert_eq!(fs::read(&staged).unwrap(), b"my bytes");
 
         let _ = fs::remove_dir_all(&dir);
@@ -549,5 +614,117 @@ mod tests {
         assert_eq!(mode, 0o600, "staging file mode {mode:o}");
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `lock_data_dir`'s `WouldBlock` arm (issue #587) — untested
+    /// despite being the exact branch that answers a concurrent
+    /// `taguru serve`/`taguru import` with a named refusal instead of a
+    /// silent last-flush-wins overwrite. `flock` locks belong to the
+    /// open file description, not the process, so a second, independent
+    /// `File::create` + `try_lock` on the same path — exactly what a
+    /// second process racing this one would do — reliably contends with
+    /// the first even from within one process; no subprocess needed.
+    #[test]
+    fn lock_data_dir_refuses_a_second_lock_naming_the_conflict() {
+        let dir = std::env::temp_dir().join(format!(
+            "taguru-storage-lock-data-dir-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+
+        let held = lock_data_dir(&dir).expect("the first lock must succeed");
+
+        let error = lock_data_dir(&dir)
+            .expect_err("a second concurrent lock attempt must be refused, not silently granted");
+        assert!(
+            error
+                .to_string()
+                .contains("is held by another taguru process"),
+            "{error}"
+        );
+
+        drop(held);
+        lock_data_dir(&dir).expect("once the first lock drops, a fresh lock must succeed");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `offload`'s three arms (issue #587): a multi-thread Tokio runtime
+    /// routes through `block_in_place`, a current-thread runtime and no
+    /// runtime at all (the CLI import/export path, and every plain
+    /// `#[test]`) both fall through to running the work inline —
+    /// `block_in_place` panics on a current-thread runtime, so picking
+    /// the wrong arm there would be immediately visible, not silently
+    /// wrong.
+    #[test]
+    fn offload_runs_the_work_and_returns_its_value_with_no_runtime() {
+        assert_eq!(offload(|| 1 + 1), 2);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn offload_runs_the_work_and_returns_its_value_on_a_current_thread_runtime() {
+        assert_eq!(
+            tokio::runtime::Handle::current().runtime_flavor(),
+            tokio::runtime::RuntimeFlavor::CurrentThread
+        );
+        assert_eq!(offload(|| 1 + 1), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn offload_runs_the_work_and_returns_its_value_on_a_multi_thread_runtime() {
+        assert_eq!(
+            tokio::runtime::Handle::current().runtime_flavor(),
+            tokio::runtime::RuntimeFlavor::MultiThread
+        );
+        assert_eq!(offload(|| 1 + 1), 2);
+    }
+
+    /// The behavioral reason `offload` picks `block_in_place` on a
+    /// multi-thread runtime instead of running inline (the return
+    /// value alone, as in the sibling test above, cannot tell the two
+    /// apart): a single worker thread must still be able to service
+    /// other tasks while `offload`'s closure blocks it. Pinning
+    /// `worker_threads = 1` makes this deterministic rather than
+    /// dependent on the CI runner's core count — with only one worker,
+    /// the spawned task below can be polled during the blocking window
+    /// ONLY if `block_in_place` frees this worker for it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn offload_frees_the_lone_worker_so_other_tasks_still_run() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+
+        let ran_while_blocked = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&ran_while_blocked);
+        // Both tasks must be spawned onto the pool, not run inline in
+        // this test function's own body: the outer test task is driven
+        // by `block_on` on the harness's calling thread, separate from
+        // the `worker_threads = 1` pool, so blocking IT proves nothing
+        // about the pool's lone worker.
+        let blocker = tokio::spawn(async {
+            offload(|| std::thread::sleep(Duration::from_millis(150)));
+        });
+        let checker = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            flag.store(true, Ordering::SeqCst);
+        });
+
+        // Check partway through `blocker`'s 150ms window, not after —
+        // awaiting both to completion would always see the flag set by
+        // then regardless of scheduling order, since `checker` finishes
+        // either way once given a turn. This runs on the harness's own
+        // calling thread (`block_on`, separate from the `worker_threads
+        // = 1` pool), so it keeps progressing on its own timer
+        // regardless of what the pool's lone worker is doing.
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert!(
+            ran_while_blocked.load(Ordering::SeqCst),
+            "with a single worker, block_in_place must free it for the \
+             spawned task to run during offload's blocking closure — an \
+             offload that skipped block_in_place would starve it until \
+             this call returns"
+        );
+
+        let _ = tokio::join!(blocker, checker);
     }
 }
