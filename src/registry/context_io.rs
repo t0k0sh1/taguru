@@ -236,7 +236,7 @@ impl AppState {
         deadline: Deadline,
     ) -> Result<CompactOutcome, AccessError> {
         let entry = self.lookup(name).ok_or(AccessError::NotFound)?;
-        let outcome = offload(|| {
+        let (bytes_before, bytes_after, stats) = offload(|| {
             let mut inner = entry.lock_unless_deleted().ok_or(AccessError::NotFound)?;
             ensure_hot(
                 &self.0.data_dir,
@@ -274,20 +274,10 @@ impl AppState {
             // an unmoved revision" shape a replica refresh guards against
             // (see `replication.rs`'s `cache_identity` bump).
             inner.invalidate_cache_identity();
-            let Slot::Hot(context) = &inner.slot else {
-                unreachable!("just installed");
-            };
-            inner.stats = ContextStats::of(context);
+            inner.stats = ContextStats::of(hot_context(&inner));
             entry.dirty.store(true, Ordering::Relaxed);
             self.recount_entry(&mut inner);
-            Ok(CompactOutcome {
-                bytes_before,
-                bytes_after,
-                dead_edges: stats.dead_edges,
-                aliases_dropped: stats.aliases_dropped,
-                passages_compacted: false,
-                image_persisted: false,
-            })
+            Ok((bytes_before, bytes_after, stats))
         })?;
         // Persist the shrunken image now (flush_entry takes its own
         // locks); a failure leaves the entry dirty for the next tick,
@@ -319,33 +309,17 @@ impl AppState {
         // compaction remains the backstop.
         let passages_compacted = entry
             .read_unless_deleted()
-            .map(
-                |_fence| match self.entry_passages(&entry, &file_stem(name)) {
-                    Ok(store) if store.watermark() > 0 => match store.compact() {
-                        Ok(()) => true,
-                        Err(error) => {
-                            tracing::warn!(
-                                context = %name, %error,
-                                "passage log not compacted (the size cap remains the backstop)"
-                            );
-                            false
-                        }
-                    },
-                    Ok(_) => false,
-                    Err(error) => {
-                        tracing::warn!(
-                            context = %name, %error,
-                            "passage store unavailable during compact; log left as is"
-                        );
-                        false
-                    }
-                },
-            )
+            .map(|_fence| {
+                self.compact_entry_passages(&entry, name, |store| store.compact().map(|()| true))
+            })
             .unwrap_or(false);
         let outcome = CompactOutcome {
+            bytes_before,
+            bytes_after,
+            dead_edges: stats.dead_edges,
+            aliases_dropped: stats.aliases_dropped,
             image_persisted,
             passages_compacted,
-            ..outcome
         };
         self.touch(&entry);
         self.enforce_budget(name);
@@ -377,22 +351,39 @@ impl AppState {
         let Some(_fence) = entry.read_unless_deleted() else {
             return false;
         };
-        // The watermark guard, same as compact_context's passage half:
-        // a context with no passage history ever must not get store
-        // files minted just to compact nothing.
-        match self.entry_passages(&entry, &file_stem(name)) {
-            Ok(store) if store.watermark() > 0 => {
-                match store.compact_if_log_outgrew_snapshot(floor_bytes) {
-                    Ok(ran) => ran,
-                    Err(error) => {
-                        tracing::warn!(
-                            context = %name, %error,
-                            "passage log not compacted (the size cap remains the backstop)"
-                        );
-                        false
-                    }
+        self.compact_entry_passages(&entry, name, |store| {
+            store.compact_if_log_outgrew_snapshot(floor_bytes)
+        })
+    }
+
+    /// The passage half of compaction, shared by
+    /// [`Self::compact_context`] and [`Self::compact_passages_if_worthwhile`]
+    /// so the watermark guard and both warning wordings cannot drift
+    /// the way they had (issue #588): a context with no passage
+    /// history ever must not get store files minted just to compact
+    /// nothing, and `compact` failing warns rather than propagating —
+    /// the caller's own work (a graph compaction, a write) already
+    /// succeeded, and the log's own size-triggered compaction remains
+    /// the backstop. Runs under the caller's already-held fence;
+    /// `compact` is the one thing that differs between the two
+    /// callers (an unconditional rewrite vs. a threshold-gated one).
+    fn compact_entry_passages(
+        &self,
+        entry: &Entry,
+        name: &str,
+        compact: impl FnOnce(&crate::passages::PassageStore) -> io::Result<bool>,
+    ) -> bool {
+        match self.entry_passages(entry, &file_stem(name)) {
+            Ok(store) if store.watermark() > 0 => match compact(&store) {
+                Ok(ran) => ran,
+                Err(error) => {
+                    tracing::warn!(
+                        context = %name, %error,
+                        "passage log not compacted (the size cap remains the backstop)"
+                    );
+                    false
                 }
-            }
+            },
             Ok(_) => false,
             Err(error) => {
                 tracing::warn!(

@@ -170,9 +170,17 @@ pub(crate) fn schema_digest_of(dir: &Path, stem: &str) -> Option<String> {
 
 /// One context's whole file family, by stem — the delete loop and the
 /// boot-time deletion sweep must never disagree about what "the whole
-/// family" means, so both read this one list. Built from the same ten
-/// path builders every other caller uses, so a file kind added there
-/// cannot silently miss this list.
+/// family" means, so both read this one list.
+///
+/// A curated list, not a mechanical projection of `paths.rs`: that
+/// module has 14 single-path builders, and the four not listed here
+/// (`schema_corrupt_path`, `deleted_marker_path`, `renaming_marker_path`,
+/// `import_marker_path`) are markers and quarantine files, deliberately
+/// NOT family members. Adding an eleventh FAMILY file kind therefore
+/// requires editing this array too — the test pinning its exact
+/// extension set (`core_tests.rs`) fails loudly on a rename or
+/// removal, but a new kind landing here is on the author, not a
+/// compiler or test that catches it automatically.
 pub(crate) fn context_files(stem: &str) -> [String; 10] {
     let unrooted = Path::new("");
     [
