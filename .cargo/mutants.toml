@@ -32,15 +32,6 @@ exclude_re = [
     # killed (a genuine collision must retry-and-succeed, not fail
     # outright) — see stage_bytes_retries_past_a_genuine_open_collision.
     "replace match guard error\\.kind\\(\\) == io::ErrorKind::AlreadyExists with true in stage_bytes",
-    # offload's runtime-flavor guard forced to false (issue #587):
-    # skipping block_in_place on a genuine multi-thread runtime still
-    # returns the SAME value from the SAME closure — block_in_place
-    # only changes whether the executor migrates other queued work off
-    # this worker while it blocks, a scheduling-efficiency effect with
-    # no return-value or filesystem signature. Distinguishing it needs
-    # a worker-count-pinned, timing-based test, which would be
-    # inherently flaky across CI runners with different core counts.
-    "replace match guard handle\\.runtime_flavor\\(\\) == tokio::runtime::RuntimeFlavor::MultiThread with false in offload",
     # The in-process embedding provider (local-embed, on by default)
     # is exercised by an #[ignore]d smoke test that downloads a real
     # model — CI sweeps can never kill mutants there, and counting

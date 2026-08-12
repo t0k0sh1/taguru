@@ -661,9 +661,12 @@ mod tests {
         assert_eq!(offload(|| 1 + 1), 2);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn offload_runs_the_work_and_returns_its_value_on_a_current_thread_runtime() {
-        assert!(tokio::runtime::Handle::try_current().is_ok());
+        assert_eq!(
+            tokio::runtime::Handle::current().runtime_flavor(),
+            tokio::runtime::RuntimeFlavor::CurrentThread
+        );
         assert_eq!(offload(|| 1 + 1), 2);
     }
 
@@ -674,5 +677,54 @@ mod tests {
             tokio::runtime::RuntimeFlavor::MultiThread
         );
         assert_eq!(offload(|| 1 + 1), 2);
+    }
+
+    /// The behavioral reason `offload` picks `block_in_place` on a
+    /// multi-thread runtime instead of running inline (the return
+    /// value alone, as in the sibling test above, cannot tell the two
+    /// apart): a single worker thread must still be able to service
+    /// other tasks while `offload`'s closure blocks it. Pinning
+    /// `worker_threads = 1` makes this deterministic rather than
+    /// dependent on the CI runner's core count — with only one worker,
+    /// the spawned task below can be polled during the blocking window
+    /// ONLY if `block_in_place` frees this worker for it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn offload_frees_the_lone_worker_so_other_tasks_still_run() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+
+        let ran_while_blocked = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&ran_while_blocked);
+        // Both tasks must be spawned onto the pool, not run inline in
+        // this test function's own body: the outer test task is driven
+        // by `block_on` on the harness's calling thread, separate from
+        // the `worker_threads = 1` pool, so blocking IT proves nothing
+        // about the pool's lone worker.
+        let blocker = tokio::spawn(async {
+            offload(|| std::thread::sleep(Duration::from_millis(150)));
+        });
+        let checker = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            flag.store(true, Ordering::SeqCst);
+        });
+
+        // Check partway through `blocker`'s 150ms window, not after —
+        // awaiting both to completion would always see the flag set by
+        // then regardless of scheduling order, since `checker` finishes
+        // either way once given a turn. This runs on the harness's own
+        // calling thread (`block_on`, separate from the `worker_threads
+        // = 1` pool), so it keeps progressing on its own timer
+        // regardless of what the pool's lone worker is doing.
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert!(
+            ran_while_blocked.load(Ordering::SeqCst),
+            "with a single worker, block_in_place must free it for the \
+             spawned task to run during offload's blocking closure — an \
+             offload that skipped block_in_place would starve it until \
+             this call returns"
+        );
+
+        let _ = tokio::join!(blocker, checker);
     }
 }
