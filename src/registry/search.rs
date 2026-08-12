@@ -107,11 +107,19 @@ impl AppState {
             );
         }
 
-        // Everything below holds the read fence: eviction and deletion
-        // are excluded for the whole search, so `store` IS the resident
-        // store throughout — an index built from a handle that predates
-        // an eviction would silently hide writes that landed in the
-        // freshly reloaded store until the next rebuild.
+        // Everything below holds the read fence: deletion is excluded
+        // for the whole search, so `store` IS the resident store
+        // throughout — an index built from a handle that predates a
+        // reload would silently hide writes that landed in the freshly
+        // reloaded store until the next rebuild. Eviction is a
+        // different story: this fence lets `Slot::Cold` through, so
+        // what actually keeps `evict_entry`'s teardown (`engine.rs`)
+        // from racing this search is narrower and holds separately —
+        // the resident `store` handle below is an `Arc` the eviction's
+        // `passages.take()` cannot invalidate out from under it, and
+        // `bm25_index` below hands back the index's own read guard,
+        // held for the rest of this call, which likewise keeps
+        // eviction's `bm25.take()` waiting until this search is done.
         let fence = entry.read_unless_deleted()?;
         let store = match self.entry_passages(&entry, &file_stem(name)) {
             Ok(store) => store,
@@ -130,13 +138,12 @@ impl AppState {
                 total: *total,
             });
 
-        if self
-            .ensure_bm25_index(&entry, &store, name, deadline)
-            .is_err()
-        {
-            return Some(Err(io::Error::other(DeadlineExceeded)));
-        }
-        // The two lanes touch disjoint locks — `entry.bm25` vs. the
+        let index = match self.bm25_index(&entry, &store, name, deadline) {
+            Ok(index) => index,
+            Err(DeadlineExceeded) => return Some(Err(io::Error::other(DeadlineExceeded))),
+        };
+        // The two lanes touch disjoint locks — `entry.bm25` (held above
+        // as `index`, for the rest of this call) vs. the
         // `passage_vectors` slot behind `passage_vector_gate` — and
         // neither reads the other's output, so they run on their own
         // scoped threads instead of back to back (same `thread::scope`
@@ -170,8 +177,6 @@ impl AppState {
                     taguru.search.hits = tracing::field::Empty,
                 );
                 let _guard = span.enter();
-                let guard = entry.bm25.read();
-                let index = guard.as_ref().expect("index was just built");
                 let hits = index.search(&query_grams, pool, eligible);
                 span.record("taguru.search.hits", hits.len());
                 hits
@@ -363,14 +368,10 @@ impl AppState {
         let eligibility = filter.map(|filter| store.eligible_sources(filter));
         let eligible = eligibility.as_ref().map(|(set, _)| set);
 
-        if self
-            .ensure_bm25_index(&entry, &store, name, deadline)
-            .is_err()
-        {
-            return Some(Err(io::Error::other(DeadlineExceeded)));
-        }
-        let guard = entry.bm25.read();
-        let index = guard.as_ref().expect("index was just built");
+        let index = match self.bm25_index(&entry, &store, name, deadline) {
+            Ok(index) => index,
+            Err(DeadlineExceeded) => return Some(Err(io::Error::other(DeadlineExceeded))),
+        };
 
         // Sweep both lanes whole, once: a lane's pool cap is a prefix
         // of the same deterministically ordered sweep, so every pool
@@ -619,73 +620,93 @@ impl AppState {
     /// `Entry::bm25` (holding `bm25` while READING the store is fine,
     /// and is how the build works). `Err` when `deadline` expires
     /// before a needed rebuild starts; the index is left as it was.
-    fn ensure_bm25_index(
+    ///
+    /// Returns the resident index's OWN read guard, taken (or, on a
+    /// build/repair, write-then-downgraded) without ever releasing
+    /// `entry.bm25` in between — the caller is required to hold it for
+    /// as long as it uses the index. That is what actually excludes
+    /// [`crate::registry::engine::AppState::evict_entry`]'s `bm25.take()`:
+    /// the read fence above (`Slot::Deleted` only) lets `Slot::Cold`
+    /// through, so without this the index could be built here, then
+    /// snatched out from under a caller that only re-locked to read it
+    /// a moment later.
+    fn bm25_index<'a>(
         &self,
-        entry: &Entry,
+        entry: &'a Entry,
         store: &crate::passages::PassageStore,
         name: &str,
         deadline: Deadline,
-    ) -> Result<(), DeadlineExceeded> {
-        let stale = {
-            let guard = entry.bm25.read();
-            match &*guard {
-                None => true,
-                Some(index) => index.needs_reclaim(),
-            }
-        };
-        if stale {
-            let mut guard = entry.bm25.write();
-            let rebuild = match &*guard {
-                None => true,
-                Some(index) => index.needs_reclaim(),
-            };
-            if rebuild {
-                if deadline.expired() {
-                    return Err(DeadlineExceeded);
-                }
-                let records = store.snapshot();
-                let built_at = std::time::Instant::now();
-                let index = if guard.take().is_some() {
-                    // Tombstone reclamation: rebuild fresh from the store.
-                    entry.bm25_dirty.store(true, Ordering::Relaxed);
-                    crate::bm25::Bm25Index::build(&records)
-                } else if let Some(mut loaded) =
-                    crate::bm25::Bm25Index::load(&bm25_path(&self.0.data_dir, &file_stem(name)))
-                {
-                    // A sidecar spares the re-tokenization, but its save
-                    // cadence is the flush tick — repair whatever drifted
-                    // (per source, both directions) instead of trusting
-                    // or rebuilding wholesale.
-                    let mut disk = loaded.source_digests();
-                    let mut drifted = 0usize;
-                    for (source, record) in &records {
-                        if disk.remove(source) != Some(crate::bm25::record_digest(record)) {
-                            loaded.upsert_source(source, record);
-                            drifted += 1;
-                        }
-                    }
-                    drifted += disk.len();
-                    for source in disk.keys() {
-                        loaded.remove_source(source);
-                    }
-                    if drifted > 0 {
-                        entry.bm25_dirty.store(true, Ordering::Relaxed);
-                    }
-                    loaded
-                } else {
-                    entry.bm25_dirty.store(true, Ordering::Relaxed);
-                    crate::bm25::Bm25Index::build(&records)
-                };
-                *guard = Some(index);
-                tracing::info!(
-                    context = %name,
-                    sources = records.len(),
-                    ms = built_at.elapsed().as_millis() as u64,
-                    "BM25 index ready",
-                );
-            }
+    ) -> Result<parking_lot::MappedRwLockReadGuard<'a, crate::bm25::Bm25Index>, DeadlineExceeded>
+    {
+        let guard = entry.bm25.read();
+        if guard.as_ref().is_some_and(|index| !index.needs_reclaim()) {
+            return Ok(parking_lot::RwLockReadGuard::map(guard, |index| {
+                index
+                    .as_ref()
+                    .expect("checked Some above, under the same guard")
+            }));
         }
-        Ok(())
+        drop(guard);
+
+        let mut guard = entry.bm25.write();
+        let rebuild = match &*guard {
+            None => true,
+            Some(index) => index.needs_reclaim(),
+        };
+        if rebuild {
+            if deadline.expired() {
+                return Err(DeadlineExceeded);
+            }
+            let records = store.snapshot();
+            let built_at = std::time::Instant::now();
+            let index = if guard.take().is_some() {
+                // Tombstone reclamation: rebuild fresh from the store.
+                entry.bm25_dirty.store(true, Ordering::Relaxed);
+                crate::bm25::Bm25Index::build(&records)
+            } else if let Some(mut loaded) =
+                crate::bm25::Bm25Index::load(&bm25_path(&self.0.data_dir, &file_stem(name)))
+            {
+                // A sidecar spares the re-tokenization, but its save
+                // cadence is the flush tick — repair whatever drifted
+                // (per source, both directions) instead of trusting
+                // or rebuilding wholesale.
+                let mut disk = loaded.source_digests();
+                let mut drifted = 0usize;
+                for (source, record) in &records {
+                    if disk.remove(source) != Some(crate::bm25::record_digest(record)) {
+                        loaded.upsert_source(source, record);
+                        drifted += 1;
+                    }
+                }
+                drifted += disk.len();
+                for source in disk.keys() {
+                    loaded.remove_source(source);
+                }
+                if drifted > 0 {
+                    entry.bm25_dirty.store(true, Ordering::Relaxed);
+                }
+                loaded
+            } else {
+                entry.bm25_dirty.store(true, Ordering::Relaxed);
+                crate::bm25::Bm25Index::build(&records)
+            };
+            *guard = Some(index);
+            tracing::info!(
+                context = %name,
+                sources = records.len(),
+                ms = built_at.elapsed().as_millis() as u64,
+                "BM25 index ready",
+            );
+        }
+        // `guard` is never released between here and the map below —
+        // downgrade swaps the lock's mode in place, so eviction's
+        // `bm25.write()` still cannot slip in before the caller is done.
+        let guard = parking_lot::RwLockWriteGuard::downgrade(guard);
+        Ok(parking_lot::RwLockReadGuard::map(guard, |index| {
+            index
+                .as_ref()
+                .expect("just built or confirmed present above, under the same guard")
+        }))
     }
 
     /// The semantic lane's query embedding, run BEFORE any lock — a
@@ -1289,6 +1310,174 @@ mod tests {
                 .source,
             "第1章",
             "the next search rebuilds and still answers"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The fix for the reachable panic #600 item 1 documents: the read
+    /// fence (`read_unless_deleted`) lets `Slot::Cold` through, so it
+    /// alone never excluded `evict_entry`'s unlocked `bm25.take()`
+    /// (`engine.rs`) — only the index's OWN guard, held for the
+    /// caller's whole use, does. Exercises both paths `bm25_index`
+    /// takes: building fresh (no resident index yet) and reading an
+    /// already-resident one — `evict_entry`'s `entry.bm25.write()`
+    /// must find the lock held throughout either.
+    #[test]
+    fn bm25_index_holds_its_read_guard_against_a_racing_eviction() {
+        let dir = scratch_dir("bm25-guard");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert(
+            "第1章".to_string(),
+            "蔵開きの祭りでは新酒がふるまわれる。".to_string(),
+        );
+        state
+            .store_passages("sake", plain(passages))
+            .unwrap()
+            .unwrap();
+
+        let entry = state.lookup("sake").unwrap();
+        let store = state.entry_passages(&entry, &file_stem("sake")).unwrap();
+
+        // Build path: nothing resident yet.
+        {
+            let guard = state
+                .bm25_index(&entry, &store, "sake", Deadline::unbounded())
+                .unwrap();
+            assert!(
+                entry.bm25.try_write().is_none(),
+                "the just-built index's guard must still hold entry.bm25, \
+                 exactly what would block evict_entry's take()"
+            );
+            assert!(
+                !guard
+                    .search(&deduped_query_grams("蔵開きの祭り"), 3, None)
+                    .is_empty(),
+                "the held guard still serves a real search"
+            );
+        }
+        assert!(
+            entry.bm25.try_write().is_some(),
+            "the guard releases entry.bm25 once the caller is done with it"
+        );
+
+        // Cached path: the index built above is already resident and
+        // not due for reclaim, so this call takes the cheap read-only
+        // branch — which must hold the guard exactly the same way.
+        {
+            let guard = state
+                .bm25_index(&entry, &store, "sake", Deadline::unbounded())
+                .unwrap();
+            assert!(
+                entry.bm25.try_write().is_none(),
+                "the cached index's guard must also still hold entry.bm25"
+            );
+            drop(guard);
+        }
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The fast-path check (`is_some_and(|index| !index.needs_reclaim())`)
+    /// must only skip the write-locked rebuild for an index that is
+    /// actually fresh — flipping that `!` would instead skip the
+    /// rebuild for a STALE one (serving it forever, tombstones and
+    /// all) while every other test here only ever exercises a fresh
+    /// index, so nothing else catches the flip. Forces the resident
+    /// index into "needs reclaim" directly (many upserts of the same
+    /// single-paragraph source, each tombstoning the previous one) —
+    /// far cheaper than driving 1000+ real store round trips through
+    /// `store_passages` to cross the reclaim threshold.
+    #[test]
+    fn bm25_index_reclaims_a_stale_resident_index_instead_of_serving_it_as_is() {
+        let dir = scratch_dir("bm25-reclaim");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert(
+            "第1章".to_string(),
+            "蔵開きの祭りでは新酒がふるまわれる。".to_string(),
+        );
+        state
+            .store_passages("sake", plain(passages))
+            .unwrap()
+            .unwrap();
+
+        let entry = state.lookup("sake").unwrap();
+        let store = state.entry_passages(&entry, &file_stem("sake")).unwrap();
+        let record = store.get("第1章").unwrap();
+
+        let mut stale = crate::bm25::Bm25Index::build(&[("第1章".to_string(), record.clone())]);
+        for _ in 0..1026 {
+            stale.upsert_source("第1章", &record);
+        }
+        assert!(
+            stale.needs_reclaim(),
+            "test setup: this index must actually be stale"
+        );
+        *entry.bm25.write() = Some(stale);
+
+        let guard = state
+            .bm25_index(&entry, &store, "sake", Deadline::unbounded())
+            .unwrap();
+        assert!(
+            !guard.needs_reclaim(),
+            "a stale resident index must be reclaimed on the next call, \
+             not handed back exactly as it was"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// [`AppState::bm25_index`]'s `Err(DeadlineExceeded)` path — the one
+    /// arm the guard-holding tests above never take. An already-expired
+    /// deadline against an entry with no resident index at all: the
+    /// build is required (`rebuild` is unconditionally true when the
+    /// slot is `None`) and must be refused, without leaving a stray
+    /// write lock behind for the caller.
+    #[test]
+    fn bm25_index_refuses_to_build_once_the_deadline_has_expired() {
+        let dir = scratch_dir("bm25-deadline");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert(
+            "第1章".to_string(),
+            "蔵開きの祭りでは新酒がふるまわれる。".to_string(),
+        );
+        state
+            .store_passages("sake", plain(passages))
+            .unwrap()
+            .unwrap();
+
+        let entry = state.lookup("sake").unwrap();
+        let store = state.entry_passages(&entry, &file_stem("sake")).unwrap();
+        let already_expired = Deadline::after(std::time::Duration::ZERO);
+
+        assert!(
+            state
+                .bm25_index(&entry, &store, "sake", already_expired)
+                .is_err(),
+            "a build against an expired deadline must be refused"
+        );
+        assert!(
+            entry.bm25.read().is_none(),
+            "a refused build must leave no index behind"
+        );
+        assert!(
+            entry.bm25.try_write().is_some(),
+            "a refused build must release entry.bm25, not strand the write lock"
         );
 
         let _ = fs::remove_dir_all(dir);

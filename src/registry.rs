@@ -493,7 +493,13 @@ pub struct Entry {
     /// heavy, dropped on eviction. Lock rule: acquire this only AFTER
     /// every passage-store lock is released (holding `bm25` while
     /// READING the store is fine and is how a build works; the reverse
-    /// nesting would deadlock against it).
+    /// nesting would deadlock against it). A search holds its read
+    /// guard (`registry::search::AppState::bm25_index`) for its whole
+    /// run, lanes included — not just the lookup — so eviction's
+    /// `bm25.write().take()` (`engine::AppState::evict_entry`) blocks
+    /// on it rather than snatching the index out from under a search
+    /// the tombstone fence alone does not exclude (that fence only
+    /// keeps out `Slot::Deleted`, and eviction leaves the slot `Cold`).
     bm25: RwLock<Option<crate::bm25::Bm25Index>>,
     /// Set when the resident index diverges from its `{stem}.bm25.bin`
     /// sidecar (a build, a repair, an in-place update); the flush tick
