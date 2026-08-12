@@ -1383,6 +1383,106 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
+    /// The fast-path check (`is_some_and(|index| !index.needs_reclaim())`)
+    /// must only skip the write-locked rebuild for an index that is
+    /// actually fresh — flipping that `!` would instead skip the
+    /// rebuild for a STALE one (serving it forever, tombstones and
+    /// all) while every other test here only ever exercises a fresh
+    /// index, so nothing else catches the flip. Forces the resident
+    /// index into "needs reclaim" directly (many upserts of the same
+    /// single-paragraph source, each tombstoning the previous one) —
+    /// far cheaper than driving 1000+ real store round trips through
+    /// `store_passages` to cross the reclaim threshold.
+    #[test]
+    fn bm25_index_reclaims_a_stale_resident_index_instead_of_serving_it_as_is() {
+        let dir = scratch_dir("bm25-reclaim");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert(
+            "第1章".to_string(),
+            "蔵開きの祭りでは新酒がふるまわれる。".to_string(),
+        );
+        state
+            .store_passages("sake", plain(passages))
+            .unwrap()
+            .unwrap();
+
+        let entry = state.lookup("sake").unwrap();
+        let store = state.entry_passages(&entry, &file_stem("sake")).unwrap();
+        let record = store.get("第1章").unwrap();
+
+        let mut stale = crate::bm25::Bm25Index::build(&[("第1章".to_string(), record.clone())]);
+        for _ in 0..1026 {
+            stale.upsert_source("第1章", &record);
+        }
+        assert!(
+            stale.needs_reclaim(),
+            "test setup: this index must actually be stale"
+        );
+        *entry.bm25.write() = Some(stale);
+
+        let guard = state
+            .bm25_index(&entry, &store, "sake", Deadline::unbounded())
+            .unwrap();
+        assert!(
+            !guard.needs_reclaim(),
+            "a stale resident index must be reclaimed on the next call, \
+             not handed back exactly as it was"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// [`AppState::bm25_index`]'s `Err(DeadlineExceeded)` path — the one
+    /// arm the guard-holding tests above never take. An already-expired
+    /// deadline against an entry with no resident index at all: the
+    /// build is required (`rebuild` is unconditionally true when the
+    /// slot is `None`) and must be refused, without leaving a stray
+    /// write lock behind for the caller.
+    #[test]
+    fn bm25_index_refuses_to_build_once_the_deadline_has_expired() {
+        let dir = scratch_dir("bm25-deadline");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert(
+            "第1章".to_string(),
+            "蔵開きの祭りでは新酒がふるまわれる。".to_string(),
+        );
+        state
+            .store_passages("sake", plain(passages))
+            .unwrap()
+            .unwrap();
+
+        let entry = state.lookup("sake").unwrap();
+        let store = state.entry_passages(&entry, &file_stem("sake")).unwrap();
+        let already_expired = Deadline::after(std::time::Duration::ZERO);
+
+        assert!(
+            state
+                .bm25_index(&entry, &store, "sake", already_expired)
+                .is_err(),
+            "a build against an expired deadline must be refused"
+        );
+        assert!(
+            entry.bm25.read().is_none(),
+            "a refused build must leave no index behind"
+        );
+        assert!(
+            entry.bm25.try_write().is_some(),
+            "a refused build must release entry.bm25, not strand the write lock"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
     /// A regression for a false-negative `limit_to_reach`: a raw semantic
     /// lane rank counts every row the vector store holds for a source,
     /// stale ones included, so it can run far ahead of `full.len()` (the

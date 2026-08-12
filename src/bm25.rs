@@ -600,8 +600,12 @@ impl Bm25Index {
             index.intern(name);
         }
         let slot_count = read_u32(bytes, &mut pos)? as usize;
+        // Capped exactly like `posting_count` below: an untrusted
+        // `slot_count` must not turn a corrupt sidecar into an
+        // oversized up-front allocation before the loop even gets a
+        // chance to reject it.
         let mut seen_slots: std::collections::HashSet<(u32, u32)> =
-            std::collections::HashSet::with_capacity(slot_count);
+            std::collections::HashSet::with_capacity(slot_count.min(1 << 20));
         for _ in 0..slot_count {
             let source_id = read_u32(bytes, &mut pos)?;
             if source_id as usize >= index.sources.len() {
