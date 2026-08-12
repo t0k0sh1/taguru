@@ -1616,6 +1616,10 @@ mod tests {
                 .contains("could not find it in the raw line"),
             "{error}"
         );
+        // The tail's line number is computed separately from the
+        // interior loop's (`segments.len() + 1`, not `index + 1`) —
+        // pin it here too, not just in the interior sibling test.
+        assert!(error.to_string().contains("line 1"), "{error}");
     }
 
     #[test]
