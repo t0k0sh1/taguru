@@ -301,11 +301,8 @@ impl AppState {
         // answer is the same: not durably reflected by THIS call, the
         // next flush tick will pick it up.
         let image_persisted = self.flush_entry(name, &entry);
-        if !image_persisted {
-            tracing::warn!(
-                context = %name,
-                "compacted image not yet persisted to disk; the next flush tick will retry"
-            );
+        if let Some(message) = unpersisted_compact_warning(image_persisted) {
+            tracing::warn!(context = %name, "{message}");
         }
         // The passage log's own dead weight (#437): a retracted
         // source's text lives on in the log as bytes behind a
@@ -518,6 +515,16 @@ impl AppState {
             skipped,
         }
     }
+}
+
+/// [`AppState::compact_context`]'s "did the publish land" warning line,
+/// or `None` when it did — pure, so the branch is unit-testable
+/// without capturing `tracing` output (there is no dev-dependency in
+/// this crate for that, and the log line is the ONLY observable effect
+/// of the branch it lives in).
+fn unpersisted_compact_warning(image_persisted: bool) -> Option<&'static str> {
+    (!image_persisted)
+        .then_some("compacted image not yet persisted to disk; the next flush tick will retry")
 }
 
 #[cfg(test)]
@@ -976,6 +983,15 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The warning line's own existence check, isolated from
+    /// `compact_context`: fires only on `false`, never on `true`.
+    #[test]
+    fn unpersisted_compact_warning_only_fires_when_the_image_did_not_land() {
+        assert_eq!(unpersisted_compact_warning(true), None);
+        let message = unpersisted_compact_warning(false).expect("must warn on a failed publish");
+        assert!(message.contains("not yet persisted"), "{message}");
     }
 
     fn apply_generated_context(

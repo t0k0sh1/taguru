@@ -264,8 +264,12 @@ taguru compact --dry-run --json | jq '.[] | select(.dead_ratio &gt; 0.2)'</code>
       <code>image_persisted</code> — <code>false</code> means the rebuild itself succeeded (the
       graph in memory is already smaller) but the durable copy on disk is still the old, larger
       one, most plausibly because the disk was full at the moment compaction tried to reclaim
-      space on it. The next flush tick retries the publish on its own; nothing needs re-running.
-      A row with <code>"stats_are_snapshot": true</code> means the context is cold (not
+      space on it. The next flush tick retries the publish on its own — no need to re-run
+      <code>compact</code> yourself — but that retry keeps failing for as long as the underlying
+      cause does (check disk space first); once it's resolved, either watch the server log for
+      the retry to stop warning, or re-run <code>compact</code> once more and confirm
+      <code>image_persisted: true</code> in its response. A row with <code>"stats_are_snapshot":
+      true</code> means the context is cold (not
       currently loaded) or came from a remote listing, so its numbers are the last-saved snapshot
       rather than a live recomputation — still accurate as of the last flush, just not
       up-to-the-millisecond.
@@ -311,10 +315,11 @@ curl -X POST localhost:8248/contexts/sake/compact</code></pre>
       same response: the compaction endpoint answers 200 as soon as the rebuild is done in
       memory, but if the rebuilt image could not be written back to disk (a full disk being the
       likely cause, which is also exactly when a deletion is hardest to complete), the OLD image
-      — with the shed bytes still in it — is what a crash right after would boot from. Confirm
-      <code>image_persisted: true</code> before treating the erasure as durable; otherwise wait
-      for the next flush tick and re-run <code>POST .../compact</code> (safe to repeat) to
-      confirm.
+      — with the shed bytes still in it — is what a crash right after would boot from. A deletion
+      request is <b>not complete</b> until the response confirms <code>image_persisted: true</code>;
+      <code>image_persisted: false</code> means resolve whatever kept it off disk (disk space,
+      most plausibly) first, then re-run <code>POST .../compact</code> (safe to repeat) and check
+      the response again.
     </p>
     <p>
       Two boundaries to know. <b>Names survive</b>: concepts and relation labels the document
