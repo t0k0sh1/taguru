@@ -3177,17 +3177,20 @@ fn ensure_hot(
     Ok(())
 }
 
-/// The `Context` behind a slot [`ensure_hot`] just returned `Ok` for.
-/// Panicking rather than returning an error is the point: `ensure_hot`
-/// has exactly two `Ok` returns — the `matches!(inner.slot,
+/// The `Context` behind a slot known to be hot — either because
+/// [`ensure_hot`] just returned `Ok` for it, or because the caller
+/// itself just installed `Slot::Hot(...)` under the same lock it still
+/// holds (`compact_context`'s rebuild, which never goes cold in
+/// between). Panicking rather than returning an error is the point:
+/// `ensure_hot` has exactly two `Ok` returns — the `matches!(inner.slot,
 /// Slot::Hot(_))` fast path at its top, and falling off its end after
 /// `inner.slot = Slot::Hot(...)` — and every caller holds the entry's
-/// exclusive lock across both the `ensure_hot` call and this read, so
+/// exclusive lock across both the slot becoming hot and this read, so
 /// nothing else can demote the slot in between. A `Cold` or `Deleted`
 /// slot here means that invariant has been broken inside this module
 /// — a bug to surface loudly at the offending request, not a runtime
-/// condition six call sites would each have to handle. Every
-/// `ensure_hot` caller reads its result through this pair (or
+/// condition every call site would each have to handle. Every caller
+/// that just made the slot hot reads the result through this pair (or
 /// [`hot_context_mut`]) so they cannot drift on the wording or on
 /// which lock they hold.
 fn hot_context(inner: &EntryInner) -> &Context {

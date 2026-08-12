@@ -453,12 +453,14 @@ mod tests {
         assert!(!is_staging_extension("bak42"));
     }
 
-    /// Simulates two independent allocators (two processes racing the
-    /// same destination, or this thread's counter wrapping back onto a
-    /// name another stager already claimed) picking the identical
-    /// staging name. `stage_bytes` must not give up or, worse, reuse
-    /// the colliding name — it must retry onto a fresh, unclaimed name
-    /// and still succeed.
+    /// Simulates two independent allocators — two processes racing the
+    /// same destination — picking the identical staging name.
+    /// `STAGING_NONCE` is a process-global counter (`staging_path`'s
+    /// own doc), so nothing within one process can collide with
+    /// itself this way; this forces the cross-process shape directly
+    /// rather than actually racing two processes. `stage_bytes` must
+    /// not give up or, worse, reuse the colliding name — it must retry
+    /// onto a fresh, unclaimed name and still succeed.
     #[test]
     fn stage_bytes_retries_past_a_forced_staging_collision() {
         let dir = std::env::temp_dir().join(format!(

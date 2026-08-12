@@ -36,28 +36,41 @@ mod tests {
         assert_eq!(name_from_stem("%FF%FE"), None);
     }
 
-    /// [`context_files`]'s own doc claims it is "built from the same
-    /// ten path builders every other caller uses, so a file kind added
-    /// there cannot silently miss this list" — a claim, not an
-    /// enforced invariant, until this test. Pins the count AND that
-    /// the schema file (`{stem}.schema.json`, added by #379/ADR 0009)
-    /// is a member — the delete loop, the rename pivot walk, and
+    /// [`context_files`] is a curated list, not a mechanical
+    /// projection of `paths.rs` (see its own doc) — nothing catches a
+    /// renamed or dropped family member except this test, so it pins
+    /// the exact extension set, not just its length: `files.len() ==
+    /// 10` on a `[String; 10]` is a compile-time-constant comparison
+    /// that can never fail, which is why the count alone was never a
+    /// real invariant. The delete loop, the rename pivot walk, and
     /// `FamilySig` (`src/hydrate.rs`) all read this one list, so a
     /// family member silently missing here would silently miss all
     /// three.
     #[test]
-    fn context_files_names_every_family_member_including_the_schema_file() {
+    fn context_files_names_exactly_the_ten_family_extensions_in_order() {
         let files = context_files("sake");
-        assert_eq!(files.len(), 10, "{files:?}");
-        assert!(
-            files.iter().any(|path| path.ends_with("sake.schema.json")),
-            "{files:?}"
-        );
-        // Last on purpose (the array's own doc): a missing/lagging
-        // schema file must never block the pivot rename, so it sits
-        // where a straggler is already tolerated as best-effort.
-        assert!(
-            files.last().unwrap().ends_with("sake.schema.json"),
+        let extensions: Vec<&str> = files
+            .iter()
+            .map(|path| path.strip_prefix("sake.").unwrap())
+            .collect();
+        assert_eq!(
+            extensions,
+            [
+                "ctx",
+                "meta.json",
+                "sources.json",
+                "passages.bin",
+                "passages.wal.jsonl",
+                "pvectors.bin",
+                "bm25.bin",
+                "vectors.bin",
+                "wal.jsonl",
+                // Last on purpose (the array's own doc): a missing or
+                // lagging schema file must never block the pivot
+                // rename, so it sits where a straggler is already
+                // tolerated as best-effort (ADR 0009 §5.1).
+                "schema.json",
+            ],
             "{files:?}"
         );
     }
