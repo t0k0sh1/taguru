@@ -1728,10 +1728,28 @@ pub(crate) struct PassageSearchExplanation {
     pub(crate) limit: usize,
     pub(crate) served: bool,
     pub(crate) cutoff_score: Option<f32>,
-    /// A limit VERIFIED to serve the target by rerunning the real
-    /// serve computation, pool caps included; `None` when the target
-    /// ranks nowhere (or no limit up to the ranking's size reaches it).
-    pub(crate) limit_to_reach: Option<usize>,
+    pub(crate) limit_to_reach: LimitToReach,
+}
+
+/// The probe for the smallest limit that would serve the explain
+/// target has three different endings a bare `Option<usize>` cannot
+/// tell apart (#601 item 4): verified reachable, never ranked at all,
+/// or the probe exhausted its search space (the raw ceiling every
+/// lane's row count bounds) without reaching it.
+#[cfg_attr(test, derive(Debug, PartialEq))]
+pub(crate) enum LimitToReach {
+    /// The smallest limit VERIFIED to serve the target, by rerunning
+    /// the real serve computation, pool caps included.
+    At(usize),
+    /// The target ranks nowhere in the full (unbounded) ranking —
+    /// there is no limit that would serve it.
+    NotRanked,
+    /// The target ranks somewhere in the full ranking, but no probed
+    /// limit up to the raw ceiling served it — RRF against capped
+    /// pools can seat a late double-lane candidate above a mid-pool
+    /// single-lane hit, so a rank in the unbounded ranking does not
+    /// by itself guarantee a reachable limit.
+    Unreachable,
 }
 
 /// The vector lane's side of an explanation: why it did not run, or

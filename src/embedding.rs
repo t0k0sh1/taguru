@@ -1155,6 +1155,20 @@ impl PassageVectorStore {
             .zip(self.data.chunks_exact(self.dim.max(1)))
     }
 
+    /// Whether `top_matches(_, pool)` would consult the
+    /// [`PassageAnnIndex`] (deadline aside) — the same two-part
+    /// condition `top_matches` checks: a narrower-than-whole-store
+    /// request, at or above [`PASSAGE_ANN_THRESHOLD`]. Exposed so a
+    /// caller that needs to replay several pool sizes through the
+    /// exact SAME path a search would take (`explain_passage_search`,
+    /// #601) can tell, per pool, whether that means calling back into
+    /// `top_matches` or — below the threshold, or at `limit >= len()`
+    /// — safely taking a prefix of its own single unbounded sweep,
+    /// which is byte-for-byte what the exact path would return anyway.
+    pub(crate) fn approximates(&self, pool: usize) -> bool {
+        pool < self.len() && self.len() >= PASSAGE_ANN_THRESHOLD
+    }
+
     /// Rough resident bytes when held in memory, for the cache budget.
     pub fn footprint(&self) -> usize {
         const KEY_OVERHEAD: usize = 48;
@@ -1210,8 +1224,7 @@ impl PassageVectorStore {
             taguru.search.hits = tracing::field::Empty,
         );
         let _guard = span.enter();
-        let hits = if limit < self.len()
-            && self.len() >= PASSAGE_ANN_THRESHOLD
+        let hits = if self.approximates(limit)
             && let Some(index) = self.ensure_ann_index(deadline)
         {
             span.record("taguru.search.exact", false);
@@ -2526,6 +2539,38 @@ mod tests {
         assert!(
             store.ann.lock().is_none(),
             "limit >= len() must never touch the index"
+        );
+    }
+
+    #[test]
+    fn approximates_matches_the_exact_three_part_condition_top_matches_checks() {
+        // `explain_passage_search` (#601 item 2) replays several pool
+        // sizes through this same call rather than duplicating
+        // `top_matches`'s branch, so its correctness rests entirely on
+        // this method staying in lockstep with the private condition
+        // inside `top_matches` — pinned here independent of that.
+        let below_threshold = synthetic_passage_store(64, 6);
+        assert!(
+            !below_threshold.approximates(10),
+            "below the threshold, even a narrow pool stays exact"
+        );
+
+        let at_threshold = synthetic_passage_store(PASSAGE_ANN_THRESHOLD, 6);
+        assert!(
+            !at_threshold.approximates(usize::MAX),
+            "a pool covering every row is always exact, any store size"
+        );
+        assert!(
+            !at_threshold.approximates(at_threshold.len()),
+            "limit == len() is still 'every row', not 'narrower than'"
+        );
+        assert!(
+            at_threshold.approximates(at_threshold.len() - 1),
+            "at or above the threshold, a strictly narrower pool approximates"
+        );
+        assert!(
+            at_threshold.approximates(1),
+            "a small pool still approximates once the store crosses the threshold"
         );
     }
 

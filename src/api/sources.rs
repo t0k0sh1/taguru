@@ -1068,7 +1068,12 @@ pub struct VectorExplain {
 /// truncates: its rank against `ranked` scored candidates, the
 /// `cutoff_score` the request's `limit` served down to, and a
 /// `limit_to_reach` VERIFIED by rerunning the real serve computation
-/// (pool caps included), not read off the unbounded ranking.
+/// (pool caps included), not read off the unbounded ranking. `None`
+/// alone cannot tell "never ranked at all" from "the probe exhausted
+/// its search space without reaching it" — `limit_to_reach_reason`
+/// names the latter (`"unreachable"`) when it applies; the former
+/// never reaches this struct with `rank` set, so it needs no reason
+/// of its own (#601 item 4).
 #[derive(Serialize)]
 pub struct RankingExplain {
     pub fused: bool,
@@ -1083,6 +1088,8 @@ pub struct RankingExplain {
     pub cutoff_score: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit_to_reach: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit_to_reach_reason: Option<&'static str>,
 }
 
 impl SearchExplanation {
@@ -1161,7 +1168,17 @@ impl SearchExplanation {
         source: &str,
         explanation: crate::registry::PassageSearchExplanation,
     ) -> Self {
-        use crate::registry::VectorLaneReport;
+        use crate::registry::{LimitToReach, VectorLaneReport};
+
+        // Wire shape once, up front: `limit_to_reach` moving out of
+        // `explanation` here (it is not `Copy` — three distinct
+        // endings, #601 item 4) would otherwise conflict with the
+        // struct build further down, which needs the same value.
+        let (limit_to_reach, limit_to_reach_reason) = match explanation.limit_to_reach {
+            LimitToReach::At(limit) => (Some(limit), None),
+            LimitToReach::NotRanked => (None, None),
+            LimitToReach::Unreachable => (None, Some("unreachable")),
+        };
 
         let verdict = if explanation.served {
             "served"
@@ -1227,7 +1244,7 @@ impl SearchExplanation {
                 explanation.limit
             ),
             "below_cutoff" => {
-                let reach = match explanation.limit_to_reach {
+                let reach = match limit_to_reach {
                     Some(limit) => format!("limit {limit} reaches it"),
                     None => format!(
                         "no limit up to {} reaches it (pool interplay)",
@@ -1312,7 +1329,8 @@ impl SearchExplanation {
                 limit: explanation.limit,
                 served: explanation.served,
                 cutoff_score: explanation.cutoff_score,
-                limit_to_reach: explanation.limit_to_reach,
+                limit_to_reach,
+                limit_to_reach_reason,
             }),
         }
     }
@@ -1322,8 +1340,11 @@ impl SearchExplanation {
 /// of "orchestrate four endpoints and cross-reference by hand": name
 /// the query and the source (optionally the paragraph) you expected to
 /// see, get the first verdict that applies with its evidence. Runs the
-/// same lanes the search runs (read-only, roughly one query plus one
-/// targeted scoring); the serve boundary is recomputed exactly as
+/// same lanes the search runs, read-only — one unbounded sweep per
+/// lane (the vector lane's own ANN-vs-exact choice included, so a
+/// large corpus is not swept exactly just because this is explain),
+/// then O(log(raw row count)) reruns of the ranking alone to verify
+/// `limit_to_reach`; the serve boundary is recomputed exactly as
 /// `sources/search` computes it, so the two cannot disagree.
 pub async fn explain_search_passages(
     State(state): State<AppState>,
