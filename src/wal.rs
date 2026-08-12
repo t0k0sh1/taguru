@@ -243,6 +243,79 @@ fn line_has_a_field_the_op_cannot_explain<Op: Serialize>(line: &[u8], op: &Op) -
     }))
 }
 
+/// The one "corrupt WAL record" wording, shared by every parsing and
+/// verification failure below so the phrasing cannot drift into
+/// several variants again (it had, before this helper: the shipper's
+/// mismatch message was missing an entire clause the other two sites
+/// had). `path` is `None` for [`shippable_records`], which reads raw
+/// bytes it was never given a path for.
+fn corrupt_record(
+    path: Option<&Path>,
+    line_number: usize,
+    detail: impl std::fmt::Display,
+) -> io::Error {
+    let message = match path {
+        Some(path) => format!(
+            "corrupt WAL record at {} line {line_number}: {detail}",
+            path.display()
+        ),
+        None => format!("corrupt WAL record at line {line_number}: {detail}"),
+    };
+    io::Error::new(io::ErrorKind::InvalidData, message)
+}
+
+/// Verifies one record line against its already-parsed, stored crc:
+/// recovers the canonical crc-less bytes and compares their crc32c
+/// against `stored`. Bare wording, no path or line number — every
+/// call site here shares this exact check and wraps the `Err` through
+/// [`corrupt_record`] with whatever context it has (or, for
+/// [`tail_record_is_complete`], lets its own caller add that context).
+fn verify_record_crc(line: &[u8], stored: u32) -> io::Result<()> {
+    let canonical = canonical_bytes_of_line(line).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "parsed a crc field but could not find it in the raw line",
+        )
+    })?;
+    let computed = crate::crc32c::crc32c(&canonical);
+    if computed != stored {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "checksum mismatch (stored {stored:#010x}, computed {computed:#010x}) — \
+                 the bytes changed after they were written",
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// The one-shot "fail after N more successes" fault shared by
+/// [`injected_append_failure`], [`injected_truncate_failure`], and
+/// [`injected_newline_heal_failure`]: `successes` more calls against
+/// `cell` succeed normally, the one after them fails with an error
+/// naming `what`, and the hook disarms. Each of the three thread_locals
+/// still needs its own storage (a test arming one must never arm the
+/// others), but the countdown-and-disarm logic and the error wording
+/// were identical three times over except for this string.
+#[cfg(test)]
+fn injected_fault(
+    cell: &'static std::thread::LocalKey<std::cell::Cell<Option<u32>>>,
+    what: &str,
+) -> Option<io::Error> {
+    cell.with(|cell| match cell.get() {
+        Some(0) => {
+            cell.set(None);
+            Some(io::Error::other(format!("injected {what} failure")))
+        }
+        Some(remaining) => {
+            cell.set(Some(remaining - 1));
+            None
+        }
+        None => None,
+    })
+}
+
 /// Test-only fault injection: arms the calling thread so that, after
 /// `successes` more non-empty [`append_batch`] calls succeed normally,
 /// the one after them fails with an injected error and the hook
@@ -261,17 +334,7 @@ thread_local! {
 
 #[cfg(test)]
 fn injected_append_failure() -> Option<io::Error> {
-    APPEND_FAULT.with(|cell| match cell.get() {
-        Some(0) => {
-            cell.set(None);
-            Some(io::Error::other("injected append failure"))
-        }
-        Some(remaining) => {
-            cell.set(Some(remaining - 1));
-            None
-        }
-        None => None,
-    })
+    injected_fault(&APPEND_FAULT, "append")
 }
 
 /// [`fail_appends_after`]'s twin for [`truncate_to`]: after `successes`
@@ -291,17 +354,7 @@ thread_local! {
 
 #[cfg(test)]
 fn injected_truncate_failure() -> Option<io::Error> {
-    TRUNCATE_FAULT.with(|cell| match cell.get() {
-        Some(0) => {
-            cell.set(None);
-            Some(io::Error::other("injected truncate failure"))
-        }
-        Some(remaining) => {
-            cell.set(Some(remaining - 1));
-            None
-        }
-        None => None,
-    })
+    injected_fault(&TRUNCATE_FAULT, "truncate")
 }
 
 /// [`fail_appends_after`]'s twin for [`append_missing_newline`]: after
@@ -319,17 +372,7 @@ thread_local! {
 
 #[cfg(test)]
 fn injected_newline_heal_failure() -> Option<io::Error> {
-    NEWLINE_HEAL_FAULT.with(|cell| match cell.get() {
-        Some(0) => {
-            cell.set(None);
-            Some(io::Error::other("injected newline-heal failure"))
-        }
-        Some(remaining) => {
-            cell.set(Some(remaining - 1));
-            None
-        }
-        None => None,
-    })
+    injected_fault(&NEWLINE_HEAL_FAULT, "newline-heal")
 }
 
 /// Arms the calling thread so that the next `count` directory-fsyncs
@@ -700,22 +743,7 @@ fn tail_record_is_complete<Op: DeserializeOwned + Serialize>(tail: &[u8]) -> io:
         }
         return Ok(true);
     };
-    let canonical = canonical_bytes_of_line(tail).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "parsed a crc field but could not find it in the raw line",
-        )
-    })?;
-    let computed = crate::crc32c::crc32c(&canonical);
-    if computed != stored {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "checksum mismatch (stored {stored:#010x}, computed {computed:#010x}) — \
-                 the bytes changed after they were written",
-            ),
-        ));
-    }
+    verify_record_crc(tail, stored)?;
     Ok(true)
 }
 
@@ -752,15 +780,8 @@ fn parse_log<Op: DeserializeOwned + Serialize>(
             // has already had this tail popped off, so its remaining
             // length is exactly the count of lines ahead of it.
             let line_number = segments.len() + 1;
-            let complete = tail_record_is_complete::<Op>(tail).map_err(|error| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "corrupt WAL record at {} line {line_number}: {error}",
-                        path.display(),
-                    ),
-                )
-            })?;
+            let complete = tail_record_is_complete::<Op>(tail)
+                .map_err(|error| corrupt_record(Some(path), line_number, error))?;
             if complete {
                 segments.push(tail);
                 Some(TornTail::Recovered {
@@ -781,16 +802,8 @@ fn parse_log<Op: DeserializeOwned + Serialize>(
     let mut top = watermark;
     let mut unchecked = 0usize;
     for (index, line) in segments.iter().enumerate() {
-        let record: WalRecord<Op> = serde_json::from_slice(line).map_err(|error| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "corrupt WAL record at {} line {}: {error}",
-                    path.display(),
-                    index + 1
-                ),
-            )
-        })?;
+        let record: WalRecord<Op> = serde_json::from_slice(line)
+            .map_err(|error| corrupt_record(Some(path), index + 1, error))?;
         match record.crc {
             // Every checksummed record is verified, at or below the
             // watermark included: a watermark-covered record replays to
@@ -798,42 +811,16 @@ fn parse_log<Op: DeserializeOwned + Serialize>(
             // eating this file — the one thing structural parsing
             // cannot notice and the whole reason the field exists.
             Some(stored) => {
-                let canonical = canonical_bytes_of_line(line).ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "corrupt WAL record at {} line {}: parsed a crc field but \
-                             could not find it in the raw line",
-                            path.display(),
-                            index + 1
-                        ),
-                    )
-                })?;
-                let computed = crate::crc32c::crc32c(&canonical);
-                if computed != stored {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "corrupt WAL record at {} line {}: checksum mismatch (stored \
-                             {stored:#010x}, computed {computed:#010x}) — the bytes changed \
-                             after they were written",
-                            path.display(),
-                            index + 1
-                        ),
-                    ));
-                }
+                verify_record_crc(line, stored)
+                    .map_err(|error| corrupt_record(Some(path), index + 1, error))?;
             }
             None => {
                 if line_has_a_field_the_op_cannot_explain(line, &record.op)? {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "corrupt WAL record at {} line {}: a field the op does not \
-                             account for is present in the raw bytes — the crc field's \
-                             name is likely corrupted, not genuinely absent",
-                            path.display(),
-                            index + 1
-                        ),
+                    return Err(corrupt_record(
+                        Some(path),
+                        index + 1,
+                        "a field the op does not account for is present in the raw bytes \
+                         — the crc field's name is likely corrupted, not genuinely absent",
                     ));
                 }
                 unchecked += 1;
@@ -925,34 +912,11 @@ pub(crate) fn shippable_records(bytes: &[u8]) -> io::Result<Vec<ShippableRecord<
         // a record below, the same fatal corruption a torn field
         // produces) — shipping something replay would refuse is
         // exactly what this function's doc rules out.
-        let parsed: SeqOnly = serde_json::from_slice(line).map_err(|error| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("corrupt WAL record at line {}: {error}", index + 1),
-            )
-        })?;
+        let parsed: SeqOnly =
+            serde_json::from_slice(line).map_err(|error| corrupt_record(None, index + 1, error))?;
         if let Some(stored) = parsed.crc {
-            let canonical = canonical_bytes_of_line(line).ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "corrupt WAL record at line {}: parsed a crc field but could \
-                         not find it in the raw line",
-                        index + 1
-                    ),
-                )
-            })?;
-            let computed = crate::crc32c::crc32c(&canonical);
-            if computed != stored {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "corrupt WAL record at line {}: checksum mismatch (stored \
-                         {stored:#010x}, computed {computed:#010x})",
-                        index + 1
-                    ),
-                ));
-            }
+            verify_record_crc(line, stored)
+                .map_err(|error| corrupt_record(None, index + 1, error))?;
         }
         records.push(ShippableRecord {
             seq: parsed.seq,
@@ -1098,6 +1062,10 @@ mod tests {
         let error = shippable_records(rotted.as_bytes())
             .expect_err("a flipped byte with an intact crc field must refuse");
         assert!(error.to_string().contains("checksum mismatch"), "{error}");
+        // The FIRST record (1-indexed line 1) is the one that fails —
+        // pins the line number the error reports, not just its
+        // presence, since every record shares the rotted label.
+        assert!(error.to_string().contains("line 1"), "{error}");
     }
 
     /// `canonical_bytes_of_line`'s `,"crc":` marker is a byte-exact
@@ -1165,6 +1133,9 @@ mod tests {
             ship_error.to_string().contains("corrupt WAL record"),
             "{ship_error}"
         );
+        // The spliced blank line is the second segment (1-indexed line
+        // 2) — pins the line number the error reports.
+        assert!(ship_error.to_string().contains("line 2"), "{ship_error}");
     }
 
     #[test]
