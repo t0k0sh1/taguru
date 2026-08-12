@@ -1100,6 +1100,44 @@ mod tests {
         assert!(error.to_string().contains("checksum mismatch"), "{error}");
     }
 
+    /// `canonical_bytes_of_line`'s `,"crc":` marker is a byte-exact
+    /// match; a crc field that exists but isn't preceded by that exact
+    /// marker (here, because it's the FIRST field, preceded by `{` not
+    /// `,`) cannot be canonicalized — issue #587, this call site of
+    /// `canonical_bytes_of_line` had never been exercised at all.
+    #[test]
+    fn shippable_records_reports_an_uncanonicalizable_crc_field() {
+        let bytes = b"{\"crc\":7,\"seq\":1}\n".to_vec();
+        let error = shippable_records(&bytes)
+            .expect_err("a crc field the marker search cannot locate must refuse, not trust");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            error
+                .to_string()
+                .contains("could not find it in the raw line"),
+            "{error}"
+        );
+    }
+
+    /// A duplicate seq is `parse_log`'s later-wins problem, not this
+    /// function's: shipping is a byte transport, not the trust
+    /// boundary (see the doc comment on `shippable_records`), so both
+    /// copies ride straight through.
+    #[test]
+    fn shippable_records_does_not_dedupe_a_repeated_seq() {
+        let path = scratch_wal("shippable-dupseq");
+        append_batch(&path, 1, &[associate("ghost")]).unwrap();
+        append_batch(&path, 1, &[associate("real")]).unwrap();
+
+        let bytes = fs::read(&path).unwrap();
+        let records = shippable_records(&bytes).unwrap();
+        assert_eq!(
+            records.iter().map(|r| r.seq).collect::<Vec<_>>(),
+            vec![1, 1],
+            "unlike replay, both copies of a reused seq ship"
+        );
+    }
+
     /// An interior empty line is the same fatal corruption `parse_log`
     /// (replay) already refuses — never a shape `shippable_records`
     /// may skip past. Before the fix, this function silently skipped
@@ -1202,6 +1240,35 @@ mod tests {
             error
                 .to_string()
                 .contains("field's name is likely corrupted"),
+            "{error}"
+        );
+        assert!(error.to_string().contains("line 1"), "{error}");
+    }
+
+    /// A THIRD distinct corruption shape from the two siblings above:
+    /// the field name and its data are both intact, but the exact
+    /// `,"crc":` marker `canonical_bytes_of_line` scans for isn't
+    /// there (here, because whitespace crept in after the comma — JSON
+    /// itself does not care, but the byte-exact marker search does).
+    /// The record still parses with `crc: Some(_)`, so this is neither
+    /// the pre-checksum path nor the corrupted-field-name path: it is
+    /// `canonical_bytes_of_line` returning `None`, exercised for the
+    /// first time in this repository (issue #587).
+    #[test]
+    fn an_interior_crc_field_whose_marker_cannot_be_recovered_is_fatal() {
+        let path = scratch_wal("crc-marker-gone-interior");
+        append_batch(&path, 1, &[associate("a")]).unwrap();
+
+        let text = String::from_utf8(fs::read(&path).unwrap()).unwrap();
+        assert_eq!(text.matches(",\"crc\":").count(), 1);
+        fs::write(&path, text.replace(",\"crc\":", ", \"crc\":")).unwrap();
+
+        let error = replay::<WalOp>(&path, 0).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            error
+                .to_string()
+                .contains("could not find it in the raw line"),
             "{error}"
         );
         assert!(error.to_string().contains("line 1"), "{error}");
@@ -1525,6 +1592,36 @@ mod tests {
         );
     }
 
+    /// The tail-specific counterpart to
+    /// `an_interior_crc_field_whose_marker_cannot_be_recovered_is_fatal`:
+    /// the record parses complete with `crc: Some(_)`, but the marker
+    /// `canonical_bytes_of_line` scans for isn't present byte-exact, so
+    /// this must be reported through `tail_record_is_complete`'s own
+    /// error rather than silently discarded as a torn write.
+    #[test]
+    fn a_tail_crc_field_whose_marker_cannot_be_recovered_is_fatal_not_torn() {
+        let path = scratch_wal("crc-marker-gone-tail");
+        append_batch(&path, 1, &[associate("a")]).unwrap();
+        let mut bytes = fs::read(&path).unwrap();
+        assert_eq!(bytes.pop(), Some(b'\n'));
+        let text = String::from_utf8(bytes).unwrap();
+        assert_eq!(text.matches(",\"crc\":").count(), 1);
+        fs::write(&path, text.replace(",\"crc\":", ", \"crc\":")).unwrap();
+
+        let error = replay::<WalOp>(&path, 0).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            error
+                .to_string()
+                .contains("could not find it in the raw line"),
+            "{error}"
+        );
+        // The tail's line number is computed separately from the
+        // interior loop's (`segments.len() + 1`, not `index + 1`) —
+        // pin it here too, not just in the interior sibling test.
+        assert!(error.to_string().contains("line 1"), "{error}");
+    }
+
     #[test]
     fn a_legacy_tail_missing_its_newline_is_recovered_and_counted_unchecked() {
         // A pre-checksum record (no crc field) missing only its
@@ -1578,6 +1675,15 @@ mod tests {
             error.to_string().contains("injected truncate failure"),
             "{error}"
         );
+        // `replay` rewraps the injected failure with its own "could not
+        // heal" message — the inner assertion above only pinned the
+        // cause, not that this specific heal site is the one reporting it.
+        assert!(
+            error
+                .to_string()
+                .contains("could not heal torn WAL tail at"),
+            "{error}"
+        );
         // The failed heal must not leave the file in some in-between
         // state: nothing was truncated, so the torn bytes are untouched.
         assert_eq!(fs::metadata(&path).unwrap().len(), torn_len);
@@ -1599,9 +1705,33 @@ mod tests {
             error.to_string().contains("injected newline-heal failure"),
             "{error}"
         );
+        // Same rewrap check as the truncate-heal sibling above: pin the
+        // outer "could not heal" message, not just the injected cause.
+        assert!(
+            error
+                .to_string()
+                .contains("could not heal a missing WAL newline at"),
+            "{error}"
+        );
         // The failed heal must not leave the file in some in-between
         // state: the missing newline was never appended.
         assert_eq!(fs::metadata(&path).unwrap().len(), stripped_len);
+    }
+
+    /// `reset`'s non-`NotFound` arm: any other truncate failure must
+    /// propagate, not be swallowed the way a missing file is.
+    #[test]
+    fn reset_propagates_a_non_missing_truncate_failure() {
+        let path = scratch_wal("reset-non-notfound-failure");
+        append_batch(&path, 1, &[associate("a")]).unwrap();
+
+        fail_truncates_after(0);
+        let error = reset(&path).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert!(
+            error.to_string().contains("injected truncate failure"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -1656,6 +1786,31 @@ mod tests {
         assert_eq!(top, 5);
         assert_eq!(torn, None);
         assert_eq!(unchecked, 0);
+    }
+
+    /// `replay`'s non-`NotFound` read-failure arm. `fs::read` sits
+    /// outside the fault-injection choke point (storage.rs), so this
+    /// can only be reached with a real OS error — a directory sitting
+    /// where the WAL file should be turns the read into "not NotFound",
+    /// exactly the aspect this guards, without pinning a
+    /// platform-specific error kind (Linux and macOS disagree on it).
+    #[test]
+    fn replay_propagates_a_non_missing_read_failure() {
+        let path = scratch_wal("replay-non-notfound-failure");
+        fs::create_dir_all(&path).unwrap();
+
+        let error = replay::<WalOp>(&path, 0).unwrap_err();
+        assert_ne!(error.kind(), io::ErrorKind::NotFound, "{error}");
+    }
+
+    /// The read-only sibling of the test above.
+    #[test]
+    fn replay_readonly_propagates_a_non_missing_read_failure() {
+        let path = scratch_wal("replay-readonly-non-notfound-failure");
+        fs::create_dir_all(&path).unwrap();
+
+        let error = replay_readonly::<WalOp>(&path, 0).unwrap_err();
+        assert_ne!(error.kind(), io::ErrorKind::NotFound, "{error}");
     }
 
     #[test]

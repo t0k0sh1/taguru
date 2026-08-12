@@ -38,6 +38,17 @@ exclude_re = [
     # not just zero. Same equivalence as the entry above, different
     # mutation operator on the same expression.
     "replace > with >= in AppState::compact_passages_if_worthwhile",
+    # stage_bytes's real (non-injected) AlreadyExists match guard,
+    # `with true` arm only (issue #587): a permanent, non-collision
+    # open failure (EACCES, ENOSPC, ...) that the guard would wrongly
+    # treat as retriable still ends the retry loop with the SAME error
+    # kind the correct code returns immediately — every attempt fails
+    # identically, so no black-box test (return value or filesystem
+    # state) can tell "retried 8 times then gave up" apart from "gave
+    # up immediately". The `with false` sibling on this same guard IS
+    # killed (a genuine collision must retry-and-succeed, not fail
+    # outright) — see stage_bytes_retries_past_a_genuine_open_collision.
+    "replace match guard error\\.kind\\(\\) == io::ErrorKind::AlreadyExists with true in stage_bytes",
     # The in-process embedding provider (local-embed, on by default)
     # is exercised by an #[ignore]d smoke test that downloads a real
     # model — CI sweeps can never kill mutants there, and counting
