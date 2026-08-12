@@ -254,6 +254,17 @@ fn filtered_search_serves_only_eligible_sources_with_an_honest_plan() {
     let limited = search(json!({"query": "共通語の資料", "tags": ["酒", "蔵"], "limit": 1}));
     assert_eq!(hit_sources(&limited).len(), 1);
 
+    // A limit-0 request never reaches either lane, but still owes the
+    // filter block: "nothing served because limit=0" must stay
+    // distinguishable from "nothing served because nothing was
+    // eligible" (#601).
+    let zero = search(json!({"query": "共通語の資料", "tags": ["酒"], "limit": 0}));
+    assert!(hit_sources(&zero).is_empty());
+    assert_eq!(
+        zero["plan"]["contexts"][0]["filter"],
+        json!({"eligible_sources": 1, "total_sources": 3})
+    );
+
     // An empty window is refused, not silently empty.
     let (status, answer) = server.call(
         "POST",
