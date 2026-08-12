@@ -389,6 +389,27 @@ mod tests {
             .expect("an empty Path::parent() must resolve to the current directory, not ENOENT");
     }
 
+    /// A genuine (non-empty) parent that does not exist must surface
+    /// `fsync_dir`'s own open failure — the one observable way to tell
+    /// this apart from a no-op: a mutated `fsync_parent_dir` that
+    /// always returned `Ok(())`, or one whose `is_empty()` guard always
+    /// took the `"."` branch, would both silently succeed here instead.
+    #[cfg(unix)]
+    #[test]
+    fn fsync_parent_dir_propagates_a_real_parents_open_failure() {
+        let path = std::env::temp_dir()
+            .join(format!(
+                "taguru-storage-fsync-missing-parent-{}",
+                std::process::id()
+            ))
+            .join("nonexistent-dir")
+            .join("file.txt");
+
+        let error = fsync_parent_dir(&path)
+            .expect_err("fsyncing a nonexistent parent directory must fail, not silently succeed");
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    }
+
     /// `Path::extension()` only ever returns the bytes after the LAST
     /// dot — boot's resume-sweep (registry/boot.rs's `scan_data_dir`)
     /// matches leftover staging files by `extension().starts_with("tmp")`.
@@ -453,6 +474,42 @@ mod tests {
 
         let staged = stage_bytes(&path, b"my bytes", false)
             .expect("stage_bytes must retry past forced collisions, not fail the write");
+        assert_eq!(fs::read(&staged).unwrap(), b"my bytes");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The sibling above forces a collision through the test hook,
+    /// which short-circuits before `stage_bytes` ever calls the real
+    /// `OpenOptions::create_new` — the retry loop's actual match guard
+    /// on a GENUINE `AlreadyExists` (a real cross-process race, in
+    /// production) stays unexercised by every other test in this file.
+    /// This one predicts `staging_path`'s next nonce and pre-creates a
+    /// real file there, so the open call itself fails for real.
+    /// Reliable only because nextest gives every test its own process
+    /// — a fresh, zeroed `STAGING_NONCE` seen by nothing but this
+    /// test's own calls; the project's other collision tests all use
+    /// the forcing hook specifically to avoid depending on that.
+    #[test]
+    fn stage_bytes_retries_past_a_genuine_open_collision() {
+        let dir = std::env::temp_dir().join(format!(
+            "taguru-storage-real-collision-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("output.txt");
+
+        let predicted = staging_path(&path);
+        fs::write(&predicted, b"already here").unwrap();
+
+        let staged = stage_bytes(&path, b"my bytes", false)
+            .expect("a genuine AlreadyExists on one attempt must retry, not fail outright");
+        assert_ne!(staged, predicted, "must land on a distinct, unclaimed name");
+        assert_eq!(
+            fs::read(&predicted).unwrap(),
+            b"already here",
+            "the collided name must be left untouched"
+        );
         assert_eq!(fs::read(&staged).unwrap(), b"my bytes");
 
         let _ = fs::remove_dir_all(&dir);
