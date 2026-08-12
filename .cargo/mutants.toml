@@ -32,6 +32,12 @@ exclude_re = [
     # regardless of this guard — no test can observe a difference
     # because there is none to observe.
     "replace match guard store\\.watermark\\(\\) > 0 with true in AppState::compact_passages_if_worthwhile",
+    # Same guard, the `>` -> `>=` operator mutation specifically:
+    # `watermark(): u64` can never be negative, so `watermark() >= 0`
+    # is a tautology — identical to `true` for every possible value,
+    # not just zero. Same equivalence as the entry above, different
+    # mutation operator on the same expression.
+    "replace > with >= in AppState::compact_passages_if_worthwhile",
     # The in-process embedding provider (local-embed, on by default)
     # is exercised by an #[ignore]d smoke test that downloads a real
     # model — CI sweeps can never kill mutants there, and counting
