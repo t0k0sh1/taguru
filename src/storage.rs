@@ -550,4 +550,64 @@ mod tests {
 
         let _ = fs::remove_dir_all(&dir);
     }
+
+    /// `lock_data_dir`'s `WouldBlock` arm (issue #587) — untested
+    /// despite being the exact branch that answers a concurrent
+    /// `taguru serve`/`taguru import` with a named refusal instead of a
+    /// silent last-flush-wins overwrite. `flock` locks belong to the
+    /// open file description, not the process, so a second, independent
+    /// `File::create` + `try_lock` on the same path — exactly what a
+    /// second process racing this one would do — reliably contends with
+    /// the first even from within one process; no subprocess needed.
+    #[test]
+    fn lock_data_dir_refuses_a_second_lock_naming_the_conflict() {
+        let dir = std::env::temp_dir().join(format!(
+            "taguru-storage-lock-data-dir-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+
+        let held = lock_data_dir(&dir).expect("the first lock must succeed");
+
+        let error = lock_data_dir(&dir)
+            .expect_err("a second concurrent lock attempt must be refused, not silently granted");
+        assert!(
+            error
+                .to_string()
+                .contains("is held by another taguru process"),
+            "{error}"
+        );
+
+        drop(held);
+        lock_data_dir(&dir).expect("once the first lock drops, a fresh lock must succeed");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `offload`'s three arms (issue #587): a multi-thread Tokio runtime
+    /// routes through `block_in_place`, a current-thread runtime and no
+    /// runtime at all (the CLI import/export path, and every plain
+    /// `#[test]`) both fall through to running the work inline —
+    /// `block_in_place` panics on a current-thread runtime, so picking
+    /// the wrong arm there would be immediately visible, not silently
+    /// wrong.
+    #[test]
+    fn offload_runs_the_work_and_returns_its_value_with_no_runtime() {
+        assert_eq!(offload(|| 1 + 1), 2);
+    }
+
+    #[tokio::test]
+    async fn offload_runs_the_work_and_returns_its_value_on_a_current_thread_runtime() {
+        assert!(tokio::runtime::Handle::try_current().is_ok());
+        assert_eq!(offload(|| 1 + 1), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn offload_runs_the_work_and_returns_its_value_on_a_multi_thread_runtime() {
+        assert_eq!(
+            tokio::runtime::Handle::current().runtime_flavor(),
+            tokio::runtime::RuntimeFlavor::MultiThread
+        );
+        assert_eq!(offload(|| 1 + 1), 2);
+    }
 }
