@@ -2106,11 +2106,15 @@ mod tests {
         )
         .unwrap();
 
-        // The file move itself bypasses this injector (`move_context_files`
-        // uses `fs::rename` directly), so the very first persistence op
-        // this boot performs is the membership rewrite's own
-        // `write_group` — fail that one.
-        fail_persistence_ops_after(0);
+        // `move_context_files` now routes every one of `context_files`'
+        // ten renames through the same injector (#586) — it consults
+        // the injector once per family slot regardless of whether that
+        // slot's source file exists (a `NotFound` is only known AFTER
+        // the call), so the move alone spends exactly `context_files`'
+        // length worth of "successes" before the membership rewrite's
+        // own `write_group` gets to run. Let all ten land, then fail
+        // the very next persistence op — `write_group`'s own stage.
+        fail_persistence_ops_after(context_files(&file_stem("sake")).len() as u32);
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         let past_end = clear_persistence_fault();
         assert!(!past_end, "the group write itself must be what failed");

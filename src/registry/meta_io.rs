@@ -206,7 +206,10 @@ pub(crate) fn context_files(stem: &str) -> [String; 10] {
 /// is returned so the caller knows the move is incomplete and keeps the
 /// rename marker. All ten share `data_dir` as their parent, so one
 /// fsync after every rename covers the whole family durably instead of
-/// paying for it (via `commit_staged`) up to ten times. The fsync's own
+/// paying for it (via `commit_staged`) up to ten times. Each rename
+/// itself still goes through the shared [`rename_persisted_file`] choke
+/// point — this crate's highest-risk multi-step FS operation is fault-
+/// injectable exactly like a single-file publish is. The fsync's own
 /// failure is reported too, but only when there was no earlier
 /// straggler to report first — a rename error names the file that
 /// actually didn't move, which is more actionable than a directory
@@ -223,7 +226,7 @@ pub(super) fn move_context_files(
         .zip(context_files(to_stem))
         .enumerate()
     {
-        match fs::rename(data_dir.join(from_file), data_dir.join(to_file)) {
+        match rename_persisted_file(data_dir.join(from_file), data_dir.join(to_file)) {
             Ok(()) => moved_any = true,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             // The pivot: fail outright so nothing else moves.
@@ -348,6 +351,95 @@ mod tests {
                 config: 1
             }
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// #586: `move_context_files` now routes every one of its ten
+    /// renames through the same [`crate::storage::rename_persisted_file`]
+    /// choke point every other publish uses — the fault injector must
+    /// actually reach the pivot move, the highest-risk multi-step FS
+    /// operation in the crate. A failure there must behave exactly like
+    /// a real `fs::rename` failure on the pivot always has: nothing
+    /// else in the family moves.
+    #[test]
+    fn an_injected_pivot_rename_failure_moves_nothing() {
+        let dir = scratch_dir("meta-io-move-pivot-fault");
+        fs::create_dir_all(&dir).unwrap();
+        let from_stem = file_stem("sake");
+        let to_stem = file_stem("shochu");
+        fs::write(image_path(&dir, &from_stem), b"ctx bytes").unwrap();
+        fs::write(meta_path(&dir, &from_stem), b"meta bytes").unwrap();
+
+        fail_persistence_ops_after(0);
+        let error = move_context_files(&dir, &from_stem, &to_stem).unwrap_err();
+        let past_end = clear_persistence_fault();
+        assert!(
+            !past_end,
+            "the very first rename (the pivot) must be what failed"
+        );
+        assert_eq!(
+            error.kind(),
+            io::ErrorKind::Other,
+            "an injected failure, not a real ENOENT: {error:?}"
+        );
+
+        assert!(
+            image_path(&dir, &from_stem).exists(),
+            "the pivot must stay put"
+        );
+        assert!(
+            meta_path(&dir, &from_stem).exists(),
+            "a post-pivot file must never be touched once the pivot itself failed"
+        );
+        assert!(!image_path(&dir, &to_stem).exists());
+        assert!(!meta_path(&dir, &to_stem).exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The best-effort half of the same contract: an injected failure
+    /// on a post-pivot file (here `.meta.json`, `context_files`'
+    /// second entry) must behave like the existing real-FS-blocker
+    /// tests (`lifecycle.rs`'s straggler tests) already prove for a
+    /// genuine `fs::rename` error — the pivot has already moved, so
+    /// the loop keeps going rather than stopping, and a later file in
+    /// the family (here `sources_path`, the third entry) still lands
+    /// at `to_stem`. The first straggler error is what
+    /// `move_context_files` reports.
+    #[test]
+    fn an_injected_straggler_rename_failure_still_lets_later_files_move() {
+        let dir = scratch_dir("meta-io-move-straggler-fault");
+        fs::create_dir_all(&dir).unwrap();
+        let from_stem = file_stem("sake");
+        let to_stem = file_stem("shochu");
+        fs::write(image_path(&dir, &from_stem), b"ctx bytes").unwrap();
+        fs::write(meta_path(&dir, &from_stem), b"meta bytes").unwrap();
+        fs::write(sources_path(&dir, &from_stem), b"sources bytes").unwrap();
+
+        // One success (the pivot) then fail the very next op — the
+        // `.meta.json` rename.
+        fail_persistence_ops_after(1);
+        let error = move_context_files(&dir, &from_stem, &to_stem).unwrap_err();
+        let past_end = clear_persistence_fault();
+        assert!(!past_end, "the meta rename must be what failed");
+        assert_eq!(error.kind(), io::ErrorKind::Other, "{error:?}");
+
+        assert!(
+            !image_path(&dir, &from_stem).exists(),
+            "the pivot already moved before the fault"
+        );
+        assert!(image_path(&dir, &to_stem).exists());
+        assert!(
+            meta_path(&dir, &from_stem).exists(),
+            "the failed rename must never have touched the source"
+        );
+        assert!(!meta_path(&dir, &to_stem).exists());
+        assert!(
+            !sources_path(&dir, &from_stem).exists() && sources_path(&dir, &to_stem).exists(),
+            "best-effort continues past a post-pivot straggler: a LATER \
+             family member still lands at the destination"
+        );
+
         let _ = fs::remove_dir_all(&dir);
     }
 }
