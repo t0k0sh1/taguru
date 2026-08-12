@@ -534,7 +534,7 @@ mod tests {
         AliasInput, AssocInput, RetractionInput, config as proptest_config,
         json_roundtrip_f64_strategy, scenario_strategy,
     };
-    use crate::registry::test_support::{assoc_op, scratch_dir};
+    use crate::registry::test_support::{assoc_op, plain, scratch_dir};
     use proptest::prelude::*;
 
     /// The three revision counters move on exactly their own lane —
@@ -835,6 +835,134 @@ mod tests {
             "a failed hot-path export must not call enforce_budget either"
         );
 
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// `compact_passages_if_worthwhile` (taguru-code's sync, issue #452)
+    /// has never had a single test in this repository despite four
+    /// early-return branches — issue #587. A replica's snapshot and log
+    /// are manifest-owned, so it must decline before ever touching the
+    /// entry's passage store.
+    #[test]
+    fn compact_passages_if_worthwhile_never_compacts_on_a_replica() {
+        let dir = scratch_dir("compact-worthwhile-replica");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state.create("sake", ContextMeta::default()).unwrap();
+            state
+                .store_passages(
+                    "sake",
+                    plain(BTreeMap::from([(
+                        "a.md".to_string(),
+                        "蔵は1832年創業。".to_string(),
+                    )])),
+                )
+                .unwrap()
+                .unwrap();
+        }
+        let wal_path = passages_wal_path(&dir, &file_stem("sake"));
+        let before = fs::metadata(&wal_path).unwrap().len();
+        assert!(before > 0, "sanity: the store has a pending log");
+
+        let state = AppState::boot_with(
+            dir.clone(),
+            usize::MAX,
+            None,
+            BootOptions {
+                replica: Some(std::sync::Arc::new(crate::replica::ReplicaInfo::new(None))),
+                ..BootOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(state.is_replica(), "sanity: the reopened boot is a replica");
+
+        assert!(
+            !state.compact_passages_if_worthwhile("sake", 0),
+            "a replica must decline even with a floor of zero"
+        );
+        assert_eq!(
+            fs::metadata(&wal_path).unwrap().len(),
+            before,
+            "a declined replica compaction must leave the log untouched"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// An unknown context name is the second early return.
+    #[test]
+    fn compact_passages_if_worthwhile_declines_an_unknown_context() {
+        let dir = scratch_dir("compact-worthwhile-unknown");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        assert!(!state.compact_passages_if_worthwhile("no-such-context", 0));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A deleted (tombstoned) context is the third early return —
+    /// `read_unless_deleted` must refuse it just as it does every other
+    /// entry point.
+    #[test]
+    fn compact_passages_if_worthwhile_declines_a_deleted_context() {
+        let dir = scratch_dir("compact-worthwhile-deleted");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state.create("sake", ContextMeta::default()).unwrap();
+        state.delete("sake").unwrap().unwrap();
+        assert!(!state.compact_passages_if_worthwhile("sake", 0));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The watermark guard: a context whose passage log has never
+    /// received a single write must not get store files minted just to
+    /// compact nothing.
+    #[test]
+    fn compact_passages_if_worthwhile_declines_a_context_with_no_passage_history() {
+        let dir = scratch_dir("compact-worthwhile-watermark-zero");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state.create("sake", ContextMeta::default()).unwrap();
+
+        assert!(!state.compact_passages_if_worthwhile("sake", 0));
+        assert!(
+            !passages_path(&dir, &file_stem("sake")).exists(),
+            "a declined compaction on an empty store must write nothing"
+        );
+        assert!(
+            !passages_wal_path(&dir, &file_stem("sake")).exists(),
+            "a store that was never written to must never be touched on disk"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The one path where `compact_passages_if_worthwhile` actually
+    /// runs: passage history past the floor folds the log into the
+    /// snapshot, same as the write-path trigger it stands in for.
+    #[test]
+    fn compact_passages_if_worthwhile_compacts_past_the_floor() {
+        let dir = scratch_dir("compact-worthwhile-runs");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state.create("sake", ContextMeta::default()).unwrap();
+        state
+            .store_passages(
+                "sake",
+                plain(BTreeMap::from([(
+                    "a.md".to_string(),
+                    "蔵は1832年創業。".to_string(),
+                )])),
+            )
+            .unwrap()
+            .unwrap();
+
+        let wal_path = passages_wal_path(&dir, &file_stem("sake"));
+        let pending = fs::metadata(&wal_path).unwrap().len();
+        assert!(pending > 0, "sanity: the store has a pending log");
+
+        assert!(
+            state.compact_passages_if_worthwhile("sake", pending - 1),
+            "a log past the floor is worthwhile to fold"
+        );
+        assert_eq!(
+            fs::metadata(&wal_path).unwrap().len(),
+            0,
+            "the covered log truncates once compacted"
+        );
         let _ = fs::remove_dir_all(dir);
     }
 
