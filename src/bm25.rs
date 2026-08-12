@@ -557,6 +557,29 @@ impl Bm25Index {
         out
     }
 
+    /// Rejects a well-formed-looking but structurally invalid image
+    /// (bounds are fine, but the content violates the invariants
+    /// [`Self::to_bytes`] always writes) exactly like the corruption
+    /// checks above: refuse and let the caller rebuild. There is no
+    /// CRC on these sidecars (see the comment on the `length` check
+    /// below), so this is the only line between a torn write and a
+    /// silently wrong corpus for the shapes bounds-checking alone
+    /// cannot see:
+    /// - a source name repeated (`to_bytes` writes each live source
+    ///   once, sorted and deduplicated by construction),
+    /// - a live (source, paragraph) pair repeated — `search`'s
+    ///   tie-break key `(score, source, index)` stops being unique,
+    ///   and the final order falls back to `HashMap` iteration order
+    ///   (non-deterministic ranking),
+    /// - a term repeated across postings blocks,
+    /// - a posting list not slot-ascending (`to_bytes` always sorts a
+    ///   term's live postings by slot) — this also rejects the same
+    ///   slot posted twice for one term, which would make `carriers`
+    ///   exceed `live_count` and `idf` go negative (the only path to a
+    ///   negative idf in this design): `search` sums both postings and
+    ///   double-counts the contribution, but `explain`'s `.find()`
+    ///   only sees the first, breaking the "bit-for-bit the same
+    ///   score" contract between them.
     pub(crate) fn from_bytes(bytes: &[u8]) -> Option<Self> {
         let mut pos = 0usize;
         if bytes.get(..8)? != INDEX_MAGIC {
@@ -570,16 +593,24 @@ impl Bm25Index {
             let slice = bytes.get(pos..pos.checked_add(len)?)?;
             pos += len;
             let name = std::str::from_utf8(slice).ok()?;
+            if index.source_ids.contains_key(name) {
+                return None;
+            }
             // intern() assigns ids in insertion order = file order.
             index.intern(name);
         }
         let slot_count = read_u32(bytes, &mut pos)? as usize;
+        let mut seen_slots: std::collections::HashSet<(u32, u32)> =
+            std::collections::HashSet::with_capacity(slot_count);
         for _ in 0..slot_count {
             let source_id = read_u32(bytes, &mut pos)?;
             if source_id as usize >= index.sources.len() {
                 return None;
             }
             let paragraph = read_u32(bytes, &mut pos)?;
+            if !seen_slots.insert((source_id, paragraph)) {
+                return None;
+            }
             let length = f32::from_le_bytes(bytes.get(pos..pos + 4)?.try_into().ok()?);
             pos += 4;
             // A non-finite or negative length is corruption: added into
@@ -615,11 +646,20 @@ impl Bm25Index {
             pos += 8;
             let posting_count = read_u32(bytes, &mut pos)? as usize;
             let mut list = Vec::with_capacity(posting_count.min(1 << 20));
+            // `to_bytes` always writes one term's postings slot-ascending
+            // — enforcing strict monotonicity here rejects an
+            // out-of-order list AND a slot posted twice for this term in
+            // one check (a repeat can only fail the `>` test).
+            let mut prev_slot: Option<u32> = None;
             for _ in 0..posting_count {
                 let slot = read_u32(bytes, &mut pos)?;
                 if slot as usize >= index.slots.len() {
                     return None;
                 }
+                if prev_slot.is_some_and(|prev| slot <= prev) {
+                    return None;
+                }
+                prev_slot = Some(slot);
                 let tf = f32::from_le_bytes(bytes.get(pos..pos + 4)?.try_into().ok()?);
                 pos += 4;
                 // Same reasoning as `length` above: a non-finite or
@@ -632,7 +672,9 @@ impl Bm25Index {
                 }
                 list.push(Posting { slot, tf });
             }
-            index.postings.insert(term, list);
+            if index.postings.insert(term, list).is_some() {
+                return None;
+            }
         }
         (pos == bytes.len()).then_some(index)
     }
@@ -801,6 +843,120 @@ mod tests {
             .into_iter()
             .filter(|gram| seen.insert(*gram))
             .collect()
+    }
+
+    /// Hand-builds a `from_bytes` image in [`Bm25Index::to_bytes`]'s
+    /// exact wire format, for constructing the structurally invalid
+    /// shapes bounds-checking alone lets through (#600 item 2) —
+    /// bytes no real `to_bytes` call would ever produce, but a torn
+    /// write could, since the sidecar carries no CRC.
+    fn image(
+        sources: &[&str],
+        // (source_id, paragraph, length, hash, question_hash)
+        slots: &[(u32, u32, f32, u64, u64)],
+        // (term, [(slot, tf)])
+        terms: &[(u64, &[(u32, f32)])],
+    ) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(INDEX_MAGIC);
+        out.extend_from_slice(&(sources.len() as u32).to_le_bytes());
+        for source in sources {
+            out.extend_from_slice(&(source.len() as u32).to_le_bytes());
+            out.extend_from_slice(source.as_bytes());
+        }
+        out.extend_from_slice(&(slots.len() as u32).to_le_bytes());
+        for &(source_id, paragraph, length, hash, question_hash) in slots {
+            out.extend_from_slice(&source_id.to_le_bytes());
+            out.extend_from_slice(&paragraph.to_le_bytes());
+            out.extend_from_slice(&length.to_le_bytes());
+            out.extend_from_slice(&hash.to_le_bytes());
+            out.extend_from_slice(&question_hash.to_le_bytes());
+        }
+        out.extend_from_slice(&(terms.len() as u32).to_le_bytes());
+        for &(term, postings) in terms {
+            out.extend_from_slice(&term.to_le_bytes());
+            out.extend_from_slice(&(postings.len() as u32).to_le_bytes());
+            for &(slot, tf) in postings {
+                out.extend_from_slice(&slot.to_le_bytes());
+                out.extend_from_slice(&tf.to_le_bytes());
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn from_bytes_accepts_a_canonical_hand_built_image() {
+        // The positive control for the rejection tests below: if this
+        // ever fails to decode, `image` itself drifted from
+        // `to_bytes`'s format and every rejection test below is
+        // meaningless.
+        let bytes = image(
+            &["a.md", "b.md"],
+            &[(0, 0, 2.0, 1, 0), (1, 0, 3.0, 2, 0)],
+            &[(10, &[(0, 1.0), (1, 1.0)]), (20, &[(1, 2.0)])],
+        );
+        let index =
+            Bm25Index::from_bytes(&bytes).expect("a well-formed canonical image must decode");
+        assert_eq!(index.live_count, 2);
+        assert_eq!(index.sources, vec!["a.md".to_string(), "b.md".to_string()]);
+    }
+
+    #[test]
+    fn from_bytes_rejects_a_source_name_repeated() {
+        // `to_bytes` writes each live source once (sorted, deduplicated
+        // by construction) — a repeat is a shape it never produces.
+        let bytes = image(&["a.md", "a.md"], &[], &[]);
+        assert!(Bm25Index::from_bytes(&bytes).is_none());
+    }
+
+    #[test]
+    fn from_bytes_rejects_a_live_paragraph_repeated_for_one_source() {
+        // Two slots both claiming (source 0, paragraph 0): `search`'s
+        // tie-break key (score, source, index) stops being unique, so
+        // the final order falls back to `HashMap` iteration order —
+        // non-deterministic ranking.
+        let bytes = image(&["a.md"], &[(0, 0, 1.0, 1, 0), (0, 0, 1.0, 2, 0)], &[]);
+        assert!(Bm25Index::from_bytes(&bytes).is_none());
+    }
+
+    #[test]
+    fn from_bytes_rejects_a_term_repeated_across_postings_blocks() {
+        // `postings.insert` would silently overwrite the first block —
+        // a repeat is corruption, not a redundant-but-harmless write.
+        let bytes = image(
+            &["a.md"],
+            &[(0, 0, 1.0, 1, 0)],
+            &[(10, &[(0, 1.0)]), (10, &[(0, 1.0)])],
+        );
+        assert!(Bm25Index::from_bytes(&bytes).is_none());
+    }
+
+    #[test]
+    fn from_bytes_rejects_a_posting_repeated_for_the_same_term() {
+        // Slot 0 posted twice for term 10: `carriers` would exceed
+        // `live_count` and `idf` would go negative (the only path to a
+        // negative idf in this design). `search` sums both postings
+        // and double-counts the contribution, but `explain`'s
+        // `.find()` only sees the first — breaking the "bit-for-bit
+        // the same score" contract between them.
+        let bytes = image(
+            &["a.md"],
+            &[(0, 0, 1.0, 1, 0)],
+            &[(10, &[(0, 1.0), (0, 1.0)])],
+        );
+        assert!(Bm25Index::from_bytes(&bytes).is_none());
+    }
+
+    #[test]
+    fn from_bytes_rejects_a_posting_list_not_slot_ascending() {
+        // `to_bytes` always writes one term's live postings sorted by
+        // slot — a descending pair is a shape it never produces.
+        let bytes = image(
+            &["a.md"],
+            &[(0, 0, 1.0, 1, 0), (0, 1, 1.0, 2, 0)],
+            &[(10, &[(1, 1.0), (0, 1.0)])],
+        );
+        assert!(Bm25Index::from_bytes(&bytes).is_none());
     }
 
     #[test]
