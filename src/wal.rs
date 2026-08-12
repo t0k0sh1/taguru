@@ -1062,6 +1062,10 @@ mod tests {
         let error = shippable_records(rotted.as_bytes())
             .expect_err("a flipped byte with an intact crc field must refuse");
         assert!(error.to_string().contains("checksum mismatch"), "{error}");
+        // The FIRST record (1-indexed line 1) is the one that fails —
+        // pins the line number the error reports, not just its
+        // presence, since every record shares the rotted label.
+        assert!(error.to_string().contains("line 1"), "{error}");
     }
 
     /// `canonical_bytes_of_line`'s `,"crc":` marker is a byte-exact
@@ -1129,6 +1133,9 @@ mod tests {
             ship_error.to_string().contains("corrupt WAL record"),
             "{ship_error}"
         );
+        // The spliced blank line is the second segment (1-indexed line
+        // 2) — pins the line number the error reports.
+        assert!(ship_error.to_string().contains("line 2"), "{ship_error}");
     }
 
     #[test]
