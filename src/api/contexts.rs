@@ -202,6 +202,7 @@ pub async fn maintenance_compact(
         target: "taguru::audit",
         key = %key_name(&key),
         contexts_compacted = outcome.contexts.len(),
+        contexts_skipped = outcome.skipped.len(),
         deadline_exceeded = outcome.deadline_exceeded,
         "maintenance compaction swept the server",
     );

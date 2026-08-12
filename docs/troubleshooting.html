@@ -259,7 +259,17 @@ taguru compact --dry-run --json | jq '.[] | select(.dead_ratio &gt; 0.2)'</code>
       were already on the wire, just not surfaced by the CLI). One thing it deliberately does
       <b>not</b> predict: the rebuilt image's byte size (<code>bytes_after</code>) — that depends
       on exactly how the rewrite lays out the surviving content, which only running the rewrite
-      produces. A row with <code>"stats_are_snapshot": true</code> means the context is cold (not
+      produces. Whether that rebuilt image actually reached disk is a separate question from
+      whether the numbers above are real: a real compaction's response also carries
+      <code>image_persisted</code> — <code>false</code> means the rebuild itself succeeded (the
+      graph in memory is already smaller) but the durable copy on disk is still the old, larger
+      one, most plausibly because the disk was full at the moment compaction tried to reclaim
+      space on it. The next flush tick retries the publish on its own — no need to re-run
+      <code>compact</code> yourself — but that retry keeps failing for as long as the underlying
+      cause does (check disk space first); once it's resolved, either watch the server log for
+      the retry to stop warning, or re-run <code>compact</code> once more and confirm
+      <code>image_persisted: true</code> in its response. A row with <code>"stats_are_snapshot":
+      true</code> means the context is cold (not
       currently loaded) or came from a remote listing, so its numbers are the last-saved snapshot
       rather than a live recomputation — still accurate as of the last flush, just not
       up-to-the-millisecond.
@@ -301,6 +311,15 @@ curl -X POST localhost:8248/contexts/sake/compact</code></pre>
       the retracted text (<code>passages_compacted: true</code> in its response confirms the
       log rewrite ran). Until a compaction runs — yours, or the automatic ratio/size-triggered
       ones — the withdrawn content is unreachable through every API but still present on disk.
+      For an actual deletion-request obligation, also check <code>image_persisted</code> in the
+      same response: the compaction endpoint answers 200 as soon as the rebuild is done in
+      memory, but if the rebuilt image could not be written back to disk (a full disk being the
+      likely cause, which is also exactly when a deletion is hardest to complete), the OLD image
+      — with the shed bytes still in it — is what a crash right after would boot from. A deletion
+      request is <b>not complete</b> until the response confirms <code>image_persisted: true</code>;
+      <code>image_persisted: false</code> means resolve whatever kept it off disk (disk space,
+      most plausibly) first, then re-run <code>POST .../compact</code> (safe to repeat) and check
+      the response again.
     </p>
     <p>
       Two boundaries to know. <b>Names survive</b>: concepts and relation labels the document

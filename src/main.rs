@@ -1260,6 +1260,7 @@ fn run_flush_tick(
                     bytes_after = outcome.bytes_after,
                     dead_edges = outcome.dead_edges,
                     aliases_dropped = outcome.aliases_dropped,
+                    image_persisted = outcome.image_persisted,
                     "context compacted",
                 );
             }

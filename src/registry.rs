@@ -1209,6 +1209,27 @@ pub struct CompactOutcome {
     /// --url` still reads an older server's response.
     #[serde(default)]
     pub passages_compacted: bool,
+    /// Whether the rebuilt image this response describes actually
+    /// reached disk (#586). `bytes_after` is computed from the
+    /// in-memory rebuild alone — a `flush_entry` that cannot publish
+    /// it (a full disk, most plausibly, on the very endpoint whose job
+    /// is reclaiming space) still leaves the graph compacted in
+    /// memory, so the call is not a failure, but the response must not
+    /// silently claim the smaller footprint is durable when it is not.
+    /// `#[serde(default = "default_image_persisted")]` reads an older
+    /// server's response (which never lied about this — it simply
+    /// never said) as the historically true case, not a false alarm.
+    #[serde(default = "default_image_persisted")]
+    pub image_persisted: bool,
+}
+
+/// [`CompactOutcome::image_persisted`]'s `serde(default)` — `true`,
+/// not `false`: a server predating this field never reported a
+/// publish failure separately from the call's own error return, so
+/// silence is the pre-#586 evidence of success, and defaulting to
+/// `false` would flag every old response as suspect for no reason.
+fn default_image_persisted() -> bool {
+    true
 }
 
 /// One context's [`CompactOutcome`] inside a
@@ -1221,6 +1242,20 @@ pub struct MaintenanceCompactionEntry {
     pub outcome: CompactOutcome,
 }
 
+/// One candidate [`AppState::run_maintenance_compaction`] selected but
+/// could not compact at all — [`AccessError`] other than
+/// [`AccessError::DeadlineExceeded`], which ends the sweep instead of
+/// producing a skip. Named so the sweep's response can say WHICH
+/// contexts it gave up on and why, rather than only how many landed:
+/// before #586 a sweep that failed on every single candidate still
+/// answered `200 {"contexts": [], "deadline_exceeded": false}`,
+/// indistinguishable from a fleet with nothing left to compact.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MaintenanceCompactionSkip {
+    pub name: String,
+    pub error: String,
+}
+
 /// What a `POST /maintenance/compact` sweep accomplished: every context
 /// it compacted, worst dead ratio first, and whether the deadline cut
 /// the sweep short of the full candidate list.
@@ -1228,6 +1263,13 @@ pub struct MaintenanceCompactionEntry {
 pub struct MaintenanceCompactionOutcome {
     pub contexts: Vec<MaintenanceCompactionEntry>,
     pub deadline_exceeded: bool,
+    /// Candidates the sweep selected but could not compact — a load
+    /// failure, a quota refusal, anything short of the deadline
+    /// cutting the sweep short. `#[serde(default)]` so `compact --url`
+    /// still reads an older server's response, which never reported
+    /// this at all (see [`MaintenanceCompactionSkip`]'s doc).
+    #[serde(default)]
+    pub skipped: Vec<MaintenanceCompactionSkip>,
 }
 
 /// Why an operation on a named context could not run.
