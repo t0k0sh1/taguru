@@ -499,7 +499,15 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("output.txt");
 
-        let predicted = staging_path(&path);
+        // `staging_path`'s own nonce only ever grows, so calling it
+        // ourselves to "peek" the next name would consume the very
+        // nonce stage_bytes's first attempt is about to draw, leaving
+        // our decoy at a name stage_bytes never touches — construct
+        // the same shape directly instead. Reliable because nextest
+        // gives every test its own process: this is the FIRST call
+        // that would ever touch STAGING_NONCE here, so it is
+        // guaranteed to be nonce 0.
+        let predicted = path.with_extension(format!("tmp{}-0", std::process::id()));
         fs::write(&predicted, b"already here").unwrap();
 
         let staged = stage_bytes(&path, b"my bytes", false)
