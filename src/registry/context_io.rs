@@ -905,7 +905,14 @@ mod tests {
         let dir = scratch_dir("compact-worthwhile-deleted");
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         state.create("sake", ContextMeta::default()).unwrap();
-        state.delete("sake").unwrap().unwrap();
+        // Simulates the race `delete()` can open: still a member of the
+        // registry map (so `lookup` finds it, exercising the
+        // `read_unless_deleted()` branch rather than `lookup`'s own
+        // `None` one) but its slot already flipped to the tombstone —
+        // same shape as `run_maintenance_compaction_skips_a_deleted_entry_without_panicking`
+        // above.
+        let entry = state.lookup("sake").expect("just created");
+        entry.inner.write().slot = Slot::Deleted;
         assert!(!state.compact_passages_if_worthwhile("sake", 0));
         let _ = fs::remove_dir_all(dir);
     }
@@ -963,6 +970,23 @@ mod tests {
             0,
             "the covered log truncates once compacted"
         );
+
+        // An emptied log alone doesn't prove the passage survived —
+        // an implementation that truncates the WAL before the snapshot
+        // actually lands would pass the assertion above while losing
+        // the write. Restart from disk and dereference it back.
+        drop(state);
+        let reopened = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let (passages, missing) = reopened
+            .lookup_passages("sake", &["a.md".to_string()])
+            .unwrap()
+            .unwrap();
+        assert!(missing.is_empty(), "{missing:?}");
+        assert_eq!(
+            passages.get("a.md").map(String::as_str),
+            Some("蔵は1832年創業。")
+        );
+
         let _ = fs::remove_dir_all(dir);
     }
 
