@@ -225,21 +225,40 @@ fn canonical_bytes_of_line(line: &[u8]) -> Option<Vec<u8>> {
 /// a corrupted-name record has one extra field sitting alongside them.
 /// Re-serializing the already-deserialized `op` recovers exactly the
 /// key set it explains — without ever needing to know `Op`'s field
-/// names statically — and this only ever compares KEYS, never a value,
-/// so serde_json's occasional one-ULP float round-trip drift (see
-/// [`canonical_bytes_of_line`]'s doc comment) cannot produce a false
-/// positive here the way comparing re-encoded bytes could.
+/// names statically.
+///
+/// A stray key alone is not quite enough, though: several op fields
+/// (`AssocOp::source`/`paragraph`, every optional or collection field
+/// on `PassageOp::Store`) carry `skip_serializing_if`, so a genuine
+/// pre-checksum record that happened to write one of them explicitly
+/// (`"source":null`) re-serializes WITHOUT it — the same "extra key"
+/// shape a corrupted crc field's name produces. What distinguishes
+/// them is the VALUE: the crc field's value survives a name
+/// corruption unchanged (still the `u32` it was written as), while
+/// every `skip_serializing_if` field above serializes to `null` or an
+/// array, never a bare non-negative integer. So a stray key is only
+/// treated as the renamed crc field when its value fits `u32` — never
+/// comparing a re-encoded VALUE otherwise, so serde_json's occasional
+/// one-ULP float round-trip drift (see [`canonical_bytes_of_line`]'s
+/// doc comment) still cannot produce a false positive here.
+///
+/// `raw.as_object()` is always `Some`: both call sites reach here only
+/// after `WalRecord` — which `#[serde(flatten)]`s — already
+/// deserialized these same bytes as an object, so the fold below never
+/// needs a branch for the case that cannot occur.
 fn line_has_a_field_the_op_cannot_explain<Op: Serialize>(line: &[u8], op: &Op) -> io::Result<bool> {
     let raw: serde_json::Value = serde_json::from_slice(line)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
-    let Some(raw_fields) = raw.as_object() else {
-        return Ok(false);
-    };
     let op_value = serde_json::to_value(op)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
     let op_fields = op_value.as_object();
-    Ok(raw_fields.keys().any(|key| {
-        key != "seq" && key != "crc" && !op_fields.is_some_and(|fields| fields.contains_key(key))
+    Ok(raw.as_object().into_iter().flatten().any(|(key, value)| {
+        key != "seq"
+            && key != "crc"
+            && !op_fields.is_some_and(|fields| fields.contains_key(key))
+            && value
+                .as_u64()
+                .is_some_and(|crc_shaped| crc_shaped <= u32::MAX as u64)
     }))
 }
 
@@ -569,10 +588,11 @@ pub fn append_batch<Op: Serialize>(path: &Path, first_seq: u64, ops: &[Op]) -> i
     Ok(buffer.len() as u64)
 }
 
-/// Reads the log back: every op with `seq > watermark` in file order,
-/// plus the highest seq observed (or `watermark` when the file is
-/// absent, empty, or entirely at/below it) — the caller numbers its
-/// next write from there.
+/// Reads the log back: every op with `seq > watermark` in seq order
+/// (== file order for the monotonic tail, but a repeated seq keeps the
+/// later record — see below), plus the highest seq observed (or
+/// `watermark` when the file is absent, empty, or entirely at/below
+/// it) — the caller numbers its next write from there.
 ///
 /// A trailing line without its `\n` is a crash mid-append, classified
 /// by whether the record itself finished writing
@@ -926,9 +946,10 @@ pub(crate) fn shippable_records(bytes: &[u8]) -> io::Result<Vec<ShippableRecord<
     Ok(records)
 }
 
-/// Rewinds the log to exactly `len` bytes — same in-place, no-rename
-/// shape as `reset`, but to an arbitrary prior length rather than
-/// zero. The caller for this is a batch write whose live apply stopped
+/// Rewinds the log to `len` bytes — never grows it, see the refusal
+/// below — same in-place, no-rename shape as `reset`, but to an
+/// arbitrary prior length rather than zero. The caller for this is a
+/// batch write whose live apply stopped
 /// short of what was staged: durability appends the whole batch before
 /// running it, so a partial apply leaves the tail describing ops that
 /// were never actually tried. Left on disk, that tail is
@@ -1330,6 +1351,73 @@ mod tests {
         // The healing replay accepts the same mix.
         let (ops, _) = replay::<WalOp>(&path, 0).unwrap();
         assert_eq!(ops.len(), 2);
+    }
+
+    #[test]
+    fn a_pre_checksum_record_with_an_explicit_null_skipped_field_replays_clean() {
+        // `AssocOp::source`/`paragraph` carry `skip_serializing_if =
+        // "Option::is_none"`, so a normal writer never spells out
+        // `"source":null` — but nothing stops a hand-edited or
+        // third-party pre-checksum log from doing so. Before the fix,
+        // `line_has_a_field_the_op_cannot_explain` treated ANY key the
+        // re-serialized op omits as evidence the crc field's name was
+        // corrupted — which misfired on exactly this shape, since a
+        // corrupted-name crc field's VALUE is still the `u32` it was
+        // written as, never `null`.
+        let path = scratch_wal("pre-checksum-explicit-null-field");
+        fs::write(
+            &path,
+            "{\"seq\":1,\"op\":\"associate\",\"subject\":\"s\",\"label\":\"l\",\
+             \"object\":\"o\",\"weight\":1.0,\"source\":null}\n",
+        )
+        .unwrap();
+
+        let (ops, top) = replay::<WalOp>(&path, 0).unwrap();
+        assert_eq!(top, 1);
+        assert_eq!(
+            ops,
+            vec![WalOp::Associate(AssocOp {
+                subject: "s".to_string(),
+                label: "l".to_string(),
+                object: "o".to_string(),
+                weight: 1.0,
+                source: None,
+                paragraph: None,
+            })]
+        );
+    }
+
+    #[test]
+    fn a_pre_checksum_tail_record_with_an_explicit_null_skipped_field_is_recovered() {
+        // The tail-position twin of the test above: `crc: None` at
+        // this exact record hits `tail_record_is_complete`'s heuristic
+        // check instead of `parse_log`'s interior one — a second call
+        // site the same false positive could have hit independently.
+        let path = scratch_wal("pre-checksum-explicit-null-field-tail");
+        fs::write(
+            &path,
+            "{\"seq\":1,\"op\":\"associate\",\"subject\":\"s\",\"label\":\"l\",\
+             \"object\":\"o\",\"weight\":1.0,\"source\":null}",
+        )
+        .unwrap();
+
+        let (ops, top) = replay::<WalOp>(&path, 0).unwrap();
+        assert_eq!(top, 1);
+        assert_eq!(
+            ops,
+            vec![WalOp::Associate(AssocOp {
+                subject: "s".to_string(),
+                label: "l".to_string(),
+                object: "o".to_string(),
+                weight: 1.0,
+                source: None,
+                paragraph: None,
+            })]
+        );
+        assert!(
+            fs::read(&path).unwrap().ends_with(b"\n"),
+            "a Recovered tail is healed by appending its missing newline"
+        );
     }
 
     #[test]
