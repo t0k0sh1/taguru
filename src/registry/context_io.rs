@@ -377,8 +377,14 @@ impl AppState {
             Ok(store) if store.watermark() > 0 => match compact(&store) {
                 Ok(ran) => ran,
                 Err(error) => {
+                    // Never named `error`: tracing-opentelemetry
+                    // special-cases that exact field into an exception
+                    // event and (by default) an ERROR span status,
+                    // which would color the whole request ERROR for a
+                    // call whose graph compaction already succeeded
+                    // (ADR 0008 §9).
                     tracing::warn!(
-                        context = %name, %error,
+                        context = %name, reason = %error,
                         "passage log not compacted (the size cap remains the backstop)"
                     );
                     false
@@ -387,7 +393,7 @@ impl AppState {
             Ok(_) => false,
             Err(error) => {
                 tracing::warn!(
-                    context = %name, %error,
+                    context = %name, reason = %error,
                     "passage store unavailable during compact; log left as is"
                 );
                 false
