@@ -21,6 +21,23 @@ test_tool = "nextest"
 # and `<` mutants on the same comparison are caught).
 exclude_re = [
     "replace > with >= in dispatch_chunks_concurrently",
+    # `compact_passages_if_worthwhile`'s watermark guard (issue #587):
+    # `PassageStore::load` only ever produces `watermark() == 0`
+    # together with `log_bytes == 0` and `snapshot_bytes == 0` — a
+    # fresh store, or one healed back to a clean state, never a store
+    # with pending log bytes and no watermark. With both at zero,
+    # `compact_if_log_outgrew_snapshot`'s own condition
+    # (`log_bytes > floor_bytes.max(ratio * snapshot_bytes)`) is
+    # `0 > floor_bytes.max(0)`, false for every `floor_bytes: u64`
+    # regardless of this guard — no test can observe a difference
+    # because there is none to observe.
+    "replace match guard store\\.watermark\\(\\) > 0 with true in AppState::compact_passages_if_worthwhile",
+    # Same guard, the `>` -> `>=` operator mutation specifically:
+    # `watermark(): u64` can never be negative, so `watermark() >= 0`
+    # is a tautology — identical to `true` for every possible value,
+    # not just zero. Same equivalence as the entry above, different
+    # mutation operator on the same expression.
+    "replace > with >= in AppState::compact_passages_if_worthwhile",
     # stage_bytes's real (non-injected) AlreadyExists match guard,
     # `with true` arm only (issue #587): a permanent, non-collision
     # open failure (EACCES, ENOSPC, ...) that the guard would wrongly
