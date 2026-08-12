@@ -37,6 +37,63 @@ pub(super) fn applied_count(result: &Result<usize, PartialWrite>) -> usize {
     }
 }
 
+// Test-only deterministic fault injection for `replay_wal_guarded` —
+// the same shape as `storage::fail_persistence_ops_after` applied to a
+// different subsystem.
+#[cfg(test)]
+thread_local! {
+    static FORCE_PANIC_AT_OP: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    static FORCE_CAPACITY_LOSS_AT_OP: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+/// A genuine panic mid-replay (a bug in some op's own application
+/// logic) needs conditions this crate cannot cheaply construct in a
+/// unit test — so this lets a test make [`replay_wal_guarded`] panic
+/// reapplying the op at `index`, on purpose, deterministically.
+#[cfg(test)]
+pub(super) fn force_panic_at_op(index: usize) {
+    FORCE_PANIC_AT_OP.with(|cell| cell.set(Some(index)));
+}
+
+/// A genuine capacity-`Full` rejection is a real trigger, just an
+/// impractical one to construct in a unit test (a `Context`'s real
+/// ceiling is a multi-billion-record affair) — this makes `replay_op`
+/// report the op at `index` as a capacity loss without needing one.
+#[cfg(test)]
+pub(super) fn force_capacity_loss_at_op(index: usize) {
+    FORCE_CAPACITY_LOSS_AT_OP.with(|cell| cell.set(Some(index)));
+}
+
+/// Resets both hooks — a test that armed either (whether or not it
+/// actually fired: the panic case never gets a chance to self-clear)
+/// must call this before returning, or the armed state bleeds into
+/// whatever later test happens to share this thread.
+#[cfg(test)]
+pub(super) fn clear_forced_replay_faults() {
+    FORCE_PANIC_AT_OP.with(|cell| cell.set(None));
+    FORCE_CAPACITY_LOSS_AT_OP.with(|cell| cell.set(None));
+}
+
+#[cfg(test)]
+fn take_forced_panic_at_op(index: usize) -> bool {
+    FORCE_PANIC_AT_OP.with(|cell| cell.get() == Some(index))
+}
+
+#[cfg(not(test))]
+fn take_forced_panic_at_op(_index: usize) -> bool {
+    false
+}
+
+#[cfg(test)]
+fn take_forced_capacity_loss_at_op(index: usize) -> bool {
+    FORCE_CAPACITY_LOSS_AT_OP.with(|cell| cell.get() == Some(index))
+}
+
+#[cfg(not(test))]
+fn take_forced_capacity_loss_at_op(_index: usize) -> bool {
+    false
+}
+
 /// Where a guarded replay currently stands — parsing the log, or
 /// partway through applying its recovered ops — so a panic in either
 /// half can name what it was doing ([`replay_panic_line`]) instead of
@@ -168,7 +225,10 @@ pub(super) fn replay_wal_guarded(
                 total,
                 kind: op.kind(),
             });
-            let is_capacity_loss = replay_op(context, op);
+            if take_forced_panic_at_op(index) {
+                panic!("forced test panic reapplying op {index} ({})", op.kind());
+            }
+            let is_capacity_loss = take_forced_capacity_loss_at_op(index) || replay_op(context, op);
             capacity_losses.set(tally_capacity_loss(capacity_losses.get(), is_capacity_loss));
         }
         Ok(top)
@@ -282,6 +342,7 @@ pub(super) fn apply_op(context: &mut Context, op: &WalOp) -> Result<(), (String,
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::test_support::scratch_dir;
 
     fn sample_op() -> WalOp {
         WalOp::AliasConcept {
@@ -374,5 +435,63 @@ mod tests {
         assert!(!should_report_capacity_losses(0));
         assert!(should_report_capacity_losses(1));
         assert!(should_report_capacity_losses(5));
+    }
+
+    /// The wiring between the pure helpers above, not any one of them
+    /// in isolation: `stage` must name the op CURRENTLY being applied
+    /// when a panic hits it, not a stale one from an earlier iteration
+    /// — and it must do so even after an earlier op in the same replay
+    /// already recorded a capacity loss (`capacity_losses`, read only
+    /// after `catch_unwind` returns, must not be corrupted or lost by
+    /// the unwind). A genuine trigger for either (a bug in an op's own
+    /// apply logic; a real capacity-`Full` rejection) needs conditions
+    /// this crate cannot cheaply construct in a unit test, so this
+    /// drives the real function through `force_panic_at_op`/
+    /// `force_capacity_loss_at_op` instead — the fault-injection shape
+    /// `storage::fail_persistence_ops_after` already uses for an
+    /// unrelated subsystem.
+    ///
+    /// The `error!` summary line the survived `capacity_losses` count
+    /// would additionally emit is not asserted here: this crate has no
+    /// tracing-capture test harness, and building one is out of
+    /// proportion to what this covers — the counting math itself is
+    /// already pinned above by
+    /// `tally_capacity_loss_counts_only_true_flags_and_accumulates`.
+    #[test]
+    fn replay_wal_guarded_names_the_panicking_op_after_a_prior_capacity_loss() {
+        let dir = scratch_dir("wal-replay-guarded-wiring");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("replay.wal.jsonl");
+        let ops = vec![
+            WalOp::RetractSource {
+                source: "a.md".to_string(),
+            },
+            WalOp::RetractSource {
+                source: "b.md".to_string(),
+            },
+            WalOp::RetractSource {
+                source: "c.md".to_string(),
+            },
+        ];
+        wal::append_batch(&path, 1, &ops).unwrap();
+
+        force_capacity_loss_at_op(0);
+        force_panic_at_op(2);
+        let mut context = Context::default();
+        let error = replay_wal_guarded(&path, 0, &mut context);
+        clear_forced_replay_faults();
+        let message = error.expect_err("the forced panic at op 2 must surface");
+
+        assert!(
+            message.contains("op 3/3"),
+            "1-based, and naming the op that actually panicked, not op 1: {message}"
+        );
+        assert!(message.contains("RetractSource"), "{message}");
+        assert!(
+            message.contains("forced test panic"),
+            "the forced panic's own payload must reach the line: {message}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
