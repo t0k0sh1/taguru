@@ -1705,7 +1705,14 @@ pub(crate) struct PassageSearchExplanation {
     pub(crate) paragraph_terms: Option<Vec<String>>,
     /// The vector lane's account.
     pub(crate) vector: VectorLaneReport,
-    /// Whether the ranking fused both lanes (RRF) or served raw BM25.
+    /// Whether the ranking fused both lanes (RRF) or served raw BM25 —
+    /// true iff the vector lane RAN (`vector` is `VectorLaneReport::
+    /// Ran`), never "iff a candidate survived the floor": a lane that
+    /// swept and found nothing above the floor still committed the
+    /// whole ranking to the RRF scale (#601). `score`/`rank` below and
+    /// `cutoff_score` are two different rerankings of the SAME lanes
+    /// (unbounded vs. `limit`-pooled) and are therefore always on this
+    /// one scale together.
     pub(crate) fused: bool,
     /// The full ranking's size: every candidate either lane surfaced,
     /// staleness-validated, nothing truncated.

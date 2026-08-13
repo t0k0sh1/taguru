@@ -63,23 +63,25 @@ impl AppState {
         let entry = self.lookup(name)?;
         if limit == 0 {
             tracing::info!(taguru.reason = "zero_limit", "taguru.skip");
-            return entry.read_unless_deleted().map(|_| {
-                Ok(PassageSearch {
-                    hits: Vec::new(),
-                    lanes: PassageSearchLanes::ZeroLimit,
-                    filter: None,
-                })
+            return entry.read_unless_deleted().map(|_fence| {
+                self.short_circuit_filter_report(&entry, name, filter)
+                    .map(|filter| PassageSearch {
+                        hits: Vec::new(),
+                        lanes: PassageSearchLanes::ZeroLimit,
+                        filter,
+                    })
             });
         }
         let query_grams = deduped_query_grams(query);
         if query_grams.is_empty() {
             tracing::info!(taguru.reason = "no_query_terms", "taguru.skip");
-            return entry.read_unless_deleted().map(|_| {
-                Ok(PassageSearch {
-                    hits: Vec::new(),
-                    lanes: PassageSearchLanes::NoQueryTerms,
-                    filter: None,
-                })
+            return entry.read_unless_deleted().map(|_fence| {
+                self.short_circuit_filter_report(&entry, name, filter)
+                    .map(|filter| PassageSearch {
+                        hits: Vec::new(),
+                        lanes: PassageSearchLanes::NoQueryTerms,
+                        filter,
+                    })
             });
         }
         let pool = lane_pool(limit);
@@ -280,7 +282,13 @@ impl AppState {
             taguru.passage.hit_count = tracing::field::Empty,
         );
         let _fuse_guard = fuse_span.enter();
-        let hits = fuse_passage_lanes(&store, lexical, semantic, limit);
+        // Fused iff the lane RAN, not iff any of its candidates
+        // survived the floor: a lane that swept and found nothing
+        // above the floor still ran, and the score scale it committed
+        // to (RRF) must not silently revert to raw BM25 underneath a
+        // plan that reports `vector.ran = true` (#601).
+        let vector_ran = matches!(vector, VectorLaneStatus::Ran { .. });
+        let hits = fuse_passage_lanes(&store, lexical, semantic, limit, vector_ran);
         fuse_span.record("taguru.passage.hit_count", hits.len());
 
         Some(Ok(PassageSearch {
@@ -403,12 +411,23 @@ impl AppState {
                 .cloned()
                 .collect()
         };
+        // Whether the vector lane RAN — the same condition the `vector`
+        // report below settles on (`VectorLaneReport::Ran`), computed
+        // here (by reference, `cue`/`gate` are still owned below) so
+        // every fusion in this call — not just the report — uses it
+        // instead of "did anything survive the floor" (#601).
+        let lane_ran = matches!(
+            (&cue, &gate),
+            (Ok(Some(cue)), Some(PassageVectorGate::Ready(vectors)))
+                if cue.len() == vectors.dim()
+        );
 
         let full = fuse_passage_lanes(
             &store,
             lexical_lane(usize::MAX),
             semantic_lane(usize::MAX),
             usize::MAX,
+            lane_ran,
         );
         // The served list exactly as `search_passages(limit)` builds it.
         let served_hits = fuse_passage_lanes(
@@ -416,6 +435,7 @@ impl AppState {
             lexical_lane(lane_pool(limit)),
             semantic_lane(lane_pool(limit)),
             limit,
+            lane_ran,
         );
 
         let chosen = paragraph
@@ -571,6 +591,7 @@ impl AppState {
                         lexical_lane(lane_pool(candidate)),
                         semantic_lane(lane_pool(candidate)),
                         candidate,
+                        lane_ran,
                     );
                     if rerun.iter().any(is_target) {
                         return Some(candidate);
@@ -598,7 +619,7 @@ impl AppState {
                 lexical,
                 paragraph_terms,
                 vector,
-                fused: !semantic_lane(usize::MAX).is_empty(),
+                fused: lane_ran,
                 ranked: full.len(),
                 rank: rank.map(|at| at + 1),
                 score: target.map(|hit| hit.score),
@@ -709,6 +730,31 @@ impl AppState {
         }))
     }
 
+    /// The `filter` report a zero-limit or no-query-terms short-circuit
+    /// owes the caller: neither lane runs, but the request's source
+    /// filter (#167) is still evaluated against the resident store
+    /// under the caller's read fence — the same eligibility count the
+    /// full search computes — so an empty page under a narrow filter
+    /// stays diagnosable without a second call, even when nothing was
+    /// searched at all. `None` filter costs nothing extra: the store is
+    /// never touched.
+    fn short_circuit_filter_report(
+        &self,
+        entry: &Entry,
+        name: &str,
+        filter: Option<&crate::passages::SourceFilter>,
+    ) -> io::Result<Option<super::SourceFilterReport>> {
+        let Some(filter) = filter else {
+            return Ok(None);
+        };
+        let store = self.entry_passages(entry, &file_stem(name))?;
+        let (eligible, total) = store.eligible_sources(filter);
+        Ok(Some(super::SourceFilterReport {
+            eligible: eligible.len(),
+            total,
+        }))
+    }
+
     /// The semantic lane's query embedding, run BEFORE any lock — a
     /// provider round trip must never extend an entry fence. `Ok(None)`
     /// when the lane is off; `Err` carries the provider's refusal for
@@ -801,17 +847,22 @@ fn semantic_lane_hits(
 /// text between refreshes — a stale lane must neither smuggle its
 /// outdated score onto fresh text nor veto the other lane's fresh
 /// match, so each loses exactly its own evidence (and its fusion
-/// term). The top-level score stays the raw BM25 number when no
-/// semantic lane ran, so a lexical-only deployment keeps its
-/// historical score semantics.
+/// term). `fused` is whether the vector lane RAN this call — not
+/// whether `semantic` (already floor-filtered) came back non-empty:
+/// a lane that swept and found nothing above the floor still ran, and
+/// the RRF scale it committed to must not silently revert to raw
+/// BM25 underneath it (#601). The top-level score stays the raw BM25
+/// number only when `fused` is false, so a lexical-only deployment
+/// (or a call whose embedding failed) keeps its historical score
+/// semantics.
 fn fuse_passage_lanes(
     store: &crate::passages::PassageStore,
     lexical: Vec<crate::bm25::IndexHit>,
     semantic: Vec<(String, u32, u64, f32)>,
     limit: usize,
+    fused: bool,
 ) -> Vec<PassageSearchHit> {
     const RRF_K: f32 = 60.0;
-    let fused = !semantic.is_empty();
     let mut accumulated: HashMap<(String, u32), FusedHit> = HashMap::new();
     for (rank, (source, index, hash, score)) in lexical.into_iter().enumerate() {
         accumulated.entry((source, index)).or_default().bm25 = Some((rank + 1, score, hash));
@@ -2168,6 +2219,256 @@ mod tests {
             hits.is_empty(),
             "an override above the cosine drops it even under a context floor lowered below it: {hits:?}"
         );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_vector_lane_that_floored_every_candidate_still_scores_by_rrf() {
+        // The document's own text starts with "みかん" (cosine axis
+        // [0.28, 0.96, 0]); the query starts with "りんご" ([1, 0, 0]),
+        // giving a 0.28 cosine — under the 0.35 default floor, so the
+        // ONLY vector candidate is dropped. But the query and the text
+        // still share the literal substring "りんご", so the lexical
+        // lane matches: the lane ran and found nothing servable, which
+        // must still count as "ran" for the score scale (#601) — unlike
+        // `search_passages_vector_lane_drops_candidates_below_the_
+        // default_semantic_floor`, where BM25 has nothing to match
+        // either and the whole case is degenerate.
+        let dir = scratch_dir("passages-floored-rrf");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let state =
+            boot_for_passage_embedding(&dir, Arc::new(MockEmbeddings::fruity(&calls)), 20_000);
+        state
+            .create("fruit", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert(
+            "doc-a".to_string(),
+            "みかんとりんごを箱に詰めた。".to_string(),
+        );
+        state
+            .store_passages("fruit", plain(passages))
+            .unwrap()
+            .unwrap();
+        state
+            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+
+        let found = state
+            .search_passages(
+                "fruit",
+                "りんごは美味しい",
+                3,
+                None,
+                None,
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        let PassageSearchLanes::Ran { vector } = &found.lanes else {
+            panic!("expected Ran, got {:?}", found.lanes);
+        };
+        assert!(
+            matches!(vector, VectorLaneStatus::Ran { .. }),
+            "the sweep ran; the floor is a per-candidate filter, not a lane-off signal: {vector:?}"
+        );
+
+        let hits = found.hits;
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(
+            hits[0].vector.is_none(),
+            "the only candidate sits under the floor"
+        );
+        let (rank, bm25_score) = hits[0].bm25.expect("the lexical lane matched");
+        assert_eq!(rank, 1);
+        assert_ne!(
+            hits[0].score, bm25_score,
+            "fused iff the lane ran, not iff a candidate survived the floor (#601)"
+        );
+        assert!(
+            hits[0].score < 0.02,
+            "RRF scale (~1/61), not raw BM25: {}",
+            hits[0].score
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn explain_reports_fused_when_the_lane_ran_with_nothing_above_the_floor() {
+        // Same geometry as the search test above, mirrored on the
+        // explain path (#601): `fused` must track whether the vector
+        // lane ran, not whether `semantic_lane(usize::MAX)` — already
+        // floor-filtered — came back non-empty.
+        let dir = scratch_dir("explain-floored-rrf");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let state =
+            boot_for_passage_embedding(&dir, Arc::new(MockEmbeddings::fruity(&calls)), 20_000);
+        state
+            .create("fruit", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert(
+            "doc-a".to_string(),
+            "みかんとりんごを箱に詰めた。".to_string(),
+        );
+        state
+            .store_passages("fruit", plain(passages))
+            .unwrap()
+            .unwrap();
+        state
+            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+
+        let explanation = state
+            .explain_passage_search(
+                "fruit",
+                "りんごは美味しい",
+                "doc-a",
+                None,
+                3,
+                None,
+                None,
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        let PassageExplainLookup::Explained(explanation) = explanation else {
+            panic!("expected an Explained verdict");
+        };
+        assert!(
+            matches!(explanation.vector, VectorLaneReport::Ran { .. }),
+            "the sweep ran: {:?}",
+            explanation.vector
+        );
+        assert!(
+            explanation.fused,
+            "the lane ran, even though its one candidate sat under the floor"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn search_passages_reports_the_filter_at_a_zero_limit() {
+        // #601: an early return must not silently drop the `filter`
+        // report — a narrow filter and "nothing eligible" have to stay
+        // distinguishable even when neither lane ever runs.
+        let dir = scratch_dir("passages-filter-zero-limit");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert(
+            "doc-a".to_string(),
+            crate::passages::PassageSubmission {
+                text: "杜氏の話。".to_string(),
+                questions: Vec::new(),
+                sections: Vec::new(),
+                locators: Vec::new(),
+                meta: crate::passages::SourceMeta {
+                    stored_at: None,
+                    date: None,
+                    tags: vec!["酒".to_string()],
+                },
+            },
+        );
+        passages.insert(
+            "doc-b".to_string(),
+            crate::passages::PassageSubmission {
+                text: "蔵開きの話。".to_string(),
+                questions: Vec::new(),
+                sections: Vec::new(),
+                locators: Vec::new(),
+                meta: crate::passages::SourceMeta::default(),
+            },
+        );
+        state.store_passages("sake", passages).unwrap().unwrap();
+
+        let filter = crate::passages::SourceFilter {
+            tags: vec!["酒".to_string()],
+            since: None,
+            until: None,
+        };
+        let found = state
+            .search_passages(
+                "sake",
+                "杜氏",
+                0,
+                None,
+                Some(&filter),
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        assert!(matches!(found.lanes, PassageSearchLanes::ZeroLimit));
+        assert!(found.hits.is_empty());
+        let report = found.filter.expect("a filter was requested");
+        assert_eq!(report.eligible, 1, "only doc-a carries the tag");
+        assert_eq!(report.total, 2);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn search_passages_reports_the_filter_when_the_query_has_no_terms() {
+        // Same short-circuit, the other reason (#601).
+        let dir = scratch_dir("passages-filter-no-terms");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert(
+            "doc-a".to_string(),
+            crate::passages::PassageSubmission {
+                text: "杜氏の話。".to_string(),
+                questions: Vec::new(),
+                sections: Vec::new(),
+                locators: Vec::new(),
+                meta: crate::passages::SourceMeta {
+                    stored_at: None,
+                    date: None,
+                    tags: vec!["酒".to_string()],
+                },
+            },
+        );
+        passages.insert(
+            "doc-b".to_string(),
+            crate::passages::PassageSubmission {
+                text: "蔵開きの話。".to_string(),
+                questions: Vec::new(),
+                sections: Vec::new(),
+                locators: Vec::new(),
+                meta: crate::passages::SourceMeta::default(),
+            },
+        );
+        state.store_passages("sake", passages).unwrap().unwrap();
+
+        let filter = crate::passages::SourceFilter {
+            tags: vec!["酒".to_string()],
+            since: None,
+            until: None,
+        };
+        // An empty query yields no searchable terms at all — distinct
+        // from a query that has terms but shares none with the corpus.
+        let found = state
+            .search_passages("sake", "", 3, None, Some(&filter), Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        assert!(matches!(found.lanes, PassageSearchLanes::NoQueryTerms));
+        assert!(found.hits.is_empty());
+        let report = found.filter.expect("a filter was requested");
+        assert_eq!(report.eligible, 1, "only doc-a carries the tag");
+        assert_eq!(report.total, 2);
 
         let _ = fs::remove_dir_all(dir);
     }
