@@ -119,13 +119,13 @@ pub use passages::PassagesWriteError;
 pub(crate) use concurrency::{Semaphore, dispatch_chunks_concurrently, parallel_map};
 use meta_io::{MetaFile, move_context_files, read_meta_file, save_files, write_meta};
 pub(crate) use meta_io::{context_files, schema_digest_of};
-use paths::{FNV_OFFSET, FNV_PRIME, rename_markers_targeting, wal_lane_bytes, write_rename_marker};
 pub(crate) use paths::{
     IMPORT_MARKER_EXTENSION, ImportMarker, ResumedRenames, bm25_path, deleted_marker_path,
     file_stem, image_path, import_marker_path, import_marker_paths, meta_path, name_from_stem,
     passages_path, passages_wal_path, pvectors_path, renaming_marker_path, resume_rename_markers,
     schema_corrupt_path, schema_path, sources_path, vectors_path, wal_path,
 };
+use paths::{rename_markers_targeting, wal_lane_bytes, write_rename_marker};
 pub(crate) use retrieval_cache::{CachedRetrieval, RetrievalKey};
 pub(crate) use semantic_cache::SemanticFill;
 pub(crate) use terms::{passage_terms, spelled_passage_terms};
