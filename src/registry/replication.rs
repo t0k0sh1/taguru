@@ -162,8 +162,11 @@ impl AppState {
     /// resumption, no corrupt set-aside, no reconcile persistence: the
     /// manifest is the author here, and anything odd heals when the
     /// next diff refetches the file. A record that does not parse
-    /// keeps its previous in-memory version rather than vanishing
-    /// mid-serve.
+    /// falls back to its previous in-memory version rather than
+    /// vanishing mid-serve — except the first time this replica ever
+    /// sees that name, when there IS no previous version: it simply
+    /// stays absent until a later poll lands a parseable copy (see the
+    /// `carried` loop's own comment).
     pub(crate) fn replica_reload_groups(&self) {
         let entries = match fs::read_dir(&self.0.data_dir) {
             Ok(entries) => entries,
@@ -190,16 +193,44 @@ impl AppState {
                     fresh.insert(name, record);
                 }
                 Err(error) => {
-                    tracing::warn!(group = %name, %error, "tailed group file unreadable; keeping its previous record");
+                    // Whether a previous record exists is decided
+                    // below, once every file is read — this line
+                    // cannot yet promise "keeping its previous record"
+                    // the way it used to unconditionally claim.
+                    tracing::warn!(group = %name, %error, "tailed group file unreadable");
                     carried.push(name);
                 }
             }
         }
         let mut groups = self.0.groups.write();
         for name in carried {
-            if let Some(previous) = groups.get(&name) {
-                fresh.insert(name, previous.clone());
+            match groups.get(&name) {
+                Some(previous) => {
+                    fresh.insert(name, previous.clone());
+                }
+                None => {
+                    // No fallback exists for a name this replica has
+                    // never held a good copy of — it stays absent from
+                    // `fresh` (not inserted, not repaired-around) until
+                    // the manifest's next diff lands a parseable file.
+                    tracing::warn!(
+                        group = %name,
+                        "no previous record to fall back to for this unreadable group; \
+                         it stays absent until a later poll lands a parseable copy"
+                    );
+                }
             }
+        }
+        // `repair_nesting` requires dangling child references dropped
+        // first (its own doc comment) — the other two callers
+        // (`boot::reconcile_groups`, `inspect`'s shape preview) both do
+        // this before calling it; a name `carried` above but with no
+        // fallback (just warned about, immediately above) is exactly
+        // the kind of dangling reference this guards against, since
+        // some OTHER record's `groups` set may still name it.
+        let scanned = fresh.clone();
+        for record in fresh.values_mut() {
+            record.groups.retain(|child| scanned.contains_key(child));
         }
         groups::repair_nesting(&mut fresh);
         *groups = fresh;
@@ -371,6 +402,110 @@ mod tests {
         assert_eq!(groups.len(), 1, "{groups:?}");
         assert_eq!(groups[0].0, "kura");
         assert_eq!(groups[0].1.contexts.len(), 1);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// #617 item 2: a group naming a child that no longer has a
+    /// (parseable) file must not carry that dangling reference into
+    /// `repair_nesting` — its own doc comment requires callers to drop
+    /// dangling children first, and the other two callers
+    /// (`boot::reconcile_groups`, `inspect`'s shape preview) both do.
+    #[test]
+    fn a_replica_reload_drops_a_dangling_child_reference_before_repair() {
+        let dir = scratch_dir("replica-group-dangling-child");
+        let state = AppState::boot_with(
+            dir.clone(),
+            usize::MAX,
+            None,
+            BootOptions {
+                replica: Some(std::sync::Arc::new(crate::replica::ReplicaInfo::new(None))),
+                ..BootOptions::default()
+            },
+        )
+        .unwrap();
+
+        // `parent` names `child` as a nested group, but `child`'s own
+        // file never lands (deleted upstream, or torn on this exact
+        // poll) — the shape `repair_nesting`'s precondition exists
+        // for.
+        let parent = groups::GroupRecord {
+            description: "parent".to_string(),
+            contexts: std::collections::BTreeSet::new(),
+            groups: std::collections::BTreeSet::from(["child".to_string()]),
+        };
+        fs::write(
+            dir.join(format!("{}.group", file_stem("parent"))),
+            serde_json::to_vec(&parent).unwrap(),
+        )
+        .unwrap();
+
+        state.replica_reload_groups();
+        let (_, groups) = state.group_page(None, usize::MAX);
+        assert_eq!(groups.len(), 1, "{groups:?}");
+        assert_eq!(groups[0].0, "parent");
+        assert!(
+            groups[0].1.groups.is_empty(),
+            "the dangling child reference must be dropped, not carried into \
+             repair_nesting: {groups:?}"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// #617 item 3: a group whose file fails to parse THE FIRST TIME
+    /// this replica ever sees that name has no previous in-memory
+    /// version to fall back to — it must stay absent rather than the
+    /// fallback silently no-op-ing into an inconsistent state, and a
+    /// SIBLING group that already existed with a good previous record
+    /// must still be kept, unaffected.
+    #[test]
+    fn a_replica_reload_leaves_a_never_seen_unparseable_group_absent() {
+        let dir = scratch_dir("replica-group-new-unparseable");
+        let state = AppState::boot_with(
+            dir.clone(),
+            usize::MAX,
+            None,
+            BootOptions {
+                replica: Some(std::sync::Arc::new(crate::replica::ReplicaInfo::new(None))),
+                ..BootOptions::default()
+            },
+        )
+        .unwrap();
+
+        // An existing, already-loaded group with a good record...
+        let kura = groups::GroupRecord {
+            description: "蔵まとめ".to_string(),
+            contexts: std::collections::BTreeSet::new(),
+            groups: std::collections::BTreeSet::new(),
+        };
+        fs::write(
+            dir.join(format!("{}.group", file_stem("kura"))),
+            serde_json::to_vec(&kura).unwrap(),
+        )
+        .unwrap();
+        state.replica_reload_groups();
+        assert_eq!(state.group_page(None, usize::MAX).1.len(), 1);
+
+        // ...plus a BRAND NEW group whose file is unparseable from the
+        // start — this replica has never held a good copy of it.
+        fs::write(
+            dir.join(format!("{}.group", file_stem("brandnew"))),
+            b"{not json",
+        )
+        .unwrap();
+        state.replica_reload_groups();
+
+        let (_, groups) = state.group_page(None, usize::MAX);
+        assert_eq!(
+            groups.len(),
+            1,
+            "the never-seen unparseable group must stay absent: {groups:?}"
+        );
+        assert_eq!(
+            groups[0].0, "kura",
+            "the sibling with a good record survives"
+        );
 
         let _ = fs::remove_dir_all(dir);
     }
