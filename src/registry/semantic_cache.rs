@@ -41,14 +41,23 @@
 //! The guard is a tripwire, not a parser. It compares three multisets
 //! over NFKC-folded text and refuses on ANY asymmetry, so its false
 //! positives only cost a cache miss while its false negatives are the
-//! dangerous direction. Known blind spots, accepted as out of scope
-//! (`#153`): spelled-out numbers ("two" vs "three") and kanji numerals
-//! (二十 vs 三十) are not numeric tokens; an English entity in
-//! sentence-initial position ("Acme makes…" vs "Globex makes…") hides
-//! behind the capitalization exemption; entities in unsegmented
-//! scripts carry no case marker at all. The cosine threshold is the
-//! primary filter for all of these; the default posture is the safest
-//! one — the tier is OFF until an operator sets the threshold.
+//! dangerous direction. The digit-run and entity-ish signals use
+//! Unicode-aware character classes (`char::is_numeric`,
+//! `char::is_uppercase`, #602 item 3), not their ASCII subsets, so
+//! non-ASCII digits (Arabic-Indic ٢٠ vs ٣٠) and non-ASCII
+//! uppercase-marked entities (Étienne vs Émile, Жуков vs Иванов) are
+//! caught too. Known blind spots, accepted as out of scope (`#153`):
+//! spelled-out numbers ("two" vs "three") and kanji numerals (二十 vs
+//! 三十) carry no Unicode numeric category, so they are not numeric
+//! tokens; entities in scripts with no case distinction (Han,
+//! Hiragana/Katakana, Arabic letters) carry no uppercase marker at
+//! all; and the sentence-initial exemption (see `entityish_tokens`)
+//! is POSITION-based (the query's own first token), not
+//! sentence-based — a multi-sentence query's second-and-later
+//! sentence-initial words ARE treated as entity-ish, which only costs
+//! a spurious refusal (the safe direction). The cosine threshold is
+//! the primary filter for all of these; the default posture is the
+//! safest one — the tier is OFF until an operator sets the threshold.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -424,14 +433,17 @@ fn negation_marks(folded: &str) -> Vec<usize> {
     marks
 }
 
-/// The sorted multiset of maximal ASCII digit runs. "v2" contributes
+/// The sorted multiset of maximal Unicode-numeric digit runs
+/// (`char::is_numeric`, not the ASCII subset — #602 item 3, so
+/// Arabic-Indic ٢٠ is caught exactly like ASCII 20). "v2" contributes
 /// "2"; "01" and "1" differ on purpose (a version is not its numeric
-/// value).
+/// value). Kanji numerals (二十) carry no Unicode numeric category and
+/// stay a blind spot — see the module doc.
 fn digit_runs(folded: &str) -> Vec<String> {
     let mut runs = Vec::new();
     let mut current = String::new();
     for ch in folded.chars() {
-        if ch.is_ascii_digit() {
+        if ch.is_numeric() {
             current.push(ch);
         } else if !current.is_empty() {
             runs.push(std::mem::take(&mut current));
@@ -445,9 +457,14 @@ fn digit_runs(folded: &str) -> Vec<String> {
 }
 
 /// The sorted, case-folded multiset of capitalization-marked tokens —
-/// the "named-entity-ish" signal. The sentence-initial token is exempt
-/// unless it is an all-caps acronym ("Does…" is position, "NASA…" is a
-/// name); everything later with an uppercase letter counts.
+/// the "named-entity-ish" signal. Uses `char::is_uppercase`, not the
+/// ASCII subset (#602 item 3), so non-ASCII uppercase letters (Étienne,
+/// Жуков, Ω) count too. The token at position 0 — the QUERY's own
+/// first token, not each sentence's first token in a multi-sentence
+/// query — is exempt unless it is an all-caps acronym ("Does…" is
+/// position, "NASA…" is a name); everything later with an
+/// uppercase-marked letter counts. See the module doc for why a later
+/// sentence's first word is deliberately NOT exempt.
 fn entityish_tokens(folded: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     for (position, token) in folded
@@ -455,12 +472,10 @@ fn entityish_tokens(folded: &str) -> Vec<String> {
         .filter(|token| !token.is_empty())
         .enumerate()
     {
-        if !token.chars().any(|ch| ch.is_ascii_uppercase()) {
+        if !token.chars().any(char::is_uppercase) {
             continue;
         }
-        if position == 0
-            && !(token.chars().count() >= 2 && token.chars().all(|ch| ch.is_ascii_uppercase()))
-        {
+        if position == 0 && !(token.chars().count() >= 2 && token.chars().all(char::is_uppercase)) {
             continue;
         }
         tokens.push(token.to_lowercase());
@@ -547,6 +562,44 @@ mod tests {
             "when did Acme ship widgets",
             "when did ACME ship widgets"
         ));
+    }
+
+    /// #602 item 3: the entity guard used to be ASCII-only
+    /// (`is_ascii_uppercase`), so accented/non-Latin uppercase letters
+    /// were invisible to it — a dangerous-direction blind spot, since
+    /// two DIFFERENT entities could then look identical to the guard.
+    /// The entity sits past position 0 (like the existing "does Acme…"
+    /// case), so this isolates the character-class fix from the
+    /// separate, still-documented sentence-initial exemption.
+    #[test]
+    fn a_swapped_non_ascii_entity_refuses_across_scripts() {
+        // Latin with diacritics.
+        assert!(!queries_agree(
+            "does Étienne have credentials",
+            "does Émile have credentials"
+        ));
+        // Cyrillic.
+        assert!(!queries_agree(
+            "does Жуков have credentials",
+            "does Иванов have credentials"
+        ));
+        // Greek.
+        assert!(!queries_agree("is Ω the value here", "is Σ the value here"));
+        // The same non-ASCII entity in both queries still agrees,
+        // case-folded.
+        assert!(queries_agree(
+            "does Étienne have credentials",
+            "does ÉTIENNE have credentials"
+        ));
+    }
+
+    /// #602 item 3: the digit guard used to be ASCII-only
+    /// (`is_ascii_digit`), so ٢٠ and ٣٠ (Arabic-Indic digits) both
+    /// folded to an empty multiset and looked identical.
+    #[test]
+    fn a_changed_non_ascii_digit_refuses() {
+        assert!(!queries_agree("٢٠個売れたか", "٣٠個売れたか"));
+        assert!(queries_agree("٢٠個売れたか", "٢٠個は売れたか"));
     }
 
     // ------- the index.
