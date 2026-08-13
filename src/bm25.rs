@@ -1034,6 +1034,19 @@ mod tests {
     }
 
     #[test]
+    fn avalanche_is_pinned_to_specific_outputs() {
+        // Exact bit patterns, computed independently in Python from
+        // the same splitmix64/fmix64 finalizer — pins every operator
+        // (`>>` vs `<<`, `^=` vs `|=`/`&=`) so a mutant swapping one is
+        // caught directly, instead of only probabilistically via the
+        // bucket-spread test below.
+        assert_eq!(avalanche(0x1), 0x5692_161d_100b_05e5);
+        assert_eq!(avalanche(0x1234_5678_9abc_def0), 0x9629_f58e_8ec5_b906);
+        assert_eq!(avalanche(0x4e00_0000_0000_306e), 0xaa6b_b41e_ce8f_1772);
+        assert_eq!(avalanche(0xffff_ffff_ffff_ffff), 0xb4d0_55fc_f2cb_bd7b);
+    }
+
+    #[test]
     fn term_hasher_spreads_bigram_keys_that_share_a_second_character() {
         // Before the #606 fix, `TermHasher::write_u64` passed
         // `(prev << 32) | ch` through unchanged: every key sharing
