@@ -28,7 +28,10 @@ mix two histories. Verify the result with: taguru inspect DIR
 /// `taguru restore --out DIR [URL]`: materializes a data directory
 /// from the bucket's newest COMPLETE generation. Exit codes follow the
 /// house rule: 0 restored · 1 bucket unusable (no fence, no complete
-/// generation, corrupt segments) · 2 usage error.
+/// generation, corrupt segments, or the store itself refused to open
+/// — bad/missing credentials, a rejected cloud config, an
+/// inaccessible local path) · 2 usage error (a malformed URL, an
+/// unrecognized scheme, or a bad flag).
 pub(crate) fn run(args: &[String]) -> i32 {
     let usage = |message: &str| crate::config::subcommand_usage_error("restore", message);
     let mut out: Option<PathBuf> = None;
@@ -135,7 +138,21 @@ pub(crate) fn run(args: &[String]) -> i32 {
         Ok(opened) => opened,
         Err(error) => {
             eprintln!("taguru: restore: {error}");
-            return 2;
+            // `open_store`'s two failure shapes carry different exit
+            // codes: a malformed URL/scheme/local-path is a usage
+            // mistake (`InvalidInput`/`NotFound`, exit 2 — fixing the
+            // argument fixes it); a store that parsed fine but could
+            // not be OPENED (bad/missing credentials, a cloud builder
+            // rejecting the config, a local path that exists but is
+            // not actually usable) is the store itself being
+            // unusable, same bucket as "no fence, no complete
+            // generation" (exit 1) — no amount of retrying THIS
+            // invocation's arguments would fix it.
+            return if error.kind() == io::ErrorKind::Other {
+                1
+            } else {
+                2
+            };
         }
     };
     // The CLI runs with no ambient runtime (same posture as import and
@@ -165,9 +182,45 @@ pub(crate) fn run(args: &[String]) -> i32 {
         }
         Err(error) => {
             eprintln!("taguru: restore: {error}");
+            // Clean up so a retry does not need the operator to
+            // manually empty the directory: the occupied check above
+            // already refused to start unless `out` held nothing but
+            // our own `.taguru.lock`, so every OTHER entry here was
+            // created by THIS attempt — never a second history to
+            // preserve.
+            if let Err(cleanup_error) = clean_partial_restore(&out) {
+                eprintln!(
+                    "taguru: restore: additionally failed to clean up the partial \
+                     result ({cleanup_error}) — remove {} by hand before retrying",
+                    out.display()
+                );
+            }
             1
         }
     }
+}
+
+/// Removes everything a just-failed restore left under `out`, so the
+/// next `taguru restore --out DIR` against the same directory sees it
+/// empty again instead of tripping the occupied-directory refusal on
+/// its own half-written state. Only ever called after `run`'s own
+/// occupied check has already confirmed `out` held nothing but
+/// `.taguru.lock` when this attempt started — that is what makes
+/// "remove everything except the lock" safe unconditionally here.
+fn clean_partial_restore(out: &FsPath) -> io::Result<()> {
+    for entry in std::fs::read_dir(out)? {
+        let entry = entry?;
+        if entry.file_name() == ".taguru.lock" {
+            continue;
+        }
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            std::fs::remove_dir_all(&path)?;
+        } else {
+            std::fs::remove_file(&path)?;
+        }
+    }
+    Ok(())
 }
 
 /// The restore body: pick the newest complete generation and

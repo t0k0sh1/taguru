@@ -54,7 +54,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use object_store::ObjectStore;
 use object_store::path::Path as StorePath;
@@ -128,14 +128,89 @@ pub(crate) struct TailerHandle {
     thread: std::thread::JoinHandle<()>,
 }
 
+/// Bound on `TailerHandle::shutdown`'s wait for the tailer thread.
+/// `poll_once` chains several sequential bucket calls (a fence lookup,
+/// `newest_complete_generation`, `read_manifest`, `hydrate_shared`,
+/// one `ensure_context` per stale stem) with no per-await cancellation
+/// — `stop` is only checked between whole polls and once inside the
+/// per-stem worklist loop, never at the earlier await points — so a
+/// single hung bucket call can hold up the whole cycle. `object_store`
+/// defaults each individual call's own timeout to 30s; this is a
+/// multiple of that; margin for several such calls landing in one
+/// cycle, not a promise that the tailer itself stops by then.
+const TAILER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(90);
+
 impl TailerHandle {
+    /// Signals stop and waits for the tailer, bounded. `shutdown` runs
+    /// inside `main`'s own shutdown sequence
+    /// (`tokio::task::block_in_place(|| tailer.shutdown())`) — a plain
+    /// `JoinHandle::join` here would block the WHOLE process's clean
+    /// exit for as long as a hung poll takes, which `poll_once`'s lack
+    /// of per-await cancellation (see [`TAILER_SHUTDOWN_TIMEOUT`])
+    /// could make indefinite in the worst case.
     pub(crate) fn shutdown(self) {
         self.stop.store(true, Ordering::Relaxed);
         let _ = self.wake.send(());
-        if self.thread.join().is_err() {
-            tracing::warn!("replica tailer did not shut down cleanly");
+        match join_bounded(self.thread, TAILER_SHUTDOWN_TIMEOUT) {
+            JoinOutcome::Clean => {}
+            JoinOutcome::Panicked => tracing::warn!("replica tailer did not shut down cleanly"),
+            JoinOutcome::TimedOut => tracing::warn!(
+                timeout_secs = TAILER_SHUTDOWN_TIMEOUT.as_secs(),
+                "replica tailer did not stop within the shutdown timeout (a bucket call is \
+                 likely hung); continuing shutdown without it",
+            ),
+            JoinOutcome::CouldNotSpawnWatchdog => tracing::warn!(
+                "could not spawn a thread to bound the replica tailer's shutdown wait; \
+                 the tailer thread is now unjoined and will finish on its own"
+            ),
         }
     }
+}
+
+#[derive(Debug)]
+enum JoinOutcome {
+    Clean,
+    Panicked,
+    TimedOut,
+    CouldNotSpawnWatchdog,
+}
+
+/// Joins `thread`, bounded by `timeout` — `JoinHandle::join` itself
+/// has no timeout in std, so the join runs on a detached helper
+/// thread instead, and the caller waits on THAT thread through a
+/// channel it can time out on. Only one thread may ever call
+/// `JoinHandle::join` on a given handle, which is why this spawns a
+/// helper rather than racing the join against a timer directly.
+///
+/// Past the bound, this returns `TimedOut` and the original `thread`
+/// stays unjoined — not aborted, not signaled, just no longer waited
+/// on. It finishes on its own (or is torn down with the process) at
+/// whatever pace the thing it is blocked on allows.
+fn join_bounded(thread: std::thread::JoinHandle<()>, timeout: Duration) -> JoinOutcome {
+    let (done, waited) = std::sync::mpsc::channel();
+    let joiner = std::thread::Builder::new()
+        .name("taguru-replica-shutdown-wait".into())
+        .spawn(move || {
+            let clean = thread.join().is_ok();
+            let _ = done.send(clean);
+        });
+    let Ok(joiner) = joiner else {
+        // `thread` moved into the closure above regardless of whether
+        // the spawn itself succeeded — std hands back no way to
+        // reclaim it from a failed `spawn`, so there is no "join it
+        // directly" fallback left to fall back to.
+        return JoinOutcome::CouldNotSpawnWatchdog;
+    };
+    let outcome = match waited.recv_timeout(timeout) {
+        Ok(true) => JoinOutcome::Clean,
+        Ok(false) => JoinOutcome::Panicked,
+        Err(_) => JoinOutcome::TimedOut,
+    };
+    // Detached either way: joining the watchdog here would just
+    // reintroduce the unbounded wait this function exists to avoid
+    // (the watchdog itself only returns once ITS join finishes).
+    drop(joiner);
+    outcome
 }
 
 /// Boots the tailer on its own thread (with its own small runtime,
@@ -834,5 +909,49 @@ mod tests {
             "{}",
             routed.refusal()
         );
+    }
+
+    /// #616 item 4: `join_bounded` must return promptly on a thread
+    /// that never finishes — standing in for `poll_once` stuck on a
+    /// hung bucket call with no per-await cancellation — rather than
+    /// blocking the caller (in production, the whole process's
+    /// shutdown sequence) for as long as the thread takes.
+    #[test]
+    fn join_bounded_times_out_on_a_thread_that_never_finishes() {
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let thread = std::thread::spawn(move || {
+            let _ = held.recv();
+        });
+        let started = std::time::Instant::now();
+        let outcome = join_bounded(thread, Duration::from_millis(50));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "must return promptly instead of waiting for the hung thread: {:?}",
+            started.elapsed()
+        );
+        assert!(matches!(outcome, JoinOutcome::TimedOut));
+        // Release the leaked thread so it does not outlive the test
+        // binary for no reason.
+        let _ = release.send(());
+    }
+
+    /// The companion case: a thread that finishes well within the
+    /// bound reports `Clean`, not a spurious timeout.
+    #[test]
+    fn join_bounded_reports_clean_for_a_thread_that_finishes_in_time() {
+        let thread = std::thread::spawn(|| {});
+        let outcome = join_bounded(thread, Duration::from_secs(5));
+        assert!(matches!(outcome, JoinOutcome::Clean), "{outcome:?}");
+    }
+
+    /// And a thread whose body panics reports `Panicked`, matching
+    /// what `shutdown` warns on today (`join().is_err()`).
+    #[test]
+    fn join_bounded_reports_panicked_for_a_thread_that_panics() {
+        let thread = std::thread::Builder::new()
+            .spawn(|| panic!("intentional panic for join_bounded's Panicked arm"))
+            .unwrap();
+        let outcome = join_bounded(thread, Duration::from_secs(5));
+        assert!(matches!(outcome, JoinOutcome::Panicked), "{outcome:?}");
     }
 }

@@ -372,6 +372,17 @@ impl Metrics {
         self.replication_errors.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// A cycle failure the store classified as likely-permanent
+    /// (`ShipError::Permanent` — see `ship::error::store_error`), on
+    /// top of whatever `record_replication_error` call the failing
+    /// operation itself already made: a more specific, alertable
+    /// series for the subset that will not self-heal without operator
+    /// action.
+    pub fn record_replication_permanent_error(&self) {
+        self.replication_permanent_errors
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     /// One cycle that shipped everything it found. Deliberately NOT
     /// part of `/health`: a degraded bucket must page whoever watches
     /// the dashboards, never convince an orchestrator to restart a

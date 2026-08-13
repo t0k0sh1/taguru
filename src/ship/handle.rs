@@ -94,6 +94,24 @@ pub(crate) fn spawn(
                     // cycle retries exactly where this one failed.
                     tracing::warn!(%error, "replication cycle failed; will retry");
                 }
+                Err(ShipError::Permanent(error)) => {
+                    // Not fail-stop like `Fenced` — credentials can be
+                    // rotated back, a bucket policy can be relaxed —
+                    // but a bare "will retry" warning is exactly what
+                    // this class of failure does NOT deserve: it will
+                    // keep failing every cycle until an operator acts,
+                    // so it gets the same audit-log treatment `Fenced`
+                    // gets, minus the permanent latch.
+                    state.metrics().record_replication_permanent_error();
+                    tracing::error!(
+                        target: "taguru::audit",
+                        %error,
+                        "replication cycle failed with a likely-permanent store error \
+                         (credentials, an unsupported operation, or invalid config) — \
+                         will keep retrying, but this will not self-heal without \
+                         operator action",
+                    );
+                }
             }
             if stopping {
                 // The final cycle above drained the post-flush state;

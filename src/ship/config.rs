@@ -51,6 +51,15 @@ impl ReplicateConfig {
 /// explicitly. `file://` is first-class, not a test crutch: it is how
 /// the round trip is verified without cloud spend, and how an
 /// air-gapped deployment ships to a mounted remote volume.
+///
+/// The `ErrorKind` a failure carries is load-bearing, not incidental:
+/// `taguru restore`'s exit-code contract (`restore::run`) reads it
+/// back to tell a usage mistake (`InvalidInput`/`NotFound` — a
+/// malformed URL, an unrecognized scheme, a local path that does not
+/// exist) from the store itself refusing to open
+/// (`io::Error::other` — a rejected credential, a cloud builder
+/// config error, an inaccessible local path). Keep new failure arms
+/// on the right side of that split.
 pub(crate) fn open_store(url: &str) -> io::Result<(Arc<dyn ObjectStore>, StorePath)> {
     use object_store::ObjectStoreScheme;
 
@@ -115,4 +124,50 @@ pub(crate) fn open_store(url: &str) -> io::Result<(Arc<dyn ObjectStore>, StorePa
         }
     };
     Ok((store, root))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A malformed/unrecognized URL is a usage mistake: `InvalidInput`.
+    #[test]
+    fn a_bad_scheme_is_invalid_input() {
+        let error = open_store("ftp://wherever").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{error}");
+    }
+
+    /// A syntactically fine `file://` URL naming a directory that does
+    /// not exist is also a usage mistake, not the store refusing to
+    /// open: `NotFound`.
+    #[test]
+    fn a_missing_local_directory_is_not_found() {
+        let missing =
+            std::env::temp_dir().join(format!("taguru-open-store-missing-{}", std::process::id()));
+        let error = open_store(&format!("file://{}", missing.display())).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound, "{error}");
+    }
+
+    /// A well-formed cloud URL whose builder refuses to construct
+    /// (missing/rejected credentials, a config error) is the STORE
+    /// itself being unusable, not a usage mistake — `open_store` must
+    /// carry that as `Other`, the kind `restore::run` maps to exit 1
+    /// instead of exit 2. Azure's builder is the one of the three
+    /// cloud backends that fails synchronously (no network round trip)
+    /// on a missing account name, which is what makes this
+    /// deterministic without real credentials or a live endpoint.
+    #[test]
+    fn a_rejected_cloud_builder_config_is_other() {
+        // SAFETY: test-only, and this test does not run concurrently
+        // with anything that reads these same Azure env vars.
+        for key in [
+            "AZURE_STORAGE_ACCOUNT_NAME",
+            "AZURE_STORAGE_ACCOUNT_KEY",
+            "AZURE_STORAGE_CONNECTION_STRING",
+        ] {
+            unsafe { std::env::remove_var(key) };
+        }
+        let error = open_store("az://some-bucket").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Other, "{error}");
+    }
 }

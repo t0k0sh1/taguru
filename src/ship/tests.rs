@@ -77,17 +77,22 @@ async fn object_names(store: &Arc<InMemory>) -> Vec<String> {
     names
 }
 
-/// A store that delegates every call to `inner` except two dials
+/// A store that delegates every call to `inner` except three dials
 /// this test module turns: `fail_puts` and `fail_deletes` each
 /// count down by one on a matching call, answering a transient I/O
 /// error while `> 0` and falling through to the real store once
 /// they hit zero — "the bucket flaked N times, then came back",
 /// the shape a retry-on-next-cycle fix needs proof against.
+/// `fail_puts_permanently` answers `PermissionDenied` instead — a
+/// deployment-shaped failure `store_error` must classify as
+/// `ShipError::Permanent`, never `Io` — and never counts down (a
+/// revoked credential does not spontaneously heal).
 #[derive(Debug)]
 struct FlakyStore {
     inner: Arc<dyn ObjectStore>,
     fail_puts: Arc<Mutex<usize>>,
     fail_deletes: Arc<Mutex<usize>>,
+    fail_puts_permanently: Arc<Mutex<bool>>,
 }
 
 impl std::fmt::Display for FlakyStore {
@@ -111,6 +116,12 @@ impl ObjectStore for FlakyStore {
         payload: PutPayload,
         opts: PutOptions,
     ) -> object_store::Result<object_store::PutResult> {
+        if *self.fail_puts_permanently.lock() {
+            return Err(object_store::Error::PermissionDenied {
+                path: location.to_string(),
+                source: "injected revoked credential".into(),
+            });
+        }
         {
             let mut remaining = self.fail_puts.lock();
             if *remaining > 0 {
@@ -161,6 +172,88 @@ impl ObjectStore for FlakyStore {
                 }
             })
             .boxed()
+    }
+
+    fn list(
+        &self,
+        prefix: Option<&StorePath>,
+    ) -> futures_util::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+    {
+        self.inner.list(prefix)
+    }
+
+    async fn list_with_delimiter(
+        &self,
+        prefix: Option<&StorePath>,
+    ) -> object_store::Result<object_store::ListResult> {
+        self.inner.list_with_delimiter(prefix).await
+    }
+
+    async fn copy_opts(
+        &self,
+        from: &StorePath,
+        to: &StorePath,
+        options: object_store::CopyOptions,
+    ) -> object_store::Result<()> {
+        self.inner.copy_opts(from, to, options).await
+    }
+}
+
+/// Delegates everything to `inner` except reads of one specific key,
+/// which always answer a non-`NotFound` error — the shape
+/// `newest_complete_generation`'s `head()` check on the newest
+/// candidate generation must fail loudly on rather than silently
+/// falling back to an older, possibly-complete generation (#616 item
+/// 5). `head()`'s default implementation routes through `get_opts`
+/// (see `object_store::ObjectStore::head`), so overriding `get_opts`
+/// alone is enough to reach it.
+#[derive(Debug)]
+struct GetFailsOnStore {
+    inner: Arc<dyn ObjectStore>,
+    fails_on: StorePath,
+}
+
+impl std::fmt::Display for GetFailsOnStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "GetFailsOnStore({})", self.inner)
+    }
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for GetFailsOnStore {
+    async fn put_opts(
+        &self,
+        location: &StorePath,
+        payload: PutPayload,
+        opts: PutOptions,
+    ) -> object_store::Result<object_store::PutResult> {
+        self.inner.put_opts(location, payload, opts).await
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        location: &StorePath,
+        opts: object_store::PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+        self.inner.put_multipart_opts(location, opts).await
+    }
+
+    async fn get_opts(
+        &self,
+        location: &StorePath,
+        options: object_store::GetOptions,
+    ) -> object_store::Result<object_store::GetResult> {
+        if *location == self.fails_on {
+            return Err(injected("get"));
+        }
+        self.inner.get_opts(location, options).await
+    }
+
+    fn delete_stream(
+        &self,
+        locations: futures_util::stream::BoxStream<'static, object_store::Result<StorePath>>,
+    ) -> futures_util::stream::BoxStream<'static, object_store::Result<StorePath>> {
+        self.inner.delete_stream(locations)
     }
 
     fn list(
@@ -460,6 +553,7 @@ async fn a_failed_retire_delete_is_retried_not_orphaned() {
         inner: Arc::clone(&inner) as Arc<dyn ObjectStore>,
         fail_puts: Arc::new(Mutex::new(0)),
         fail_deletes: Arc::clone(&fail_deletes),
+        fail_puts_permanently: Arc::new(Mutex::new(false)),
     });
 
     std::fs::write(dir.join("ctx_a.ctx"), b"image-v1").unwrap();
@@ -513,6 +607,7 @@ async fn a_failed_lane_retire_delete_is_retried_not_orphaned() {
         inner: Arc::clone(&inner) as Arc<dyn ObjectStore>,
         fail_puts: Arc::new(Mutex::new(0)),
         fail_deletes: Arc::clone(&fail_deletes),
+        fail_puts_permanently: Arc::new(Mutex::new(false)),
     });
 
     let wal_path = dir.join("ctx_a.wal.jsonl");
@@ -568,6 +663,7 @@ async fn a_failed_manifest_put_is_retried_on_the_next_idle_cycle() {
         inner: Arc::clone(&inner) as Arc<dyn ObjectStore>,
         fail_puts: Arc::clone(&fail_puts),
         fail_deletes: Arc::new(Mutex::new(0)),
+        fail_puts_permanently: Arc::new(Mutex::new(false)),
     });
 
     std::fs::write(dir.join("ctx_a.ctx"), b"image-v1").unwrap();
@@ -611,6 +707,44 @@ async fn a_failed_manifest_put_is_retried_on_the_next_idle_cycle() {
         !fresh.files.contains_key("ctx_a.ctx"),
         "the manifest must catch up to the retire on the very next cycle: {fresh:?}"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A deployment-shaped store failure (revoked credentials) must reach
+/// the caller as `ShipError::Permanent`, not the generic `Io` every
+/// other injected failure in this module produces — that distinction
+/// is the whole fix (#616 item 1): a `handle::spawn` that only ever
+/// sees `Io` cannot tell "the network blipped" from "this will never
+/// succeed again without operator action".
+#[tokio::test]
+async fn a_permission_denied_upload_classifies_as_a_permanent_ship_error() {
+    let dir = scratch_dir("permission-denied");
+    let state = state_for(&dir);
+    let progress = Arc::new(ShipProgress::new(crate::registry::DEFAULT_WAL_MAX_BYTES));
+    let inner = Arc::new(InMemory::new());
+    let fail_puts_permanently = Arc::new(Mutex::new(false));
+    let store: Arc<dyn ObjectStore> = Arc::new(FlakyStore {
+        inner: Arc::clone(&inner) as Arc<dyn ObjectStore>,
+        fail_puts: Arc::new(Mutex::new(0)),
+        fail_deletes: Arc::new(Mutex::new(0)),
+        fail_puts_permanently: Arc::clone(&fail_puts_permanently),
+    });
+
+    std::fs::write(dir.join("ctx_a.ctx"), b"image-v1").unwrap();
+    let mut shipper = claimed_dyn(Arc::clone(&store), &dir, &state, &progress).await;
+    *fail_puts_permanently.lock() = true;
+    let error = shipper.cycle().await.unwrap_err();
+    assert!(
+        matches!(error, ShipError::Permanent(_)),
+        "a PermissionDenied upload must classify as Permanent, got: {error}"
+    );
+
+    // Unlike a transient failure, this does not spontaneously heal —
+    // the very next cycle hits the same wall, still classified the
+    // same way (no accidental one-shot "permanent" that quietly
+    // reverts to Io on retry).
+    let error = shipper.cycle().await.unwrap_err();
+    assert!(matches!(error, ShipError::Permanent(_)), "{error}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -681,6 +815,93 @@ async fn restore_picks_the_newest_complete_generation_not_the_newest_claim() {
     );
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&restored_dir);
+}
+
+/// The fail-loud counterpart to the test above (#616 item 5): a
+/// genuine store error while checking the NEWEST candidate generation
+/// must propagate immediately, not be swallowed the way `NotFound`
+/// is — falling back to an older, possibly-complete generation on ANY
+/// store error would risk restoring stale data while believing the
+/// newest generation was simply never shipped, when the bucket may in
+/// fact be unreachable or the object corrupt in a way `NotFound`
+/// never means.
+#[tokio::test]
+async fn newest_complete_generation_fails_loudly_rather_than_falling_back_past_a_store_error() {
+    let dir = scratch_dir("newest-store-error");
+    let state = state_for(&dir);
+    let progress = Arc::new(ShipProgress::new(crate::registry::DEFAULT_WAL_MAX_BYTES));
+    let inner = Arc::new(InMemory::new());
+
+    // Generation 1: a real, complete baseline.
+    std::fs::write(dir.join("ctx_a.ctx"), b"gen1-image").unwrap();
+    let mut first = claimed(&inner, &dir, &state, &progress).await;
+    first.cycle().await.unwrap();
+    assert_eq!(first.generation, 1);
+
+    // Generation 2: claimed but never shipped — ordinarily its
+    // missing complete marker would make `newest_complete_generation`
+    // skip it and fall back to generation 1 (the test above pins
+    // exactly that). Here the store is wrapped so reading THAT marker
+    // answers a real error instead of the natural `NotFound`.
+    let second = claimed(&inner, &dir, &state, &progress).await;
+    assert_eq!(second.generation, 2);
+    let marker = StorePath::parse("gen-00000000000000000002/complete").unwrap();
+    let wrapped: Arc<dyn ObjectStore> = Arc::new(GetFailsOnStore {
+        inner: Arc::clone(&inner) as Arc<dyn ObjectStore>,
+        fails_on: marker,
+    });
+
+    let error = newest_complete_generation(wrapped.as_ref(), &StorePath::default())
+        .await
+        .unwrap_err();
+    assert_ne!(
+        error.kind(),
+        io::ErrorKind::NotFound,
+        "a genuine store error must not be reported as simply not-shipped-yet: {error}"
+    );
+    assert!(
+        error.to_string().contains("checking generation 2"),
+        "{error}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `run`'s exit-code contract (#616 item 3): a usage mistake in the
+/// URL is exit 2, a store that refuses to open is exit 1 — end to end
+/// through the real CLI entry point, not just `open_store` in
+/// isolation.
+#[test]
+fn run_maps_a_usage_mistake_and_a_rejected_store_to_different_exit_codes() {
+    let out = scratch_dir("run-exit-codes-out");
+
+    let usage_code = run(&[
+        "--out".to_string(),
+        out.display().to_string(),
+        "not a url at all".to_string(),
+    ]);
+    assert_eq!(usage_code, 2, "a malformed URL must be a usage error");
+
+    // SAFETY: test-only, and this test does not run concurrently with
+    // anything that reads these same Azure env vars.
+    for key in [
+        "AZURE_STORAGE_ACCOUNT_NAME",
+        "AZURE_STORAGE_ACCOUNT_KEY",
+        "AZURE_STORAGE_CONNECTION_STRING",
+    ] {
+        unsafe { std::env::remove_var(key) };
+    }
+    let rejected_code = run(&[
+        "--out".to_string(),
+        out.display().to_string(),
+        "az://some-bucket".to_string(),
+    ]);
+    assert_eq!(
+        rejected_code, 1,
+        "a well-formed URL the store refuses to open must be bucket-unusable, not a usage error"
+    );
+
+    let _ = std::fs::remove_dir_all(&out);
 }
 
 #[test]
