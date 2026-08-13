@@ -55,4 +55,18 @@ exclude_re = [
     # them as missed would only be noise.
     "LocalEmbeddings",
     "fastembed_model",
+    # `Bm25Index::explain`'s `tf > 0.0` guard (issue #604): when
+    # `tf == 0.0`, `contribution(idf, 0.0, ...)` is `idf * 0.0 / d`
+    # for some nonzero `d` — exactly 0.0 for every finite, non-NaN
+    # `idf` (which `idf()` always produces, since its `ln` argument
+    # is always >= 1.0). That's bit-for-bit the same value the
+    # `else` arm's literal `0.0` would return, so `tf >= 0.0` (also
+    # always true, `tf` is never negative) picks the SAME branch
+    # value at the only boundary where it disagrees with `tf > 0.0`
+    # — no test can observe a difference because there is none to
+    # observe. `explain`'s single `>` operator makes this pattern
+    # unambiguous within the function; unlike the sibling `==`/`<`
+    # mutants here (which DO change the addend when `tf > 0.0` and
+    # are caught), only the `>=` variant is this tautology.
+    "replace > with >= in Bm25Index::explain",
 ]
