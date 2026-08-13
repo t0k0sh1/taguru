@@ -623,6 +623,12 @@ impl Bm25Index {
     ///   tie-break key `(score, source, index)` stops being unique,
     ///   and the final order falls back to `HashMap` iteration order
     ///   (non-deterministic ranking),
+    /// - one source's slots not index-ascending (`to_bytes` sorts by
+    ///   `(source_name, index)` before writing) — `source_digests`
+    ///   folds `by_source` in this same append order, so accepting a
+    ///   scrambled run would desync it from `record_digest`'s ascending
+    ///   walk and force a needless re-upsert on every load
+    ///   (CodeRabbit, PR #632),
     /// - a term repeated across postings blocks,
     /// - a posting list not slot-ascending (`to_bytes` always sorts a
     ///   term's live postings by slot) — this also rejects the same
@@ -658,6 +664,16 @@ impl Bm25Index {
         // chance to reject it.
         let mut seen_slots: std::collections::HashSet<(u32, u32)> =
             std::collections::HashSet::with_capacity(slot_count.min(1 << 20));
+        // `to_bytes` sorts every slot by `(source_name, index)` before
+        // writing, so one source's slots always form an index-ascending
+        // run in the file — `source_digests` folds `by_source` in this
+        // same append order and depends on it matching `record_digest`'s
+        // own ascending walk (CodeRabbit, PR #632). Tracked as "the
+        // previous slot for whichever source is currently running" so a
+        // new source starting doesn't need its own reset branch: the
+        // `prev_source != source_id` case simply never fails the `<=`
+        // check below.
+        let mut prev_slot_for_source: Option<(u32, u32)> = None;
         for _ in 0..slot_count {
             let source_id = read_u32(bytes, &mut pos)?;
             if source_id as usize >= index.sources.len() {
@@ -667,6 +683,12 @@ impl Bm25Index {
             if !seen_slots.insert((source_id, paragraph)) {
                 return None;
             }
+            if prev_slot_for_source.is_some_and(|(prev_source, prev_paragraph)| {
+                prev_source == source_id && paragraph <= prev_paragraph
+            }) {
+                return None;
+            }
+            prev_slot_for_source = Some((source_id, paragraph));
             let length = f32::from_le_bytes(bytes.get(pos..pos + 4)?.try_into().ok()?);
             pos += 4;
             // A non-finite or negative length is corruption: added into
@@ -1015,6 +1037,16 @@ mod tests {
         // the final order falls back to `HashMap` iteration order —
         // non-deterministic ranking.
         let bytes = image(&["a.md"], &[(0, 0, 1.0, 1, 0), (0, 0, 1.0, 2, 0)], &[]);
+        assert!(Bm25Index::from_bytes(&bytes).is_none());
+    }
+
+    #[test]
+    fn from_bytes_rejects_one_sources_slots_out_of_index_order() {
+        // `to_bytes` always writes one source's slots index-ascending
+        // (CodeRabbit, PR #632) — paragraph 1 before paragraph 0 for
+        // the same source is a shape it never produces, and would
+        // desync `source_digests`'s fold order from `record_digest`'s.
+        let bytes = image(&["a.md"], &[(0, 1, 1.0, 1, 0), (0, 0, 1.0, 2, 0)], &[]);
         assert!(Bm25Index::from_bytes(&bytes).is_none());
     }
 
