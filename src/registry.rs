@@ -1553,8 +1553,25 @@ impl PassageSearchLanes {
     /// a transiently degraded result must not be pinned into the
     /// retrieval caches, where it would keep serving BM25-only answers
     /// (and canonicalize paraphrases onto them) until an unrelated
-    /// write. The stable skip states stay cacheable — a vector publish
-    /// or config change DOES move the key.
+    /// write. `ModelChanged`/`WidthChanged` stay OUT of this exclusion
+    /// (cacheable) on the premise that a vector publish or a config
+    /// change DOES move the key — `refresh_passage_embeddings`
+    /// (`registry/embeddings.rs`) calls `bump_config_revision` exactly
+    /// when `published_change` is true, i.e. whenever it actually
+    /// changes what is served, which is the only case that could
+    /// disagree with a fill cached under the OLD key. That call is
+    /// pinned by
+    /// `a_passage_vector_publish_moves_the_search_passages_key`
+    /// (`registry/retrieval_cache.rs`) — if it is ever removed, that
+    /// test fails, not silently. #602 item 2: the risk this doc used
+    /// to leave unaddressed is a refresh that keeps FAILING rather
+    /// than never running — the key then never moves and a
+    /// `ModelChanged`/`WidthChanged` fill stays pinned indefinitely.
+    /// That is a correct (if stale-until-fixed) answer, not a
+    /// correctness bug, and it is observable: `timed_embed_for_refresh`
+    /// records every attempt in `taguru_embed_refresh_total{outcome=
+    /// "failed"}`, so an operator diagnosing a persistently
+    /// lexical-only result set has a signal to look at.
     pub(crate) fn embedding_failed(&self) -> bool {
         matches!(
             self,

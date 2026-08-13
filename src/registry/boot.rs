@@ -170,6 +170,24 @@ impl AppState {
         // env boundary — issue #563 item 5) can never leave the two
         // ceilings disagreeing with each other.
         let embed_parallel = options.embed_parallel.max(1);
+        let retrieval_cache_bytes = crate::env::env_number(
+            "TAGURU_RETRIEVAL_CACHE_BYTES",
+            retrieval_cache::DEFAULT_RETRIEVAL_CACHE_BYTES,
+        );
+        // A budget that is ON but too small to ever seat one realistic
+        // response is pure cost: keys keep getting minted, `insert`
+        // keeps declining every one of them, and (with the semantic
+        // tier also on) each request pays a provider call for
+        // equivalence claims that can only resolve to `stale` (#602
+        // item 4) — same "the source is the only place to learn this"
+        // motivation as the ANN heads-up above.
+        if retrieval_cache::budget_seats_nothing(retrieval_cache_bytes) {
+            tracing::warn!(
+                budget_bytes = retrieval_cache_bytes,
+                entrance_ceiling_bytes = retrieval_cache_bytes / 4,
+                "TAGURU_RETRIEVAL_CACHE_BYTES is set but too small to admit a realistic response; the exact-match cache will stay empty and, if TAGURU_SEMANTIC_CACHE_THRESHOLD is also set, the semantic tier will pay a provider call per request for claims that can only resolve stale"
+            );
+        }
         let state = Self(Arc::new(StateInner {
             data_dir,
             _dir_lock: dir_lock,
@@ -187,10 +205,7 @@ impl AppState {
                 .clamp(0.0, 1.0),
             cue_cache: Mutex::new(CueCache::default()),
             retrieval_cache: Mutex::new(retrieval_cache::RetrievalCache::new(
-                crate::env::env_number(
-                    "TAGURU_RETRIEVAL_CACHE_BYTES",
-                    retrieval_cache::DEFAULT_RETRIEVAL_CACHE_BYTES,
-                ),
+                retrieval_cache_bytes,
             )),
             semantic_cache: Mutex::new(semantic_cache::SemanticCache::new(crate::env::env_floor(
                 "TAGURU_SEMANTIC_CACHE_THRESHOLD",
