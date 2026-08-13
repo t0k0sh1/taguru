@@ -485,6 +485,18 @@ impl AppState {
                 // Nothing of the source ranked at all: the best showing
                 // is the paragraph sharing the most query terms (the
                 // first one, when they tie — including at zero).
+                //
+                // "Ranked nowhere" is itself proof `shared` is 0 for
+                // EVERY paragraph here (issue #604): a live posting
+                // with `tf > 0.0` for any query gram is precisely what
+                // `Bm25Index::search` touches to populate `full`, so
+                // this closure only ever runs over a uniformly-zero
+                // `shared`. `tf > 0.0`'s `==`/`<`/`>=` siblings and
+                // `shared > best.1`'s `<` sibling are consequently
+                // unkillable mutants, not missing tests — every
+                // variant that only changes behavior when some
+                // paragraph's real count is nonzero can never diverge
+                // from this loop's actual, always-uniform input.
                 let mut best = (0u32, 0usize);
                 for at in 0..paragraphs as u32 {
                     let shared = index.explain(&query_grams, source, at).map_or(0, |lex| {
