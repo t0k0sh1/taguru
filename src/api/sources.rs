@@ -9,7 +9,10 @@ use serde_json::Value;
 use taguru::deadline::Deadline;
 
 use crate::metrics::{ErrorKind, RetrievalCacheOp, SearchOp};
-use crate::registry::{AppState, CitationLookup, PassageExplainLookup, SemanticFill};
+use crate::registry::{
+    AppState, CachedRetrieval, CitationLookup, PassageExplainLookup, RetrievalKey, SemanticFill,
+    SemanticServe,
+};
 
 use super::aliases::KeysetQuery;
 use super::recall::cross_targets;
@@ -785,6 +788,89 @@ fn vector_width_changed_reason(stored: usize, current: usize) -> String {
     )
 }
 
+/// [`passage_search_cache_probe`]'s outcome recorder gets called with:
+/// which of the two ways a probe can answer directly fired, so a
+/// caller that tracks cache-outcome span attributes (ADR 0008 §6)
+/// knows which to record.
+enum CacheProbeHit {
+    Exact,
+    Semantic,
+}
+
+/// [`passage_search_cache_probe`]'s result: it already answered the
+/// request, or nothing did and the caller's own fresh search should
+/// run, carrying whatever [`SemanticFill`] the probe warmed (if any)
+/// to file alongside its own result.
+enum CacheProbe {
+    Answered(Response),
+    Fresh(Option<SemanticFill>),
+}
+
+/// The lookup → semantic-probe → fill block `search_passages` and
+/// `cross_search_passages` both open with, character-for-character
+/// identical but for the search-log line's one differing field name
+/// (issue #605): an exact-cache hit or a semantic-tier hit answers
+/// immediately; otherwise the caller's own fresh search must run.
+/// `log_hit`/`log_semantic_hit` stay per-caller because `tracing`
+/// field names are macro-time identifiers, not runtime strings, so
+/// `context = %name` and `contexts = %targets.join(",")` cannot share
+/// one call; `on_hit` likewise stays per-caller because only
+/// `search_passages` carries a `taguru.passage_search` span to
+/// attribute a cache outcome onto — `cross_search_passages` has none
+/// today (found while extracting this block, not fixed here: giving
+/// cross searches their own span is a bigger design question than
+/// this duplication cleanup covers).
+#[allow(clippy::too_many_arguments)]
+fn passage_search_cache_probe(
+    state: &AppState,
+    key: Option<&RetrievalKey>,
+    key_params: &PassageKeyParams,
+    query: &str,
+    deadline: Deadline,
+    started_at: Instant,
+    log_hit: impl FnOnce(&CachedRetrieval),
+    log_semantic_hit: impl FnOnce(&SemanticServe),
+    on_hit: impl FnOnce(CacheProbeHit),
+) -> CacheProbe {
+    let Some(key) = key else {
+        return CacheProbe::Fresh(None);
+    };
+    if let Some(found) = state.retrieval_lookup(key) {
+        replay_cached_search(state, key, &found);
+        if search_log_enabled() {
+            log_hit(&found);
+        }
+        on_hit(CacheProbeHit::Exact);
+        return CacheProbe::Answered(ok(found.payload.as_ref(), started_at));
+    }
+    // The semantic tier (see `semantic_retrieval`): the bucket is the
+    // key params with the query stripped, so equivalence can only pair
+    // requests that agree on everything else — the filter included.
+    // Blocking section — the probe may pay the query embedding the
+    // fresh search below would otherwise pay (same cue cache, one
+    // provider call either way).
+    if let Some(sans_query) = key_params.sans_query()
+        && let Some(probe) = tokio::task::block_in_place(|| {
+            state.semantic_retrieval(key, &sans_query, query, deadline)
+        })
+    {
+        if let Some(served) = probe.served {
+            replay_cached_search(state, key, &served.value);
+            if search_log_enabled() {
+                log_semantic_hit(&served);
+            }
+            on_hit(CacheProbeHit::Semantic);
+            return CacheProbe::Answered(ok(served.value.payload.as_ref(), started_at));
+        }
+        return CacheProbe::Fresh(Some(SemanticFill {
+            params: sans_query,
+            query: query.to_string(),
+            embedding: probe.embedding,
+        }));
+    }
+    CacheProbe::Fresh(None)
+}
+
 pub async fn search_passages(
     State(state): State<AppState>,
     AppPath(name): AppPath<String>,
@@ -841,75 +927,64 @@ pub async fn search_passages(
         std::slice::from_ref(&name),
         key_params.exact(),
     );
-    let mut semantic_fill = None;
-    if let Some(key) = &key {
-        if let Some(found) = state.retrieval_lookup(key) {
-            replay_cached_search(&state, key, &found);
-            if search_log_enabled() {
-                tracing::info!(
-                    target: "taguru::search",
-                    context = %name,
-                    op = "search_passages",
-                    cue = %request.query,
-                    hits = found.log_hits,
-                    top_score = f64::from(found.log_top_score),
-                    cached = true,
-                    "search",
-                );
+    let semantic_fill = match passage_search_cache_probe(
+        &state,
+        key.as_ref(),
+        &key_params,
+        &request.query,
+        deadline,
+        started_at,
+        |found| {
+            tracing::info!(
+                target: "taguru::search",
+                context = %name,
+                op = "search_passages",
+                cue = %request.query,
+                hits = found.log_hits,
+                top_score = f64::from(found.log_top_score),
+                cached = true,
+                "search",
+            );
+        },
+        |served| {
+            tracing::info!(
+                target: "taguru::search",
+                context = %name,
+                op = "search_passages",
+                cue = %request.query,
+                hits = served.value.log_hits,
+                top_score = f64::from(served.value.log_top_score),
+                cached = true,
+                similarity = f64::from(served.similarity),
+                matched = %served.canonical,
+                "search",
+            );
+        },
+        |hit| match hit {
+            // A hit answers with THIS span and no lane children — that
+            // zero-duration childless span is the signal (ADR 0008
+            // §6.1).
+            CacheProbeHit::Exact => {
+                span.record("taguru.cache.result", "hit");
+                tracing::info!(taguru.reason = "retrieval_cache_hit", "taguru.cache");
             }
-            // A hit answers with THIS span and no lane children —
-            // that zero-duration childless span is the signal (ADR
-            // 0008 §6.1).
-            span.record("taguru.cache.result", "hit");
-            tracing::info!(taguru.reason = "retrieval_cache_hit", "taguru.cache");
-            return ok(found.payload.as_ref(), started_at);
-        }
-        // The semantic tier (see `semantic_retrieval`): the bucket is
-        // the key params with the query stripped, so equivalence can
-        // only pair requests that agree on everything else — the
-        // filter included. Blocking section — the probe may pay the
-        // query embedding the search below would otherwise pay (same
-        // cue cache, one provider call either way).
-        if let Some(sans_query) = key_params.sans_query()
-            && let Some(probe) = tokio::task::block_in_place(|| {
-                state.semantic_retrieval(key, &sans_query, &request.query, deadline)
-            })
-        {
-            if let Some(served) = probe.served {
-                replay_cached_search(&state, key, &served.value);
-                if search_log_enabled() {
-                    tracing::info!(
-                        target: "taguru::search",
-                        context = %name,
-                        op = "search_passages",
-                        cue = %request.query,
-                        hits = served.value.log_hits,
-                        top_score = f64::from(served.value.log_top_score),
-                        cached = true,
-                        similarity = f64::from(served.similarity),
-                        matched = %served.canonical,
-                        "search",
-                    );
-                }
-                // The exact tier missed (we are past that early
-                // return) but the semantic tier served — the two
-                // outcomes are independent attributes on purpose
-                // (ADR 0008 §6). `semantic_retrieval` already emitted
-                // its own `taguru.cache` event for the outcome.
+            // The exact tier missed (we are past that early return)
+            // but the semantic tier served — the two outcomes are
+            // independent attributes on purpose (ADR 0008 §6).
+            // `semantic_retrieval` already emitted its own
+            // `taguru.cache` event for the outcome.
+            CacheProbeHit::Semantic => {
                 span.record("taguru.cache.result", "miss");
                 span.record(
                     "taguru.cache.semantic",
                     crate::metrics::SemanticCacheOutcome::Hit.as_str(),
                 );
-                return ok(served.value.payload.as_ref(), started_at);
             }
-            semantic_fill = Some(SemanticFill {
-                params: sans_query,
-                query: request.query.clone(),
-                embedding: probe.embedding,
-            });
-        }
-    }
+        },
+    ) {
+        CacheProbe::Answered(response) => return response,
+        CacheProbe::Fresh(fill) => fill,
+    };
     // Off the async worker: a residency's first search tokenizes the
     // whole corpus into the index (the audit endpoints' rule).
     let outcome = tokio::task::block_in_place(|| {
@@ -1540,59 +1615,51 @@ pub async fn cross_search_passages(
         &targets,
         key_params.exact(),
     );
-    let mut semantic_fill = None;
-    if let Some(key) = &key {
-        if let Some(found) = state.retrieval_lookup(key) {
-            replay_cached_search(&state, key, &found);
-            if search_log_enabled() {
-                tracing::info!(
-                    target: "taguru::search",
-                    contexts = %targets.join(","),
-                    op = "search_passages",
-                    cue = %request.query,
-                    hits = found.log_hits,
-                    top_score = f64::from(found.log_top_score),
-                    cached = true,
-                    "search",
-                );
-            }
-            return ok(found.payload.as_ref(), started_at);
-        }
-        // The semantic tier, keyed on the resolved target list like
-        // the exact key above. A side effect worth having: the probe
-        // warms the cue cache before the fan-out, so a cold cross
-        // search no longer has up to `permits` targets each paying
-        // for the same query embedding.
-        if let Some(sans_query) = key_params.sans_query()
-            && let Some(probe) = tokio::task::block_in_place(|| {
-                state.semantic_retrieval(key, &sans_query, &request.query, deadline)
-            })
-        {
-            if let Some(served) = probe.served {
-                replay_cached_search(&state, key, &served.value);
-                if search_log_enabled() {
-                    tracing::info!(
-                        target: "taguru::search",
-                        contexts = %targets.join(","),
-                        op = "search_passages",
-                        cue = %request.query,
-                        hits = served.value.log_hits,
-                        top_score = f64::from(served.value.log_top_score),
-                        cached = true,
-                        similarity = f64::from(served.similarity),
-                        matched = %served.canonical,
-                        "search",
-                    );
-                }
-                return ok(served.value.payload.as_ref(), started_at);
-            }
-            semantic_fill = Some(SemanticFill {
-                params: sans_query,
-                query: request.query.clone(),
-                embedding: probe.embedding,
-            });
-        }
-    }
+    // The semantic tier is keyed on the resolved target list like the
+    // exact key above. A side effect worth having: the probe warms the
+    // cue cache before the fan-out, so a cold cross search no longer
+    // has up to `permits` targets each paying for the same query
+    // embedding.
+    let semantic_fill = match passage_search_cache_probe(
+        &state,
+        key.as_ref(),
+        &key_params,
+        &request.query,
+        deadline,
+        started_at,
+        |found| {
+            tracing::info!(
+                target: "taguru::search",
+                contexts = %targets.join(","),
+                op = "search_passages",
+                cue = %request.query,
+                hits = found.log_hits,
+                top_score = f64::from(found.log_top_score),
+                cached = true,
+                "search",
+            );
+        },
+        |served| {
+            tracing::info!(
+                target: "taguru::search",
+                contexts = %targets.join(","),
+                op = "search_passages",
+                cue = %request.query,
+                hits = served.value.log_hits,
+                top_score = f64::from(served.value.log_top_score),
+                cached = true,
+                similarity = f64::from(served.similarity),
+                matched = %served.canonical,
+                "search",
+            );
+        },
+        // No span to record a cache outcome onto (issue #605): unlike
+        // `search_passages`, this handler carries none today.
+        |_hit| {},
+    ) {
+        CacheProbe::Answered(response) => return response,
+        CacheProbe::Fresh(fill) => fill,
+    };
     // Each residency's first search tokenizes its whole corpus, so the
     // fetch belongs on the blocking pool — bounded and concurrent, the
     // same `bounded_parallel_map` shape as `cross_matches`'s gather.
