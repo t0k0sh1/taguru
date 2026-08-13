@@ -127,6 +127,27 @@ mod tests {
         }
     }
 
+    /// `Display` must actually render each variant's message, not
+    /// just carry the right data — `Fenced` names the generation,
+    /// `Io`/`Permanent` both delegate to the wrapped `io::Error`'s own
+    /// text.
+    #[test]
+    fn display_renders_each_variant() {
+        let fenced = ShipError::Fenced {
+            newer_generation: 7,
+        };
+        assert!(fenced.to_string().contains("generation 7"), "{fenced}");
+
+        let io = ShipError::Io(io::Error::other("transient boom"));
+        assert!(io.to_string().contains("transient boom"), "{io}");
+
+        let permanent = ShipError::Permanent(io::Error::other("permanent boom"));
+        assert!(
+            permanent.to_string().contains("permanent boom"),
+            "{permanent}"
+        );
+    }
+
     /// Everything else stays `Io` — the safe, transient-by-default
     /// assumption this classifier has always made, unchanged by this
     /// fix.

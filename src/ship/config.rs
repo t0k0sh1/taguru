@@ -158,15 +158,7 @@ mod tests {
     /// deterministic without real credentials or a live endpoint.
     #[test]
     fn a_rejected_cloud_builder_config_is_other() {
-        // SAFETY: test-only, and this test does not run concurrently
-        // with anything that reads these same Azure env vars.
-        for key in [
-            "AZURE_STORAGE_ACCOUNT_NAME",
-            "AZURE_STORAGE_ACCOUNT_KEY",
-            "AZURE_STORAGE_CONNECTION_STRING",
-        ] {
-            unsafe { std::env::remove_var(key) };
-        }
+        let _env = crate::ship::test_support::ScrubbedAzureEnv::new();
         let error = open_store("az://some-bucket").unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::Other, "{error}");
     }

@@ -77,55 +77,37 @@ pub(crate) fn run(args: &[String]) -> i32 {
         return usage("restore needs a bucket URL — pass one, or set TAGURU_REPLICATE_URL");
     };
 
-    // Refuse a target that already holds data: a restore layered over
-    // an existing directory would interleave two histories — exactly
-    // the corruption the fence exists to prevent bucket-side. A lone
-    // `.taguru.lock` does not count as data — it is the empty leftover
-    // of the lock below (an earlier restore that died before writing
-    // anything), and the lock file itself never ships.
-    match std::fs::read_dir(&out) {
-        Ok(entries) => {
-            let occupied = entries
-                .filter_map(|entry| entry.ok())
-                .any(|entry| entry.file_name() != ".taguru.lock");
-            if occupied {
-                eprintln!(
-                    "taguru: restore: {} is not empty — restore refuses to mix histories; \
-                     point --out at a new or empty directory",
-                    out.display()
-                );
-                return 1;
-            }
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            if let Err(error) = std::fs::create_dir_all(&out) {
-                eprintln!("taguru: restore: cannot create {}: {error}", out.display());
-                return 1;
-            }
-            // Every file this restore writes below fsyncs its own
-            // directory (`write_atomic`'s rename), but that directory's
-            // OWN entry in ITS parent was never synced — without this,
-            // "restored generation N" printed on success could still
-            // have power loss drop `out`'s directory entry wholesale,
-            // even though every file inside it landed durably.
-            if let Err(error) = crate::storage::fsync_parent_dir(&out) {
-                eprintln!(
-                    "taguru: restore: cannot durably create {}: {error}",
-                    out.display()
-                );
-                return 1;
-            }
-        }
-        Err(error) => {
-            eprintln!("taguru: restore: cannot read {}: {error}", out.display());
-            return 1;
-        }
+    // The directory must exist before the lock below can create its
+    // file inside it — idempotent (a no-op if `out` already exists),
+    // so no separate exists/missing branch is needed.
+    if let Err(error) = std::fs::create_dir_all(&out) {
+        eprintln!("taguru: restore: cannot create {}: {error}", out.display());
+        return 1;
     }
+    // Every file this restore writes below fsyncs its own directory
+    // (`write_atomic`'s rename), but that directory's OWN entry in ITS
+    // parent was never synced — without this, "restored generation N"
+    // printed on success could still have power loss drop `out`'s
+    // directory entry wholesale, even though every file inside it
+    // landed durably. Harmless (and cheap) to redo when `out` already
+    // existed.
+    if let Err(error) = crate::storage::fsync_parent_dir(&out) {
+        eprintln!(
+            "taguru: restore: cannot durably create {}: {error}",
+            out.display()
+        );
+        return 1;
+    }
+
     // Hold the same advisory lock every writer takes, for the whole
-    // materialization: a `taguru serve` pointed at this directory
-    // mid-restore would otherwise boot over a half-written family and
-    // cache the holes as truth. Import already refuses to run beside a
-    // live server through this exact lock; restore is a writer too.
+    // materialization — acquired BEFORE the occupied-directory check
+    // below, not after: `lock_data_dir` fails immediately (never
+    // blocks) if another `taguru` process already holds it, so
+    // acquiring it first turns a race between two concurrent restores
+    // (or a restore and a live `serve`/`import`) against the same
+    // directory into an immediate, clear refusal for the loser instead
+    // of both passing the occupied check and one of them later wiping
+    // out the other's in-progress files via the failure cleanup below.
     let _dir_lock = match crate::storage::lock_data_dir(&out) {
         Ok(lock) => lock,
         Err(error) => {
@@ -133,6 +115,33 @@ pub(crate) fn run(args: &[String]) -> i32 {
             return 1;
         }
     };
+
+    // Refuse a target that already holds data: a restore layered onto
+    // an existing directory would interleave two histories — exactly
+    // the corruption the fence exists to prevent bucket-side. A lone
+    // `.taguru.lock` does not count as data — it is the empty leftover
+    // of the lock just taken (an earlier restore that died before
+    // writing anything), and the lock file itself never ships. Reading
+    // this AFTER the lock, not before, is what makes it safe: nothing
+    // else can be concurrently writing into `out` while this decides
+    // whether it is empty.
+    let occupied = match std::fs::read_dir(&out) {
+        Ok(entries) => entries
+            .filter_map(|entry| entry.ok())
+            .any(|entry| entry.file_name() != ".taguru.lock"),
+        Err(error) => {
+            eprintln!("taguru: restore: cannot read {}: {error}", out.display());
+            return 1;
+        }
+    };
+    if occupied {
+        eprintln!(
+            "taguru: restore: {} is not empty — restore refuses to mix histories; \
+             point --out at a new or empty directory",
+            out.display()
+        );
+        return 1;
+    }
 
     let (store, root) = match open_store(&url) {
         Ok(opened) => opened,

@@ -103,13 +103,27 @@ pub(crate) fn spawn(
                     // so it gets the same audit-log treatment `Fenced`
                     // gets, minus the permanent latch.
                     state.metrics().record_replication_permanent_error();
+                    // The ordinary log gets the store's own error text
+                    // (may name a path, a bucket, a rejected config
+                    // value); the audit line — like `Fenced`'s above —
+                    // stays fixed and structured, never interpolating
+                    // that external text, so audit output (often
+                    // shipped to a different, more broadly-read sink)
+                    // never carries whatever a cloud SDK chose to put
+                    // in an error message.
+                    tracing::warn!(
+                        %error,
+                        "replication cycle failed with a likely-permanent store error; \
+                         will keep retrying"
+                    );
                     tracing::error!(
                         target: "taguru::audit",
-                        %error,
+                        kind = "permanent_store",
                         "replication cycle failed with a likely-permanent store error \
                          (credentials, an unsupported operation, or invalid config) — \
                          will keep retrying, but this will not self-heal without \
-                         operator action",
+                         operator action; see the preceding warning for the store's own \
+                         error text",
                     );
                 }
             }

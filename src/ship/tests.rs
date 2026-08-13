@@ -882,15 +882,7 @@ fn run_maps_a_usage_mistake_and_a_rejected_store_to_different_exit_codes() {
     ]);
     assert_eq!(usage_code, 2, "a malformed URL must be a usage error");
 
-    // SAFETY: test-only, and this test does not run concurrently with
-    // anything that reads these same Azure env vars.
-    for key in [
-        "AZURE_STORAGE_ACCOUNT_NAME",
-        "AZURE_STORAGE_ACCOUNT_KEY",
-        "AZURE_STORAGE_CONNECTION_STRING",
-    ] {
-        unsafe { std::env::remove_var(key) };
-    }
+    let _env = crate::ship::test_support::ScrubbedAzureEnv::new();
     let rejected_code = run(&[
         "--out".to_string(),
         out.display().to_string(),

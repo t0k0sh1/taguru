@@ -368,6 +368,82 @@ fn a_restore_that_fails_partway_cleans_up_so_a_retry_succeeds() {
     }
 }
 
+/// The concurrency counterpart (a CodeRabbit review finding on #616's
+/// PR): a restore racing an ACTIVE writer for the same `--out` must be
+/// refused immediately by the directory lock, before it ever looks at
+/// what is in the directory — never allowed to treat the active
+/// writer's in-progress files as its own leftover partial state and
+/// delete them. Reordering the lock ahead of the occupied-directory
+/// check (rather than after) is what this test pins: with the lock
+/// taken first, a concurrent restore's `lock_data_dir` call fails
+/// outright, so it can never reach the cleanup path at all.
+#[test]
+fn a_restore_racing_an_active_writer_is_refused_and_leaves_its_data_intact() {
+    let bucket = scratch("racing-restore-bucket");
+    let source = Server::start_with_env(
+        "repl-racing-source",
+        &[
+            ("TAGURU_REPLICATE_URL", &bucket_url(&bucket)),
+            ("TAGURU_REPLICATE_INTERVAL_MS", "100"),
+        ],
+    );
+    source.ok("PUT", "/contexts/sake", Some(json!({})));
+    wait_for("the baseline to complete", || {
+        bucket
+            .join("gen-00000000000000000001")
+            .join("complete")
+            .exists()
+    });
+    let source_data_dir = source.stop_gracefully();
+
+    // A SEPARATE, unrelated writer already occupies the restore
+    // target directory — boots fresh there and holds it for the whole
+    // test, the same flock a real concurrent `taguru serve` or
+    // `taguru restore` would hold.
+    let target = scratch("racing-restore-target");
+    let writer = Server::start_on("repl-racing-target", target.clone());
+    writer.ok(
+        "PUT",
+        "/contexts/precious",
+        Some(json!({"description": "must survive"})),
+    );
+
+    // The restore must be refused by the lock, not by "not empty" —
+    // proving it never got far enough to read the directory's
+    // contents, let alone decide to clean any of them up.
+    let racing = run_cli(
+        &[
+            "restore",
+            "--out",
+            &target.display().to_string(),
+            &bucket_url(&bucket),
+        ],
+        &[],
+    );
+    assert!(
+        !racing.status.success(),
+        "a restore racing an active writer for the same directory must be refused"
+    );
+    let stderr = String::from_utf8_lossy(&racing.stderr);
+    assert!(
+        stderr.contains("held by another taguru process"),
+        "{stderr}"
+    );
+
+    // The active writer's own data is untouched — provable while it
+    // is still running (the same process, the same lock, the whole
+    // time): still there, still answering, not wiped by the racing
+    // restore's cleanup path.
+    let (status, body) = writer.call("GET", "/contexts/precious", None);
+    assert_eq!(status, 200, "{body}");
+
+    let target_data_dir = writer.stop_gracefully();
+    assert_eq!(target_data_dir, target);
+    for dir in [bucket, source_data_dir, target] {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
 /// A pre-manifest bucket (an EMPTY `complete` marker) whose
 /// generation still carries wal segments must restore the tail they
 /// hold, through the listing-driven compatibility path. No other test

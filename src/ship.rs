@@ -172,3 +172,62 @@ use restore::{parse_segment_name, restore_into};
 #[path = "ship/tests.rs"]
 #[cfg(test)]
 mod tests;
+
+/// Shared by `config::tests` and `ship::tests`: both scrub the Azure
+/// credential env vars to force a deterministic, credential-free
+/// builder failure, and env vars are process-global — `cargo test`
+/// runs tests in parallel within one process, so both call sites must
+/// serialize on the same lock and restore exactly what they found,
+/// even if the test panics mid-body.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use parking_lot::Mutex;
+
+    static AZURE_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    const AZURE_ENV_KEYS: [&str; 3] = [
+        "AZURE_STORAGE_ACCOUNT_NAME",
+        "AZURE_STORAGE_ACCOUNT_KEY",
+        "AZURE_STORAGE_CONNECTION_STRING",
+    ];
+
+    /// Holds the lock and the pre-scrub values for its lifetime;
+    /// `Drop` puts every key back exactly as found (present or
+    /// absent), so a later test never inherits this one's scrub.
+    pub(crate) struct ScrubbedAzureEnv {
+        _lock: parking_lot::MutexGuard<'static, ()>,
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl ScrubbedAzureEnv {
+        pub(crate) fn new() -> Self {
+            let lock = AZURE_ENV_LOCK.lock();
+            let saved = AZURE_ENV_KEYS
+                .iter()
+                .map(|&key| (key, std::env::var(key).ok()))
+                .collect();
+            for key in AZURE_ENV_KEYS {
+                // SAFETY: serialized by `AZURE_ENV_LOCK` — no other
+                // thread reads or writes these keys while this guard
+                // (held for the lock's lifetime, via `_lock`) exists.
+                unsafe { std::env::remove_var(key) };
+            }
+            Self { _lock: lock, saved }
+        }
+    }
+
+    impl Drop for ScrubbedAzureEnv {
+        fn drop(&mut self) {
+            for (key, value) in &self.saved {
+                // SAFETY: same lock, still held (`_lock` drops after
+                // this body via field declaration order).
+                unsafe {
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
+    }
+}

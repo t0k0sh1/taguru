@@ -1107,9 +1107,18 @@ mod tests {
             elapsed >= delay / 2,
             "shutdown() must block for the in-flight slow poll, not return immediately: {elapsed:?}"
         );
+        // Delay-relative, not a fixed wall-clock ceiling: one poll can
+        // touch several `get_opts` calls in sequence (the complete
+        // marker's `head`, the manifest `get`, the shared-files pass,
+        // one `ensure_context` read), each paying `delay` under
+        // `SlowStore`, plus whatever scheduling slack a loaded CI
+        // runner adds — a generous multiple of `delay` bounds that
+        // without hard-coding a number unrelated to the fixture.
+        let ceiling = delay * 20;
         assert!(
-            elapsed < Duration::from_secs(10),
-            "shutdown() must not block far longer than the one slow poll it is waiting on: {elapsed:?}"
+            elapsed < ceiling,
+            "shutdown() must not block far longer than the slow polls it is waiting on: \
+             {elapsed:?} (ceiling {ceiling:?})"
         );
 
         for dir in [bucket, target] {
