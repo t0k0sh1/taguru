@@ -735,13 +735,13 @@ mod tests {
 
     // ------- the `taguru.cache` span event.
 
-    /// Captures only the `taguru.reason` field of every event fired
-    /// while it's the default subscriber — enough to pin
+    /// Captures every event's `(message, taguru.reason)` pair while
+    /// it's the default subscriber — enough to pin
     /// [`record_semantic_cache_span_event`] without pulling in the
     /// OTLP export pipeline `tests/http_api/tracing_pipeline.rs` uses
     /// for the composed-retrieve tree.
     #[derive(Clone)]
-    struct ReasonRecorder(Arc<std::sync::Mutex<Vec<String>>>);
+    struct ReasonRecorder(Arc<std::sync::Mutex<Vec<(String, String)>>>);
 
     impl tracing::Subscriber for ReasonRecorder {
         fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
@@ -753,22 +753,32 @@ mod tests {
         fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
         fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
         fn event(&self, event: &tracing::Event<'_>) {
-            struct ReasonField(Option<String>);
-            impl tracing::field::Visit for ReasonField {
+            // Captures both fields, not just `taguru.reason` (CodeRabbit,
+            // PR #629): `"taguru.cache"` is the macro's message literal,
+            // not the event's `Metadata::name()` — a regression that
+            // renamed it would pass a reason-only check.
+            #[derive(Default)]
+            struct EventFields {
+                message: Option<String>,
+                reason: Option<String>,
+            }
+            impl tracing::field::Visit for EventFields {
                 fn record_debug(
                     &mut self,
                     field: &tracing::field::Field,
                     value: &dyn std::fmt::Debug,
                 ) {
-                    if field.name() == "taguru.reason" {
-                        self.0 = Some(format!("{value:?}"));
+                    match field.name() {
+                        "message" => self.message = Some(format!("{value:?}")),
+                        "taguru.reason" => self.reason = Some(format!("{value:?}")),
+                        _ => {}
                     }
                 }
             }
-            let mut visitor = ReasonField(None);
+            let mut visitor = EventFields::default();
             event.record(&mut visitor);
-            if let Some(reason) = visitor.0 {
-                self.0.lock().unwrap().push(reason);
+            if let (Some(message), Some(reason)) = (visitor.message, visitor.reason) {
+                self.0.lock().unwrap().push((message, reason));
             }
         }
         fn enter(&self, _: &tracing::span::Id) {}
@@ -814,7 +824,10 @@ mod tests {
         assert!(probe.is_some(), "an empty cache still probes as a Miss");
         assert_eq!(
             events.lock().unwrap().as_slice(),
-            ["semantic_cache_miss"],
+            [(
+                "taguru.cache".to_string(),
+                "semantic_cache_miss".to_string()
+            )],
             "the Miss outcome must reach a taguru.cache span event"
         );
     }
