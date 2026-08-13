@@ -284,15 +284,19 @@ pub(crate) fn spawn(
                     }
                 }
             }));
-            if let Some(message) = message {
+            if message.is_some() {
                 // Not "poll failed; will retry" — there is no retry
                 // left, the thread is unwinding — so this reuses the
                 // poll-error counter (the closest existing alertable
                 // series) at error level, distinguishable from an
-                // ordinary poll failure's warn.
+                // ordinary poll failure's warn. The payload itself is
+                // never logged: the guard spans the whole tailer body,
+                // so an arbitrary panic!()/unwrap() anywhere under it
+                // could carry user data, credentials, or another
+                // high-cardinality value — only the fixed message goes
+                // out.
                 state_on_panic.metrics().record_replica_poll(false);
                 tracing::error!(
-                    %message,
                     "replica tailer thread panicked and will not resume tailing; \
                      /metrics will stop advancing until the process restarts"
                 );
@@ -407,11 +411,21 @@ impl Tailer {
             return Ok(());
         };
 
-        let switched = self.hydrator.generation() != Some(generation);
+        // Not `self.hydrator.generation() != Some(generation)`: retarget()
+        // below commits the new generation to the hydrator before this
+        // poll's own hydration can fail, so a retry after a failed switch
+        // would see its own prior attempt's already-committed target and
+        // wrongly compute `false` — silently skipping the lane reset and
+        // replication-record write further down on the very poll meant to
+        // finish that switch. `manifest_stamp`'s generation only advances
+        // once a poll fully succeeds, so it stays a reliable "last fully
+        // reconciled generation" across any number of failed retries.
+        let previous_generation = self.manifest_stamp.map(|(generation, _)| generation);
+        let switched = previous_generation != Some(generation);
         if switched {
             tracing::info!(
                 generation,
-                from = self.hydrator.generation(),
+                from = previous_generation,
                 "the bucket lineage moved to a new generation; re-verifying the cache \
                  against it"
             );
@@ -1164,6 +1178,143 @@ mod tests {
         assert!(
             after.contains("taguru_replica_applied_seq{context=\"ctx_a\",lane=\"graph\"} 1"),
             "the previous lineage's lag row must survive a failed switch, not go blank: {after}"
+        );
+
+        for dir in [bucket, writer, target] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    /// #634 review: `switched` must stay true across a failed-then-
+    /// retried generation switch, not just for the poll where the
+    /// failure happens — `Hydrator::retarget` commits the new
+    /// generation before `hydrate_shared` can fail, so a `switched`
+    /// computed from the hydrator's OWN generation sees no switch on
+    /// the retry (it already reads the new generation from the earlier
+    /// failed attempt) and skips `reset_replica_lanes`, leaving a lane
+    /// the new generation's manifest no longer carries stuck at its
+    /// stale value forever instead of being dropped on the poll that
+    /// actually finishes the switch.
+    #[tokio::test]
+    async fn a_lane_absent_from_the_new_generation_is_dropped_on_a_switch_that_only_succeeds_on_retry()
+     {
+        let bucket = scratch("switch-retry-bucket");
+        let writer = scratch("switch-retry-writer");
+        std::fs::write(writer.join("ctx_a.ctx"), b"image-v1").unwrap();
+        std::fs::write(
+            writer.join("ctx_a.meta.json"),
+            br#"{"description":"a","pinned":false}"#,
+        )
+        .unwrap();
+        wal::append_batch(&writer.join("ctx_a.wal.jsonl"), 1, &[associate("a")]).unwrap();
+        std::fs::write(writer.join("ctx_b.ctx"), b"image-v1").unwrap();
+        std::fs::write(
+            writer.join("ctx_b.meta.json"),
+            br#"{"description":"b","pinned":false}"#,
+        )
+        .unwrap();
+        wal::append_batch(&writer.join("ctx_b.wal.jsonl"), 1, &[associate("b")]).unwrap();
+        let writer_state = AppState::boot(writer.clone(), 64 * 1024 * 1024, None).unwrap();
+        let mut shipper = Shipper::claim(
+            local_store(&bucket),
+            StorePath::default(),
+            url_of("switch-retry"),
+            writer.clone(),
+            Arc::new(ShipProgress::new(crate::registry::DEFAULT_WAL_MAX_BYTES)),
+            writer_state,
+            None,
+        )
+        .await
+        .unwrap();
+        shipper.cycle().await.unwrap();
+        shipper.retire_generation().await;
+        drop(shipper);
+
+        let url = url_of("switch-retry");
+        let store = local_store(&bucket);
+        let target = scratch("switch-retry-target");
+        let hydrator =
+            crate::hydrate::prepare_replica(&store, &StorePath::default(), &url, &target)
+                .await
+                .expect("hydrates");
+        let state = AppState::boot(target.clone(), 64 * 1024 * 1024, None).unwrap();
+        state.metrics().set_replica_mode();
+        let mut tailer = tailer_for(
+            &bucket,
+            url.clone(),
+            target.clone(),
+            state.clone(),
+            hydrator,
+        );
+        tailer.poll_once().await.expect("the first manifest lands");
+        let before = scrape(&state);
+        assert!(
+            before.contains("taguru_replica_applied_seq{context=\"ctx_b\",lane=\"graph\"} 1"),
+            "{before}"
+        );
+
+        // Generation 2 drops only ctx_b's graph LANE — ctx_b's `.ctx`
+        // and `.meta.json` survive untouched, so the context itself
+        // does not vanish (retarget's stale/vanished bookkeeping is
+        // stem-level, driven by the published family files, and never
+        // sees this at all — only `reset_replica_lanes` can clear the
+        // row a lane like this leaves behind). ctx_a's meta changes so
+        // `hydrate_shared` cannot skip the download via a byte-identical
+        // local copy (which would make tearing the remote object below
+        // invisible).
+        std::fs::remove_file(writer.join("ctx_b.wal.jsonl")).unwrap();
+        std::fs::write(
+            writer.join("ctx_a.meta.json"),
+            br#"{"description":"a2","pinned":false}"#,
+        )
+        .unwrap();
+        let writer_state = AppState::boot(writer.clone(), 64 * 1024 * 1024, None).unwrap();
+        let mut second_shipper = Shipper::claim(
+            local_store(&bucket),
+            StorePath::default(),
+            url.clone(),
+            writer.clone(),
+            Arc::new(ShipProgress::new(crate::registry::DEFAULT_WAL_MAX_BYTES)),
+            writer_state,
+            None,
+        )
+        .await
+        .unwrap();
+        second_shipper.cycle().await.unwrap();
+
+        // Tear generation 2's published meta object so the shared pass
+        // fails on the FIRST attempt to switch — `retarget()` has
+        // already committed the hydrator to generation 2 by the time
+        // this error surfaces.
+        let meta_object = bucket
+            .join("gen-00000000000000000002")
+            .join("files")
+            .join("ctx_a.meta.json");
+        std::fs::rename(&meta_object, meta_object.with_extension("torn-aside")).unwrap();
+        tailer
+            .poll_once()
+            .await
+            .expect_err("a torn shared object on the new generation fails the poll");
+
+        // Heal the object and retry: this poll must still recognize the
+        // switch and clear ctx_b's now-vanished lane row, even though
+        // the hydrator's own generation already reads 2 from the failed
+        // attempt above.
+        std::fs::rename(meta_object.with_extension("torn-aside"), &meta_object).unwrap();
+        tailer
+            .poll_once()
+            .await
+            .expect("the retried switch to generation 2 lands");
+
+        let after = scrape(&state);
+        assert!(
+            !after.contains("taguru_replica_applied_seq{context=\"ctx_b\""),
+            "a lane the new generation no longer carries must be dropped on the poll \
+             that actually completes the switch, not left stale forever: {after}"
+        );
+        assert!(
+            after.contains("taguru_replica_applied_seq{context=\"ctx_a\",lane=\"graph\"}"),
+            "{after}"
         );
 
         for dir in [bucket, writer, target] {

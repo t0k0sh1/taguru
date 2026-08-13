@@ -625,6 +625,10 @@ pub(crate) struct VetoUndo(Option<StemState>);
 /// successful poll provisions the target.
 #[derive(Debug, Clone)]
 struct Target {
+    // Read back only by the test-only `Hydrator::generation()` accessor —
+    // production code tracks the last *fully reconciled* generation via
+    // `Tailer::manifest_stamp` instead (see that accessor's doc comment).
+    #[allow(dead_code)]
     generation: u64,
     root: StorePath,
     manifest: Manifest,
@@ -727,7 +731,13 @@ impl Hydrator {
     }
 
     /// The generation currently being materialized (`None` until a
-    /// degraded replica boot first reaches its bucket).
+    /// degraded replica boot first reaches its bucket). This is
+    /// `retarget`'s pre-commit, not a completed hydration — a caller
+    /// deciding whether a generation switch has been fully reconciled
+    /// wants its own "last poll that finished cleanly" state instead
+    /// (`Tailer::manifest_stamp`), since this can already show the new
+    /// generation while a first attempt at it is still failing.
+    #[cfg(test)]
     pub(crate) fn generation(&self) -> Option<u64> {
         let inner = self.inner.lock();
         inner.target.as_ref().map(|target| target.generation)
