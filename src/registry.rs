@@ -127,7 +127,7 @@ pub(crate) use paths::{
 };
 use paths::{rename_markers_targeting, wal_lane_bytes, write_rename_marker};
 pub(crate) use retrieval_cache::{CachedRetrieval, RetrievalKey};
-pub(crate) use semantic_cache::SemanticFill;
+pub(crate) use semantic_cache::{SemanticFill, SemanticServe};
 pub(crate) use terms::{passage_terms, spelled_passage_terms};
 use wal_replay::{applied_count, apply_in_order, replay_wal_guarded};
 // Unused-looking from this file alone: hoisted here so `core_tests.rs`
