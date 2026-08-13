@@ -1,4 +1,4 @@
-use super::{FNV_OFFSET, FNV_PRIME};
+use crate::hash::{FNV1A_OFFSET, fnv1a_fold};
 
 /// Where the term walkers deliver their stream. The index build wants
 /// bare hashes; the search-explain path wants the spelling each hash
@@ -32,8 +32,7 @@ impl TermSink for HashSink {
         self.0.push(hash);
     }
 
-    fn lone(&mut self, hash: u64, ch: char) {
-        let _ = ch;
+    fn lone(&mut self, hash: u64, _: char) {
         self.0.push(hash);
     }
 }
@@ -148,12 +147,14 @@ fn camel_pieces(run: &[char], sink: &mut impl TermSink) {
     }
     starts.push(run.len());
     for window in starts.windows(2) {
-        let mut word = FNV_OFFSET;
+        let mut word = FNV1A_OFFSET;
         for ch in &run[window[0]..window[1]] {
             let ch = ch.to_ascii_lowercase();
             sink.word_char(ch);
-            word ^= ch as u64;
-            word = word.wrapping_mul(FNV_PRIME);
+            // ASCII-only per this run's own construction, so the byte
+            // cast is lossless (issue #605: was a hand-unrolled
+            // duplicate of this same fold).
+            word = fnv1a_fold(word, [ch as u8]);
         }
         sink.word(word | 1 << 63);
     }
@@ -178,7 +179,7 @@ pub(super) fn text_terms(text: &str) -> Vec<u64> {
 /// at spaces and punctuation, and a script switch breaks the run too,
 /// so terms never straddle "第10篇"-style boundaries.
 fn walk_text_terms(text: &str, sink: &mut impl TermSink) {
-    let mut word = FNV_OFFSET; // running FNV-1a over the current ASCII word
+    let mut word = FNV1A_OFFSET; // running FNV-1a over the current ASCII word
     let mut in_word = false;
     let mut run: Option<char> = None; // previous char of the current non-ASCII run
     let mut run_len = 0usize;
@@ -193,13 +194,15 @@ fn walk_text_terms(text: &str, sink: &mut impl TermSink) {
         if ch.is_ascii_alphanumeric() {
             flush_run(sink, &mut run, &mut run_len);
             sink.word_char(ch);
-            word ^= ch as u64;
-            word = word.wrapping_mul(FNV_PRIME);
+            // ASCII-only (the `is_ascii_alphanumeric` guard above), so
+            // the byte cast is lossless (issue #605: was a
+            // hand-unrolled duplicate of this same fold).
+            word = fnv1a_fold(word, [ch as u8]);
             in_word = true;
         } else {
             if in_word {
                 sink.word(word | 1 << 63); // disjoint from pair keys (chars < 2^21)
-                word = FNV_OFFSET;
+                word = FNV1A_OFFSET;
                 in_word = false;
             }
             if ch.is_alphanumeric() {

@@ -9,9 +9,15 @@
 //! old paragraphs in O(paragraphs touched) instead of walking every
 //! posting list — common bigrams appear in a large fraction of all
 //! paragraphs, so eager physical deletion would make one retraction
-//! cost O(total postings). Tombstones are reclaimed by an in-place
-//! rebuild once they outnumber a quarter of the live paragraphs
-//! (amortized O(1) per mutation, same argument as `Vec` doubling).
+//! cost O(total postings). Tombstones are reclaimed once they outnumber
+//! a floor (`COMPACT_DEAD_FLOOR`) or a quarter of the live paragraphs,
+//! whichever is larger (`needs_reclaim`) — checked on the next READ
+//! (`AppState::bm25_index`), not eagerly on the mutation that crossed
+//! it, by discarding this whole index and rebuilding it fresh from the
+//! store's current records (`Bm25Index::build`; amortized O(1) per
+//! mutation, same argument as `Vec` doubling — `reclaim_if_due` here is
+//! only the bookkeeping check, the registry holds the records the
+//! rebuild itself needs).
 
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
@@ -92,8 +98,11 @@ pub(crate) struct Bm25Index {
     slots: Vec<Slot>,
     postings: TermMap<Vec<Posting>>,
     live_count: u32,
-    /// f64 on purpose: an incrementally maintained f32 sum would drift
-    /// as paragraphs come and go.
+    /// f64 on purpose: an incrementally maintained sum drifts as
+    /// paragraphs come and go regardless of width (`+=`/`-=` isn't
+    /// exactly reversible in f64 either), but f64's ~29 extra mantissa
+    /// bits over f32 keep the residue far below the `.max(1.0)`-floored
+    /// average `corpus_stats` derives from this.
     live_total_length: f64,
     dead_count: u32,
 }
@@ -145,6 +154,16 @@ fn contribution(idf: f32, tf: f32, length: f32, average_length: f32) -> f32 {
 }
 
 impl Bm25Index {
+    /// The corpus-wide stats `idf`/`contribution` both need — shared by
+    /// `search` and `explain` (issue #605: they used to re-derive this
+    /// independently) so the two cannot compute a different average
+    /// from the same live corpus.
+    fn corpus_stats(&self) -> (f32, f32) {
+        let total = self.live_count as f32;
+        let average_length = (self.live_total_length / f64::from(self.live_count)).max(1.0) as f32;
+        (total, average_length)
+    }
+
     pub(crate) fn empty() -> Self {
         Self {
             sources: Vec::new(),
@@ -324,8 +343,7 @@ impl Bm25Index {
                 .map(|source| set.contains(source))
                 .collect()
         });
-        let total = self.live_count as f32;
-        let average_length = (self.live_total_length / f64::from(self.live_count)).max(1.0) as f32;
+        let (total, average_length) = self.corpus_stats();
 
         // Keyed by touched slot only, so cost tracks how many paragraphs
         // the query actually matches rather than the index's total slot
@@ -419,8 +437,7 @@ impl Bm25Index {
             slot.alive && slot.index == index
         })?;
         let slot = &self.slots[slot_id as usize];
-        let total = self.live_count as f32;
-        let average_length = (self.live_total_length / f64::from(self.live_count)).max(1.0) as f32;
+        let (total, average_length) = self.corpus_stats();
 
         let mut terms = Vec::with_capacity(query_grams.len());
         let mut score = 0f32;
@@ -466,10 +483,18 @@ impl Bm25Index {
     }
 
     /// Per-source digest over (paragraph index, paragraph hash,
-    /// question fold) of the LIVE slots, in index order — the load-time
-    /// drift detector: a source whose digest disagrees with the passage
-    /// store's current record gets re-upserted instead of costing a
-    /// full rebuild.
+    /// question fold) of the LIVE slots, folded in `by_source`'s
+    /// per-source append order — the load-time drift detector: a
+    /// source whose digest disagrees with the passage store's current
+    /// record gets re-upserted instead of costing a full rebuild.
+    /// Append order equals ascending index order by construction (not
+    /// sorted here, since that would cost every call): `upsert_source`
+    /// always tombstones a source before rebuilding its `slot_list`
+    /// from `record.paragraph_texts()`'s own vec order, and
+    /// `from_bytes` restores a `to_bytes` image that was already sorted
+    /// by `(source, index)` — a future writer of `by_source` that ever
+    /// pushed out of index order would silently destabilize this
+    /// digest across a rebuild.
     pub(crate) fn source_digests(&self) -> HashMap<String, u64> {
         let mut digests = HashMap::new();
         for (&source_id, slot_list) in &self.by_source {
@@ -598,6 +623,12 @@ impl Bm25Index {
     ///   tie-break key `(score, source, index)` stops being unique,
     ///   and the final order falls back to `HashMap` iteration order
     ///   (non-deterministic ranking),
+    /// - one source's slots not index-ascending (`to_bytes` sorts by
+    ///   `(source_name, index)` before writing) — `source_digests`
+    ///   folds `by_source` in this same append order, so accepting a
+    ///   scrambled run would desync it from `record_digest`'s ascending
+    ///   walk and force a needless re-upsert on every load
+    ///   (CodeRabbit, PR #632),
     /// - a term repeated across postings blocks,
     /// - a posting list not slot-ascending (`to_bytes` always sorts a
     ///   term's live postings by slot) — this also rejects the same
@@ -633,6 +664,16 @@ impl Bm25Index {
         // chance to reject it.
         let mut seen_slots: std::collections::HashSet<(u32, u32)> =
             std::collections::HashSet::with_capacity(slot_count.min(1 << 20));
+        // `to_bytes` sorts every slot by `(source_name, index)` before
+        // writing, so one source's slots always form an index-ascending
+        // run in the file — `source_digests` folds `by_source` in this
+        // same append order and depends on it matching `record_digest`'s
+        // own ascending walk (CodeRabbit, PR #632). Tracked as "the
+        // previous slot for whichever source is currently running" so a
+        // new source starting doesn't need its own reset branch: the
+        // `prev_source != source_id` case simply never fails the `<=`
+        // check below.
+        let mut prev_slot_for_source: Option<(u32, u32)> = None;
         for _ in 0..slot_count {
             let source_id = read_u32(bytes, &mut pos)?;
             if source_id as usize >= index.sources.len() {
@@ -642,6 +683,12 @@ impl Bm25Index {
             if !seen_slots.insert((source_id, paragraph)) {
                 return None;
             }
+            if prev_slot_for_source.is_some_and(|(prev_source, prev_paragraph)| {
+                prev_source == source_id && paragraph <= prev_paragraph
+            }) {
+                return None;
+            }
+            prev_slot_for_source = Some((source_id, paragraph));
             let length = f32::from_le_bytes(bytes.get(pos..pos + 4)?.try_into().ok()?);
             pos += 4;
             // A non-finite or negative length is corruption: added into
@@ -990,6 +1037,16 @@ mod tests {
         // the final order falls back to `HashMap` iteration order —
         // non-deterministic ranking.
         let bytes = image(&["a.md"], &[(0, 0, 1.0, 1, 0), (0, 0, 1.0, 2, 0)], &[]);
+        assert!(Bm25Index::from_bytes(&bytes).is_none());
+    }
+
+    #[test]
+    fn from_bytes_rejects_one_sources_slots_out_of_index_order() {
+        // `to_bytes` always writes one source's slots index-ascending
+        // (CodeRabbit, PR #632) — paragraph 1 before paragraph 0 for
+        // the same source is a shape it never produces, and would
+        // desync `source_digests`'s fold order from `record_digest`'s.
+        let bytes = image(&["a.md"], &[(0, 1, 1.0, 1, 0), (0, 0, 1.0, 2, 0)], &[]);
         assert!(Bm25Index::from_bytes(&bytes).is_none());
     }
 

@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::hash::{FNV1A_OFFSET, fnv1a_fold};
 use crate::storage::write_atomic;
 
 /// Encodes a context name as a file stem: bytes outside [A-Za-z0-9_-]
@@ -42,20 +43,13 @@ pub(crate) fn name_from_stem(stem: &str) -> Option<String> {
 
 /// FNV-1a over raw bytes — the same primitive the search terms build
 /// on, kept here for the one non-search need (import marker file
-/// names, below).
+/// names, below). A thin wrapper over [`crate::hash::fnv1a_fold`]
+/// (issue #605): this used to re-declare the offset/prime constants
+/// and hand-unroll the loop, a byte-identical duplicate of the shared
+/// primitive.
 fn fnv64(bytes: &[u8]) -> u64 {
-    let mut hash = FNV_OFFSET;
-    for &byte in bytes {
-        hash ^= byte as u64;
-        hash = hash.wrapping_mul(FNV_PRIME);
-    }
-    hash
+    fnv1a_fold(FNV1A_OFFSET, bytes.iter().copied())
 }
-
-// `pub(super)` for terms.rs, which runs the same FNV-1a inline over
-// its word stream rather than calling `fnv64` on a slice.
-pub(super) const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-pub(super) const FNV_PRIME: u64 = 0x1_0000_01b3;
 
 pub(crate) fn image_path(dir: &Path, stem: &str) -> PathBuf {
     dir.join(format!("{stem}.ctx"))
