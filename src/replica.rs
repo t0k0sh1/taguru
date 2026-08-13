@@ -893,6 +893,84 @@ mod tests {
         }
     }
 
+    fn last_poll_epoch(text: &str) -> u64 {
+        text.lines()
+            .find(|line| line.starts_with("taguru_replica_last_poll_success_timestamp_seconds "))
+            .and_then(|line| line.split_whitespace().last())
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0)
+    }
+
+    /// #616 item 4: `TailerHandle::shutdown` must actually stop the
+    /// tailer, not merely return — a real background tailer against a
+    /// fast poll interval, stopped, then watched well past several
+    /// more intervals: the poll-success epoch must not move again.
+    /// (A `shutdown` body deleted outright would drop the handle
+    /// without ever setting `stop`, so the thread — and the epoch —
+    /// would keep moving underneath this exact assertion.)
+    #[tokio::test]
+    async fn shutdown_actually_stops_the_tailer_from_polling_further() {
+        let (bucket, _writer) = two_segment_bucket("shutdown-stop").await;
+        let url = url_of("shutdown-stop");
+        let store = local_store(&bucket);
+        let target = scratch("shutdown-stop-target");
+        let hydrator =
+            crate::hydrate::prepare_replica(&store, &StorePath::default(), &url, &target)
+                .await
+                .expect("hydrates");
+        let state = AppState::boot(target.clone(), 64 * 1024 * 1024, None).unwrap();
+        state.metrics().set_replica_mode();
+
+        let handle = spawn(
+            local_store(&bucket),
+            StorePath::default(),
+            ship::ReplicateConfig {
+                url,
+                interval: Duration::from_millis(20),
+            },
+            target.clone(),
+            state.clone(),
+            hydrator,
+            Arc::new(ReplicaInfo::new(None)),
+        );
+
+        // At least one poll must land before stopping — otherwise a
+        // slow test runner could shut the tailer down before it ever
+        // polled once, and the assertion below would pass vacuously.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while last_poll_epoch(&scrape(&state)) == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no poll landed within 5s"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        // `shutdown` blocks the calling thread (by design — see its
+        // doc comment), so it needs to run off the async executor.
+        tokio::task::spawn_blocking(move || handle.shutdown())
+            .await
+            .unwrap();
+        let epoch_at_shutdown = last_poll_epoch(&scrape(&state));
+
+        // Real code: the thread is gone by the time `shutdown()`
+        // returns, so nothing can poll again — waiting well past
+        // several more 20ms intervals must not move the epoch.
+        // Mutated `shutdown` (a no-op): the thread keeps polling
+        // every 20ms regardless and crosses into a new second well
+        // within this wait, moving the epoch forward.
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        let epoch_after_wait = last_poll_epoch(&scrape(&state));
+        assert_eq!(
+            epoch_at_shutdown, epoch_after_wait,
+            "no poll may land after shutdown() has returned"
+        );
+
+        for dir in [bucket, target] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
     #[test]
     fn the_refusal_names_what_the_replica_knows() {
         let bare = ReplicaInfo::new(None);
