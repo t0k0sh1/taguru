@@ -301,9 +301,12 @@ impl Bm25Index {
     /// A returned score can be exactly 0.0: at corpus sizes around
     /// 2^23 live paragraphs sharing a query gram, f32 `idf` underflows
     /// to 0.0, and a matching paragraph is still a match. Such hits
-    /// tie-break by name and index like any other; they are never
-    /// dropped, so "no hits" always means the query touched nothing —
-    /// never that everything it touched scored 0.0.
+    /// tie-break by name and index like any other; a touched slot is
+    /// never dropped for scoring 0.0 — an empty result still means
+    /// there is no eligible, in-limit candidate to return (nothing
+    /// touched, `limit` is 0, or every touched slot's source was
+    /// filtered out by `eligible`), never that everything touched
+    /// scored 0.0.
     pub(crate) fn search(
         &self,
         query_grams: &[u64],
@@ -687,11 +690,18 @@ impl Bm25Index {
                 let tf = f32::from_le_bytes(bytes.get(pos..pos + 4)?.try_into().ok()?);
                 pos += 4;
                 // Same reasoning as `length` above: a non-finite or
-                // negative term frequency flows straight into the BM25
-                // numerator and makes the score NaN/negative. Reject the
-                // index and rebuild rather than trust an unchecksummed
-                // sidecar's word.
-                if !tf.is_finite() || tf < 0.0 {
+                // non-positive term frequency flows straight into the
+                // BM25 numerator. `to_bytes` only ever writes a posting
+                // for a gram the paragraph actually carries (`count`
+                // starts every gram's frequency at 1.0), so a genuine
+                // tf is always positive — a 0.0 posting is a term
+                // "occurring" zero times, a contradiction no encoder
+                // emits, and (since #603 dropped `search`'s score>0.0
+                // filter) would otherwise surface as a spurious hit for
+                // a term the paragraph doesn't actually carry. Reject
+                // the index and rebuild rather than trust an
+                // unchecksummed sidecar's word.
+                if !tf.is_finite() || tf <= 0.0 {
                     return None;
                 }
                 list.push(Posting { slot, tf });
@@ -1446,6 +1456,21 @@ mod tests {
                 "a {poison} term frequency makes the score NaN — reject and rebuild"
             );
         }
+
+        // 0.0 is not in the poison list above: unlike a negative or
+        // non-finite length, a paragraph legitimately CAN have length
+        // 0.0 (no grams at all). A 0.0 tf has no such legitimate
+        // reading — `to_bytes` never writes one (every posted gram's
+        // frequency starts at 1.0) — so it gets its own check, not a
+        // shared loop with length's poison values.
+        let mut zero_tf = good.clone();
+        zero_tf[tf_off..].copy_from_slice(&0.0f32.to_le_bytes());
+        assert!(
+            Bm25Index::from_bytes(&zero_tf).is_none(),
+            "a term posted with zero frequency is self-contradictory — reject and rebuild, \
+             not surface as a spurious no-overlap hit now that #603 removed search's \
+             score>0.0 filter"
+        );
     }
 
     #[test]
