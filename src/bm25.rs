@@ -297,6 +297,13 @@ impl Bm25Index {
     /// they are scored against (an eligible paragraph scores exactly
     /// what it scores unfiltered, so explain's evidence stays true
     /// under any filter).
+    ///
+    /// A returned score can be exactly 0.0: at corpus sizes around
+    /// 2^23 live paragraphs sharing a query gram, f32 `idf` underflows
+    /// to 0.0, and a matching paragraph is still a match. Such hits
+    /// tie-break by name and index like any other; they are never
+    /// dropped, so "no hits" always means the query touched nothing —
+    /// never that everything it touched scored 0.0.
     pub(crate) fn search(
         &self,
         query_grams: &[u64],
@@ -323,7 +330,11 @@ impl Bm25Index {
         // establishes "first hit" by key presence, so — unlike a flat
         // `scores` array — this stays correct even when a `contribution`
         // underflows to exactly 0.0 (a gram carried by nearly every live
-        // paragraph): the slot is never double-added on a later gram.
+        // paragraph): the slot is never double-added on a later gram,
+        // AND every key this loop inserts is a real match, score 0.0
+        // included — nothing downstream may drop a key for being 0.0,
+        // or a query whose only matching grams all underflow gets read
+        // as "no match" instead of "matched, contributed nothing".
         let mut scores: HashMap<u32, f32> = HashMap::new();
         // Reused across grams: each gram's alive postings, so idf's
         // carrier count and the scoring pass both walk them without a
@@ -356,9 +367,18 @@ impl Bm25Index {
             }
         }
 
+        // No `score > 0.0` filter: every key in `scores` is a slot the
+        // query actually touched (a live posting on at least one
+        // query gram), so it belongs in the results regardless of
+        // what it scored. At corpus sizes around 2^23 live paragraphs
+        // sharing a gram, `idf` (and so `contribution`) rounds to
+        // exactly 0.0 in f32 — dropping those slots here would read a
+        // real, ubiquitous-term match as "no match", indistinguishable
+        // from a query that touched nothing at all, and would
+        // disagree with `explain`, which reports the same paragraph
+        // at the same score without ever hiding it.
         let mut hits: Vec<IndexHit> = scores
             .into_iter()
-            .filter(|&(_, score)| score > 0.0)
             .map(|(slot_id, score)| {
                 let slot = &self.slots[slot_id as usize];
                 (
@@ -1047,6 +1067,67 @@ mod tests {
             1,
             "the slot must appear once even though its first matching gram's \
              contribution underflowed to 0.0: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn search_reports_a_hit_whose_every_matching_gram_underflowed_idf_to_zero() {
+        // #603 item 3: unlike the sibling test above, the query here
+        // has NO normal gram to keep the total score above 0.0 — every
+        // gram it matches underflows `idf` to exactly 0.0 (same 2^23
+        // carrier scale). `search` must still report the paragraph:
+        // dropping a touched-but-0.0 slot makes an ubiquitous-term
+        // query indistinguishable from one that matched nothing, and
+        // disagrees with `explain`, which never hides a 0.0 addend.
+        const CARRIERS: u32 = 8_388_608; // 2^23
+        let mut index = Bm25Index::empty();
+        assert_eq!(
+            idf(CARRIERS as f32, CARRIERS as f32),
+            0.0,
+            "test setup must actually underflow idf to zero"
+        );
+
+        index.sources.push("only".to_string());
+        index.source_ids.insert("only".to_string(), 0);
+        index.slots.push(Slot {
+            source_id: 0,
+            index: 0,
+            length: 2.0,
+            hash: 42,
+            question_hash: 0,
+            alive: true,
+        });
+        index.by_source.insert(0, vec![0]);
+        index.live_count = CARRIERS;
+        index.live_total_length = f64::from(CARRIERS) * 2.0;
+
+        let underflowing_gram = 1u64;
+        let postings = index.postings.entry(underflowing_gram).or_default();
+        postings.reserve(CARRIERS as usize);
+        for _ in 0..CARRIERS {
+            postings.push(Posting { slot: 0, tf: 1.0 });
+        }
+
+        let hits = index.search(&[underflowing_gram], 10, None);
+        assert_eq!(
+            hits,
+            vec![("only".to_string(), 0, 42, 0.0)],
+            "a slot the query actually touched must be reported even at score 0.0"
+        );
+    }
+
+    #[test]
+    fn idf_underflows_to_zero_only_at_near_total_carrier_scale() {
+        // Pins the trigger scale the two `search` tests above rely on:
+        // a small corpus (a handful of live paragraphs, a query gram
+        // most of them carry) keeps idf comfortably above zero, while
+        // 2^23 carriers over 2^23 live paragraphs is where f32's `ln(1
+        // + epsilon)` rounds all the way down.
+        assert!(idf(10.0, 9.0) > 0.0, "a small corpus must not underflow");
+        assert_eq!(
+            idf(8_388_608.0, 8_388_608.0),
+            0.0,
+            "2^23 carriers over 2^23 live paragraphs is the underflow scale search relies on"
         );
     }
 
