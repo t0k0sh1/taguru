@@ -536,6 +536,17 @@ mod tests {
     }
 
     #[test]
+    fn negation_marks_counts_exact_word_matches_not_everything_else() {
+        let text = folded("this is not a drill and not a test");
+        let marks = negation_marks(&text);
+        // NEGATION_WORDS[0] = "no", [1] = "not": "not" occurs twice
+        // among 9 tokens, "no" zero times. Counting anything OTHER
+        // than the word itself would report 7 and 9 here instead.
+        assert_eq!(marks[0], 0);
+        assert_eq!(marks[1], 2);
+    }
+
+    #[test]
     fn a_changed_number_refuses_and_a_folded_width_does_not() {
         assert!(!queries_agree(
             "did it sell 20 units",
@@ -720,5 +731,91 @@ mod tests {
         assert_eq!(cache.tick, 1, "a bucket miss is still a recency event");
         let _ = cache.candidates(&bucket("missing"), &[1.0, 0.0]);
         assert_eq!(cache.tick, 2);
+    }
+
+    // ------- the `taguru.cache` span event.
+
+    /// Captures only the `taguru.reason` field of every event fired
+    /// while it's the default subscriber — enough to pin
+    /// [`record_semantic_cache_span_event`] without pulling in the
+    /// OTLP export pipeline `tests/http_api/tracing_pipeline.rs` uses
+    /// for the composed-retrieve tree.
+    #[derive(Clone)]
+    struct ReasonRecorder(Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl tracing::Subscriber for ReasonRecorder {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct ReasonField(Option<String>);
+            impl tracing::field::Visit for ReasonField {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "taguru.reason" {
+                        self.0 = Some(format!("{value:?}"));
+                    }
+                }
+            }
+            let mut visitor = ReasonField(None);
+            event.record(&mut visitor);
+            if let Some(reason) = visitor.0 {
+                self.0.lock().unwrap().push(reason);
+            }
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    #[test]
+    fn a_miss_probe_records_its_taguru_cache_span_event() {
+        use crate::registry::retrieval_cache::TargetFingerprint;
+        use crate::registry::test_support::{
+            MockEmbeddings, boot_for_passage_embedding, scratch_dir,
+        };
+
+        let dir = scratch_dir("semantic-span-event");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let state = boot_for_passage_embedding(&dir, Arc::new(MockEmbeddings::fruity(&calls)), 0);
+        // A fresh cache candidate set is always empty — the Miss
+        // outcome the span-event mutant is easiest to observe
+        // through, without needing a registered claim first.
+        *state.0.semantic_cache.lock() = SemanticCache::new(Some(0.9));
+
+        let key = RetrievalKey {
+            op: RetrievalCacheOp::SearchPassages,
+            targets: Box::new([TargetFingerprint {
+                name: "c".to_string(),
+                identity: 1,
+                lanes: [0, 0],
+            }]),
+            params: "p".to_string(),
+        };
+
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = ReasonRecorder(Arc::clone(&events));
+        let probe = tracing::subscriber::with_default(subscriber, || {
+            state.semantic_retrieval(
+                &key,
+                "p",
+                "does the mill produce oysters",
+                Deadline::unbounded(),
+            )
+        });
+
+        assert!(probe.is_some(), "an empty cache still probes as a Miss");
+        assert_eq!(
+            events.lock().unwrap().as_slice(),
+            ["semantic_cache_miss"],
+            "the Miss outcome must reach a taguru.cache span event"
+        );
     }
 }

@@ -596,6 +596,11 @@ mod tests {
     /// still seats one, one byte under does not.
     #[test]
     fn budget_seats_nothing_is_false_for_off_and_for_real_budgets() {
+        // Every other assertion below compares against
+        // `TYPICAL_RETRIEVAL_PAYLOAD_BYTES` symbolically, so a wrong
+        // value of the constant itself would still satisfy them —
+        // this literal is what actually pins it.
+        assert_eq!(TYPICAL_RETRIEVAL_PAYLOAD_BYTES, 4 * 1024);
         assert!(!budget_seats_nothing(0), "0 is the deliberate off switch");
         assert!(!budget_seats_nothing(DEFAULT_RETRIEVAL_CACHE_BYTES));
         // A quarter exactly at the typical PAYLOAD size still cannot
