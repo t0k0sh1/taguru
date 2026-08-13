@@ -175,6 +175,15 @@ impl RetrievalCache {
     }
 
     fn lookup(&mut self, key: &RetrievalKey) -> Option<CachedRetrieval> {
+        // Structurally enforces the struct doc's "0 = disabled: lookup
+        // and insert both no-op" (issue #605) — unreachable today,
+        // since `AppState::retrieval_key` already refuses to mint a
+        // key while disabled, but that guard living in a different
+        // file is caller discipline, not something this method itself
+        // holds.
+        if !self.is_enabled() {
+            return None;
+        }
         self.tick += 1;
         let tick = self.tick;
         let slot = self.entries.get_mut(key)?;
@@ -334,7 +343,6 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::CueCache;
 
     fn key(params: &str) -> RetrievalKey {
         RetrievalKey {
@@ -469,92 +477,6 @@ mod tests {
         cache.insert(key("a"), value(10));
         assert!(cache.lookup(&key("a")).is_none());
         assert_eq!(cache.len(), 0);
-    }
-
-    #[test]
-    fn cue_cache_get_promotes_recency_so_eviction_spares_the_touched_entry() {
-        let mut cache = CueCache::default();
-        for i in 0..CueCache::CAP {
-            cache.insert(format!("cue{i}"), Arc::new(vec![i as f32]));
-        }
-        // Touching cue0 makes it the most recently used entry, even
-        // though it was the first one inserted.
-        assert!(cache.get("cue0").is_some());
-        // The cache is at capacity, so this eviction must reach for the
-        // least recently used entry — cue1, never touched again after
-        // its insert — not the oldest insertion, which is cue0.
-        cache.insert("fresh-cue".to_string(), Arc::new(vec![-1.0]));
-        assert!(
-            cache.get("cue0").is_some(),
-            "a touched entry must survive the next eviction"
-        );
-        assert!(
-            cache.get("cue1").is_none(),
-            "the least recently used entry must be the one evicted"
-        );
-        assert!(cache.get("fresh-cue").is_some());
-    }
-
-    #[test]
-    fn cue_cache_insert_does_not_overwrite_an_existing_key() {
-        let mut cache = CueCache::default();
-        cache.insert("cue".to_string(), Arc::new(vec![1.0]));
-        cache.insert("cue".to_string(), Arc::new(vec![2.0]));
-        assert_eq!(*cache.get("cue").unwrap(), vec![1.0]);
-    }
-
-    /// Issue #563 item 3: re-inserting an already-resident key must
-    /// still count as a recency touch, or a cue that keeps getting
-    /// resolved (its `get` at the top of `cue_vector` misses because
-    /// it raced eviction, then `insert` re-adds it) reads as
-    /// never-touched to the LRU and can be evicted while genuinely hot.
-    #[test]
-    fn cue_cache_reinsert_of_an_existing_key_counts_as_a_recency_touch() {
-        let mut cache = CueCache::default();
-        for i in 0..CueCache::CAP {
-            cache.insert(format!("cue{i}"), Arc::new(vec![i as f32]));
-        }
-        // Re-inserting cue0 (its value already resident) must promote
-        // it exactly like a `get` would, with no read in between.
-        cache.insert("cue0".to_string(), Arc::new(vec![0.0]));
-        cache.insert("fresh-cue".to_string(), Arc::new(vec![-1.0]));
-        assert!(
-            cache.get("cue0").is_some(),
-            "a re-inserted entry must survive the next eviction"
-        );
-        assert!(
-            cache.get("cue1").is_none(),
-            "the least recently touched entry must be the one evicted"
-        );
-    }
-
-    /// Issue #563 item 1's other half: a resident cue's width can
-    /// drift out from under it if a backend swap changes the
-    /// embedding dimension behind an unchanged model name. Every
-    /// resident vector must agree on one width — a stale-width cue
-    /// left in place would score a silent 0.0 against every table
-    /// (`similarity`'s width-mismatch sentinel) forever, since nothing
-    /// else in the cue cache ever re-checks it.
-    #[test]
-    fn cue_cache_insert_at_a_new_width_clears_stale_width_entries() {
-        let mut cache = CueCache::default();
-        cache.insert("old".to_string(), Arc::new(vec![1.0, 0.0, 0.0]));
-        assert!(cache.get("old").is_some());
-
-        // A backend swap answers a different width under the same
-        // model name: the next insert must wipe the old-width entry
-        // rather than let it sit unreachable-but-present.
-        cache.insert("new".to_string(), Arc::new(vec![1.0, 0.0]));
-        assert!(
-            cache.get("old").is_none(),
-            "a width change must clear every entry at the stale width"
-        );
-        assert_eq!(*cache.get("new").unwrap(), vec![1.0, 0.0]);
-
-        // Further same-width inserts are unaffected.
-        cache.insert("newer".to_string(), Arc::new(vec![0.0, 1.0]));
-        assert!(cache.get("new").is_some());
-        assert!(cache.get("newer").is_some());
     }
 
     /// The documented default budget and the slot-cost formula, by

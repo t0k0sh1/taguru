@@ -92,11 +92,15 @@ impl SearchOp {
 
 /// The retrieval surfaces the exact-match cache fronts — the label
 /// vocabulary of `taguru_retrieval_cache_total`, and the cache key's
-/// op discriminant (each op reads a different pair of revision lanes,
-/// so the same request text under two ops must never collide). Cross
-/// variants fold into their base op: the resolved target list already
-/// distinguishes them in the key, and a per-variant label would split
-/// the hit-rate signal without adding meaning.
+/// op discriminant (`op_lanes` groups these into two revision-lane
+/// pairs, `Recall`/`Query` sharing one and `SearchPassages`/
+/// `SearchCommunities` the other — issue #605 corrected this from
+/// claiming all four read distinct pairs — but the discriminant itself
+/// still must separate them: the same request text under two ops must
+/// never collide). Cross variants fold into their base op: the
+/// resolved target list already distinguishes them in the key, and a
+/// per-variant label would split the hit-rate signal without adding
+/// meaning.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum RetrievalCacheOp {
     Recall,
