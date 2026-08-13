@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 use taguru::deadline::{Deadline, DeadlineExceeded};
 
 use super::{
-    AppState, ContextMeta, Entry, FusedHit, PassageExplainLookup, PassageSearch,
+    AppState, ContextMeta, Entry, FusedHit, LimitToReach, PassageExplainLookup, PassageSearch,
     PassageSearchExplanation, PassageSearchHit, PassageSearchLanes, PassageVectorGate,
     VectorLaneReport, VectorLaneStatus, bm25_path, file_stem, passage_terms, spelled_passage_terms,
 };
@@ -308,8 +308,15 @@ impl AppState {
     /// recomputed exactly as `search_passages(limit)` computes it,
     /// pool caps included, `floor_override` too: an explanation under
     /// a different floor would account for a call nobody made.
-    /// Read-only, and bounded like one normal query plus one targeted
-    /// scoring.
+    /// Read-only. Cost: one unbounded sweep per lane (each honoring
+    /// the SAME ANN-vs-exact choice `search_passages` would make for
+    /// its own pool size, #601 item 2), then O(log(raw row count))
+    /// reruns of the ranking alone — never the paragraph text (#601
+    /// item 3) — to verify `limit_to_reach`, `deadline`-checked before
+    /// each rerun so a huge corpus's iteration count cannot outrun the
+    /// caller's own timeout budget. A target that never ranked at all
+    /// additionally costs one `index.explain` per paragraph of the
+    /// source, to find the best-sharing one.
     ///
     /// `filter` is the source filter of the search being explained
     /// (#167), applied exactly as `search_passages` applies it: an
@@ -401,28 +408,58 @@ impl AppState {
         let lexical_lane = |pool: usize| -> Vec<crate::bm25::IndexHit> {
             lexical_full.iter().take(pool).cloned().collect()
         };
+        // Cheap owned handles (an `Arc` clone each, no data copy) to
+        // the cue and the ready store — kept alive past the `vector`
+        // report below, which otherwise consumes `cue`/`gate` by move,
+        // so `semantic_lane`'s retry-loop replays (#601 item 2) can
+        // still call back into `top_matches` for a pool the search
+        // itself would approximate. `Some` under exactly the condition
+        // `VectorLaneReport::Ran` below settles on.
+        let ann_source: Option<(Arc<Vec<f32>>, Arc<crate::embedding::PassageVectorStore>)> =
+            match (&cue, &gate) {
+                (Ok(Some(cue)), Some(PassageVectorGate::Ready(vectors)))
+                    if cue.len() == vectors.dim() =>
+                {
+                    Some((Arc::clone(cue), Arc::clone(vectors)))
+                }
+                _ => None,
+            };
+        // Whether the vector lane RAN — never "iff a candidate
+        // survived the floor" (#601 item 1, mirrors search_passages).
+        let lane_ran = ann_source.is_some();
         // Pool first, floor second — the order search_passages applies
-        // them in (`top_matches(cue, pool)` then the filter).
+        // them in (`top_matches(cue, pool)` then the filter). A pool
+        // the real search would approximate replays through the SAME
+        // `top_matches` call a search makes (#601 item 2) — below the
+        // ANN threshold, or at the full unbounded sweep, that call and
+        // taking a prefix of `vector_rows` return byte-for-byte the
+        // same rows, so the cheap prefix stays the fast path there.
         let semantic_lane = |pool: usize| -> Vec<(String, u32, u64, f32)> {
-            vector_rows
-                .iter()
-                .take(pool)
-                .filter(|&&(.., score)| score >= floor)
-                .cloned()
-                .collect()
+            if let Some((cue, vectors)) = &ann_source
+                && vectors.approximates(pool)
+            {
+                vectors
+                    .top_matches(cue, pool, deadline, eligible)
+                    .into_iter()
+                    .filter(|&(_, score)| score >= floor)
+                    .map(|(key, score)| (key.source.clone(), key.index, key.hash, score))
+                    .collect()
+            } else {
+                vector_rows
+                    .iter()
+                    .take(pool)
+                    .filter(|&&(.., score)| score >= floor)
+                    .cloned()
+                    .collect()
+            }
         };
-        // Whether the vector lane RAN — the same condition the `vector`
-        // report below settles on (`VectorLaneReport::Ran`), computed
-        // here (by reference, `cue`/`gate` are still owned below) so
-        // every fusion in this call — not just the report — uses it
-        // instead of "did anything survive the floor" (#601).
-        let lane_ran = matches!(
-            (&cue, &gate),
-            (Ok(Some(cue)), Some(PassageVectorGate::Ready(vectors)))
-                if cue.len() == vectors.dim()
-        );
 
-        let full = fuse_passage_lanes(
+        // Rankings only, never the text (#601 item 3): every use below
+        // — locating the target, its rank/score/lane evidence, the
+        // `served`/`cutoff_score` verdicts, and the `limit_to_reach`
+        // probe's reruns — reads nothing but (source, index) identity
+        // and lane evidence.
+        let full = fuse_passage_ranking(
             &store,
             lexical_lane(usize::MAX),
             semantic_lane(usize::MAX),
@@ -430,7 +467,7 @@ impl AppState {
             lane_ran,
         );
         // The served list exactly as `search_passages(limit)` builds it.
-        let served_hits = fuse_passage_lanes(
+        let served_hits = fuse_passage_ranking(
             &store,
             lexical_lane(lane_pool(limit)),
             semantic_lane(lane_pool(limit)),
@@ -534,7 +571,7 @@ impl AppState {
             (Ok(Some(_)), None) => unreachable!("the gate is read whenever a cue exists"),
         };
 
-        let is_target = |hit: &PassageSearchHit| hit.source == source && hit.index == chosen;
+        let is_target = |hit: &RankedPassage| hit.source == source && hit.index == chosen;
         let rank = full.iter().position(is_target);
         let target = rank.map(|at| &full[at]);
         let served = served_hits.iter().any(is_target);
@@ -544,70 +581,87 @@ impl AppState {
         // real serve computation, and grow on a miss — RRF against
         // capped pools can seat late double-lane candidates above a
         // mid-pool single-lane hit, so the unbounded rank alone is a
-        // floor, not an answer.
-        //
-        // The starting pool must cover the WORSE of the two lane
-        // ranks, not the better one: a dual-lane target's rerun score
-        // only matches its full-ranking score once both lanes are
-        // in-pool, and a pool sized off the better rank routinely
-        // truncates away the worse lane's contribution, understating
-        // the target and forcing extra doublings (or exhausting the
-        // retry budget below) to reach a candidate this same target
-        // would have cleared on the first try.
+        // floor, not an answer. Three different endings, told apart by
+        // `LimitToReach` (#601 item 4): served already, never ranked
+        // at all (`rank` itself is `None` — nothing below needs to
+        // probe), or the probe below exhausts the raw ceiling without
+        // reaching it.
         let limit_to_reach = if served {
-            Some(limit)
+            LimitToReach::At(limit)
         } else {
-            rank.map(|at| at + 1).and_then(|first| {
-                let lane_need = target
-                    .and_then(|hit| match (hit.bm25, hit.vector) {
-                        (Some((bm25, _)), Some((vector, _))) => Some(bm25.max(vector)),
-                        (Some((lane, _)), None) | (None, Some((lane, _))) => Some(lane),
-                        (None, None) => None,
-                    })
-                    .map_or(1, |lane| lane.div_ceil(4));
-                // `lane_need` sizes the pool a RAW lane rank would need,
-                // unlike `first` it is not bounded by `full.len()` — two
-                // different things can inflate a raw rank past it. Under
-                // heavy staleness, many raw lane hits get filtered out
-                // before `full` is built, so `lane_need` overshoots what
-                // is actually necessary there and `full.len()` — always
-                // a legal, still-untried candidate — is the right first
-                // try. But a paragraph can also own several LIVE rows in
-                // a lane (doc2query question rows in the vector lane),
-                // and then `lane_need` is exactly right while
-                // `full.len()`'s own pool (`lane_pool(full.len())`) is
-                // too small to ever reach it — no amount of retrying at
-                // or below `full.len()` would. So: try the cheap
-                // `full.len()`-bounded candidate first (keeps the
-                // staleness case minimal), and only once that is
-                // exhausted widen to the raw row ceiling `lane_need` was
-                // actually sized for.
-                let raw_ceiling = lexical_full.len().max(vector_rows.len()).max(full.len());
-                let mut candidate = first.max(lane_need).min(full.len());
-                let mut widened = false;
-                for _ in 0..8 {
-                    let rerun = fuse_passage_lanes(
-                        &store,
-                        lexical_lane(lane_pool(candidate)),
-                        semantic_lane(lane_pool(candidate)),
-                        candidate,
-                        lane_ran,
-                    );
-                    if rerun.iter().any(is_target) {
-                        return Some(candidate);
+            match rank {
+                None => LimitToReach::NotRanked,
+                Some(at) => {
+                    let first = at + 1;
+                    let lane_need = target
+                        .and_then(|hit| match (hit.bm25, hit.vector) {
+                            (Some((bm25, _)), Some((vector, _))) => Some(bm25.max(vector)),
+                            (Some((lane, _)), None) | (None, Some((lane, _))) => Some(lane),
+                            (None, None) => None,
+                        })
+                        .map_or(1, |lane| lane.div_ceil(4));
+                    // `lane_need` sizes the pool a RAW lane rank would
+                    // need, unlike `first` it is not bounded by
+                    // `full.len()` — two different things can inflate a
+                    // raw rank past it. Under heavy staleness, many raw
+                    // lane hits get filtered out before `full` is
+                    // built, so `lane_need` overshoots what is actually
+                    // necessary there and `full.len()` — always a
+                    // legal, still-untried candidate — is the right
+                    // first try. But a paragraph can also own several
+                    // LIVE rows in a lane (doc2query question rows in
+                    // the vector lane), and then `lane_need` is exactly
+                    // right while `full.len()`'s own pool
+                    // (`lane_pool(full.len())`) is too small to ever
+                    // reach it — no amount of retrying at or below
+                    // `full.len()` would. So: try the cheap
+                    // `full.len()`-bounded candidate first (keeps the
+                    // staleness case minimal), and only once that is
+                    // exhausted widen to the raw row ceiling `lane_need`
+                    // was actually sized for.
+                    let raw_ceiling = lexical_full.len().max(vector_rows.len()).max(full.len());
+                    let mut candidate = first.max(lane_need).min(full.len());
+                    let mut widened = false;
+                    let mut reached = None;
+                    for _ in 0..probe_budget(raw_ceiling) {
+                        // `probe_budget` bounds the ITERATION count, not
+                        // wall-clock: each rerun re-ranks up to
+                        // `lane_pool(raw_ceiling)` rows, so a caller's
+                        // deadline must still cut this short on a huge
+                        // corpus rather than trusting the log-scaled
+                        // budget alone. A cut-short probe cannot claim
+                        // "tried the whole raw ceiling and failed" any
+                        // more truthfully than it can claim success, so
+                        // it settles on the same `Unreachable` a
+                        // completed-but-failed probe does (#601).
+                        if deadline.expired() {
+                            break;
+                        }
+                        let rerun = fuse_passage_ranking(
+                            &store,
+                            lexical_lane(lane_pool(candidate)),
+                            semantic_lane(lane_pool(candidate)),
+                            candidate,
+                            lane_ran,
+                        );
+                        if rerun.iter().any(is_target) {
+                            reached = Some(candidate);
+                            break;
+                        }
+                        if candidate >= raw_ceiling {
+                            break;
+                        }
+                        candidate = advance_probe_candidate(
+                            candidate,
+                            lane_need,
+                            full.len(),
+                            raw_ceiling,
+                            &mut widened,
+                        );
                     }
-                    if candidate >= raw_ceiling {
-                        return None;
-                    }
-                    candidate = if !widened && candidate >= full.len() {
-                        widened = true;
-                        lane_need.max(candidate + 1).min(raw_ceiling)
-                    } else {
-                        (candidate.saturating_mul(2)).min(raw_ceiling)
-                    };
+                    reached.map_or(LimitToReach::Unreachable, LimitToReach::At)
                 }
-                None
-            })
+            }
         };
 
         Some(Ok(PassageExplainLookup::Explained(Box::new(
@@ -809,6 +863,37 @@ fn lane_pool(limit: usize) -> usize {
     limit.saturating_mul(4).max(50)
 }
 
+/// One step of the `limit_to_reach` probe's candidate growth (#601
+/// item 4): a one-time non-doubling widen to at least `lane_need` once
+/// `candidate` reaches `full_len`, then doubling, always capped at
+/// `raw_ceiling` — see [`probe_budget`] for why this reaches
+/// `raw_ceiling` within budget regardless of where it starts.
+fn advance_probe_candidate(
+    candidate: usize,
+    lane_need: usize,
+    full_len: usize,
+    raw_ceiling: usize,
+    widened: &mut bool,
+) -> usize {
+    if !*widened && candidate >= full_len {
+        *widened = true;
+        lane_need.max(candidate + 1).min(raw_ceiling)
+    } else {
+        candidate.saturating_mul(2).min(raw_ceiling)
+    }
+}
+
+/// How many tries the `limit_to_reach` probe allows itself (#601 item
+/// 4): doubling from candidate 1 reaches any `raw_ceiling` within
+/// ⌈log2(raw_ceiling)⌉ + 1 tries; +2 covers the initial try and the
+/// one-time non-doubling widen step ([`advance_probe_candidate`]),
+/// regardless of where the probe actually starts — a higher start only
+/// needs FEWER tries. Scales with the search space instead of a fixed
+/// constant that silently under-covers a large corpus.
+fn probe_budget(raw_ceiling: usize) -> usize {
+    raw_ceiling.max(1).ilog2() as usize + 3
+}
+
 /// The deduplicated term keys of one query — first occurrence of each
 /// key wins, so the stream keeps [`passage_terms`] order.
 fn deduped_query_grams(query: &str) -> Vec<u64> {
@@ -841,27 +926,48 @@ fn semantic_lane_hits(
         .collect()
 }
 
-/// Fuses the two lanes' pools into the served ranking. Fuse by rank,
-/// then validate EACH LANE against the store's current paragraph:
+/// One ranked candidate, staleness-validated against the store's
+/// current paragraph — everything [`fuse_passage_lanes`] computes
+/// except the materialized text. `record` is an `Arc` clone (a
+/// refcount bump, not a copy) of the SAME immutable snapshot this
+/// candidate's hash was checked against — re-storing a source swaps
+/// in a whole new `Arc` rather than mutating one in place, so
+/// deferring `.paragraph()` off this held handle carries none of the
+/// re-validation risk a fresh store lookup would. `explain_passage_
+/// search` reruns fusion many times (one unbounded sweep, then
+/// O(log candidates) pool replays for `limit_to_reach`, #601 item 3)
+/// and only ever needs rank/score/lane evidence and (source, index)
+/// identity from those reruns — never the text.
+struct RankedPassage {
+    source: String,
+    index: u32,
+    score: f32,
+    bm25: Option<(usize, f32)>,
+    vector: Option<(usize, f32)>,
+    record: Arc<crate::passages::PassageRecord>,
+}
+
+/// The ranking core [`fuse_passage_lanes`] wraps: fuse by rank, then
+/// validate EACH LANE against the store's current paragraph SPAN —
 /// every lane scored the text it saw, and vectors routinely lag the
-/// text between refreshes — a stale lane must neither smuggle its
+/// text between refreshes, so a stale lane must neither smuggle its
 /// outdated score onto fresh text nor veto the other lane's fresh
-/// match, so each loses exactly its own evidence (and its fusion
-/// term). `fused` is whether the vector lane RAN this call — not
-/// whether `semantic` (already floor-filtered) came back non-empty:
-/// a lane that swept and found nothing above the floor still ran, and
-/// the RRF scale it committed to must not silently revert to raw
-/// BM25 underneath it (#601). The top-level score stays the raw BM25
-/// number only when `fused` is false, so a lexical-only deployment
-/// (or a call whose embedding failed) keeps its historical score
-/// semantics.
-fn fuse_passage_lanes(
+/// match; each loses exactly its own evidence (and its fusion term).
+/// `fused` is whether the vector lane RAN this call — not whether
+/// `semantic` (already floor-filtered) came back non-empty: a lane
+/// that swept and found nothing above the floor still ran, and the
+/// RRF scale it committed to must not silently revert to raw BM25
+/// underneath it (#601 item 1). The top-level score stays the raw
+/// BM25 number only when `fused` is false, so a lexical-only
+/// deployment (or a call whose embedding failed) keeps its historical
+/// score semantics.
+fn fuse_passage_ranking(
     store: &crate::passages::PassageStore,
     lexical: Vec<crate::bm25::IndexHit>,
     semantic: Vec<(String, u32, u64, f32)>,
     limit: usize,
     fused: bool,
-) -> Vec<PassageSearchHit> {
+) -> Vec<RankedPassage> {
     const RRF_K: f32 = 60.0;
     let mut accumulated: HashMap<(String, u32), FusedHit> = HashMap::new();
     for (rank, (source, index, hash, score)) in lexical.into_iter().enumerate() {
@@ -880,12 +986,12 @@ fn fuse_passage_lanes(
 
     let rrf =
         |lane: &Option<(usize, f32)>| lane.map_or(0.0, |(rank, _)| 1.0 / (RRF_K + rank as f32));
-    let mut hits: Vec<PassageSearchHit> = Vec::new();
+    let mut ranked: Vec<RankedPassage> = Vec::new();
     for ((source, index), lanes) in accumulated {
         let Some(record) = store.get(&source) else {
             continue;
         };
-        let Some((span, text)) = record.paragraph(index as usize) else {
+        let Some((span, _)) = record.paragraph(index as usize) else {
             continue;
         };
         let bm25 = lanes
@@ -904,23 +1010,51 @@ fn fuse_passage_lanes(
         } else {
             bm25.map(|(_, score)| score).unwrap_or(0.0)
         };
-        hits.push(PassageSearchHit {
+        ranked.push(RankedPassage {
             source,
             index,
             score,
-            text: text.to_string(),
             bm25,
             vector,
+            record,
         });
     }
-    hits.sort_by(|a, b| {
+    ranked.sort_by(|a, b| {
         b.score
             .total_cmp(&a.score)
             .then_with(|| a.source.cmp(&b.source))
             .then_with(|| a.index.cmp(&b.index))
     });
-    hits.truncate(limit);
-    hits
+    ranked.truncate(limit);
+    ranked
+}
+
+/// [`fuse_passage_ranking`] plus the materialized paragraph text —
+/// `search_passages`'s own wrapper: every served hit needs text, but
+/// only for the (already truncated to `limit`) survivors, so this
+/// stays a plain `map` over the ranking rather than a second pass
+/// over the whole candidate pool.
+fn fuse_passage_lanes(
+    store: &crate::passages::PassageStore,
+    lexical: Vec<crate::bm25::IndexHit>,
+    semantic: Vec<(String, u32, u64, f32)>,
+    limit: usize,
+    fused: bool,
+) -> Vec<PassageSearchHit> {
+    fuse_passage_ranking(store, lexical, semantic, limit, fused)
+        .into_iter()
+        .filter_map(|ranked| {
+            let (_, text) = ranked.record.paragraph(ranked.index as usize)?;
+            Some(PassageSearchHit {
+                source: ranked.source,
+                index: ranked.index,
+                score: ranked.score,
+                text: text.to_string(),
+                bm25: ranked.bm25,
+                vector: ranked.vector,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1630,7 +1764,7 @@ mod tests {
         );
         assert_eq!(
             explanation.limit_to_reach,
-            Some(2),
+            LimitToReach::At(2),
             "full.len() (2) is itself a valid, untried candidate — it must not \
              be skipped as unreachable just because lane_need overshoots it"
         );
@@ -1750,18 +1884,21 @@ mod tests {
         );
         assert_eq!(
             explanation.limit_to_reach,
-            Some(16),
+            LimitToReach::At(16),
             "target-doc's raw vector-lane rank is 63rd (62 decoy rows \
              ahead of it); lane_pool(16) = 64 is the smallest pool that \
              reaches it, and full.len() (3) must widen to it rather than \
              give up once its own 50-row pool comes up short"
         );
+        let LimitToReach::At(reach) = explanation.limit_to_reach else {
+            panic!("expected At, got {:?}", explanation.limit_to_reach);
+        };
 
         let hits = state
             .search_passages(
                 "sake",
                 "QUERYMARKER",
-                explanation.limit_to_reach.unwrap(),
+                reach,
                 None,
                 None,
                 Deadline::unbounded(),
@@ -2525,6 +2662,199 @@ mod tests {
     }
 
     #[test]
+    fn explain_names_a_width_mismatch_instead_of_smuggling_it_into_top_matches() {
+        // A provider whose QUERY-purpose embedding width differs from
+        // its INDEX-purpose one (#133: a dimensions setting changed
+        // behind a stable model name). The regression case for the
+        // `ann_source` binding (#601 item 2): forcing it to hold the
+        // mismatched pair regardless would smuggle a wrong-width query
+        // into `top_matches` instead of skipping the lane — `fused`
+        // stays false and the target's rank comes from BM25 alone.
+        struct WidthShiftingEmbeddings;
+        impl EmbeddingProvider for WidthShiftingEmbeddings {
+            fn model(&self) -> &str {
+                "shifty"
+            }
+            fn embed(
+                &self,
+                texts: &[&str],
+                purpose: EmbedPurpose,
+                _deadline: Deadline,
+            ) -> Result<Vec<Vec<f32>>, String> {
+                let dim = match purpose {
+                    EmbedPurpose::Index => 3,
+                    EmbedPurpose::Query => 2,
+                };
+                Ok(texts.iter().map(|_| vec![1.0; dim]).collect())
+            }
+        }
+
+        let dir = scratch_dir("explain-width-mismatch");
+        let state = boot_for_passage_embedding(&dir, Arc::new(WidthShiftingEmbeddings), 20_000);
+        state
+            .create("fruit", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert("doc-a".to_string(), "りんごは真っ赤に実った。".to_string());
+        state
+            .store_passages("fruit", plain(passages))
+            .unwrap()
+            .unwrap();
+        state
+            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+
+        let explanation = state
+            .explain_passage_search(
+                "fruit",
+                "りんご",
+                "doc-a",
+                None,
+                3,
+                None,
+                None,
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        let PassageExplainLookup::Explained(explanation) = explanation else {
+            panic!("expected an Explained verdict");
+        };
+        assert!(
+            matches!(
+                explanation.vector,
+                VectorLaneReport::WidthChanged {
+                    stored: 3,
+                    current: 2
+                }
+            ),
+            "{:?}",
+            explanation.vector
+        );
+        assert!(
+            !explanation.fused,
+            "a width mismatch never runs the lane; the ranking must stay raw BM25"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn explain_calls_back_into_top_matches_for_a_pool_the_search_would_approximate() {
+        // Below `PASSAGE_ANN_THRESHOLD` (or at `limit >= len()`), the
+        // exact sweep and a prefix of `vector_rows` are byte-for-byte
+        // identical, so nothing OBSERVABLE distinguishes explain's two
+        // `semantic_lane` code paths — the only reliable signal that
+        // the real `top_matches` ran (and not the cheaper prefix) is
+        // whether it built the ANN index (#601 item 2). Only the
+        // `served_hits`/`limit_to_reach` pools go through this path;
+        // `full` always covers the whole store and stays exact.
+        struct AxisEmbeddings;
+        impl EmbeddingProvider for AxisEmbeddings {
+            fn model(&self) -> &str {
+                "axis"
+            }
+            fn embed(
+                &self,
+                texts: &[&str],
+                _purpose: EmbedPurpose,
+                _deadline: Deadline,
+            ) -> Result<Vec<Vec<f32>>, String> {
+                // Keyed independently of the query TEXT (unlike
+                // `MockEmbeddings::fruity`'s `starts_with`, which would
+                // make the query and the target share a literal prefix
+                // — and therefore a BM25 bigram, contaminating the
+                // "only the vector lane can serve this" setup below):
+                // only the target paragraph's own marker prefix and
+                // the literal query string align; everything else,
+                // decoys included, is orthogonal.
+                Ok(texts
+                    .iter()
+                    .map(|&text| {
+                        if text == "あいうえお" || text.starts_with("targetmarker") {
+                            vec![1.0, 0.0]
+                        } else {
+                            vec![0.0, 1.0]
+                        }
+                    })
+                    .collect())
+            }
+        }
+
+        let dir = scratch_dir("explain-ann-path");
+        let state = boot_for_passage_embedding(&dir, Arc::new(AxisEmbeddings), usize::MAX);
+        state
+            .create("big", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+
+        // The query shares no bigram with either paragraph kind (same
+        // vector-only-hit shape `hybrid_search_surfaces_a_vector_only_
+        // hit_that_shares_no_letters` uses): only the vector lane, and
+        // therefore only this code path, can serve the target.
+        let mut passages = BTreeMap::new();
+        passages.insert(
+            "target-doc".to_string(),
+            "targetmarkerかきくけこ。".to_string(),
+        );
+        for i in 0..crate::embedding::PASSAGE_ANN_THRESHOLD {
+            passages.insert(format!("decoy-{i}"), "さしすせそ。".to_string());
+        }
+        state
+            .store_passages("big", plain(passages))
+            .unwrap()
+            .unwrap();
+        state
+            .refresh_passage_embeddings("big", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+
+        let vectors = state.entry_passage_vectors(&state.lookup("big").unwrap(), "big");
+        assert!(
+            !vectors.ann_built(),
+            "lazy: nothing has searched this store yet"
+        );
+
+        // `lane_pool(1) = 50`, well under the corpus size — the served
+        // pool this call replays is a case `PassageVectorStore::
+        // approximates` says yes to.
+        let explanation = state
+            .explain_passage_search(
+                "big",
+                "あいうえお",
+                "target-doc",
+                None,
+                1,
+                None,
+                None,
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        let PassageExplainLookup::Explained(explanation) = explanation else {
+            panic!("expected an Explained verdict");
+        };
+
+        assert!(
+            vectors.ann_built(),
+            "the served pool should have called back into the real top_matches, \
+             not just taken a prefix of the unbounded sweep"
+        );
+        assert!(
+            explanation.bm25_lane.is_none(),
+            "no shared bigram — only the vector lane can have served this"
+        );
+        assert!(
+            explanation.served,
+            "the aligned target must clear the ANN-narrowed pool and the floor: {explanation:?}"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn eviction_persists_a_dirty_index_for_the_next_residency() {
         let dir = scratch_dir("bm25-evict-save");
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
@@ -2813,11 +3143,159 @@ mod tests {
         };
         assert_eq!(
             explanation.limit_to_reach,
-            Some(3),
+            LimitToReach::At(3),
             "rank 2 serves at limit 3, and the probe must start there"
         );
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn limit_to_reach_probe_stops_at_an_expired_deadline_instead_of_ignoring_it() {
+        // Same corpus and target as `..._is_the_exact_serving_limit`
+        // above, where an unbounded deadline lets the probe reach
+        // `At(3)`. `probe_budget` bounds ITERATIONS, not wall-clock —
+        // without its own deadline check the loop would keep re-
+        // ranking regardless of how long the caller intended to wait
+        // (CodeRabbit, PR #609). The first call warms the BM25 index
+        // (and the query embedding cache, when the vector lane is on)
+        // under an unbounded deadline so the SECOND, expired-deadline
+        // call fails inside the probe itself, not earlier at index
+        // build or embedding.
+        let dir = scratch_dir("explain-limit-deadline");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert(
+            "doc-1".to_string(),
+            "杜氏、杜氏、杜氏、杜氏、杜氏の五連。".to_string(),
+        );
+        passages.insert("doc-2".to_string(), "杜氏と杜氏と杜氏と杜氏。".to_string());
+        passages.insert("doc-3".to_string(), "杜氏の杜氏による杜氏。".to_string());
+        passages.insert("doc-4".to_string(), "杜氏と杜氏の記録。".to_string());
+        passages.insert("doc-5".to_string(), "杜氏の単独記録。".to_string());
+        state
+            .store_passages("sake", plain(passages))
+            .unwrap()
+            .unwrap();
+        state
+            .explain_passage_search(
+                "sake",
+                "杜氏",
+                "doc-3",
+                None,
+                1,
+                None,
+                None,
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+
+        let expired = Deadline::after(std::time::Duration::ZERO);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        assert!(expired.expired());
+
+        let explanation = state
+            .explain_passage_search("sake", "杜氏", "doc-3", None, 1, None, None, expired)
+            .unwrap()
+            .unwrap();
+        let PassageExplainLookup::Explained(explanation) = explanation else {
+            panic!("expected an Explained verdict");
+        };
+        assert_eq!(
+            explanation.rank,
+            Some(3),
+            "the target still ranks — an expired deadline degrades the \
+             probe, not the rest of the explanation"
+        );
+        assert_eq!(
+            explanation.limit_to_reach,
+            LimitToReach::Unreachable,
+            "an expired deadline must stop the probe before it ever tries \
+             candidate 3, which an unbounded deadline reaches: {explanation:?}"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn limit_to_reach_probe_budget_covers_the_raw_ceiling() {
+        // The old fixed budget of 8 could exhaust before the doubling
+        // schedule ever reached a large `raw_ceiling`, misreporting a
+        // genuinely reachable limit as if nothing served it (#601 item
+        // 4). Replays the exact growth step the real probe uses
+        // (`advance_probe_candidate`) against `probe_budget`'s derived
+        // ceiling, from every start the real probe could hand it, for
+        // ceilings well past what budget 8 would have covered.
+        for raw_ceiling in [1usize, 2, 3, 7, 8, 9, 64, 1000, 10_000, 1_000_000] {
+            for start in [1usize, raw_ceiling / 2 + 1, raw_ceiling] {
+                let mut candidate = start.clamp(1, raw_ceiling);
+                let mut widened = false;
+                let mut reached = candidate >= raw_ceiling;
+                for _ in 0..probe_budget(raw_ceiling) {
+                    if reached {
+                        break;
+                    }
+                    candidate = advance_probe_candidate(candidate, 1, 0, raw_ceiling, &mut widened);
+                    reached = candidate >= raw_ceiling;
+                }
+                assert!(
+                    reached,
+                    "budget {} never reaches raw_ceiling {raw_ceiling} from start {start} \
+                     (stalled at {candidate})",
+                    probe_budget(raw_ceiling)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn advance_probe_candidate_widen_step_targets_candidate_plus_one_or_lane_need() {
+        // `candidate >= full_len` is the ONE-TIME widen trigger; its
+        // target is `candidate + 1`, unless `lane_need` asks for more.
+        // The looser `..._covers_the_raw_ceiling` sweep above does not
+        // pin this exact arithmetic: an off-by-one here just costs one
+        // extra doubling, absorbed by that test's budget margin (#601
+        // item 4).
+        let mut widened = false;
+        assert_eq!(
+            advance_probe_candidate(10, 5, 10, 100, &mut widened),
+            11,
+            "lane_need (5) is smaller than candidate + 1 (11): candidate + 1 wins"
+        );
+        assert!(widened, "the widen step fired");
+
+        let mut widened = false;
+        assert_eq!(
+            advance_probe_candidate(10, 50, 10, 100, &mut widened),
+            50,
+            "lane_need (50) is larger than candidate + 1 (11): lane_need wins"
+        );
+        assert!(widened);
+    }
+
+    #[test]
+    fn advance_probe_candidate_never_widens_twice() {
+        let mut widened = true;
+        assert_eq!(
+            advance_probe_candidate(10, 999, 10, 100, &mut widened),
+            20,
+            "already widened: doubles from candidate regardless of lane_need"
+        );
+    }
+
+    #[test]
+    fn probe_budget_is_ilog2_of_the_ceiling_plus_three() {
+        // ilog2(1) = 0 makes `+` vs `*` maximally distinguishable
+        // (3 vs 0) right away; the rest pin the scaling (#601 item 4).
+        assert_eq!(probe_budget(1), 3);
+        assert_eq!(probe_budget(2), 4);
+        assert_eq!(probe_budget(8), 6);
+        assert_eq!(probe_budget(1024), 13);
     }
 
     /// A source retracted while its digest still sits in the BM25

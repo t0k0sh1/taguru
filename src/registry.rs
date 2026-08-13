@@ -1728,10 +1728,32 @@ pub(crate) struct PassageSearchExplanation {
     pub(crate) limit: usize,
     pub(crate) served: bool,
     pub(crate) cutoff_score: Option<f32>,
-    /// A limit VERIFIED to serve the target by rerunning the real
-    /// serve computation, pool caps included; `None` when the target
-    /// ranks nowhere (or no limit up to the ranking's size reaches it).
-    pub(crate) limit_to_reach: Option<usize>,
+    pub(crate) limit_to_reach: LimitToReach,
+}
+
+/// The probe for the smallest limit that would serve the explain
+/// target has three different endings a bare `Option<usize>` cannot
+/// tell apart (#601 item 4): verified reachable, never ranked at all,
+/// or the probe exhausted its search space (the raw ceiling every
+/// lane's row count bounds) without reaching it.
+#[cfg_attr(test, derive(Debug, PartialEq))]
+pub(crate) enum LimitToReach {
+    /// The smallest limit VERIFIED to serve the target, by rerunning
+    /// the real serve computation, pool caps included.
+    At(usize),
+    /// The target ranks nowhere in the full (unbounded) ranking —
+    /// there is no limit that would serve it.
+    NotRanked,
+    /// The target ranks somewhere in the full ranking, but the probe
+    /// never confirmed a limit that serves it — either every probed
+    /// limit up to the raw ceiling missed (RRF against capped pools
+    /// can seat a late double-lane candidate above a mid-pool
+    /// single-lane hit, so a rank in the unbounded ranking does not by
+    /// itself guarantee a reachable limit), or the request's deadline
+    /// cut the probe short first. The two are not distinguished: a
+    /// truncated probe cannot claim "tried the whole raw ceiling and
+    /// failed" any more truthfully than it can claim success.
+    Unreachable,
 }
 
 /// The vector lane's side of an explanation: why it did not run, or

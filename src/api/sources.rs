@@ -1068,7 +1068,12 @@ pub struct VectorExplain {
 /// truncates: its rank against `ranked` scored candidates, the
 /// `cutoff_score` the request's `limit` served down to, and a
 /// `limit_to_reach` VERIFIED by rerunning the real serve computation
-/// (pool caps included), not read off the unbounded ranking.
+/// (pool caps included), not read off the unbounded ranking. `None`
+/// alone cannot tell "never ranked at all" from "the probe exhausted
+/// its search space without reaching it" — `limit_to_reach_reason`
+/// names the latter (`"unreachable"`) when it applies; the former
+/// never reaches this struct with `rank` set, so it needs no reason
+/// of its own (#601 item 4).
 #[derive(Serialize)]
 pub struct RankingExplain {
     pub fused: bool,
@@ -1083,6 +1088,8 @@ pub struct RankingExplain {
     pub cutoff_score: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit_to_reach: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit_to_reach_reason: Option<&'static str>,
 }
 
 impl SearchExplanation {
@@ -1161,7 +1168,17 @@ impl SearchExplanation {
         source: &str,
         explanation: crate::registry::PassageSearchExplanation,
     ) -> Self {
-        use crate::registry::VectorLaneReport;
+        use crate::registry::{LimitToReach, VectorLaneReport};
+
+        // Wire shape once, up front: `limit_to_reach` moving out of
+        // `explanation` here (it is not `Copy` — three distinct
+        // endings, #601 item 4) would otherwise conflict with the
+        // struct build further down, which needs the same value.
+        let (limit_to_reach, limit_to_reach_reason) = match explanation.limit_to_reach {
+            LimitToReach::At(limit) => (Some(limit), None),
+            LimitToReach::NotRanked => (None, None),
+            LimitToReach::Unreachable => (None, Some("unreachable")),
+        };
 
         let verdict = if explanation.served {
             "served"
@@ -1227,7 +1244,7 @@ impl SearchExplanation {
                 explanation.limit
             ),
             "below_cutoff" => {
-                let reach = match explanation.limit_to_reach {
+                let reach = match limit_to_reach {
                     Some(limit) => format!("limit {limit} reaches it"),
                     None => format!(
                         "no limit up to {} reaches it (pool interplay)",
@@ -1312,7 +1329,8 @@ impl SearchExplanation {
                 limit: explanation.limit,
                 served: explanation.served,
                 cutoff_score: explanation.cutoff_score,
-                limit_to_reach: explanation.limit_to_reach,
+                limit_to_reach,
+                limit_to_reach_reason,
             }),
         }
     }
@@ -1322,8 +1340,11 @@ impl SearchExplanation {
 /// of "orchestrate four endpoints and cross-reference by hand": name
 /// the query and the source (optionally the paragraph) you expected to
 /// see, get the first verdict that applies with its evidence. Runs the
-/// same lanes the search runs (read-only, roughly one query plus one
-/// targeted scoring); the serve boundary is recomputed exactly as
+/// same lanes the search runs, read-only — one unbounded sweep per
+/// lane (the vector lane's own ANN-vs-exact choice included, so a
+/// large corpus is not swept exactly just because this is explain),
+/// then O(log(raw row count)) reruns of the ranking alone to verify
+/// `limit_to_reach`; the serve boundary is recomputed exactly as
 /// `sources/search` computes it, so the two cannot disagree.
 pub async fn explain_search_passages(
     State(state): State<AppState>,
@@ -2357,6 +2378,107 @@ mod tests {
             lanes,
             serde_json::json!({"bm25": {"rank": 1, "score": 2.5}}),
             "an absent lane omits its key"
+        );
+    }
+
+    /// The `below_cutoff` verdict's summary text comes from its own
+    /// match arm, picked by a string comparison nothing else in the
+    /// wire shape (verdict, ranking.rank, ranking.served) would notice
+    /// falling through to the generic "shares no term" phrasing
+    /// instead (#601).
+    #[test]
+    fn below_cutoff_summary_reports_the_rank_and_cutoff_not_the_no_term_overlap_text() {
+        let explanation = crate::registry::PassageSearchExplanation {
+            paragraph: 0,
+            paragraphs: 1,
+            paragraph_named: false,
+            query_terms: Vec::new(),
+            lexical: None,
+            paragraph_terms: None,
+            vector: crate::registry::VectorLaneReport::Off {
+                provider_configured: false,
+            },
+            fused: false,
+            ranked: 5,
+            rank: Some(4),
+            score: Some(0.1),
+            bm25_lane: Some((4, 0.1)),
+            vector_lane: None,
+            limit: 3,
+            served: false,
+            cutoff_score: Some(0.5),
+            limit_to_reach: crate::registry::LimitToReach::At(4),
+        };
+        let result = SearchExplanation::from_explanation("doc-a", explanation);
+        assert_eq!(result.verdict, "below_cutoff", "{}", result.summary);
+        assert!(
+            result.summary.contains("ranked 4 of 5"),
+            "must use the below_cutoff phrasing, not the no-term-overlap \
+             fallback: {}",
+            result.summary
+        );
+        assert!(
+            result.summary.contains("limit 4 reaches it"),
+            "{}",
+            result.summary
+        );
+    }
+
+    /// `LimitToReach`'s three endings must stay distinguishable on the
+    /// wire: `Unreachable` sends `limit_to_reach_reason: "unreachable"`
+    /// with `limit_to_reach` itself omitted — never confusable with
+    /// `NotRanked`, which omits both (CodeRabbit, PR #609).
+    #[test]
+    fn limit_to_reach_wire_shape_distinguishes_unreachable_from_not_ranked() {
+        let base = |rank, limit_to_reach| crate::registry::PassageSearchExplanation {
+            paragraph: 0,
+            paragraphs: 1,
+            paragraph_named: false,
+            query_terms: Vec::new(),
+            lexical: None,
+            paragraph_terms: None,
+            vector: crate::registry::VectorLaneReport::Off {
+                provider_configured: false,
+            },
+            fused: false,
+            ranked: 5,
+            rank,
+            score: None,
+            bm25_lane: None,
+            vector_lane: None,
+            limit: 3,
+            served: false,
+            cutoff_score: Some(0.5),
+            limit_to_reach,
+        };
+
+        let unreachable = serde_json::to_value(SearchExplanation::from_explanation(
+            "doc-a",
+            base(Some(4), crate::registry::LimitToReach::Unreachable),
+        ))
+        .unwrap();
+        assert_eq!(
+            unreachable["ranking"]["limit_to_reach_reason"],
+            "unreachable"
+        );
+        assert!(
+            unreachable["ranking"].get("limit_to_reach").is_none(),
+            "{unreachable}"
+        );
+
+        let not_ranked = serde_json::to_value(SearchExplanation::from_explanation(
+            "doc-a",
+            base(None, crate::registry::LimitToReach::NotRanked),
+        ))
+        .unwrap();
+        assert!(
+            not_ranked["ranking"].get("limit_to_reach").is_none(),
+            "{not_ranked}"
+        );
+        assert!(
+            not_ranked["ranking"].get("limit_to_reach_reason").is_none(),
+            "NotRanked carries no reason — a bare absence, distinct from \
+             Unreachable's explicit one: {not_ranked}"
         );
     }
 }
