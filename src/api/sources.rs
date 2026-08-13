@@ -476,19 +476,66 @@ pub(super) fn resolve_window(
     }
 }
 
-/// The filter fields exactly as they enter a retrieval cache key —
-/// one value serialized into BOTH the main key and the sans-query
-/// semantic bucket of each search variant, so the two hand-built
-/// tuples can never disagree about the filter (the semantic tier
-/// compares query text only; a filter missing from its bucket params
-/// would pair filter-A registrations with filter-B lookups). `None`
-/// (no filter) serializes as `null`, distinct from every real filter.
-fn filter_key_params(
-    filter: &Option<crate::passages::SourceFilter>,
-) -> Option<(&Vec<String>, Option<u64>, Option<u64>)> {
-    filter
-        .as_ref()
-        .map(|filter| (&filter.tags, filter.since, filter.until))
+/// One passage-search variant's full set of result-affecting
+/// parameters — the request query plus everything else that can
+/// change the page served. The exact cache key and the semantic
+/// tier's sans-query bucket ([`Self::exact`], [`Self::sans_query`])
+/// are both DERIVED from one value here, so a field added to a search
+/// request reaches both automatically. Before this type, the two were
+/// hand-written tuple literals with no shared type or test binding
+/// them — a field added to one and not the other would let requests
+/// that disagree on that field share a [`super::semantic_cache::SemanticBucket`],
+/// and a rewrite would splice in the canonical's full params, serving
+/// a page computed for a different limit/floor/filter (#602 item 1).
+/// `None` (no filter) serializes as `null`, distinct from every real
+/// filter.
+#[derive(Clone, Copy, Serialize)]
+struct PassageKeyParams<'a> {
+    /// Distinguishes `search_passages` from `cross_search_passages`,
+    /// which otherwise share every other field's shape.
+    op: &'static str,
+    /// `None` in the bucket half — see [`Self::sans_query`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    query: Option<&'a str>,
+    limit: usize,
+    semantic_floor: Option<f32>,
+    filter: Option<(&'a [String], Option<u64>, Option<u64>)>,
+}
+
+impl<'a> PassageKeyParams<'a> {
+    fn new(
+        op: &'static str,
+        query: &'a str,
+        limit: usize,
+        semantic_floor: Option<f32>,
+        filter: &'a Option<crate::passages::SourceFilter>,
+    ) -> Self {
+        Self {
+            op,
+            query: Some(query),
+            limit,
+            semantic_floor,
+            filter: filter
+                .as_ref()
+                .map(|filter| (filter.tags.as_slice(), filter.since, filter.until)),
+        }
+    }
+
+    /// The exact key's full params, query included.
+    fn exact(&self) -> Option<String> {
+        serde_json::to_string(self).ok()
+    }
+
+    /// The semantic tier's bucket params: the same value with the
+    /// query stripped, so the two serializations can never disagree
+    /// about anything else (#602 item 1).
+    fn sans_query(&self) -> Option<String> {
+        serde_json::to_string(&Self {
+            query: None,
+            ..*self
+        })
+        .ok()
+    }
 }
 
 /// One PARAGRAPH matched by passage search: the text lane, for
@@ -753,9 +800,16 @@ pub async fn search_passages(
         Ok(filter) => filter,
         Err(refusal) => return *refusal,
     };
-    // The one filter value BOTH key tuples below serialize — see
-    // `filter_key_params` for why sharing it is load-bearing.
-    let filter_params = filter_key_params(&filter);
+    // One params value the exact key and the semantic bucket below
+    // both derive from — see `PassageKeyParams` for why that sharing
+    // is load-bearing.
+    let key_params = PassageKeyParams::new(
+        "search_passages",
+        &request.query,
+        limit,
+        request.semantic_floor,
+        &filter,
+    );
     // One span for the whole handler — cache hits included, so a hit
     // is a childless span of its own rather than invisible (ADR 0008
     // §5, §6). Synchronous for the rest of this function (every I/O
@@ -785,14 +839,7 @@ pub async fn search_passages(
     let key = state.retrieval_key(
         RetrievalCacheOp::SearchPassages,
         std::slice::from_ref(&name),
-        serde_json::to_string(&(
-            "search_passages",
-            &request.query,
-            limit,
-            request.semantic_floor,
-            &filter_params,
-        ))
-        .ok(),
+        key_params.exact(),
     );
     let mut semantic_fill = None;
     if let Some(key) = &key {
@@ -823,14 +870,11 @@ pub async fn search_passages(
         // filter included. Blocking section — the probe may pay the
         // query embedding the search below would otherwise pay (same
         // cue cache, one provider call either way).
-        if let Ok(sans_query) = serde_json::to_string(&(
-            "search_passages",
-            limit,
-            request.semantic_floor,
-            &filter_params,
-        )) && let Some(probe) = tokio::task::block_in_place(|| {
-            state.semantic_retrieval(key, &sans_query, &request.query, deadline)
-        }) {
+        if let Some(sans_query) = key_params.sans_query()
+            && let Some(probe) = tokio::task::block_in_place(|| {
+                state.semantic_retrieval(key, &sans_query, &request.query, deadline)
+            })
+        {
             if let Some(served) = probe.served {
                 replay_cached_search(&state, key, &served.value);
                 if search_log_enabled() {
@@ -1459,9 +1503,16 @@ pub async fn cross_search_passages(
         Ok(filter) => filter,
         Err(refusal) => return *refusal,
     };
-    // The one filter value BOTH key tuples below serialize — see
-    // `filter_key_params` for why sharing it is load-bearing.
-    let filter_params = filter_key_params(&filter);
+    // One params value the exact key and the semantic bucket below
+    // both derive from — see `PassageKeyParams` for why that sharing
+    // is load-bearing.
+    let key_params = PassageKeyParams::new(
+        "cross_search_passages",
+        &request.query,
+        limit,
+        request.semantic_floor,
+        &filter,
+    );
     // One rank cut for both sites below: inside the loop it holds the
     // memory bound (hits carry their full paragraph text) — firing at
     // twice the limit and coming back to the limit, so each firing
@@ -1487,14 +1538,7 @@ pub async fn cross_search_passages(
     let key = state.retrieval_key(
         RetrievalCacheOp::SearchPassages,
         &targets,
-        serde_json::to_string(&(
-            "cross_search_passages",
-            &request.query,
-            limit,
-            request.semantic_floor,
-            &filter_params,
-        ))
-        .ok(),
+        key_params.exact(),
     );
     let mut semantic_fill = None;
     if let Some(key) = &key {
@@ -1519,14 +1563,11 @@ pub async fn cross_search_passages(
         // warms the cue cache before the fan-out, so a cold cross
         // search no longer has up to `permits` targets each paying
         // for the same query embedding.
-        if let Ok(sans_query) = serde_json::to_string(&(
-            "cross_search_passages",
-            limit,
-            request.semantic_floor,
-            &filter_params,
-        )) && let Some(probe) = tokio::task::block_in_place(|| {
-            state.semantic_retrieval(key, &sans_query, &request.query, deadline)
-        }) {
+        if let Some(sans_query) = key_params.sans_query()
+            && let Some(probe) = tokio::task::block_in_place(|| {
+                state.semantic_retrieval(key, &sans_query, &request.query, deadline)
+            })
+        {
             if let Some(served) = probe.served {
                 replay_cached_search(&state, key, &served.value);
                 if search_log_enabled() {
@@ -2378,6 +2419,109 @@ mod tests {
             lanes,
             serde_json::json!({"bm25": {"rank": 1, "score": 2.5}}),
             "an absent lane omits its key"
+        );
+    }
+
+    /// The semantic tier's bucket must be exactly the exact key's
+    /// params with the query field removed — never a separately
+    /// hand-written shape that could drift from it (#602 item 1).
+    #[test]
+    fn the_semantic_bucket_params_are_the_exact_params_minus_the_query() {
+        let filter = Some(crate::passages::SourceFilter {
+            tags: vec!["a".to_string(), "b".to_string()],
+            since: Some(1),
+            until: Some(2),
+        });
+        let params = PassageKeyParams::new("search_passages", "the query", 7, Some(0.5), &filter);
+        let exact: serde_json::Value = serde_json::from_str(&params.exact().unwrap()).unwrap();
+        let sans_query: serde_json::Value =
+            serde_json::from_str(&params.sans_query().unwrap()).unwrap();
+        assert_eq!(
+            exact.get("query").and_then(Value::as_str),
+            Some("the query"),
+            "the exact key must actually carry the query"
+        );
+        let mut exact_minus_query = exact.as_object().unwrap().clone();
+        exact_minus_query.remove("query");
+        assert_eq!(
+            Value::Object(exact_minus_query),
+            sans_query,
+            "the bucket must be exactly the exact params minus the query"
+        );
+    }
+
+    /// Every result-affecting field must move the semantic bucket —
+    /// otherwise two requests that disagree on that field could share
+    /// a bucket, and a rewrite would serve one's page for the other's
+    /// parameters (#602 item 1).
+    #[test]
+    fn every_result_affecting_field_moves_the_bucket() {
+        let base_filter = Some(crate::passages::SourceFilter {
+            tags: vec!["a".to_string()],
+            since: Some(1),
+            until: Some(2),
+        });
+        let base = PassageKeyParams::new("search_passages", "q", 5, Some(0.5), &base_filter)
+            .sans_query()
+            .unwrap();
+
+        let other_op =
+            PassageKeyParams::new("cross_search_passages", "q", 5, Some(0.5), &base_filter)
+                .sans_query()
+                .unwrap();
+        assert_ne!(base, other_op, "op must move the bucket");
+
+        let other_limit = PassageKeyParams::new("search_passages", "q", 6, Some(0.5), &base_filter)
+            .sans_query()
+            .unwrap();
+        assert_ne!(base, other_limit, "limit must move the bucket");
+
+        let other_floor = PassageKeyParams::new("search_passages", "q", 5, Some(0.6), &base_filter)
+            .sans_query()
+            .unwrap();
+        assert_ne!(base, other_floor, "semantic_floor must move the bucket");
+
+        let other_tags_filter = Some(crate::passages::SourceFilter {
+            tags: vec!["c".to_string()],
+            since: Some(1),
+            until: Some(2),
+        });
+        let other_tags =
+            PassageKeyParams::new("search_passages", "q", 5, Some(0.5), &other_tags_filter)
+                .sans_query()
+                .unwrap();
+        assert_ne!(base, other_tags, "filter tags must move the bucket");
+
+        let other_since_filter = Some(crate::passages::SourceFilter {
+            tags: vec!["a".to_string()],
+            since: Some(9),
+            until: Some(2),
+        });
+        let other_since =
+            PassageKeyParams::new("search_passages", "q", 5, Some(0.5), &other_since_filter)
+                .sans_query()
+                .unwrap();
+        assert_ne!(base, other_since, "filter since must move the bucket");
+
+        let other_until_filter = Some(crate::passages::SourceFilter {
+            tags: vec!["a".to_string()],
+            since: Some(1),
+            until: Some(9),
+        });
+        let other_until =
+            PassageKeyParams::new("search_passages", "q", 5, Some(0.5), &other_until_filter)
+                .sans_query()
+                .unwrap();
+        assert_ne!(base, other_until, "filter until must move the bucket");
+
+        let no_filter: Option<crate::passages::SourceFilter> = None;
+        let without_filter =
+            PassageKeyParams::new("search_passages", "q", 5, Some(0.5), &no_filter)
+                .sans_query()
+                .unwrap();
+        assert_ne!(
+            base, without_filter,
+            "presence of a filter must move the bucket"
         );
     }
 

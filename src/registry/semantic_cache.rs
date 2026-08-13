@@ -64,7 +64,13 @@ use crate::metrics::{RetrievalCacheOp, SemanticCacheOutcome};
 /// NOT the query text. Two requests can only share a canonical when
 /// their operation, their resolved target list (in effective order —
 /// the same grants-resolve-alike posture the exact tier keys on), and
-/// every other result-affecting parameter agree exactly.
+/// every other result-affecting parameter agree exactly. On the
+/// passage-search handlers, `params` and the exact key's own params
+/// are both produced by `PassageKeyParams::sans_query`/`::exact`
+/// (`src/api/sources.rs`) — one value each, so a field that moves the
+/// exact key always moves this bucket too (#602 item 1; before that
+/// type existed, the two were separately hand-written tuples that
+/// could silently drift apart).
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 struct SemanticBucket {
     op: RetrievalCacheOp,
