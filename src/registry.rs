@@ -1797,6 +1797,75 @@ pub(crate) enum VectorLaneReport {
     Ran { floor: f32, cosine: Option<f32> },
 }
 
+/// The vector lane's status apart from actually running — everything
+/// [`VectorLaneStatus`] and [`VectorLaneReport`] have in common (issue
+/// #605), so their 5 non-`Ran` variants have exactly one declaration
+/// between them instead of two hand-synced copies. Each enum's own
+/// `From<VectorLaneIdle>` impl is a trivial 1:1 mapping — and, being an
+/// exhaustive match, a variant added here without adding it to BOTH
+/// impls fails the build instead of silently drifting. `search.rs`'s
+/// `classify_vector_lane` is the one place that builds this from
+/// `(cue, gate)`; `Ran` itself stays out because it's the one variant
+/// whose payload differs (a cosine, for explain's one named target;
+/// none, for search's whole lane) — each caller builds its own after
+/// classification says it can.
+pub(crate) enum VectorLaneIdle {
+    /// `TAGURU_EMBED_PASSAGES` is off, or no provider is configured —
+    /// `provider_configured` says which.
+    Off { provider_configured: bool },
+    /// The lane should have run; the provider refused the query.
+    QueryEmbeddingFailed(String),
+    /// Nothing embedded yet (no sidecar rows).
+    NoVectors,
+    /// The sidecar's rows belong to another model; they are never
+    /// served, and the next refresh discards and re-embeds them.
+    ModelChanged { stored: String, current: String },
+    /// The sidecar's rows have a different dimension than the provider
+    /// now answers (a dimensions setting changed behind a stable model
+    /// name, #133) — never served, re-embedded by the next refresh.
+    WidthChanged { stored: usize, current: usize },
+}
+
+impl From<VectorLaneIdle> for VectorLaneStatus {
+    fn from(idle: VectorLaneIdle) -> Self {
+        match idle {
+            VectorLaneIdle::Off {
+                provider_configured,
+            } => Self::Off {
+                provider_configured,
+            },
+            VectorLaneIdle::QueryEmbeddingFailed(error) => Self::QueryEmbeddingFailed(error),
+            VectorLaneIdle::NoVectors => Self::NoVectors,
+            VectorLaneIdle::ModelChanged { stored, current } => {
+                Self::ModelChanged { stored, current }
+            }
+            VectorLaneIdle::WidthChanged { stored, current } => {
+                Self::WidthChanged { stored, current }
+            }
+        }
+    }
+}
+
+impl From<VectorLaneIdle> for VectorLaneReport {
+    fn from(idle: VectorLaneIdle) -> Self {
+        match idle {
+            VectorLaneIdle::Off {
+                provider_configured,
+            } => Self::Off {
+                provider_configured,
+            },
+            VectorLaneIdle::QueryEmbeddingFailed(error) => Self::QueryEmbeddingFailed(error),
+            VectorLaneIdle::NoVectors => Self::NoVectors,
+            VectorLaneIdle::ModelChanged { stored, current } => {
+                Self::ModelChanged { stored, current }
+            }
+            VectorLaneIdle::WidthChanged { stored, current } => {
+                Self::WidthChanged { stored, current }
+            }
+        }
+    }
+}
+
 /// Why the vector lane can or cannot sweep an entry's paragraphs —
 /// search takes the `Ready` arm and silently skips the rest; explain
 /// names them in its [`VectorLaneReport`] (which carries the

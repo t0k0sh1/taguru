@@ -8,7 +8,8 @@ use taguru::deadline::{Deadline, DeadlineExceeded};
 use super::{
     AppState, ContextMeta, Entry, FusedHit, LimitToReach, PassageExplainLookup, PassageSearch,
     PassageSearchExplanation, PassageSearchHit, PassageSearchLanes, PassageVectorGate,
-    VectorLaneReport, VectorLaneStatus, bm25_path, file_stem, passage_terms, spelled_passage_terms,
+    VectorLaneIdle, VectorLaneReport, VectorLaneStatus, bm25_path, file_stem, passage_terms,
+    spelled_passage_terms,
 };
 
 impl AppState {
@@ -196,33 +197,15 @@ impl AppState {
         // a `taguru.degrade` span event names it too (ADR 0008 §6.2).
         let semantic_work = || -> (Vec<(String, u32, u64, f32)>, VectorLaneStatus) {
             parent.in_scope(|| {
-                let (hits, status) = match &cue {
-                    Err(error) => (
-                        Vec::new(),
-                        VectorLaneStatus::QueryEmbeddingFailed(error.clone()),
-                    ),
-                    Ok(None) => (
-                        Vec::new(),
-                        VectorLaneStatus::Off {
-                            provider_configured: self.0.embedder.is_some(),
-                        },
-                    ),
-                    Ok(Some(cue)) => match self.passage_vector_gate(&entry, &file_stem(name)) {
-                        // The gate checks the model NAME; the width can
-                        // still disagree (a dimensions setting changed
-                        // behind a stable name, #133). Swept anyway,
-                        // every row would be `similarity`'s silent 0.0 —
-                        // an empty lane the plan would then call "ran" —
-                        // so the mismatch is named instead, exactly like
-                        // a model change.
-                        PassageVectorGate::Ready(vectors) if cue.len() != vectors.dim() => (
-                            Vec::new(),
-                            VectorLaneStatus::WidthChanged {
-                                stored: vectors.dim(),
-                                current: cue.len(),
-                            },
-                        ),
-                        PassageVectorGate::Ready(vectors) => {
+                // Mirrors explain's own lazy gate read: only worth the
+                // call once a cue exists to check it against.
+                let gate = match &cue {
+                    Ok(Some(_)) => Some(self.passage_vector_gate(&entry, &file_stem(name))),
+                    _ => None,
+                };
+                let (hits, status) =
+                    match classify_vector_lane(&cue, gate.as_ref(), self.0.embedder.is_some()) {
+                        Ok((cue, vectors)) => {
                             let floor = self.effective_semantic_floor(floor_override, &fence.meta);
                             (
                                 semantic_lane_hits(
@@ -232,22 +215,8 @@ impl AppState {
                                 VectorLaneStatus::Ran { floor },
                             )
                         }
-                        // Unreachable in practice (a cue exists only
-                        // when the lane is on), kept for the same
-                        // defensiveness as explain's mapping.
-                        PassageVectorGate::Disabled => (
-                            Vec::new(),
-                            VectorLaneStatus::Off {
-                                provider_configured: self.0.embedder.is_some(),
-                            },
-                        ),
-                        PassageVectorGate::Empty => (Vec::new(), VectorLaneStatus::NoVectors),
-                        PassageVectorGate::ModelChanged { stored, current } => (
-                            Vec::new(),
-                            VectorLaneStatus::ModelChanged { stored, current },
-                        ),
-                    },
-                };
+                        Err(idle) => (Vec::new(), idle.into()),
+                    };
                 if !matches!(status, VectorLaneStatus::Ran { .. }) {
                     let reason = format!("vector_{}", status.code());
                     tracing::info!(taguru.reason = %reason, "taguru.degrade");
@@ -409,11 +378,11 @@ impl AppState {
             lexical_full.iter().take(pool).cloned().collect()
         };
         // Cheap owned handles (an `Arc` clone each, no data copy) to
-        // the cue and the ready store — kept alive past the `vector`
-        // report below, which otherwise consumes `cue`/`gate` by move,
-        // so `semantic_lane`'s retry-loop replays (#601 item 2) can
-        // still call back into `top_matches` for a pool the search
-        // itself would approximate. `Some` under exactly the condition
+        // the cue and the ready store, stable across `semantic_lane`'s
+        // several calls below (#601 item 2's retry-loop replays call
+        // back into `top_matches` for a pool the search itself would
+        // approximate) instead of re-deriving them from `cue`/`gate`
+        // each time. `Some` under exactly the condition
         // `VectorLaneReport::Ran` below settles on.
         let ann_source: Option<(Arc<Vec<f32>>, Arc<crate::embedding::PassageVectorStore>)> =
             match (&cue, &gate) {
@@ -542,36 +511,18 @@ impl AppState {
             terms
         });
 
-        let vector = match (cue, gate) {
-            (Err(error), _) => VectorLaneReport::QueryEmbeddingFailed(error),
-            (Ok(None), _) | (Ok(Some(_)), Some(PassageVectorGate::Disabled)) => {
-                VectorLaneReport::Off {
-                    provider_configured: self.0.embedder.is_some(),
-                }
-            }
-            (Ok(Some(_)), Some(PassageVectorGate::Empty)) => VectorLaneReport::NoVectors,
-            (Ok(Some(_)), Some(PassageVectorGate::ModelChanged { stored, current })) => {
-                VectorLaneReport::ModelChanged { stored, current }
-            }
-            // Same width guard as the search itself: `vector_rows` is
-            // already empty (top_matches refuses a mismatched query),
-            // and without this arm that silence would be reported as
-            // `Ran { cosine: None }` — "not yet embedded", the wrong
-            // diagnosis with the wrong repair.
-            (Ok(Some(cue)), Some(PassageVectorGate::Ready(vectors)))
-                if cue.len() != vectors.dim() =>
-            {
-                VectorLaneReport::WidthChanged {
-                    stored: vectors.dim(),
-                    current: cue.len(),
-                }
-            }
-            (Ok(Some(_)), Some(PassageVectorGate::Ready(_))) => {
+        let vector = match classify_vector_lane(&cue, gate.as_ref(), self.0.embedder.is_some()) {
+            Ok(_) => {
                 // The target's best cosine across its rows (text row
                 // and doc2query question rows alike), current-text rows
                 // only — a stale row IS "not yet re-embedded". The
                 // sweep is score-descending, so the first row is the
-                // best one, floor or no floor.
+                // best one, floor or no floor. (A width mismatch never
+                // reaches here — `classify_vector_lane` already routed
+                // it to `WidthChanged`, so `vector_rows` being empty
+                // from `top_matches` refusing the query can't be
+                // misread as `Ran { cosine: None }`, "not yet
+                // embedded", the wrong diagnosis with the wrong repair.)
                 let cosine = vector_rows
                     .iter()
                     .find(|&&(ref row_source, row_index, hash, _)| {
@@ -580,7 +531,7 @@ impl AppState {
                     .map(|&(.., score)| score);
                 VectorLaneReport::Ran { floor, cosine }
             }
-            (Ok(Some(_)), None) => unreachable!("the gate is read whenever a cue exists"),
+            Err(idle) => idle.into(),
         };
 
         let is_target = |hit: &RankedPassage| hit.source == source && hit.index == chosen;
@@ -611,7 +562,7 @@ impl AppState {
                             (Some((lane, _)), None) | (None, Some((lane, _))) => Some(lane),
                             (None, None) => None,
                         })
-                        .map_or(1, |lane| lane.div_ceil(4));
+                        .map_or(1, lane_pool_floor);
                     // `lane_need` sizes the pool a RAW lane rank would
                     // need, unlike `first` it is not bounded by
                     // `full.len()` — two different things can inflate a
@@ -875,6 +826,64 @@ fn lane_pool(limit: usize) -> usize {
     limit.saturating_mul(4).max(50)
 }
 
+/// The exact inverse of [`lane_pool`] (issue #605): the smallest
+/// `limit` whose pool covers a raw lane rank of `lane`. `lane_pool`'s
+/// own `.max(50)` floor means any `lane` at or under it needs no more
+/// than `limit = 1` — a second, hand-written `lane.div_ceil(4)` at this
+/// function's one call site ignored that floor and asked probes to
+/// start wider than necessary (conservative, never wrong, just wasted
+/// iterations).
+fn lane_pool_floor(lane: usize) -> usize {
+    if lane <= 50 { 1 } else { lane.div_ceil(4) }
+}
+
+/// Classifies the vector lane from `(cue, gate)` — `Ok` once it can
+/// actually run (the caller sweeps and builds its own `Ran`, the one
+/// variant [`VectorLaneIdle`] leaves out), `Err` with the shared idle
+/// reason otherwise. `search_passages`' `semantic_work` and
+/// `explain_passage_search` both classify from this exact shape
+/// (`gate` is only ever computed once `cue` is `Ok(Some(_))`, so
+/// `(Ok(Some(_)), None)` is unreachable by construction, not a case
+/// this function must answer for); issue #605 pulled it out of the two
+/// independent matches that used to hand-build the shared 5 variants.
+fn classify_vector_lane<'a>(
+    cue: &'a Result<Option<Arc<Vec<f32>>>, String>,
+    gate: Option<&'a PassageVectorGate>,
+    provider_configured: bool,
+) -> Result<(&'a Arc<Vec<f32>>, &'a crate::embedding::PassageVectorStore), VectorLaneIdle> {
+    match (cue, gate) {
+        (Err(error), _) => Err(VectorLaneIdle::QueryEmbeddingFailed(error.clone())),
+        (Ok(None), _) => Err(VectorLaneIdle::Off {
+            provider_configured,
+        }),
+        // The gate checks the model NAME; the width can still disagree
+        // (a dimensions setting changed behind a stable name, #133).
+        // Swept anyway, every row would be `similarity`'s silent 0.0 —
+        // an empty lane that would then read as "ran" — so the
+        // mismatch is named instead, exactly like a model change.
+        (Ok(Some(cue)), Some(PassageVectorGate::Ready(vectors))) if cue.len() != vectors.dim() => {
+            Err(VectorLaneIdle::WidthChanged {
+                stored: vectors.dim(),
+                current: cue.len(),
+            })
+        }
+        (Ok(Some(cue)), Some(PassageVectorGate::Ready(vectors))) => Ok((cue, vectors)),
+        (Ok(Some(_)), Some(PassageVectorGate::Empty)) => Err(VectorLaneIdle::NoVectors),
+        (Ok(Some(_)), Some(PassageVectorGate::ModelChanged { stored, current })) => {
+            Err(VectorLaneIdle::ModelChanged {
+                stored: stored.clone(),
+                current: current.clone(),
+            })
+        }
+        // Unreachable in practice (a cue exists only when the lane is
+        // on), kept for the same defensiveness as the `None` arm below.
+        (Ok(Some(_)), Some(PassageVectorGate::Disabled)) => Err(VectorLaneIdle::Off {
+            provider_configured,
+        }),
+        (Ok(Some(_)), None) => unreachable!("the gate is read whenever a cue exists"),
+    }
+}
+
 /// One step of the `limit_to_reach` probe's candidate growth (#601
 /// item 4): a one-time non-doubling widen to at least `lane_need` once
 /// `candidate` reaches `full_len`, then doubling, always capped at
@@ -982,8 +991,18 @@ fn fuse_passage_ranking(
 ) -> Vec<RankedPassage> {
     const RRF_K: f32 = 60.0;
     let mut accumulated: HashMap<(String, u32), FusedHit> = HashMap::new();
+    // Both lanes are first-wins (issue #605): `Bm25Index::upsert_source`
+    // tombstones a source before rebuilding its slots, so at most one
+    // alive slot exists per (source, index) and the BM25 lane cannot
+    // actually emit a duplicate today — but nothing enforced that here,
+    // and the vector lane's rationale below applies just as much to a
+    // future BM25 lane change. Matching policies means one comment
+    // documents both instead of two contradicting each other.
     for (rank, (source, index, hash, score)) in lexical.into_iter().enumerate() {
-        accumulated.entry((source, index)).or_default().bm25 = Some((rank + 1, score, hash));
+        let slot = accumulated.entry((source, index)).or_default();
+        if slot.bm25.is_none() {
+            slot.bm25 = Some((rank + 1, score, hash));
+        }
     }
     for (rank, (source, index, hash, score)) in semantic.into_iter().enumerate() {
         // A paragraph can hit this lane several times (its own text
@@ -1020,6 +1039,19 @@ fn fuse_passage_ranking(
         let score = if fused {
             rrf(&bm25) + rrf(&vector)
         } else {
+            // Unreachable (issue #605): `fused` is false only when the
+            // vector lane never ran, which both callers arrange to
+            // also mean `vector` (this slot's own lane hit) is `None`
+            // — `search_passages`' `semantic_lane` only ever returns
+            // hits under `VectorLaneStatus::Ran`, and explain's
+            // `vector_rows` (built from `top_matches`) is empty
+            // whenever `ann_source`/`lane_ran` is `None` (a width
+            // mismatch makes `top_matches` refuse the query too, see
+            // `PassageVectorStore::top_matches`). So whenever this
+            // branch runs, `bm25.is_none() && vector.is_none()` above
+            // would already have `continue`d unless `bm25` is `Some` —
+            // this `unwrap_or` never actually falls back to its
+            // default.
             bm25.map(|(_, score)| score).unwrap_or(0.0)
         };
         ranked.push(RankedPassage {
@@ -3310,6 +3342,26 @@ mod tests {
                     probe_budget(raw_ceiling)
                 );
             }
+        }
+    }
+
+    #[test]
+    fn lane_pool_floor_is_lane_pools_exact_inverse() {
+        // At or under lane_pool's own `.max(50)` floor, limit=1 always
+        // suffices — this is the branch a hand-written `div_ceil(4)`
+        // (this function's predecessor, issue #605) got wrong.
+        assert_eq!(lane_pool_floor(1), 1);
+        assert_eq!(lane_pool_floor(50), 1);
+        // Past the floor, it's the ceiling division.
+        assert_eq!(lane_pool_floor(51), 13);
+        assert_eq!(lane_pool_floor(200), 50);
+        // The defining property, for a spread of inputs: `lane_pool`
+        // of the floor must cover the lane it was computed for.
+        for lane in [1, 2, 49, 50, 51, 52, 100, 1000, 100_000] {
+            assert!(
+                lane_pool(lane_pool_floor(lane)) >= lane,
+                "lane_pool_floor({lane}) must be large enough for lane_pool to reach it back"
+            );
         }
     }
 
