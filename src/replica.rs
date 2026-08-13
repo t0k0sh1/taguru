@@ -232,46 +232,92 @@ pub(crate) fn spawn(
     let stop = Arc::new(AtomicBool::new(false));
     let (wake, waker) = std::sync::mpsc::channel::<()>();
     let stopping = Arc::clone(&stop);
+    // A separate handle for the panic branch below: `state` itself
+    // moves into the guarded closure, and a panic there (most
+    // realistically the runtime build — resource exhaustion, not a
+    // logic bug) must still be able to record and log it.
+    let state_on_panic = state.clone();
     let thread = std::thread::Builder::new()
         .name("taguru-replica".into())
         .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("building the replica tailer runtime");
-            let mut tailer = Tailer {
-                store,
-                root,
-                url,
-                data_dir,
-                state,
-                hydrator,
-                info,
-                stop: stopping,
-                manifest_stamp: None,
-                fence_seen: None,
-                pending_refresh: Default::default(),
-            };
-            loop {
-                match runtime.block_on(tailer.poll_once()) {
-                    Ok(()) => tailer.state.metrics().record_replica_poll(true),
-                    Err(error) => {
-                        tailer.state.metrics().record_replica_poll(false);
-                        tracing::warn!(%error, "replica poll failed; will retry");
+            // Guarded for the same reason `spawn_flusher`'s tick is
+            // (`main.rs`): this thread's `JoinHandle` result is never
+            // inspected on the success path, so an unguarded panic —
+            // most plausibly the runtime build below, but any bug
+            // anywhere in the loop counts too — would silently stop
+            // tailing forever: no `record_replica_poll` call, no log,
+            // nothing but `/metrics` quietly freezing at its last
+            // watermark with no signal that it will never move again.
+            let message = catch_and_describe_panic(std::panic::AssertUnwindSafe(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("building the replica tailer runtime");
+                let mut tailer = Tailer {
+                    store,
+                    root,
+                    url,
+                    data_dir,
+                    state,
+                    hydrator,
+                    info,
+                    stop: stopping,
+                    manifest_stamp: None,
+                    fence_seen: None,
+                    pending_refresh: Default::default(),
+                };
+                loop {
+                    match runtime.block_on(tailer.poll_once()) {
+                        Ok(()) => tailer.state.metrics().record_replica_poll(true),
+                        Err(error) => {
+                            tailer.state.metrics().record_replica_poll(false);
+                            tracing::warn!(%error, "replica poll failed; will retry");
+                        }
+                    }
+                    if tailer.stop.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    match waker.recv_timeout(interval) {
+                        // A wake or a closed channel both mean "stop now".
+                        Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                     }
                 }
-                if tailer.stop.load(Ordering::Relaxed) {
-                    return;
-                }
-                match waker.recv_timeout(interval) {
-                    // A wake or a closed channel both mean "stop now".
-                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                }
+            }));
+            if let Some(message) = message {
+                // Not "poll failed; will retry" — there is no retry
+                // left, the thread is unwinding — so this reuses the
+                // poll-error counter (the closest existing alertable
+                // series) at error level, distinguishable from an
+                // ordinary poll failure's warn.
+                state_on_panic.metrics().record_replica_poll(false);
+                tracing::error!(
+                    %message,
+                    "replica tailer thread panicked and will not resume tailing; \
+                     /metrics will stop advancing until the process restarts"
+                );
             }
         })
         .expect("spawning the replica tailer thread");
     TailerHandle { stop, wake, thread }
+}
+
+/// Runs `body`, catching a panic instead of letting it unwind past the
+/// caller — `None` on ordinary completion, `Some(message)` on a panic,
+/// with the payload's text recovered the same way `std::panic`'s
+/// default hook does (a `String` or `&str` payload, which covers
+/// `panic!`/`.expect`/`.unwrap`; anything else names itself generically
+/// rather than silently losing the panic).
+fn catch_and_describe_panic(body: impl FnOnce() + std::panic::UnwindSafe) -> Option<String> {
+    std::panic::catch_unwind(body).err().map(|payload| {
+        if let Some(s) = payload.downcast_ref::<String>() {
+            s.clone()
+        } else if let Some(s) = payload.downcast_ref::<&str>() {
+            (*s).to_string()
+        } else {
+            "replica tailer panicked with a non-string payload".to_string()
+        }
+    })
 }
 
 struct Tailer {
@@ -375,10 +421,6 @@ impl Tailer {
             .hydrator
             .retarget(generation, generation_root, manifest.clone());
         self.state.metrics().note_replica_generation(generation);
-        if switched {
-            // Applied seqs are per-lineage: see `reset_replica_lanes`.
-            self.state.metrics().reset_replica_lanes();
-        }
         // Stale stems join the refresh debt BEFORE anything below can
         // fail the poll; the worklist is the whole debt, not this
         // retarget's report — a stem whose hydration a per-request
@@ -430,6 +472,21 @@ impl Tailer {
             }
             self.state.replica_refresh(&name);
             self.pending_refresh.remove(stem);
+        }
+        // Applied seqs are per-lineage, so a switch must clear the old
+        // lineage's rows before this poll's own repopulation below —
+        // but ONLY here, immediately adjacent to that repopulation,
+        // with nothing fallible in between: every earlier `?`/early
+        // return in this function (the fence/generation/manifest
+        // lookups, `hydrate_shared`, the worklist loop's `stop` check
+        // above) now runs BEFORE this point, so any of them exiting
+        // early leaves the previous lineage's rows exactly as they
+        // were instead of clearing them and then never refilling —
+        // stale-but-present beats a blank `/metrics` for however long
+        // (up to indefinitely, if it coincides with shutdown) the next
+        // successful poll takes to arrive.
+        if switched {
+            self.state.metrics().reset_replica_lanes();
         }
         // Lag rows for every lane the manifest carries. A family that
         // landed (this pass or any earlier one — retarget reported
@@ -574,6 +631,79 @@ mod tests {
             options: object_store::CopyOptions,
         ) -> object_store::Result<()> {
             self.inner.copy_opts(from, to, options).await
+        }
+    }
+
+    /// A store whose `list()` panics unconditionally — `newest_fence`
+    /// (`ship::newest_fence`) calls it as the very FIRST thing
+    /// `poll_once` does, so spawning a tailer against this store
+    /// panics deterministically on its first poll, no timing or
+    /// network fault injection needed.
+    #[derive(Debug)]
+    struct PanickingStore;
+
+    impl std::fmt::Display for PanickingStore {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "PanickingStore")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for PanickingStore {
+        async fn put_opts(
+            &self,
+            _location: &StorePath,
+            _payload: object_store::PutPayload,
+            _opts: object_store::PutOptions,
+        ) -> object_store::Result<object_store::PutResult> {
+            unimplemented!()
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            _location: &StorePath,
+            _opts: object_store::PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+            unimplemented!()
+        }
+
+        async fn get_opts(
+            &self,
+            _location: &StorePath,
+            _options: object_store::GetOptions,
+        ) -> object_store::Result<object_store::GetResult> {
+            unimplemented!()
+        }
+
+        fn delete_stream(
+            &self,
+            _locations: futures_util::stream::BoxStream<'static, object_store::Result<StorePath>>,
+        ) -> futures_util::stream::BoxStream<'static, object_store::Result<StorePath>> {
+            unimplemented!()
+        }
+
+        fn list(
+            &self,
+            _prefix: Option<&StorePath>,
+        ) -> futures_util::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            panic!("injected panic for testing the replica tailer's panic guard");
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            _prefix: Option<&StorePath>,
+        ) -> object_store::Result<object_store::ListResult> {
+            unimplemented!()
+        }
+
+        async fn copy_opts(
+            &self,
+            _from: &StorePath,
+            _to: &StorePath,
+            _options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
+            unimplemented!()
         }
     }
 
@@ -930,6 +1060,117 @@ mod tests {
         }
     }
 
+    /// #617 item 1: a generation switch whose shared-hydration pass
+    /// fails must leave the PREVIOUS lineage's replica_lag rows in
+    /// place, not blank them — `reset_replica_lanes` used to run right
+    /// after `retarget()`, well before `hydrate_shared`'s `?` could
+    /// abort the poll, so a failure there left `/metrics` reporting no
+    /// lag rows at all for every context until some later poll
+    /// succeeded all the way through.
+    #[tokio::test]
+    async fn a_failed_switch_leaves_the_previous_lineages_lag_rows_intact() {
+        let bucket = scratch("switch-blackout-bucket");
+        let writer = scratch("switch-blackout-writer");
+        std::fs::write(writer.join("ctx_a.ctx"), b"image-v1").unwrap();
+        std::fs::write(
+            writer.join("ctx_a.meta.json"),
+            br#"{"description":"old","pinned":false}"#,
+        )
+        .unwrap();
+        wal::append_batch(&writer.join("ctx_a.wal.jsonl"), 1, &[associate("a")]).unwrap();
+        let writer_state = AppState::boot(writer.clone(), 64 * 1024 * 1024, None).unwrap();
+        let mut shipper = Shipper::claim(
+            local_store(&bucket),
+            StorePath::default(),
+            url_of("switch-blackout"),
+            writer.clone(),
+            Arc::new(ShipProgress::new(crate::registry::DEFAULT_WAL_MAX_BYTES)),
+            writer_state,
+            None,
+        )
+        .await
+        .unwrap();
+        shipper.cycle().await.unwrap();
+
+        let url = url_of("switch-blackout");
+        let store = local_store(&bucket);
+        let target = scratch("switch-blackout-target");
+        let hydrator =
+            crate::hydrate::prepare_replica(&store, &StorePath::default(), &url, &target)
+                .await
+                .expect("hydrates");
+        let state = AppState::boot(target.clone(), 64 * 1024 * 1024, None).unwrap();
+        state.metrics().set_replica_mode();
+        let mut tailer = tailer_for(
+            &bucket,
+            url.clone(),
+            target.clone(),
+            state.clone(),
+            hydrator,
+        );
+        tailer.poll_once().await.expect("the first manifest lands");
+        let before = scrape(&state);
+        assert!(
+            before.contains("taguru_replica_applied_seq{context=\"ctx_a\",lane=\"graph\"} 1"),
+            "{before}"
+        );
+
+        // A second, genuinely NEW generation (a fresh claim, same
+        // writer directory reused just to produce another shipped
+        // baseline) — `switched` will be true on the tailer's next
+        // poll. The first shipper (and the flock its `AppState`
+        // holds) must drop before re-booting `writer`.
+        shipper.retire_generation().await;
+        drop(shipper);
+        // Change the meta content before the second baseline: a
+        // byte-identical local copy from generation 1 would make
+        // `hydrate_shared` reuse it without ever attempting a
+        // download, which would make tearing the remote object below
+        // invisible.
+        std::fs::write(
+            writer.join("ctx_a.meta.json"),
+            br#"{"description":"new","pinned":false}"#,
+        )
+        .unwrap();
+        let writer_state = AppState::boot(writer.clone(), 64 * 1024 * 1024, None).unwrap();
+        let mut second_shipper = Shipper::claim(
+            local_store(&bucket),
+            StorePath::default(),
+            url.clone(),
+            writer.clone(),
+            Arc::new(ShipProgress::new(crate::registry::DEFAULT_WAL_MAX_BYTES)),
+            writer_state,
+            None,
+        )
+        .await
+        .unwrap();
+        second_shipper.cycle().await.unwrap();
+
+        // Tear the new generation's published meta object: the shared
+        // pass fails the whole poll before any per-family repopulation
+        // runs.
+        let meta_object = bucket
+            .join("gen-00000000000000000002")
+            .join("files")
+            .join("ctx_a.meta.json");
+        std::fs::rename(&meta_object, meta_object.with_extension("torn-aside")).unwrap();
+
+        tailer
+            .poll_once()
+            .await
+            .expect_err("a torn shared object on the new generation fails the poll");
+
+        let after = scrape(&state);
+        assert!(
+            after.contains("taguru_replica_applied_seq{context=\"ctx_a\",lane=\"graph\"} 1"),
+            "the previous lineage's lag row must survive a failed switch, not go blank: {after}"
+        );
+
+        for dir in [bucket, writer, target] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
     #[tokio::test]
     async fn a_restart_mid_apply_re_verifies_the_cache_and_heals() {
         let (bucket, writer) = two_segment_bucket("midapply").await;
@@ -1119,6 +1360,86 @@ mod tests {
             elapsed < ceiling,
             "shutdown() must not block far longer than the slow polls it is waiting on: \
              {elapsed:?} (ceiling {ceiling:?})"
+        );
+
+        for dir in [bucket, target] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    /// #617 item 4, the pure classification logic: a `String` payload
+    /// (`panic!("...")`) and a `&'static str` payload (`.expect("...")`
+    /// on a value with no `Debug`, or a bare string-literal panic
+    /// message under some panic strategies) must both come back as
+    /// readable text, and a body that completes normally must report
+    /// no panic at all.
+    #[test]
+    fn catch_and_describe_panic_classifies_string_and_str_payloads() {
+        assert_eq!(catch_and_describe_panic(|| {}), None);
+
+        let owned = catch_and_describe_panic(|| panic!("owned {}", "boom")).unwrap();
+        assert!(owned.contains("owned boom"), "{owned}");
+
+        let literal = catch_and_describe_panic(|| panic!("literal boom")).unwrap();
+        assert!(literal.contains("literal boom"), "{literal}");
+    }
+
+    /// #617 item 4, the wiring: a genuine panic inside the spawned
+    /// tailer thread must be caught (the process does not abort),
+    /// recorded (`taguru_replica_poll_errors_total` moves, the only
+    /// signal `/metrics` has for "tailing stopped"), and must not
+    /// leave `shutdown()` hanging afterward — the thread is already
+    /// gone, so `join_bounded` must see that promptly rather than
+    /// waiting out the full shutdown timeout for a thread that will
+    /// never check `stop`. `PanickingStore::list` panics on the very
+    /// first call `poll_once` makes (`newest_fence`), so this needs no
+    /// timing or network fault injection to be deterministic.
+    #[tokio::test]
+    async fn a_panicking_poll_is_caught_recorded_and_does_not_hang_shutdown() {
+        let bucket = scratch("panic-guard-bucket");
+        std::fs::create_dir_all(&bucket).unwrap();
+        let url = url_of("panic-guard");
+        let real_store = local_store(&bucket);
+        let target = scratch("panic-guard-target");
+        let hydrator =
+            crate::hydrate::prepare_replica(&real_store, &StorePath::default(), &url, &target)
+                .await
+                .expect("hydrates against an empty (virgin) bucket");
+        let state = AppState::boot(target.clone(), 64 * 1024 * 1024, None).unwrap();
+        state.metrics().set_replica_mode();
+
+        let panicking: Arc<dyn ObjectStore> = Arc::new(PanickingStore);
+        let handle = spawn(
+            panicking,
+            StorePath::default(),
+            ship::ReplicateConfig {
+                url,
+                interval: Duration::from_millis(20),
+            },
+            target.clone(),
+            state.clone(),
+            hydrator,
+            Arc::new(ReplicaInfo::new(None)),
+        );
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !scrape(&state).contains("taguru_replica_poll_errors_total 1") {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the panic must be recorded within 5s: {}",
+                scrape(&state)
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        let started = std::time::Instant::now();
+        tokio::task::spawn_blocking(move || handle.shutdown())
+            .await
+            .unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "shutdown() must not hang waiting for an already-dead thread: {:?}",
+            started.elapsed()
         );
 
         for dir in [bucket, target] {
