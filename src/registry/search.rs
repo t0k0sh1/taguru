@@ -433,19 +433,22 @@ impl AppState {
         // taking a prefix of `vector_rows` return byte-for-byte the
         // same rows, so the cheap prefix stays the fast path there.
         let semantic_lane = |pool: usize| -> Vec<(String, u32, u64, f32)> {
-            match &ann_source {
-                Some((cue, vectors)) if vectors.approximates(pool) => vectors
+            if let Some((cue, vectors)) = &ann_source
+                && vectors.approximates(pool)
+            {
+                vectors
                     .top_matches(cue, pool, deadline, eligible)
                     .into_iter()
                     .filter(|&(_, score)| score >= floor)
                     .map(|(key, score)| (key.source.clone(), key.index, key.hash, score))
-                    .collect(),
-                _ => vector_rows
+                    .collect()
+            } else {
+                vector_rows
                     .iter()
                     .take(pool)
                     .filter(|&&(.., score)| score >= floor)
                     .cloned()
-                    .collect(),
+                    .collect()
             }
         };
 
@@ -2644,6 +2647,199 @@ mod tests {
     }
 
     #[test]
+    fn explain_names_a_width_mismatch_instead_of_smuggling_it_into_top_matches() {
+        // A provider whose QUERY-purpose embedding width differs from
+        // its INDEX-purpose one (#133: a dimensions setting changed
+        // behind a stable model name). The regression case for the
+        // `ann_source` binding (#601 item 2): forcing it to hold the
+        // mismatched pair regardless would smuggle a wrong-width query
+        // into `top_matches` instead of skipping the lane — `fused`
+        // stays false and the target's rank comes from BM25 alone.
+        struct WidthShiftingEmbeddings;
+        impl EmbeddingProvider for WidthShiftingEmbeddings {
+            fn model(&self) -> &str {
+                "shifty"
+            }
+            fn embed(
+                &self,
+                texts: &[&str],
+                purpose: EmbedPurpose,
+                _deadline: Deadline,
+            ) -> Result<Vec<Vec<f32>>, String> {
+                let dim = match purpose {
+                    EmbedPurpose::Index => 3,
+                    EmbedPurpose::Query => 2,
+                };
+                Ok(texts.iter().map(|_| vec![1.0; dim]).collect())
+            }
+        }
+
+        let dir = scratch_dir("explain-width-mismatch");
+        let state = boot_for_passage_embedding(&dir, Arc::new(WidthShiftingEmbeddings), 20_000);
+        state
+            .create("fruit", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert("doc-a".to_string(), "りんごは真っ赤に実った。".to_string());
+        state
+            .store_passages("fruit", plain(passages))
+            .unwrap()
+            .unwrap();
+        state
+            .refresh_passage_embeddings("fruit", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+
+        let explanation = state
+            .explain_passage_search(
+                "fruit",
+                "りんご",
+                "doc-a",
+                None,
+                3,
+                None,
+                None,
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        let PassageExplainLookup::Explained(explanation) = explanation else {
+            panic!("expected an Explained verdict");
+        };
+        assert!(
+            matches!(
+                explanation.vector,
+                VectorLaneReport::WidthChanged {
+                    stored: 3,
+                    current: 2
+                }
+            ),
+            "{:?}",
+            explanation.vector
+        );
+        assert!(
+            !explanation.fused,
+            "a width mismatch never runs the lane; the ranking must stay raw BM25"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn explain_calls_back_into_top_matches_for_a_pool_the_search_would_approximate() {
+        // Below `PASSAGE_ANN_THRESHOLD` (or at `limit >= len()`), the
+        // exact sweep and a prefix of `vector_rows` are byte-for-byte
+        // identical, so nothing OBSERVABLE distinguishes explain's two
+        // `semantic_lane` code paths — the only reliable signal that
+        // the real `top_matches` ran (and not the cheaper prefix) is
+        // whether it built the ANN index (#601 item 2). Only the
+        // `served_hits`/`limit_to_reach` pools go through this path;
+        // `full` always covers the whole store and stays exact.
+        struct AxisEmbeddings;
+        impl EmbeddingProvider for AxisEmbeddings {
+            fn model(&self) -> &str {
+                "axis"
+            }
+            fn embed(
+                &self,
+                texts: &[&str],
+                _purpose: EmbedPurpose,
+                _deadline: Deadline,
+            ) -> Result<Vec<Vec<f32>>, String> {
+                // Keyed independently of the query TEXT (unlike
+                // `MockEmbeddings::fruity`'s `starts_with`, which would
+                // make the query and the target share a literal prefix
+                // — and therefore a BM25 bigram, contaminating the
+                // "only the vector lane can serve this" setup below):
+                // only the target paragraph's own marker prefix and
+                // the literal query string align; everything else,
+                // decoys included, is orthogonal.
+                Ok(texts
+                    .iter()
+                    .map(|&text| {
+                        if text == "あいうえお" || text.starts_with("targetmarker") {
+                            vec![1.0, 0.0]
+                        } else {
+                            vec![0.0, 1.0]
+                        }
+                    })
+                    .collect())
+            }
+        }
+
+        let dir = scratch_dir("explain-ann-path");
+        let state = boot_for_passage_embedding(&dir, Arc::new(AxisEmbeddings), usize::MAX);
+        state
+            .create("big", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+
+        // The query shares no bigram with either paragraph kind (same
+        // vector-only-hit shape `hybrid_search_surfaces_a_vector_only_
+        // hit_that_shares_no_letters` uses): only the vector lane, and
+        // therefore only this code path, can serve the target.
+        let mut passages = BTreeMap::new();
+        passages.insert(
+            "target-doc".to_string(),
+            "targetmarkerかきくけこ。".to_string(),
+        );
+        for i in 0..crate::embedding::PASSAGE_ANN_THRESHOLD {
+            passages.insert(format!("decoy-{i}"), "さしすせそ。".to_string());
+        }
+        state
+            .store_passages("big", plain(passages))
+            .unwrap()
+            .unwrap();
+        state
+            .refresh_passage_embeddings("big", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+
+        let vectors = state.entry_passage_vectors(&state.lookup("big").unwrap(), "big");
+        assert!(
+            !vectors.ann_built(),
+            "lazy: nothing has searched this store yet"
+        );
+
+        // `lane_pool(1) = 50`, well under the corpus size — the served
+        // pool this call replays is a case `PassageVectorStore::
+        // approximates` says yes to.
+        let explanation = state
+            .explain_passage_search(
+                "big",
+                "あいうえお",
+                "target-doc",
+                None,
+                1,
+                None,
+                None,
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        let PassageExplainLookup::Explained(explanation) = explanation else {
+            panic!("expected an Explained verdict");
+        };
+
+        assert!(
+            vectors.ann_built(),
+            "the served pool should have called back into the real top_matches, \
+             not just taken a prefix of the unbounded sweep"
+        );
+        assert!(
+            explanation.bm25_lane.is_none(),
+            "no shared bigram — only the vector lane can have served this"
+        );
+        assert!(
+            explanation.served,
+            "the aligned target must clear the ANN-narrowed pool and the floor: {explanation:?}"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn eviction_persists_a_dirty_index_for_the_next_residency() {
         let dir = scratch_dir("bm25-evict-save");
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
@@ -2968,6 +3164,51 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn advance_probe_candidate_widen_step_targets_candidate_plus_one_or_lane_need() {
+        // `candidate >= full_len` is the ONE-TIME widen trigger; its
+        // target is `candidate + 1`, unless `lane_need` asks for more.
+        // The looser `..._covers_the_raw_ceiling` sweep above does not
+        // pin this exact arithmetic: an off-by-one here just costs one
+        // extra doubling, absorbed by that test's budget margin (#601
+        // item 4).
+        let mut widened = false;
+        assert_eq!(
+            advance_probe_candidate(10, 5, 10, 100, &mut widened),
+            11,
+            "lane_need (5) is smaller than candidate + 1 (11): candidate + 1 wins"
+        );
+        assert!(widened, "the widen step fired");
+
+        let mut widened = false;
+        assert_eq!(
+            advance_probe_candidate(10, 50, 10, 100, &mut widened),
+            50,
+            "lane_need (50) is larger than candidate + 1 (11): lane_need wins"
+        );
+        assert!(widened);
+    }
+
+    #[test]
+    fn advance_probe_candidate_never_widens_twice() {
+        let mut widened = true;
+        assert_eq!(
+            advance_probe_candidate(10, 999, 10, 100, &mut widened),
+            20,
+            "already widened: doubles from candidate regardless of lane_need"
+        );
+    }
+
+    #[test]
+    fn probe_budget_is_ilog2_of_the_ceiling_plus_three() {
+        // ilog2(1) = 0 makes `+` vs `*` maximally distinguishable
+        // (3 vs 0) right away; the rest pin the scaling (#601 item 4).
+        assert_eq!(probe_budget(1), 3);
+        assert_eq!(probe_budget(2), 4);
+        assert_eq!(probe_budget(8), 6);
+        assert_eq!(probe_budget(1024), 13);
     }
 
     /// A source retracted while its digest still sits in the BM25

@@ -2380,4 +2380,47 @@ mod tests {
             "an absent lane omits its key"
         );
     }
+
+    /// The `below_cutoff` verdict's summary text comes from its own
+    /// match arm, picked by a string comparison nothing else in the
+    /// wire shape (verdict, ranking.rank, ranking.served) would notice
+    /// falling through to the generic "shares no term" phrasing
+    /// instead (#601).
+    #[test]
+    fn below_cutoff_summary_reports_the_rank_and_cutoff_not_the_no_term_overlap_text() {
+        let explanation = crate::registry::PassageSearchExplanation {
+            paragraph: 0,
+            paragraphs: 1,
+            paragraph_named: false,
+            query_terms: Vec::new(),
+            lexical: None,
+            paragraph_terms: None,
+            vector: crate::registry::VectorLaneReport::Off {
+                provider_configured: false,
+            },
+            fused: false,
+            ranked: 5,
+            rank: Some(4),
+            score: Some(0.1),
+            bm25_lane: Some((4, 0.1)),
+            vector_lane: None,
+            limit: 3,
+            served: false,
+            cutoff_score: Some(0.5),
+            limit_to_reach: crate::registry::LimitToReach::At(4),
+        };
+        let result = SearchExplanation::from_explanation("doc-a", explanation);
+        assert_eq!(result.verdict, "below_cutoff", "{}", result.summary);
+        assert!(
+            result.summary.contains("ranked 4 of 5"),
+            "must use the below_cutoff phrasing, not the no-term-overlap \
+             fallback: {}",
+            result.summary
+        );
+        assert!(
+            result.summary.contains("limit 4 reaches it"),
+            "{}",
+            result.summary
+        );
+    }
 }

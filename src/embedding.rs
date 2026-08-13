@@ -1261,6 +1261,18 @@ impl PassageVectorStore {
         scored
     }
 
+    /// Whether the ANN index has been built yet — the observable side
+    /// effect a caller outside this module can check (`ann` itself is
+    /// private) to tell "consulted `top_matches` for real" apart from
+    /// "took a cheaper equivalent path" without depending on result
+    /// contents, which the two paths can share even when only one of
+    /// them actually touched the index (`registry::search`'s explain
+    /// tests, #601 item 2).
+    #[cfg(test)]
+    pub(crate) fn ann_built(&self) -> bool {
+        self.ann.lock().is_some()
+    }
+
     /// The cached index, building it first if this is the first search
     /// to need one. `None` only when `deadline` is already spent —
     /// the caller falls back to the exact sweep for just this call and
