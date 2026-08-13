@@ -479,6 +479,25 @@ mod tests {
         assert_eq!(cache.len(), 0);
     }
 
+    /// `lookup` holds its own `is_enabled` guard (issue #605) rather
+    /// than relying on `insert` alone leaving the map empty while
+    /// disabled: force the two out of sync (a real entry, `budget`
+    /// dropped to `0` after the fact — `AppState::retrieval_key`
+    /// prevents this in practice, but `lookup` must not depend on that)
+    /// to prove the guard, not empty-map luck, is why a disabled
+    /// lookup misses.
+    #[test]
+    fn lookup_refuses_a_hit_the_instant_the_budget_drops_to_zero() {
+        let mut cache = RetrievalCache::new(DEFAULT_RETRIEVAL_CACHE_BYTES);
+        cache.insert(key("a"), value(10));
+        assert!(
+            cache.lookup(&key("a")).is_some(),
+            "sanity: the entry is live"
+        );
+        cache.budget = 0;
+        assert!(cache.lookup(&key("a")).is_none());
+    }
+
     /// The documented default budget and the slot-cost formula, by
     /// value: the payload dominates, keys add their length plus 24
     /// per target, and the fixed overhead is 64.
