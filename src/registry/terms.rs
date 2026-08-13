@@ -126,6 +126,17 @@ fn camel_pieces(run: &[char], sink: &mut impl TermSink) {
             continue;
         }
         let after_lower = run[at - 1].is_ascii_lowercase() || run[at - 1].is_ascii_digit();
+        // `run` is ASCII-alnum-only by construction (`walk_passage_terms`
+        // breaks the run on the first non-ASCII-alnum char), so
+        // `after_lower` false and `run[at - 1].is_ascii_uppercase()`
+        // true are the SAME fact (issue #604): the `at - 1` here can
+        // only ever be swapped for something observably different
+        // (e.g. by a mutation reading `run[at]`, always uppercase per
+        // the guard above) when `after_lower` already forces
+        // `starts.push(at)` regardless of `ends_acronym`'s value —
+        // making the two conditions agree everywhere `starts`'s
+        // content can differ. No test can distinguish a mutant that
+        // only changes which char this line reads.
         let ends_acronym = run[at - 1].is_ascii_uppercase()
             && run.get(at + 1).is_some_and(|ch| ch.is_ascii_lowercase());
         if after_lower || ends_acronym {
@@ -193,6 +204,15 @@ fn walk_text_terms(text: &str, sink: &mut impl TermSink) {
             }
             if ch.is_alphanumeric() {
                 if let Some(prev) = run {
+                    // `|` here is bitwise-OR, not addition (issue
+                    // #604): `prev << 32` only ever sets bits 32+ and
+                    // `ch as u64` is a `char`, always < 2^21 (max code
+                    // point U+10FFFF), so the two operands never share
+                    // a set bit. OR and XOR agree on every disjoint
+                    // pair of operands — a mutant swapping this for
+                    // `^` computes the identical `u64` for every
+                    // possible `(prev, ch)`, so no test can tell them
+                    // apart.
                     sink.pair(((prev as u64) << 32) | ch as u64, prev, ch);
                 }
                 run = Some(ch);
