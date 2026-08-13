@@ -352,6 +352,43 @@ pub(crate) fn fsync_parent_dir(path: &Path) -> io::Result<()> {
     }
 }
 
+/// Whether a sidecar read failure is worth a log line. `NotFound` is
+/// the routine "never written yet" case every derived-cache `load`
+/// treats as cold-start; anything else (`PermissionDenied`, `EIO`, a
+/// full disk on some platforms) is a standing problem that silently
+/// taxes every residency with a full rebuild and deserves a name.
+/// Pulled out as a pure predicate — a branch that only gates a log
+/// line is otherwise unkillable by a behavioral test (the same reason
+/// `remove_persisted_file_quietly` in `registry/boot.rs` needs
+/// `#[mutants::skip]`) — so the mutation gate has something to catch.
+pub(crate) fn sidecar_read_worth_warning(error: &io::Error) -> bool {
+    error.kind() != io::ErrorKind::NotFound
+}
+
+/// Reads a derived-cache sidecar (BM25 index, vector store): `Some` on
+/// success, `None` on any read failure — a missing or unreadable
+/// sidecar costs a rebuild, never an outage. Unlike a parse failure
+/// (which the caller already warns on for its own bytes), a read that
+/// never got bytes at all was silent everywhere before this: `what`
+/// names the sidecar kind for [`sidecar_read_worth_warning`]'s warning.
+pub(crate) fn read_sidecar(path: &Path, what: &str) -> Option<Vec<u8>> {
+    match fs::read(path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) => {
+            if sidecar_read_worth_warning(&error) {
+                // Never a bare `error` field — see the ADR 0008 note on
+                // `rename_context`'s `Stuck` arm in `lifecycle.rs`.
+                tracing::warn!(
+                    path = %path.display(),
+                    read_error = %error,
+                    "{what} sidecar unreadable; costing a full rebuild every residency until fixed",
+                );
+            }
+            None
+        }
+    }
+}
+
 /// Runs blocking work — a cold load's disk read plus full-image
 /// validation — off the async runtime when called from one:
 /// `block_in_place` tells the multi-thread runtime this worker will
@@ -408,6 +445,45 @@ mod tests {
         let error = fsync_parent_dir(&path)
             .expect_err("fsyncing a nonexistent parent directory must fail, not silently succeed");
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    }
+
+    /// `NotFound` (the routine "never written yet" cold-start case
+    /// every sidecar `load` sees on a fresh context) must stay quiet;
+    /// anything else — permission, I/O — is the standing-problem case
+    /// #603 found silent: a permanently unreadable sidecar paid a full
+    /// rebuild every residency with nothing in the logs.
+    #[test]
+    fn sidecar_read_worth_warning_is_false_only_for_not_found() {
+        assert!(!sidecar_read_worth_warning(&io::Error::from(
+            io::ErrorKind::NotFound
+        )));
+        assert!(sidecar_read_worth_warning(&io::Error::from(
+            io::ErrorKind::PermissionDenied
+        )));
+        assert!(sidecar_read_worth_warning(&io::Error::other(
+            "simulated I/O failure"
+        )));
+    }
+
+    #[test]
+    fn read_sidecar_round_trips_bytes_and_answers_none_when_missing() {
+        let path = std::env::temp_dir().join(format!(
+            "taguru-storage-read-sidecar-{}",
+            std::process::id()
+        ));
+        assert_eq!(
+            read_sidecar(&path, "test sidecar"),
+            None,
+            "a never-written sidecar must answer None, not panic or warn"
+        );
+
+        fs::write(&path, b"the sidecar's bytes").unwrap();
+        assert_eq!(
+            read_sidecar(&path, "test sidecar"),
+            Some(b"the sidecar's bytes".to_vec())
+        );
+
+        let _ = fs::remove_file(&path);
     }
 
     /// `Path::extension()` only ever returns the bytes after the LAST

@@ -957,14 +957,18 @@ impl VectorStore {
             .next()
     }
     /// Reads a sidecar, returning an empty store on any problem — a
-    /// corrupt vector cache costs a re-embed, never an outage.
+    /// corrupt vector cache costs a re-embed, never an outage. A read
+    /// failure other than "not written yet" is warned by
+    /// [`crate::storage::read_sidecar`] — otherwise a permanently
+    /// unreadable sidecar pays a full re-embed every residency with
+    /// nothing in the logs to say why.
     pub fn load(path: &Path) -> Self {
-        match std::fs::read(path) {
-            Ok(bytes) => Self::from_bytes(&bytes).unwrap_or_else(|| {
+        match crate::storage::read_sidecar(path, "vector store") {
+            Some(bytes) => Self::from_bytes(&bytes).unwrap_or_else(|| {
                 tracing::warn!("ignoring corrupt vector store at {}", path.display());
                 Self::default()
             }),
-            Err(_) => Self::default(),
+            None => Self::default(),
         }
     }
 
@@ -1293,10 +1297,14 @@ impl PassageVectorStore {
     /// Reads the sidecar, returning an empty store on any problem — a
     /// corrupt vector cache costs a re-embed, never an outage. A
     /// pre-doc2query file (TAGURUP1) is discarded the same way, minus
-    /// the alarm: it is an upgrade, not corruption.
+    /// the alarm: it is an upgrade, not corruption. A read failure
+    /// other than "not written yet" is warned by
+    /// [`crate::storage::read_sidecar`] — otherwise a permanently
+    /// unreadable sidecar pays a full re-embed every residency with
+    /// nothing in the logs to say why.
     pub fn load(path: &Path) -> Self {
-        match std::fs::read(path) {
-            Ok(bytes) => Self::from_bytes(&bytes).unwrap_or_else(|| {
+        match crate::storage::read_sidecar(path, "passage vector store") {
+            Some(bytes) => Self::from_bytes(&bytes).unwrap_or_else(|| {
                 if bytes.get(..8) == Some(LEGACY_PASSAGE_VECTOR_MAGIC.as_slice()) {
                     tracing::info!(
                         "passage vectors at {} predate doc2query; re-embedding",
@@ -1310,7 +1318,7 @@ impl PassageVectorStore {
                 }
                 Self::default()
             }),
-            Err(_) => Self::default(),
+            None => Self::default(),
         }
     }
 
