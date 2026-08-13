@@ -40,10 +40,31 @@ const B: f32 = 0.75;
 /// Tombstones are reclaimed past max(this floor, live / 4).
 const COMPACT_DEAD_FLOOR: u32 = 1024;
 
-/// Pass-through hasher for keys that are ALREADY hashes (the u64 FNV
-/// terms `passage_terms` emits). Hashing a hash through SipHash would
-/// spend most of a lookup's time re-mixing perfectly good entropy.
-/// Only `write_u64` is meaningful; any other key type is a bug.
+/// Cheap avalanche for a `u64` term key, used in place of re-hashing
+/// through SipHash. Not all `passage_terms` output is already a good
+/// hash: word terms are `fnv1a_fold` output, but a bigram/lone-char
+/// term (`terms.rs`'s `walk_text_terms`) is a raw packed
+/// `(prev << 32) | ch` — its low 32 bits are `ch` alone. hashbrown
+/// picks a bucket from the hash's LOW bits (`hash & (capacity - 1)`),
+/// so every bigram sharing a second character shared a bucket outright
+/// (issue #606: ~1000x slower lookups measured on a synthetic
+/// Japanese corpus, since a handful of common particles dominate as
+/// bigram second characters). The finalizer below (splitmix64/Murmur3
+/// fmix64 lineage) is a bijection, so it introduces no new collisions
+/// for keys that were already distinct — it only spreads each key's
+/// entropy across every bit instead of leaving it concentrated where
+/// the key happened to put it.
+fn avalanche(mut x: u64) -> u64 {
+    x ^= x >> 30;
+    x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x ^= x >> 27;
+    x = x.wrapping_mul(0x94D0_49BB_1331_11EB);
+    x ^= x >> 31;
+    x
+}
+
+/// Hasher over already-avalanched `u64` term keys. Only `write_u64` is
+/// meaningful; any other key type is a bug.
 #[derive(Default)]
 pub(crate) struct TermHasher(u64);
 
@@ -57,7 +78,7 @@ impl Hasher for TermHasher {
     }
 
     fn write_u64(&mut self, key: u64) {
-        self.0 = key;
+        self.0 = avalanche(key);
     }
 }
 
@@ -1010,6 +1031,35 @@ mod tests {
         // (a no-op `write` would make the map key on nothing at all).
         let mut hasher = TermHasher::default();
         std::hash::Hasher::write(&mut hasher, &[1, 2, 3]);
+    }
+
+    #[test]
+    fn term_hasher_spreads_bigram_keys_that_share_a_second_character() {
+        // Before the #606 fix, `TermHasher::write_u64` passed
+        // `(prev << 32) | ch` through unchanged: every key sharing
+        // `ch` (bits 0..21) shared every low bucket-index bit too, so
+        // hashbrown's `hash & (capacity - 1)` sent them all to the
+        // same bucket. Pin the fix directly: for a fixed second
+        // character, hash a batch of keys differing only in `prev`
+        // and confirm they land in distinct buckets under a mask
+        // sized like a real few-hundred-thousand-entry vocabulary
+        // (2^19 - 1). Before the fix this asserted `buckets.len() ==
+        // 1`.
+        let ch = 'の' as u64;
+        let mask = (1u64 << 19) - 1;
+        let mut buckets = std::collections::HashSet::new();
+        for prev in 0x4E00u64..0x4E00 + 2000 {
+            let key = (prev << 32) | ch;
+            let mut hasher = TermHasher::default();
+            hasher.write_u64(key);
+            buckets.insert(std::hash::Hasher::finish(&hasher) & mask);
+        }
+        assert!(
+            buckets.len() > 1900,
+            "bigram keys sharing a second character should spread across \
+             buckets, got {} distinct buckets out of 2000 keys",
+            buckets.len()
+        );
     }
 
     #[test]
