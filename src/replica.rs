@@ -498,6 +498,85 @@ mod tests {
         Arc::new(object_store::local::LocalFileSystem::new_with_prefix(bucket).unwrap())
     }
 
+    /// Delegates everything to `inner`, delaying every read
+    /// (`get_opts` — which `head()`'s default implementation also
+    /// routes through) by `delay`. Standing in for a slow bucket call:
+    /// every `poll_once` reads at least the `complete` marker via
+    /// `newest_complete_generation`'s `head()`, so wrapping the store a
+    /// tailer is spawned against makes ONE poll cycle take at least
+    /// `delay`, deterministically.
+    #[derive(Debug)]
+    struct SlowStore {
+        inner: Arc<dyn ObjectStore>,
+        delay: Duration,
+    }
+
+    impl std::fmt::Display for SlowStore {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "SlowStore({})", self.inner)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for SlowStore {
+        async fn put_opts(
+            &self,
+            location: &StorePath,
+            payload: object_store::PutPayload,
+            opts: object_store::PutOptions,
+        ) -> object_store::Result<object_store::PutResult> {
+            self.inner.put_opts(location, payload, opts).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &StorePath,
+            opts: object_store::PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+            self.inner.put_multipart_opts(location, opts).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &StorePath,
+            options: object_store::GetOptions,
+        ) -> object_store::Result<object_store::GetResult> {
+            tokio::time::sleep(self.delay).await;
+            self.inner.get_opts(location, options).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: futures_util::stream::BoxStream<'static, object_store::Result<StorePath>>,
+        ) -> futures_util::stream::BoxStream<'static, object_store::Result<StorePath>> {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&StorePath>,
+        ) -> futures_util::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&StorePath>,
+        ) -> object_store::Result<object_store::ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &StorePath,
+            to: &StorePath,
+            options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+    }
+
     fn associate(subject: &str) -> WalOp {
         WalOp::Associate(crate::registry::AssocOp {
             subject: subject.to_string(),
@@ -964,6 +1043,73 @@ mod tests {
         assert_eq!(
             epoch_at_shutdown, epoch_after_wait,
             "no poll may land after shutdown() has returned"
+        );
+
+        for dir in [bucket, target] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    /// #616 item 4, the precise property: `shutdown()` must BLOCK
+    /// until the in-flight poll actually finishes, not merely return
+    /// while it winds down on its own. A `shutdown` body deleted
+    /// outright (dropping the handle with no explicit wait) happens to
+    /// still stop the loop soon after — dropping the `wake` sender
+    /// disconnects the channel the tailer's own sleep is waiting on —
+    /// which is why the weaker "no poll lands after shutdown returns"
+    /// property above does not catch that mutation: the timing is
+    /// what distinguishes "waited for it" from "walked away and it
+    /// happened to stop anyway".
+    #[tokio::test]
+    async fn shutdown_blocks_for_the_in_flight_poll_not_just_until_it_returns() {
+        let (bucket, _writer) = two_segment_bucket("shutdown-blocks").await;
+        let url = url_of("shutdown-blocks");
+        let store = local_store(&bucket);
+        let target = scratch("shutdown-blocks-target");
+        let hydrator =
+            crate::hydrate::prepare_replica(&store, &StorePath::default(), &url, &target)
+                .await
+                .expect("hydrates");
+        let state = AppState::boot(target.clone(), 64 * 1024 * 1024, None).unwrap();
+        state.metrics().set_replica_mode();
+
+        let delay = Duration::from_millis(500);
+        let slow: Arc<dyn ObjectStore> = Arc::new(SlowStore {
+            inner: local_store(&bucket),
+            delay,
+        });
+        let handle = spawn(
+            slow,
+            StorePath::default(),
+            ship::ReplicateConfig {
+                url,
+                // Long enough that this test's own `shutdown()` call
+                // always lands during the FIRST poll, never a later
+                // one waiting out the interval.
+                interval: Duration::from_secs(30),
+            },
+            target.clone(),
+            state.clone(),
+            hydrator,
+            Arc::new(ReplicaInfo::new(None)),
+        );
+
+        // No wait here: `shutdown()` must correctly wait out a poll
+        // that has not even reached its first slow read yet, same as
+        // one already mid-read — both are "in flight" from the
+        // caller's point of view the moment `spawn` returns.
+        let started = std::time::Instant::now();
+        tokio::task::spawn_blocking(move || handle.shutdown())
+            .await
+            .unwrap();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= delay / 2,
+            "shutdown() must block for the in-flight slow poll, not return immediately: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "shutdown() must not block far longer than the one slow poll it is waiting on: {elapsed:?}"
         );
 
         for dir in [bucket, target] {
