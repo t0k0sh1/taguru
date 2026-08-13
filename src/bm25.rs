@@ -954,6 +954,28 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "TermHasher only hashes u64 term keys")]
+    fn term_hasher_refuses_a_byte_slice_key() {
+        // `TermMap` only ever hashes `u64` term keys through
+        // `write_u64` — `write` existing at all is a `Hasher` trait
+        // obligation, not a real code path. Its `unreachable!` is the
+        // guard against a future key type silently hashing wrong
+        // (a no-op `write` would make the map key on nothing at all).
+        let mut hasher = TermHasher::default();
+        std::hash::Hasher::write(&mut hasher, &[1, 2, 3]);
+    }
+
+    #[test]
+    fn from_bytes_accepts_a_slot_with_zero_length() {
+        // `length < 0.0` rejects negative and non-finite lengths but
+        // not zero — a paragraph with no matchable terms is a real,
+        // decodable slot, not corruption.
+        let bytes = image(&["a.md"], &[(0, 0, 0.0, 1, 0)], &[]);
+        let index = Bm25Index::from_bytes(&bytes).expect("a zero-length slot must decode");
+        assert_eq!(index.live_count, 1);
+    }
+
+    #[test]
     fn from_bytes_rejects_a_source_name_repeated() {
         // `to_bytes` writes each live source once (sorted, deduplicated
         // by construction) — a repeat is a shape it never produces.
@@ -1009,6 +1031,65 @@ mod tests {
             &[(10, &[(1, 1.0), (0, 1.0)])],
         );
         assert!(Bm25Index::from_bytes(&bytes).is_none());
+    }
+
+    #[test]
+    fn search_short_circuits_on_a_zero_live_count_even_with_stale_alive_postings() {
+        // A genuinely empty index never has alive postings to score,
+        // so the `live_count == 0` guard alone can't be distinguished
+        // from just letting the scoring loop run and find nothing.
+        // Forcing `live_count` to 0 while a slot is still marked
+        // alive (a state `tombstone` never actually produces) is the
+        // only way to observe the guard itself: without it, the loop
+        // below would score that stale-alive slot instead of
+        // returning empty.
+        let mut index = Bm25Index::build(&corpus());
+        let query_grams = grams("state");
+        assert!(
+            !index.search(&query_grams, 10, None).is_empty(),
+            "the query must match something before live_count is forced to 0"
+        );
+        index.live_count = 0;
+        assert!(index.search(&query_grams, 10, None).is_empty());
+    }
+
+    #[test]
+    fn needs_reclaim_only_consults_a_quarter_of_live_count_not_four_times_it() {
+        let mut index = Bm25Index::empty();
+        // A quarter of live_count (1000) stays under the floor
+        // (1024), so the floor governs: 1025 dead is due, 1024 is
+        // not. Four times live_count (16000) would instead swallow
+        // both — this is the case that tells the two readings apart.
+        index.live_count = 4000;
+        index.dead_count = COMPACT_DEAD_FLOOR + 1;
+        assert!(index.needs_reclaim());
+        index.dead_count = COMPACT_DEAD_FLOOR;
+        assert!(!index.needs_reclaim());
+    }
+
+    #[test]
+    fn footprint_sums_names_slots_postings_and_by_source_maps() {
+        // Two sources of different name lengths, and a shared term
+        // (posting list length 2) alongside a solo one (length 1), so
+        // every `+`/`*` in the formula below actually matters — a
+        // list of length 1 or a single source would let `+` and `*`
+        // agree by accident.
+        let mut index = Bm25Index::empty();
+        index.upsert_source("alpha.md", &record("青嶺 酒造 は 蔵元"));
+        index.upsert_source("bravo-a-longer-name.md", &record("青嶺 高瀬 は 杜氏"));
+
+        const POSTING: usize = std::mem::size_of::<Posting>();
+        const SLOT: usize = std::mem::size_of::<Slot>();
+        let names: usize = index.sources.iter().map(|s| s.len() * 2 + 64).sum();
+        let posting_lists: usize = index
+            .postings
+            .values()
+            .map(|list| 8 + 24 + list.len() * POSTING)
+            .sum();
+        let expected =
+            names + index.slots.len() * SLOT + posting_lists + index.by_source.len() * 40;
+
+        assert_eq!(index.footprint(), expected);
     }
 
     #[test]
