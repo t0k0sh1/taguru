@@ -3346,6 +3346,26 @@ mod tests {
     }
 
     #[test]
+    fn lane_pool_floor_is_lane_pools_exact_inverse() {
+        // At or under lane_pool's own `.max(50)` floor, limit=1 always
+        // suffices — this is the branch a hand-written `div_ceil(4)`
+        // (this function's predecessor, issue #605) got wrong.
+        assert_eq!(lane_pool_floor(1), 1);
+        assert_eq!(lane_pool_floor(50), 1);
+        // Past the floor, it's the ceiling division.
+        assert_eq!(lane_pool_floor(51), 13);
+        assert_eq!(lane_pool_floor(200), 50);
+        // The defining property, for a spread of inputs: `lane_pool`
+        // of the floor must cover the lane it was computed for.
+        for lane in [1, 2, 49, 50, 51, 52, 100, 1000, 100_000] {
+            assert!(
+                lane_pool(lane_pool_floor(lane)) >= lane,
+                "lane_pool_floor({lane}) must be large enough for lane_pool to reach it back"
+            );
+        }
+    }
+
+    #[test]
     fn advance_probe_candidate_widen_step_targets_candidate_plus_one_or_lane_need() {
         // `candidate >= full_len` is the ONE-TIME widen trigger; its
         // target is `candidate + 1`, unless `lane_need` asks for more.
