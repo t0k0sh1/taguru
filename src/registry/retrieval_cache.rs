@@ -46,12 +46,17 @@ use crate::metrics::RetrievalCacheOp;
 /// `0` disables the cache entirely).
 pub(crate) const DEFAULT_RETRIEVAL_CACHE_BYTES: usize = 32 * 1024 * 1024;
 
-/// A realistic floor for one retrieval response's serialized size —
+/// A realistic floor for one retrieval response's PAYLOAD size alone —
 /// small compared to real recall/query/passage-search payloads, but
 /// big enough to catch a budget that could never seat one. `insert`'s
-/// entrance ceiling is `budget / 4` (see there), so any budget whose
-/// quarter sits below this admits nothing: keys keep getting minted,
-/// `insert` keeps declining every one of them, and — when
+/// entrance ceiling is `budget / 4` (see there), and what actually has
+/// to fit under it is `slot_cost`, not the bare payload — key bytes
+/// plus a fixed 64-byte overhead ride on top (see `slot_cost`). So a
+/// budget whose quarter lands EXACTLY on this constant still admits
+/// nothing real: every actual slot costs strictly more than its own
+/// payload. `budget_seats_nothing` therefore treats equality as
+/// failure too. Below this floor: keys keep getting minted, `insert`
+/// keeps declining every one of them, and — when
 /// `TAGURU_SEMANTIC_CACHE_THRESHOLD` is also set — the semantic tier
 /// keeps paying a provider call per request for equivalence claims
 /// that can only ever resolve to `stale` (#602 item 4).
@@ -60,9 +65,12 @@ pub(crate) const TYPICAL_RETRIEVAL_PAYLOAD_BYTES: usize = 4 * 1024;
 /// Whether `budget` is enabled (nonzero) but too small to ever seat a
 /// realistic response — pure cost with none of the cache's benefit.
 /// `0` is the deliberate off switch, not this failure mode, so it
-/// reads `false`.
+/// reads `false`. `<=`, not `<`: `TYPICAL_RETRIEVAL_PAYLOAD_BYTES` is
+/// payload alone, and every real slot's cost is payload PLUS overhead
+/// (`slot_cost`), so an entrance ceiling merely equal to it still
+/// admits nothing (CodeRabbit, PR #612).
 pub(crate) fn budget_seats_nothing(budget: usize) -> bool {
-    budget != 0 && budget / 4 < TYPICAL_RETRIEVAL_PAYLOAD_BYTES
+    budget != 0 && budget / 4 <= TYPICAL_RETRIEVAL_PAYLOAD_BYTES
 }
 
 /// One target's contribution to a cache key: which context, which
@@ -590,14 +598,18 @@ mod tests {
     fn budget_seats_nothing_is_false_for_off_and_for_real_budgets() {
         assert!(!budget_seats_nothing(0), "0 is the deliberate off switch");
         assert!(!budget_seats_nothing(DEFAULT_RETRIEVAL_CACHE_BYTES));
+        // A quarter exactly at the typical PAYLOAD size still cannot
+        // seat a real slot — `slot_cost` is payload plus key bytes
+        // plus a fixed 64-byte overhead, so equality is failure, not
+        // the fitting line (CodeRabbit, PR #612).
         let exactly_typical = TYPICAL_RETRIEVAL_PAYLOAD_BYTES * 4;
         assert!(
-            !budget_seats_nothing(exactly_typical),
-            "a quarter exactly at the typical payload size still seats one"
+            budget_seats_nothing(exactly_typical),
+            "a quarter exactly at the typical payload size still cannot fit a real slot"
         );
         assert!(
-            budget_seats_nothing(exactly_typical - 1),
-            "one byte under the line seats nothing"
+            !budget_seats_nothing(exactly_typical + 4),
+            "one quarter-step above the typical payload size seats one"
         );
         assert!(budget_seats_nothing(1000));
     }
