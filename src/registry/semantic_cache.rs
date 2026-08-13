@@ -154,9 +154,12 @@ impl SemanticCache {
     /// promises tick uniqueness by construction (one tick per
     /// operation), every slot ONE sweep touches here shares the same
     /// `tick` — a known blind spot (issue #605, same class as
-    /// [`super::CueCache`]'s own documented one): `evict_stalest`'s tie
-    /// among same-tick slots falls back to `HashMap` iteration order,
-    /// not a further recency distinction.
+    /// [`super::CueCache`]'s own documented one): since a sweep only
+    /// ever touches slots within THIS bucket, `evict_stalest`'s tie
+    /// among same-tick slots resolves by this bucket's `Vec` position
+    /// (CodeRabbit, PR #635), not a further recency distinction — and
+    /// `swap_remove` reshuffles later positions on every eviction, so
+    /// even that isn't a stable order to rely on.
     fn candidates(&mut self, bucket: &SemanticBucket, embedding: &[f32]) -> Vec<Candidate> {
         let Some(threshold) = self.threshold else {
             return Vec::new();
