@@ -1744,11 +1744,15 @@ pub(crate) enum LimitToReach {
     /// The target ranks nowhere in the full (unbounded) ranking —
     /// there is no limit that would serve it.
     NotRanked,
-    /// The target ranks somewhere in the full ranking, but no probed
-    /// limit up to the raw ceiling served it — RRF against capped
-    /// pools can seat a late double-lane candidate above a mid-pool
-    /// single-lane hit, so a rank in the unbounded ranking does not
-    /// by itself guarantee a reachable limit.
+    /// The target ranks somewhere in the full ranking, but the probe
+    /// never confirmed a limit that serves it — either every probed
+    /// limit up to the raw ceiling missed (RRF against capped pools
+    /// can seat a late double-lane candidate above a mid-pool
+    /// single-lane hit, so a rank in the unbounded ranking does not by
+    /// itself guarantee a reachable limit), or the request's deadline
+    /// cut the probe short first. The two are not distinguished: a
+    /// truncated probe cannot claim "tried the whole raw ceiling and
+    /// failed" any more truthfully than it can claim success.
     Unreachable,
 }
 

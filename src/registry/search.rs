@@ -312,9 +312,11 @@ impl AppState {
     /// the SAME ANN-vs-exact choice `search_passages` would make for
     /// its own pool size, #601 item 2), then O(log(raw row count))
     /// reruns of the ranking alone — never the paragraph text (#601
-    /// item 3) — to verify `limit_to_reach`. A target that never
-    /// ranked at all additionally costs one `index.explain` per
-    /// paragraph of the source, to find the best-sharing one.
+    /// item 3) — to verify `limit_to_reach`, `deadline`-checked before
+    /// each rerun so a huge corpus's iteration count cannot outrun the
+    /// caller's own timeout budget. A target that never ranked at all
+    /// additionally costs one `index.explain` per paragraph of the
+    /// source, to find the best-sharing one.
     ///
     /// `filter` is the source filter of the search being explained
     /// (#167), applied exactly as `search_passages` applies it: an
@@ -622,6 +624,19 @@ impl AppState {
                     let mut widened = false;
                     let mut reached = None;
                     for _ in 0..probe_budget(raw_ceiling) {
+                        // `probe_budget` bounds the ITERATION count, not
+                        // wall-clock: each rerun re-ranks up to
+                        // `lane_pool(raw_ceiling)` rows, so a caller's
+                        // deadline must still cut this short on a huge
+                        // corpus rather than trusting the log-scaled
+                        // budget alone. A cut-short probe cannot claim
+                        // "tried the whole raw ceiling and failed" any
+                        // more truthfully than it can claim success, so
+                        // it settles on the same `Unreachable` a
+                        // completed-but-failed probe does (#601).
+                        if deadline.expired() {
+                            break;
+                        }
                         let rerun = fuse_passage_ranking(
                             &store,
                             lexical_lane(lane_pool(candidate)),
@@ -3130,6 +3145,78 @@ mod tests {
             explanation.limit_to_reach,
             LimitToReach::At(3),
             "rank 2 serves at limit 3, and the probe must start there"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn limit_to_reach_probe_stops_at_an_expired_deadline_instead_of_ignoring_it() {
+        // Same corpus and target as `..._is_the_exact_serving_limit`
+        // above, where an unbounded deadline lets the probe reach
+        // `At(3)`. `probe_budget` bounds ITERATIONS, not wall-clock —
+        // without its own deadline check the loop would keep re-
+        // ranking regardless of how long the caller intended to wait
+        // (CodeRabbit, PR #609). The first call warms the BM25 index
+        // (and the query embedding cache, when the vector lane is on)
+        // under an unbounded deadline so the SECOND, expired-deadline
+        // call fails inside the probe itself, not earlier at index
+        // build or embedding.
+        let dir = scratch_dir("explain-limit-deadline");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert(
+            "doc-1".to_string(),
+            "杜氏、杜氏、杜氏、杜氏、杜氏の五連。".to_string(),
+        );
+        passages.insert("doc-2".to_string(), "杜氏と杜氏と杜氏と杜氏。".to_string());
+        passages.insert("doc-3".to_string(), "杜氏の杜氏による杜氏。".to_string());
+        passages.insert("doc-4".to_string(), "杜氏と杜氏の記録。".to_string());
+        passages.insert("doc-5".to_string(), "杜氏の単独記録。".to_string());
+        state
+            .store_passages("sake", plain(passages))
+            .unwrap()
+            .unwrap();
+        state
+            .explain_passage_search(
+                "sake",
+                "杜氏",
+                "doc-3",
+                None,
+                1,
+                None,
+                None,
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+
+        let expired = Deadline::after(std::time::Duration::ZERO);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        assert!(expired.expired());
+
+        let explanation = state
+            .explain_passage_search("sake", "杜氏", "doc-3", None, 1, None, None, expired)
+            .unwrap()
+            .unwrap();
+        let PassageExplainLookup::Explained(explanation) = explanation else {
+            panic!("expected an Explained verdict");
+        };
+        assert_eq!(
+            explanation.rank,
+            Some(3),
+            "the target still ranks — an expired deadline degrades the \
+             probe, not the rest of the explanation"
+        );
+        assert_eq!(
+            explanation.limit_to_reach,
+            LimitToReach::Unreachable,
+            "an expired deadline must stop the probe before it ever tries \
+             candidate 3, which an unbounded deadline reaches: {explanation:?}"
         );
 
         let _ = fs::remove_dir_all(dir);

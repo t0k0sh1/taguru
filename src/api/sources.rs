@@ -2423,4 +2423,62 @@ mod tests {
             result.summary
         );
     }
+
+    /// `LimitToReach`'s three endings must stay distinguishable on the
+    /// wire: `Unreachable` sends `limit_to_reach_reason: "unreachable"`
+    /// with `limit_to_reach` itself omitted — never confusable with
+    /// `NotRanked`, which omits both (CodeRabbit, PR #609).
+    #[test]
+    fn limit_to_reach_wire_shape_distinguishes_unreachable_from_not_ranked() {
+        let base = |rank, limit_to_reach| crate::registry::PassageSearchExplanation {
+            paragraph: 0,
+            paragraphs: 1,
+            paragraph_named: false,
+            query_terms: Vec::new(),
+            lexical: None,
+            paragraph_terms: None,
+            vector: crate::registry::VectorLaneReport::Off {
+                provider_configured: false,
+            },
+            fused: false,
+            ranked: 5,
+            rank,
+            score: None,
+            bm25_lane: None,
+            vector_lane: None,
+            limit: 3,
+            served: false,
+            cutoff_score: Some(0.5),
+            limit_to_reach,
+        };
+
+        let unreachable = serde_json::to_value(SearchExplanation::from_explanation(
+            "doc-a",
+            base(Some(4), crate::registry::LimitToReach::Unreachable),
+        ))
+        .unwrap();
+        assert_eq!(
+            unreachable["ranking"]["limit_to_reach_reason"],
+            "unreachable"
+        );
+        assert!(
+            unreachable["ranking"].get("limit_to_reach").is_none(),
+            "{unreachable}"
+        );
+
+        let not_ranked = serde_json::to_value(SearchExplanation::from_explanation(
+            "doc-a",
+            base(None, crate::registry::LimitToReach::NotRanked),
+        ))
+        .unwrap();
+        assert!(
+            not_ranked["ranking"].get("limit_to_reach").is_none(),
+            "{not_ranked}"
+        );
+        assert!(
+            not_ranked["ranking"].get("limit_to_reach_reason").is_none(),
+            "NotRanked carries no reason — a bare absence, distinct from \
+             Unreachable's explicit one: {not_ranked}"
+        );
+    }
 }
