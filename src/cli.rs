@@ -203,7 +203,11 @@ ENVIRONMENT (every knob; unset = the shown default):
   TAGURU_CACHE_BYTES           resident budget for unpinned contexts (512 MiB)
   TAGURU_RETRIEVAL_CACHE_BYTES  exact-match result cache for recall/query/
                                passage search, invalidated by the revision
-                               counters (32 MiB; 0 = off)
+                               counters (32 MiB; 0 = off; below ~16 KiB is
+                               not a smaller cache but pure cost — no
+                               response fits, so keys keep getting minted
+                               and only ever miss; a boot-time warning
+                               fires under that floor)
   TAGURU_SEMANTIC_CACHE_THRESHOLD  semantic tier over the exact cache,
                                passage search only: a paraphrased query
                                clearing this cosine floor (plus a negation/

@@ -46,6 +46,33 @@ use crate::metrics::RetrievalCacheOp;
 /// `0` disables the cache entirely).
 pub(crate) const DEFAULT_RETRIEVAL_CACHE_BYTES: usize = 32 * 1024 * 1024;
 
+/// A realistic floor for one retrieval response's PAYLOAD size alone —
+/// small compared to real recall/query/passage-search payloads, but
+/// big enough to catch a budget that could never seat one. `insert`'s
+/// entrance ceiling is `budget / 4` (see there), and what actually has
+/// to fit under it is `slot_cost`, not the bare payload — key bytes
+/// plus a fixed 64-byte overhead ride on top (see `slot_cost`). So a
+/// budget whose quarter lands EXACTLY on this constant still admits
+/// nothing real: every actual slot costs strictly more than its own
+/// payload. `budget_seats_nothing` therefore treats equality as
+/// failure too. Below this floor: keys keep getting minted, `insert`
+/// keeps declining every one of them, and — when
+/// `TAGURU_SEMANTIC_CACHE_THRESHOLD` is also set — the semantic tier
+/// keeps paying a provider call per request for equivalence claims
+/// that can only ever resolve to `stale` (#602 item 4).
+pub(crate) const TYPICAL_RETRIEVAL_PAYLOAD_BYTES: usize = 4 * 1024;
+
+/// Whether `budget` is enabled (nonzero) but too small to ever seat a
+/// realistic response — pure cost with none of the cache's benefit.
+/// `0` is the deliberate off switch, not this failure mode, so it
+/// reads `false`. `<=`, not `<`: `TYPICAL_RETRIEVAL_PAYLOAD_BYTES` is
+/// payload alone, and every real slot's cost is payload PLUS overhead
+/// (`slot_cost`), so an entrance ceiling merely equal to it still
+/// admits nothing (CodeRabbit, PR #612).
+pub(crate) fn budget_seats_nothing(budget: usize) -> bool {
+    budget != 0 && budget / 4 <= TYPICAL_RETRIEVAL_PAYLOAD_BYTES
+}
+
 /// One target's contribution to a cache key: which context, which
 /// incarnation of it, and the values of the two revision lanes this
 /// operation's response can depend on.
@@ -332,6 +359,61 @@ mod tests {
         }
     }
 
+    /// #602 item 2: `PassageSearchLanes::embedding_failed()` keeps
+    /// `ModelChanged`/`WidthChanged` OUT of the "must not cache" gate
+    /// on the premise that a passage vector publish always moves the
+    /// `SearchPassages` key (see that method's doc). This pins the
+    /// premise directly: if `refresh_passage_embeddings` ever stops
+    /// calling `bump_config_revision` on a real publish, this test
+    /// fails instead of the assumption quietly rotting.
+    #[test]
+    fn a_passage_vector_publish_moves_the_search_passages_key() {
+        let dir = crate::registry::test_support::scratch_dir("retrieval-cache-publish-moves-key");
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let embedder = std::sync::Arc::new(crate::registry::test_support::MockEmbeddings::fruity(
+            &calls,
+        )) as std::sync::Arc<dyn crate::embedding::EmbeddingProvider>;
+        let state =
+            crate::registry::test_support::boot_for_passage_embedding(&dir, embedder, 20_000);
+        state
+            .create("sake", crate::registry::ContextMeta::default())
+            .unwrap();
+        let mut passages = std::collections::BTreeMap::new();
+        passages.insert("第1章".to_string(), "りんごの話".to_string());
+        state
+            .store_passages("sake", crate::registry::test_support::plain(passages))
+            .unwrap()
+            .unwrap();
+
+        let before = state
+            .retrieval_key(
+                RetrievalCacheOp::SearchPassages,
+                &["sake".to_string()],
+                Some("params".to_string()),
+            )
+            .expect("the retrieval cache is enabled by default");
+
+        state
+            .refresh_passage_embeddings("sake", taguru::deadline::Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+
+        let after = state
+            .retrieval_key(
+                RetrievalCacheOp::SearchPassages,
+                &["sake".to_string()],
+                Some("params".to_string()),
+            )
+            .unwrap();
+
+        assert_ne!(
+            before, after,
+            "a passage vector publish must move the SearchPassages key"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn eviction_drops_the_least_recently_used_entry_and_keeps_the_bytes_honest() {
         // The quarter-of-budget guard means at least four equal slots
@@ -505,5 +587,30 @@ mod tests {
         }
         assert_eq!(cache.len(), 4, "an exactly-full cache evicts nothing");
         assert_eq!(cache.bytes(), cost * 4);
+    }
+
+    /// #602 item 4: `0` is the deliberate off switch and must read
+    /// `false`, not the failure mode this predicate is for. Every
+    /// other boundary is checked on both sides of the line — a budget
+    /// whose quarter lands exactly on `TYPICAL_RETRIEVAL_PAYLOAD_BYTES`
+    /// still seats one, one byte under does not.
+    #[test]
+    fn budget_seats_nothing_is_false_for_off_and_for_real_budgets() {
+        assert!(!budget_seats_nothing(0), "0 is the deliberate off switch");
+        assert!(!budget_seats_nothing(DEFAULT_RETRIEVAL_CACHE_BYTES));
+        // A quarter exactly at the typical PAYLOAD size still cannot
+        // seat a real slot — `slot_cost` is payload plus key bytes
+        // plus a fixed 64-byte overhead, so equality is failure, not
+        // the fitting line (CodeRabbit, PR #612).
+        let exactly_typical = TYPICAL_RETRIEVAL_PAYLOAD_BYTES * 4;
+        assert!(
+            budget_seats_nothing(exactly_typical),
+            "a quarter exactly at the typical payload size still cannot fit a real slot"
+        );
+        assert!(
+            !budget_seats_nothing(exactly_typical + 4),
+            "one quarter-step above the typical payload size seats one"
+        );
+        assert!(budget_seats_nothing(1000));
     }
 }
