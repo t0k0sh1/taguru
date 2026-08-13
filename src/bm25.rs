@@ -467,9 +467,13 @@ impl Bm25Index {
     }
 
     /// Reads the sidecar, `None` on any problem — a corrupt or missing
-    /// index costs a rebuild, never an outage.
+    /// index costs a rebuild, never an outage. A read failure other
+    /// than "not written yet" (permission, I/O) is warned by
+    /// [`crate::storage::read_sidecar`] — otherwise a permanently
+    /// unreadable sidecar pays a full re-tokenization every residency
+    /// with nothing in the logs to say why.
     pub(crate) fn load(path: &Path) -> Option<Self> {
-        let bytes = std::fs::read(path).ok()?;
+        let bytes = crate::storage::read_sidecar(path, "BM25 index")?;
         let parsed = Self::from_bytes(&bytes);
         if parsed.is_none() {
             tracing::warn!("ignoring corrupt BM25 index at {}", path.display());
