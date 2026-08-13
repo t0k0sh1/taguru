@@ -54,7 +54,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use object_store::ObjectStore;
 use object_store::path::Path as StorePath;
@@ -128,14 +128,89 @@ pub(crate) struct TailerHandle {
     thread: std::thread::JoinHandle<()>,
 }
 
+/// Bound on `TailerHandle::shutdown`'s wait for the tailer thread.
+/// `poll_once` chains several sequential bucket calls (a fence lookup,
+/// `newest_complete_generation`, `read_manifest`, `hydrate_shared`,
+/// one `ensure_context` per stale stem) with no per-await cancellation
+/// — `stop` is only checked between whole polls and once inside the
+/// per-stem worklist loop, never at the earlier await points — so a
+/// single hung bucket call can hold up the whole cycle. `object_store`
+/// defaults each individual call's own timeout to 30s; this is a
+/// multiple of that; margin for several such calls landing in one
+/// cycle, not a promise that the tailer itself stops by then.
+const TAILER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(90);
+
 impl TailerHandle {
+    /// Signals stop and waits for the tailer, bounded. `shutdown` runs
+    /// inside `main`'s own shutdown sequence
+    /// (`tokio::task::block_in_place(|| tailer.shutdown())`) — a plain
+    /// `JoinHandle::join` here would block the WHOLE process's clean
+    /// exit for as long as a hung poll takes, which `poll_once`'s lack
+    /// of per-await cancellation (see [`TAILER_SHUTDOWN_TIMEOUT`])
+    /// could make indefinite in the worst case.
     pub(crate) fn shutdown(self) {
         self.stop.store(true, Ordering::Relaxed);
         let _ = self.wake.send(());
-        if self.thread.join().is_err() {
-            tracing::warn!("replica tailer did not shut down cleanly");
+        match join_bounded(self.thread, TAILER_SHUTDOWN_TIMEOUT) {
+            JoinOutcome::Clean => {}
+            JoinOutcome::Panicked => tracing::warn!("replica tailer did not shut down cleanly"),
+            JoinOutcome::TimedOut => tracing::warn!(
+                timeout_secs = TAILER_SHUTDOWN_TIMEOUT.as_secs(),
+                "replica tailer did not stop within the shutdown timeout (a bucket call is \
+                 likely hung); continuing shutdown without it",
+            ),
+            JoinOutcome::CouldNotSpawnWatchdog => tracing::warn!(
+                "could not spawn a thread to bound the replica tailer's shutdown wait; \
+                 the tailer thread is now unjoined and will finish on its own"
+            ),
         }
     }
+}
+
+#[derive(Debug)]
+enum JoinOutcome {
+    Clean,
+    Panicked,
+    TimedOut,
+    CouldNotSpawnWatchdog,
+}
+
+/// Joins `thread`, bounded by `timeout` — `JoinHandle::join` itself
+/// has no timeout in std, so the join runs on a detached helper
+/// thread instead, and the caller waits on THAT thread through a
+/// channel it can time out on. Only one thread may ever call
+/// `JoinHandle::join` on a given handle, which is why this spawns a
+/// helper rather than racing the join against a timer directly.
+///
+/// Past the bound, this returns `TimedOut` and the original `thread`
+/// stays unjoined — not aborted, not signaled, just no longer waited
+/// on. It finishes on its own (or is torn down with the process) at
+/// whatever pace the thing it is blocked on allows.
+fn join_bounded(thread: std::thread::JoinHandle<()>, timeout: Duration) -> JoinOutcome {
+    let (done, waited) = std::sync::mpsc::channel();
+    let joiner = std::thread::Builder::new()
+        .name("taguru-replica-shutdown-wait".into())
+        .spawn(move || {
+            let clean = thread.join().is_ok();
+            let _ = done.send(clean);
+        });
+    let Ok(joiner) = joiner else {
+        // `thread` moved into the closure above regardless of whether
+        // the spawn itself succeeded — std hands back no way to
+        // reclaim it from a failed `spawn`, so there is no "join it
+        // directly" fallback left to fall back to.
+        return JoinOutcome::CouldNotSpawnWatchdog;
+    };
+    let outcome = match waited.recv_timeout(timeout) {
+        Ok(true) => JoinOutcome::Clean,
+        Ok(false) => JoinOutcome::Panicked,
+        Err(_) => JoinOutcome::TimedOut,
+    };
+    // Detached either way: joining the watchdog here would just
+    // reintroduce the unbounded wait this function exists to avoid
+    // (the watchdog itself only returns once ITS join finishes).
+    drop(joiner);
+    outcome
 }
 
 /// Boots the tailer on its own thread (with its own small runtime,
@@ -421,6 +496,85 @@ mod tests {
 
     fn local_store(bucket: &FsPath) -> Arc<dyn ObjectStore> {
         Arc::new(object_store::local::LocalFileSystem::new_with_prefix(bucket).unwrap())
+    }
+
+    /// Delegates everything to `inner`, delaying every read
+    /// (`get_opts` — which `head()`'s default implementation also
+    /// routes through) by `delay`. Standing in for a slow bucket call:
+    /// every `poll_once` reads at least the `complete` marker via
+    /// `newest_complete_generation`'s `head()`, so wrapping the store a
+    /// tailer is spawned against makes ONE poll cycle take at least
+    /// `delay`, deterministically.
+    #[derive(Debug)]
+    struct SlowStore {
+        inner: Arc<dyn ObjectStore>,
+        delay: Duration,
+    }
+
+    impl std::fmt::Display for SlowStore {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "SlowStore({})", self.inner)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for SlowStore {
+        async fn put_opts(
+            &self,
+            location: &StorePath,
+            payload: object_store::PutPayload,
+            opts: object_store::PutOptions,
+        ) -> object_store::Result<object_store::PutResult> {
+            self.inner.put_opts(location, payload, opts).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &StorePath,
+            opts: object_store::PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+            self.inner.put_multipart_opts(location, opts).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &StorePath,
+            options: object_store::GetOptions,
+        ) -> object_store::Result<object_store::GetResult> {
+            tokio::time::sleep(self.delay).await;
+            self.inner.get_opts(location, options).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: futures_util::stream::BoxStream<'static, object_store::Result<StorePath>>,
+        ) -> futures_util::stream::BoxStream<'static, object_store::Result<StorePath>> {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&StorePath>,
+        ) -> futures_util::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&StorePath>,
+        ) -> object_store::Result<object_store::ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &StorePath,
+            to: &StorePath,
+            options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
     }
 
     fn associate(subject: &str) -> WalOp {
@@ -818,6 +972,160 @@ mod tests {
         }
     }
 
+    fn last_poll_epoch(text: &str) -> u64 {
+        text.lines()
+            .find(|line| line.starts_with("taguru_replica_last_poll_success_timestamp_seconds "))
+            .and_then(|line| line.split_whitespace().last())
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0)
+    }
+
+    /// #616 item 4: `TailerHandle::shutdown` must actually stop the
+    /// tailer, not merely return — a real background tailer against a
+    /// fast poll interval, stopped, then watched well past several
+    /// more intervals: the poll-success epoch must not move again.
+    /// (A `shutdown` body deleted outright would drop the handle
+    /// without ever setting `stop`, so the thread — and the epoch —
+    /// would keep moving underneath this exact assertion.)
+    #[tokio::test]
+    async fn shutdown_actually_stops_the_tailer_from_polling_further() {
+        let (bucket, _writer) = two_segment_bucket("shutdown-stop").await;
+        let url = url_of("shutdown-stop");
+        let store = local_store(&bucket);
+        let target = scratch("shutdown-stop-target");
+        let hydrator =
+            crate::hydrate::prepare_replica(&store, &StorePath::default(), &url, &target)
+                .await
+                .expect("hydrates");
+        let state = AppState::boot(target.clone(), 64 * 1024 * 1024, None).unwrap();
+        state.metrics().set_replica_mode();
+
+        let handle = spawn(
+            local_store(&bucket),
+            StorePath::default(),
+            ship::ReplicateConfig {
+                url,
+                interval: Duration::from_millis(20),
+            },
+            target.clone(),
+            state.clone(),
+            hydrator,
+            Arc::new(ReplicaInfo::new(None)),
+        );
+
+        // At least one poll must land before stopping — otherwise a
+        // slow test runner could shut the tailer down before it ever
+        // polled once, and the assertion below would pass vacuously.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while last_poll_epoch(&scrape(&state)) == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no poll landed within 5s"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        // `shutdown` blocks the calling thread (by design — see its
+        // doc comment), so it needs to run off the async executor.
+        tokio::task::spawn_blocking(move || handle.shutdown())
+            .await
+            .unwrap();
+        let epoch_at_shutdown = last_poll_epoch(&scrape(&state));
+
+        // Real code: the thread is gone by the time `shutdown()`
+        // returns, so nothing can poll again — waiting well past
+        // several more 20ms intervals must not move the epoch.
+        // Mutated `shutdown` (a no-op): the thread keeps polling
+        // every 20ms regardless and crosses into a new second well
+        // within this wait, moving the epoch forward.
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        let epoch_after_wait = last_poll_epoch(&scrape(&state));
+        assert_eq!(
+            epoch_at_shutdown, epoch_after_wait,
+            "no poll may land after shutdown() has returned"
+        );
+
+        for dir in [bucket, target] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    /// #616 item 4, the precise property: `shutdown()` must BLOCK
+    /// until the in-flight poll actually finishes, not merely return
+    /// while it winds down on its own. A `shutdown` body deleted
+    /// outright (dropping the handle with no explicit wait) happens to
+    /// still stop the loop soon after — dropping the `wake` sender
+    /// disconnects the channel the tailer's own sleep is waiting on —
+    /// which is why the weaker "no poll lands after shutdown returns"
+    /// property above does not catch that mutation: the timing is
+    /// what distinguishes "waited for it" from "walked away and it
+    /// happened to stop anyway".
+    #[tokio::test]
+    async fn shutdown_blocks_for_the_in_flight_poll_not_just_until_it_returns() {
+        let (bucket, _writer) = two_segment_bucket("shutdown-blocks").await;
+        let url = url_of("shutdown-blocks");
+        let store = local_store(&bucket);
+        let target = scratch("shutdown-blocks-target");
+        let hydrator =
+            crate::hydrate::prepare_replica(&store, &StorePath::default(), &url, &target)
+                .await
+                .expect("hydrates");
+        let state = AppState::boot(target.clone(), 64 * 1024 * 1024, None).unwrap();
+        state.metrics().set_replica_mode();
+
+        let delay = Duration::from_millis(500);
+        let slow: Arc<dyn ObjectStore> = Arc::new(SlowStore {
+            inner: local_store(&bucket),
+            delay,
+        });
+        let handle = spawn(
+            slow,
+            StorePath::default(),
+            ship::ReplicateConfig {
+                url,
+                // Long enough that this test's own `shutdown()` call
+                // always lands during the FIRST poll, never a later
+                // one waiting out the interval.
+                interval: Duration::from_secs(30),
+            },
+            target.clone(),
+            state.clone(),
+            hydrator,
+            Arc::new(ReplicaInfo::new(None)),
+        );
+
+        // No wait here: `shutdown()` must correctly wait out a poll
+        // that has not even reached its first slow read yet, same as
+        // one already mid-read — both are "in flight" from the
+        // caller's point of view the moment `spawn` returns.
+        let started = std::time::Instant::now();
+        tokio::task::spawn_blocking(move || handle.shutdown())
+            .await
+            .unwrap();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= delay / 2,
+            "shutdown() must block for the in-flight slow poll, not return immediately: {elapsed:?}"
+        );
+        // Delay-relative, not a fixed wall-clock ceiling: one poll can
+        // touch several `get_opts` calls in sequence (the complete
+        // marker's `head`, the manifest `get`, the shared-files pass,
+        // one `ensure_context` read), each paying `delay` under
+        // `SlowStore`, plus whatever scheduling slack a loaded CI
+        // runner adds — a generous multiple of `delay` bounds that
+        // without hard-coding a number unrelated to the fixture.
+        let ceiling = delay * 20;
+        assert!(
+            elapsed < ceiling,
+            "shutdown() must not block far longer than the slow polls it is waiting on: \
+             {elapsed:?} (ceiling {ceiling:?})"
+        );
+
+        for dir in [bucket, target] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
     #[test]
     fn the_refusal_names_what_the_replica_knows() {
         let bare = ReplicaInfo::new(None);
@@ -834,5 +1142,49 @@ mod tests {
             "{}",
             routed.refusal()
         );
+    }
+
+    /// #616 item 4: `join_bounded` must return promptly on a thread
+    /// that never finishes — standing in for `poll_once` stuck on a
+    /// hung bucket call with no per-await cancellation — rather than
+    /// blocking the caller (in production, the whole process's
+    /// shutdown sequence) for as long as the thread takes.
+    #[test]
+    fn join_bounded_times_out_on_a_thread_that_never_finishes() {
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let thread = std::thread::spawn(move || {
+            let _ = held.recv();
+        });
+        let started = std::time::Instant::now();
+        let outcome = join_bounded(thread, Duration::from_millis(50));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "must return promptly instead of waiting for the hung thread: {:?}",
+            started.elapsed()
+        );
+        assert!(matches!(outcome, JoinOutcome::TimedOut));
+        // Release the leaked thread so it does not outlive the test
+        // binary for no reason.
+        let _ = release.send(());
+    }
+
+    /// The companion case: a thread that finishes well within the
+    /// bound reports `Clean`, not a spurious timeout.
+    #[test]
+    fn join_bounded_reports_clean_for_a_thread_that_finishes_in_time() {
+        let thread = std::thread::spawn(|| {});
+        let outcome = join_bounded(thread, Duration::from_secs(5));
+        assert!(matches!(outcome, JoinOutcome::Clean), "{outcome:?}");
+    }
+
+    /// And a thread whose body panics reports `Panicked`, matching
+    /// what `shutdown` warns on today (`join().is_err()`).
+    #[test]
+    fn join_bounded_reports_panicked_for_a_thread_that_panics() {
+        let thread = std::thread::Builder::new()
+            .spawn(|| panic!("intentional panic for join_bounded's Panicked arm"))
+            .unwrap();
+        let outcome = join_bounded(thread, Duration::from_secs(5));
+        assert!(matches!(outcome, JoinOutcome::Panicked), "{outcome:?}");
     }
 }

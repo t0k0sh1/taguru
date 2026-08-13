@@ -212,6 +212,14 @@ pub struct Metrics {
     /// dashboard-visible half of that fail-stop.
     replication_uploads: AtomicU64,
     replication_errors: AtomicU64,
+    /// Subset of `replication_errors` the store classified as
+    /// likely-permanent (bad credentials, unsupported operation,
+    /// unrecognized config key — see `ship::error::store_error`): the
+    /// shipper still retries, but this will not self-heal on its own
+    /// the way the rest of `replication_errors` usually does, so it
+    /// gets its own alertable series instead of hiding inside the
+    /// generic count.
+    replication_permanent_errors: AtomicU64,
     replication_fenced: AtomicBool,
     /// Unix seconds of the last cycle that shipped everything it found
     /// (0 = none since boot) — `time() - this` on a dashboard bounds
@@ -546,6 +554,27 @@ mod tests {
         metrics.note_replica_shipped("sake", "graph", 4);
         let cleared_below = metrics.replica_lag.lock()[&key].behind_since_epoch;
         assert_eq!(cleared_below, 0, "a lower shipped seq also clears the age");
+    }
+
+    /// #616 item 1: a likely-permanent shipping error (bad
+    /// credentials, an unsupported operation, an unrecognized config
+    /// key) gets its own alertable series on top of the generic
+    /// replication-errors count.
+    #[test]
+    fn a_permanent_replication_error_renders_its_own_counter() {
+        let metrics = Metrics::default();
+        let before = metrics.render_prometheus(&empty_gauges());
+        assert!(
+            before.contains("taguru_replication_permanent_errors_total 0"),
+            "{before}"
+        );
+        metrics.record_replication_permanent_error();
+        metrics.record_replication_permanent_error();
+        let after = metrics.render_prometheus(&empty_gauges());
+        assert!(
+            after.contains("taguru_replication_permanent_errors_total 2"),
+            "{after}"
+        );
     }
 
     /// The in-flight counter: a ceiling refuses at capacity, zero means

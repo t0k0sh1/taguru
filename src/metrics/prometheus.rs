@@ -758,6 +758,13 @@ impl Metrics {
         );
         push_value(
             &mut out,
+            "taguru_replication_permanent_errors_total",
+            "counter",
+            "Replication failures the store classified as likely-permanent (bad credentials, unsupported operation, unrecognized config key); the shipper still retries, but this will not self-heal without operator action — unlike most of taguru_replication_errors_total.",
+            self.replication_permanent_errors.load(Ordering::Relaxed),
+        );
+        push_value(
+            &mut out,
             "taguru_replication_fenced",
             "gauge",
             "1 once a newer writer claimed the bucket and shipping fail-stopped (latched; restart to contest).",
