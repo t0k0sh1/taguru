@@ -748,7 +748,7 @@ impl AppState {
                 let mut disk = loaded.source_digests();
                 let mut drifted = 0usize;
                 for (source, record) in &records {
-                    if disk.remove(source) != Some(crate::bm25::record_digest(record)) {
+                    if disk.remove(source) != crate::bm25::record_digest(record) {
                         loaded.upsert_source(source, record);
                         drifted += 1;
                     }
@@ -1364,6 +1364,54 @@ mod tests {
         assert!(
             !entry.bm25_dirty.load(Ordering::Relaxed),
             "a clean sidecar loads as-is — nothing drifted, nothing re-tokenized"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_whitespace_only_source_does_not_leave_the_sidecar_permanently_dirty() {
+        // #603: a source whose text splits to zero paragraphs (a
+        // whitespace-only passage — `interpret_passages` lets it
+        // through the public API uncaught) used to make `record_digest`
+        // return `Some(FNV1A_OFFSET)` while `source_digests` carried no
+        // entry for it at all. The repair loop in `bm25_index` read
+        // that as permanent drift: `bm25_dirty` got set on every
+        // residency, the sidecar got rewritten on every flush, and
+        // `upsert_source` never had anything to append that would make
+        // the two sides agree.
+        let dir = scratch_dir("bm25-blank-source");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            let mut passages = BTreeMap::new();
+            passages.insert("第1章".to_string(), "青嶺酒造の創業は1907年。".to_string());
+            passages.insert("空欄".to_string(), "   \n\n\t \n".to_string());
+            state
+                .store_passages("sake", plain(passages))
+                .unwrap()
+                .unwrap();
+            state
+                .search_passages("sake", "創業はいつ", 3, None, None, Deadline::unbounded())
+                .unwrap()
+                .unwrap();
+            state.flush_dirty();
+        }
+
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let hits = state
+            .search_passages("sake", "創業はいつ", 3, None, None, Deadline::unbounded())
+            .unwrap()
+            .unwrap()
+            .hits;
+        assert_eq!(hits[0].source, "第1章");
+        let entry = state.lookup("sake").unwrap();
+        assert!(
+            !entry.bm25_dirty.load(Ordering::Relaxed),
+            "a whitespace-only source must not read as drifted on a clean sidecar"
         );
 
         let _ = fs::remove_dir_all(dir);

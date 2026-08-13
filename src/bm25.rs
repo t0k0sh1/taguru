@@ -743,12 +743,26 @@ fn take_questions_fold<'r>(
 /// index WOULD have for this record if it were fresh. The same
 /// lockstep cursor as `upsert_source`, so both sides cost
 /// O(paragraphs + questions).
-pub(crate) fn record_digest(record: &PassageRecord) -> u64 {
+///
+/// `None` for a record with zero paragraphs (an empty or
+/// whitespace-only passage, which `paragraph::split` turns into zero
+/// spans) — matching [`Bm25Index::source_digests`]'s own rule that a
+/// source with no LIVE slot has no entry at all. Returning
+/// `Some(FNV1A_OFFSET)` here instead would disagree with that absence
+/// on every comparison: `bm25_index`'s repair loop would read the
+/// source as permanently drifted (`upsert_source` on an empty record
+/// changes nothing, so the sidecar never catches up) and mark the
+/// index dirty every residency for a source that never had anything
+/// to be dirty about.
+pub(crate) fn record_digest(record: &PassageRecord) -> Option<u64> {
+    if record.paragraphs.is_empty() {
+        return None;
+    }
     let mut questions = record.questions.iter().peekable();
-    record.paragraphs.iter().fold(FNV1A_OFFSET, |digest, span| {
+    Some(record.paragraphs.iter().fold(FNV1A_OFFSET, |digest, span| {
         let question_hash = take_questions_fold(&mut questions, span.index, |_| {});
         digest_fold(digest, span.index, span.hash, question_hash)
-    })
+    }))
 }
 
 fn read_u32(bytes: &[u8], pos: &mut usize) -> Option<u32> {
@@ -1374,11 +1388,29 @@ mod tests {
         let digests = index.source_digests();
         for (source, record) in &records {
             assert_eq!(
-                digests[source],
+                Some(digests[source]),
                 record_digest(record),
                 "both sides of the drift comparison must compute the same digest ({source})"
             );
         }
+    }
+
+    #[test]
+    fn record_digest_is_none_for_a_paragraph_less_record_and_absent_from_source_digests() {
+        // Whitespace-only text splits to zero paragraphs (paragraph.rs)
+        // — the same shape `interpret_passages` lets through the public
+        // API uncaught. Both sides of the drift comparison must agree
+        // there is nothing to digest, or the repair loop in
+        // `PassageSearch::bm25_index` reads the source as permanently
+        // drifted.
+        let blank = record("   \n\n\t \n");
+        assert_eq!(record_digest(&blank), None);
+
+        let index = Bm25Index::build(&[("blank".to_string(), blank)]);
+        assert!(
+            !index.source_digests().contains_key("blank"),
+            "a source with no live slot must have no digest entry"
+        );
     }
 
     #[test]
@@ -1444,9 +1476,15 @@ mod tests {
         // through the byte round trip too, or the sidecar would
         // re-upsert every boot.
         let index = Bm25Index::build(&[("doc".to_string(), questioned.clone())]);
-        assert_eq!(index.source_digests()["doc"], record_digest(&questioned));
+        assert_eq!(
+            Some(index.source_digests()["doc"]),
+            record_digest(&questioned)
+        );
         let reborn = Bm25Index::from_bytes(&index.to_bytes()).unwrap();
-        assert_eq!(reborn.source_digests()["doc"], record_digest(&questioned));
+        assert_eq!(
+            Some(reborn.source_digests()["doc"]),
+            record_digest(&questioned)
+        );
     }
 
     #[test]
