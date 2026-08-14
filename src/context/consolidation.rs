@@ -605,19 +605,30 @@ mod tests {
     /// deadline check, independent of the outgoing loop above — a
     /// concept that is mostly (or only) an OBJECT of other assertions
     /// has an unbounded incoming degree the outgoing loop's own check
-    /// never walks through.
+    /// never walks through. Calls `neighbor_set` directly rather than
+    /// through `merge_evidence`: `deadline.expired() || injected(..)`
+    /// short-circuits, so if the incoming loop's own check were ever
+    /// downgraded to `&&`, an unconsumed armed fault would silently
+    /// leak forward into `merge_evidence`'s later checkpoints (`b`'s
+    /// own walk, then the fingerprint fold) and still be consumed
+    /// there — making the overall call return `Err` either way and
+    /// hiding exactly the regression this test exists to catch.
     #[test]
     fn merge_evidence_checks_the_deadline_on_the_incoming_side_too() {
         let mut context = Context::default();
-        // "a" has zero outgoing edges and one incoming edge — the
-        // outgoing loop consults the fault zero times, so this proves
-        // the incoming loop's own check is independently wired, not
-        // just reached as a side effect of the outgoing one.
-        context.associate("z", "r", "a", 1.0).unwrap();
-        context.associate("b", "r", "y", 1.0).unwrap();
+        // "a" has zero outgoing edges and five incoming edges — the
+        // outgoing loop consults the fault zero times, so the first
+        // consult the fault sees can only come from the incoming loop.
+        for n in 0..5 {
+            context.associate(format!("z{n}"), "r", "a", 1.0).unwrap();
+        }
+        let a_id = *context.concept_ids.get("a").unwrap();
 
-        expire_merge_evidence_loop_after(0);
-        let result = context.merge_evidence("a", "b", 10, &[], Deadline::unbounded());
+        // The first per-edge check reports "not yet expired"; the
+        // second reports expired — proof the check runs more than
+        // once across the incoming walk, not only once before it.
+        expire_merge_evidence_loop_after(1);
+        let result = context.neighbor_set(a_id, &HashSet::new(), Deadline::unbounded());
         assert!(
             result.is_err(),
             "the incoming-edge loop must also consult the injected fault"
