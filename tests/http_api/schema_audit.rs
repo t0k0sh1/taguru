@@ -44,6 +44,26 @@ fn audit_refuses_with_no_schema_or_no_context() {
     assert_eq!(body["code"], "no_context", "{body}");
 }
 
+/// `SchemaAuditRequest` now denies unknown fields (issue #623 finding
+/// 1), matching its sibling `SchemaValidateRequest` — a typo in
+/// `limit`/`after` refuses instead of silently falling back to the
+/// default page. `audit_schema` parses the body itself via
+/// `optional_body` (not axum's `Json` extractor, which `PUT /schema`
+/// uses and which 422s), so a bad body here is `error`'s ordinary 400,
+/// and fires before the context lookup.
+#[test]
+fn audit_denies_unknown_fields() {
+    let server = Server::start("schema-audit-unknown-field");
+
+    let (status, body) = server.call(
+        "POST",
+        "/contexts/sake/schema/audit",
+        Some(json!({"limit": 5, "typo": true})),
+    );
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["code"], "malformed_request", "{body}");
+}
+
 /// ADR 0009 §7.1: "pre-existing violations are visible only through the
 /// explicitly-invoked, read-only audit" — the audit must judge by the
 /// same domain/range predicate `strict` would, even when the document's

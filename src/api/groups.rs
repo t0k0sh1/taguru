@@ -12,7 +12,7 @@ use crate::groups::GroupRecord;
 use crate::metrics::ErrorKind;
 use crate::registry::{AppState, CreateGroupError, RenameGroupError, UpdateGroupError};
 
-use super::aliases::KeysetQuery;
+use super::aliases::{KeysetQuery, keyset_bounds};
 use super::contexts::RenameRequest;
 use super::{
     AppBytes, AppJson, AppPath, AppQuery, ErrorCode, MAX_CONTEXT_NAME_BYTES, MAX_DESCRIPTION_BYTES,
@@ -294,6 +294,9 @@ pub async fn list_groups(
     AppQuery(query): AppQuery<KeysetQuery>,
 ) -> Response {
     let started_at = Instant::now();
+    if let Some(refusal) = keyset_bounds(&query, started_at) {
+        return refusal;
+    }
     let (total, page) = state.group_page(
         query.after.as_deref(),
         clamp_page(query.limit, MAX_MATCH_LIMIT, MAX_MATCH_LIMIT),

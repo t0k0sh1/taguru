@@ -117,6 +117,35 @@ pub struct KeysetQuery {
     pub prefix: Option<String>,
 }
 
+/// Byte cap for `KeysetQuery`'s `after`/`prefix` (issue #623 finding 3)
+/// — one name's worth ([`MAX_NAME_BYTES`]), plus the widest namespace
+/// tag `list_aliases`'s cursor prefixes onto an alias (`"concept:"`,
+/// longer than `"label:"`). Not a cost fix — the seeks and comparisons
+/// these two feed all short-circuit, so cost is O(source count)
+/// regardless of `prefix`/`after` length — but a consistency one: every
+/// other request string reaches [`oversized`], and paging was the one
+/// door across all four `KeysetQuery` handlers that didn't.
+pub(super) const MAX_CURSOR_BYTES: usize = MAX_NAME_BYTES + "concept:".len();
+
+/// Length-gates `after`/`prefix` before any handler-specific shape
+/// check (e.g. `list_aliases`'s `concept:`/`label:` split below) —
+/// cheaper, so it runs first. An empty string passes either field:
+/// `?prefix=` means "no narrowing," not an illegal name, and an absent
+/// `after` is simply the first page.
+pub(super) fn keyset_bounds(query: &KeysetQuery, started_at: Instant) -> Option<Response> {
+    if let Some(prefix) = query.prefix.as_deref()
+        && let Some(refusal) = oversized("prefix", prefix, MAX_CURSOR_BYTES, started_at)
+    {
+        return Some(refusal);
+    }
+    if let Some(after) = query.after.as_deref()
+        && let Some(refusal) = oversized("after", after, MAX_CURSOR_BYTES, started_at)
+    {
+        return Some(refusal);
+    }
+    None
+}
+
 pub async fn add_aliases(
     State(state): State<AppState>,
     AppPath(name): AppPath<String>,
@@ -320,6 +349,9 @@ pub async fn list_aliases(
     AppQuery(query): AppQuery<KeysetQuery>,
 ) -> Response {
     let started_at = Instant::now();
+    if let Some(refusal) = keyset_bounds(&query, started_at) {
+        return refusal;
+    }
     // The cursor names a namespace and an alias; anything else is a
     // malformed request, not an empty page.
     let after = match query.after.as_deref() {
@@ -437,5 +469,40 @@ pub async fn list_aliases(
     match outcome {
         Ok(result) => ok(result, started_at),
         Err(failure) => access_error(&state, failure, &name, started_at),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn query(prefix: Option<&str>, after: Option<&str>) -> KeysetQuery {
+        KeysetQuery {
+            limit: None,
+            after: after.map(str::to_string),
+            prefix: prefix.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn keyset_bounds_accepts_exactly_the_cap() {
+        let q = query(Some(&"a".repeat(MAX_CURSOR_BYTES)), None);
+        assert!(keyset_bounds(&q, Instant::now()).is_none());
+        let q = query(None, Some(&"a".repeat(MAX_CURSOR_BYTES)));
+        assert!(keyset_bounds(&q, Instant::now()).is_none());
+    }
+
+    #[test]
+    fn keyset_bounds_refuses_one_byte_past_the_cap() {
+        let q = query(Some(&"a".repeat(MAX_CURSOR_BYTES + 1)), None);
+        assert!(keyset_bounds(&q, Instant::now()).is_some());
+        let q = query(None, Some(&"a".repeat(MAX_CURSOR_BYTES + 1)));
+        assert!(keyset_bounds(&q, Instant::now()).is_some());
+    }
+
+    #[test]
+    fn keyset_bounds_accepts_empty_and_absent_fields() {
+        assert!(keyset_bounds(&query(None, None), Instant::now()).is_none());
+        assert!(keyset_bounds(&query(Some(""), Some("")), Instant::now()).is_none());
     }
 }
