@@ -601,6 +601,53 @@ mod tests {
         );
     }
 
+    /// issue #620: `neighbor_set`'s INCOMING-edge loop has its own
+    /// deadline check, independent of the outgoing loop above — a
+    /// concept that is mostly (or only) an OBJECT of other assertions
+    /// has an unbounded incoming degree the outgoing loop's own check
+    /// never walks through.
+    #[test]
+    fn merge_evidence_checks_the_deadline_on_the_incoming_side_too() {
+        let mut context = Context::default();
+        // "a" has zero outgoing edges and one incoming edge — the
+        // outgoing loop consults the fault zero times, so this proves
+        // the incoming loop's own check is independently wired, not
+        // just reached as a side effect of the outgoing one.
+        context.associate("z", "r", "a", 1.0).unwrap();
+        context.associate("b", "r", "y", 1.0).unwrap();
+
+        expire_merge_evidence_loop_after(0);
+        let result = context.merge_evidence("a", "b", 10, &[], Deadline::unbounded());
+        assert!(
+            result.is_err(),
+            "the incoming-edge loop must also consult the injected fault"
+        );
+    }
+
+    /// issue #620: the fingerprint fold over the full evidence
+    /// (`fact_strings`, after both sides' `neighbor_set` calls
+    /// already succeeded) has its own deadline check too — the fold
+    /// is unbounded in the number of shared/distinct facts, same
+    /// reasoning as the adjacency walk itself.
+    #[test]
+    fn merge_evidence_checks_the_deadline_during_the_fingerprint_fold_too() {
+        let mut context = Context::default();
+        context.associate("a", "r", "only-a", 1.0).unwrap();
+        context.associate("b", "r", "only-b", 1.0).unwrap();
+
+        // Exactly 2 fault consults happen inside `neighbor_set("a")`
+        // and `neighbor_set("b")` (one outgoing edge each, no
+        // incoming ones) before either side's walk could possibly
+        // fail; the 3rd consult is `fact_strings`' own first
+        // iteration over the (non-shared) evidence.
+        expire_merge_evidence_loop_after(2);
+        let result = context.merge_evidence("a", "b", 10, &[], Deadline::unbounded());
+        assert!(
+            result.is_err(),
+            "the fingerprint fold must also consult the injected fault"
+        );
+    }
+
     #[test]
     fn contradiction_groups_find_multi_object_labels_and_measure_tendency() {
         let mut context = Context::default();
