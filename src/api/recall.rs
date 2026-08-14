@@ -384,7 +384,6 @@ async fn cross_matches(
             return Err(Box::new(cross_job_panic(
                 state,
                 &targets[panicked.index],
-                &panicked.payload,
                 started_at,
             )));
         }

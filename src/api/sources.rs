@@ -1686,12 +1686,7 @@ pub async fn cross_search_passages(
     {
         Ok(fetched) => fetched,
         Err(panicked) => {
-            return cross_job_panic(
-                &state,
-                &targets[panicked.index],
-                &panicked.payload,
-                started_at,
-            );
+            return cross_job_panic(&state, &targets[panicked.index], started_at);
         }
     };
 

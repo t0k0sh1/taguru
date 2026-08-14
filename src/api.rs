@@ -1679,15 +1679,19 @@ fn explore_page(
 
 /// One [`bounded_parallel_map`] job's panic, caught rather than left
 /// to unwind into `CatchPanicLayer`'s anonymous 500 (issue #620): the
-/// index it broke at, so a caller can name the target it belongs to,
-/// and the payload's recovered text for the log. `index` is always the
-/// SMALLEST panicking index — [`bounded_parallel_map`] drains every
-/// job before reporting one, so this matches the "first failure in
-/// target-list order" contract its callers already document for the
-/// ordinary error case.
+/// index it broke at, so a caller can name the target it belongs to.
+/// `payload` is the recovered panic text — kept for this module's own
+/// tests to assert on, but never logged by [`cross_job_panic`] itself
+/// (it can carry arbitrary caller-controlled text; Rust's own default
+/// panic hook already puts it on stderr ahead of `catch_unwind`
+/// catching it). `index` is always the SMALLEST panicking index —
+/// [`bounded_parallel_map`] drains every job before reporting one, so
+/// this matches the "first failure in target-list order" contract its
+/// callers already document for the ordinary error case.
 #[derive(Debug)]
 struct PanickedJob {
     index: usize,
+    #[allow(dead_code)] // asserted on by bounded_parallel_map's own tests only
     payload: String,
 }
 
@@ -1747,18 +1751,16 @@ async fn bounded_parallel_map<R: Send + 'static>(
 
 /// Turns a [`bounded_parallel_map`] job's caught [`PanickedJob`] into
 /// the structured 500 every cross-context caller answers with — the
-/// target the panic came from is named in the response, and the
-/// payload's recovered text rides the log message rather than a span-
-/// event field (ADR 0008 §7 forbids one named `error`), the same shape
-/// `recall::resolve_cross_type_schemas`'s own load-failure branch
-/// already uses.
-pub(crate) fn cross_job_panic(
-    state: &AppState,
-    name: &str,
-    payload: &str,
-    started_at: Instant,
-) -> Response {
-    tracing::error!(context = %name, "cross-context job panicked: {payload}");
+/// target the panic came from is named in the response body (never on
+/// the span: ADR 0008 §8 forbids recording context names on any span,
+/// not just the `error`-named field §7 forbids), and the recovered
+/// panic payload is dropped rather than logged — it can carry
+/// arbitrary caller-controlled text, including the forbidden data ADR
+/// 0008 §8 lists. `PanickedJob.index` already pins the panic to a
+/// specific job in `bounded_parallel_map`'s own unit tests; a fixed
+/// `op`/`outcome` pair is all the span needs.
+pub(crate) fn cross_job_panic(state: &AppState, name: &str, started_at: Instant) -> Response {
+    tracing::error!(op = "cross_context_search", outcome = "job_panic");
     state.metrics().record_error(ErrorKind::Panic);
     error(
         ErrorCode::Internal,
@@ -3200,20 +3202,26 @@ mod tests {
     /// issue #620: `cross_job_panic`'s response must name the target
     /// and read as an ordinary 500, not the shared `Response` default
     /// — a caller matching on status/body must see a real refusal.
-    #[test]
-    fn cross_job_panic_names_the_target_and_answers_a_500() {
+    #[tokio::test]
+    async fn cross_job_panic_names_the_target_and_answers_a_500() {
         let dir =
             std::env::temp_dir().join(format!("taguru-api-cross-job-panic-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
 
-        let response = cross_job_panic(&state, "ghost", "kaboom", Instant::now());
+        let response = cross_job_panic(&state, "ghost", Instant::now());
 
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(
             response.headers()[axum::http::header::CONTENT_TYPE],
             "application/json"
         );
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], ErrorCode::Internal.as_str());
+        assert!(body["error"].as_str().unwrap().contains("ghost"), "{body}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
