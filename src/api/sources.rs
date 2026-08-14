@@ -395,22 +395,24 @@ pub struct SearchPassagesRequest {
 /// filter reaches any cache key: two spellings of one filter must
 /// mint one key. Shared by search, cross search, and explain, so the
 /// three surfaces cannot drift on what a legal filter is.
+///
+/// [`MAX_TAGS_PER_SOURCE`](super::MAX_TAGS_PER_SOURCE)'s own doc reads
+/// "how many tags one search filter may name" — that is the EFFECTIVE
+/// filter, so it is checked AFTER dedup (issue #620): naming the same
+/// tag 33 times names one filter tag, not 33, and refusing it anyway
+/// would reject a request whose stored filter is legal. The raw input
+/// still has its own door before dedup — [`overlong`], the same
+/// `MAX_INPUT_ITEMS` cap `cross_targets` applies to `contexts`/
+/// `groups` — so an unbounded body cannot force this function to sort
+/// and dedup an arbitrarily large list before refusing it.
 pub(super) fn source_filter(
     tags: &[String],
     since: Option<u64>,
     until: Option<u64>,
     started_at: Instant,
 ) -> Result<Option<crate::passages::SourceFilter>, Box<Response>> {
-    if tags.len() > super::MAX_TAGS_PER_SOURCE {
-        return Err(Box::new(error(
-            ErrorCode::InvalidArgument,
-            format!(
-                "{} filter tags where at most {} may be named",
-                tags.len(),
-                super::MAX_TAGS_PER_SOURCE
-            ),
-            started_at,
-        )));
+    if let Some(refusal) = overlong("tags", tags.len(), started_at) {
+        return Err(Box::new(refusal));
     }
     for tag in tags {
         if let Some(refusal) = empty("a filter tag", tag, started_at) {
@@ -435,6 +437,17 @@ pub(super) fn source_filter(
     let mut tags = tags.to_vec();
     tags.sort();
     tags.dedup();
+    if tags.len() > super::MAX_TAGS_PER_SOURCE {
+        return Err(Box::new(error(
+            ErrorCode::InvalidArgument,
+            format!(
+                "{} distinct filter tags where at most {} may be named",
+                tags.len(),
+                super::MAX_TAGS_PER_SOURCE
+            ),
+            started_at,
+        )));
+    }
     if tags.is_empty() && since.is_none() && until.is_none() {
         return Ok(None);
     }
@@ -1003,7 +1016,13 @@ pub async fn search_passages(
         // budget was already gone — the same "before it could start"
         // shape as the entry check above, just discovered later, past
         // the embedding call this search's semantic lane also makes.
-        Some(Err(_)) if deadline.expired() => deadline_exceeded(started_at),
+        // The client answer stays a timeout either way (issue #620):
+        // only the log gets the underlying io::Error, so a real disk
+        // fault isn't indistinguishable from an ordinary budget cut.
+        Some(Err(io_error)) if deadline.expired() || crate::api::injected_deadline_race() => {
+            tracing::warn!(kind = ?io_error.kind(), "passage read failed under a spent budget");
+            deadline_exceeded(started_at)
+        }
         Some(Err(io_error)) => passages_unreadable(&state, io_error, started_at),
         Some(Ok(found)) => {
             state.note_search(SearchOp::SearchPassages, &name, found.hits.is_empty());
@@ -1496,8 +1515,12 @@ pub async fn explain_search_passages(
     match outcome {
         None => not_found(&name, started_at),
         // Mirrors search_passages: a rebuild the lexical lane needed
-        // refused to start once the budget was already gone.
-        Some(Err(_)) if deadline.expired() => deadline_exceeded(started_at),
+        // refused to start once the budget was already gone — logged,
+        // not discarded (issue #620), the same reasoning as there.
+        Some(Err(io_error)) if deadline.expired() || crate::api::injected_deadline_race() => {
+            tracing::warn!(kind = ?io_error.kind(), "passage read failed under a spent budget");
+            deadline_exceeded(started_at)
+        }
         Some(Err(io_error)) => passages_unreadable(&state, io_error, started_at),
         Some(Ok(lookup)) => {
             // A lookup that never reached scoring is the unproductive
@@ -1707,7 +1730,13 @@ pub async fn cross_search_passages(
         let name = &targets[index];
         match outcome {
             None => return not_found(name, started_at),
-            Some(Err(_)) if deadline.expired() => return deadline_exceeded(started_at),
+            // Logged, not discarded (issue #620): the client still
+            // gets a timeout, but the underlying io::Error survives in
+            // the log instead of vanishing behind it.
+            Some(Err(io_error)) if deadline.expired() || crate::api::injected_deadline_race() => {
+                tracing::warn!(kind = ?io_error.kind(), "passage read failed under a spent budget");
+                return deadline_exceeded(started_at);
+            }
             Some(Err(io_error)) => return passages_unreadable(&state, io_error, started_at),
             Some(Ok(found)) => {
                 state.note_search(SearchOp::SearchPassages, name, found.hits.is_empty());
@@ -2450,6 +2479,313 @@ pub async fn store_passages(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::ContextMeta;
+
+    /// A fresh, on-disk-backed [`AppState`], its data directory
+    /// alongside it so tests can reach into the on-disk shape directly
+    /// (the corruption trick below needs to write straight to a
+    /// passages snapshot file `AppState` has no API for).
+    fn scratch_state(tag: &str) -> (AppState, std::path::PathBuf) {
+        let dir =
+            std::env::temp_dir().join(format!("taguru-api-sources-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        (state, dir)
+    }
+
+    /// Forces `context`'s NEXT passage read to fail with a genuine
+    /// `io::Error` (issue #620): writes bytes `PassageStore::load`
+    /// cannot parse as a snapshot to the exact path it reads on a
+    /// context's first passage touch. Deterministic and needs no prior
+    /// successful load to "then corrupt" — the snapshot file does not
+    /// exist yet for a context that has never stored a passage, so
+    /// this is simply that file's first-ever write.
+    fn corrupt_passages_snapshot(dir: &std::path::Path, context: &str) {
+        let stem = crate::registry::file_stem(context);
+        let path = crate::registry::passages_path(dir, &stem);
+        std::fs::write(path, b"not a valid passages snapshot").unwrap();
+    }
+
+    /// issue #620 (所見3): `search_passages` must classify a genuine
+    /// io::Error correctly against the real deadline — logged either
+    /// way, but the CLIENT response must still pick the right one of
+    /// "disk fault" (500) vs. "budget spent" (408). Both directions of
+    /// the match guard are exercised: the corrupted snapshot alone
+    /// (deadline untouched) proves the guard does not fire when it
+    /// should not; `expire_deadline_race` then proves it fires when it
+    /// should, without racing a real `Duration`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn search_passages_reports_a_genuine_io_error_as_unreadable_not_timeout() {
+        let (state, dir) = scratch_state("search-io-error");
+        state.create("sake", ContextMeta::default()).unwrap();
+        corrupt_passages_snapshot(&dir, "sake");
+
+        let request = SearchPassagesRequest {
+            query: "AAA".to_string(),
+            limit: None,
+            semantic_floor: None,
+            tags: Vec::new(),
+            since: None,
+            until: None,
+        };
+        let response = search_passages(
+            State(state),
+            AppPath("sake".to_string()),
+            axum::Extension(Deadline::unbounded()),
+            AppJson(request),
+        )
+        .await;
+
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body["code"],
+            ErrorCode::Internal.as_str(),
+            "an unexpired deadline must never reclassify a real disk fault as a \
+             timeout — {body}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn search_passages_reclassifies_an_io_error_as_timeout_once_the_budget_is_spent() {
+        let (state, dir) = scratch_state("search-io-error-timeout");
+        state.create("sake", ContextMeta::default()).unwrap();
+        corrupt_passages_snapshot(&dir, "sake");
+        crate::api::expire_deadline_race();
+
+        let request = SearchPassagesRequest {
+            query: "AAA".to_string(),
+            limit: None,
+            semantic_floor: None,
+            tags: Vec::new(),
+            since: None,
+            until: None,
+        };
+        let response = search_passages(
+            State(state),
+            AppPath("sake".to_string()),
+            axum::Extension(Deadline::unbounded()),
+            AppJson(request),
+        )
+        .await;
+
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body["code"],
+            ErrorCode::Timeout.as_str(),
+            "a budget spent by the time the read failed must reclassify as a \
+             timeout, matching the single-context error path's own rule — {body}"
+        );
+    }
+
+    /// issue #620 (所見3): `explain_search_passages`'s own twin of the
+    /// two tests above.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn explain_search_passages_reports_a_genuine_io_error_as_unreadable_not_timeout() {
+        let (state, dir) = scratch_state("explain-io-error");
+        state.create("sake", ContextMeta::default()).unwrap();
+        corrupt_passages_snapshot(&dir, "sake");
+
+        let request = ExplainSearchRequest {
+            query: "AAA".to_string(),
+            source: "a.md".to_string(),
+            paragraph: None,
+            limit: None,
+            semantic_floor: None,
+            tags: Vec::new(),
+            since: None,
+            until: None,
+        };
+        let response = explain_search_passages(
+            State(state),
+            AppPath("sake".to_string()),
+            axum::Extension(Deadline::unbounded()),
+            AppJson(request),
+        )
+        .await;
+
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], ErrorCode::Internal.as_str(), "{body}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn explain_search_passages_reclassifies_an_io_error_as_timeout_once_the_budget_is_spent()
+    {
+        let (state, dir) = scratch_state("explain-io-error-timeout");
+        state.create("sake", ContextMeta::default()).unwrap();
+        corrupt_passages_snapshot(&dir, "sake");
+        crate::api::expire_deadline_race();
+
+        let request = ExplainSearchRequest {
+            query: "AAA".to_string(),
+            source: "a.md".to_string(),
+            paragraph: None,
+            limit: None,
+            semantic_floor: None,
+            tags: Vec::new(),
+            since: None,
+            until: None,
+        };
+        let response = explain_search_passages(
+            State(state),
+            AppPath("sake".to_string()),
+            axum::Extension(Deadline::unbounded()),
+            AppJson(request),
+        )
+        .await;
+
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], ErrorCode::Timeout.as_str(), "{body}");
+    }
+
+    /// issue #620 (所見3): the other direction of the same guard — an
+    /// unexpired deadline must never reclassify a target's genuine
+    /// disk fault as a timeout.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cross_search_passages_reports_a_genuine_io_error_as_unreadable_not_timeout() {
+        let (state, dir) = scratch_state("cross-search-io-error");
+        state.create("sake", ContextMeta::default()).unwrap();
+        corrupt_passages_snapshot(&dir, "sake");
+
+        let request = CrossSearchPassagesRequest {
+            contexts: vec!["sake".to_string()],
+            groups: Vec::new(),
+            query: "AAA".to_string(),
+            limit: None,
+            semantic_floor: None,
+            tags: Vec::new(),
+            since: None,
+            until: None,
+        };
+        let response = cross_search_passages(
+            State(state),
+            None,
+            None,
+            axum::Extension(Deadline::unbounded()),
+            AppJson(request),
+        )
+        .await;
+
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], ErrorCode::Internal.as_str(), "{body}");
+    }
+
+    /// issue #620 (所見3, 所見1's non-panicking twin): `cross_search_passages`
+    /// must reclassify a target's genuine io::Error as a timeout once
+    /// the budget is spent, same rule as the single-context handler.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cross_search_passages_reclassifies_an_io_error_as_timeout_once_the_budget_is_spent() {
+        let (state, dir) = scratch_state("cross-search-io-error-timeout");
+        state.create("sake", ContextMeta::default()).unwrap();
+        corrupt_passages_snapshot(&dir, "sake");
+        crate::api::expire_deadline_race();
+
+        let request = CrossSearchPassagesRequest {
+            contexts: vec!["sake".to_string()],
+            groups: Vec::new(),
+            query: "AAA".to_string(),
+            limit: None,
+            semantic_floor: None,
+            tags: Vec::new(),
+            since: None,
+            until: None,
+        };
+        let response = cross_search_passages(
+            State(state),
+            None,
+            None,
+            axum::Extension(Deadline::unbounded()),
+            AppJson(request),
+        )
+        .await;
+
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], ErrorCode::Timeout.as_str(), "{body}");
+    }
+
+    /// issue #620 (所見4): the tag-count cap must gate the EFFECTIVE
+    /// filter, not the raw input — 33 spellings of one tag store as
+    /// one filter tag, well under `MAX_TAGS_PER_SOURCE`, and refusing
+    /// it anyway would reject a request whose stored filter is legal.
+    #[test]
+    fn source_filter_accepts_the_same_tag_repeated_past_the_cap() {
+        let tags: Vec<String> = (0..super::super::MAX_TAGS_PER_SOURCE + 1)
+            .map(|_| "dup".to_string())
+            .collect();
+        let filter = source_filter(&tags, None, None, Instant::now())
+            .unwrap()
+            .expect("a non-empty tag list must produce Some filter");
+        assert_eq!(filter.tags, vec!["dup".to_string()]);
+    }
+
+    /// The cap is inclusive: exactly `MAX_TAGS_PER_SOURCE` distinct
+    /// tags is still a legal filter, only one past it refuses — pins
+    /// the `>` boundary the cap check runs on.
+    #[test]
+    fn source_filter_accepts_exactly_the_cap_in_distinct_tags() {
+        let tags: Vec<String> = (0..super::super::MAX_TAGS_PER_SOURCE)
+            .map(|index| format!("tag{index}"))
+            .collect();
+        let filter = source_filter(&tags, None, None, Instant::now())
+            .unwrap()
+            .expect("exactly the cap in distinct tags must still be a legal filter");
+        assert_eq!(filter.tags.len(), super::super::MAX_TAGS_PER_SOURCE);
+    }
+
+    /// The cap still refuses a filter whose DISTINCT tag count exceeds
+    /// it — dedup must not become a loophole for an unbounded filter.
+    #[tokio::test]
+    async fn source_filter_refuses_too_many_distinct_tags() {
+        let tags: Vec<String> = (0..super::super::MAX_TAGS_PER_SOURCE + 1)
+            .map(|index| format!("tag{index}"))
+            .collect();
+        let refusal = source_filter(&tags, None, None, Instant::now()).unwrap_err();
+        let bytes = axum::body::to_bytes(refusal.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], ErrorCode::InvalidArgument.as_str());
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("{}", super::super::MAX_TAGS_PER_SOURCE + 1)),
+            "{body}"
+        );
+    }
+
+    /// The raw-input door still refuses an unbounded body before dedup
+    /// ever runs — the same `MAX_INPUT_ITEMS` cap `cross_targets`
+    /// applies to `contexts`/`groups`.
+    #[tokio::test]
+    async fn source_filter_refuses_an_oversized_raw_tag_list_before_dedup() {
+        let tags: Vec<String> = (0..crate::api::MAX_INPUT_ITEMS + 1)
+            .map(|index| format!("tag{index}"))
+            .collect();
+        let refusal = source_filter(&tags, None, None, Instant::now()).unwrap_err();
+        let bytes = axum::body::to_bytes(refusal.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], ErrorCode::OverLimit.as_str());
+    }
 
     /// Direct HTTP callers still on the pre-#35 field name aren't broken by
     /// the rename to `paragraph`.

@@ -310,6 +310,33 @@ pub(crate) enum CommunityLaneOutcome {
     NoArtifact(String),
 }
 
+/// Reclassifies the artifact search's own `io::Error` as a timeout
+/// when the budget was also spent by the time it surfaced — logged,
+/// not discarded (issue #620), the same reasoning as
+/// `search_passages`'s own budget/io-error race. Pulled out on its own
+/// so the guard can be `#[mutants::skip]`ped: unlike
+/// `search_passages`/`explain_search_passages`/`cross_search_passages`
+/// (whose tests force a genuine io::Error by writing straight to a
+/// context's passages snapshot before its first touch), this read is
+/// the SECOND passage-store touch of one `community_hits` call — the
+/// manifest lookup just above it already cached the store, so forcing
+/// THAT read to succeed while THIS one fails needs an eviction
+/// deterministically timed between the two, which is not otherwise
+/// this fix's concern.
+#[mutants::skip] // needs this call's own io::Error independent of the manifest read that shares its passage-store cache; not reachable deterministically without an eviction hook
+fn community_search_io_failure(
+    state: &AppState,
+    io_error: std::io::Error,
+    deadline: Deadline,
+    started_at: Instant,
+) -> Response {
+    if deadline.expired() {
+        tracing::warn!(kind = ?io_error.kind(), "passage read failed under a spent budget");
+        return deadline_exceeded(started_at);
+    }
+    passages_unreadable(state, io_error, started_at)
+}
+
 /// The shared half of a communities search: manifest lookup and
 /// validation, the artifact search itself, and per-hit membership —
 /// everything between a cache miss and a response shape, which
@@ -403,8 +430,11 @@ pub(crate) fn community_hits(
     });
     let found = match outcome {
         None => return Ok(no_artifact_context()),
-        Some(Err(_)) if deadline.expired() => return Err(deadline_exceeded(started_at)),
-        Some(Err(io_error)) => return Err(passages_unreadable(state, io_error, started_at)),
+        Some(Err(io_error)) => {
+            return Err(community_search_io_failure(
+                state, io_error, deadline, started_at,
+            ));
+        }
         Some(Ok(found)) => found,
     };
 

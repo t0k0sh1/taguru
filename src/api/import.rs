@@ -1074,8 +1074,26 @@ pub(super) fn export_response(
         // context's associations/aliases can outlast the budget after
         // export_context's entry check already passed — reclassify by
         // asking the same deadline again rather than by matching
-        // render()'s message text.
-        Ok(Err(_)) if deadline.expired() => deadline_exceeded(started_at),
+        // render()'s message text. Logged, not discarded (issue #620):
+        // render() can also fail on a real id collision (the arm
+        // below), so a message that happens to land after the budget
+        // expired must not vanish silently if it was actually that.
+        Ok(Err(message)) if deadline.expired() => {
+            // Neither of render()'s two Err(String) shapes ever carries
+            // caller data (the reserved-id message names only the fixed
+            // EMPTY_SOURCE constant; the other is DeadlineExceeded's own
+            // Display), but a raw String is still not the "stable,
+            // low-cardinality code" ADR 0008 §8 asks for — classify by
+            // which of the two fixed shapes this is instead of logging
+            // the text itself.
+            let reason = if message.contains("reserved by export") {
+                "reserved_id_collision"
+            } else {
+                "deadline_only"
+            };
+            tracing::warn!(reason, "export render failed under a spent budget");
+            deadline_exceeded(started_at)
+        }
         // A real source colliding with a reserved export id — the one
         // thing a context can hold that the stream cannot say.
         Ok(Err(message)) => error(ErrorCode::Conflict, message, started_at),
