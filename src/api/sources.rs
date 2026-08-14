@@ -20,10 +20,11 @@ use super::{
     AppJson, AppPath, AppQuery, CrossMatch, ErrorCode, Issue, MAX_LOCATOR_KIND_BYTES,
     MAX_LOCATOR_VALUE_BYTES, MAX_MATCH_LIMIT, MAX_NAME_BYTES, MAX_PASSAGES_PER_REQUEST,
     MAX_QUESTION_BYTES, MAX_QUESTIONS_PER_PARAGRAPH, MAX_SECTION_BYTES, MAX_TAG_BYTES,
-    MAX_TAGS_PER_SOURCE, RefusalDetail, access_error, bounded_parallel_map, cache_and_serve, clamp,
-    clamp_page, collected_validation_message, cross_job_panic, cross_search_concurrency,
-    deadline_exceeded, empty, error, not_found, ok, overlong, oversized, replay_cached_search,
-    search_log_enabled, truncate_issues, validation_error,
+    MAX_TAGS_PER_SOURCE, RefusalDetail, access_error, bounded_parallel_map, cache_and_serve,
+    check_bounded_len, clamp, clamp_page, collected_validation_message, cross_job_panic,
+    cross_search_concurrency, deadline_exceeded, empty, error, interpret_bounded_text, not_found,
+    ok, overlong, oversized, replay_cached_search, search_log_enabled, truncate_issues,
+    validation_error,
 };
 
 #[derive(Debug, Deserialize)]
@@ -1998,38 +1999,6 @@ fn interpret_locator_item(item: &Value, path: &str, issues: &mut Vec<Issue>) -> 
     LocatorSpec { paragraph, locator }
 }
 
-/// A required, non-empty, within-cap string field read from a JSON
-/// object — shared by question text, section labels, and tags (issue
-/// #182), each a short string riding a paragraph index or a source.
-fn interpret_bounded_text(
-    obj: &serde_json::Map<String, Value>,
-    key: &str,
-    path: &str,
-    cap: usize,
-    issues: &mut Vec<Issue>,
-) -> String {
-    let full_path = format!("{path}.{key}");
-    match obj.get(key) {
-        None | Some(Value::Null) => {
-            issues.push(Issue::missing(full_path, "a non-empty string"));
-            String::new()
-        }
-        Some(Value::String(text)) if text.is_empty() => {
-            issues.push(Issue::empty(full_path));
-            String::new()
-        }
-        Some(Value::String(text)) if text.len() > cap => {
-            issues.push(Issue::too_long(full_path, cap, text.len()));
-            String::new()
-        }
-        Some(Value::String(text)) => text.clone(),
-        Some(other) => {
-            issues.push(Issue::wrong_type(full_path, "a non-empty string", other));
-            String::new()
-        }
-    }
-}
-
 /// `source`'s orphan rule shared by questions/sections/tags/dates: a
 /// source must name a passage carried alongside it IN THIS REQUEST — a
 /// question or section cannot attach to text the request does not
@@ -2062,15 +2031,12 @@ fn interpret_passages(
         }
         Some(Value::Object(map)) => {
             for (source, text) in map {
-                if source.is_empty() {
-                    issues.push(Issue::empty("a passage source id"));
-                } else if source.len() > MAX_NAME_BYTES {
-                    issues.push(Issue::too_long(
-                        "a passage source id",
-                        MAX_NAME_BYTES,
-                        source.len(),
-                    ));
-                }
+                check_bounded_len(
+                    source,
+                    "a passage source id".to_string(),
+                    MAX_NAME_BYTES,
+                    issues,
+                );
                 match text {
                     Value::String(text) => {
                         passages.insert(source.clone(), text.clone());
@@ -2260,13 +2226,11 @@ fn interpret_tags(
                 for (index, item) in array.iter().enumerate() {
                     let item_path = format!("tags['{source}'][{index}]");
                     match item {
-                        Value::String(text) if text.is_empty() => {
-                            issues.push(Issue::empty(item_path));
+                        Value::String(text) => {
+                            if check_bounded_len(text, item_path, MAX_TAG_BYTES, issues) {
+                                values.push(text.clone());
+                            }
                         }
-                        Value::String(text) if text.len() > MAX_TAG_BYTES => {
-                            issues.push(Issue::too_long(item_path, MAX_TAG_BYTES, text.len()));
-                        }
-                        Value::String(text) => values.push(text.clone()),
                         other => {
                             issues.push(Issue::wrong_type(item_path, "a non-empty string", other))
                         }
