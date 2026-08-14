@@ -3196,4 +3196,25 @@ mod tests {
              — their results would otherwise be discarded for nothing"
         );
     }
+
+    /// issue #620: `cross_job_panic`'s response must name the target
+    /// and read as an ordinary 500, not the shared `Response` default
+    /// — a caller matching on status/body must see a real refusal.
+    #[test]
+    fn cross_job_panic_names_the_target_and_answers_a_500() {
+        let dir =
+            std::env::temp_dir().join(format!("taguru-api-cross-job-panic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = AppState::boot(dir.clone(), 1 << 20, None).unwrap();
+
+        let response = cross_job_panic(&state, "ghost", "kaboom", Instant::now());
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            response.headers()[axum::http::header::CONTENT_TYPE],
+            "application/json"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
