@@ -560,6 +560,44 @@ pub(super) fn schema_import_refusal(
     }
 }
 
+// Test-only deterministic fault injection for the schema-record loop's
+// per-iteration deadline check (issue #620): mirrors `api::groups`'s
+// own `expire_fingerprint_loop_after` — a real deadline landing
+// between two in-memory iterations cannot be raced reliably, so a
+// regression test that needs the check to fire partway through arms
+// this instead.
+#[cfg(test)]
+thread_local! {
+    static EXPIRE_SCHEMA_LOOP_AFTER: std::cell::Cell<Option<u32>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn expire_schema_loop_after(remaining: u32) {
+    EXPIRE_SCHEMA_LOOP_AFTER.with(|cell| cell.set(Some(remaining)));
+}
+
+#[cfg(test)]
+fn injected_schema_loop_expiry() -> bool {
+    EXPIRE_SCHEMA_LOOP_AFTER.with(|cell| match cell.get() {
+        Some(0) => {
+            cell.set(None);
+            true
+        }
+        Some(remaining) => {
+            cell.set(Some(remaining - 1));
+            false
+        }
+        None => false,
+    })
+}
+
+#[cfg(not(test))]
+#[mutants::skip] // dead under cfg(test) — mirrors api.rs's injected_deadline_race
+fn injected_schema_loop_expiry() -> bool {
+    false
+}
+
 /// The refusal a budget spent partway through the schema-record loop
 /// answers (issue #620) — [`import_budget_refusal`]'s twin for this
 /// second phase of the stream, which previously had no deadline check
@@ -947,7 +985,7 @@ pub async fn import_batch(
                 // each landed batch AND each installed schema record
                 // is durable, so a budget that runs out partway is
                 // safe to report as a resumable prefix.
-                if deadline.expired() {
+                if deadline.expired() || injected_schema_loop_expiry() {
                     return Err(Box::new(schema_import_budget_refusal(
                         index,
                         stream.schemas.len(),
@@ -1173,4 +1211,115 @@ pub async fn export_group(
         crate::export::render_group(&name, &filtered),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::registry::ContextMeta;
+
+    fn scratch_state(tag: &str) -> AppState {
+        let dir =
+            std::env::temp_dir().join(format!("taguru-api-import-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        AppState::boot(dir, usize::MAX, None).unwrap()
+    }
+
+    fn schema_line(context: &str) -> String {
+        format!(
+            "{{\"taguru_schema\": 1, \"context\": \"{context}\", \"mode\": \"warn\", \
+             \"closed_labels\": false, \"types\": {{\"Brewery\": {{}}}}, \
+             \"relations\": {{}}}}\n"
+        )
+    }
+
+    async fn call_import(state: AppState, body: &str) -> Response {
+        import_batch(
+            State(state),
+            None,
+            None,
+            axum::Extension(Deadline::unbounded()),
+            AppQuery(ImportQuery::default()),
+            AppBytes(axum::body::Bytes::from(body.to_string())),
+        )
+        .await
+    }
+
+    /// issue #620 (所見5): a budget spent partway through the
+    /// schema-record loop must refuse with the SAME resumable-prefix
+    /// accounting `import_budget_refusal` uses for the batch loop —
+    /// pins `schema_import_budget_refusal`'s arithmetic and field
+    /// wiring for the "no batch of THIS stream landed" shape (a
+    /// schema-only stream against pre-existing contexts).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn schema_loop_reports_a_resumable_prefix_when_the_budget_dies_on_the_second_record() {
+        let state = scratch_state("schema-loop-budget-no-batches");
+        state.create("sake", ContextMeta::default()).unwrap();
+        state.create("bunko", ContextMeta::default()).unwrap();
+        let body = format!("{}{}", schema_line("sake"), schema_line("bunko"));
+
+        // The first record installs for real; the second's deadline
+        // check reports expired — proving the check runs on a LATER
+        // iteration, not only before the loop starts.
+        expire_schema_loop_after(1);
+        let response = call_import(state, &body).await;
+
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], ErrorCode::Timeout.as_str(), "{body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("schema record 2 of 2"),
+            "{body}"
+        );
+        assert_eq!(
+            body["integrity"], "durable_prefix",
+            "one schema record (bunko is durable_batches-free) already installed — {body}"
+        );
+        assert!(
+            body.get("durable_batches").is_none() || body["durable_batches"].is_null(),
+            "no BATCH of this stream landed — only a schema record did, which \
+             durable_batches never counts — {body}"
+        );
+    }
+
+    /// issue #620 (所見5): the "a batch of this stream also landed"
+    /// shape — pins `durable_batches`'s own presence (the field-
+    /// deletion mutant) and the `>` boundary distinguishing it from
+    /// `>=`/`==` at a nonzero count.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn schema_loop_counts_a_landed_batch_of_the_same_stream_in_durable_batches() {
+        let state = scratch_state("schema-loop-budget-with-batch");
+        let body = "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \
+             \"create\": {\"description\": \"d\"}}\n"
+            .to_string()
+            + &schema_line("sake");
+
+        // The batch lands; the schema loop's very first iteration
+        // reports expired.
+        expire_schema_loop_after(0);
+        let response = call_import(state, &body).await;
+
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], ErrorCode::Timeout.as_str(), "{body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("schema record 1 of 1"),
+            "{body}"
+        );
+        assert_eq!(
+            body["integrity"], "durable_prefix",
+            "the batch that just created 'sake' is durable — {body}"
+        );
+        assert_eq!(body["durable_batches"], 1, "{body}");
+    }
 }
