@@ -397,7 +397,15 @@ pub async fn assemble_evidence(
             )
         }) {
             None => return not_found(&name, started_at),
-            Some(Err(_)) if deadline.expired() => return deadline_exceeded(started_at),
+            // Logged, not discarded (issue #620): same reasoning as
+            // `search_passages`'s own budget/io-error race.
+            Some(Err(io_error)) if deadline.expired() => {
+                tracing::warn!(
+                    context = %name,
+                    "passage read failed under a spent budget: {io_error}"
+                );
+                return deadline_exceeded(started_at);
+            }
             Some(Err(io_error)) => {
                 return crate::api::sources::passages_unreadable(&state, io_error, started_at);
             }

@@ -403,7 +403,15 @@ pub(crate) fn community_hits(
     });
     let found = match outcome {
         None => return Ok(no_artifact_context()),
-        Some(Err(_)) if deadline.expired() => return Err(deadline_exceeded(started_at)),
+        // Logged, not discarded (issue #620): same reasoning as
+        // `search_passages`'s own budget/io-error race.
+        Some(Err(io_error)) if deadline.expired() => {
+            tracing::warn!(
+                context = %derived,
+                "passage read failed under a spent budget: {io_error}"
+            );
+            return Err(deadline_exceeded(started_at));
+        }
         Some(Err(io_error)) => return Err(passages_unreadable(state, io_error, started_at)),
         Some(Ok(found)) => found,
     };
