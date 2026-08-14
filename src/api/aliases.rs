@@ -484,6 +484,17 @@ mod tests {
         }
     }
 
+    /// Pins the cap's actual computed value (not just its relationship
+    /// to itself, which the boundary tests below use to build their
+    /// input) — a mutation swapping `+` for `-`/`*` in
+    /// `MAX_CURSOR_BYTES`'s definition would otherwise go undetected,
+    /// since every other test here measures input against the same
+    /// (possibly mutated) constant.
+    #[test]
+    fn max_cursor_bytes_is_1032() {
+        assert_eq!(MAX_CURSOR_BYTES, 1032);
+    }
+
     #[test]
     fn keyset_bounds_accepts_exactly_the_cap() {
         let q = query(Some(&"a".repeat(MAX_CURSOR_BYTES)), None);
