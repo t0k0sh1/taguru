@@ -19,8 +19,9 @@ use super::groups::{scope_allows, scope_refusal};
 use super::{
     AppJson, AppPath, CrossMatchPage, DEFAULT_MATCH_LIMIT, ErrorCode, MAX_MATCH_LIMIT, MatchCursor,
     MatchPage, MatchPlan, access_error, associations_out, bounded_parallel_map, cache_and_serve,
-    clamp, cross_associations_out, cross_search_concurrency, deadline_exceeded, error,
-    group_not_found, not_found, ok, overlong, page, replay_cached_search, search_log_enabled,
+    clamp, cross_associations_out, cross_job_panic, cross_search_concurrency, deadline_exceeded,
+    error, group_not_found, not_found, ok, overlong, page, replay_cached_search,
+    search_log_enabled,
 };
 
 #[derive(Debug, Deserialize)]
@@ -158,6 +159,14 @@ pub async fn recall(
 /// ([`group_entry`]) — refusing would name out-of-grant members and
 /// leak what the listing hides. The slice can come up empty; a legal
 /// request that resolves to nothing is an empty result, not an error.
+///
+/// The `no_context` check above is a SNAPSHOT (issue #620): a target
+/// can still vanish between this call and the per-target fetch
+/// `cross_matches` runs afterward. That later fetch, not this one, is
+/// the authoritative answer to "does this context still exist" —
+/// `resolve_cross_type_schemas` (below) documents the same window for
+/// its own per-target lookup, and `cross_matches`'s own doc names what
+/// happens when a target loses the race.
 pub(super) fn cross_targets(
     state: &AppState,
     scope: &Option<axum::Extension<crate::auth::KeyScope>>,
@@ -342,6 +351,15 @@ pub(super) fn cross_page_by(
 /// landed, not the first one hit in real time — the response is
 /// identical either way, since a read has nothing to half-apply and
 /// every fetch has to land before any cut can run.
+///
+/// This is where `cross_targets`'s existence snapshot gets its
+/// authoritative answer (issue #620): a target that vanished in the
+/// window between the two calls surfaces here as an ordinary
+/// [`AccessError::NotFound`](crate::registry::AccessError::NotFound),
+/// which `access_error` turns into the same whole-response abort as
+/// any other per-target failure — the non-panicking twin of this
+/// function's own caught-panic path below (`bounded_parallel_map`'s
+/// `Err(panicked)` arm).
 async fn cross_matches(
     state: &AppState,
     targets: &Arc<[String]>,
@@ -355,11 +373,22 @@ async fn cross_matches(
     let permits = cross_search_concurrency().min(targets.len().max(1));
     let owned_targets = Arc::clone(targets);
     let job_state = state.clone();
-    let fetched = bounded_parallel_map(targets.len(), permits, move |index| {
+    let fetched = match bounded_parallel_map(targets.len(), permits, move |index| {
         let name = &owned_targets[index];
         job_state.read_context(name, |context| search(name, context))
     })
-    .await;
+    .await
+    {
+        Ok(fetched) => fetched,
+        Err(panicked) => {
+            return Err(Box::new(cross_job_panic(
+                state,
+                &targets[panicked.index],
+                &panicked.payload,
+                started_at,
+            )));
+        }
+    };
 
     let mut total = 0;
     let mut pool: Vec<(usize, Association)> = Vec::new();
@@ -449,6 +478,17 @@ fn refuse_cross_window(
 /// its own, and repeating that refusal here would only race it. A load
 /// failure aborts the whole response, mirroring `cross_matches`'s own
 /// "first per-context failure aborts" contract.
+///
+/// Deliberately sequential, not `bounded_parallel_map`'d like
+/// `cross_matches`'s own fan-out (issue #620): `schema_of`'s common
+/// case is already resolved without touching disk (a read lock plus an
+/// `Arc` clone — see its own doc), so the usual per-target cost this
+/// loop pays is cheap and parallelizing it would buy nothing. Only the
+/// rare slow path (a replica mid-hydration, or a rename's freshly
+/// registered entry) falls through to `ensure_hot`, and that path
+/// takes THAT target's own write lock — running it from a fan-out
+/// would only manufacture contention on a lock nothing else here needs
+/// to hold, for a case this loop already runs infrequently.
 fn resolve_cross_type_schemas(
     state: &AppState,
     targets: &[String],
@@ -497,6 +537,12 @@ pub async fn cross_recall(
     AppJson(request): AppJson<CrossRecallRequest>,
 ) -> Response {
     let started_at = Instant::now();
+    // Symmetric with `recall`'s own front-of-handler gate (issue #620):
+    // a spent budget is refused before anything runs, not just before
+    // the retrieval-cache/search work below.
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
+    }
     if let Some(refusal) = refuse_cross_window(request.since, request.until, started_at) {
         return refusal;
     }
@@ -511,6 +557,9 @@ pub async fn cross_recall(
         Ok(targets) => targets,
         Err(refusal) => return *refusal,
     };
+    // A second gate: `cross_targets` can do real I/O (`resolve_groups`
+    // fsyncs behind the groups lock), so this catches a budget spent
+    // during THAT work, not just before it started.
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }
@@ -912,6 +961,13 @@ pub async fn cross_query(
     {
         return refusal;
     }
+    // Symmetric with `query`'s own gate (issue #620): checked here,
+    // after the free validations above and before `cross_targets`'s
+    // I/O, the same position `query` checks it relative to its own
+    // pre-search validation.
+    if deadline.expired() {
+        return deadline_exceeded(started_at);
+    }
     let targets = match cross_targets(
         &state,
         &scope,
@@ -923,6 +979,10 @@ pub async fn cross_query(
         Ok(targets) => targets,
         Err(refusal) => return *refusal,
     };
+    // A second gate: `cross_targets` can do real I/O (`resolve_groups`
+    // fsyncs behind the groups lock), so this catches a budget spent
+    // during THAT work, not just before it started — same reasoning as
+    // `cross_recall`'s own second gate.
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }
@@ -1037,4 +1097,144 @@ pub async fn cross_query(
         None,
         started_at,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::registry::ContextMeta;
+
+    /// A fresh, on-disk-backed [`AppState`] — the same construction
+    /// `api::groups`'s own `scratch_state` uses, kept local for the
+    /// same reason its doc gives: `registry::test_support` is a
+    /// private module this file cannot name from outside `registry`.
+    fn scratch_state(tag: &str) -> AppState {
+        let dir =
+            std::env::temp_dir().join(format!("taguru-api-recall-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        AppState::boot(dir, usize::MAX, None).unwrap()
+    }
+
+    /// A deadline that has already elapsed by the time it is checked —
+    /// mirrors `api::groups`'s own `already_expired_deadline`.
+    fn already_expired_deadline() -> Deadline {
+        let deadline = Deadline::after(std::time::Duration::ZERO);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        assert!(deadline.expired(), "a zero budget must read as expired");
+        deadline
+    }
+
+    /// Regression for issue #620 (所見8): `cross_recall` must refuse a
+    /// spent budget before `cross_targets` does any work, symmetric
+    /// with `recall`'s own front-of-handler gate. Naming a context
+    /// that does not exist makes the ordering observable without a
+    /// fault-injection hook: if the deadline gate ran only AFTER
+    /// `cross_targets` (the pre-fix order), this would answer 404
+    /// `no_context` instead of the timeout asserted below.
+    #[tokio::test]
+    async fn cross_recall_refuses_an_already_expired_deadline_before_resolving_targets() {
+        let state = scratch_state("cross-recall-expired");
+        let deadline = already_expired_deadline();
+        let request = CrossRecallRequest {
+            contexts: vec!["ghost".to_string()],
+            groups: Vec::new(),
+            cue: "AAA".to_string(),
+            limit: None,
+            after: None,
+            since: None,
+            until: None,
+        };
+
+        let response = cross_recall(
+            State(state),
+            None,
+            None,
+            axum::Extension(deadline),
+            AppJson(request),
+        )
+        .await;
+
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["status"], "error", "{body}");
+        assert_eq!(body["code"], ErrorCode::Timeout.as_str(), "{body}");
+    }
+
+    /// Regression for issue #620 (所見8): same as the `cross_recall`
+    /// test above, for `cross_query` — symmetric with `query`'s own
+    /// gate, checked after the free validations and before
+    /// `cross_targets`'s I/O.
+    #[tokio::test]
+    async fn cross_query_refuses_an_already_expired_deadline_before_resolving_targets() {
+        let state = scratch_state("cross-query-expired");
+        let deadline = already_expired_deadline();
+        let request = CrossQueryRequest {
+            contexts: vec!["ghost".to_string()],
+            groups: Vec::new(),
+            subject: Some(OneOrMany::One("蔵".to_string())),
+            label: None,
+            object: None,
+            subject_types: None,
+            object_types: None,
+            limit: None,
+            after: None,
+            since: None,
+            until: None,
+        };
+
+        let response = cross_query(
+            State(state),
+            None,
+            None,
+            axum::Extension(deadline),
+            AppJson(request),
+        )
+        .await;
+
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["status"], "error", "{body}");
+        assert_eq!(body["code"], ErrorCode::Timeout.as_str(), "{body}");
+    }
+
+    /// issue #620: a target that vanishes in the window between
+    /// `cross_targets`'s existence check and `cross_matches`'s own
+    /// per-target fetch must abort the whole response, naming that
+    /// target — the non-panicking twin of `bounded_parallel_map`'s
+    /// caught-panic path (see `cross_matches`'s own doc). Driving that
+    /// exact race isn't reachable deterministically, so this calls
+    /// `cross_matches` directly with a target that was never created —
+    /// the same `AccessError::NotFound` a deleted-mid-race target
+    /// would produce, since `read_context` cannot distinguish "never
+    /// existed" from "existed, then vanished".
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cross_matches_names_a_target_that_does_not_exist() {
+        let state = scratch_state("missing-target");
+        state.create("alive", ContextMeta::default()).unwrap();
+        let targets: Arc<[String]> = Arc::from(vec!["alive".to_string(), "ghost".to_string()]);
+
+        let outcome = cross_matches(
+            &state,
+            &targets,
+            SearchOp::Recall,
+            None,
+            None,
+            |_name, _context| Vec::new(),
+            Instant::now(),
+        )
+        .await;
+
+        let refusal = *outcome.expect_err("a missing target must abort the response");
+        assert_eq!(refusal.status(), axum::http::StatusCode::NOT_FOUND);
+        let bytes = axum::body::to_bytes(refusal.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], ErrorCode::NoContext.as_str());
+        assert!(body["error"].as_str().unwrap().contains("ghost"), "{body}");
+    }
 }

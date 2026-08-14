@@ -826,13 +826,7 @@ fn coded(
 /// envelope answers 200 either way, so `taguru_errors_total` is the
 /// only signal that call ever left behind.
 pub(crate) fn panic_response(payload: Box<dyn std::any::Any + Send>, state: &AppState) -> Response {
-    let message = if let Some(s) = payload.downcast_ref::<String>() {
-        s.clone()
-    } else if let Some(s) = payload.downcast_ref::<&str>() {
-        (*s).to_string()
-    } else {
-        "handler panicked with a non-string payload".to_string()
-    };
+    let message = panic_payload_message(payload);
     // A bug surfacing at runtime, not one of the foreseen degraded
     // states this codebase otherwise logs with warn! — worth the same
     // loud signal as a boot-time fatal.
@@ -844,6 +838,24 @@ pub(crate) fn panic_response(payload: Box<dyn std::any::Any + Send>, state: &App
         format!("internal error: {message}"),
         Instant::now(),
     )
+}
+
+/// Recovers a panic payload's text the same way `std::panic`'s default
+/// hook does (a `String` or `&str` payload, which covers
+/// `panic!`/`.expect`/`.unwrap`); anything else names itself
+/// generically rather than silently losing the panic. Shared by
+/// [`panic_response`] and [`bounded_parallel_map`]'s own caught-panic
+/// path — the same downcast idiom this codebase already repeats in
+/// `replica.rs`'s `catch_and_describe_panic` and
+/// `registry/wal_replay.rs`'s `replay_panic_line`.
+fn panic_payload_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else {
+        "panicked with a non-string payload".to_string()
+    }
 }
 
 fn not_found(name: &str, started_at: Instant) -> Response {
@@ -1665,6 +1677,20 @@ fn explore_page(
     (total, matches)
 }
 
+/// One [`bounded_parallel_map`] job's panic, caught rather than left
+/// to unwind into `CatchPanicLayer`'s anonymous 500 (issue #620): the
+/// index it broke at, so a caller can name the target it belongs to,
+/// and the payload's recovered text for the log. `index` is always the
+/// SMALLEST panicking index — [`bounded_parallel_map`] drains every
+/// job before reporting one, so this matches the "first failure in
+/// target-list order" contract its callers already document for the
+/// ordinary error case.
+#[derive(Debug)]
+struct PanickedJob {
+    index: usize,
+    payload: String,
+}
+
 /// Runs `job` for every index in `0..count` on the blocking thread
 /// pool, at most `permits` at once, and returns the results in index
 /// order (not completion order) — so callers can zip them back against
@@ -1672,13 +1698,19 @@ fn explore_page(
 /// each `job` call is one context's blocking read, and bounding
 /// concurrency keeps a large `contexts`/`groups` list from opening one
 /// blocking thread per target at once.
+///
+/// A panicking `job` is caught here, not left to unwind: every other
+/// job still runs to completion (their results would otherwise be
+/// discarded even though nothing was wrong with them), and the
+/// [`PanickedJob`] this returns lets the caller name which target
+/// broke instead of surfacing as `CatchPanicLayer`'s generic 500.
 async fn bounded_parallel_map<R: Send + 'static>(
     count: usize,
     permits: usize,
     job: impl Fn(usize) -> R + Send + Sync + 'static,
-) -> Vec<R> {
+) -> Result<Vec<R>, PanickedJob> {
     if count == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let permits = permits.clamp(1, count);
     let semaphore = Arc::new(tokio::sync::Semaphore::new(permits));
@@ -1692,18 +1724,47 @@ async fn bounded_parallel_map<R: Send + 'static>(
         let job = Arc::clone(&job);
         set.spawn_blocking(move || {
             let _permit = permit;
-            (index, job(index))
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(index)))
+                .map_err(panic_payload_message);
+            (index, outcome)
         });
     }
-    let mut slots: Vec<Option<R>> = (0..count).map(|_| None).collect();
+    let mut slots: Vec<Option<Result<R, String>>> = (0..count).map(|_| None).collect();
     while let Some(outcome) = set.join_next().await {
-        let (index, value) = outcome.expect("cross-search job panicked");
+        let (index, value) =
+            outcome.expect("bounded_parallel_map job neither panicked nor was cancelled");
         slots[index] = Some(value);
     }
-    slots
-        .into_iter()
-        .map(|slot| slot.expect("every index was joined"))
-        .collect()
+    let mut results = Vec::with_capacity(count);
+    for (index, slot) in slots.into_iter().enumerate() {
+        match slot.expect("every index was joined") {
+            Ok(value) => results.push(value),
+            Err(payload) => return Err(PanickedJob { index, payload }),
+        }
+    }
+    Ok(results)
+}
+
+/// Turns a [`bounded_parallel_map`] job's caught [`PanickedJob`] into
+/// the structured 500 every cross-context caller answers with — the
+/// target the panic came from is named in the response, and the
+/// payload's recovered text rides the log message rather than a span-
+/// event field (ADR 0008 §7 forbids one named `error`), the same shape
+/// `recall::resolve_cross_type_schemas`'s own load-failure branch
+/// already uses.
+pub(crate) fn cross_job_panic(
+    state: &AppState,
+    name: &str,
+    payload: &str,
+    started_at: Instant,
+) -> Response {
+    tracing::error!(context = %name, "cross-context job panicked: {payload}");
+    state.metrics().record_error(ErrorKind::Panic);
+    error(
+        ErrorCode::Internal,
+        format!("context '{name}' search job panicked — see server logs"),
+        started_at,
+    )
 }
 
 /// Concurrency ceiling for [`bounded_parallel_map`]'s cross-context fan
@@ -3067,5 +3128,72 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// issue #620: `bounded_parallel_map` must not let one job's panic
+    /// discard every sibling's already-computed result — these exercise
+    /// the caught-panic path directly, since driving a real panic
+    /// through a cross-context HTTP handler isn't otherwise reachable
+    /// deterministically.
+    #[tokio::test]
+    async fn bounded_parallel_map_returns_results_in_index_order() {
+        let result = bounded_parallel_map(5, 3, |index| index * 10).await;
+        assert_eq!(result.unwrap(), vec![0, 10, 20, 30, 40]);
+    }
+
+    #[tokio::test]
+    async fn bounded_parallel_map_reports_a_single_panicking_job() {
+        let result = bounded_parallel_map(4, 2, |index| {
+            if index == 2 {
+                panic!("job {index} exploded");
+            }
+            index
+        })
+        .await;
+        let panicked = result.expect_err("job 2 panicked");
+        assert_eq!(panicked.index, 2);
+        assert!(
+            panicked.payload.contains("job 2 exploded"),
+            "{}",
+            panicked.payload
+        );
+    }
+
+    #[tokio::test]
+    async fn bounded_parallel_map_reports_the_smallest_panicking_index() {
+        let result = bounded_parallel_map(5, 5, |index| {
+            if index == 1 || index == 3 {
+                panic!("job {index} exploded");
+            }
+            index
+        })
+        .await;
+        let panicked = result.expect_err("two jobs panicked");
+        assert_eq!(
+            panicked.index, 1,
+            "the SMALLEST panicking index must be reported, matching the \
+             \"first failure in target-list order\" contract callers document"
+        );
+    }
+
+    #[tokio::test]
+    async fn bounded_parallel_map_drains_every_job_even_after_one_panics() {
+        let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&completed);
+        let result = bounded_parallel_map(6, 2, move |index| {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if index == 4 {
+                panic!("job 4 exploded");
+            }
+            index
+        })
+        .await;
+        assert!(result.is_err());
+        assert_eq!(
+            completed.load(std::sync::atomic::Ordering::SeqCst),
+            6,
+            "every job must still run to completion even though one panicked \
+             — their results would otherwise be discarded for nothing"
+        );
     }
 }

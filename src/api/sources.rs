@@ -21,9 +21,9 @@ use super::{
     MAX_LOCATOR_VALUE_BYTES, MAX_MATCH_LIMIT, MAX_NAME_BYTES, MAX_PASSAGES_PER_REQUEST,
     MAX_QUESTION_BYTES, MAX_QUESTIONS_PER_PARAGRAPH, MAX_SECTION_BYTES, MAX_TAG_BYTES,
     MAX_TAGS_PER_SOURCE, RefusalDetail, access_error, bounded_parallel_map, cache_and_serve, clamp,
-    clamp_page, collected_validation_message, cross_search_concurrency, deadline_exceeded, empty,
-    error, not_found, ok, overlong, oversized, replay_cached_search, search_log_enabled,
-    truncate_issues, validation_error,
+    clamp_page, collected_validation_message, cross_job_panic, cross_search_concurrency,
+    deadline_exceeded, empty, error, not_found, ok, overlong, oversized, replay_cached_search,
+    search_log_enabled, truncate_issues, validation_error,
 };
 
 #[derive(Debug, Deserialize)]
@@ -1672,7 +1672,7 @@ pub async fn cross_search_passages(
     let semantic_floor = request.semantic_floor;
     let job_filter = filter.clone();
     let job_state = state.clone();
-    let fetched = bounded_parallel_map(targets.len(), permits, move |index| {
+    let fetched = match bounded_parallel_map(targets.len(), permits, move |index| {
         job_state.search_passages(
             &owned_targets[index],
             &query,
@@ -1682,7 +1682,18 @@ pub async fn cross_search_passages(
             deadline,
         )
     })
-    .await;
+    .await
+    {
+        Ok(fetched) => fetched,
+        Err(panicked) => {
+            return cross_job_panic(
+                &state,
+                &targets[panicked.index],
+                &panicked.payload,
+                started_at,
+            );
+        }
+    };
 
     // Sequential merge: every fetch has already landed, so nothing
     // here blocks. The first per-context failure aborts the whole
