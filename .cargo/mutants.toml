@@ -69,4 +69,38 @@ exclude_re = [
     # mutants here (which DO change the addend when `tf > 0.0` and
     # are caught), only the `>=` variant is this tautology.
     "replace > with >= in Bm25Index::explain",
+    # `newest_fence`'s max-so-far comparison (issue #618): every fence
+    # object's name is that generation's decimal key, written at most
+    # once each (`claim`'s `PutMode::Create` refuses a second write to
+    # the same name), so one listing pass can never present the same
+    # generation twice — `fence.generation == generation` never holds
+    # mid-loop, and `<=` computes the identical `newest` to `<` for
+    # every possible listing.
+    "replace < with <= in newest_fence",
+    # `ReplicateConfig::from_env`'s interval floor (issue #618): at
+    # `requested == 100` (the only value where `<` and `<=` disagree),
+    # both arms compute the same `Duration::from_millis(100)` — the
+    # floor branch explicitly, the else branch because `requested`
+    # already IS 100 — so the mutant produces the identical `interval`
+    # for every possible input; only the warn log (uncaptured by any
+    # test here) would differ.
+    "replace < with <= in ReplicateConfig::from_env",
+    # `Shipper::ship_lane`'s SECOND and THIRD `vanished_mid_cycle`
+    # call sites (issue #618, shipper.rs:426 and :459) — line-anchored
+    # because the identical guard expression also appears at :390,
+    # where it IS tested (see
+    # a_lane_deleted_between_the_scan_and_its_own_turn_ships_nothing_not_an_error).
+    # Both of these sites have NO `.await` between `ship_lane`'s own
+    # entry and reaching them (metadata → sig check → read → prefix
+    # check → this metadata, all synchronous), so — unlike :390, which
+    # a test can race by pausing an EARLIER `scan.changed` upload —
+    # nothing running on this cooperative single-threaded executor can
+    # ever land between two back-to-back non-yielding `std::fs` calls
+    # within the SAME `ship_lane` invocation. A real concurrent unlink
+    # at the OS level could still hit this window in production; no
+    # test can pin that.
+    "src/ship/shipper\\.rs:426:31: replace match guard vanished_mid_cycle\\(&error\\) with true in Shipper::ship_lane",
+    "src/ship/shipper\\.rs:426:31: replace match guard vanished_mid_cycle\\(&error\\) with false in Shipper::ship_lane",
+    "src/ship/shipper\\.rs:459:35: replace match guard vanished_mid_cycle\\(&error\\) with true in Shipper::ship_lane",
+    "src/ship/shipper\\.rs:459:35: replace match guard vanished_mid_cycle\\(&error\\) with false in Shipper::ship_lane",
 ]

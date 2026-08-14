@@ -595,6 +595,60 @@ async fn a_newer_claim_fences_the_shipper_on_its_next_dirty_cycle() {
 }
 
 #[tokio::test]
+async fn a_lane_deleted_between_the_scan_and_its_own_turn_ships_nothing_not_an_error() {
+    let dir = scratch_dir("vanished-mid-cycle");
+    let state = state_for(&dir);
+    let progress = Arc::new(ShipProgress::new(crate::registry::DEFAULT_WAL_MAX_BYTES));
+    let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+
+    std::fs::write(dir.join("ctx_a.ctx"), b"image-v1").unwrap();
+    std::fs::write(dir.join("ctx_b.ctx"), b"image-v1").unwrap();
+    let ctx_b_wal = dir.join("ctx_b.wal.jsonl");
+    wal::append_batch(&ctx_b_wal, 1, &[associate("b")]).unwrap();
+
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    // ctx_a.ctx's publish PUT: a `scan.changed` entry, which the
+    // whole `scan.changed` loop finishes BEFORE the `scan.lanes` loop
+    // (that reaches ctx_b's wal file) ever begins — a real `.await`
+    // boundary a test can pause on, deterministically, unlike a race
+    // WITHIN one `ship_lane` call (no `.await` between its own
+    // `fs::metadata`/`fs::read` pair for a test to land in).
+    let files_key = gen_root(&StorePath::default(), 1)
+        .join("files")
+        .join("ctx_a.ctx");
+    let store: Arc<dyn ObjectStore> = Arc::new(PausingStore {
+        inner: Arc::clone(&inner),
+        pause_on: files_key,
+        started: Arc::clone(&started),
+        release: Arc::clone(&release),
+    });
+
+    let dir2 = dir.clone();
+    let state2 = state.clone();
+    let progress2 = Arc::clone(&progress);
+    let cycle_task = tokio::spawn(async move {
+        let mut shipper = claimed_dyn(store, &dir2, &state2, &progress2).await;
+        shipper.cycle().await
+    });
+
+    started.notified().await;
+    std::fs::remove_file(&ctx_b_wal).unwrap();
+    release.notify_one();
+
+    let result = tokio::time::timeout(Duration::from_secs(5), cycle_task)
+        .await
+        .expect("must not hang")
+        .unwrap();
+    assert!(
+        result.is_ok(),
+        "a lane deleted between the directory scan and the lanes loop reaching its own \
+         turn must ship as if nothing changed there, not fail the whole cycle: {result:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn a_vanished_family_is_retired_remotely_including_its_segments() {
     let dir = scratch_dir("retire");
     let state = state_for(&dir);
