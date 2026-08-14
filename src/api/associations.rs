@@ -15,45 +15,10 @@ use crate::schema::{IssuePath, SchemaCheckInput, SchemaEnv, SchemaMode, schema_i
 
 use super::{
     AppJson, AppPath, ErrorCode, Issue, MAX_ASSOCIATION_WEIGHT, MAX_ASSOCIATIONS_PER_REQUEST,
-    MAX_NAME_BYTES, RefusalDetail, access_error, collected_validation_message, deadline_exceeded,
-    describe_value, empty, error, key_name, ok, ok_with_issues, oversized, partial_write_error,
-    truncate_issues, validation_error,
+    MAX_NAME_BYTES, RefusalDetail, access_error, check_bounded_len, collected_validation_message,
+    deadline_exceeded, describe_value, empty, error, interpret_bounded_text, key_name, ok,
+    ok_with_issues, oversized, partial_write_error, truncate_issues, validation_error,
 };
-
-/// Reads one `associations[index]` item's required, non-empty,
-/// within-cap string field — the raw-JSON twin of what a
-/// `Deserialize<String>` plus the old post-hoc `oversized`/`empty`
-/// checks did together. Working from `Value` (issue #182) instead of a
-/// typed struct means a wrong-typed field is diagnosed alongside every
-/// other item's issues in one pass, rather than rejecting the whole
-/// batch at the JSON-extractor layer before this handler ever runs.
-fn interpret_required_string(
-    obj: &serde_json::Map<String, Value>,
-    key: &str,
-    path: &str,
-    issues: &mut Vec<Issue>,
-) -> String {
-    let full_path = format!("{path}.{key}");
-    match obj.get(key) {
-        None | Some(Value::Null) => {
-            issues.push(Issue::missing(full_path, "a non-empty string"));
-            String::new()
-        }
-        Some(Value::String(text)) if text.is_empty() => {
-            issues.push(Issue::empty(full_path));
-            String::new()
-        }
-        Some(Value::String(text)) if text.len() > MAX_NAME_BYTES => {
-            issues.push(Issue::too_long(full_path, MAX_NAME_BYTES, text.len()));
-            String::new()
-        }
-        Some(Value::String(text)) => text.clone(),
-        Some(other) => {
-            issues.push(Issue::wrong_type(full_path, "a non-empty string", other));
-            String::new()
-        }
-    }
-}
 
 /// `source`'s shape: omitted (or null) means the ordinary unsourced
 /// association — see [`AssocOp::source`] — but a source that IS
@@ -67,19 +32,13 @@ fn interpret_source(
 ) -> Option<String> {
     match obj.get("source") {
         None | Some(Value::Null) => None,
-        Some(Value::String(text)) if text.is_empty() => {
-            issues.push(Issue::empty(format!("{path}.source")));
-            None
+        Some(Value::String(text)) => {
+            if check_bounded_len(text, format!("{path}.source"), MAX_NAME_BYTES, issues) {
+                Some(text.clone())
+            } else {
+                None
+            }
         }
-        Some(Value::String(text)) if text.len() > MAX_NAME_BYTES => {
-            issues.push(Issue::too_long(
-                format!("{path}.source"),
-                MAX_NAME_BYTES,
-                text.len(),
-            ));
-            None
-        }
-        Some(Value::String(text)) => Some(text.clone()),
         Some(other) => {
             issues.push(Issue::wrong_type(
                 format!("{path}.source"),
@@ -179,9 +138,9 @@ fn interpret_associations(value: &Value) -> Result<Vec<AssocOp>, Vec<Issue>> {
             issues.push(Issue::wrong_type(path, "an object", item));
             continue;
         };
-        let subject = interpret_required_string(obj, "subject", &path, &mut issues);
-        let label = interpret_required_string(obj, "label", &path, &mut issues);
-        let object = interpret_required_string(obj, "object", &path, &mut issues);
+        let subject = interpret_bounded_text(obj, "subject", &path, MAX_NAME_BYTES, &mut issues);
+        let label = interpret_bounded_text(obj, "label", &path, MAX_NAME_BYTES, &mut issues);
+        let object = interpret_bounded_text(obj, "object", &path, MAX_NAME_BYTES, &mut issues);
         let weight = interpret_weight(obj, &path, &mut issues);
         let source = interpret_source(obj, &path, &mut issues);
         let paragraph = interpret_paragraph(obj, &path, &mut issues);

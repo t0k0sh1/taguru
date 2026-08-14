@@ -627,4 +627,35 @@ fn store_passages_issue_paths_name_the_source_and_item_index() {
         Some(json!({"sources": ["doc.md"]})),
     );
     assert_eq!(lookup["missing"], json!(["doc.md"]), "{lookup}");
+
+    // A bad passage source id names a real JSON path too — the same
+    // `passages['{source}']` shape a wrong-typed passage text uses,
+    // not prose (issue #622 finding 2's review: this used to read "a
+    // passage source id", not a path a client could act on).
+    let (status, body) = server.call(
+        "POST",
+        "/contexts/sake/sources",
+        Some(json!({"passages": {"": "text"}})),
+    );
+    assert_eq!(status, 400, "{body}");
+    let issues = body["issues"].as_array().expect("issues array");
+    assert_eq!(issues.len(), 1, "{body}");
+    assert_eq!(issues[0]["path"], json!("passages['']"), "{body}");
+    assert_eq!(issues[0]["kind"], json!("empty"), "{body}");
+
+    let long = "s".repeat(1025);
+    let (status, body) = server.call(
+        "POST",
+        "/contexts/sake/sources",
+        Some(json!({"passages": {long.clone(): "text"}})),
+    );
+    assert_eq!(status, 400, "{body}");
+    let issues = body["issues"].as_array().expect("issues array");
+    assert_eq!(issues.len(), 1, "{body}");
+    assert_eq!(
+        issues[0]["path"],
+        json!(format!("passages['{long}']")),
+        "{body}"
+    );
+    assert_eq!(issues[0]["kind"], json!("too_long"), "{body}");
 }

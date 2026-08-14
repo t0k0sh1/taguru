@@ -141,6 +141,28 @@ fn store_stamps_metadata_and_lists_it_back() {
     }
 }
 
+/// issue #622 finding 2: a tag array element that is `null` must land
+/// as `Issue::wrong_type`, NOT `Issue::missing` — an array slot can
+/// never be "absent" the way an object field can, so this is the one
+/// point where the tag validator's missing/null handling deliberately
+/// diverges from the bounded-string field validator questions/sections/
+/// locators share with it.
+#[test]
+fn a_null_tag_is_wrong_type_not_missing() {
+    let server = Server::start("meta-null-tag");
+    server.ok("PUT", "/contexts/sake", None);
+    let (status, answer) = server.call(
+        "POST",
+        "/contexts/sake/sources",
+        Some(json!({"passages": {"x": "本文"}, "tags": {"x": [null]}})),
+    );
+    assert_eq!(status, 400, "{answer}");
+    let issues = answer["issues"].as_array().expect("issues array");
+    assert_eq!(issues.len(), 1, "{answer}");
+    assert_eq!(issues[0]["path"], json!("tags['x'][0]"), "{answer}");
+    assert_eq!(issues[0]["kind"], json!("type"), "{answer}");
+}
+
 #[test]
 fn metadata_survives_a_restart_and_an_export_import_round_trip() {
     let server = Server::start("meta-durable");
