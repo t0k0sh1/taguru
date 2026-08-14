@@ -430,6 +430,17 @@ const NEAREST_SPELLINGS: usize = 5;
 /// cue": machine-readable in `verdict`, human-readable in `summary`,
 /// evidence attached. Every verdict is a 200 — a diagnosed miss is
 /// this endpoint's success.
+///
+/// Explain counts as a READ (`state.note_read`, issue #621's finding
+/// 2) but never as a SEARCH: no `note_search`, no
+/// `record_resolve_tier`, no `taguru::search` log line. This is
+/// deliberate, not an oversight — `SearchOp` (`src/metrics/taxonomy.rs`)
+/// is documented as a fixed, sealed label set with no explain variant,
+/// resolve-tier and the search log are both defined in terms of the
+/// SERVED payload (explain serves no candidates, it diagnoses), and
+/// `explain_search_passages` (`src/api/sources.rs`) follows the exact
+/// same rule — one convention shared by every explain endpoint, not a
+/// one-off.
 #[derive(Serialize)]
 pub struct ResolveExplanation {
     /// `not_in_vocabulary` | `served` | `cue_resolved_exactly` |
@@ -541,6 +552,10 @@ struct VocabularyView {
     nearest: Vec<Resolution>,
 }
 
+/// Shares `resolve_served`'s DATA half — the same tiers, floors,
+/// merge, and trim (`ResolvedTiers`) — but not its metrics half: see
+/// [`ResolveExplanation`]'s doc for why explain is a `note_read`, not
+/// a `note_search`/resolve-tier/search-log site (issue #621).
 fn explain_resolve_verdict(
     state: &AppState,
     name: &str,

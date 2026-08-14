@@ -63,13 +63,29 @@ pub async fn changes(
             state.note_read(&name, events.is_empty());
             ok(ChangesPage { events, next, more }, started_at)
         }
-        Ok(ChangesOutcome::Stale) => error(
-            ErrorCode::StaleCursor,
-            "the cursor's history is no longer held (a restart, a recreate, or more \
-             changes than the feed retains) — run a full resync, then tail again from \
-             a fresh cursor (GET /changes without since)",
-            started_at,
-        ),
+        // note_read here, unlike the Err arm below (issue #621's
+        // finding 3): the context WAS successfully consulted and
+        // answered — the cursor just aged out — the same "successful
+        // read whose answer happens to be a 4xx" shape `citation`'s
+        // own UnknownSource/IndexOutOfRange arms count. `empty: true`
+        // matches UnknownSource's precedent: nothing the caller named
+        // (this cursor's history) still exists. `Err` below stays
+        // uncounted because there the ACCESS itself failed, not the
+        // answer — matching every sibling handler's convention. Purely
+        // advisory either way: only `GET /contexts`'s usage row and
+        // the MCP routing directory read these counters: eviction uses
+        // the separate `last_touch` field, which `context_changes`
+        // already stamps on both the Page and Stale paths.
+        Ok(ChangesOutcome::Stale) => {
+            state.note_read(&name, true);
+            error(
+                ErrorCode::StaleCursor,
+                "the cursor's history is no longer held (a restart, a recreate, or more \
+                 changes than the feed retains) — run a full resync, then tail again from \
+                 a fresh cursor (GET /changes without since)",
+                started_at,
+            )
+        }
         Err(failure) => access_error(&state, failure, &name, started_at),
     }
 }

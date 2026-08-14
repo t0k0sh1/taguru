@@ -884,6 +884,35 @@ fn passage_search_cache_probe(
     CacheProbe::Fresh(None)
 }
 
+/// Tallies [`Metrics::record_passage_hit`]'s lane split across a batch
+/// of SERVED hits — calling it once per hit and returning the same
+/// `[bm25_only, both_lanes, vector_only]` shape `cache_and_serve`
+/// stores. Callers MUST feed only hits that will actually reach the
+/// client (issue #621): the metric and its Prometheus counter
+/// (`taguru_passage_lane_contributions_total`) are documented as
+/// counting served hits, not everything a lane found before
+/// truncation or a cross-context merge. `communities.rs`'s
+/// `community_hits` truncates its own ranked list before tallying for
+/// the same reason; this helper exists so `search_passages` and
+/// `cross_search_passages` don't each reimplement the three-way lane
+/// match (and so both get the same unit-test coverage of it).
+fn record_lane_hits(
+    metrics: &crate::metrics::Metrics,
+    hits: impl IntoIterator<Item = (bool, bool)>,
+) -> [u64; 3] {
+    let mut lane_hits = [0u64; 3];
+    for (bm25, vector) in hits {
+        metrics.record_passage_hit(bm25, vector);
+        match (bm25, vector) {
+            (true, false) => lane_hits[0] += 1,
+            (true, true) => lane_hits[1] += 1,
+            (false, true) => lane_hits[2] += 1,
+            (false, false) => {}
+        }
+    }
+    lane_hits
+}
+
 pub async fn search_passages(
     State(state): State<AppState>,
     AppPath(name): AppPath<String>,
@@ -1027,18 +1056,13 @@ pub async fn search_passages(
         Some(Ok(found)) => {
             state.note_search(SearchOp::SearchPassages, &name, found.hits.is_empty());
             let target_empty = vec![found.hits.is_empty()];
-            let mut lane_hits = [0u64; 3];
-            for hit in &found.hits {
-                state
-                    .metrics()
-                    .record_passage_hit(hit.bm25.is_some(), hit.vector.is_some());
-                match (hit.bm25.is_some(), hit.vector.is_some()) {
-                    (true, false) => lane_hits[0] += 1,
-                    (true, true) => lane_hits[1] += 1,
-                    (false, true) => lane_hits[2] += 1,
-                    (false, false) => {}
-                }
-            }
+            let lane_hits = record_lane_hits(
+                state.metrics(),
+                found
+                    .hits
+                    .iter()
+                    .map(|hit| (hit.bm25.is_some(), hit.vector.is_some())),
+            );
             if search_log_enabled() {
                 tracing::info!(
                     target: "taguru::search",
@@ -1484,6 +1508,12 @@ impl SearchExplanation {
 /// then O(log(raw row count)) reruns of the ranking alone to verify
 /// `limit_to_reach`; the serve boundary is recomputed exactly as
 /// `sources/search` computes it, so the two cannot disagree.
+///
+/// Counts as a READ (`state.note_read`) but not a SEARCH — no
+/// `note_search`, no `record_passage_hit`, no `taguru::search` log
+/// line (issue #621's finding 2, deliberate). `resolve`'s
+/// `explain_resolve_verdict` documents the same rule; see
+/// [`crate::api::resolve::ResolveExplanation`] for why.
 pub async fn explain_search_passages(
     State(state): State<AppState>,
     AppPath(name): AppPath<String>,
@@ -1725,7 +1755,6 @@ pub async fn cross_search_passages(
     let mut target_empty = Vec::with_capacity(targets.len());
     let mut plans = Vec::with_capacity(targets.len());
     let mut embedding_failed = false;
-    let mut lane_hits = [0u64; 3];
     for (index, outcome) in fetched.into_iter().enumerate() {
         let name = &targets[index];
         match outcome {
@@ -1747,17 +1776,6 @@ pub async fn cross_search_passages(
                     FilterPlan::of(found.filter),
                 ));
                 embedding_failed |= found.lanes.embedding_failed();
-                for hit in &found.hits {
-                    state
-                        .metrics()
-                        .record_passage_hit(hit.bm25.is_some(), hit.vector.is_some());
-                    match (hit.bm25.is_some(), hit.vector.is_some()) {
-                        (true, false) => lane_hits[0] += 1,
-                        (true, true) => lane_hits[1] += 1,
-                        (false, true) => lane_hits[2] += 1,
-                        (false, false) => {}
-                    }
-                }
                 pool.extend(
                     found
                         .hits
@@ -1772,6 +1790,16 @@ pub async fn cross_search_passages(
         }
     }
     cut(&mut pool);
+    // Tallied AFTER the final cut, against the merged/truncated pool —
+    // not per-target inside the loop above (issue #621): each target
+    // can return up to `limit` hits, so counting before the merge
+    // could over-report served hits by up to a factor of `targets.len()`
+    // relative to what the client actually receives.
+    let lane_hits = record_lane_hits(
+        state.metrics(),
+        pool.iter()
+            .map(|(_, _, hit)| (hit.bm25.is_some(), hit.vector.is_some())),
+    );
     if search_log_enabled() {
         tracing::info!(
             target: "taguru::search",
@@ -3032,6 +3060,76 @@ mod tests {
             not_ranked["ranking"].get("limit_to_reach_reason").is_none(),
             "NotRanked carries no reason — a bare absence, distinct from \
              Unreachable's explicit one: {not_ranked}"
+        );
+    }
+
+    /// issue #621: `record_lane_hits` must sort each hit into exactly
+    /// one of the three named lanes, matching `record_passage_hit`'s
+    /// own "counted nowhere rather than inventing a fourth label" rule
+    /// for a hit with neither lane set (which cannot occur from a real
+    /// search, but the tally must not silently misclassify it either).
+    #[test]
+    fn record_lane_hits_sorts_each_combination_into_its_own_lane() {
+        let metrics = crate::metrics::Metrics::default();
+        let lane_hits = record_lane_hits(
+            &metrics,
+            [
+                (true, false),  // bm25_only
+                (true, false),  // bm25_only
+                (true, true),   // both_lanes
+                (false, true),  // vector_only
+                (false, false), // neither — counted nowhere
+            ],
+        );
+        assert_eq!(
+            lane_hits,
+            [2, 1, 1],
+            "[bm25_only, both_lanes, vector_only], neither-lane hits excluded"
+        );
+    }
+
+    #[test]
+    fn record_lane_hits_reports_all_zeros_for_an_empty_batch() {
+        let metrics = crate::metrics::Metrics::default();
+        assert_eq!(record_lane_hits(&metrics, []), [0, 0, 0]);
+    }
+
+    /// issue #621: the tally is not just a local count — it must also
+    /// drive `Metrics::record_passage_hit` so the Prometheus counter
+    /// agrees with the returned array. A mutant that dropped the
+    /// `metrics.record_passage_hit(..)` call inside the loop would
+    /// still pass the two tests above.
+    #[test]
+    fn record_lane_hits_also_drives_the_prometheus_counter() {
+        let metrics = crate::metrics::Metrics::default();
+        record_lane_hits(&metrics, [(true, false), (true, true), (false, true)]);
+        let gauges = crate::metrics::GaugeSnapshot {
+            contexts_registered: 0,
+            groups_registered: 0,
+            contexts_resident: 0,
+            resident_bytes: 0,
+            wal_bytes: 0,
+            passages_wal_bytes: 0,
+            dead_edges_total: 0,
+            dead_attributions_total: 0,
+            arena_slack_total: 0,
+            unsourced_edges_total: 0,
+            unsourced_weight_total: 0.0,
+            embed_breaker: None,
+            rerank_breaker: None,
+            retrieval_cache_entries: 0,
+            retrieval_cache_bytes: 0,
+            semantic_cache_entries: 0,
+            embed_slot_waiters: 0,
+            per_context: Vec::new(),
+        };
+        let rendered = metrics.render_prometheus(&gauges);
+        assert!(rendered.contains("taguru_passage_lane_contributions_total{lane=\"bm25_only\"} 1"));
+        assert!(
+            rendered.contains("taguru_passage_lane_contributions_total{lane=\"both_lanes\"} 1")
+        );
+        assert!(
+            rendered.contains("taguru_passage_lane_contributions_total{lane=\"vector_only\"} 1")
         );
     }
 }
