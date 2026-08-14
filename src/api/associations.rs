@@ -321,6 +321,7 @@ fn associations_refusal(issues: Vec<Issue>, started_at: Instant) -> Response {
         message,
         RefusalDetail {
             issues,
+            issues_total: Some(total),
             integrity: Some("nothing_written"),
             retryable_after_correction: Some(true),
             ..Default::default()

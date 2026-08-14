@@ -285,6 +285,7 @@ pub(super) fn import_refusal(
                         format!("batches[{batch_index}].create"),
                         "a create block, since the named context does not exist yet",
                     )],
+                    issues_total: None,
                     integrity: Some(integrity),
                     durable_batches,
                     retryable_after_correction: Some(true),
@@ -330,6 +331,7 @@ pub(super) fn import_refusal(
                 message,
                 RefusalDetail {
                     issues: vec![issue],
+                    issues_total: None,
                     integrity: Some(integrity),
                     durable_batches,
                     retryable_after_correction: Some(true),
@@ -357,6 +359,7 @@ pub(super) fn import_refusal(
                 message,
                 RefusalDetail {
                     issues,
+                    issues_total: None,
                     integrity: Some(integrity),
                     durable_batches,
                     retryable_after_correction: Some(true),
@@ -487,6 +490,7 @@ pub(super) fn schema_import_refusal(
                     "an earlier batch of this stream (or a previous request) creating it, \
                      since a schema record's context must already exist",
                 )],
+                issues_total: None,
                 integrity: Some(integrity),
                 durable_batches,
                 retryable_after_correction: Some(true),

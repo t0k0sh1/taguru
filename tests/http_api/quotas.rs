@@ -167,6 +167,13 @@ fn import_stops_at_the_capped_batch_as_a_resumable_prefix() {
     // so without parsing the prose.
     assert_eq!(refused["integrity"], json!("durable_prefix"), "{refused}");
     assert_eq!(refused["durable_batches"], json!(1), "{refused}");
+    // `stream_refusal` never names an `Issue` (issue #623 finding 5) —
+    // `issues_total` stays at its true value of zero and is omitted
+    // entirely, the same as `issues` itself already is.
+    assert!(
+        !refused.as_object().unwrap().contains_key("issues_total"),
+        "a refusal with no issues at all must not carry issues_total: {refused}"
+    );
 
     // The uncapped batch before the stop landed whole — the created
     // context AND its association line, not just the create block.

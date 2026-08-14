@@ -657,6 +657,15 @@ pub(crate) const MAX_LISTED_ISSUES: usize = 20;
 #[derive(Default)]
 pub(crate) struct RefusalDetail {
     pub issues: Vec<Issue>,
+    /// `issues`' true count before a caller trims it to
+    /// [`MAX_LISTED_ISSUES`] itself (issue #623 finding 5) —
+    /// [`collected_validation_message`]'s callers ([`truncate_issues`])
+    /// already truncate before building their own prose, so by the time
+    /// `issues` reaches [`validation_error`] the true total is gone from
+    /// `issues.len()`. `None` (the common case: a handful of issues,
+    /// caller does no truncation of its own) means `validation_error`
+    /// derives it — and truncates — itself.
+    pub issues_total: Option<usize>,
     pub integrity: Option<&'static str>,
     pub durable_batches: Option<usize>,
     pub retryable_after_correction: Option<bool>,
@@ -670,6 +679,21 @@ pub struct ApiError {
     time: f64,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     issues: Vec<Issue>,
+    /// `issues`' true count before [`validation_error`] truncates it to
+    /// [`MAX_LISTED_ISSUES`] (issue #623 finding 5) — the failure side's
+    /// counterpart to `ApiResponse::schema_violations`, which ADR 0009
+    /// §8.3 requires mirror `ApiError.issues` field-for-field "because
+    /// `MAX_LISTED_ISSUES` truncates the list and the tally must survive
+    /// truncation." Before this field, a refusal's true count lived only
+    /// in `validation_error`'s prose ("N issues total; showing the first
+    /// 20") — human-readable, but nothing a client could parse the way
+    /// `schema_violations` already let a `warn`-mode success respond.
+    /// Not named `schema_violations`: an `Issue` here need not be a
+    /// schema violation at all (a missing name, a wrong type, an
+    /// over-length field, …), so the shared name would mislabel most of
+    /// what this field actually counts.
+    #[serde(skip_serializing_if = "is_zero")]
+    issues_total: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     integrity: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -684,6 +708,7 @@ impl ApiError {
         error: impl Into<String>,
         started_at: Instant,
         detail: RefusalDetail,
+        issues_total: usize,
     ) -> Self {
         Self {
             status: "error",
@@ -691,6 +716,7 @@ impl ApiError {
             error: error.into(),
             time: started_at.elapsed().as_secs_f64(),
             issues: detail.issues,
+            issues_total,
             integrity: detail.integrity,
             durable_batches: detail.durable_batches,
             retryable_after_correction: detail.retryable_after_correction,
@@ -757,8 +783,14 @@ pub(crate) fn validation_error(
     mut detail: RefusalDetail,
     started_at: Instant,
 ) -> Response {
-    let total = detail.issues.len();
-    let message = if total > MAX_LISTED_ISSUES {
+    // `issues_total` set means the caller already truncated `issues`
+    // and accounted for the true count in its own message (issue #623
+    // finding 5) — this function must not truncate (a no-op on an
+    // already-short list) or append a second, redundant "N issues
+    // total" notice on top of the caller's own.
+    let pre_truncated = detail.issues_total.is_some();
+    let total = detail.issues_total.unwrap_or(detail.issues.len());
+    let message = if !pre_truncated && total > MAX_LISTED_ISSUES {
         detail.issues.truncate(MAX_LISTED_ISSUES);
         format!(
             "{} ({total} issues total; showing the first {MAX_LISTED_ISSUES})",
@@ -770,7 +802,7 @@ pub(crate) fn validation_error(
     let status = code.status();
     (
         status,
-        Json(ApiError::new(code, message, started_at, detail)),
+        Json(ApiError::new(code, message, started_at, detail, total)),
     )
         .into_response()
 }
@@ -864,6 +896,7 @@ fn coded(
             message,
             started_at,
             RefusalDetail::default(),
+            0,
         )),
     )
         .into_response()
@@ -1223,9 +1256,27 @@ fn cache_and_serve<T: Serialize>(
     started_at: Instant,
 ) -> Response {
     let Ok(raw) = serde_json::value::to_raw_value(payload) else {
-        // Unreachable for these payload types (no non-string map keys,
-        // no non-finite floats) — serve uncached rather than fail a
-        // response the search already computed.
+        // Unreachable today (issue #623 finding 4): `to_raw_value` only
+        // fails on a non-string map key (serde_json's
+        // `MapKeySerializer::serialize_*`), and none of the seven
+        // payload types this function ever serializes
+        // (`MatchPage`/`CrossMatchPage`/`CommunityPage`/`PassagePage`/
+        // `CrossPassagePage` and their transitive fields) contain a map
+        // at all. A non-finite float is NOT a failure mode here —
+        // serde_json writes one as `null` in value position instead of
+        // erroring; only a non-string MAP KEY errors. `error!`, not
+        // `warn!`: this would mean a payload type gained a field this
+        // comment's premise no longer covers — a bug surfacing at
+        // runtime, the same class `panic_response` logs this loudly for,
+        // not one of the foreseen degraded states `warn!` is for
+        // elsewhere in this file. No `record_error` counter: unlike
+        // `panic_response`, this path still answers 200 (uncached, not
+        // 500), so `ErrorKind` — documented as classifying "why a
+        // request answered 500" — would not fit.
+        tracing::error!(
+            "cache_and_serve: payload failed to serialize as a raw JSON \
+             value; serving it uncached instead of failing the response"
+        );
         return ok(payload, started_at);
     };
     let raw: Arc<serde_json::value::RawValue> = raw.into();

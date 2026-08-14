@@ -16,6 +16,7 @@
         "path": "batches[1].concepts['Alpha']"
       }
     ],
+    "issues_total": 1,
     "retryable_after_correction": true,
     "status": "error",
     "time": 0.0

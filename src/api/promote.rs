@@ -32,7 +32,7 @@ use super::import::{
 };
 use super::{
     AppJson, AppPath, AppQuery, ErrorCode, Issue, RefusalDetail, access_error, deadline_exceeded,
-    error, key_name, ok_with_issues_total, overlong, validation_error,
+    error, key_name, ok_with_issues_total, overlong, truncate_issues, validation_error,
 };
 
 #[derive(Debug, Deserialize)]
@@ -208,16 +208,24 @@ pub async fn promote_sources(
         })
         .collect();
     if !issues.is_empty() {
+        // Pre-truncated via `truncate_issues` (issue #623 finding 5) —
+        // the message below already names the true total, and passing
+        // it as `issues_total` tells `validation_error` not to also
+        // truncate and append its own "(N issues total; showing the
+        // first 20)", which would otherwise print the same count twice
+        // in one string. `associations_refusal` (`api/associations.rs`)
+        // and `store_passages` (`sources.rs`) follow the same shape.
+        let (issues, total) = truncate_issues(issues);
         return validation_error(
             ErrorCode::NoSource,
             format!(
-                "{} of the named source id(s) exist(s) nowhere in context '{name}' — \
+                "{total} of the named source id(s) exist(s) nowhere in context '{name}' — \
                  under retract-then-apply a mistyped id would no-op silently, so the \
                  whole request refuses instead; nothing was applied",
-                issues.len()
             ),
             RefusalDetail {
                 issues,
+                issues_total: Some(total),
                 integrity: Some("nothing_written"),
                 retryable_after_correction: Some(true),
                 ..Default::default()
