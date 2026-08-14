@@ -85,20 +85,33 @@ exclude_re = [
     # for every possible input; only the warn log (uncaptured by any
     # test here) would differ.
     "replace < with <= in ReplicateConfig::from_env",
-    # `Shipper::ship_lane`'s SECOND and THIRD `vanished_mid_cycle`
-    # call sites (issue #618, shipper.rs:426 and :459) — line-anchored
-    # because the identical guard expression also appears at :390,
-    # where it IS tested (see
-    # a_lane_deleted_between_the_scan_and_its_own_turn_ships_nothing_not_an_error).
-    # Both of these sites have NO `.await` between `ship_lane`'s own
-    # entry and reaching them (metadata → sig check → read → prefix
-    # check → this metadata, all synchronous), so — unlike :390, which
-    # a test can race by pausing an EARLIER `scan.changed` upload —
-    # nothing running on this cooperative single-threaded executor can
-    # ever land between two back-to-back non-yielding `std::fs` calls
-    # within the SAME `ship_lane` invocation. A real concurrent unlink
-    # at the OS level could still hit this window in production; no
-    # test can pin that.
+    # `Shipper::ship_lane`'s THREE identical `vanished_mid_cycle` call
+    # sites (issue #618, shipper.rs:390, :426, :459) — line-anchored
+    # since the guard expression is byte-identical at all three.
+    # :390's "false" arm (a genuine NotFound reaching this guard IS
+    # the vanished-mid-cycle case) is real-tested — see
+    # a_lane_deleted_between_the_scan_and_its_own_turn_ships_nothing_not_an_error,
+    # which races an earlier `scan.changed` upload to delete the lane
+    # file before the lanes loop reaches it. Excluded here:
+    # - :390 "true": distinguishing this needs a LOCAL fs error at
+    #   this exact point that is NOT NotFound (permission denied,
+    #   ELOOP, ...) — this suite has no fault-injection wrapper for
+    #   `std::fs` calls (only for the `ObjectStore` trait), and the
+    #   two portable ways to fake one — chmod-ing the containing
+    #   directory, or a self-referential symlink — either break the
+    #   SAME pausing mechanism :390's own test relies on (chmod blocks
+    #   every other file under it, including the upload being paused
+    #   on) or are platform-fragile.
+    # - :426 and :459: no `.await` exists between `ship_lane`'s own
+    #   entry and reaching them (metadata → sig check → read → prefix
+    #   check → this metadata, all synchronous) — unlike :390, nothing
+    #   running on this cooperative single-threaded executor can ever
+    #   land between two back-to-back non-yielding `std::fs` calls
+    #   within the SAME `ship_lane` invocation.
+    # A real concurrent unlink/permission change at the OS level could
+    # still hit any of these windows in production; no test here can
+    # pin that.
+    "src/ship/shipper\\.rs:390:27: replace match guard vanished_mid_cycle\\(&error\\) with true in Shipper::ship_lane",
     "src/ship/shipper\\.rs:426:31: replace match guard vanished_mid_cycle\\(&error\\) with true in Shipper::ship_lane",
     "src/ship/shipper\\.rs:426:31: replace match guard vanished_mid_cycle\\(&error\\) with false in Shipper::ship_lane",
     "src/ship/shipper\\.rs:459:35: replace match guard vanished_mid_cycle\\(&error\\) with true in Shipper::ship_lane",
