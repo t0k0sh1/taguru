@@ -1724,6 +1724,38 @@ fn cross_search_concurrency() -> usize {
     })
 }
 
+// Test-only deterministic fault injection for the "deadline expired
+// exactly when a passage read's io::Error also surfaced" race several
+// `search_passages`-callers' match guards must classify correctly
+// (issue #620). Real wall-clock expiry landing in that exact window is
+// not something a test can race reliably — mirrors `api::groups`'s own
+// `expire_fingerprint_loop_after` for the same reason, but shared
+// across every caller of `search_passages` rather than reimplemented
+// per file.
+#[cfg(test)]
+thread_local! {
+    static EXPIRE_DEADLINE_RACE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Arms the fault: the next [`injected_deadline_race`] consult reports
+/// expired regardless of `deadline`'s own real state, then clears
+/// itself — one arm never leaks into an unrelated later test on a
+/// reused thread.
+#[cfg(test)]
+pub(crate) fn expire_deadline_race() {
+    EXPIRE_DEADLINE_RACE.with(|cell| cell.set(true));
+}
+
+#[cfg(test)]
+pub(crate) fn injected_deadline_race() -> bool {
+    EXPIRE_DEADLINE_RACE.with(|cell| cell.replace(false))
+}
+
+#[cfg(not(test))]
+pub(crate) fn injected_deadline_race() -> bool {
+    false
+}
+
 /// `Attribution`'s wire shape: everything the library exposes, plus the
 /// section label and typed citation locator (ADR 0007 §7) the server
 /// resolves from `paragraph` via `AppState::resolve_markers`. Each is

@@ -399,7 +399,7 @@ pub async fn assemble_evidence(
             None => return not_found(&name, started_at),
             // Logged, not discarded (issue #620): same reasoning as
             // `search_passages`'s own budget/io-error race.
-            Some(Err(io_error)) if deadline.expired() => {
+            Some(Err(io_error)) if deadline.expired() || crate::api::injected_deadline_race() => {
                 tracing::warn!(
                     context = %name,
                     "passage read failed under a spent budget: {io_error}"
@@ -651,4 +651,107 @@ fn resolve_citations(
         }
     }
     Ok(citation_lookup)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::registry::ContextMeta;
+
+    fn scratch_state(tag: &str) -> (AppState, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "taguru-api-evidence-assemble-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        (state, dir)
+    }
+
+    /// Forces `context`'s next passage read to fail with a genuine
+    /// `io::Error` — the same trick `api::sources`'s own io-error
+    /// tests use (issue #620): a snapshot file `PassageStore::load`
+    /// cannot parse, written before the context's first passage touch.
+    fn corrupt_passages_snapshot(dir: &std::path::Path, context: &str) {
+        let stem = crate::registry::file_stem(context);
+        let path = crate::registry::passages_path(dir, &stem);
+        std::fs::write(path, b"not a valid passages snapshot").unwrap();
+    }
+
+    fn minimal_request() -> AssembleEvidenceRequest {
+        AssembleEvidenceRequest {
+            origins: OneOrMany::Many(Vec::new()),
+            labels: None,
+            dice_floor: None,
+            semantic_floor: None,
+            resolve_limit: None,
+            activate_decay: None,
+            activate_limit: None,
+            // Non-empty on purpose: an empty query short-circuits
+            // `search_passages` before it ever touches the passage
+            // store, which would never reach the corrupted snapshot.
+            text_fallback_query: Some("AAA".to_string()),
+            search_limit: None,
+            include_communities: false,
+            budget: None,
+            rerank: None,
+        }
+    }
+
+    /// issue #620 (所見3): `assemble_evidence`'s own twin of
+    /// `search_passages`'s io-error/deadline race tests.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn assemble_evidence_reports_a_genuine_io_error_as_unreadable_not_timeout() {
+        let (state, dir) = scratch_state("io-error");
+        state.create("sake", ContextMeta::default()).unwrap();
+        corrupt_passages_snapshot(&dir, "sake");
+
+        let response = assemble_evidence(
+            State(state),
+            AppPath("sake".to_string()),
+            None,
+            axum::Extension(Deadline::unbounded()),
+            AppJson(minimal_request()),
+        )
+        .await;
+
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body["code"],
+            crate::api::ErrorCode::Internal.as_str(),
+            "an unexpired deadline must never reclassify a real disk fault as a \
+             timeout — {body}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn assemble_evidence_reclassifies_an_io_error_as_timeout_once_the_budget_is_spent() {
+        let (state, dir) = scratch_state("io-error-timeout");
+        state.create("sake", ContextMeta::default()).unwrap();
+        corrupt_passages_snapshot(&dir, "sake");
+        crate::api::expire_deadline_race();
+
+        let response = assemble_evidence(
+            State(state),
+            AppPath("sake".to_string()),
+            None,
+            axum::Extension(Deadline::unbounded()),
+            AppJson(minimal_request()),
+        )
+        .await;
+
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body["code"],
+            crate::api::ErrorCode::Timeout.as_str(),
+            "a budget spent by the time the read failed must reclassify as a \
+             timeout — {body}"
+        );
+    }
 }

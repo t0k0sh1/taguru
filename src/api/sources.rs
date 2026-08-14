@@ -1019,7 +1019,7 @@ pub async fn search_passages(
         // The client answer stays a timeout either way (issue #620):
         // only the log gets the underlying io::Error, so a real disk
         // fault isn't indistinguishable from an ordinary budget cut.
-        Some(Err(io_error)) if deadline.expired() => {
+        Some(Err(io_error)) if deadline.expired() || crate::api::injected_deadline_race() => {
             tracing::warn!(context = %name, "passage read failed under a spent budget: {io_error}");
             deadline_exceeded(started_at)
         }
@@ -1517,7 +1517,7 @@ pub async fn explain_search_passages(
         // Mirrors search_passages: a rebuild the lexical lane needed
         // refused to start once the budget was already gone — logged,
         // not discarded (issue #620), the same reasoning as there.
-        Some(Err(io_error)) if deadline.expired() => {
+        Some(Err(io_error)) if deadline.expired() || crate::api::injected_deadline_race() => {
             tracing::warn!(context = %name, "passage read failed under a spent budget: {io_error}");
             deadline_exceeded(started_at)
         }
@@ -1727,7 +1727,7 @@ pub async fn cross_search_passages(
             // Logged, not discarded (issue #620): the client still
             // gets a timeout, but the underlying io::Error survives in
             // the log instead of vanishing behind it.
-            Some(Err(io_error)) if deadline.expired() => {
+            Some(Err(io_error)) if deadline.expired() || crate::api::injected_deadline_race() => {
                 tracing::warn!(
                     context = %name,
                     "passage read failed under a spent budget: {io_error}"
@@ -2476,6 +2476,211 @@ pub async fn store_passages(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::ContextMeta;
+
+    /// A fresh, on-disk-backed [`AppState`], its data directory
+    /// alongside it so tests can reach into the on-disk shape directly
+    /// (the corruption trick below needs to write straight to a
+    /// passages snapshot file `AppState` has no API for).
+    fn scratch_state(tag: &str) -> (AppState, std::path::PathBuf) {
+        let dir =
+            std::env::temp_dir().join(format!("taguru-api-sources-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        (state, dir)
+    }
+
+    /// Forces `context`'s NEXT passage read to fail with a genuine
+    /// `io::Error` (issue #620): writes bytes `PassageStore::load`
+    /// cannot parse as a snapshot to the exact path it reads on a
+    /// context's first passage touch. Deterministic and needs no prior
+    /// successful load to "then corrupt" — the snapshot file does not
+    /// exist yet for a context that has never stored a passage, so
+    /// this is simply that file's first-ever write.
+    fn corrupt_passages_snapshot(dir: &std::path::Path, context: &str) {
+        let stem = crate::registry::file_stem(context);
+        let path = crate::registry::passages_path(dir, &stem);
+        std::fs::write(path, b"not a valid passages snapshot").unwrap();
+    }
+
+    /// issue #620 (所見3): `search_passages` must classify a genuine
+    /// io::Error correctly against the real deadline — logged either
+    /// way, but the CLIENT response must still pick the right one of
+    /// "disk fault" (500) vs. "budget spent" (408). Both directions of
+    /// the match guard are exercised: the corrupted snapshot alone
+    /// (deadline untouched) proves the guard does not fire when it
+    /// should not; `expire_deadline_race` then proves it fires when it
+    /// should, without racing a real `Duration`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn search_passages_reports_a_genuine_io_error_as_unreadable_not_timeout() {
+        let (state, dir) = scratch_state("search-io-error");
+        state.create("sake", ContextMeta::default()).unwrap();
+        corrupt_passages_snapshot(&dir, "sake");
+
+        let request = SearchPassagesRequest {
+            query: "AAA".to_string(),
+            limit: None,
+            semantic_floor: None,
+            tags: Vec::new(),
+            since: None,
+            until: None,
+        };
+        let response = search_passages(
+            State(state),
+            AppPath("sake".to_string()),
+            axum::Extension(Deadline::unbounded()),
+            AppJson(request),
+        )
+        .await;
+
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body["code"],
+            ErrorCode::Internal.as_str(),
+            "an unexpired deadline must never reclassify a real disk fault as a \
+             timeout — {body}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn search_passages_reclassifies_an_io_error_as_timeout_once_the_budget_is_spent() {
+        let (state, dir) = scratch_state("search-io-error-timeout");
+        state.create("sake", ContextMeta::default()).unwrap();
+        corrupt_passages_snapshot(&dir, "sake");
+        crate::api::expire_deadline_race();
+
+        let request = SearchPassagesRequest {
+            query: "AAA".to_string(),
+            limit: None,
+            semantic_floor: None,
+            tags: Vec::new(),
+            since: None,
+            until: None,
+        };
+        let response = search_passages(
+            State(state),
+            AppPath("sake".to_string()),
+            axum::Extension(Deadline::unbounded()),
+            AppJson(request),
+        )
+        .await;
+
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body["code"],
+            ErrorCode::Timeout.as_str(),
+            "a budget spent by the time the read failed must reclassify as a \
+             timeout, matching the single-context error path's own rule — {body}"
+        );
+    }
+
+    /// issue #620 (所見3): `explain_search_passages`'s own twin of the
+    /// two tests above.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn explain_search_passages_reports_a_genuine_io_error_as_unreadable_not_timeout() {
+        let (state, dir) = scratch_state("explain-io-error");
+        state.create("sake", ContextMeta::default()).unwrap();
+        corrupt_passages_snapshot(&dir, "sake");
+
+        let request = ExplainSearchRequest {
+            query: "AAA".to_string(),
+            source: "a.md".to_string(),
+            paragraph: None,
+            limit: None,
+            semantic_floor: None,
+            tags: Vec::new(),
+            since: None,
+            until: None,
+        };
+        let response = explain_search_passages(
+            State(state),
+            AppPath("sake".to_string()),
+            axum::Extension(Deadline::unbounded()),
+            AppJson(request),
+        )
+        .await;
+
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], ErrorCode::Internal.as_str(), "{body}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn explain_search_passages_reclassifies_an_io_error_as_timeout_once_the_budget_is_spent()
+    {
+        let (state, dir) = scratch_state("explain-io-error-timeout");
+        state.create("sake", ContextMeta::default()).unwrap();
+        corrupt_passages_snapshot(&dir, "sake");
+        crate::api::expire_deadline_race();
+
+        let request = ExplainSearchRequest {
+            query: "AAA".to_string(),
+            source: "a.md".to_string(),
+            paragraph: None,
+            limit: None,
+            semantic_floor: None,
+            tags: Vec::new(),
+            since: None,
+            until: None,
+        };
+        let response = explain_search_passages(
+            State(state),
+            AppPath("sake".to_string()),
+            axum::Extension(Deadline::unbounded()),
+            AppJson(request),
+        )
+        .await;
+
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], ErrorCode::Timeout.as_str(), "{body}");
+    }
+
+    /// issue #620 (所見3, 所見1's non-panicking twin): `cross_search_passages`
+    /// must reclassify a target's genuine io::Error as a timeout once
+    /// the budget is spent, same rule as the single-context handler.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cross_search_passages_reclassifies_an_io_error_as_timeout_once_the_budget_is_spent() {
+        let (state, dir) = scratch_state("cross-search-io-error-timeout");
+        state.create("sake", ContextMeta::default()).unwrap();
+        corrupt_passages_snapshot(&dir, "sake");
+        crate::api::expire_deadline_race();
+
+        let request = CrossSearchPassagesRequest {
+            contexts: vec!["sake".to_string()],
+            groups: Vec::new(),
+            query: "AAA".to_string(),
+            limit: None,
+            semantic_floor: None,
+            tags: Vec::new(),
+            since: None,
+            until: None,
+        };
+        let response = cross_search_passages(
+            State(state),
+            None,
+            None,
+            axum::Extension(Deadline::unbounded()),
+            AppJson(request),
+        )
+        .await;
+
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], ErrorCode::Timeout.as_str(), "{body}");
+    }
 
     /// issue #620 (所見4): the tag-count cap must gate the EFFECTIVE
     /// filter, not the raw input — 33 spellings of one tag store as
