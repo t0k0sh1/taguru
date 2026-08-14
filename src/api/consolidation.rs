@@ -38,6 +38,45 @@ pub(crate) const CONSOLIDATION_DETECTOR: &str = "consolidation/1";
 /// choose one — totals stay exact either way (no silent caps).
 pub(super) const DEFAULT_EVIDENCE_CAP: usize = 20;
 
+// Test-only deterministic fault injection for `staleness_section`'s
+// per-attribution deadline check (issue #620): mirrors
+// `api::groups`'s own `expire_fingerprint_loop_after` — one
+// association's attribution count is not bounded by anything the
+// per-edge check controls, and a real deadline landing mid-walk
+// through it cannot be raced reliably (each step is an in-memory
+// lookup, done in well under a microsecond).
+#[cfg(test)]
+thread_local! {
+    static EXPIRE_STALENESS_ATTRIBUTION_LOOP_AFTER: std::cell::Cell<Option<u32>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn expire_staleness_attribution_loop_after(remaining: u32) {
+    EXPIRE_STALENESS_ATTRIBUTION_LOOP_AFTER.with(|cell| cell.set(Some(remaining)));
+}
+
+#[cfg(test)]
+fn injected_staleness_attribution_loop_expiry() -> bool {
+    EXPIRE_STALENESS_ATTRIBUTION_LOOP_AFTER.with(|cell| match cell.get() {
+        Some(0) => {
+            cell.set(None);
+            true
+        }
+        Some(remaining) => {
+            cell.set(Some(remaining - 1));
+            false
+        }
+        None => false,
+    })
+}
+
+#[cfg(not(test))]
+#[mutants::skip] // dead under cfg(test) — mirrors api.rs's injected_deadline_race
+fn injected_staleness_attribution_loop_expiry() -> bool {
+    false
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ConsolidationAuditRequest {
     /// Which sections to compute — required and non-empty: every
@@ -358,13 +397,20 @@ pub(super) fn merge_section(
             // but each pair costs two adjacency walks plus a full-
             // evidence fingerprint fold — unbounded in neighbor count
             // — so a large enough pair list can still outrun the
-            // budget without a check here.
+            // budget without a check here. `merge_evidence` itself is
+            // ALSO deadline-checked (a single hub-concept pair can run
+            // long enough to outrun this per-pair check alone), so its
+            // own `DeadlineExceeded` maps the same way this loop's own
+            // check does.
             let mut candidates = Vec::with_capacity(pairs.len());
             for (a, b, name_score, tier) in pairs {
                 if deadline.expired() {
                     return Err(AccessError::DeadlineExceeded);
                 }
-                let Some(evidence) = context.merge_evidence(&a, &b, evidence_cap, &excluded) else {
+                let Some(evidence) = context
+                    .merge_evidence(&a, &b, evidence_cap, &excluded, deadline)
+                    .map_err(|_| AccessError::DeadlineExceeded)?
+                else {
                     continue;
                 };
                 let (types_a, types_b) = match hidden {
@@ -511,11 +557,19 @@ pub(super) fn staleness_section(
         if deadline.expired() {
             return Err(AccessError::DeadlineExceeded);
         }
-        let latest = association
-            .attributions
-            .iter()
-            .filter_map(|attribution| effective.get(&attribution.source).copied())
-            .max();
+        // Checked per attribution too (issue #620): one association's
+        // attribution count is not bounded by anything this pass
+        // controls — a fact corroborated by very many sources can
+        // still outrun the budget between two EDGES' own checks.
+        let mut latest: Option<u64> = None;
+        for attribution in &association.attributions {
+            if deadline.expired() || injected_staleness_attribution_loop_expiry() {
+                return Err(AccessError::DeadlineExceeded);
+            }
+            if let Some(time) = effective.get(&attribution.source).copied() {
+                latest = Some(latest.map_or(time, |current| current.max(time)));
+            }
+        }
         match latest {
             Some(time) => {
                 let newest = subject_latest
@@ -575,4 +629,39 @@ pub(super) fn staleness_section(
         undatable,
         candidates,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// issue #620: `staleness_section`'s per-attribution check must
+    /// fire on a LATER iteration of one association's attribution
+    /// list, not only before/between edges — a fact corroborated by
+    /// very many sources is not bounded by anything the per-edge check
+    /// controls. `expire_staleness_attribution_loop_after` arms the
+    /// fault instead of racing a real `Duration` (each step is an
+    /// in-memory `HashMap` lookup, done in well under a microsecond).
+    #[test]
+    fn staleness_section_checks_the_deadline_mid_attribution_walk() {
+        let mut context = Context::default();
+        let mut effective = HashMap::new();
+        for n in 0..5u64 {
+            let source = format!("doc-{n}");
+            context
+                .associate_from("a", "r", "b", 1.0, &source, None)
+                .unwrap();
+            effective.insert(source, n);
+        }
+
+        // The first per-attribution check reports "not yet expired";
+        // the second reports expired — proof the check runs more than
+        // once across this one association's five-attribution list.
+        expire_staleness_attribution_loop_after(1);
+        let result = staleness_section(&context, &effective, 0, 100, Deadline::unbounded());
+        assert!(
+            result.is_err(),
+            "the check must fire on a later iteration of the attribution walk"
+        );
+    }
 }

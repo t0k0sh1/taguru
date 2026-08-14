@@ -1233,9 +1233,9 @@ mod tests {
         )
     }
 
-    async fn call_import(state: AppState, body: &str) -> Response {
+    async fn call_import(state: &AppState, body: &str) -> Response {
         import_batch(
-            State(state),
+            State(state.clone()),
             None,
             None,
             axum::Extension(Deadline::unbounded()),
@@ -1243,6 +1243,14 @@ mod tests {
             AppBytes(axum::body::Bytes::from(body.to_string())),
         )
         .await
+    }
+
+    /// `true` once `context` has an installed schema, `false` for a
+    /// schema-free (or nonexistent) context — never distinguishes the
+    /// two, since every scenario these tests build already knows which
+    /// contexts exist.
+    fn has_installed_schema(state: &AppState, context: &str) -> bool {
+        matches!(state.schema_of(context), Some(Ok(Some(_))))
     }
 
     /// issue #620 (所見5): a budget spent partway through the
@@ -1262,7 +1270,7 @@ mod tests {
         // check reports expired — proving the check runs on a LATER
         // iteration, not only before the loop starts.
         expire_schema_loop_after(1);
-        let response = call_import(state, &body).await;
+        let response = call_import(&state, &body).await;
 
         let bytes = axum::body::to_bytes(response.into_body(), 4096)
             .await
@@ -1285,6 +1293,19 @@ mod tests {
             "no BATCH of this stream landed — only a schema record did, which \
              durable_batches never counts — {body}"
         );
+        // The response's own claim, checked against what actually
+        // landed (issue #620 review): moving the deadline check to
+        // AFTER `apply_schema_record` would answer the same Timeout
+        // body while installing bunko's schema anyway — only reading
+        // persisted state catches that.
+        assert!(
+            has_installed_schema(&state, "sake"),
+            "the first record must have actually installed"
+        );
+        assert!(
+            !has_installed_schema(&state, "bunko"),
+            "the second record must NOT have installed — \"not attempted\" must be true"
+        );
     }
 
     /// issue #620 (所見5): the "a batch of this stream also landed"
@@ -1302,7 +1323,7 @@ mod tests {
         // The batch lands; the schema loop's very first iteration
         // reports expired.
         expire_schema_loop_after(0);
-        let response = call_import(state, &body).await;
+        let response = call_import(&state, &body).await;
 
         let bytes = axum::body::to_bytes(response.into_body(), 4096)
             .await
@@ -1321,5 +1342,11 @@ mod tests {
             "the batch that just created 'sake' is durable — {body}"
         );
         assert_eq!(body["durable_batches"], 1, "{body}");
+        // Persisted-state check (issue #620 review): "not attempted"
+        // must mean the schema record never actually installed.
+        assert!(
+            !has_installed_schema(&state, "sake"),
+            "the only record must NOT have installed — the budget died on its own first check"
+        );
     }
 }
