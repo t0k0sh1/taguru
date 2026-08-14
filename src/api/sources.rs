@@ -2033,7 +2033,7 @@ fn interpret_passages(
             for (source, text) in map {
                 check_bounded_len(
                     source,
-                    "a passage source id".to_string(),
+                    format!("passages['{source}']"),
                     MAX_NAME_BYTES,
                     issues,
                 );

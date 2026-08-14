@@ -3355,6 +3355,37 @@ mod tests {
         assert_eq!(issues[0].actual, "7 bytes");
     }
 
+    /// issue #622 finding 2 (review): the cap is a BYTE count, not a
+    /// character count — exactly at the cap must pass, one byte over
+    /// must not, and a multibyte string's byte length (not its char
+    /// count) is what gets measured either way.
+    #[test]
+    fn check_bounded_len_compares_bytes_not_chars_at_the_exact_boundary() {
+        let mut issues = Vec::new();
+        assert!(check_bounded_len("abc", "p".to_string(), 3, &mut issues));
+        assert!(
+            issues.is_empty(),
+            "exactly at the cap must pass: {issues:?}"
+        );
+
+        let mut issues = Vec::new();
+        assert!(!check_bounded_len("abcd", "p".to_string(), 3, &mut issues));
+        assert_eq!(issues[0].kind, "too_long", "one byte over must fail");
+
+        // "酒" is 3 bytes in UTF-8, 1 char — a char-counting bug would
+        // pass this at cap 2; the byte count correctly rejects it.
+        let mut issues = Vec::new();
+        assert!(!check_bounded_len("酒", "p".to_string(), 2, &mut issues));
+        assert_eq!(issues[0].kind, "too_long");
+        assert_eq!(issues[0].actual, "3 bytes");
+
+        let mut issues = Vec::new();
+        assert!(
+            check_bounded_len("酒", "p".to_string(), 3, &mut issues),
+            "a 3-byte character must pass at cap 3: {issues:?}"
+        );
+    }
+
     /// issue #622 finding 2: `interpret_bounded_text`'s missing/wrong_type
     /// arms, which `check_bounded_len` does not cover on its own since
     /// they fire before a string value even exists to measure.
@@ -3375,5 +3406,22 @@ mod tests {
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].path, "p.key");
         assert_eq!(issues[0].kind, "type");
+    }
+
+    /// issue #622 finding 2 (review): an explicit JSON `null` value
+    /// (as opposed to the key being altogether absent) must fold into
+    /// the same `missing` arm, not `wrong_type` — `None | Some(Value::Null)`
+    /// is one match arm in the source, but nothing pinned the `Some(Null)`
+    /// half specifically.
+    #[test]
+    fn interpret_bounded_text_treats_explicit_null_as_missing() {
+        let obj = serde_json::json!({"key": null});
+        let obj = obj.as_object().unwrap();
+        let mut issues = Vec::new();
+        let text = interpret_bounded_text(obj, "key", "p", 10, &mut issues);
+        assert_eq!(text, "");
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].path, "p.key");
+        assert_eq!(issues[0].kind, "missing");
     }
 }
