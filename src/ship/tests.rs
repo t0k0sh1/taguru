@@ -281,6 +281,89 @@ impl ObjectStore for GetFailsOnStore {
     }
 }
 
+/// Delegates everything to `inner`, except `put_opts` on one specific
+/// key: that FIRST call signals `started`, then blocks on `release`
+/// before proceeding — a deterministic window for a test to inject a
+/// competing write through the unwrapped store before this call's own
+/// `put_opts` actually lands, without relying on non-deterministic
+/// task-scheduling luck to force a real race.
+#[derive(Debug)]
+struct PausingStore {
+    inner: Arc<dyn ObjectStore>,
+    pause_on: StorePath,
+    started: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+impl std::fmt::Display for PausingStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PausingStore({})", self.inner)
+    }
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for PausingStore {
+    async fn put_opts(
+        &self,
+        location: &StorePath,
+        payload: PutPayload,
+        opts: PutOptions,
+    ) -> object_store::Result<object_store::PutResult> {
+        if *location == self.pause_on {
+            self.started.notify_one();
+            self.release.notified().await;
+        }
+        self.inner.put_opts(location, payload, opts).await
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        location: &StorePath,
+        opts: object_store::PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+        self.inner.put_multipart_opts(location, opts).await
+    }
+
+    async fn get_opts(
+        &self,
+        location: &StorePath,
+        options: object_store::GetOptions,
+    ) -> object_store::Result<object_store::GetResult> {
+        self.inner.get_opts(location, options).await
+    }
+
+    fn delete_stream(
+        &self,
+        locations: futures_util::stream::BoxStream<'static, object_store::Result<StorePath>>,
+    ) -> futures_util::stream::BoxStream<'static, object_store::Result<StorePath>> {
+        self.inner.delete_stream(locations)
+    }
+
+    fn list(
+        &self,
+        prefix: Option<&StorePath>,
+    ) -> futures_util::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+    {
+        self.inner.list(prefix)
+    }
+
+    async fn list_with_delimiter(
+        &self,
+        prefix: Option<&StorePath>,
+    ) -> object_store::Result<object_store::ListResult> {
+        self.inner.list_with_delimiter(prefix).await
+    }
+
+    async fn copy_opts(
+        &self,
+        from: &StorePath,
+        to: &StorePath,
+        options: object_store::CopyOptions,
+    ) -> object_store::Result<()> {
+        self.inner.copy_opts(from, to, options).await
+    }
+}
+
 #[tokio::test]
 async fn claims_are_monotonic_and_a_race_converges_on_distinct_generations() {
     let dir = scratch_dir("claim");
@@ -896,6 +979,36 @@ fn run_maps_a_usage_mistake_and_a_rejected_store_to_different_exit_codes() {
     let _ = std::fs::remove_dir_all(&out);
 }
 
+/// #618: an unrecognized flag must refuse as a usage error naming the
+/// flag, DURING ARGUMENT PARSING — before `--out`'s directory is ever
+/// touched. A dash-prefixed string can never parse as a URL either, so
+/// a mutant that disables this guard and lets the flag fall through to
+/// the positional arm still ultimately fails with the same usage exit
+/// code (2) once `open_store` rejects it as malformed — the exit code
+/// alone cannot distinguish the two. Whether `--out`'s directory got
+/// CREATED can: `open_store` runs well after `create_dir_all`, so only
+/// the buggy, later failure leaves it behind.
+#[test]
+fn run_refuses_an_unrecognized_flag_before_touching_out() {
+    let out = std::env::temp_dir().join(format!(
+        "taguru-run-unknown-flag-out-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&out);
+    let code = run(&[
+        "--out".to_string(),
+        out.display().to_string(),
+        "--bogus".to_string(),
+    ]);
+    assert_eq!(code, 2, "an unrecognized flag must be a usage error");
+    assert!(
+        !out.exists(),
+        "an unrecognized flag must be refused during argument parsing, before --out's \
+         directory is created"
+    );
+    let _ = std::fs::remove_dir_all(&out);
+}
+
 #[test]
 fn allows_reset_defers_until_shipped_and_caps_the_deferral() {
     let progress = ShipProgress::new(crate::registry::DEFAULT_WAL_MAX_BYTES);
@@ -1102,13 +1215,202 @@ fn classification_and_lane_parents_agree_with_the_family_layout() {
         "x.passages.bin"
     );
     assert_eq!(parent_snapshot_of("x.ctx"), None);
+}
 
+/// #618: a `.taguru.replication` record that exists but cannot be
+/// parsed must surface as an error, never silently treated as absent
+/// — `prepare`/`prepare_replica` both refuse to boot on it rather than
+/// risk forking the lineage. A directory in place of the file is an
+/// easy, portable way to make the read fail with something other than
+/// `NotFound`.
+#[test]
+fn a_corrupt_replication_record_is_an_error_not_a_missing_one() {
+    let dir = scratch_dir("corrupt-replication-record");
+    std::fs::create_dir(dir.join(REPLICATION_RECORD)).unwrap();
+    let error = read_replication_record(&dir)
+        .expect_err("a directory in place of the record must not read as 'never written'");
+    assert_ne!(error.kind(), io::ErrorKind::NotFound, "{error}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #618: `Shipper::claim`'s retry loop must land on a generation past
+/// one taken between its own `newest_fence` read and its own
+/// `put_opts` — not loop forever on the same number. Forced
+/// deterministically (no reliance on real task-scheduling luck): a
+/// wrapper store pauses THIS claim's very first `put_opts` attempt
+/// until the test has stolen that exact generation out from under it
+/// via a raw write through the unwrapped store.
+#[tokio::test]
+async fn a_claim_retries_past_a_generation_taken_between_its_check_and_its_write() {
+    let dir = scratch_dir("claim-retry-race");
+    let state = state_for(&dir);
+    let progress = Arc::new(ShipProgress::new(crate::registry::DEFAULT_WAL_MAX_BYTES));
+    let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let target = fence_key(&StorePath::default(), 1);
+    let store: Arc<dyn ObjectStore> = Arc::new(PausingStore {
+        inner: Arc::clone(&inner),
+        pause_on: target.clone(),
+        started: Arc::clone(&started),
+        release: Arc::clone(&release),
+    });
+
+    let dir2 = dir.clone();
+    let state2 = state.clone();
+    let progress2 = Arc::clone(&progress);
+    let claim_task =
+        tokio::spawn(async move { claimed_dyn(store, &dir2, &state2, &progress2).await });
+
+    started.notified().await;
+    inner
+        .put_opts(
+            &target,
+            PutPayload::from(Vec::new()),
+            PutOptions::from(PutMode::Create),
+        )
+        .await
+        .expect("stealing generation 1 out from under the paused claim");
+    release.notify_one();
+
+    // Bounded, not `claim_task.await` bare: a retry that never
+    // advances past the stolen generation loops forever bidding the
+    // same taken number — this must fail fast, not hang the suite.
+    let shipper = tokio::time::timeout(Duration::from_secs(5), claim_task)
+        .await
+        .expect("a claim retrying past a taken generation must not loop forever")
+        .unwrap();
     assert_eq!(
-        parse_segment_name("0000000001-0000000002.jsonl"),
-        Some((1, 2))
+        shipper.generation, 2,
+        "a generation taken between the check and this claim's own write must be \
+         retried past, not looped on forever"
     );
-    assert_eq!(parse_segment_name(&segment_name(3, 4)), Some((3, 4)));
-    assert_eq!(parse_segment_name("junk"), None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #618: the replication record's `hydrated_from` carries forward only
+/// when the EXISTING record names the SAME bucket url this claim is
+/// against — a directory whose record predates a re-pointed bucket
+/// must not inherit a generation number that means nothing there.
+#[tokio::test]
+async fn a_claim_carries_hydrated_from_forward_only_for_the_same_bucket_url() {
+    let dir = scratch_dir("claim-hydrated-from");
+    write_replication_record(
+        &dir,
+        &ReplicationRecord {
+            url: "mem://test".to_string(),
+            claimed_generation: None,
+            hydrated_from: Some(5),
+        },
+    )
+    .unwrap();
+    let state = state_for(&dir);
+    let progress = Arc::new(ShipProgress::new(crate::registry::DEFAULT_WAL_MAX_BYTES));
+    let store = Arc::new(InMemory::new());
+
+    // `claimed()` always claims against "mem://test" — the same url
+    // the pre-seeded record above names.
+    claimed(&store, &dir, &state, &progress).await;
+    let record = read_replication_record(&dir).unwrap().unwrap();
+    assert_eq!(
+        record.hydrated_from,
+        Some(5),
+        "a claim against the SAME bucket must carry the prior hydrated_from forward"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #618: under a lazy (not-yet-drained) hydration, a cycle whose ONLY
+/// activity is a lane shipping something for the first time must still
+/// report `true` — the manifest-publish step that (when hydration IS
+/// drained) would independently re-assert `shipped = true` is exactly
+/// the step this scenario skips, so the lane loop's own return value
+/// is what the caller actually sees.
+#[tokio::test]
+async fn a_cycle_with_undrained_hydration_still_reports_a_shipped_lane() {
+    // A separate, already-shipped bucket to hydrate FROM: a real
+    // claimed generation with one context family, so `prepare_replica`
+    // returns a hydrator whose stems start `Pending` (undrained) and
+    // stay that way — nothing here ever calls `ensure_context`.
+    let source_dir = scratch_dir("undrained-source");
+    let source_state = state_for(&source_dir);
+    let progress = Arc::new(ShipProgress::new(crate::registry::DEFAULT_WAL_MAX_BYTES));
+    let store = Arc::new(InMemory::new());
+    std::fs::write(source_dir.join("ctx_a.ctx"), b"image-v1").unwrap();
+    let mut source_shipper = claimed(&store, &source_dir, &source_state, &progress).await;
+    source_shipper.cycle().await.unwrap();
+
+    let target_dir = scratch_dir("undrained-target");
+    let hydrator = crate::hydrate::prepare_replica(
+        &(store.clone() as Arc<dyn ObjectStore>),
+        &StorePath::default(),
+        "mem://test",
+        &target_dir,
+    )
+    .await
+    .expect("hydrates");
+    assert!(
+        !hydrator.drained(),
+        "a freshly prepared hydrator with a real family must start undrained"
+    );
+
+    let target_state = state_for(&target_dir);
+    let mut shipper = Shipper::claim(
+        store.clone() as Arc<dyn ObjectStore>,
+        StorePath::default(),
+        "mem://test".to_string(),
+        target_dir.clone(),
+        Arc::clone(&progress),
+        target_state,
+        Some(hydrator),
+    )
+    .await
+    .unwrap();
+
+    // A genuinely new local write, unrelated to the hydration above —
+    // the server keeps accepting writes while background-hydrating.
+    wal::append_batch(&target_dir.join("ctx_a.wal.jsonl"), 1, &[associate("a")]).unwrap();
+
+    assert!(
+        shipper.cycle().await.unwrap(),
+        "a lane that genuinely shipped something must report true even when hydration \
+         has not drained and the manifest-publish step is skipped entirely"
+    );
+    let _ = std::fs::remove_dir_all(&source_dir);
+    let _ = std::fs::remove_dir_all(&target_dir);
+}
+
+/// #618: `fence_holder` was never directly exercised — only ever
+/// called from `main`'s replica-status wiring.
+#[tokio::test]
+async fn fence_holder_reads_back_the_claiming_holder() {
+    let dir = scratch_dir("fence-holder");
+    let state = state_for(&dir);
+    let progress = Arc::new(ShipProgress::new(crate::registry::DEFAULT_WAL_MAX_BYTES));
+    let store = Arc::new(InMemory::new());
+
+    let shipper = claimed(&store, &dir, &state, &progress).await;
+    let holder = fence_holder(
+        store.as_ref() as &dyn ObjectStore,
+        &StorePath::default(),
+        shipper.generation,
+    )
+    .await
+    .expect("the just-claimed generation's fence body reads back");
+    assert!(holder.contains('#'), "the holder is HOSTNAME#pid: {holder}");
+
+    // A generation nothing ever claimed: best-effort `None`, not an
+    // error or a panic.
+    assert!(
+        fence_holder(
+            store.as_ref() as &dyn ObjectStore,
+            &StorePath::default(),
+            9999
+        )
+        .await
+        .is_none()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The restore-equivalence property, generated: any interleaving

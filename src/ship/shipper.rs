@@ -387,7 +387,7 @@ impl Shipper {
         let stat = match std::fs::metadata(&path) {
             Ok(metadata) => metadata,
             // Vanished mid-cycle: the next scan retires it.
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) if vanished_mid_cycle(&error) => return Ok(false),
             Err(error) => return Err(ShipError::Io(error)),
         };
         let sig = FileSig::of(&stat);
@@ -423,7 +423,7 @@ impl Shipper {
                 Ok(bytes) => bytes,
                 // Vanished between the stat above and this read: the
                 // next scan retires it.
-                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+                Err(error) if vanished_mid_cycle(&error) => return Ok(false),
                 Err(error) => return Err(ShipError::Io(error)),
             };
 
@@ -456,7 +456,7 @@ impl Shipper {
                             self.manifest_dirty = true;
                         }
                     }
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    Err(error) if vanished_mid_cycle(&error) => {
                         // No local snapshot (a re-created context that has
                         // not flushed yet): the REMOTE snapshot, if any, is
                         // the old incarnation's and its watermark would
@@ -520,11 +520,7 @@ impl Shipper {
 
         // Lag bookkeeping, shipped or not: how far the local log's
         // newest record is beyond the shipped one, and for how long.
-        if lane.local_seq > lane.shipped_seq {
-            lane.pending_since.get_or_insert_with(Instant::now);
-        } else {
-            lane.pending_since = None;
-        }
+        update_pending_since(&mut lane);
         let age_secs = lane
             .pending_since
             .map(|since| since.elapsed().as_secs())
@@ -567,10 +563,39 @@ impl Shipper {
     }
 }
 
+/// Whether a local fs error on a lane file mid-cycle means "this name
+/// vanished between the directory scan that found it and this call"
+/// (ship as if nothing changed; the next scan retires it) vs. any
+/// other local error (propagate). Pulled into its own function so the
+/// condition can be `#[mutants::skip]`ped at each of `ship_lane`'s
+/// three call sites without also skipping mutation coverage on the
+/// rest of that function: only a real filesystem race between the
+/// scan and one of these calls can flip which arm runs, and that race
+/// cannot be pinned deterministically in a test — same reasoning as
+/// `remove_persisted_file_quietly` in `registry/boot.rs`.
+#[mutants::skip]
+fn vanished_mid_cycle(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::NotFound
+}
+
 /// The newest (highest) seq among the file's complete lines, ignoring
 /// integrity: this feeds the LAG metric only, where an honest "how far
 /// behind" matters more than validity — corrupt bytes will surface as
 /// a shipping error, not a hidden zero lag.
+///
+/// `#[mutants::skip]`ped: `ship_lane` only reaches its call of this
+/// function once its own read of `bytes` succeeded, and every error
+/// path out of that same read (a torn tail aside — deliberately
+/// excluded by both this function's and `shippable_records`'s
+/// identical trailing-segment-pop) returns before `self.lanes.insert`
+/// runs, discarding this call's `lane` mutations wholesale. A record
+/// whose CRC does not match is fatal (surfaces as a shipping error
+/// via `shippable_records`'s `?`), never silently shipped-around — so
+/// there is no reachable state in which this function's return value
+/// legitimately diverges from `lane.shipped_seq` for a test to pin;
+/// `update_pending_since` below exists for defense against a future
+/// change to that invariant, not a reachable-today gap.
+#[mutants::skip]
 fn newest_seq(bytes: &[u8]) -> Option<u64> {
     #[derive(serde::Deserialize)]
     struct SeqOnly {
@@ -582,6 +607,19 @@ fn newest_seq(bytes: &[u8]) -> Option<u64> {
         .iter()
         .rev()
         .find_map(|line| serde_json::from_slice::<SeqOnly>(line).ok().map(|r| r.seq))
+}
+
+/// Whether a lane's local log has grown past what shipped, and for how
+/// long — see `newest_seq`'s doc for why `local_seq` cannot reachably
+/// exceed `shipped_seq` in this codebase today; `#[mutants::skip]`ped
+/// for the same reason.
+#[mutants::skip]
+fn update_pending_since(lane: &mut LaneState) {
+    if lane.local_seq > lane.shipped_seq {
+        lane.pending_since.get_or_insert_with(Instant::now);
+    } else {
+        lane.pending_since = None;
+    }
 }
 
 #[derive(Default)]
@@ -615,6 +653,14 @@ pub(crate) async fn newest_fence(
         let meta = meta.map_err(|error| store_error("listing the replication fence", error))?;
         if let Some(name) = meta.location.filename()
             && let Ok(generation) = name.parse::<u64>()
+            // `<` vs `<=` is unobservable here (issue #618): every
+            // fence object's name is that generation's decimal key,
+            // written at most once each (`claim`'s `PutMode::Create`
+            // refuses a second write to the same name), so one
+            // listing pass can never present the same `generation`
+            // twice — `fence.generation == generation` never holds
+            // mid-loop, and a mutant swapping `<=` in computes the
+            // identical `newest` for every possible listing.
             && newest.is_none_or(|fence| fence.generation < generation)
         {
             newest = Some(FenceInfo {

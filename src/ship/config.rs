@@ -31,6 +31,13 @@ impl ReplicateConfig {
             return None;
         }
         let requested = crate::env::env_number("TAGURU_REPLICATE_INTERVAL_MS", 1000);
+        // `<` vs `<=` is unobservable at the boundary itself (issue
+        // #618): at `requested == 100`, both arms compute the same
+        // `Duration::from_millis(100)` — the floor branch explicitly,
+        // the else branch because `requested` already IS 100 — so a
+        // mutant swapping this for `<=` produces the identical
+        // `interval` for every possible input; only the warn log
+        // (uncaptured by any test here) would differ.
         let interval = if requested < 100 {
             tracing::warn!(
                 "TAGURU_REPLICATE_INTERVAL_MS={requested} would busy-poll the data \
@@ -161,5 +168,65 @@ mod tests {
         let _env = crate::ship::test_support::ScrubbedAzureEnv::new();
         let error = open_store("az://some-bucket").unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::Other, "{error}");
+    }
+
+    /// #618: `s3://`/`gs://` must reach their own cloud builders, not
+    /// fall through to the catch-all "unsupported scheme" refusal —
+    /// whatever the builder does with ambient credentials (succeed,
+    /// fail synchronously) is not this test's concern; only that it is
+    /// even ATTEMPTED, not skipped.
+    #[test]
+    fn amazon_s3_and_google_cloud_storage_are_recognized_schemes() {
+        for url in ["s3://some-bucket", "gs://some-bucket"] {
+            if let Err(error) = open_store(url) {
+                assert!(
+                    !error.to_string().contains("unsupported replication scheme"),
+                    "{url} must reach its own cloud builder, not the catch-all: {error}"
+                );
+            }
+        }
+    }
+
+    /// #618: `TAGURU_REPLICATE_URL` set but blank is the same
+    /// templating-accident trap `TAGURU_PUBLIC_URL` guards against —
+    /// treated as disabled, not as a URL to parse.
+    #[test]
+    fn from_env_treats_a_blank_url_as_disabled() {
+        let _env = crate::ship::test_support::ScopedReplicateEnv::new([Some("   "), None]);
+        assert!(ReplicateConfig::from_env().is_none());
+    }
+
+    /// #618: unset entirely is the ordinary "shipping off" case, not
+    /// the blank-but-present trap above — both must return `None`, but
+    /// only one of them logs a warning about it.
+    #[test]
+    fn from_env_returns_none_when_unset() {
+        let _env = crate::ship::test_support::ScopedReplicateEnv::new([None, None]);
+        assert!(ReplicateConfig::from_env().is_none());
+    }
+
+    /// #618: an interval below the busy-poll floor is raised to it,
+    /// loudly — never silently honored.
+    #[test]
+    fn from_env_floors_a_tiny_interval() {
+        let _env = crate::ship::test_support::ScopedReplicateEnv::new([
+            Some("file:///tmp/wherever"),
+            Some("1"),
+        ]);
+        let config = ReplicateConfig::from_env().expect("a non-blank URL enables shipping");
+        assert_eq!(config.interval, Duration::from_millis(100));
+    }
+
+    /// #618: an unparseable interval falls back to the documented
+    /// default (1000ms) — `env_number`'s own contract, pinned here at
+    /// the call site that actually matters for replication.
+    #[test]
+    fn from_env_falls_back_to_the_default_interval_on_a_bad_value() {
+        let _env = crate::ship::test_support::ScopedReplicateEnv::new([
+            Some("file:///tmp/wherever"),
+            Some("not-a-number"),
+        ]);
+        let config = ReplicateConfig::from_env().expect("a non-blank URL enables shipping");
+        assert_eq!(config.interval, Duration::from_millis(1000));
     }
 }

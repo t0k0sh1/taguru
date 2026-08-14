@@ -167,7 +167,7 @@ pub(crate) use shipper::{FenceInfo, Shipper, fence_holder, newest_fence};
 #[cfg(test)]
 use progress::DEFAULT_DEFER_CAP_BYTES;
 #[cfg(test)]
-use restore::{parse_segment_name, restore_into};
+use restore::restore_into;
 
 #[path = "ship/tests.rs"]
 #[cfg(test)]
@@ -217,6 +217,58 @@ pub(crate) mod test_support {
     }
 
     impl Drop for ScrubbedAzureEnv {
+        fn drop(&mut self) {
+            for (key, value) in &self.saved {
+                // SAFETY: same lock, still held (`_lock` drops after
+                // this body via field declaration order).
+                unsafe {
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
+    }
+
+    static REPLICATE_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    const REPLICATE_ENV_KEYS: [&str; 2] = ["TAGURU_REPLICATE_URL", "TAGURU_REPLICATE_INTERVAL_MS"];
+
+    /// Sets `TAGURU_REPLICATE_URL`/`_INTERVAL_MS` for the guard's
+    /// lifetime (`None` in a pair removes that key instead), restoring
+    /// each key exactly as found on drop — the same shape as
+    /// [`ScrubbedAzureEnv`], for `ReplicateConfig::from_env` tests that
+    /// would otherwise race every other test touching these two
+    /// process-global vars.
+    pub(crate) struct ScopedReplicateEnv {
+        _lock: parking_lot::MutexGuard<'static, ()>,
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl ScopedReplicateEnv {
+        pub(crate) fn new(values: [Option<&str>; 2]) -> Self {
+            let lock = REPLICATE_ENV_LOCK.lock();
+            let saved = REPLICATE_ENV_KEYS
+                .iter()
+                .map(|&key| (key, std::env::var(key).ok()))
+                .collect();
+            for (key, value) in REPLICATE_ENV_KEYS.iter().zip(values) {
+                // SAFETY: serialized by `REPLICATE_ENV_LOCK` — no other
+                // thread reads or writes these keys while this guard
+                // (held for the lock's lifetime, via `_lock`) exists.
+                unsafe {
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+            Self { _lock: lock, saved }
+        }
+    }
+
+    impl Drop for ScopedReplicateEnv {
         fn drop(&mut self) {
             for (key, value) in &self.saved {
                 // SAFETY: same lock, still held (`_lock` drops after

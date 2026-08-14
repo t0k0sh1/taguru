@@ -100,9 +100,9 @@ pub(crate) fn write_replication_record(
 /// state, so a reader can verify every downloaded byte and decide
 /// whether a LOCAL file already matches without downloading anything.
 /// The marker's existence still means what it always did — this
-/// generation restores whole — and a pre-manifest (empty) marker still
-/// restores through the listing fallback, just without the per-object
-/// verification or the local-reuse shortcut.
+/// generation restores whole — but an empty (pre-manifest) marker now
+/// names a generation from before #128, which `restore_into` refuses
+/// rather than reconstructing by listing.
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Manifest {
     pub(crate) generation: u64,
