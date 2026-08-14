@@ -28,7 +28,7 @@ use super::consolidation::{
 };
 use super::import::{
     ImportOutcome, import_batch_note, import_outcome, import_refusal, schema_issues_in_batch,
-    stream_integrity,
+    stream_refusal,
 };
 use super::{
     AppJson, AppPath, AppQuery, ErrorCode, Issue, RefusalDetail, access_error, deadline_exceeded,
@@ -485,31 +485,19 @@ fn quota_refusal(
     ceiling: u64,
     started_at: Instant,
 ) -> Response {
-    let note = import_batch_note(
+    stream_refusal(
         index,
         total,
         batch,
         landed,
         false,
-        ("not previewed", "not attempted"),
+        ErrorCode::StorageFull,
+        crate::registry::storage_quota_message(&batch.context, used, ceiling),
         (
             "re-running the preview against a shrunk destination is exact",
             "retracting or compacting the destination (or raising its quota), then \
              re-calling promote is exact (each batch replaces its own source)",
         ),
-    );
-    let (integrity, durable_batches) = stream_integrity(landed, false);
-    validation_error(
-        ErrorCode::StorageFull,
-        format!(
-            "{note}{}",
-            crate::registry::storage_quota_message(&batch.context, used, ceiling)
-        ),
-        RefusalDetail {
-            integrity: Some(integrity),
-            durable_batches,
-            ..Default::default()
-        },
         started_at,
     )
 }
@@ -525,31 +513,20 @@ fn budget_refusal(
     dry_run: bool,
     started_at: Instant,
 ) -> Response {
-    let note = import_batch_note(
+    stream_refusal(
         index,
         total,
         batch,
         landed,
         dry_run,
-        ("not previewed", "not attempted"),
+        ErrorCode::Timeout,
+        "request exceeded its budget partway through the promotion \
+         (TAGURU_REQUEST_TIMEOUT_SECS tunes this)",
         (
             "re-running the preview with more time or fewer sources is exact",
             "re-calling promote with the same sources is exact (each batch replaces its \
              own source)",
         ),
-    );
-    let (integrity, durable_batches) = stream_integrity(landed, dry_run);
-    validation_error(
-        ErrorCode::Timeout,
-        format!(
-            "{note}request exceeded its budget partway through the promotion \
-             (TAGURU_REQUEST_TIMEOUT_SECS tunes this)"
-        ),
-        RefusalDetail {
-            integrity: Some(integrity),
-            durable_batches,
-            ..Default::default()
-        },
         started_at,
     )
 }

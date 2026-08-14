@@ -232,31 +232,20 @@ pub(super) fn import_budget_refusal(
     dry_run: bool,
     started_at: Instant,
 ) -> Response {
-    let note = import_batch_note(
+    stream_refusal(
         index,
         total,
         batch,
         landed,
         dry_run,
-        ("not previewed", "not attempted"),
+        ErrorCode::Timeout,
+        "request exceeded its budget partway through a multi-batch import \
+         (TAGURU_REQUEST_TIMEOUT_SECS tunes this)",
         (
             "re-running the preview with more time or a narrower stream is exact",
             "re-POSTing the remaining stream is exact (each batch replaces its \
              own source)",
         ),
-    );
-    let (integrity, durable_batches) = stream_integrity(landed, dry_run);
-    validation_error(
-        ErrorCode::Timeout,
-        format!(
-            "{note}request exceeded its budget partway through a multi-batch \
-             import (TAGURU_REQUEST_TIMEOUT_SECS tunes this)"
-        ),
-        RefusalDetail {
-            integrity: Some(integrity),
-            durable_batches,
-            ..Default::default()
-        },
         started_at,
     )
 }
@@ -676,6 +665,48 @@ pub(super) fn import_batch_note(
     )
 }
 
+/// The shared skeleton behind every mid-stream budget/quota refusal
+/// (issue #622 finding 1): [`import_batch_note`]'s prefix, then
+/// [`stream_integrity`]'s verdict, then a [`validation_error`] wrapping
+/// a [`RefusalDetail`] naming it — the same three-step shape
+/// `import_budget_refusal`, the batch loop's own quota check, and
+/// `promote.rs`'s `budget_refusal`/`quota_refusal` each used to build
+/// independently, differing only in `code`, `body`, and `next_step`'s
+/// two halves (dry-run vs real).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn stream_refusal(
+    index: usize,
+    total: usize,
+    batch: &crate::ingest::Batch,
+    landed: usize,
+    dry_run: bool,
+    code: ErrorCode,
+    body: impl std::fmt::Display,
+    next_step: (&str, &str),
+    started_at: Instant,
+) -> Response {
+    let note = import_batch_note(
+        index,
+        total,
+        batch,
+        landed,
+        dry_run,
+        ("not previewed", "not attempted"),
+        next_step,
+    );
+    let (integrity, durable_batches) = stream_integrity(landed, dry_run);
+    validation_error(
+        code,
+        format!("{note}{body}"),
+        RefusalDetail {
+            integrity: Some(integrity),
+            durable_batches,
+            ..Default::default()
+        },
+        started_at,
+    )
+}
+
 /// `POST /import` — the batch-file contract (docs/import.html) over
 /// HTTP: the body IS one batch file — or a whole stream of batches,
 /// as `GET /contexts/{name}/export` renders — applied to the live
@@ -878,32 +909,20 @@ pub async fn import_batch(
                 && let Some((used, ceiling)) = state.storage_quota_refusal(&batch.context)
             {
                 state.metrics().record_storage_quota_refusal();
-                let note = import_batch_note(
+                return Err(Box::new(stream_refusal(
                     index,
                     total,
                     batch,
                     outcomes.len(),
                     query.dry_run,
-                    ("not previewed", "not attempted"),
+                    ErrorCode::StorageFull,
+                    crate::registry::storage_quota_message(&batch.context, used, ceiling),
                     (
                         "re-running the preview against a shrunk context is exact",
                         "retracting or compacting the context (or raising its quota), then \
                          re-POSTing the remaining stream is exact (each batch replaces its \
                          own source)",
                     ),
-                );
-                let (integrity, durable_batches) = stream_integrity(outcomes.len(), query.dry_run);
-                return Err(Box::new(validation_error(
-                    ErrorCode::StorageFull,
-                    format!(
-                        "{note}{}",
-                        crate::registry::storage_quota_message(&batch.context, used, ceiling)
-                    ),
-                    RefusalDetail {
-                        integrity: Some(integrity),
-                        durable_batches,
-                        ..Default::default()
-                    },
                     started_at,
                 )));
             }
