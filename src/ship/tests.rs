@@ -281,6 +281,89 @@ impl ObjectStore for GetFailsOnStore {
     }
 }
 
+/// Delegates everything to `inner`, except `put_opts` on one specific
+/// key: that FIRST call signals `started`, then blocks on `release`
+/// before proceeding — a deterministic window for a test to inject a
+/// competing write through the unwrapped store before this call's own
+/// `put_opts` actually lands, without relying on non-deterministic
+/// task-scheduling luck to force a real race.
+#[derive(Debug)]
+struct PausingStore {
+    inner: Arc<dyn ObjectStore>,
+    pause_on: StorePath,
+    started: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+impl std::fmt::Display for PausingStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PausingStore({})", self.inner)
+    }
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for PausingStore {
+    async fn put_opts(
+        &self,
+        location: &StorePath,
+        payload: PutPayload,
+        opts: PutOptions,
+    ) -> object_store::Result<object_store::PutResult> {
+        if *location == self.pause_on {
+            self.started.notify_one();
+            self.release.notified().await;
+        }
+        self.inner.put_opts(location, payload, opts).await
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        location: &StorePath,
+        opts: object_store::PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+        self.inner.put_multipart_opts(location, opts).await
+    }
+
+    async fn get_opts(
+        &self,
+        location: &StorePath,
+        options: object_store::GetOptions,
+    ) -> object_store::Result<object_store::GetResult> {
+        self.inner.get_opts(location, options).await
+    }
+
+    fn delete_stream(
+        &self,
+        locations: futures_util::stream::BoxStream<'static, object_store::Result<StorePath>>,
+    ) -> futures_util::stream::BoxStream<'static, object_store::Result<StorePath>> {
+        self.inner.delete_stream(locations)
+    }
+
+    fn list(
+        &self,
+        prefix: Option<&StorePath>,
+    ) -> futures_util::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+    {
+        self.inner.list(prefix)
+    }
+
+    async fn list_with_delimiter(
+        &self,
+        prefix: Option<&StorePath>,
+    ) -> object_store::Result<object_store::ListResult> {
+        self.inner.list_with_delimiter(prefix).await
+    }
+
+    async fn copy_opts(
+        &self,
+        from: &StorePath,
+        to: &StorePath,
+        options: object_store::CopyOptions,
+    ) -> object_store::Result<()> {
+        self.inner.copy_opts(from, to, options).await
+    }
+}
+
 #[tokio::test]
 async fn claims_are_monotonic_and_a_race_converges_on_distinct_generations() {
     let dir = scratch_dir("claim");
@@ -507,6 +590,62 @@ async fn a_newer_claim_fences_the_shipper_on_its_next_dirty_cycle() {
         read_object(&store, "gen-00000000000000000001/files/ctx_a.ctx").await,
         b"image-v1",
         "{names:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_lane_deleted_between_the_scan_and_its_own_turn_ships_nothing_not_an_error() {
+    let dir = scratch_dir("vanished-mid-cycle");
+    let state = state_for(&dir);
+    let progress = Arc::new(ShipProgress::new(crate::registry::DEFAULT_WAL_MAX_BYTES));
+    let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+
+    std::fs::write(dir.join("ctx_a.ctx"), b"image-v1").unwrap();
+    std::fs::write(dir.join("ctx_b.ctx"), b"image-v1").unwrap();
+    let ctx_b_wal = dir.join("ctx_b.wal.jsonl");
+    wal::append_batch(&ctx_b_wal, 1, &[associate("b")]).unwrap();
+
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    // ctx_a.ctx's publish PUT: a `scan.changed` entry, which the
+    // whole `scan.changed` loop finishes BEFORE the `scan.lanes` loop
+    // (that reaches ctx_b's wal file) ever begins — a real `.await`
+    // boundary a test can pause on, deterministically, unlike a race
+    // WITHIN one `ship_lane` call (no `.await` between its own
+    // `fs::metadata`/`fs::read` pair for a test to land in).
+    let files_key = gen_root(&StorePath::default(), 1)
+        .join("files")
+        .join("ctx_a.ctx");
+    let store: Arc<dyn ObjectStore> = Arc::new(PausingStore {
+        inner: Arc::clone(&inner),
+        pause_on: files_key,
+        started: Arc::clone(&started),
+        release: Arc::clone(&release),
+    });
+
+    let dir2 = dir.clone();
+    let state2 = state.clone();
+    let progress2 = Arc::clone(&progress);
+    let cycle_task = tokio::spawn(async move {
+        let mut shipper = claimed_dyn(store, &dir2, &state2, &progress2).await;
+        shipper.cycle().await
+    });
+
+    tokio::time::timeout(Duration::from_secs(5), started.notified())
+        .await
+        .expect("the paused put must start");
+    std::fs::remove_file(&ctx_b_wal).unwrap();
+    release.notify_one();
+
+    let result = tokio::time::timeout(Duration::from_secs(5), cycle_task)
+        .await
+        .expect("must not hang")
+        .unwrap();
+    assert!(
+        result.is_ok(),
+        "a lane deleted between the directory scan and the lanes loop reaching its own \
+         turn must ship as if nothing changed there, not fail the whole cycle: {result:?}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -896,6 +1035,36 @@ fn run_maps_a_usage_mistake_and_a_rejected_store_to_different_exit_codes() {
     let _ = std::fs::remove_dir_all(&out);
 }
 
+/// #618: an unrecognized flag must refuse as a usage error naming the
+/// flag, DURING ARGUMENT PARSING — before `--out`'s directory is ever
+/// touched. A dash-prefixed string can never parse as a URL either, so
+/// a mutant that disables this guard and lets the flag fall through to
+/// the positional arm still ultimately fails with the same usage exit
+/// code (2) once `open_store` rejects it as malformed — the exit code
+/// alone cannot distinguish the two. Whether `--out`'s directory got
+/// CREATED can: `open_store` runs well after `create_dir_all`, so only
+/// the buggy, later failure leaves it behind.
+#[test]
+fn run_refuses_an_unrecognized_flag_before_touching_out() {
+    let out = std::env::temp_dir().join(format!(
+        "taguru-run-unknown-flag-out-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&out);
+    let code = run(&[
+        "--out".to_string(),
+        out.display().to_string(),
+        "--bogus".to_string(),
+    ]);
+    assert_eq!(code, 2, "an unrecognized flag must be a usage error");
+    assert!(
+        !out.exists(),
+        "an unrecognized flag must be refused during argument parsing, before --out's \
+         directory is created"
+    );
+    let _ = std::fs::remove_dir_all(&out);
+}
+
 #[test]
 fn allows_reset_defers_until_shipped_and_caps_the_deferral() {
     let progress = ShipProgress::new(crate::registry::DEFAULT_WAL_MAX_BYTES);
@@ -1043,6 +1212,73 @@ async fn restore_refuses_a_manifest_naming_a_path_outside_the_target_directory()
     let _ = std::fs::remove_file(&escape_target);
 }
 
+/// A manifest naming the SAME entry as both a file and a lane must
+/// refuse, not let one silently clobber the other's already-restored
+/// bytes (issue #638 review): never produced by a real shipper (files
+/// and lanes are named from disjoint suffixes), so this is bucket rot
+/// or tampering, exactly the posture `safe_manifest_name` exists for.
+#[tokio::test]
+async fn restore_refuses_a_manifest_naming_the_same_entry_as_a_file_and_a_lane() {
+    let dir = scratch_dir("manifest-file-lane-collision");
+    let state = state_for(&dir);
+    let progress = Arc::new(ShipProgress::new(crate::registry::DEFAULT_WAL_MAX_BYTES));
+    let store = Arc::new(InMemory::new());
+
+    std::fs::write(dir.join("ctx_a.ctx"), b"image-v1").unwrap();
+    let wal_path = dir.join("ctx_a.wal.jsonl");
+    wal::append_batch(&wal_path, 1, &[associate("a")]).unwrap();
+    let mut shipper = claimed(&store, &dir, &state, &progress).await;
+    shipper.cycle().await.unwrap();
+
+    // Tamper the manifest: insert a FILES entry under the same name as
+    // the already-shipped LANE — a real CRC over an arbitrary payload,
+    // so content verification alone would accept it.
+    let generation_root = gen_root(&StorePath::default(), 1);
+    let colliding_name = "ctx_a.wal.jsonl";
+    let payload = b"clobbered!".to_vec();
+    let key = generation_root.clone().join("files").join(colliding_name);
+    (store.as_ref() as &dyn ObjectStore)
+        .put(&key, PutPayload::from(payload.clone()))
+        .await
+        .unwrap();
+    let bytes = read_object(&store, "gen-00000000000000000001/complete").await;
+    let mut manifest: Manifest = serde_json::from_slice(&bytes).unwrap();
+    assert!(
+        manifest.lanes.contains_key(colliding_name),
+        "the fixture must already ship this name as a lane: {manifest:?}"
+    );
+    manifest.files.insert(
+        colliding_name.to_string(),
+        ManifestFile {
+            len: payload.len() as u64,
+            crc: crate::crc32c::crc32c(&payload),
+        },
+    );
+    (store.as_ref() as &dyn ObjectStore)
+        .put(
+            &generation_root.clone().join(COMPLETE_MARKER),
+            PutPayload::from(serde_json::to_vec(&manifest).unwrap()),
+        )
+        .await
+        .unwrap();
+
+    let restored_dir = scratch_dir("manifest-file-lane-collision-out");
+    let error = restore_into(
+        store.as_ref() as &dyn ObjectStore,
+        &StorePath::default(),
+        &restored_dir,
+    )
+    .await
+    .expect_err("a name that is both a file and a lane must refuse");
+    assert!(
+        error.to_string().contains("both a file and a lane"),
+        "{error}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&restored_dir);
+}
+
 #[tokio::test]
 async fn a_claim_is_recorded_locally_and_liveness_markers_land() {
     let dir = scratch_dir("liveness");
@@ -1102,13 +1338,283 @@ fn classification_and_lane_parents_agree_with_the_family_layout() {
         "x.passages.bin"
     );
     assert_eq!(parent_snapshot_of("x.ctx"), None);
+}
 
-    assert_eq!(
-        parse_segment_name("0000000001-0000000002.jsonl"),
-        Some((1, 2))
+/// #638 review: `newest_seq` pinned directly, on the exact input
+/// shapes `ship_lane` actually passes it (complete lines, or complete
+/// lines followed by a torn tail — never a lone line with no trailing
+/// newline at all, which `ship_lane` only ever reads as part of a
+/// larger buffer that already ends `\n`-terminated up to the last
+/// complete record).
+#[test]
+fn newest_seq_reports_the_highest_seq_among_complete_lines() {
+    assert_eq!(newest_seq(b""), None);
+    assert_eq!(newest_seq(b"{\"seq\":1}\n"), Some(1));
+    assert_eq!(newest_seq(b"{\"seq\":1}\n{\"seq\":2}\n"), Some(2));
+    // A torn tail (no trailing newline) is ignored, same as
+    // `shippable_records`'s own trailing-segment-pop.
+    assert_eq!(newest_seq(b"{\"seq\":1}\n{\"seq\":2}\n{\"seq\":3"), Some(2));
+}
+
+/// #638 review: `update_pending_since`'s `local_seq > shipped_seq`
+/// boundary, pinned directly on a `LaneState` — `>` and `>=` disagree
+/// exactly at equality (the ordinary fully-caught-up case), where `>=`
+/// would wrongly mark a caught-up lane as newly pending.
+#[test]
+fn update_pending_since_treats_equal_seqs_as_caught_up_not_pending() {
+    let mut lane = LaneState::fresh(0);
+    lane.shipped_seq = 5;
+    lane.local_seq = 5;
+    update_pending_since(&mut lane);
+    assert!(
+        lane.pending_since.is_none(),
+        "local_seq == shipped_seq must not be pending"
     );
-    assert_eq!(parse_segment_name(&segment_name(3, 4)), Some((3, 4)));
-    assert_eq!(parse_segment_name("junk"), None);
+}
+
+/// #638 review: the complementary case — a lane genuinely behind must
+/// be marked pending, and one that WAS behind and just caught up must
+/// have that pending mark cleared, not linger.
+#[test]
+fn update_pending_since_marks_a_real_gap_and_clears_once_caught_up() {
+    let mut lane = LaneState::fresh(0);
+    lane.shipped_seq = 5;
+    lane.local_seq = 6;
+    update_pending_since(&mut lane);
+    assert!(
+        lane.pending_since.is_some(),
+        "local_seq > shipped_seq must be pending"
+    );
+
+    lane.local_seq = 5;
+    update_pending_since(&mut lane);
+    assert!(
+        lane.pending_since.is_none(),
+        "catching up must clear the pending mark, not leave it stale"
+    );
+}
+
+/// #618: a `.taguru.replication` record that exists but cannot be
+/// parsed must surface as an error, never silently treated as absent
+/// — `prepare`/`prepare_replica` both refuse to boot on it rather than
+/// risk forking the lineage. A directory in place of the file is an
+/// easy, portable way to make the read fail with something other than
+/// `NotFound`.
+#[test]
+fn a_corrupt_replication_record_is_an_error_not_a_missing_one() {
+    let dir = scratch_dir("corrupt-replication-record");
+    std::fs::create_dir(dir.join(REPLICATION_RECORD)).unwrap();
+    let error = read_replication_record(&dir)
+        .expect_err("a directory in place of the record must not read as 'never written'");
+    assert_ne!(error.kind(), io::ErrorKind::NotFound, "{error}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #618: `Shipper::claim`'s retry loop must land on a generation past
+/// one taken between its own `newest_fence` read and its own
+/// `put_opts` — not loop forever on the same number. Forced
+/// deterministically (no reliance on real task-scheduling luck): a
+/// wrapper store pauses THIS claim's very first `put_opts` attempt
+/// until the test has stolen that exact generation out from under it
+/// via a raw write through the unwrapped store.
+#[tokio::test]
+async fn a_claim_retries_past_a_generation_taken_between_its_check_and_its_write() {
+    let dir = scratch_dir("claim-retry-race");
+    let state = state_for(&dir);
+    let progress = Arc::new(ShipProgress::new(crate::registry::DEFAULT_WAL_MAX_BYTES));
+    let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let target = fence_key(&StorePath::default(), 1);
+    let store: Arc<dyn ObjectStore> = Arc::new(PausingStore {
+        inner: Arc::clone(&inner),
+        pause_on: target.clone(),
+        started: Arc::clone(&started),
+        release: Arc::clone(&release),
+    });
+
+    let dir2 = dir.clone();
+    let state2 = state.clone();
+    let progress2 = Arc::clone(&progress);
+    let claim_task =
+        tokio::spawn(async move { claimed_dyn(store, &dir2, &state2, &progress2).await });
+
+    tokio::time::timeout(Duration::from_secs(5), started.notified())
+        .await
+        .expect("the paused put must start");
+    inner
+        .put_opts(
+            &target,
+            PutPayload::from(Vec::new()),
+            PutOptions::from(PutMode::Create),
+        )
+        .await
+        .expect("stealing generation 1 out from under the paused claim");
+    release.notify_one();
+
+    // Bounded, not `claim_task.await` bare: a retry that never
+    // advances past the stolen generation loops forever bidding the
+    // same taken number — this must fail fast, not hang the suite.
+    let shipper = tokio::time::timeout(Duration::from_secs(5), claim_task)
+        .await
+        .expect("a claim retrying past a taken generation must not loop forever")
+        .unwrap();
+    assert_eq!(
+        shipper.generation, 2,
+        "a generation taken between the check and this claim's own write must be \
+         retried past, not looped on forever"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #618: the replication record's `hydrated_from` carries forward only
+/// when the EXISTING record names the SAME bucket url this claim is
+/// against — a directory whose record predates a re-pointed bucket
+/// must not inherit a generation number that means nothing there.
+#[tokio::test]
+async fn a_claim_carries_hydrated_from_forward_only_for_the_same_bucket_url() {
+    let dir = scratch_dir("claim-hydrated-from");
+    write_replication_record(
+        &dir,
+        &ReplicationRecord {
+            url: "mem://test".to_string(),
+            claimed_generation: None,
+            hydrated_from: Some(5),
+        },
+    )
+    .unwrap();
+    let state = state_for(&dir);
+    let progress = Arc::new(ShipProgress::new(crate::registry::DEFAULT_WAL_MAX_BYTES));
+    let store = Arc::new(InMemory::new());
+
+    // `claimed()` always claims against "mem://test" — the same url
+    // the pre-seeded record above names.
+    claimed(&store, &dir, &state, &progress).await;
+    let record = read_replication_record(&dir).unwrap().unwrap();
+    assert_eq!(
+        record.hydrated_from,
+        Some(5),
+        "a claim against the SAME bucket must carry the prior hydrated_from forward"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // The other half of the `record.url == url` filter: a directory
+    // whose EXISTING record names a DIFFERENT bucket must not inherit
+    // a generation number that means nothing there — removing the
+    // filter (or inverting it) would still pass the same-url assertion
+    // above, so this is the branch that actually pins the condition.
+    let other_dir = scratch_dir("claim-hydrated-from-different-url");
+    write_replication_record(
+        &other_dir,
+        &ReplicationRecord {
+            url: "mem://a-different-bucket".to_string(),
+            claimed_generation: None,
+            hydrated_from: Some(5),
+        },
+    )
+    .unwrap();
+    let other_state = state_for(&other_dir);
+    claimed(&store, &other_dir, &other_state, &progress).await;
+    let other_record = read_replication_record(&other_dir).unwrap().unwrap();
+    assert_eq!(
+        other_record.hydrated_from, None,
+        "a claim against a DIFFERENT bucket than the existing record names must not \
+         inherit its hydrated_from"
+    );
+    let _ = std::fs::remove_dir_all(&other_dir);
+}
+
+/// #618: under a lazy (not-yet-drained) hydration, a cycle whose ONLY
+/// activity is a lane shipping something for the first time must still
+/// report `true` — the manifest-publish step that (when hydration IS
+/// drained) would independently re-assert `shipped = true` is exactly
+/// the step this scenario skips, so the lane loop's own return value
+/// is what the caller actually sees.
+#[tokio::test]
+async fn a_cycle_with_undrained_hydration_still_reports_a_shipped_lane() {
+    // A separate, already-shipped bucket to hydrate FROM: a real
+    // claimed generation with one context family, so `prepare_replica`
+    // returns a hydrator whose stems start `Pending` (undrained) and
+    // stay that way — nothing here ever calls `ensure_context`.
+    let source_dir = scratch_dir("undrained-source");
+    let source_state = state_for(&source_dir);
+    let progress = Arc::new(ShipProgress::new(crate::registry::DEFAULT_WAL_MAX_BYTES));
+    let store = Arc::new(InMemory::new());
+    std::fs::write(source_dir.join("ctx_a.ctx"), b"image-v1").unwrap();
+    let mut source_shipper = claimed(&store, &source_dir, &source_state, &progress).await;
+    source_shipper.cycle().await.unwrap();
+
+    let target_dir = scratch_dir("undrained-target");
+    let hydrator = crate::hydrate::prepare_replica(
+        &(store.clone() as Arc<dyn ObjectStore>),
+        &StorePath::default(),
+        "mem://test",
+        &target_dir,
+    )
+    .await
+    .expect("hydrates");
+    assert!(
+        !hydrator.drained(),
+        "a freshly prepared hydrator with a real family must start undrained"
+    );
+
+    let target_state = state_for(&target_dir);
+    let mut shipper = Shipper::claim(
+        store.clone() as Arc<dyn ObjectStore>,
+        StorePath::default(),
+        "mem://test".to_string(),
+        target_dir.clone(),
+        Arc::clone(&progress),
+        target_state,
+        Some(hydrator),
+    )
+    .await
+    .unwrap();
+
+    // A genuinely new local write, unrelated to the hydration above —
+    // the server keeps accepting writes while background-hydrating.
+    wal::append_batch(&target_dir.join("ctx_a.wal.jsonl"), 1, &[associate("a")]).unwrap();
+
+    assert!(
+        shipper.cycle().await.unwrap(),
+        "a lane that genuinely shipped something must report true even when hydration \
+         has not drained and the manifest-publish step is skipped entirely"
+    );
+    let _ = std::fs::remove_dir_all(&source_dir);
+    let _ = std::fs::remove_dir_all(&target_dir);
+}
+
+/// #618: `fence_holder` was never directly exercised — only ever
+/// called from `main`'s replica-status wiring.
+#[tokio::test]
+async fn fence_holder_reads_back_the_claiming_holder() {
+    let dir = scratch_dir("fence-holder");
+    let state = state_for(&dir);
+    let progress = Arc::new(ShipProgress::new(crate::registry::DEFAULT_WAL_MAX_BYTES));
+    let store = Arc::new(InMemory::new());
+
+    let shipper = claimed(&store, &dir, &state, &progress).await;
+    let holder = fence_holder(
+        store.as_ref() as &dyn ObjectStore,
+        &StorePath::default(),
+        shipper.generation,
+    )
+    .await
+    .expect("the just-claimed generation's fence body reads back");
+    assert!(holder.contains('#'), "the holder is HOSTNAME#pid: {holder}");
+
+    // A generation nothing ever claimed: best-effort `None`, not an
+    // error or a panic.
+    assert!(
+        fence_holder(
+            store.as_ref() as &dyn ObjectStore,
+            &StorePath::default(),
+            9999
+        )
+        .await
+        .is_none()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The restore-equivalence property, generated: any interleaving

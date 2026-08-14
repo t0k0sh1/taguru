@@ -233,9 +233,15 @@ fn clean_partial_restore(out: &FsPath) -> io::Result<()> {
 }
 
 /// The restore body: pick the newest complete generation and
-/// materialize it. A manifest-bearing `complete` (issue #128 onward)
-/// drives an exact, verified restore; an empty pre-manifest marker
-/// falls back to restoring by listing, as before.
+/// materialize it exactly as its manifest (issue #128 onward)
+/// describes — the object set is exactly what the writer said it
+/// shipped, and every downloaded byte is checked against the writer's
+/// own CRC before it lands, so a swapped or rotted object is a
+/// refusal, not a quiet divergence. A generation whose `complete`
+/// marker predates the manifest (empty body) refuses outright: every
+/// generation any current writer ships carries a manifest, so this
+/// only ever names a bucket from before #128, which restore no longer
+/// supports materializing.
 pub(crate) async fn restore_into(
     store: &dyn ObjectStore,
     root: &StorePath,
@@ -248,119 +254,52 @@ pub(crate) async fn restore_into(
         ..RestoreReport::default()
     };
 
-    if let Some(manifest) = read_manifest(store, &generation_root).await? {
-        // Manifest-driven: the object set is exactly what the writer
-        // said it shipped, and every downloaded byte is checked
-        // against the writer's own CRC before it lands — a swapped or
-        // rotted object is a refusal, not a quiet divergence.
-        for (name, expect) in &manifest.files {
-            let key = generation_root.clone().join("files").join(name.as_str());
-            let bytes = fetch(store, &key).await?;
-            verify_file_bytes(name, &bytes, *expect)?;
-            write_restored_file(out, name, &bytes)?;
-            report.files += 1;
-        }
-        for (name, lane) in &manifest.lanes {
-            let assembled = fetch_lane(store, &generation_root, name, *lane).await?;
-            let records = crate::wal::shippable_records(&assembled).map_err(|error| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("lane {name} series {}: {error}", lane.series),
-                )
-            })?;
-            report.records += records.len();
-            crate::storage::write_atomic(&out.join(name), &assembled)?;
-            report.lanes += 1;
-        }
-        return Ok(report);
+    let Some(manifest) = read_manifest(store, &generation_root).await? else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "generation {generation}: its complete marker predates the shipping \
+                 manifest (issue #128) — restore cannot materialize a bucket this old"
+            ),
+        ));
+    };
+    // The same hostile-input posture `safe_manifest_name` exists for:
+    // a name in both maps would have the lane's `write_atomic` clobber
+    // the file's already-restored bytes (or vice versa, depending on
+    // iteration order — a HashMap's, unspecified), landing a directory
+    // that does not match the manifest either way. Never produced by a
+    // real shipper (files and lanes are named from disjoint suffixes),
+    // so this is bucket rot or tampering, not age.
+    if let Some(name) = manifest
+        .files
+        .keys()
+        .find(|name| manifest.lanes.contains_key(*name))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{name}: the manifest names both a file and a lane — the bucket may be \
+                 tampered with"
+            ),
+        ));
     }
-
-    // files/* — verbatim, atomically (stage + rename via the same
-    // helper the server writes with, so a crash mid-restore leaves
-    // whole files or nothing, never a torn image). The grant store is
-    // the one secret-bearing file and keeps its owner-only mode.
-    let files_prefix = generation_root.clone().join("files");
-    let names = list_names_under(store, &files_prefix).await?;
-    for name in names {
-        // The same name check the manifest path gets in `read_manifest`:
-        // a listing-supplied name is just as attacker-writable as a
-        // manifest-supplied one, and `write_restored_file` joins it
-        // under `out` unexamined.
-        if !safe_manifest_name(&name) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("{name}: not a safe file name — the bucket may be tampered with"),
-            ));
-        }
-        let key = files_prefix.clone().join(name.as_str());
+    for (name, expect) in &manifest.files {
+        let key = generation_root.clone().join("files").join(name.as_str());
         let bytes = fetch(store, &key).await?;
-        write_restored_file(out, &name, &bytes)?;
+        verify_file_bytes(name, &bytes, *expect)?;
+        write_restored_file(out, name, &bytes)?;
         report.files += 1;
     }
-
-    // wal/{lane}/ — newest series only, segments in order, each
-    // verified record-by-record before any byte lands: shipping runs
-    // the same check, so a mismatch here means the bucket rotted (or
-    // was edited), and a restore that "mostly worked" would be worse
-    // than one that says so.
-    let wal_prefix = generation_root.clone().join("wal");
-    for lane in list_names_under(store, &wal_prefix).await? {
-        if !safe_manifest_name(&lane) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("{lane}: not a safe lane name — the bucket may be tampered with"),
-            ));
-        }
-        let lane_prefix = wal_prefix.clone().join(lane.as_str());
-        let mut segments: Vec<(u64, u64, StorePath)> = Vec::new();
-        let mut listing = store.list(Some(&lane_prefix));
-        while let Some(meta) = listing.next().await {
-            let meta =
-                meta.map_err(|error| io::Error::other(format!("listing lane {lane}: {error}")))?;
-            let Some(segment_file) = meta.location.filename() else {
-                continue;
-            };
-            let Some((series, seg)) = parse_segment_name(segment_file) else {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("lane {lane}: unrecognized segment object '{segment_file}'"),
-                ));
-            };
-            segments.push((series, seg, meta.location));
-        }
-        let Some(&(newest_series, _, _)) = segments.iter().max() else {
-            continue;
-        };
-        let mut series_segments: Vec<(u64, StorePath)> = segments
-            .into_iter()
-            .filter(|&(series, _, _)| series == newest_series)
-            .map(|(_, seg, key)| (seg, key))
-            .collect();
-        series_segments.sort();
-        let mut assembled = Vec::new();
-        for (position, (seg, key)) in series_segments.iter().enumerate() {
-            // Segment numbers are the shipper's cursor, one PUT each:
-            // a hole means an object vanished, and the records it held
-            // are acknowledged writes — refuse, never skip.
-            if *seg != position as u64 {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "lane {lane} series {newest_series}: segment {position} is missing \
-                         (found {seg}) — the bucket lost or dropped an object"
-                    ),
-                ));
-            }
-            assembled.extend_from_slice(&fetch(store, key).await?);
-        }
+    for (name, lane) in &manifest.lanes {
+        let assembled = fetch_lane(store, &generation_root, name, *lane).await?;
         let records = crate::wal::shippable_records(&assembled).map_err(|error| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("lane {lane} series {newest_series}: {error}"),
+                format!("lane {name} series {}: {error}", lane.series),
             )
         })?;
         report.records += records.len();
-        crate::storage::write_atomic(&out.join(&lane), &assembled)?;
+        crate::storage::write_atomic(&out.join(name), &assembled)?;
         report.lanes += 1;
     }
     Ok(report)
@@ -529,35 +468,6 @@ pub(crate) async fn newest_complete_generation(
         "no complete generation in the bucket — every claimant died before finishing \
          its baseline sync; nothing here can restore a whole directory",
     ))
-}
-
-/// The distinct first-level names under `prefix` (file names under
-/// `files/`, lane names under `wal/`), via delimited listing.
-async fn list_names_under(store: &dyn ObjectStore, prefix: &StorePath) -> io::Result<Vec<String>> {
-    let listing = store
-        .list_with_delimiter(Some(prefix))
-        .await
-        .map_err(|error| io::Error::other(format!("listing {prefix}: {error}")))?;
-    let mut names: Vec<String> = listing
-        .objects
-        .iter()
-        .filter_map(|meta| meta.location.filename().map(String::from))
-        .chain(
-            listing
-                .common_prefixes
-                .iter()
-                .filter_map(|p| p.filename().map(String::from)),
-        )
-        .collect();
-    names.sort();
-    names.dedup();
-    Ok(names)
-}
-
-pub(super) fn parse_segment_name(name: &str) -> Option<(u64, u64)> {
-    let body = name.strip_suffix(".jsonl")?;
-    let (series, seg) = body.split_once('-')?;
-    Some((series.parse().ok()?, seg.parse().ok()?))
 }
 
 pub(crate) async fn fetch(store: &dyn ObjectStore, key: &StorePath) -> io::Result<Vec<u8>> {

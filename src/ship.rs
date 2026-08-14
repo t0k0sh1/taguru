@@ -167,7 +167,9 @@ pub(crate) use shipper::{FenceInfo, Shipper, fence_holder, newest_fence};
 #[cfg(test)]
 use progress::DEFAULT_DEFER_CAP_BYTES;
 #[cfg(test)]
-use restore::{parse_segment_name, restore_into};
+use restore::restore_into;
+#[cfg(test)]
+use shipper::{newest_seq, update_pending_since};
 
 #[path = "ship/tests.rs"]
 #[cfg(test)]

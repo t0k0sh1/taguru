@@ -509,4 +509,130 @@ mod tests {
 
         let _ = fs::remove_dir_all(dir);
     }
+
+    /// #618: `replica_register` was never directly exercised — only
+    /// ever called from `Tailer::poll_once`. The hydrator's shared
+    /// pass lands the meta before this runs, so registration is a
+    /// pure in-memory step reading a file that already exists.
+    #[test]
+    fn a_replica_register_adds_a_new_context_from_its_landed_meta() {
+        let dir = scratch_dir("replica-register-new");
+        let state = AppState::boot_with(
+            dir.clone(),
+            usize::MAX,
+            None,
+            BootOptions {
+                replica: Some(std::sync::Arc::new(crate::replica::ReplicaInfo::new(None))),
+                ..BootOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            state.lookup("sake").is_none(),
+            "nothing registered before the tailer touches it"
+        );
+
+        let stem = file_stem("sake");
+        fs::write(
+            dir.join(format!("{stem}.meta.json")),
+            br#"{"description":"sake","pinned":false}"#,
+        )
+        .unwrap();
+        state.replica_register(&stem);
+        assert_eq!(
+            state
+                .directory_entry("sake")
+                .expect("the stem must register")
+                .description,
+            "sake"
+        );
+
+        // Idempotent: a second registration of the same stem must not
+        // REPLACE the entry — `lookup` alone would pass even if it did
+        // (a fresh entry with the same name still looks up fine), so
+        // this pins the actual identity via `Arc::ptr_eq`.
+        let first = state.lookup("sake").expect("just registered");
+        state.replica_register(&stem);
+        let second = state.lookup("sake").expect("still registered");
+        assert!(
+            std::sync::Arc::ptr_eq(&first, &second),
+            "a repeat registration of an already-registered stem must not replace the entry"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// #618: an undecodable stem (never a name this server itself
+    /// wrote) must be a silent no-op, not a panic — the tailer's own
+    /// worklist loop already filters these via `name_from_stem`, but
+    /// `replica_register` guards against it independently too.
+    #[test]
+    fn a_replica_register_ignores_an_undecodable_stem() {
+        let dir = scratch_dir("replica-register-undecodable");
+        let state = AppState::boot_with(
+            dir.clone(),
+            usize::MAX,
+            None,
+            BootOptions {
+                replica: Some(std::sync::Arc::new(crate::replica::ReplicaInfo::new(None))),
+                ..BootOptions::default()
+            },
+        )
+        .unwrap();
+        // `context_count` is the actual registry `replica_register`
+        // writes into — `group_page` is a different subsystem and
+        // would pass even if this call registered something.
+        //
+        // `name_from_stem` only refuses a `%`-escape it cannot decode
+        // (an odd/invalid hex pair, or a `%` with nothing — or too
+        // little — after it): a plain string with no `%` at all
+        // decodes to itself unchanged, so it is NOT the "undecodable"
+        // case this test means to cover — `"trailing%"` genuinely is,
+        // its dangling `%` running out of input mid-escape.
+        let before = state.context_count();
+        state.replica_register("trailing%");
+        assert_eq!(
+            state.context_count(),
+            before,
+            "an undecodable stem must not register anything"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// #618: `replica_deregister` was never directly exercised — only
+    /// ever called from `Tailer::poll_once` for a vanished lineage
+    /// member.
+    #[test]
+    fn a_replica_deregister_removes_a_registered_context() {
+        let dir = scratch_dir("replica-deregister");
+        let state = AppState::boot_with(
+            dir.clone(),
+            usize::MAX,
+            None,
+            BootOptions {
+                replica: Some(std::sync::Arc::new(crate::replica::ReplicaInfo::new(None))),
+                ..BootOptions::default()
+            },
+        )
+        .unwrap();
+        let stem = file_stem("sake");
+        fs::write(
+            dir.join(format!("{stem}.meta.json")),
+            br#"{"description":"sake","pinned":false}"#,
+        )
+        .unwrap();
+        state.replica_register(&stem);
+        assert!(state.lookup("sake").is_some());
+
+        state.replica_deregister("sake");
+        assert!(
+            state.lookup("sake").is_none(),
+            "the lineage no longer carrying this context must drop it in memory"
+        );
+
+        // A name never registered: a no-op, not a panic.
+        state.replica_deregister("never-registered");
+
+        let _ = fs::remove_dir_all(dir);
+    }
 }

@@ -648,6 +648,91 @@ mod tests {
         }
     }
 
+    /// Delegates everything to `inner` except `get_opts` on one
+    /// specific key, which always answers a non-`NotFound` error —
+    /// `newest_complete_generation`'s `head()` check on a candidate
+    /// generation's `complete` marker must fail the whole poll loudly
+    /// on this, not treat it as "not this one, try older" the way a
+    /// genuine `NotFound` is meant to (#618). `head()`'s default
+    /// implementation routes through `get_opts`, so overriding that
+    /// alone is enough to reach it.
+    #[derive(Debug)]
+    struct FailsGetOnStore {
+        inner: Arc<dyn ObjectStore>,
+        fails_on: StorePath,
+    }
+
+    impl std::fmt::Display for FailsGetOnStore {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "FailsGetOnStore({})", self.inner)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for FailsGetOnStore {
+        async fn put_opts(
+            &self,
+            location: &StorePath,
+            payload: object_store::PutPayload,
+            opts: object_store::PutOptions,
+        ) -> object_store::Result<object_store::PutResult> {
+            self.inner.put_opts(location, payload, opts).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &StorePath,
+            opts: object_store::PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+            self.inner.put_multipart_opts(location, opts).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &StorePath,
+            options: object_store::GetOptions,
+        ) -> object_store::Result<object_store::GetResult> {
+            if *location == self.fails_on {
+                return Err(object_store::Error::Generic {
+                    store: "fails-get",
+                    source: "injected non-NotFound get failure".into(),
+                });
+            }
+            self.inner.get_opts(location, options).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: futures_util::stream::BoxStream<'static, object_store::Result<StorePath>>,
+        ) -> futures_util::stream::BoxStream<'static, object_store::Result<StorePath>> {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&StorePath>,
+        ) -> futures_util::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&StorePath>,
+        ) -> object_store::Result<object_store::ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &StorePath,
+            to: &StorePath,
+            options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+    }
+
     /// A store whose `list()` panics unconditionally — `newest_fence`
     /// (`ship::newest_fence`) calls it as the very FIRST thing
     /// `poll_once` does, so spawning a tailer against this store
@@ -791,6 +876,143 @@ mod tests {
 
     fn scrape(state: &AppState) -> String {
         state.metrics().render_prometheus(&state.gauge_snapshot())
+    }
+
+    /// #618: `newest_complete_generation`'s `head()` check on the
+    /// newest candidate generation must fail the WHOLE poll loudly on
+    /// a non-`NotFound` error — only a genuine `NotFound` means "not
+    /// this one, keep looking older"; anything else (a permissions
+    /// error, a transient store fault surfaced as something other than
+    /// 404) must not be swallowed the same way.
+    #[tokio::test]
+    async fn a_non_notfound_head_failure_on_the_complete_marker_fails_the_poll() {
+        let (bucket, _writer) = two_segment_bucket("head-fails").await;
+        let url = url_of("head-fails");
+        let store = local_store(&bucket);
+        let target = scratch("head-fails-target");
+        let hydrator =
+            crate::hydrate::prepare_replica(&store, &StorePath::default(), &url, &target)
+                .await
+                .expect("hydrates");
+        let state = AppState::boot(target.clone(), 64 * 1024 * 1024, None).unwrap();
+        state.metrics().set_replica_mode();
+
+        let failing: Arc<dyn ObjectStore> = Arc::new(FailsGetOnStore {
+            inner: local_store(&bucket),
+            fails_on: ship::complete_key(&ship::gen_root(&StorePath::default(), 1)),
+        });
+        let mut tailer = Tailer {
+            store: failing,
+            root: StorePath::default(),
+            url,
+            data_dir: target.clone(),
+            state,
+            hydrator,
+            info: Arc::new(ReplicaInfo::new(None)),
+            stop: Arc::new(AtomicBool::new(false)),
+            manifest_stamp: None,
+            fence_seen: None,
+            pending_refresh: Default::default(),
+        };
+        let error = tailer.poll_once().await.expect_err(
+            "a non-NotFound head failure must fail the poll, not be silently treated as \
+             'nothing complete yet'",
+        );
+        assert_ne!(error.kind(), std::io::ErrorKind::NotFound, "{error}");
+
+        for dir in [bucket, target] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    /// #618: the very FIRST poll against a bucket whose fence already
+    /// names a claimant must resolve the holder line — a `fence_seen`
+    /// gate backwards (comparing for equality instead of inequality)
+    /// would skip this on the first sighting of a generation and only
+    /// ever fire on a REPEAT of one already seen, meaning it would
+    /// never fire at all under normal monotonic generations.
+    #[tokio::test]
+    async fn a_first_poll_against_an_existing_fence_resolves_the_holder_line() {
+        let (bucket, _writer) = two_segment_bucket("fence-first-poll").await;
+        let url = url_of("fence-first-poll");
+        let store = local_store(&bucket);
+        let target = scratch("fence-first-poll-target");
+        let hydrator =
+            crate::hydrate::prepare_replica(&store, &StorePath::default(), &url, &target)
+                .await
+                .expect("hydrates");
+        let state = AppState::boot(target.clone(), 64 * 1024 * 1024, None).unwrap();
+        state.metrics().set_replica_mode();
+        let mut tailer = tailer_for(&bucket, url, target.clone(), state, hydrator);
+        assert!(
+            tailer.info.refusal().contains("none known"),
+            "before any poll, nothing is known yet: {}",
+            tailer.info.refusal()
+        );
+
+        // The fixture's own expected holder string, fetched
+        // independently — asserting only the ABSENCE of "none known"
+        // would also pass if `note_fence` resolved a `None` holder
+        // (still no "none known" phrase, but not what this test is
+        // pinning): the poll must actually carry the real holder text.
+        let expected_holder = ship::fence_holder(store.as_ref(), &StorePath::default(), 1)
+            .await
+            .expect("the fixture's own writer claimed generation 1");
+
+        tailer.poll_once().await.expect("the poll completes");
+        let refusal = tailer.info.refusal();
+        assert!(
+            refusal.contains("claimed by") && refusal.contains(&expected_holder),
+            "the very first poll against an existing fence must resolve the holder \
+             line, not wait for a repeat poll of the same generation: {refusal}"
+        );
+
+        for dir in [bucket, target] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    /// #618: the OTHER half of the guard above — a genuine `NotFound`
+    /// (a claimant exists but nothing has completed a baseline yet)
+    /// must stay a quiet `Ok(())`, not propagate as an error; a mutant
+    /// disabling the guard entirely would fail every such poll loudly.
+    #[tokio::test]
+    async fn a_poll_before_any_generation_completes_is_a_quiet_ok() {
+        let bucket = scratch("no-complete-yet-bucket");
+        let writer = scratch("no-complete-yet-writer");
+        let writer_state = AppState::boot(writer.clone(), 64 * 1024 * 1024, None).unwrap();
+        // A claim writes the fence eagerly, before any cycle — no
+        // `cycle()` call here, so nothing ever completes a baseline.
+        let _shipper = Shipper::claim(
+            local_store(&bucket),
+            StorePath::default(),
+            url_of("no-complete-yet"),
+            writer.clone(),
+            Arc::new(ShipProgress::new(crate::registry::DEFAULT_WAL_MAX_BYTES)),
+            writer_state,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let url = url_of("no-complete-yet");
+        let store = local_store(&bucket);
+        let target = scratch("no-complete-yet-target");
+        let hydrator =
+            crate::hydrate::prepare_replica(&store, &StorePath::default(), &url, &target)
+                .await
+                .expect("a fence with no complete generation is still a valid replica boot");
+        let state = AppState::boot(target.clone(), 64 * 1024 * 1024, None).unwrap();
+        state.metrics().set_replica_mode();
+        let mut tailer = tailer_for(&bucket, url, target.clone(), state, hydrator);
+        tailer
+            .poll_once()
+            .await
+            .expect("a fence with no complete generation yet must be a quiet Ok, not an error");
+
+        for dir in [bucket, writer, target] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 
     #[tokio::test]
@@ -1611,6 +1833,15 @@ mod tests {
         let routed = ReplicaInfo::new(Some("http://writer.internal:8248".into()));
         assert!(
             routed.refusal().contains("http://writer.internal:8248"),
+            "{}",
+            routed.refusal()
+        );
+        // #618: a known writer URL but no fence claim seen YET must
+        // not also claim "none known to the bucket" — that phrase is
+        // for the bucket genuinely naming no writer, not for this
+        // replica simply not having polled a fence claim yet.
+        assert!(
+            !routed.refusal().contains("none known"),
             "{}",
             routed.refusal()
         );

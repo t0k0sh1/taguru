@@ -444,21 +444,22 @@ fn a_restore_racing_an_active_writer_is_refused_and_leaves_its_data_intact() {
     }
 }
 
-/// A pre-manifest bucket (an EMPTY `complete` marker) whose
-/// generation still carries wal segments must restore the tail they
-/// hold, through the listing-driven compatibility path. No other test
-/// reaches that path's wal-lane loop: the graceful-stop round trip
-/// above drains the tail into the baseline files before restore runs,
-/// and today's writer always ships a manifest, which routes restore
-/// through the manifest branch instead. Here the writer is SIGKILLed
-/// after a post-baseline write provably ships, then the marker is
-/// emptied to the pre-manifest shape — from there only the listed
-/// lane's replay can carry the write into the restored directory.
+/// A generation whose `complete` marker predates the shipping
+/// manifest (an EMPTY body — issue #128's baseline shape) is refused
+/// outright, not silently reconstructed by listing: every generation
+/// any current writer ships carries a manifest (confirmed by
+/// `the_manifest_records_every_shipped_extent_and_restore_verifies_it`
+/// in `ship/tests.rs`), so an empty marker only ever names a bucket
+/// from before #128, and restore no longer supports materializing
+/// one. Constructed the same way the pre-#128-compat path used to be
+/// exercised (a writer SIGKILLed after a post-baseline write ships,
+/// then the marker rewound to its empty shape) so the refusal is
+/// pinned against the same generation shape, not a synthetic one.
 #[test]
-fn a_hard_killed_writers_bucket_restores_the_shipped_wal_tail() {
-    let bucket = scratch("wal-tail-bucket");
+fn a_pre_manifest_generation_is_refused_not_silently_restored() {
+    let bucket = scratch("pre-manifest-bucket");
     let server = Server::start_with_env(
-        "repl-wal-tail",
+        "repl-pre-manifest",
         &[
             ("TAGURU_REPLICATE_URL", &bucket_url(&bucket)),
             ("TAGURU_REPLICATE_INTERVAL_MS", "100"),
@@ -491,13 +492,13 @@ fn a_hard_killed_writers_bucket_restores_the_shipped_wal_tail() {
     let data_dir = server.stop_hard();
 
     // Rewind the marker to the pre-manifest shape (an empty
-    // `complete`). This both pins the compatibility path and makes the
-    // test deterministic: with the manifest branch, whether the lane is
-    // restored depends on whether the writer's manifest UPDATE beat the
-    // SIGKILL — a race this test must not encode.
+    // `complete`) — this is also what makes the test deterministic:
+    // with a real manifest, whether the tail write is reflected
+    // depends on whether the writer's manifest UPDATE beat the
+    // SIGKILL, a race this test must not encode.
     std::fs::write(generation.join("complete"), b"").unwrap();
 
-    let restored = scratch("wal-tail-restored");
+    let restored = scratch("pre-manifest-restored");
     let restore = run_cli(
         &[
             "restore",
@@ -508,27 +509,16 @@ fn a_hard_killed_writers_bucket_restores_the_shipped_wal_tail() {
         &[],
     );
     assert!(
-        restore.status.success(),
-        "restore failed: {}",
-        String::from_utf8_lossy(&restore.stderr)
+        !restore.status.success(),
+        "a pre-manifest generation must be refused, not silently restored"
     );
-
-    // The tail write is present — provable only via the wal replay.
-    let exports = scratch("wal-tail-exports");
-    let exported = run_cli(
-        &["export", "--out", &exports.display().to_string()],
-        &[("TAGURU_DATA_DIR", &restored.display().to_string())],
-    );
+    let stderr = String::from_utf8_lossy(&restore.stderr);
     assert!(
-        exported.status.success(),
-        "{}",
-        String::from_utf8_lossy(&exported.stderr)
+        stderr.contains("predates the shipping manifest"),
+        "{stderr}"
     );
-    let stream = std::fs::read_to_string(exports.join("sake.jsonl"))
-        .expect("the restored export must carry sake.jsonl");
-    assert!(stream.contains("代表銘柄"), "{stream}");
 
-    for dir in [bucket, data_dir, restored, exports] {
+    for dir in [bucket, data_dir, restored] {
         let _ = std::fs::remove_dir_all(dir);
     }
 }
