@@ -817,7 +817,10 @@ pub(super) fn corrective_message(
 /// one turn's prompt balloon without bound — the model gets the worst
 /// offenders (in the same associations→aliases→questions walk order
 /// [`interpret_model_output`] collects them) and a count of the rest.
-pub(super) const MAX_LISTED_ISSUES: usize = 20;
+/// Shared with `api.rs`'s own issue-listing cap on a rejected HTTP
+/// write (issue #622 finding 8: a compiler-linked constant, not two
+/// independently defined `20`s that could silently disagree).
+pub(super) use crate::api::MAX_LISTED_ISSUES;
 
 /// The corrective turn's ask when an answer parsed as JSON but failed
 /// Stage 1/Stage 2 validation (issue #199, ADR 0001 §8 bucket 2): name

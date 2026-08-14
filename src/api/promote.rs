@@ -23,8 +23,8 @@ use crate::metrics::ErrorKind;
 use crate::registry::{AccessError, AppState};
 
 use super::consolidation::{
-    CONSOLIDATION_DETECTOR, ConsolidationAudit, DEFAULT_EVIDENCE_CAP, contradiction_section,
-    merge_section, staleness_section,
+    CONSOLIDATION_DETECTOR, ConsolidationAudit, DEFAULT_COSINE_FLOOR, DEFAULT_DICE_FLOOR,
+    DEFAULT_EVIDENCE_CAP, contradiction_section, merge_section, staleness_section,
 };
 use super::import::{
     ImportOutcome, import_batch_note, import_outcome, import_refusal, schema_issues_in_batch,
@@ -404,10 +404,11 @@ pub async fn promote_sources(
 
 /// The destination's consolidation audit with `audit_consolidation`'s
 /// own defaults — all three checks, limit 100, evidence cap
-/// [`DEFAULT_EVIDENCE_CAP`], floors 0.6. Tuned re-runs belong to the
-/// standalone endpoint (fingerprint reuse makes them cheap); the
-/// error is a machine-readable reason for [`PromoteOutcome::
-/// audit_skipped`], never a refusal.
+/// [`DEFAULT_EVIDENCE_CAP`], floors [`DEFAULT_DICE_FLOOR`]/
+/// [`DEFAULT_COSINE_FLOOR`]. Tuned re-runs belong to the standalone
+/// endpoint (fingerprint reuse makes them cheap); the error is a
+/// machine-readable reason for [`PromoteOutcome::audit_skipped`],
+/// never a refusal.
 fn landing_audit(
     state: &AppState,
     into: &str,
@@ -426,8 +427,8 @@ fn landing_audit(
     let merge = merge_section(
         state,
         into,
-        0.6,
-        0.6,
+        DEFAULT_DICE_FLOOR,
+        DEFAULT_COSINE_FLOOR,
         DEFAULT_EVIDENCE_CAP,
         100,
         hidden,

@@ -579,9 +579,9 @@ pub(crate) fn describe_value(value: &serde_json::Value) -> String {
 }
 
 /// How many [`Issue`]s a rejected call's prose enumerates before
-/// simply counting the rest — the same cap `extract.rs`'s corrective
-/// message caps a retrying LLM's turn at (`MAX_LISTED_ISSUES`,
-/// extract.rs:2101), so neither surface can be made to balloon a
+/// simply counting the rest — the canonical definition
+/// `extract::chunking`'s own corrective-message cap re-exports (issue
+/// #622 finding 8), so neither surface can be made to balloon a
 /// response by sending a batch with thousands of bad items.
 pub(crate) const MAX_LISTED_ISSUES: usize = 20;
 
@@ -1298,10 +1298,11 @@ pub(crate) const MAX_ASSOCIATIONS_PER_REQUEST: usize = 10_000;
 /// and for `lookup_passages` the response body scales with the list
 /// too — the output-side clamps cannot bound what the request itself
 /// carries, so the input is refused up front like an oversized
-/// association batch. It matches the largest page any read endpoint
-/// serves, so a paged bulk workflow (list_sources → lookup_passages)
-/// fits exactly.
-const MAX_INPUT_ITEMS: usize = 1000;
+/// association batch. Matches [`MAX_MATCH_LIMIT`], the largest page
+/// any read endpoint serves, so a paged bulk workflow
+/// (list_sources → lookup_passages) fits exactly (issue #622 finding 7:
+/// a compiler-linked equality, not just matching literals).
+const MAX_INPUT_ITEMS: usize = MAX_MATCH_LIMIT;
 
 /// Refuses a list-shaped input field longer than [`MAX_INPUT_ITEMS`],
 /// before any lock is taken. `None` means the length is fine.
@@ -1381,12 +1382,14 @@ pub(crate) const MAX_TAGS_PER_SOURCE: usize = 32;
 /// Per-request cap on the number of passage sources one store may
 /// carry. Each source is a whole document tokenized and folded into the
 /// resident index under the context's lock — heavier per item than an
-/// association, so a tenth of [`MAX_ASSOCIATIONS_PER_REQUEST`]. The body
-/// cap bounds the request's total bytes; this bounds how many documents
-/// do that per-item work in a single lock-hold, the same reason an
-/// association batch is refused up front. (The offline import calls the
-/// registry's `store_passages` directly and is not bound by this.)
-pub(crate) const MAX_PASSAGES_PER_REQUEST: usize = 1_000;
+/// association, so a tenth of [`MAX_ASSOCIATIONS_PER_REQUEST`] (issue
+/// #622 finding 7: a compiler-linked ratio, not just a matching
+/// literal). The body cap bounds the request's total bytes; this
+/// bounds how many documents do that per-item work in a single
+/// lock-hold, the same reason an association batch is refused up
+/// front. (The offline import calls the registry's `store_passages`
+/// directly and is not bound by this.)
+pub(crate) const MAX_PASSAGES_PER_REQUEST: usize = MAX_ASSOCIATIONS_PER_REQUEST / 10;
 
 /// The optional-body contract of create and audit: an ABSENT body
 /// means defaults, but a PRESENT body must parse as JSON — whatever

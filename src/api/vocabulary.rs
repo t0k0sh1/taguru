@@ -13,6 +13,7 @@ use crate::limits::HeavyOpsLimiter;
 use crate::registry::{AccessError, AppState};
 use crate::schema::SCHEMA_TYPE_LABEL;
 
+use super::consolidation::{DEFAULT_COSINE_FLOOR, DEFAULT_DICE_FLOOR};
 use super::{
     AppBytes, AppPath, AssociationOut, MatchCursor, access_error, association_out,
     deadline_exceeded, locator_keys, ok, optional_body, page_by,
@@ -22,9 +23,9 @@ use super::{
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct VocabularyAuditRequest {
-    /// Lexical (spelling) detector floor; omitted means 0.6.
+    /// Lexical (spelling) detector floor; omitted means [`DEFAULT_DICE_FLOOR`].
     pub dice_floor: Option<f64>,
-    /// Semantic (gloss cosine) detector floor; omitted means 0.6.
+    /// Semantic (gloss cosine) detector floor; omitted means [`DEFAULT_COSINE_FLOOR`].
     pub cosine_floor: Option<f32>,
 }
 
@@ -177,8 +178,8 @@ pub async fn audit_vocabulary(
         Ok(request) => request,
         Err(refusal) => return *refusal,
     };
-    let dice_floor = request.dice_floor.unwrap_or(0.6);
-    let cosine_floor = request.cosine_floor.unwrap_or(0.6);
+    let dice_floor = request.dice_floor.unwrap_or(DEFAULT_DICE_FLOOR);
+    let cosine_floor = request.cosine_floor.unwrap_or(DEFAULT_COSINE_FLOOR);
 
     // vocabulary_audit's lexical half builds an O(n) per-span bigram
     // table before its own inner loop ever checks this deadline — fail
@@ -223,11 +224,11 @@ pub struct DriftAuditRequest {
     /// Also run the lexical/semantic fork-candidate sweep
     /// (`vocabulary_audit`) and include it as `twins`.
     pub include_twins: bool,
-    /// Lexical (spelling) detector floor; omitted means 0.6. Ignored
-    /// unless `include_twins` is set.
+    /// Lexical (spelling) detector floor; omitted means
+    /// [`DEFAULT_DICE_FLOOR`]. Ignored unless `include_twins` is set.
     pub dice_floor: Option<f64>,
-    /// Semantic (gloss cosine) detector floor; omitted means 0.6.
-    /// Ignored unless `include_twins` is set.
+    /// Semantic (gloss cosine) detector floor; omitted means
+    /// [`DEFAULT_COSINE_FLOOR`]. Ignored unless `include_twins` is set.
     pub cosine_floor: Option<f32>,
 }
 
@@ -319,8 +320,8 @@ pub async fn audit_drift(
             Ok(permit) => permit,
             Err(shed_response) => return *shed_response,
         };
-        let dice_floor = request.dice_floor.unwrap_or(0.6);
-        let cosine_floor = request.cosine_floor.unwrap_or(0.6);
+        let dice_floor = request.dice_floor.unwrap_or(DEFAULT_DICE_FLOOR);
+        let cosine_floor = request.cosine_floor.unwrap_or(DEFAULT_COSINE_FLOOR);
         match tokio::task::block_in_place(|| {
             vocabulary_audit(&state, &name, dice_floor, cosine_floor, deadline)
         }) {

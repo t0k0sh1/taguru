@@ -40,6 +40,29 @@ pub struct RecallRequest {
     pub until: Option<u64>,
 }
 
+/// GRAPH ops (recall/query) never carry passage lanes — the inert
+/// `lane_hits` [`cache_and_serve`] takes on every call in this file
+/// (issue #622 finding 5).
+const NO_PASSAGE_LANES: [u64; 3] = [0, 0, 0];
+
+/// The shared half of every retrieval-cache probe in this file (issue
+/// #622 finding 5, mirrors `sources.rs`'s own `passage_search_cache_probe`
+/// from #605): looks the key up, replays a hit's side effects onto the
+/// usual counters, and hands the entry back for the caller to log and
+/// serve. `tracing::info!` stays with each caller — field names are
+/// macro-time identifiers, not runtime strings, so the log line is the
+/// one thing that cannot be shared (the same limit
+/// `passage_search_cache_probe`'s own doc names).
+fn graph_cache_probe(
+    state: &AppState,
+    key: &Option<crate::registry::RetrievalKey>,
+) -> Option<crate::registry::CachedRetrieval> {
+    let key = key.as_ref()?;
+    let found = state.retrieval_lookup(key)?;
+    replay_cached_search(state, key, &found);
+    Some(found)
+}
+
 pub async fn recall(
     State(state): State<AppState>,
     AppPath(name): AppPath<String>,
@@ -71,10 +94,7 @@ pub async fn recall(
         ))
         .ok(),
     );
-    if let Some(key) = &key
-        && let Some(found) = state.retrieval_lookup(key)
-    {
-        replay_cached_search(&state, key, &found);
+    if let Some(found) = graph_cache_probe(&state, &key) {
         if search_log_enabled() {
             tracing::info!(
                 target: "taguru::search",
@@ -130,7 +150,7 @@ pub async fn recall(
                     }),
                 },
                 vec![total == 0],
-                [0, 0, 0],
+                NO_PASSAGE_LANES,
                 total,
                 0.0,
                 None,
@@ -578,10 +598,7 @@ pub async fn cross_recall(
         ))
         .ok(),
     );
-    if let Some(key) = &key
-        && let Some(found) = state.retrieval_lookup(key)
-    {
-        replay_cached_search(&state, key, &found);
+    if let Some(found) = graph_cache_probe(&state, &key) {
         if search_log_enabled() {
             tracing::info!(
                 target: "taguru::search",
@@ -633,7 +650,7 @@ pub async fn cross_recall(
             }),
         },
         target_empty,
-        [0, 0, 0],
+        NO_PASSAGE_LANES,
         total,
         0.0,
         None,
@@ -786,10 +803,7 @@ pub async fn query(
         ))
         .ok(),
     );
-    if let Some(key) = &key
-        && let Some(found) = state.retrieval_lookup(key)
-    {
-        replay_cached_search(&state, key, &found);
+    if let Some(found) = graph_cache_probe(&state, &key) {
         if search_log_enabled() {
             tracing::info!(
                 target: "taguru::search",
@@ -895,7 +909,7 @@ pub async fn query(
                     }),
                 },
                 vec![total == 0],
-                [0, 0, 0],
+                NO_PASSAGE_LANES,
                 total,
                 0.0,
                 None,
@@ -1003,10 +1017,7 @@ pub async fn cross_query(
         ))
         .ok(),
     );
-    if let Some(key) = &key
-        && let Some(found) = state.retrieval_lookup(key)
-    {
-        replay_cached_search(&state, key, &found);
+    if let Some(found) = graph_cache_probe(&state, &key) {
         if search_log_enabled() {
             tracing::info!(
                 target: "taguru::search",
@@ -1090,7 +1101,7 @@ pub async fn cross_query(
             }),
         },
         target_empty,
-        [0, 0, 0],
+        NO_PASSAGE_LANES,
         total,
         0.0,
         None,

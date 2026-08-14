@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use taguru::context::{Context, MergeEvidence, ObjectRow};
 use taguru::deadline::Deadline;
 
-use crate::hash::{FNV1A_OFFSET, fnv1a_fold};
+use crate::hash::{FNV1A_OFFSET, fnv1a_fold, fold_field};
 use crate::metrics::ErrorKind;
 use crate::registry::{AccessError, AppState};
 
@@ -37,6 +37,18 @@ pub(crate) const CONSOLIDATION_DETECTOR: &str = "consolidation/1";
 /// Per-list ceiling on merge evidence facts when the caller does not
 /// choose one — totals stay exact either way (no silent caps).
 pub(super) const DEFAULT_EVIDENCE_CAP: usize = 20;
+
+/// `audit_consolidation`'s own merge-section default when a request
+/// omits `dice_floor` — `promote.rs`'s `landing_audit` and
+/// `vocabulary.rs`'s `audit_vocabulary`/`audit_drift` each reuse this
+/// exact default too (issue #622 finding 7: a compiler-linked constant,
+/// not four independently hardcoded `0.6`s that could silently
+/// disagree if only one changed).
+pub(super) const DEFAULT_DICE_FLOOR: f64 = 0.6;
+
+/// The semantic twin of [`DEFAULT_DICE_FLOOR`] — same sharing, same
+/// reason.
+pub(super) const DEFAULT_COSINE_FLOOR: f32 = 0.6;
 
 // Test-only deterministic fault injection for `staleness_section`'s
 // per-attribution deadline check (issue #620): mirrors
@@ -88,9 +100,10 @@ pub struct ConsolidationAuditRequest {
     pub limit: Option<usize>,
     /// Per-list ceiling on merge evidence facts (default 20).
     pub evidence_cap: Option<usize>,
-    /// Merge: lexical twin floor (default 0.6, `vocabulary/audit`'s).
+    /// Merge: lexical twin floor (default [`DEFAULT_DICE_FLOOR`],
+    /// `vocabulary/audit`'s too).
     pub dice_floor: Option<f64>,
-    /// Merge: semantic twin floor (default 0.6).
+    /// Merge: semantic twin floor (default [`DEFAULT_COSINE_FLOOR`]).
     pub cosine_floor: Option<f32>,
     /// Staleness: minimum gap (seconds) before an edge is a candidate.
     /// No default pretends to know the corpus's tempo — omitted means
@@ -213,10 +226,6 @@ fn fingerprint_hex(digest: u64) -> String {
     format!("{digest:016x}")
 }
 
-fn fold_field(digest: u64, field: &str) -> u64 {
-    fnv1a_fold(fnv1a_fold(digest, field.bytes()), [0u8])
-}
-
 pub async fn audit_consolidation(
     State(state): State<AppState>,
     AppPath(name): AppPath<String>,
@@ -286,8 +295,8 @@ pub async fn audit_consolidation(
             merge_section(
                 &state,
                 &name,
-                request.dice_floor.unwrap_or(0.6),
-                request.cosine_floor.unwrap_or(0.6),
+                request.dice_floor.unwrap_or(DEFAULT_DICE_FLOOR),
+                request.cosine_floor.unwrap_or(DEFAULT_COSINE_FLOOR),
                 evidence_cap,
                 limit,
                 hidden,

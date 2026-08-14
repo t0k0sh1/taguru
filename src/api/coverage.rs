@@ -166,16 +166,11 @@ pub async fn labels(
         return deadline_exceeded(started_at);
     }
     // ADR 0009 §6.3 exclusion 2: `schema:type` is invisible on this
-    // endpoint's default page — resolved before `read_context` since
-    // `AppState::hidden_label`'s slow path takes this entry's write
-    // lock, which would deadlock against `read_context`'s read lock
-    // held for the whole closure. `?prefix=schema:` must not be a
-    // back door around the same exclusion, so it applies on both
-    // branches below, not only the cursor one. That same slow path is
-    // real disk I/O, so it runs off the async worker like every other
-    // load-bearing call on this handler's path.
-    let hidden = tokio::task::block_in_place(|| state.hidden_label(&name));
-    let excluded: Vec<&str> = hidden.into_iter().collect();
+    // endpoint's default page. `?prefix=schema:` must not be a back
+    // door around the same exclusion, so it applies on both branches
+    // below, not only the cursor one. See `AppState::excluded_hidden_label`
+    // for why this must resolve before `read_context`, not inside it.
+    let excluded = state.excluded_hidden_label(&name);
     // A `prefix` filter defines the population rather than a cursor, so
     // — like `pinned` on `list_contexts` — it forces the whole-vocabulary
     // path instead of the BTreeMap-seeking `label_page` fast path, which
@@ -251,11 +246,7 @@ pub async fn unreachable_from(
     // ADR 0009 §6.3's traversal exclusion, same as `explore`/`activate`:
     // a `schema:type` edge to a shared type name is exactly the hub that
     // would bridge otherwise-disconnected facts and under-report orphans.
-    // Resolved before `read_context` — `AppState::hidden_label`'s slow
-    // path takes this entry's write lock, which would deadlock against
-    // `read_context`'s read lock held for the whole closure.
-    let hidden = tokio::task::block_in_place(|| state.hidden_label(&name));
-    let excluded: Vec<&str> = hidden.into_iter().collect();
+    let excluded = state.excluded_hidden_label(&name);
     let loaded = tokio::task::block_in_place(|| {
         state
             .read_context(&name, |context| {

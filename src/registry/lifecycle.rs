@@ -924,6 +924,18 @@ impl AppState {
         }
     }
 
+    /// [`Self::hidden_label`] as the exclusion slice a `read_context`
+    /// call site actually wants (issue #622 finding 4) — off the async
+    /// worker, since [`Self::hidden_label`]'s own doc requires it to
+    /// run before, never inside, a `read_context` closure. Bundles the
+    /// `block_in_place` + `.into_iter().collect()` idiom five HTTP
+    /// handlers each wrote out by hand.
+    pub fn excluded_hidden_label(&self, name: &str) -> Vec<&'static str> {
+        tokio::task::block_in_place(|| self.hidden_label(name))
+            .into_iter()
+            .collect()
+    }
+
     /// ADR 0009 §6.3 guard 2's `add_label_alias` bullet: the pre-flight
     /// an alias-creating write consults before it runs, mirroring
     /// `predicted_alias_rejection`'s own read-only-prediction shape —

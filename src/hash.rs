@@ -36,6 +36,15 @@ pub(crate) fn fnv1a(text: &str) -> u64 {
     fnv1a_fold(FNV1A_OFFSET, text.bytes())
 }
 
+/// One string folded into a fingerprint, NUL-terminated so field
+/// boundaries cannot alias ("ab"+"c" ≠ "a"+"bc") — shared by
+/// `context::consolidation`'s candidate fingerprints (ADR 0012 §5) and
+/// `api::consolidation`'s staleness digest (issue #622 finding 3),
+/// each of which independently defined this identical fold before.
+pub(crate) fn fold_field(digest: u64, field: &str) -> u64 {
+    fnv1a_fold(fnv1a_fold(digest, field.bytes()), [0u8])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

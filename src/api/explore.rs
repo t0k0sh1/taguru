@@ -99,13 +99,7 @@ pub async fn explore(
         return deadline_exceeded(started_at);
     }
     // ADR 0009 §6.3 exclusion 1: `schema:type` never bridges a walk.
-    // Resolved before `read_context` — see `AppState::hidden_label`'s
-    // own doc for why it must not run inside that closure. Its slow
-    // path is real disk I/O under a write lock, so — like every other
-    // load-bearing call on this handler's path — it runs off the async
-    // worker.
-    let hidden = tokio::task::block_in_place(|| state.hidden_label(&name));
-    let excluded: Vec<&str> = hidden.into_iter().collect();
+    let excluded = state.excluded_hidden_label(&name);
     let window_names = match super::sources::resolve_window(
         &state,
         &name,
@@ -194,9 +188,8 @@ pub async fn paths(
         return deadline_exceeded(started_at);
     }
     // ADR 0009 §6.3 exclusion 1: `schema:type` never bridges a walk —
-    // same reason and same `block_in_place` rationale as `explore`.
-    let hidden = tokio::task::block_in_place(|| state.hidden_label(&name));
-    let excluded: Vec<&str> = hidden.into_iter().collect();
+    // same reason as `explore`.
+    let excluded = state.excluded_hidden_label(&name);
     match state.read_context(&name, |context| {
         let origins: Vec<&str> = request.origins.iter().map(String::as_str).collect();
         let targets: Vec<&str> = request.targets.iter().map(String::as_str).collect();
@@ -273,10 +266,8 @@ pub async fn activate(
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }
-    // ADR 0009 §6.3 exclusion 1, the ranked sibling of `explore`'s —
-    // same reason for `block_in_place` as there.
-    let hidden = tokio::task::block_in_place(|| state.hidden_label(&name));
-    let excluded: Vec<&str> = hidden.into_iter().collect();
+    // ADR 0009 §6.3 exclusion 1, the ranked sibling of `explore`'s.
+    let excluded = state.excluded_hidden_label(&name);
     let window_names = match super::sources::resolve_window(
         &state,
         &name,
