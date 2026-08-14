@@ -560,6 +560,49 @@ pub(super) fn schema_import_refusal(
     }
 }
 
+/// The refusal a budget spent partway through the schema-record loop
+/// answers (issue #620) — [`import_budget_refusal`]'s twin for this
+/// second phase of the stream, which previously had no deadline check
+/// at all: a stream carrying many `taguru_schema` records could run
+/// past `TAGURU_REQUEST_TIMEOUT_SECS` entirely, since each record's
+/// `put_schema` (context hydration plus two fsyncs) is not free.
+/// Accounting mirrors [`schema_import_refusal`]'s own: `durable_batches`
+/// names only the batch count (a schema is not a batch), `integrity`
+/// folds in `applied_schemas` too, since an earlier schema record of
+/// this same stream can already be durable when the budget runs out on
+/// a later one.
+pub(super) fn schema_import_budget_refusal(
+    index: usize,
+    total: usize,
+    context: &str,
+    durable_batches_count: usize,
+    applied_schemas: usize,
+    started_at: Instant,
+) -> Response {
+    let integrity = if durable_batches_count + applied_schemas == 0 {
+        "nothing_written"
+    } else {
+        "durable_prefix"
+    };
+    let durable_batches = (durable_batches_count > 0).then_some(durable_batches_count);
+    validation_error(
+        ErrorCode::Timeout,
+        format!(
+            "schema record {} of {total} (context '{context}') not attempted — request \
+             exceeded its budget partway through a multi-record schema install \
+             (TAGURU_REQUEST_TIMEOUT_SECS tunes this); every batch and schema record \
+             before it is durable",
+            index + 1,
+        ),
+        RefusalDetail {
+            integrity: Some(integrity),
+            durable_batches,
+            ..Default::default()
+        },
+        started_at,
+    )
+}
+
 /// The "N batches already landed" prefix a multi-batch import prepends
 /// to a mid-stream failure — shared by the deadline-exhaustion and the
 /// refused-batch cases in [`import_batch`]'s loop, which differ only in
@@ -899,7 +942,21 @@ pub async fn import_batch(
         // group) applies.
         let mut schema_outcomes: Vec<SchemaImportOutcome> = Vec::new();
         if !query.dry_run {
-            for (context, installed) in &stream.schemas {
+            for (index, (context, installed)) in stream.schemas.iter().enumerate() {
+                // Batch-granular like the loop above (issue #620):
+                // each landed batch AND each installed schema record
+                // is durable, so a budget that runs out partway is
+                // safe to report as a resumable prefix.
+                if deadline.expired() {
+                    return Err(Box::new(schema_import_budget_refusal(
+                        index,
+                        stream.schemas.len(),
+                        context,
+                        outcomes.len(),
+                        schema_outcomes.len(),
+                        started_at,
+                    )));
+                }
                 match crate::ingest::apply_schema_record(&state, context, installed.clone()) {
                     Ok(document) => {
                         tracing::info!(

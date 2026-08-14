@@ -280,9 +280,17 @@ pub async fn audit_consolidation(
     let staleness = if wants("staleness") {
         match tokio::task::block_in_place(|| {
             state.read_context(&name, |context| {
-                staleness_section(context, &effective, request.floor_secs.unwrap_or(0), limit)
+                staleness_section(
+                    context,
+                    &effective,
+                    request.floor_secs.unwrap_or(0),
+                    limit,
+                    deadline,
+                )
             })
-        }) {
+        })
+        .and_then(std::convert::identity)
+        {
             Ok(section) => Some(section),
             Err(failure) => return access_error(&state, failure, &name, started_at),
         }
@@ -343,11 +351,22 @@ pub(super) fn merge_section(
     }
 
     let excluded: Vec<&str> = hidden.into_iter().collect();
-    let mut candidates = state.read_context(name, |context| {
-        pairs
-            .into_iter()
-            .filter_map(|(a, b, name_score, tier)| {
-                let evidence = context.merge_evidence(&a, &b, evidence_cap, &excluded)?;
+    let mut candidates = state
+        .read_context(name, |context| {
+            // Deadline-checked per pair (issue #620): candidate count
+            // is bounded by the twin sweep's own output (ADR 0012 §8),
+            // but each pair costs two adjacency walks plus a full-
+            // evidence fingerprint fold — unbounded in neighbor count
+            // — so a large enough pair list can still outrun the
+            // budget without a check here.
+            let mut candidates = Vec::with_capacity(pairs.len());
+            for (a, b, name_score, tier) in pairs {
+                if deadline.expired() {
+                    return Err(AccessError::DeadlineExceeded);
+                }
+                let Some(evidence) = context.merge_evidence(&a, &b, evidence_cap, &excluded) else {
+                    continue;
+                };
                 let (types_a, types_b) = match hidden {
                     Some(label) => (
                         context.concept_types(&a, label),
@@ -355,7 +374,7 @@ pub(super) fn merge_section(
                     ),
                     None => (Vec::new(), Vec::new()),
                 };
-                Some(MergeCandidate {
+                candidates.push(MergeCandidate {
                     fingerprint: fingerprint_hex(evidence.fingerprint),
                     a,
                     b,
@@ -364,10 +383,11 @@ pub(super) fn merge_section(
                     types_a,
                     types_b,
                     evidence,
-                })
-            })
-            .collect::<Vec<_>>()
-    })?;
+                });
+            }
+            Ok(candidates)
+        })
+        .and_then(std::convert::identity)?;
 
     // Structure first, name score second: shared facts are the
     // evidence a merge stands on; a bare spelling twin still reports,
@@ -461,15 +481,24 @@ pub(super) fn contradiction_section(
 
 /// The staleness section: edges left behind by their own subject's
 /// neighborhood, the gap measured in assertion time (ADR 0012 §4).
-/// Undated edges are counted, never guessed at.
+/// Undated edges are counted, never guessed at. Deadline-checked
+/// throughout (issue #620), matching `contradiction_section`'s own
+/// discipline — this is a full-graph pass like that one (ADR 0012 §8),
+/// and previously had no mid-pass check at all.
 pub(super) fn staleness_section(
     context: &Context,
     effective: &HashMap<String, u64>,
     floor_secs: u64,
     limit: usize,
-) -> StalenessSection {
+    deadline: Deadline,
+) -> Result<StalenessSection, AccessError> {
+    // The full edge walk itself: `all_associations` is `query_any(&[],
+    // &[], &[])`'s own deadline-checked twin (see its doc), kept
+    // separate from that always-free API so ordinary `query`/`recall`
+    // callers pay nothing for a branch none of them take.
     let live: Vec<taguru::context::Association> = context
-        .query_any(&[], &[], &[])
+        .all_associations(deadline)
+        .map_err(|_| AccessError::DeadlineExceeded)?
         .into_iter()
         .filter(|association| association.count > 0)
         .collect();
@@ -479,6 +508,9 @@ pub(super) fn staleness_section(
     let mut edge_latest: Vec<Option<u64>> = Vec::with_capacity(live.len());
     let mut subject_latest: HashMap<&str, u64> = HashMap::new();
     for association in &live {
+        if deadline.expired() {
+            return Err(AccessError::DeadlineExceeded);
+        }
         let latest = association
             .attributions
             .iter()
@@ -497,38 +529,40 @@ pub(super) fn staleness_section(
     }
 
     // Pass 2: the gap against the subject's newest.
-    let mut candidates: Vec<StaleCandidate> = live
-        .iter()
-        .zip(&edge_latest)
-        .filter_map(|(association, latest)| {
-            let latest = (*latest)?;
-            let neighborhood_latest = *subject_latest.get(association.subject.as_str())?;
-            let gap = neighborhood_latest.saturating_sub(latest);
-            if gap == 0 || gap < floor_secs {
-                return None;
-            }
-            let mut digest = fold_field(FNV1A_OFFSET, "stale");
-            digest = fold_field(digest, &association.subject);
-            digest = fold_field(digest, &association.label);
-            digest = fold_field(digest, &association.object);
-            digest = fnv1a_fold(digest, latest.to_le_bytes());
-            digest = fnv1a_fold(digest, neighborhood_latest.to_le_bytes());
-            Some(StaleCandidate {
-                subject: association.subject.clone(),
-                label: association.label.clone(),
-                object: association.object.clone(),
-                latest,
-                neighborhood_latest,
-                gap,
-                sources: association
-                    .attributions
-                    .iter()
-                    .map(|attribution| attribution.source.clone())
-                    .collect(),
-                fingerprint: fingerprint_hex(digest),
-            })
-        })
-        .collect();
+    let mut candidates: Vec<StaleCandidate> = Vec::with_capacity(live.len());
+    for (association, latest) in live.iter().zip(&edge_latest) {
+        if deadline.expired() {
+            return Err(AccessError::DeadlineExceeded);
+        }
+        let Some(latest) = *latest else { continue };
+        let Some(&neighborhood_latest) = subject_latest.get(association.subject.as_str()) else {
+            continue;
+        };
+        let gap = neighborhood_latest.saturating_sub(latest);
+        if gap == 0 || gap < floor_secs {
+            continue;
+        }
+        let mut digest = fold_field(FNV1A_OFFSET, "stale");
+        digest = fold_field(digest, &association.subject);
+        digest = fold_field(digest, &association.label);
+        digest = fold_field(digest, &association.object);
+        digest = fnv1a_fold(digest, latest.to_le_bytes());
+        digest = fnv1a_fold(digest, neighborhood_latest.to_le_bytes());
+        candidates.push(StaleCandidate {
+            subject: association.subject.clone(),
+            label: association.label.clone(),
+            object: association.object.clone(),
+            latest,
+            neighborhood_latest,
+            gap,
+            sources: association
+                .attributions
+                .iter()
+                .map(|attribution| attribution.source.clone())
+                .collect(),
+            fingerprint: fingerprint_hex(digest),
+        });
+    }
     candidates.sort_by(|a, b| {
         b.gap
             .cmp(&a.gap)
@@ -536,9 +570,9 @@ pub(super) fn staleness_section(
     });
     let total = candidates.len();
     candidates.truncate(limit);
-    StalenessSection {
+    Ok(StalenessSection {
         total,
         undatable,
         candidates,
-    }
+    })
 }
