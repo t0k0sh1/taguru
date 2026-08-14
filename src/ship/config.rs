@@ -153,7 +153,14 @@ pub(crate) fn open_store(url: &str) -> io::Result<(Arc<dyn ObjectStore>, StorePa
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
-                    "{url}: unsupported replication scheme — use s3://, gs://, az://, or file://"
+                    "{url}: unsupported replication scheme — use s3://, gs://, az://, or \
+                     file:// (also accepted: s3a://, adl://, abfs://, abfss://, and — per \
+                     object_store's own host-based detection — https:// URLs shaped like a \
+                     cloud provider's native endpoint, e.g. \
+                     https://{{account}}.blob.core.windows.net/... for Azure or \
+                     https://s3.{{region}}.amazonaws.com/... for S3; object_store also \
+                     recognizes memory:// and other https:// hosts, but taguru does not \
+                     support shipping to them)"
                 ),
             ));
         }

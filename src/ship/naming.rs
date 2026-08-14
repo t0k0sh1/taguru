@@ -30,6 +30,12 @@ pub(crate) const TAKEOVER_GRACE: Duration = Duration::from_secs(300);
 /// it hydrated from (the cache-mode marker `crate::hydrate` keys on).
 /// Never shipped (see [`classify`]): it describes the local replica of
 /// the relationship, not the data.
+///
+/// Only `crate::hydrate`'s boot-time restore writes this. The
+/// `taguru restore` CLI (`restore::run`) never does — it materializes
+/// an independent directory with no promise of ever booting against
+/// this bucket again, so there is no cache relationship to record
+/// (see `restore::run`'s own doc for the full reasoning).
 pub(crate) const REPLICATION_RECORD: &str = ".taguru.replication";
 
 /// What [`REPLICATION_RECORD`] holds.
@@ -218,21 +224,33 @@ pub(super) fn parent_snapshot_of(lane_name: &str) -> Option<String> {
         .map(|stem| format!("{stem}.ctx"))
 }
 
+/// The stem a lane's file name derives from — the passage suffix
+/// checked first because both lanes end in `.wal.jsonl`, same as
+/// [`parent_snapshot_of`]. Shared by [`lane_metric_labels`] (which
+/// decodes the stem further into a display name) and the replica
+/// tailer (which needs the raw stem itself, to key its per-poll
+/// `failed` set against `ensure_context`'s own stem-keyed errors), so
+/// the two can never drift on which suffixes count (issue #619).
+pub(crate) fn lane_stem(lane_name: &str) -> &str {
+    lane_name
+        .strip_suffix(".passages.wal.jsonl")
+        .or_else(|| lane_name.strip_suffix(".wal.jsonl"))
+        .unwrap_or(lane_name)
+}
+
 /// The per-lane label pair the lag metric carries: the context's
 /// decoded name where the stem decodes (it always should — these files
 /// were written by the server), plus which lane. The replica's lag
 /// rows reuse it so the two vocabularies cannot drift.
 pub(crate) fn lane_metric_labels(lane_name: &str) -> (String, &'static str) {
-    if let Some(stem) = lane_name.strip_suffix(".passages.wal.jsonl") {
-        (
-            crate::registry::name_from_stem(stem).unwrap_or_else(|| stem.to_string()),
-            "passages",
-        )
+    let kind = if lane_name.ends_with(".passages.wal.jsonl") {
+        "passages"
     } else {
-        let stem = lane_name.strip_suffix(".wal.jsonl").unwrap_or(lane_name);
-        (
-            crate::registry::name_from_stem(stem).unwrap_or_else(|| stem.to_string()),
-            "graph",
-        )
-    }
+        "graph"
+    };
+    let stem = lane_stem(lane_name);
+    (
+        crate::registry::name_from_stem(stem).unwrap_or_else(|| stem.to_string()),
+        kind,
+    )
 }

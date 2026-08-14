@@ -153,7 +153,7 @@ use naming::{
 pub(crate) use naming::{
     HEARTBEAT_MARKER, Manifest, ManifestFile, ManifestLane, REPLICATION_RECORD, RETIRED_MARKER,
     ReplicationRecord, TAKEOVER_GRACE, complete_key, fence_key, gen_root, lane_metric_labels,
-    read_replication_record, segment_name, write_replication_record,
+    lane_stem, read_replication_record, segment_name, write_replication_record,
 };
 pub(crate) use progress::{FileSig, ShipProgress};
 use progress::{LaneState, ShippedFile};

@@ -32,6 +32,19 @@ mix two histories. Verify the result with: taguru inspect DIR
 /// — bad/missing credentials, a rejected cloud config, an
 /// inaccessible local path) · 2 usage error (a malformed URL, an
 /// unrecognized scheme, or a bad flag).
+///
+/// Unlike `crate::hydrate`'s boot-time restore, this never writes
+/// [`ReplicationRecord`] into `out`: `taguru restore` hands back an
+/// independent directory the caller owns, with no promise the writer
+/// will ever point at this bucket again, so there is no lineage for a
+/// record to describe. `hydrate` writes one because it materializes
+/// the SAME data directory `serve` is about to run against — the
+/// record is how a later boot tells "this disk is a cache of the
+/// bucket" from "this disk is independent truth" (see
+/// [`ReplicationRecord`]'s own doc). A directory this CLI restores
+/// stays plain local truth from the moment it lands; if the caller
+/// wants it to behave as a cache instead, that is a `serve --replica`
+/// boot against it, not this command.
 pub(crate) fn run(args: &[String]) -> i32 {
     let usage = |message: &str| crate::config::subcommand_usage_error("restore", message);
     let mut out: Option<PathBuf> = None;
