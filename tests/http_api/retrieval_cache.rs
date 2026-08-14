@@ -517,3 +517,124 @@ fn cross_passage_search_keys_on_target_order() {
         "a reordered target list is a different result, so a different key"
     );
 }
+
+/// issue #621: `cross_search_passages` must tally lane contributions
+/// against the MERGED, truncated page it actually serves — not
+/// against each target's own pre-merge hits. Three targets each carry
+/// two matching paragraphs (six candidates total), but `limit: 2`
+/// means only two are ever served; counting before the merge would
+/// report six here (three times the true number), and a cache hit
+/// would then replay that inflated count again on every subsequent
+/// hit instead of the real one.
+#[test]
+fn cross_passage_search_tallies_lane_hits_against_the_served_page_not_every_target() {
+    let server = Server::start("rcache-lane-overcount");
+    for context in ["cx", "cy", "cz"] {
+        server.ok(
+            "PUT",
+            &format!("/contexts/{context}"),
+            Some(json!({"description": "d"})),
+        );
+        server.ok(
+            "POST",
+            &format!("/contexts/{context}/sources"),
+            Some(json!({
+                "passages": {
+                    "a.md": format!(
+                        "{context}の一段落目は端麗である。\n\n{context}の二段落目も端麗である。"
+                    ),
+                },
+            })),
+        );
+    }
+    let search = || {
+        server.ok(
+            "POST",
+            "/sources/search",
+            Some(json!({"contexts": ["cx", "cy", "cz"], "query": "端麗", "limit": 2})),
+        )
+    };
+
+    let first = search();
+    assert_eq!(
+        first["hits"].as_array().unwrap().len(),
+        2,
+        "limit: 2 must still cap the served page — {first}"
+    );
+    assert_eq!(
+        metric(
+            &server,
+            "taguru_passage_lane_contributions_total{lane=\"bm25_only\"}"
+        ),
+        2,
+        "must count the 2 SERVED hits, not the 6 candidates the three targets \
+         found before the merge truncated them"
+    );
+
+    // A cache hit must replay the same served count, not re-add the
+    // (already wrong, pre-fix) pre-merge total on top.
+    let second = search();
+    assert_eq!(first, second);
+    assert_eq!(cache_hits(&server, "search_passages"), 1);
+    assert_eq!(
+        metric(
+            &server,
+            "taguru_passage_lane_contributions_total{lane=\"bm25_only\"}"
+        ),
+        4,
+        "one fresh serve (2) plus one cache-hit replay (2), never 6+6"
+    );
+}
+
+/// A cross-context response must never be cached when ANY target's
+/// semantic lane hit a transient embedding failure — `embedding_failed`
+/// is accumulated with OR across every target in the merge loop, so
+/// one degraded target already vetoes the whole merged response's
+/// cache key (mirrors the single-context handler's own fill-must-not-
+/// pin rule, #602 item 2). Both targets fail identically here (one
+/// broken provider), which is enough: an AND-accumulation regression
+/// would leave the flag `false` from the very first target onward and
+/// let the response get cached, so the second identical call would
+/// wrongly register as a cache HIT instead of a fresh miss.
+#[test]
+fn cross_passage_search_never_caches_a_response_degraded_by_embedding_failure() {
+    let server = Server::start_with_env(
+        "rcache-embed-degrade",
+        &[
+            ("TAGURU_EMBED_URL", "http://127.0.0.1:9/v1/embeddings"),
+            ("TAGURU_EMBED_MODEL", "unreachable-model"),
+            ("TAGURU_EMBED_PASSAGES", "1"),
+        ],
+    );
+    for context in ["cx", "cy"] {
+        server.ok(
+            "PUT",
+            &format!("/contexts/{context}"),
+            Some(json!({"description": "d"})),
+        );
+        server.ok(
+            "POST",
+            &format!("/contexts/{context}/sources"),
+            Some(json!({"passages": {"a.md": format!("{context}の蔵は端麗な酒を醸す。")}})),
+        );
+    }
+    let search = || {
+        server.ok(
+            "POST",
+            "/sources/search",
+            Some(json!({"contexts": ["cx", "cy"], "query": "端麗"})),
+        )
+    };
+    let first = search();
+    assert!(
+        !first["hits"].as_array().unwrap().is_empty(),
+        "BM25 must still answer despite the degraded semantic lane: {first}"
+    );
+    search();
+    assert_eq!(
+        cache_hits(&server, "search_passages"),
+        0,
+        "a degraded fill must never be pinned into the retrieval cache"
+    );
+    assert_eq!(cache_misses(&server, "search_passages"), 2);
+}

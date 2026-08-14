@@ -188,6 +188,13 @@ fn lost_positions_answer_stale_cursor_and_unknown_contexts_404() {
         assert_eq!(status, 410, "{body}");
         assert_eq!(body["code"], json!("stale_cursor"), "{body}");
     }
+    // issue #621: a stale cursor is a successfully-consulted context
+    // whose answer happens to be a 410 — it must still count as a
+    // read, the same as citation's UnknownSource/IndexOutOfRange arms
+    // (advisory usage row only; eviction uses the separate last_touch
+    // field, unaffected either way).
+    let entry = server.ok("GET", "/contexts/sake", None);
+    assert_eq!(entry["usage"]["reads"], json!(2), "{entry}");
 
     // Delete-and-recreate mints a new ring: the old cursor is gone even
     // though the name answers again.
