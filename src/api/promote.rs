@@ -442,8 +442,9 @@ fn landing_audit(
         .map_err(audit_skip_reason)?;
     let staleness = state
         .read_context(into, |context| {
-            staleness_section(context, &effective, 0, 100)
+            staleness_section(context, &effective, 0, 100, deadline)
         })
+        .and_then(std::convert::identity)
         .map_err(audit_skip_reason)?;
     Ok(ConsolidationAudit {
         detector: CONSOLIDATION_DETECTOR.to_string(),

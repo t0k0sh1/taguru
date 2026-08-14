@@ -189,6 +189,41 @@ fn sections_detect_join_and_fingerprint_their_candidates() {
     assert_eq!(status, 404);
 }
 
+/// `floor_secs` is inclusive (issue #620): 蔵A's 銘柄 fact gaps its
+/// neighborhood by exactly 1000 (latest 1000 vs. neighborhood 2000,
+/// per the seed comment above), so a floor of exactly 1000 must still
+/// surface it — only a floor PAST the gap excludes it. Pins the `<`
+/// boundary `staleness_section`'s gap filter runs on.
+#[test]
+fn floor_secs_is_inclusive_of_a_gap_exactly_at_the_floor() {
+    let server = Server::start("consolidation-audit-floor-secs");
+    seed(&server);
+
+    let at_floor = audit(
+        &server,
+        json!({"checks": ["staleness"], "floor_secs": 1000}),
+    );
+    let stale = at_floor["staleness"]["candidates"].as_array().unwrap();
+    assert!(
+        stale
+            .iter()
+            .any(|candidate| candidate["label"] == json!("銘柄") && candidate["gap"] == json!(1000)),
+        "a gap exactly at floor_secs must still be a candidate — {at_floor}"
+    );
+
+    let past_floor = audit(
+        &server,
+        json!({"checks": ["staleness"], "floor_secs": 1001}),
+    );
+    let stale = past_floor["staleness"]["candidates"].as_array().unwrap();
+    assert!(
+        !stale
+            .iter()
+            .any(|candidate| candidate["label"] == json!("銘柄") && candidate["gap"] == json!(1000)),
+        "a gap one below floor_secs must be excluded — {past_floor}"
+    );
+}
+
 /// A chat stub answering every completion with a valid judgment —
 /// fenced, because real models decorate — and counting the calls.
 fn stub_judge(calls: Arc<Mutex<usize>>) -> String {

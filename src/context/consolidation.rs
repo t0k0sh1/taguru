@@ -112,29 +112,83 @@ pub struct SignConflict {
     pub fingerprint: u64,
 }
 
+// Test-only deterministic fault injection for `merge_evidence`'s own
+// per-iteration deadline checks (issue #620): mirrors `api::groups`'s
+// `expire_fingerprint_loop_after` — a real deadline landing mid-walk
+// through one concept's adjacency list cannot be raced reliably (each
+// step is an in-memory lookup, done in well under a microsecond), so a
+// regression test that needs the check to fire partway through arms
+// this instead. Shared by `neighbor_set`'s two loops and
+// `merge_evidence`'s own fingerprint fold, since all three sit behind
+// one caller-visible contract ("checked throughout", not just before
+// the call).
+#[cfg(test)]
+thread_local! {
+    static EXPIRE_MERGE_EVIDENCE_LOOP_AFTER: std::cell::Cell<Option<u32>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn expire_merge_evidence_loop_after(remaining: u32) {
+    EXPIRE_MERGE_EVIDENCE_LOOP_AFTER.with(|cell| cell.set(Some(remaining)));
+}
+
+#[cfg(test)]
+fn injected_merge_evidence_loop_expiry() -> bool {
+    EXPIRE_MERGE_EVIDENCE_LOOP_AFTER.with(|cell| match cell.get() {
+        Some(0) => {
+            cell.set(None);
+            true
+        }
+        Some(remaining) => {
+            cell.set(Some(remaining - 1));
+            false
+        }
+        None => false,
+    })
+}
+
+#[cfg(not(test))]
+#[mutants::skip] // dead under cfg(test) — mirrors api.rs's injected_deadline_race
+fn injected_merge_evidence_loop_expiry() -> bool {
+    false
+}
+
 impl Context {
     /// The live neighborhood of one concept as a set of
     /// (direction, label, other) triples, hidden labels excluded —
     /// the comparable unit behind [`Context::merge_evidence`].
+    /// Deadline-checked per edge (issue #620): a hub concept's degree
+    /// is unbounded by anything `merge_evidence`'s own caller controls
+    /// (`evidence_cap` only bounds what gets SERVED, not this walk),
+    /// so a single pair naming one can otherwise run past the budget
+    /// entirely between two of `merge_section`'s own per-pair checks.
     fn neighbor_set(
         &self,
         id: ConceptId,
         hidden: &HashSet<LabelId>,
-    ) -> BTreeSet<(u8, LabelId, ConceptId)> {
+        deadline: Deadline,
+    ) -> Result<BTreeSet<(u8, LabelId, ConceptId)>, DeadlineExceeded> {
         let mut set = BTreeSet::new();
         for edge_id in self.outgoing(id) {
+            if deadline.expired() || injected_merge_evidence_loop_expiry() {
+                return Err(DeadlineExceeded);
+            }
             let edge = &self.edges[edge_id as usize];
             if edge.count > 0 && !hidden.contains(&edge.label) {
                 set.insert((0u8, edge.label, edge.object));
             }
         }
         for edge_id in self.incoming(id) {
+            if deadline.expired() || injected_merge_evidence_loop_expiry() {
+                return Err(DeadlineExceeded);
+            }
             let edge = &self.edges[edge_id as usize];
             if edge.count > 0 && !hidden.contains(&edge.label) {
                 set.insert((1u8, edge.label, edge.subject));
             }
         }
-        set
+        Ok(set)
     }
 
     /// Structural corroboration for one candidate pair (ADR 0012 §4):
@@ -144,23 +198,28 @@ impl Context {
     /// `schema:type` when a schema is installed — count toward
     /// nothing: two same-typed concepts sharing only their type edge
     /// have no *structural* overlap, and the type itself is reported
-    /// separately by the audit (ADR 0012 §7). `None` when either
-    /// spelling is unknown.
+    /// separately by the audit (ADR 0012 §7). `Ok(None)` when either
+    /// spelling is unknown. Deadline-checked throughout (issue #620),
+    /// not just before/after the call: `neighbor_set`'s own walk and
+    /// the fingerprint fold below both scale with a concept's degree,
+    /// not with `cap`.
     pub fn merge_evidence(
         &self,
         a: &str,
         b: &str,
         cap: usize,
         excluded: &[&str],
-    ) -> Option<MergeEvidence> {
-        let &a_id = self.concept_ids.get(a)?;
-        let &b_id = self.concept_ids.get(b)?;
+        deadline: Deadline,
+    ) -> Result<Option<MergeEvidence>, DeadlineExceeded> {
+        let (Some(&a_id), Some(&b_id)) = (self.concept_ids.get(a), self.concept_ids.get(b)) else {
+            return Ok(None);
+        };
         let hidden: HashSet<LabelId> = excluded
             .iter()
             .filter_map(|name| self.label_ids.get(*name).copied())
             .collect();
-        let a_set = self.neighbor_set(a_id, &hidden);
-        let b_set = self.neighbor_set(b_id, &hidden);
+        let a_set = self.neighbor_set(a_id, &hidden, deadline)?;
+        let b_set = self.neighbor_set(b_id, &hidden, deadline)?;
 
         let materialize = |(direction, label, other): &(u8, LabelId, ConceptId)| NeighborFact {
             direction: if *direction == 0 { "out" } else { "in" }.to_string(),
@@ -175,21 +234,23 @@ impl Context {
         // The fingerprint folds NAMES over the FULL evidence, pair-order
         // canonicalized: swapping (a, b) must not mint a new identity,
         // and dense ids — reassigned by compaction — must never enter.
-        let fact_strings = |facts: &[&(u8, LabelId, ConceptId)]| -> Vec<String> {
-            let mut strings: Vec<String> = facts
-                .iter()
-                .map(|&&(direction, label, other)| {
-                    format!(
+        let fact_strings =
+            |facts: &[&(u8, LabelId, ConceptId)]| -> Result<Vec<String>, DeadlineExceeded> {
+                let mut strings = Vec::with_capacity(facts.len());
+                for &&(direction, label, other) in facts {
+                    if deadline.expired() || injected_merge_evidence_loop_expiry() {
+                        return Err(DeadlineExceeded);
+                    }
+                    strings.push(format!(
                         "{}|{}|{}",
                         direction,
                         self.label_name(label),
                         self.concept_name(other)
-                    )
-                })
-                .collect();
-            strings.sort_unstable();
-            strings
-        };
+                    ));
+                }
+                strings.sort_unstable();
+                Ok(strings)
+            };
         let (first, second, first_only, second_only) = if a <= b {
             (a, b, &only_a, &only_b)
         } else {
@@ -200,12 +261,12 @@ impl Context {
         digest = fold_field(digest, second);
         for (tag, facts) in [("s", &shared), ("f", first_only), ("g", second_only)] {
             digest = fold_field(digest, tag);
-            for fact in fact_strings(facts) {
+            for fact in fact_strings(facts)? {
                 digest = fold_field(digest, &fact);
             }
         }
 
-        Some(MergeEvidence {
+        Ok(Some(MergeEvidence {
             overlap: if union == 0 {
                 0.0
             } else {
@@ -218,7 +279,7 @@ impl Context {
             only_a: only_a.into_iter().take(cap).map(materialize).collect(),
             only_b: only_b.into_iter().take(cap).map(materialize).collect(),
             fingerprint: digest,
-        })
+        }))
     }
 
     /// Every `(subject, label)` holding at least two live distinct
@@ -397,7 +458,8 @@ mod tests {
         context.retract_source("doc");
 
         let evidence = context
-            .merge_evidence("青嶺酒造", "青嶺酒蔵", 10, &[])
+            .merge_evidence("青嶺酒造", "青嶺酒蔵", 10, &[], Deadline::unbounded())
+            .unwrap()
             .unwrap();
         assert_eq!(evidence.shared_total, 2);
         assert_eq!(evidence.only_a_total, 1, "杜氏→高瀬");
@@ -420,7 +482,8 @@ mod tests {
         );
         assert!(
             context
-                .merge_evidence("青嶺酒造", "未知", 10, &[])
+                .merge_evidence("青嶺酒造", "未知", 10, &[], Deadline::unbounded())
+                .unwrap()
                 .is_none()
         );
     }
@@ -435,11 +498,15 @@ mod tests {
             .associate("b", "schema:type", "Person", 1.0)
             .unwrap();
         let bare = context
-            .merge_evidence("a", "b", 10, &["schema:type"])
+            .merge_evidence("a", "b", 10, &["schema:type"], Deadline::unbounded())
+            .unwrap()
             .unwrap();
         assert_eq!(bare.overlap, 0.0, "a shared type edge is not structure");
         assert_eq!(bare.shared_total, 0);
-        let unhidden = context.merge_evidence("a", "b", 10, &[]).unwrap();
+        let unhidden = context
+            .merge_evidence("a", "b", 10, &[], Deadline::unbounded())
+            .unwrap()
+            .unwrap();
         assert_eq!(unhidden.overlap, 1.0);
     }
 
@@ -456,7 +523,10 @@ mod tests {
         }
         context.associate("a", "own", "only-a", 1.0).unwrap();
 
-        let capped = context.merge_evidence("a", "b", 2, &[]).unwrap();
+        let capped = context
+            .merge_evidence("a", "b", 2, &[], Deadline::unbounded())
+            .unwrap()
+            .unwrap();
         assert_eq!(capped.shared_total, 5, "totals stay exact past the cap");
         assert_eq!(capped.shared.len(), 2, "lists cap");
         assert_eq!(capped.only_a_total, 1);
@@ -464,9 +534,15 @@ mod tests {
         // The fingerprint covers the FULL evidence, so neither the cap
         // nor the pair order may move it — it is the judgment
         // artifact's identity (ADR 0012 §5).
-        let uncapped = context.merge_evidence("a", "b", 100, &[]).unwrap();
+        let uncapped = context
+            .merge_evidence("a", "b", 100, &[], Deadline::unbounded())
+            .unwrap()
+            .unwrap();
         assert_eq!(capped.fingerprint, uncapped.fingerprint);
-        let swapped = context.merge_evidence("b", "a", 2, &[]).unwrap();
+        let swapped = context
+            .merge_evidence("b", "a", 2, &[], Deadline::unbounded())
+            .unwrap()
+            .unwrap();
         assert_eq!(capped.fingerprint, swapped.fingerprint);
         assert_eq!(swapped.only_a_total, 0, "sides follow the arguments");
         assert_eq!(swapped.only_b_total, 1);
@@ -479,6 +555,108 @@ mod tests {
         let expired = Deadline::after(std::time::Duration::ZERO);
         assert!(context.contradiction_groups(expired).is_err());
         assert!(context.sign_conflicts(expired).is_err());
+    }
+
+    /// issue #620: `merge_evidence` must refuse an already-expired
+    /// deadline like every other full-graph pass.
+    #[test]
+    fn merge_evidence_honors_an_expired_deadline() {
+        let mut context = Context::default();
+        context.associate("a", "r", "x", 1.0).unwrap();
+        context.associate("b", "r", "x", 1.0).unwrap();
+        let expired = Deadline::after(std::time::Duration::ZERO);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        assert!(expired.expired(), "a zero budget must read as expired");
+        assert!(context.merge_evidence("a", "b", 10, &[], expired).is_err());
+    }
+
+    /// issue #620: the check inside `neighbor_set`'s own walk must
+    /// fire on a LATER iteration, not only before `merge_evidence` is
+    /// called — a hub concept's degree is unbounded by `evidence_cap`
+    /// (which only bounds what gets SERVED), so `merge_section`'s own
+    /// per-pair check cannot catch a budget dying partway through one
+    /// pair's adjacency walk. A real `Duration` cannot land this
+    /// deterministically (each step is an in-memory lookup, done in
+    /// well under a microsecond) — `expire_merge_evidence_loop_after`
+    /// arms the fault instead, mirroring `api::groups`'s own
+    /// `expire_fingerprint_loop_after` for the same reason.
+    #[test]
+    fn merge_evidence_checks_the_deadline_mid_walk_not_only_before_it_starts() {
+        let mut context = Context::default();
+        for n in 0..5 {
+            context
+                .associate("a", "shares", format!("x{n}"), 1.0)
+                .unwrap();
+        }
+        context.associate("b", "shares", "x0", 1.0).unwrap();
+
+        // The first per-edge check reports "not yet expired"; the
+        // second reports expired — proof the check runs more than
+        // once across "a"'s five-edge walk, not only once before it.
+        expire_merge_evidence_loop_after(1);
+        let result = context.merge_evidence("a", "b", 10, &[], Deadline::unbounded());
+        assert!(
+            result.is_err(),
+            "the check must fire on a later iteration of neighbor_set's walk"
+        );
+    }
+
+    /// issue #620: `neighbor_set`'s INCOMING-edge loop has its own
+    /// deadline check, independent of the outgoing loop above — a
+    /// concept that is mostly (or only) an OBJECT of other assertions
+    /// has an unbounded incoming degree the outgoing loop's own check
+    /// never walks through. Calls `neighbor_set` directly rather than
+    /// through `merge_evidence`: `deadline.expired() || injected(..)`
+    /// short-circuits, so if the incoming loop's own check were ever
+    /// downgraded to `&&`, an unconsumed armed fault would silently
+    /// leak forward into `merge_evidence`'s later checkpoints (`b`'s
+    /// own walk, then the fingerprint fold) and still be consumed
+    /// there — making the overall call return `Err` either way and
+    /// hiding exactly the regression this test exists to catch.
+    #[test]
+    fn merge_evidence_checks_the_deadline_on_the_incoming_side_too() {
+        let mut context = Context::default();
+        // "a" has zero outgoing edges and five incoming edges — the
+        // outgoing loop consults the fault zero times, so the first
+        // consult the fault sees can only come from the incoming loop.
+        for n in 0..5 {
+            context.associate(format!("z{n}"), "r", "a", 1.0).unwrap();
+        }
+        let a_id = *context.concept_ids.get("a").unwrap();
+
+        // The first per-edge check reports "not yet expired"; the
+        // second reports expired — proof the check runs more than
+        // once across the incoming walk, not only once before it.
+        expire_merge_evidence_loop_after(1);
+        let result = context.neighbor_set(a_id, &HashSet::new(), Deadline::unbounded());
+        assert!(
+            result.is_err(),
+            "the incoming-edge loop must also consult the injected fault"
+        );
+    }
+
+    /// issue #620: the fingerprint fold over the full evidence
+    /// (`fact_strings`, after both sides' `neighbor_set` calls
+    /// already succeeded) has its own deadline check too — the fold
+    /// is unbounded in the number of shared/distinct facts, same
+    /// reasoning as the adjacency walk itself.
+    #[test]
+    fn merge_evidence_checks_the_deadline_during_the_fingerprint_fold_too() {
+        let mut context = Context::default();
+        context.associate("a", "r", "only-a", 1.0).unwrap();
+        context.associate("b", "r", "only-b", 1.0).unwrap();
+
+        // Exactly 2 fault consults happen inside `neighbor_set("a")`
+        // and `neighbor_set("b")` (one outgoing edge each, no
+        // incoming ones) before either side's walk could possibly
+        // fail; the 3rd consult is `fact_strings`' own first
+        // iteration over the (non-shared) evidence.
+        expire_merge_evidence_loop_after(2);
+        let result = context.merge_evidence("a", "b", 10, &[], Deadline::unbounded());
+        assert!(
+            result.is_err(),
+            "the fingerprint fold must also consult the injected fault"
+        );
     }
 
     #[test]
