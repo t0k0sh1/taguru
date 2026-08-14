@@ -1752,6 +1752,7 @@ pub(crate) fn injected_deadline_race() -> bool {
 }
 
 #[cfg(not(test))]
+#[mutants::skip] // dead under cfg(test) — the test binary always compiles the OTHER arm above, so no test build ever reaches this body to tell "false" from a mutant
 pub(crate) fn injected_deadline_race() -> bool {
     false
 }

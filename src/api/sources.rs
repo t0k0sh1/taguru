@@ -2646,6 +2646,41 @@ mod tests {
         assert_eq!(body["code"], ErrorCode::Timeout.as_str(), "{body}");
     }
 
+    /// issue #620 (所見3): the other direction of the same guard — an
+    /// unexpired deadline must never reclassify a target's genuine
+    /// disk fault as a timeout.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cross_search_passages_reports_a_genuine_io_error_as_unreadable_not_timeout() {
+        let (state, dir) = scratch_state("cross-search-io-error");
+        state.create("sake", ContextMeta::default()).unwrap();
+        corrupt_passages_snapshot(&dir, "sake");
+
+        let request = CrossSearchPassagesRequest {
+            contexts: vec!["sake".to_string()],
+            groups: Vec::new(),
+            query: "AAA".to_string(),
+            limit: None,
+            semantic_floor: None,
+            tags: Vec::new(),
+            since: None,
+            until: None,
+        };
+        let response = cross_search_passages(
+            State(state),
+            None,
+            None,
+            axum::Extension(Deadline::unbounded()),
+            AppJson(request),
+        )
+        .await;
+
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], ErrorCode::Internal.as_str(), "{body}");
+    }
+
     /// issue #620 (所見3, 所見1's non-panicking twin): `cross_search_passages`
     /// must reclassify a target's genuine io::Error as a timeout once
     /// the budget is spent, same rule as the single-context handler.
@@ -2695,6 +2730,20 @@ mod tests {
             .unwrap()
             .expect("a non-empty tag list must produce Some filter");
         assert_eq!(filter.tags, vec!["dup".to_string()]);
+    }
+
+    /// The cap is inclusive: exactly `MAX_TAGS_PER_SOURCE` distinct
+    /// tags is still a legal filter, only one past it refuses — pins
+    /// the `>` boundary the cap check runs on.
+    #[test]
+    fn source_filter_accepts_exactly_the_cap_in_distinct_tags() {
+        let tags: Vec<String> = (0..super::super::MAX_TAGS_PER_SOURCE)
+            .map(|index| format!("tag{index}"))
+            .collect();
+        let filter = source_filter(&tags, None, None, Instant::now())
+            .unwrap()
+            .expect("exactly the cap in distinct tags must still be a legal filter");
+        assert_eq!(filter.tags.len(), super::super::MAX_TAGS_PER_SOURCE);
     }
 
     /// The cap still refuses a filter whose DISTINCT tag count exceeds
