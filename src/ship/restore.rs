@@ -263,6 +263,26 @@ pub(crate) async fn restore_into(
             ),
         ));
     };
+    // The same hostile-input posture `safe_manifest_name` exists for:
+    // a name in both maps would have the lane's `write_atomic` clobber
+    // the file's already-restored bytes (or vice versa, depending on
+    // iteration order — a HashMap's, unspecified), landing a directory
+    // that does not match the manifest either way. Never produced by a
+    // real shipper (files and lanes are named from disjoint suffixes),
+    // so this is bucket rot or tampering, not age.
+    if let Some(name) = manifest
+        .files
+        .keys()
+        .find(|name| manifest.lanes.contains_key(*name))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{name}: the manifest names both a file and a lane — the bucket may be \
+                 tampered with"
+            ),
+        ));
+    }
     for (name, expect) in &manifest.files {
         let key = generation_root.clone().join("files").join(name.as_str());
         let bytes = fetch(store, &key).await?;

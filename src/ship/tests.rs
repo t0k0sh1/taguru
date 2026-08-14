@@ -632,7 +632,9 @@ async fn a_lane_deleted_between_the_scan_and_its_own_turn_ships_nothing_not_an_e
         shipper.cycle().await
     });
 
-    started.notified().await;
+    tokio::time::timeout(Duration::from_secs(5), started.notified())
+        .await
+        .expect("the paused put must start");
     std::fs::remove_file(&ctx_b_wal).unwrap();
     release.notify_one();
 
@@ -1210,6 +1212,73 @@ async fn restore_refuses_a_manifest_naming_a_path_outside_the_target_directory()
     let _ = std::fs::remove_file(&escape_target);
 }
 
+/// A manifest naming the SAME entry as both a file and a lane must
+/// refuse, not let one silently clobber the other's already-restored
+/// bytes (issue #638 review): never produced by a real shipper (files
+/// and lanes are named from disjoint suffixes), so this is bucket rot
+/// or tampering, exactly the posture `safe_manifest_name` exists for.
+#[tokio::test]
+async fn restore_refuses_a_manifest_naming_the_same_entry_as_a_file_and_a_lane() {
+    let dir = scratch_dir("manifest-file-lane-collision");
+    let state = state_for(&dir);
+    let progress = Arc::new(ShipProgress::new(crate::registry::DEFAULT_WAL_MAX_BYTES));
+    let store = Arc::new(InMemory::new());
+
+    std::fs::write(dir.join("ctx_a.ctx"), b"image-v1").unwrap();
+    let wal_path = dir.join("ctx_a.wal.jsonl");
+    wal::append_batch(&wal_path, 1, &[associate("a")]).unwrap();
+    let mut shipper = claimed(&store, &dir, &state, &progress).await;
+    shipper.cycle().await.unwrap();
+
+    // Tamper the manifest: insert a FILES entry under the same name as
+    // the already-shipped LANE — a real CRC over an arbitrary payload,
+    // so content verification alone would accept it.
+    let generation_root = gen_root(&StorePath::default(), 1);
+    let colliding_name = "ctx_a.wal.jsonl";
+    let payload = b"clobbered!".to_vec();
+    let key = generation_root.clone().join("files").join(colliding_name);
+    (store.as_ref() as &dyn ObjectStore)
+        .put(&key, PutPayload::from(payload.clone()))
+        .await
+        .unwrap();
+    let bytes = read_object(&store, "gen-00000000000000000001/complete").await;
+    let mut manifest: Manifest = serde_json::from_slice(&bytes).unwrap();
+    assert!(
+        manifest.lanes.contains_key(colliding_name),
+        "the fixture must already ship this name as a lane: {manifest:?}"
+    );
+    manifest.files.insert(
+        colliding_name.to_string(),
+        ManifestFile {
+            len: payload.len() as u64,
+            crc: crate::crc32c::crc32c(&payload),
+        },
+    );
+    (store.as_ref() as &dyn ObjectStore)
+        .put(
+            &generation_root.clone().join(COMPLETE_MARKER),
+            PutPayload::from(serde_json::to_vec(&manifest).unwrap()),
+        )
+        .await
+        .unwrap();
+
+    let restored_dir = scratch_dir("manifest-file-lane-collision-out");
+    let error = restore_into(
+        store.as_ref() as &dyn ObjectStore,
+        &StorePath::default(),
+        &restored_dir,
+    )
+    .await
+    .expect_err("a name that is both a file and a lane must refuse");
+    assert!(
+        error.to_string().contains("both a file and a lane"),
+        "{error}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&restored_dir);
+}
+
 #[tokio::test]
 async fn a_claim_is_recorded_locally_and_liveness_markers_land() {
     let dir = scratch_dir("liveness");
@@ -1271,6 +1340,60 @@ fn classification_and_lane_parents_agree_with_the_family_layout() {
     assert_eq!(parent_snapshot_of("x.ctx"), None);
 }
 
+/// #638 review: `newest_seq` pinned directly, on the exact input
+/// shapes `ship_lane` actually passes it (complete lines, or complete
+/// lines followed by a torn tail — never a lone line with no trailing
+/// newline at all, which `ship_lane` only ever reads as part of a
+/// larger buffer that already ends `\n`-terminated up to the last
+/// complete record).
+#[test]
+fn newest_seq_reports_the_highest_seq_among_complete_lines() {
+    assert_eq!(newest_seq(b""), None);
+    assert_eq!(newest_seq(b"{\"seq\":1}\n"), Some(1));
+    assert_eq!(newest_seq(b"{\"seq\":1}\n{\"seq\":2}\n"), Some(2));
+    // A torn tail (no trailing newline) is ignored, same as
+    // `shippable_records`'s own trailing-segment-pop.
+    assert_eq!(newest_seq(b"{\"seq\":1}\n{\"seq\":2}\n{\"seq\":3"), Some(2));
+}
+
+/// #638 review: `update_pending_since`'s `local_seq > shipped_seq`
+/// boundary, pinned directly on a `LaneState` — `>` and `>=` disagree
+/// exactly at equality (the ordinary fully-caught-up case), where `>=`
+/// would wrongly mark a caught-up lane as newly pending.
+#[test]
+fn update_pending_since_treats_equal_seqs_as_caught_up_not_pending() {
+    let mut lane = LaneState::fresh(0);
+    lane.shipped_seq = 5;
+    lane.local_seq = 5;
+    update_pending_since(&mut lane);
+    assert!(
+        lane.pending_since.is_none(),
+        "local_seq == shipped_seq must not be pending"
+    );
+}
+
+/// #638 review: the complementary case — a lane genuinely behind must
+/// be marked pending, and one that WAS behind and just caught up must
+/// have that pending mark cleared, not linger.
+#[test]
+fn update_pending_since_marks_a_real_gap_and_clears_once_caught_up() {
+    let mut lane = LaneState::fresh(0);
+    lane.shipped_seq = 5;
+    lane.local_seq = 6;
+    update_pending_since(&mut lane);
+    assert!(
+        lane.pending_since.is_some(),
+        "local_seq > shipped_seq must be pending"
+    );
+
+    lane.local_seq = 5;
+    update_pending_since(&mut lane);
+    assert!(
+        lane.pending_since.is_none(),
+        "catching up must clear the pending mark, not leave it stale"
+    );
+}
+
 /// #618: a `.taguru.replication` record that exists but cannot be
 /// parsed must surface as an error, never silently treated as absent
 /// — `prepare`/`prepare_replica` both refuse to boot on it rather than
@@ -1316,7 +1439,9 @@ async fn a_claim_retries_past_a_generation_taken_between_its_check_and_its_write
     let claim_task =
         tokio::spawn(async move { claimed_dyn(store, &dir2, &state2, &progress2).await });
 
-    started.notified().await;
+    tokio::time::timeout(Duration::from_secs(5), started.notified())
+        .await
+        .expect("the paused put must start");
     inner
         .put_opts(
             &target,
@@ -1372,6 +1497,31 @@ async fn a_claim_carries_hydrated_from_forward_only_for_the_same_bucket_url() {
         "a claim against the SAME bucket must carry the prior hydrated_from forward"
     );
     let _ = std::fs::remove_dir_all(&dir);
+
+    // The other half of the `record.url == url` filter: a directory
+    // whose EXISTING record names a DIFFERENT bucket must not inherit
+    // a generation number that means nothing there — removing the
+    // filter (or inverting it) would still pass the same-url assertion
+    // above, so this is the branch that actually pins the condition.
+    let other_dir = scratch_dir("claim-hydrated-from-different-url");
+    write_replication_record(
+        &other_dir,
+        &ReplicationRecord {
+            url: "mem://a-different-bucket".to_string(),
+            claimed_generation: None,
+            hydrated_from: Some(5),
+        },
+    )
+    .unwrap();
+    let other_state = state_for(&other_dir);
+    claimed(&store, &other_dir, &other_state, &progress).await;
+    let other_record = read_replication_record(&other_dir).unwrap().unwrap();
+    assert_eq!(
+        other_record.hydrated_from, None,
+        "a claim against a DIFFERENT bucket than the existing record names must not \
+         inherit its hydrated_from"
+    );
+    let _ = std::fs::remove_dir_all(&other_dir);
 }
 
 /// #618: under a lazy (not-yet-drained) hydration, a cycle whose ONLY

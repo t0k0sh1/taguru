@@ -950,12 +950,21 @@ mod tests {
             tailer.info.refusal()
         );
 
+        // The fixture's own expected holder string, fetched
+        // independently — asserting only the ABSENCE of "none known"
+        // would also pass if `note_fence` resolved a `None` holder
+        // (still no "none known" phrase, but not what this test is
+        // pinning): the poll must actually carry the real holder text.
+        let expected_holder = ship::fence_holder(store.as_ref(), &StorePath::default(), 1)
+            .await
+            .expect("the fixture's own writer claimed generation 1");
+
         tailer.poll_once().await.expect("the poll completes");
+        let refusal = tailer.info.refusal();
         assert!(
-            !tailer.info.refusal().contains("none known"),
+            refusal.contains("claimed by") && refusal.contains(&expected_holder),
             "the very first poll against an existing fence must resolve the holder \
-             line, not wait for a repeat poll of the same generation: {}",
-            tailer.info.refusal()
+             line, not wait for a repeat poll of the same generation: {refusal}"
         );
 
         for dir in [bucket, target] {

@@ -18,7 +18,24 @@ impl ReplicateConfig {
     /// steady-state RPO knob). A zero interval would spin the poll
     /// loop; floor to 100ms, loudly, like every other env knob.
     pub(crate) fn from_env() -> Option<Self> {
-        let url = std::env::var("TAGURU_REPLICATE_URL").ok()?;
+        Self::from_values(
+            std::env::var("TAGURU_REPLICATE_URL").ok(),
+            std::env::var("TAGURU_REPLICATE_INTERVAL_MS").ok(),
+        )
+    }
+
+    /// The pure parsing half of [`Self::from_env`], taking the two raw
+    /// values instead of reading them itself — every branch is
+    /// reachable from a plain function call, so tests exercise them
+    /// with ordinary arguments instead of mutating the REAL process
+    /// environment (`std::env::set_var`/`remove_var` require, under
+    /// Rust's own safety contract, that no other thread reads or
+    /// writes ANY env var while the call runs — a lock scoped to only
+    /// these two keys cannot provide that against unrelated,
+    /// concurrently-running tests elsewhere in the suite that read
+    /// env vars without taking it).
+    fn from_values(url: Option<String>, interval_ms: Option<String>) -> Option<Self> {
+        let url = url?;
         let url = url.trim().to_string();
         if url.is_empty() {
             // The same present-but-blank trap TAGURU_PUBLIC_URL guards
@@ -30,7 +47,18 @@ impl ReplicateConfig {
             );
             return None;
         }
-        let requested = crate::env::env_number("TAGURU_REPLICATE_INTERVAL_MS", 1000);
+        // `crate::env::env_number`'s own contract (parse, or warn and
+        // fall back to the default), reimplemented against the passed
+        // value rather than a live env read — see this function's doc.
+        let requested = match interval_ms {
+            Some(value) => value.parse::<usize>().unwrap_or_else(|_| {
+                tracing::warn!(
+                    "ignoring TAGURU_REPLICATE_INTERVAL_MS={value}: not a number; using 1000"
+                );
+                1000
+            }),
+            None => 1000,
+        };
         // `<` vs `<=` is unobservable at the boundary itself (issue
         // #618): at `requested == 100`, both arms compute the same
         // `Duration::from_millis(100)` — the floor branch explicitly,
@@ -189,11 +217,11 @@ mod tests {
 
     /// #618: `TAGURU_REPLICATE_URL` set but blank is the same
     /// templating-accident trap `TAGURU_PUBLIC_URL` guards against —
-    /// treated as disabled, not as a URL to parse.
+    /// treated as disabled, not as a URL to parse. Exercised through
+    /// `from_values` (no real env mutation — see its doc comment).
     #[test]
     fn from_env_treats_a_blank_url_as_disabled() {
-        let _env = crate::ship::test_support::ScopedReplicateEnv::new([Some("   "), None]);
-        assert!(ReplicateConfig::from_env().is_none());
+        assert!(ReplicateConfig::from_values(Some("   ".to_string()), None).is_none());
     }
 
     /// #618: unset entirely is the ordinary "shipping off" case, not
@@ -201,19 +229,18 @@ mod tests {
     /// only one of them logs a warning about it.
     #[test]
     fn from_env_returns_none_when_unset() {
-        let _env = crate::ship::test_support::ScopedReplicateEnv::new([None, None]);
-        assert!(ReplicateConfig::from_env().is_none());
+        assert!(ReplicateConfig::from_values(None, None).is_none());
     }
 
     /// #618: an interval below the busy-poll floor is raised to it,
     /// loudly — never silently honored.
     #[test]
     fn from_env_floors_a_tiny_interval() {
-        let _env = crate::ship::test_support::ScopedReplicateEnv::new([
-            Some("file:///tmp/wherever"),
-            Some("1"),
-        ]);
-        let config = ReplicateConfig::from_env().expect("a non-blank URL enables shipping");
+        let config = ReplicateConfig::from_values(
+            Some("file:///tmp/wherever".to_string()),
+            Some("1".to_string()),
+        )
+        .expect("a non-blank URL enables shipping");
         assert_eq!(config.interval, Duration::from_millis(100));
     }
 
@@ -222,11 +249,11 @@ mod tests {
     /// the call site that actually matters for replication.
     #[test]
     fn from_env_falls_back_to_the_default_interval_on_a_bad_value() {
-        let _env = crate::ship::test_support::ScopedReplicateEnv::new([
-            Some("file:///tmp/wherever"),
-            Some("not-a-number"),
-        ]);
-        let config = ReplicateConfig::from_env().expect("a non-blank URL enables shipping");
+        let config = ReplicateConfig::from_values(
+            Some("file:///tmp/wherever".to_string()),
+            Some("not-a-number".to_string()),
+        )
+        .expect("a non-blank URL enables shipping");
         assert_eq!(config.interval, Duration::from_millis(1000));
     }
 }

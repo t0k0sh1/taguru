@@ -566,14 +566,15 @@ impl Shipper {
 /// Whether a local fs error on a lane file mid-cycle means "this name
 /// vanished between the directory scan that found it and this call"
 /// (ship as if nothing changed; the next scan retires it) vs. any
-/// other local error (propagate). Pulled into its own function so the
-/// condition can be `#[mutants::skip]`ped at each of `ship_lane`'s
-/// three call sites without also skipping mutation coverage on the
-/// rest of that function: only a real filesystem race between the
-/// scan and one of these calls can flip which arm runs, and that race
-/// cannot be pinned deterministically in a test — same reasoning as
-/// `remove_persisted_file_quietly` in `registry/boot.rs`.
-#[mutants::skip]
+/// other local error (propagate). Pulled into its own function so its
+/// mutation targets at `ship_lane`'s three call sites can each be
+/// judged on their own reachability — a real filesystem race between
+/// the scan and one of these calls cannot be pinned deterministically
+/// in a test, but a genuine `NotFound` reaching this comparison IS
+/// (see `a_lane_deleted_between_the_scan_and_its_own_turn_ships_nothing_not_an_error`,
+/// which races an earlier `scan.changed` upload to delete a lane file
+/// before the lanes loop reaches its turn) — see `.cargo/mutants.toml`
+/// for which of the three call sites remain excluded, and why.
 fn vanished_mid_cycle(error: &io::Error) -> bool {
     error.kind() == io::ErrorKind::NotFound
 }
@@ -581,22 +582,10 @@ fn vanished_mid_cycle(error: &io::Error) -> bool {
 /// The newest (highest) seq among the file's complete lines, ignoring
 /// integrity: this feeds the LAG metric only, where an honest "how far
 /// behind" matters more than validity — corrupt bytes will surface as
-/// a shipping error, not a hidden zero lag.
-///
-/// `#[mutants::skip]`ped: `ship_lane` only reaches its call of this
-/// function once its own read of `bytes` succeeded, and every error
-/// path out of that same read (a torn tail aside — deliberately
-/// excluded by both this function's and `shippable_records`'s
-/// identical trailing-segment-pop) returns before `self.lanes.insert`
-/// runs, discarding this call's `lane` mutations wholesale. A record
-/// whose CRC does not match is fatal (surfaces as a shipping error
-/// via `shippable_records`'s `?`), never silently shipped-around — so
-/// there is no reachable state in which this function's return value
-/// legitimately diverges from `lane.shipped_seq` for a test to pin;
-/// `update_pending_since` below exists for defense against a future
-/// change to that invariant, not a reachable-today gap.
-#[mutants::skip]
-fn newest_seq(bytes: &[u8]) -> Option<u64> {
+/// a shipping error, not a hidden zero lag. `pub(super)` (not private)
+/// so `ship::tests` can pin it directly with byte inputs instead of
+/// only through a full `ship_lane` cycle.
+pub(super) fn newest_seq(bytes: &[u8]) -> Option<u64> {
     #[derive(serde::Deserialize)]
     struct SeqOnly {
         seq: u64,
@@ -610,11 +599,16 @@ fn newest_seq(bytes: &[u8]) -> Option<u64> {
 }
 
 /// Whether a lane's local log has grown past what shipped, and for how
-/// long — see `newest_seq`'s doc for why `local_seq` cannot reachably
-/// exceed `shipped_seq` in this codebase today; `#[mutants::skip]`ped
-/// for the same reason.
-#[mutants::skip]
-fn update_pending_since(lane: &mut LaneState) {
+/// long. `pub(super)` (not private) so `ship::tests` can pin the
+/// `local_seq == shipped_seq` boundary directly on a `LaneState`,
+/// rather than only through a full `ship_lane` cycle where the two
+/// are, by construction, never observed to diverge (see `newest_seq`'s
+/// call site in `ship_lane`: both values come from the SAME read of
+/// `bytes`, and every error path out of that read discards this
+/// call's `lane` mutations before they would ever be compared) — this
+/// function's own boundary still needs pinning on its own terms, since
+/// `>` vs `>=` disagree exactly there.
+pub(super) fn update_pending_since(lane: &mut LaneState) {
     if lane.local_seq > lane.shipped_seq {
         lane.pending_since.get_or_insert_with(Instant::now);
     } else {

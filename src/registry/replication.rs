@@ -548,9 +548,16 @@ mod tests {
         );
 
         // Idempotent: a second registration of the same stem must not
-        // replace the entry or error.
+        // REPLACE the entry — `lookup` alone would pass even if it did
+        // (a fresh entry with the same name still looks up fine), so
+        // this pins the actual identity via `Arc::ptr_eq`.
+        let first = state.lookup("sake").expect("just registered");
         state.replica_register(&stem);
-        assert!(state.lookup("sake").is_some());
+        let second = state.lookup("sake").expect("still registered");
+        assert!(
+            std::sync::Arc::ptr_eq(&first, &second),
+            "a repeat registration of an already-registered stem must not replace the entry"
+        );
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -572,8 +579,23 @@ mod tests {
             },
         )
         .unwrap();
-        state.replica_register("not a valid stem at all");
-        assert_eq!(state.group_page(None, usize::MAX).1.len(), 0);
+        // `context_count` is the actual registry `replica_register`
+        // writes into — `group_page` is a different subsystem and
+        // would pass even if this call registered something.
+        //
+        // `name_from_stem` only refuses a `%`-escape it cannot decode
+        // (an odd/invalid hex pair, or a `%` with nothing — or too
+        // little — after it): a plain string with no `%` at all
+        // decodes to itself unchanged, so it is NOT the "undecodable"
+        // case this test means to cover — `"trailing%"` genuinely is,
+        // its dangling `%` running out of input mid-escape.
+        let before = state.context_count();
+        state.replica_register("trailing%");
+        assert_eq!(
+            state.context_count(),
+            before,
+            "an undecodable stem must not register anything"
+        );
         let _ = fs::remove_dir_all(dir);
     }
 
