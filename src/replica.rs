@@ -510,10 +510,7 @@ impl Tailer {
         // behind.
         for (lane_name, lane) in &manifest.lanes {
             let (context, lane_label) = ship::lane_metric_labels(lane_name);
-            let stem = lane_name
-                .strip_suffix(".passages.wal.jsonl")
-                .or_else(|| lane_name.strip_suffix(".wal.jsonl"))
-                .unwrap_or(lane_name);
+            let stem = ship::lane_stem(lane_name);
             if failed.contains(stem) {
                 self.state
                     .metrics()
