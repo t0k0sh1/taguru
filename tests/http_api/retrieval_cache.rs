@@ -585,3 +585,56 @@ fn cross_passage_search_tallies_lane_hits_against_the_served_page_not_every_targ
         "one fresh serve (2) plus one cache-hit replay (2), never 6+6"
     );
 }
+
+/// A cross-context response must never be cached when ANY target's
+/// semantic lane hit a transient embedding failure — `embedding_failed`
+/// is accumulated with OR across every target in the merge loop, so
+/// one degraded target already vetoes the whole merged response's
+/// cache key (mirrors the single-context handler's own fill-must-not-
+/// pin rule, #602 item 2). Both targets fail identically here (one
+/// broken provider), which is enough: an AND-accumulation regression
+/// would leave the flag `false` from the very first target onward and
+/// let the response get cached, so the second identical call would
+/// wrongly register as a cache HIT instead of a fresh miss.
+#[test]
+fn cross_passage_search_never_caches_a_response_degraded_by_embedding_failure() {
+    let server = Server::start_with_env(
+        "rcache-embed-degrade",
+        &[
+            ("TAGURU_EMBED_URL", "http://127.0.0.1:9/v1/embeddings"),
+            ("TAGURU_EMBED_MODEL", "unreachable-model"),
+            ("TAGURU_EMBED_PASSAGES", "1"),
+        ],
+    );
+    for context in ["cx", "cy"] {
+        server.ok(
+            "PUT",
+            &format!("/contexts/{context}"),
+            Some(json!({"description": "d"})),
+        );
+        server.ok(
+            "POST",
+            &format!("/contexts/{context}/sources"),
+            Some(json!({"passages": {"a.md": format!("{context}の蔵は端麗な酒を醸す。")}})),
+        );
+    }
+    let search = || {
+        server.ok(
+            "POST",
+            "/sources/search",
+            Some(json!({"contexts": ["cx", "cy"], "query": "端麗"})),
+        )
+    };
+    let first = search();
+    assert!(
+        !first["hits"].as_array().unwrap().is_empty(),
+        "BM25 must still answer despite the degraded semantic lane: {first}"
+    );
+    search();
+    assert_eq!(
+        cache_hits(&server, "search_passages"),
+        0,
+        "a degraded fill must never be pinned into the retrieval cache"
+    );
+    assert_eq!(cache_misses(&server, "search_passages"), 2);
+}
