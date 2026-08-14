@@ -552,6 +552,16 @@ struct VocabularyView {
     nearest: Vec<Resolution>,
 }
 
+/// "limit N reaches it" / "no limit reaches it" — the lexical and
+/// semantic `below_cutoff` arms below both build this from the same
+/// `limit_to_reach` (issue #622 finding 6).
+fn reach_clause(limit_to_reach: Option<usize>) -> String {
+    match limit_to_reach {
+        Some(reach) => format!("limit {reach} reaches it"),
+        None => "no limit reaches it".to_string(),
+    }
+}
+
 /// Shares `resolve_served`'s DATA half — the same tiers, floors,
 /// merge, and trim (`ResolvedTiers`) — but not its metrics half: see
 /// [`ResolveExplanation`]'s doc for why explain is a `note_read`, not
@@ -884,10 +894,7 @@ fn explain_resolve_verdict(
         )
     } else if target_score.is_some() {
         // At or above the floor yet not served: lost on the limit.
-        let reach = match limit_to_reach {
-            Some(reach) => format!("limit {reach} reaches it"),
-            None => "no limit reaches it".to_string(),
-        };
+        let reach = reach_clause(limit_to_reach);
         (
             "below_cutoff",
             format!(
@@ -937,10 +944,7 @@ fn explain_resolve_verdict(
                 } else {
                     // Cleared the floor, within the cap, yet missing:
                     // the request's own limit trimmed it out.
-                    let reach = match limit_to_reach {
-                        Some(reach) => format!("limit {reach} reaches it"),
-                        None => "no limit reaches it".to_string(),
-                    };
+                    let reach = reach_clause(limit_to_reach);
                     (
                         "below_cutoff",
                         format!(

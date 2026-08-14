@@ -11,18 +11,9 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::deadline::{Deadline, DeadlineExceeded};
-use crate::hash::{FNV1A_OFFSET, fnv1a_fold};
+use crate::hash::{FNV1A_OFFSET, fnv1a_fold, fold_field};
 
 use super::{ConceptId, Context, LabelId};
-
-/// One string folded into a candidate fingerprint, NUL-terminated so
-/// field boundaries cannot alias ("ab"+"c" ≠ "a"+"bc"). Fingerprints
-/// are the judgment artifact's identity (ADR 0012 §5), so they fold
-/// NAMES, never dense ids — ids are reassigned by compaction, names
-/// are the stable evidence.
-fn fold_field(digest: u64, field: &str) -> u64 {
-    fnv1a_fold(fnv1a_fold(digest, field.bytes()), [0u8])
-}
 
 /// One fact of a concept's neighborhood, as merge evidence reports it:
 /// `out` means the concept is the subject of `(label, other)`, `in`
