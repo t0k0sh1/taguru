@@ -914,6 +914,13 @@ fn resolve_explain_names_the_first_verdict_that_applies() {
     assert_eq!(cut["verdict"], json!("below_cutoff"), "{cut}");
     assert_eq!(cut["ranking"]["rank"], json!(2));
     let reach = cut["ranking"]["limit_to_reach"].as_u64().unwrap();
+    assert!(
+        cut["summary"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("limit {reach} reaches it")),
+        "{cut}"
+    );
     let wider = server.ok(
         "POST",
         "/contexts/sake/resolve",
