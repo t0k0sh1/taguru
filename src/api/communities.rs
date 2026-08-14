@@ -326,16 +326,12 @@ pub(crate) enum CommunityLaneOutcome {
 #[mutants::skip] // needs this call's own io::Error independent of the manifest read that shares its passage-store cache; not reachable deterministically without an eviction hook
 fn community_search_io_failure(
     state: &AppState,
-    derived: &str,
     io_error: std::io::Error,
     deadline: Deadline,
     started_at: Instant,
 ) -> Response {
     if deadline.expired() {
-        tracing::warn!(
-            context = %derived,
-            "passage read failed under a spent budget: {io_error}"
-        );
+        tracing::warn!(kind = ?io_error.kind(), "passage read failed under a spent budget");
         return deadline_exceeded(started_at);
     }
     passages_unreadable(state, io_error, started_at)
@@ -436,7 +432,7 @@ pub(crate) fn community_hits(
         None => return Ok(no_artifact_context()),
         Some(Err(io_error)) => {
             return Err(community_search_io_failure(
-                state, derived, io_error, deadline, started_at,
+                state, io_error, deadline, started_at,
             ));
         }
         Some(Ok(found)) => found,

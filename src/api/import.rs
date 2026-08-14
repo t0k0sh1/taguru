@@ -1079,7 +1079,19 @@ pub(super) fn export_response(
         // below), so a message that happens to land after the budget
         // expired must not vanish silently if it was actually that.
         Ok(Err(message)) if deadline.expired() => {
-            tracing::warn!(context = %name, "export render failed under a spent budget: {message}");
+            // Neither of render()'s two Err(String) shapes ever carries
+            // caller data (the reserved-id message names only the fixed
+            // EMPTY_SOURCE constant; the other is DeadlineExceeded's own
+            // Display), but a raw String is still not the "stable,
+            // low-cardinality code" ADR 0008 §8 asks for — classify by
+            // which of the two fixed shapes this is instead of logging
+            // the text itself.
+            let reason = if message.contains("reserved by export") {
+                "reserved_id_collision"
+            } else {
+                "deadline_only"
+            };
+            tracing::warn!(reason, "export render failed under a spent budget");
             deadline_exceeded(started_at)
         }
         // A real source colliding with a reserved export id — the one

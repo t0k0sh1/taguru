@@ -400,10 +400,7 @@ pub async fn assemble_evidence(
             // Logged, not discarded (issue #620): same reasoning as
             // `search_passages`'s own budget/io-error race.
             Some(Err(io_error)) if deadline.expired() || crate::api::injected_deadline_race() => {
-                tracing::warn!(
-                    context = %name,
-                    "passage read failed under a spent budget: {io_error}"
-                );
+                tracing::warn!(kind = ?io_error.kind(), "passage read failed under a spent budget");
                 return deadline_exceeded(started_at);
             }
             Some(Err(io_error)) => {

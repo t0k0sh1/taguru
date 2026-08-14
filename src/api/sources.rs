@@ -1020,7 +1020,7 @@ pub async fn search_passages(
         // only the log gets the underlying io::Error, so a real disk
         // fault isn't indistinguishable from an ordinary budget cut.
         Some(Err(io_error)) if deadline.expired() || crate::api::injected_deadline_race() => {
-            tracing::warn!(context = %name, "passage read failed under a spent budget: {io_error}");
+            tracing::warn!(kind = ?io_error.kind(), "passage read failed under a spent budget");
             deadline_exceeded(started_at)
         }
         Some(Err(io_error)) => passages_unreadable(&state, io_error, started_at),
@@ -1518,7 +1518,7 @@ pub async fn explain_search_passages(
         // refused to start once the budget was already gone — logged,
         // not discarded (issue #620), the same reasoning as there.
         Some(Err(io_error)) if deadline.expired() || crate::api::injected_deadline_race() => {
-            tracing::warn!(context = %name, "passage read failed under a spent budget: {io_error}");
+            tracing::warn!(kind = ?io_error.kind(), "passage read failed under a spent budget");
             deadline_exceeded(started_at)
         }
         Some(Err(io_error)) => passages_unreadable(&state, io_error, started_at),
@@ -1728,10 +1728,7 @@ pub async fn cross_search_passages(
             // gets a timeout, but the underlying io::Error survives in
             // the log instead of vanishing behind it.
             Some(Err(io_error)) if deadline.expired() || crate::api::injected_deadline_race() => {
-                tracing::warn!(
-                    context = %name,
-                    "passage read failed under a spent budget: {io_error}"
-                );
+                tracing::warn!(kind = ?io_error.kind(), "passage read failed under a spent budget");
                 return deadline_exceeded(started_at);
             }
             Some(Err(io_error)) => return passages_unreadable(&state, io_error, started_at),
