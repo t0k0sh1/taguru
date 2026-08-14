@@ -31,8 +31,10 @@ pub(crate) const TAKEOVER_GRACE: Duration = Duration::from_secs(300);
 /// Never shipped (see [`classify`]): it describes the local replica of
 /// the relationship, not the data.
 ///
-/// Only `crate::hydrate`'s boot-time restore writes this. The
-/// `taguru restore` CLI (`restore::run`) never does — it materializes
+/// Both `crate::hydrate`'s boot-time restore and the replica tailer
+/// (`replica::Tailer::poll_once`, after a successful generation
+/// switch) write this. The `taguru restore` CLI (`restore::run`)
+/// never does — it materializes
 /// an independent directory with no promise of ever booting against
 /// this bucket again, so there is no cache relationship to record
 /// (see `restore::run`'s own doc for the full reasoning).

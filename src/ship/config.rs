@@ -154,13 +154,13 @@ pub(crate) fn open_store(url: &str) -> io::Result<(Arc<dyn ObjectStore>, StorePa
                 io::ErrorKind::InvalidInput,
                 format!(
                     "{url}: unsupported replication scheme — use s3://, gs://, az://, or \
-                     file:// (also accepted: s3a://, adl://, abfs://, abfss://, and — per \
-                     object_store's own host-based detection — https:// URLs shaped like a \
-                     cloud provider's native endpoint, e.g. \
+                     file:// (also accepted: s3a://, adl://, azure://, abfs://, abfss://, \
+                     and — per object_store's own host-based detection — https:// URLs \
+                     shaped like a cloud provider's native endpoint, e.g. \
                      https://{{account}}.blob.core.windows.net/... for Azure or \
                      https://s3.{{region}}.amazonaws.com/... for S3; object_store also \
-                     recognizes memory:// and other https:// hosts, but taguru does not \
-                     support shipping to them)"
+                     recognizes memory://, plain http://, and other https:// hosts, but \
+                     taguru does not support shipping to them)"
                 ),
             ));
         }
@@ -177,6 +177,30 @@ mod tests {
     fn a_bad_scheme_is_invalid_input() {
         let error = open_store("ftp://wherever").unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{error}");
+    }
+
+    /// `object_store` itself recognizes `memory://` and generic
+    /// `http(s)://` hosts (`ObjectStoreScheme::Memory`/`Http`) — these
+    /// are not merely unrecognized like `ftp://`, they are schemes
+    /// `open_store`'s `match` deliberately falls through on. The
+    /// rejection must still be `InvalidInput`, and the message must
+    /// name both that they exist and that they are unsupported here,
+    /// not just recite the three cloud schemes as if these were never
+    /// considered.
+    #[test]
+    fn a_recognized_but_unsupported_scheme_names_itself_in_the_message() {
+        for url in [
+            "memory:///",
+            "http://example.com/path",
+            "https://example.com/path",
+        ] {
+            let error = open_store(url).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{error}");
+            let message = error.to_string();
+            assert!(message.contains(url), "{message}");
+            assert!(message.contains("memory://"), "{message}");
+            assert!(message.contains("http://"), "{message}");
+        }
     }
 
     /// A syntactically fine `file://` URL naming a directory that does
