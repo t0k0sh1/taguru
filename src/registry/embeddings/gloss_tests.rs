@@ -603,6 +603,108 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
+    /// A width change that rides alongside genuinely new content (rather
+    /// than being caught only by the no-op probe) is noticed from the
+    /// freshly embedded rows directly — but the redo it triggers must
+    /// reuse what that same pass already bought, not re-purchase it: "c"
+    /// and "d" are new concepts, embedded once at the new width before
+    /// the mismatch is even noticed; "a", "b", and label "l" are
+    /// unchanged hashes still carried at the old width and are the only
+    /// ones the redo needs to buy.
+    #[test]
+    fn a_width_change_alongside_new_content_reuses_the_rows_that_pass_already_bought() {
+        struct WidthEmbeddings {
+            width: usize,
+            texts_requested: Arc<AtomicUsize>,
+        }
+        impl EmbeddingProvider for WidthEmbeddings {
+            fn model(&self) -> &str {
+                "stable-name"
+            }
+            fn embed(
+                &self,
+                texts: &[&str],
+                _purpose: EmbedPurpose,
+                _deadline: Deadline,
+            ) -> Result<Vec<Vec<f32>>, String> {
+                self.texts_requested
+                    .fetch_add(texts.len(), Ordering::Relaxed);
+                Ok(texts
+                    .iter()
+                    .map(|_| {
+                        let mut vector = vec![0.0; self.width];
+                        vector[0] = 1.0;
+                        vector
+                    })
+                    .collect())
+            }
+        }
+
+        let dir = scratch_dir("width-change-reuse");
+        {
+            let embedder = Some(Arc::new(WidthEmbeddings {
+                width: 2,
+                texts_requested: Arc::new(AtomicUsize::new(0)),
+            }) as Arc<dyn EmbeddingProvider>);
+            let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
+            state
+                .create("w", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .write_context("w", |context| {
+                    context.associate("a", "l", "b", 1.0).unwrap();
+                })
+                .map_err(|_| "write")
+                .unwrap();
+            let (embedded, total) = state
+                .refresh_embeddings("w", Deadline::unbounded())
+                .unwrap()
+                .unwrap();
+            assert_eq!((embedded, total), (3, 3)); // a, b, and the label l
+            state.flush_dirty();
+        }
+
+        let texts_requested = Arc::new(AtomicUsize::new(0));
+        let embedder = Some(Arc::new(WidthEmbeddings {
+            width: 3,
+            texts_requested: Arc::clone(&texts_requested),
+        }) as Arc<dyn EmbeddingProvider>);
+        let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
+        state
+            .write_context("w", |context| {
+                context.associate("c", "l", "d", 1.0).unwrap();
+            })
+            .map_err(|_| "write")
+            .unwrap();
+        let (embedded, total) = state
+            .refresh_embeddings("w", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (embedded, total),
+            (5, 5),
+            "a, b, c, d, and the label l all land at the new width"
+        );
+        assert_eq!(
+            texts_requested.load(Ordering::Relaxed),
+            5,
+            "c/d bought once, before the mismatch was even noticed, must not \
+             be bought again by the redo it triggers"
+        );
+        let store = VectorStore::load(&vectors_path(&dir, &file_stem("w")));
+        assert!(
+            store
+                .concepts
+                .values()
+                .chain(store.labels.values())
+                .all(|(_, vector)| vector.len() == 3),
+            "old-width rows must not survive the width change"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn a_width_drift_confined_to_the_label_table_is_still_caught() {
         struct FixedWidthEmbeddings(usize);
@@ -1934,13 +2036,13 @@ mod tests {
         assert_eq!(carried.labels.len(), 1, "{:?}", carried.labels.keys());
 
         // Pass 2, same model at width 4: the (all-stale) concept call
-        // lands first and settles the fresh width; 分類 is carried at
-        // width 2, so the label-side clause alone declares the drift.
-        // The redo then re-embeds concepts (call 1) and fails on
-        // labels (call 2).
+        // lands first (call 0) and settles the fresh width; 分類 is
+        // carried at width 2, so the label-side clause alone declares
+        // the drift. The redo does not re-buy the concepts it already
+        // bought this same pass — only labels (call 1), which fails.
         let embedder = Some(Arc::new(FailsNth {
             calls: AtomicUsize::new(0),
-            fail_nth: 2,
+            fail_nth: 1,
             width: 4,
         }) as Arc<dyn EmbeddingProvider>);
         let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();

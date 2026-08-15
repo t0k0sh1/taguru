@@ -164,7 +164,7 @@ mod tests {
     /// every new-width row this pass embeds — silently, at a warn.
     #[test]
     fn a_passage_width_change_under_the_same_model_name_re_embeds_everything() {
-        struct WidthEmbeddings(Arc<std::sync::atomic::AtomicUsize>);
+        struct WidthEmbeddings(Arc<std::sync::atomic::AtomicUsize>, Arc<AtomicUsize>);
         impl EmbeddingProvider for WidthEmbeddings {
             fn model(&self) -> &str {
                 "stable-name"
@@ -176,6 +176,7 @@ mod tests {
                 _deadline: Deadline,
             ) -> Result<Vec<Vec<f32>>, String> {
                 let width = self.0.load(Ordering::Relaxed);
+                self.1.fetch_add(texts.len(), Ordering::Relaxed);
                 Ok(texts
                     .iter()
                     .map(|_| {
@@ -189,8 +190,15 @@ mod tests {
 
         let dir = scratch_dir("pvec-width");
         let width = Arc::new(std::sync::atomic::AtomicUsize::new(2));
-        let state =
-            boot_for_passage_embedding(&dir, Arc::new(WidthEmbeddings(Arc::clone(&width))), 20_000);
+        let texts_requested = Arc::new(AtomicUsize::new(0));
+        let state = boot_for_passage_embedding(
+            &dir,
+            Arc::new(WidthEmbeddings(
+                Arc::clone(&width),
+                Arc::clone(&texts_requested),
+            )),
+            20_000,
+        );
         state
             .create("sake", ContextMeta::default())
             .map_err(|_| "create")
@@ -245,6 +253,7 @@ mod tests {
             .store_passages("sake", plain(edited))
             .unwrap()
             .unwrap();
+        let before_mixed = texts_requested.load(Ordering::Relaxed);
         let mixed = state
             .refresh_passage_embeddings("sake", Deadline::unbounded())
             .unwrap()
@@ -253,6 +262,13 @@ mod tests {
             (mixed.embedded, mixed.total),
             (2, 2),
             "the edit's new width stales the carried row too"
+        );
+        assert_eq!(
+            texts_requested.load(Ordering::Relaxed) - before_mixed,
+            2,
+            "doc-a lands once, during the pass that first notices the width \
+             change — the redo it triggers must reuse that row, not \
+             re-purchase it alongside doc-b"
         );
         let sidecar = PassageVectorStore::load(&pvectors_path(&dir, &file_stem("sake")));
         assert_eq!(sidecar.len(), 2);
