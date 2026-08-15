@@ -518,18 +518,16 @@ fn audit_untyped_concepts_truncates_past_max_audit_names() {
 
     let audit = server.ok("POST", "/contexts/sake/schema/audit", None);
     assert_eq!(audit["untyped_concepts"]["total"], json!(101), "{audit}");
-    let names: Vec<&str> = audit["untyped_concepts"]["names"]
+    let names: Vec<String> = audit["untyped_concepts"]["names"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|v| v.as_str().unwrap())
+        .map(|v| v.as_str().unwrap().to_string())
         .collect();
-    assert_eq!(names.len(), 100, "{audit}");
-    assert!(names.contains(&"個人000"), "{audit:?}");
-    assert!(names.contains(&"個人099"), "{audit:?}");
-    assert!(
-        !names.contains(&"個人100"),
-        "the 101st name (highest-ordered) is the one past the cap: {names:?}"
+    let expected: Vec<String> = (0..100).map(|i| format!("個人{i:03}")).collect();
+    assert_eq!(
+        names, expected,
+        "the full name-ordered prefix, 個人100 excluded: {audit}"
     );
 }
 
@@ -556,18 +554,16 @@ fn audit_undeclared_types_truncates_past_max_audit_names() {
 
     let audit = server.ok("POST", "/contexts/sake/schema/audit", None);
     assert_eq!(audit["undeclared_types"]["total"], json!(101), "{audit}");
-    let names: Vec<&str> = audit["undeclared_types"]["names"]
+    let names: Vec<String> = audit["undeclared_types"]["names"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|v| v.as_str().unwrap())
+        .map(|v| v.as_str().unwrap().to_string())
         .collect();
-    assert_eq!(names.len(), 100, "{audit}");
-    assert!(names.contains(&"型000"), "{audit:?}");
-    assert!(names.contains(&"型099"), "{audit:?}");
-    assert!(
-        !names.contains(&"型100"),
-        "the 101st name (highest-ordered) is the one past the cap: {names:?}"
+    let expected: Vec<String> = (0..100).map(|i| format!("型{i:03}")).collect();
+    assert_eq!(
+        names, expected,
+        "the full name-ordered prefix, 型100 excluded: {audit}"
     );
 }
 
@@ -597,17 +593,15 @@ fn audit_unknown_labels_truncates_past_max_audit_names() {
 
     let audit = server.ok("POST", "/contexts/sake/schema/audit", None);
     assert_eq!(audit["unknown_labels"]["total"], json!(101), "{audit}");
-    let names: Vec<&str> = audit["unknown_labels"]["names"]
+    let names: Vec<String> = audit["unknown_labels"]["names"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|v| v.as_str().unwrap())
+        .map(|v| v.as_str().unwrap().to_string())
         .collect();
-    assert_eq!(names.len(), 100, "{audit}");
-    assert!(names.contains(&"未知000"), "{audit:?}");
-    assert!(names.contains(&"未知099"), "{audit:?}");
-    assert!(
-        !names.contains(&"未知100"),
-        "the 101st name (highest-ordered) is the one past the cap: {names:?}"
+    let expected: Vec<String> = (0..100).map(|i| format!("未知{i:03}")).collect();
+    assert_eq!(
+        names, expected,
+        "the full name-ordered prefix, 未知100 excluded: {audit}"
     );
 }
