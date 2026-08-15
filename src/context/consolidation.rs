@@ -44,8 +44,9 @@ pub struct MergeEvidence {
     pub only_a: Vec<NeighborFact>,
     pub only_b: Vec<NeighborFact>,
     /// FNV-1a over the pair's names and its FULL evidence sets
-    /// (never the capped lists), pair-order canonicalized — the
-    /// judgment artifact's identity (ADR 0012 §5). Serialized by the
+    /// (never the capped lists), pair-order canonicalized — stands in
+    /// for the judgment artifact's identity (ADR 0012 §5); a 64-bit
+    /// digest, not a collision-resistant hash. Serialized by the
     /// audit's own wire shape, not here.
     #[serde(skip)]
     pub fingerprint: u64,

@@ -270,7 +270,7 @@ pub(super) fn import_refusal(
     started_at: Instant,
 ) -> Response {
     match refusal {
-        // The three AccessError arms — status, metric, message — live
+        // The five AccessError arms — status, metric, message — live
         // in access_error_noted; import just supplies the batch note.
         crate::ingest::ApplyRefusal::Access(failure) => {
             access_error_noted(state, failure, &batch.context, note, started_at)
@@ -1176,8 +1176,11 @@ pub async fn import_batch(
 
 /// `POST /contexts/{name}/compact` — rebuild the image without the
 /// dead weight the append-only format accumulates (retracted edges,
-/// unlinked attributions, arena slack), persisting the result before
-/// answering. An admin verb (the role table's fail-closed default);
+/// unlinked attributions, arena slack), then try to persist the
+/// result before answering — a flush that can't publish still leaves
+/// the graph compacted in memory, so the call still answers 200; see
+/// `image_persisted` on the response for whether the rebuild actually
+/// reached disk. An admin verb (the role table's fail-closed default);
 /// the context's own requests wait out the rebuild, every other
 /// context is untouched. Content is preserved — the response says
 /// what was shed and what the footprint became.

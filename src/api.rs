@@ -1307,7 +1307,7 @@ fn access_error(
     access_error_noted(state, failure, name, "", started_at)
 }
 
-/// [`access_error`] with a leading `note` — the one place the three
+/// [`access_error`] with a leading `note` — the one place the five
 /// `AccessError` arms map to statuses and metrics, so the per-batch
 /// import path (which prefixes each refusal with which batch failed)
 /// shares them instead of hand-copying the mapping. `note` is empty
@@ -2103,9 +2103,10 @@ fn recollections_out(
 /// [`associations_out`] for a cross-context page: section/locator
 /// markers resolve against the context each match came from — one
 /// `resolve_markers` call per distinct context on the page, not one
-/// per match (and none for a context whose page entries carry no
-/// paragraph locator; `resolve_markers` short-circuits on an empty
-/// key set).
+/// per match. A context whose page entries carry no paragraph locator
+/// still gets called (every distinct context is registered in
+/// `locators` up front), but `resolve_markers` short-circuits on the
+/// resulting empty key set, so that call costs nothing.
 fn cross_associations_out(
     state: &AppState,
     page: Vec<(String, Association)>,

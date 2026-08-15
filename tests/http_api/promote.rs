@@ -526,6 +526,83 @@ fn the_destination_quota_gates_growth_before_the_batch_is_attempted() {
     assert!(message.contains("storage quota"), "{message}");
 }
 
+/// Sums the five on-disk lanes `AppState::storage_quota_excess` gates
+/// on (`src/registry/engine.rs`) straight off `/metrics`, requiring
+/// `TAGURU_METRICS_PER_CONTEXT`.
+fn disk_total_bytes(server: &Server, context: &str) -> u64 {
+    let (status, body) = server.call("GET", "/metrics", None);
+    assert_eq!(status, 200);
+    let text = body.as_str().expect("metrics body is text, not JSON");
+    ["image", "passages", "passages_wal", "sidecars", "wal"]
+        .iter()
+        .map(|file| {
+            let prefix =
+                format!("taguru_context_disk_bytes{{context=\"{context}\",file=\"{file}\"}} ");
+            text.lines()
+                .find_map(|line| line.strip_prefix(prefix.as_str()))
+                .and_then(|value| value.trim().parse::<u64>().ok())
+                .unwrap_or(0)
+        })
+        .sum()
+}
+
+/// The other half of the ceiling test above: when the destination
+/// clears its ceiling for the FIRST promoted batch but that batch's
+/// own growth tips it over, the SECOND batch's refusal reports a
+/// durable prefix — `quota_refusal`'s `landed > 0` shape, unreachable
+/// from the `nothing_written` path both this file's earlier test and
+/// `quotas.rs` already cover. `storage_quota_refusal` is a pure
+/// function of the destination's CURRENT disk usage, never wall-clock
+/// time, so the boundary is fully deterministic: measure what landing
+/// batch 0 alone costs on an uncapped probe server, then reproduce the
+/// identical scenario on a fresh server whose ceiling sits exactly at
+/// that measured usage.
+#[test]
+fn quota_refusal_reports_a_durable_prefix_when_the_first_landed_batch_tips_the_ceiling() {
+    let probe = Server::start_with_env(
+        "promote-quota-probe",
+        &[("TAGURU_METRICS_PER_CONTEXT", "1")],
+    );
+    seed(&probe);
+    probe.ok(
+        "POST",
+        "/contexts/scratch-claude/promote",
+        Some(json!({"into": "perm", "sources": ["session:claude:a/note"]})),
+    );
+    let ceiling = disk_total_bytes(&probe, "perm");
+    assert!(
+        ceiling > 0,
+        "the landed batch must have grown the destination"
+    );
+
+    let quotas = format!(r#"{{"perm": {{"storage_bytes": {ceiling}, "cache_bytes": 1048576}}}}"#);
+    let server = Server::start_with_env(
+        "promote-quota-durable",
+        &[("TAGURU_CONTEXT_QUOTAS", quotas.as_str())],
+    );
+    seed(&server);
+
+    let (status, refused) = server.call(
+        "POST",
+        "/contexts/scratch-claude/promote",
+        Some(json!({
+            "into": "perm",
+            "sources": ["session:claude:a/note", "session:claude:b"]
+        })),
+    );
+    assert_eq!(status, 507, "{refused}");
+    assert_eq!(refused["code"], json!("storage_full"), "{refused}");
+    assert_eq!(refused["integrity"], json!("durable_prefix"), "{refused}");
+    assert_eq!(refused["durable_batches"], json!(1), "{refused}");
+    let message = refused["error"].as_str().unwrap();
+    assert!(message.contains("batch 2 of 2"), "{message}");
+    assert!(message.contains("storage quota"), "{message}");
+
+    // The first batch landed for real before the second was refused.
+    let sources = server.ok("GET", "/contexts/perm/sources", None);
+    assert_eq!(sources["total"], json!(1), "{sources}");
+}
+
 /// A `warn`-mode destination schema lets the promoted batches land and
 /// reports the violations in the success envelope, `/import`'s own
 /// accounting — the exact true count, not a truncation artifact.
