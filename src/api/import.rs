@@ -711,6 +711,58 @@ pub(super) fn stream_refusal(
     )
 }
 
+/// The advisory `stream_refusal`'s two halves take when a batch was
+/// refused for being over its context's storage quota (issue #623
+/// finding 6) — shared between the pre-check below and
+/// [`quota_refusal_from_apply`], which reaches the same condition mid-
+/// apply, after the pre-check's own window has passed. Never
+/// correction-shaped like `import_refusal`'s generic advisory: unlike
+/// every other stream refusal, nothing about the request itself is
+/// wrong, so the advice only ever shrinks the target or raises its
+/// quota.
+const QUOTA_NEXT_STEP: (&str, &str) = (
+    "re-running the preview against a shrunk context is exact",
+    "retracting or compacting the context (or raising its quota), then \
+     re-POSTing the remaining stream is exact (each batch replaces its \
+     own source)",
+);
+
+/// Reroutes a deep-write-path storage-quota refusal onto the same
+/// [`stream_refusal`] shape the pre-check above uses (issue #623
+/// finding 6), instead of `import_refusal`'s generic `Access` arm —
+/// bare message, no structured `integrity`/`durable_batches`, and a
+/// correction-shaped advisory that doesn't fit an uncorrectable
+/// condition. `None` for every other [`crate::ingest::ApplyRefusal`],
+/// so the loop's ordinary dispatch still applies to those. `next_step`
+/// is threaded in rather than always [`QUOTA_NEXT_STEP`] so
+/// `promote.rs` can share this with its own "destination" wording.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn quota_refusal_from_apply(
+    refusal: &crate::ingest::ApplyRefusal,
+    index: usize,
+    total: usize,
+    batch: &crate::ingest::Batch,
+    landed: usize,
+    dry_run: bool,
+    next_step: (&str, &str),
+    started_at: Instant,
+) -> Option<Response> {
+    let crate::ingest::ApplyRefusal::Access(AccessError::QuotaExceeded(message)) = refusal else {
+        return None;
+    };
+    Some(stream_refusal(
+        index,
+        total,
+        batch,
+        landed,
+        dry_run,
+        ErrorCode::StorageFull,
+        message.clone(),
+        next_step,
+        started_at,
+    ))
+}
+
 /// `POST /import` — the batch-file contract (docs/import.html) over
 /// HTTP: the body IS one batch file — or a whole stream of batches,
 /// as `GET /contexts/{name}/export` renders — applied to the live
@@ -921,12 +973,7 @@ pub async fn import_batch(
                     query.dry_run,
                     ErrorCode::StorageFull,
                     crate::registry::storage_quota_message(&batch.context, used, ceiling),
-                    (
-                        "re-running the preview against a shrunk context is exact",
-                        "retracting or compacting the context (or raising its quota), then \
-                         re-POSTing the remaining stream is exact (each batch replaces its \
-                         own source)",
-                    ),
+                    QUOTA_NEXT_STEP,
                     started_at,
                 )));
             }
@@ -964,6 +1011,29 @@ pub async fn import_batch(
                     }
                 }
                 Err(refusal) => {
+                    // Caught here, not by the generic Access arm below
+                    // (issue #623 finding 6): the pre-check above can
+                    // race a concurrent writer on the same context
+                    // between its read and this batch's actual WAL
+                    // append, so the deep write path's own quota gate
+                    // is this stream's only backstop for that window —
+                    // and it deserves the SAME advisory and structured
+                    // detail the pre-check gives, not the generic
+                    // Access arm's bare message and correction-shaped
+                    // "fixing the stream" wording, which does not fit a
+                    // condition no request edit can correct.
+                    if let Some(response) = quota_refusal_from_apply(
+                        &refusal,
+                        index,
+                        total,
+                        batch,
+                        outcomes.len(),
+                        query.dry_run,
+                        QUOTA_NEXT_STEP,
+                        started_at,
+                    ) {
+                        return Err(Box::new(response));
+                    }
                     let note = import_batch_note(
                         index,
                         total,
@@ -1388,6 +1458,89 @@ mod tests {
         assert!(
             !has_installed_schema(&state, "sake"),
             "the only record must NOT have installed — the budget died on its own first check"
+        );
+    }
+
+    fn one_batch(context: &str) -> crate::ingest::Batch {
+        let stream = crate::ingest::parse_stream(
+            format!("{{\"taguru_batch\": 1, \"context\": \"{context}\", \"source\": \"a.md\"}}\n")
+                .as_bytes(),
+        )
+        .unwrap();
+        stream.batches.into_iter().next().unwrap()
+    }
+
+    /// issue #623 finding 6: the deep write path's own `QuotaExceeded`
+    /// reroutes onto `stream_refusal`'s shape — same code, structured
+    /// `integrity`/`durable_batches`, and advisory — instead of the
+    /// generic `Access` arm's bare message.
+    #[tokio::test]
+    async fn quota_refusal_from_apply_reroutes_a_deep_write_path_quota_refusal() {
+        let batch = one_batch("sake");
+        let refusal = crate::ingest::ApplyRefusal::Access(AccessError::QuotaExceeded(
+            "context 'sake' is at its storage quota".to_string(),
+        ));
+        let response = quota_refusal_from_apply(
+            &refusal,
+            0,
+            2,
+            &batch,
+            1,
+            false,
+            QUOTA_NEXT_STEP,
+            Instant::now(),
+        )
+        .expect("QuotaExceeded must reroute to stream_refusal");
+        assert_eq!(response.status(), StatusCode::INSUFFICIENT_STORAGE);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], ErrorCode::StorageFull.as_str(), "{body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("re-POSTing the remaining stream"),
+            "the shrink-shaped advisory, not the generic correction-shaped one: {body}"
+        );
+        assert_eq!(body["integrity"], "durable_prefix", "{body}");
+        assert_eq!(body["durable_batches"], 1, "{body}");
+    }
+
+    /// Every other `ApplyRefusal` still falls through to the caller's
+    /// own generic dispatch (`import_refusal`) — this only intercepts
+    /// `Access(QuotaExceeded(_))`.
+    #[test]
+    fn quota_refusal_from_apply_ignores_every_other_refusal_kind() {
+        let batch = one_batch("sake");
+        let refusal = crate::ingest::ApplyRefusal::Io("disk full".to_string());
+        assert!(
+            quota_refusal_from_apply(
+                &refusal,
+                0,
+                1,
+                &batch,
+                0,
+                false,
+                QUOTA_NEXT_STEP,
+                Instant::now(),
+            )
+            .is_none()
+        );
+        let refusal = crate::ingest::ApplyRefusal::Access(AccessError::NotFound);
+        assert!(
+            quota_refusal_from_apply(
+                &refusal,
+                0,
+                1,
+                &batch,
+                0,
+                false,
+                QUOTA_NEXT_STEP,
+                Instant::now(),
+            )
+            .is_none()
         );
     }
 }
