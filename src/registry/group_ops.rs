@@ -356,19 +356,34 @@ impl AppState {
                 applied += 1;
                 continue;
             }
-            // Same stale-`.grouprenaming`-marker hazard `create_group`
-            // guards against (see its own comment): a half-finished
-            // rename that crashed before its file move landed can leave
-            // a marker naming this record's stem as source or
-            // destination, which would otherwise have the next boot's
-            // resume-sweep move a stale file over the record this write
-            // is about to durably establish.
-            if let Err(error) = sweep_stale_rename_markers(&self.0.data_dir, name) {
-                return Err(RestoreGroupsError::Io {
-                    group: name.clone(),
-                    applied,
-                    error,
-                });
+            if outcomes[index].1 == GroupRestoreOutcome::Created {
+                // Same stale-`.grouprenaming`-marker hazard
+                // `create_group` guards against (see its own comment):
+                // a half-finished rename that crashed before its file
+                // move landed can leave a marker naming this record's
+                // stem as source or destination, which would otherwise
+                // have the next boot's resume-sweep move a stale file
+                // over the record this write is about to durably
+                // establish. `Created` only fires for a name not
+                // currently standing, which is exactly the state a
+                // live marker whose destination hasn't been reached
+                // yet leaves behind — the other case a marker can
+                // survive in, "file move landed but the membership
+                // rewrite didn't persist" (`rename_group`'s
+                // `retire_rename_marker`), instead leaves the
+                // destination name STANDING (`Replaced`, not
+                // `Created`), and that marker must not be swept here:
+                // it's `reconcile_groups`'s only signal to finish
+                // rewriting the parent's stale `from` reference on the
+                // next boot, not a marker this write is entitled to
+                // abandon.
+                if let Err(error) = sweep_stale_rename_markers(&self.0.data_dir, name) {
+                    return Err(RestoreGroupsError::Io {
+                        group: name.clone(),
+                        applied,
+                        error,
+                    });
+                }
             }
             if let Err(error) = groups::write_group(&self.0.data_dir, &file_stem(name), record) {
                 return Err(RestoreGroupsError::Io {
@@ -1838,6 +1853,97 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    /// CodeRabbit review on PR #680 (issue #675): the marker sweep
+    /// `restore_groups` needs before establishing a fresh name must NOT
+    /// also fire when it's REPLACING an already-standing one. A marker
+    /// can only survive past a landed rename in one case — the file
+    /// move committed but the parent's membership rewrite did not
+    /// persist (`rename_group`'s `retire_rename_marker`, exercised by
+    /// `a_group_renames_membership_rewrite_that_cannot_persist_keeps_its_marker`)
+    /// — and in that case the destination name is already STANDING
+    /// (`Replaced`, not `Created`): the marker is `reconcile_groups`'s
+    /// only signal to finish rewriting the parent's stale `from`
+    /// reference on the next boot, and sweeping it here would strand
+    /// that reference as a dangling child forever. Sweeps
+    /// `fail_persistence_ops_after` the same way the sibling rename
+    /// test does to reliably land on that exact state, then restores
+    /// the destination name and confirms both the marker and the
+    /// eventual parent repair survive.
+    #[test]
+    fn restoring_a_replaced_name_does_not_abandon_its_still_needed_rename_marker() {
+        let mut landed_with_marker = false;
+        for failure in 0..16 {
+            let dir = scratch_dir(&format!("restore-replaced-keeps-marker-{failure}"));
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state.create("sake", ContextMeta::default()).unwrap();
+            state
+                .create_group(
+                    "liquor",
+                    String::new(),
+                    BTreeSet::from(["sake".to_string()]),
+                    BTreeSet::new(),
+                )
+                .unwrap();
+            state
+                .create_group(
+                    "drinks",
+                    String::new(),
+                    BTreeSet::new(),
+                    BTreeSet::from(["liquor".to_string()]),
+                )
+                .unwrap();
+
+            fail_persistence_ops_after(failure);
+            let _ = state.rename_group("liquor", "spirits");
+            let _ = clear_persistence_fault();
+
+            let marker = groups::group_renaming_marker_path(&dir, &file_stem("liquor"));
+            let landed = state.group("spirits").is_some() && state.group("liquor").is_none();
+            if !landed || !marker.exists() {
+                // Either the rename never reached the file move, or the
+                // membership rewrite persisted after all at this exact
+                // failure offset — neither leaves the state this test
+                // targets.
+                drop(state);
+                let _ = fs::remove_dir_all(&dir);
+                continue;
+            }
+            landed_with_marker = true;
+
+            let record = GroupRecord {
+                description: "restored".to_string(),
+                contexts: BTreeSet::from(["sake".to_string()]),
+                groups: BTreeSet::new(),
+            };
+            let outcomes = state
+                .restore_groups(&[("spirits".to_string(), record)], Deadline::unbounded())
+                .unwrap();
+            assert_eq!(outcomes[0].1.as_str(), "replaced");
+            assert!(
+                marker.exists(),
+                "failure {failure}: restore_groups must not sweep a marker \
+                 surviving on a REPLACED (already-standing) name"
+            );
+            drop(state);
+
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            assert_eq!(
+                state.group("drinks").unwrap().groups,
+                BTreeSet::from(["spirits".to_string()]),
+                "failure {failure}: boot's reconcile_groups must still finish \
+                 rewriting the parent's stale 'liquor' reference to 'spirits'"
+            );
+            drop(state);
+            let _ = fs::remove_dir_all(&dir);
+            break;
+        }
+        assert!(
+            landed_with_marker,
+            "no failure offset produced a landed-rename-with-surviving-marker \
+             state to test"
+        );
     }
 
     #[test]
