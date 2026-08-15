@@ -38,6 +38,7 @@ mod offline_import;
 mod passages;
 mod promote;
 mod quotas;
+mod recall;
 mod reload;
 mod remote_compact;
 mod remote_export;
