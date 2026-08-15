@@ -24,6 +24,8 @@ jobs:
   pypi:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
     # PyPI scopes a token to one project, so each package publishes
     # with its own — a leak costs that project's token, not the account.
     env:
