@@ -1073,7 +1073,11 @@ pub enum RenameGroupError {
 /// validation refusal with NOTHING applied — the set is judged whole
 /// before the first write. `Io` names how many records persisted
 /// first; either way re-importing the same stream is exact, because a
-/// restore is a replace and a replay converges.
+/// restore is a replace and a replay converges — including across a
+/// crash that left a stale `.grouprenaming` marker naming one of the
+/// stream's records, since each write sweeps that marker clean first
+/// (the same insurance [`AppState::create_group`] takes; see its own
+/// comment).
 #[derive(Debug)]
 pub enum RestoreGroupsError {
     /// [`CreateGroupError::InvalidName`]'s twin — the parse layers
