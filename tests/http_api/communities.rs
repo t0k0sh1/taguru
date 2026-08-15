@@ -677,8 +677,15 @@ fn search_truncates_membership_past_members_per_hit_and_flags_it() {
     let hit = &page["hits"][0];
     assert_eq!(hit["members_truncated"], json!(true), "{page}");
     let served = hit["members"].as_array().unwrap();
-    assert_eq!(served.len(), 12, "{page}");
-    assert_eq!(served[0]["name"], json!("m00"), "strongest first: {page}");
+    let names: Vec<&str> = served
+        .iter()
+        .map(|member| member["name"].as_str().unwrap())
+        .collect();
+    let expected: Vec<String> = (0..12).map(|i| format!("m{i:02}")).collect();
+    assert_eq!(
+        names, expected,
+        "strongest-first order, m12 excluded: {page}"
+    );
 }
 
 /// A community summary is searchable (its passage and `contains`
