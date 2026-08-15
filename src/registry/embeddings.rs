@@ -357,28 +357,41 @@ impl AppState {
             );
             self.0.metrics.record_gloss_width_rebuild();
             fresh_model = true;
-            // A fresh agreement for the redo: the old width was just
-            // declared dead, and the redo's own first vector settles
-            // the new one for both tables.
-            let mut settled_width: Option<usize> = None;
+            // The redo's agreement is already settled: `fresh_width` came
+            // from this same pass's own rows, so a name already landed in
+            // `embedded_concepts`/`embedded_labels` is already bought at
+            // that exact width and must not be re-purchased — only names
+            // still carried at the stale old width (or dropped by the
+            // first pass's own `settled_width` disagreement) need a redo.
+            let mut settled_width: Option<usize> = fresh_width;
+            let concepts_redo: Vec<(String, String)> = concepts
+                .iter()
+                .filter(|(name, _)| !embedded_concepts.contains_key(name))
+                .cloned()
+                .collect();
             let (concepts_reembedded, concept_failure) = self.embed_stale(
                 &*embedder,
                 &existing.concepts,
-                &concepts,
+                &concepts_redo,
                 true,
                 &mut settled_width,
                 deadline,
             );
-            embedded_concepts = concepts_reembedded;
+            embedded_concepts.extend(concepts_reembedded);
+            let labels_redo: Vec<(String, String)> = labels
+                .iter()
+                .filter(|(name, _)| !embedded_labels.contains_key(name))
+                .cloned()
+                .collect();
             let (labels_reembedded, label_failure) = self.embed_stale(
                 &*embedder,
                 &existing.labels,
-                &labels,
+                &labels_redo,
                 true,
                 &mut settled_width,
                 deadline,
             );
-            embedded_labels = labels_reembedded;
+            embedded_labels.extend(labels_reembedded);
             failure = concept_failure.or(label_failure);
         }
         let newly_embedded = embedded_concepts.len() + embedded_labels.len();
@@ -662,9 +675,24 @@ impl AppState {
         // (still in scope) so it carries no extra memory. `dim` is
         // private, so the carried width is the first stored row's length.
         let carried_width = existing.iter().next().map(|(_, row)| row.len());
+        // Rows this pass already bought from the provider, kept across a
+        // width-mismatch redo so the redo's `carried` lookup below can
+        // reuse them instead of re-purchasing what already landed at the
+        // (now-settled) fresh width — only names still carried at the
+        // stale old width via `existing` need buying again.
+        let mut bought: HashMap<(String, u32, u64, Option<u64>), Vec<f32>> = HashMap::new();
+        // Once a redo fires, every row in the final store is considered
+        // freshly embedded from the caller's perspective — carried rows
+        // reused from `bought` above are not re-purchased, but they are
+        // still new at this width, exactly as if they had been (matching
+        // the pre-reuse contract every caller already relies on).
+        let mut redo_triggered = false;
         let (fresh, embedded, skipped_over_limit, failure) = loop {
             let carried: HashMap<(&str, u32, u64, Option<u64>), &[f32]> = if fresh_model {
-                HashMap::new()
+                bought
+                    .iter()
+                    .map(|(key, row)| ((key.0.as_str(), key.1, key.2, key.3), row.as_slice()))
+                    .collect()
             } else {
                 existing
                     .iter()
@@ -741,7 +769,7 @@ impl AppState {
                 match outcome {
                     Some(Ok(vectors)) => {
                         for ((key, _), vector) in chunk.iter().zip(vectors) {
-                            fresh_width.get_or_insert(vector.len());
+                            let settled = *fresh_width.get_or_insert(vector.len());
                             // `push` silently drops a row whose width
                             // disagrees with the dimension `fresh` already
                             // settled on (the same provider-mid-migration
@@ -751,8 +779,27 @@ impl AppState {
                             // `total_rows` below can already prove didn't
                             // all land.
                             let before = fresh.len();
-                            fresh.push(key.clone(), vector);
+                            fresh.push(key.clone(), vector.clone());
                             embedded += fresh.len() - before;
+                            // Worth keeping for a width-mismatch redo to
+                            // reuse even on the iteration where `fresh`
+                            // itself just dropped it: that happens when a
+                            // carried old-width row got pushed earlier in
+                            // this same walk and locked `fresh`'s
+                            // dimension first — exactly the row a redo
+                            // discards, making this fetched vector the
+                            // one it needs. Gated on agreement with this
+                            // batch's own settled width, not on whether it
+                            // landed in `fresh`, so a genuine
+                            // provider-mid-migration split (disagreeing
+                            // with this batch's first vector) still stays
+                            // unbought.
+                            if vector.len() == settled {
+                                bought.insert(
+                                    (key.source.clone(), key.index, key.hash, key.question_hash),
+                                    vector,
+                                );
+                            }
                         }
                     }
                     Some(Err(error)) => failure = failure.or(Some(error)),
@@ -796,9 +843,15 @@ impl AppState {
                 );
                 self.0.metrics.record_passage_width_rebuild();
                 fresh_model = true;
+                redo_triggered = true;
                 continue;
             }
             break (fresh, embedded, skipped_over_limit, failure);
+        };
+        let embedded = if redo_triggered {
+            fresh.len()
+        } else {
+            embedded
         };
 
         // Publish under the entry's tombstone fence (a delete that won
