@@ -273,9 +273,16 @@ pub struct SchemaAudit {
 /// Request body for `POST /contexts/{name}/schema/audit` — an absent
 /// body means every default below; paging over `violations` follows the
 /// same contract `DriftAuditRequest` (`src/api/vocabulary.rs`) applies to
-/// `unsourced`.
+/// `unsourced`. `deny_unknown_fields` (issue #623 finding 1) matches
+/// [`SchemaValidateRequest`]'s sibling `limit`/`after` fields: a typo
+/// here silently falls back to the default page instead of erroring,
+/// the same correctness hazard a stray field name causes on a cursor.
+/// `optional_body`'s `T: Default` bound composes with
+/// `deny_unknown_fields` without conflict — `WireOptions`
+/// (`src/evalset.rs`), `CreateBlock` (`src/ingest/model.rs`), and
+/// `TypeDef`/`RelationDef` (`src/schema.rs`) already combine both.
 #[derive(Debug, Default, Deserialize)]
-#[serde(default)]
+#[serde(deny_unknown_fields, default)]
 pub struct SchemaAuditRequest {
     /// Omitted means 100, capped at 1000 — pages exactly like recall,
     /// query, and every other match list.

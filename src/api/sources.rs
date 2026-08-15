@@ -14,7 +14,7 @@ use crate::registry::{
     SemanticServe,
 };
 
-use super::aliases::KeysetQuery;
+use super::aliases::{KeysetQuery, keyset_bounds};
 use super::recall::cross_targets;
 use super::{
     AppJson, AppPath, AppQuery, CrossMatch, ErrorCode, Issue, MAX_LOCATOR_KIND_BYTES,
@@ -201,6 +201,9 @@ pub async fn list_sources(
     AppQuery(query): AppQuery<KeysetQuery>,
 ) -> Response {
     let started_at = Instant::now();
+    if let Some(refusal) = keyset_bounds(&query, started_at) {
+        return refusal;
+    }
     let limit = clamp_page(query.limit, MAX_MATCH_LIMIT, MAX_MATCH_LIMIT);
     if deadline.expired() {
         return deadline_exceeded(started_at);
@@ -439,8 +442,30 @@ pub(super) fn source_filter(
     tags.sort();
     tags.dedup();
     if tags.len() > super::MAX_TAGS_PER_SOURCE {
+        // `ErrorCode::OverLimit` (issue #623 finding 2), matching the
+        // raw-input cap `overlong` applies just above (via the door at
+        // this function's own top): both are "a list-shaped field
+        // carries too many items," and a client branching on
+        // `over_limit` to pick a retry strategy must not see one of the
+        // two silently fall back to `invalid_argument`. `tags` is an
+        // any-of filter (`SourceFilter::matches`, `src/passages.rs`),
+        // so splitting the distinct set across two calls and unioning
+        // the results client-side IS equivalent to one call with the
+        // full set — `OverLimit`'s "split and resend" contract holds,
+        // the same as `cross_targets`' own any-of `contexts`/`groups`
+        // cap (`recall.rs`) already reusing `overlong`. Confirmed
+        // against this exact constant's OTHER enforcement point too:
+        // `interpret_tags` (below, a source's own stored tag list,
+        // write side) already reports an over-cap count as
+        // `Issue::over_limit`, not a type/argument issue — read and
+        // write sides of `MAX_TAGS_PER_SOURCE` agreeing on the kind is
+        // the more direct precedent. Not reused as `overlong(...)`
+        // itself: that helper hardcodes `MAX_INPUT_ITEMS` (no cap
+        // parameter) and its advice ("split the request") would read
+        // oddly here — the message below already names the right fix
+        // (name fewer distinct tags) more precisely than "split".
         return Err(Box::new(error(
-            ErrorCode::InvalidArgument,
+            ErrorCode::OverLimit,
             format!(
                 "{} distinct filter tags where at most {} may be named",
                 tags.len(),
@@ -2743,6 +2768,9 @@ mod tests {
 
     /// The cap still refuses a filter whose DISTINCT tag count exceeds
     /// it — dedup must not become a loophole for an unbounded filter.
+    /// `OverLimit`, not `InvalidArgument` (issue #623 finding 2) — the
+    /// same code the raw-input door below returns, since both are a
+    /// list-shaped field carrying too many items.
     #[tokio::test]
     async fn source_filter_refuses_too_many_distinct_tags() {
         let tags: Vec<String> = (0..super::super::MAX_TAGS_PER_SOURCE + 1)
@@ -2753,7 +2781,7 @@ mod tests {
             .await
             .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(body["code"], ErrorCode::InvalidArgument.as_str());
+        assert_eq!(body["code"], ErrorCode::OverLimit.as_str());
         assert!(
             body["error"]
                 .as_str()

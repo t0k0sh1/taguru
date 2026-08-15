@@ -9,7 +9,7 @@ use taguru::deadline::Deadline;
 
 use crate::registry::{AccessError, AppState};
 
-use super::aliases::KeysetQuery;
+use super::aliases::{KeysetQuery, keyset_bounds};
 use super::{
     AppJson, AppPath, AppQuery, ErrorCode, MAX_MATCH_LIMIT, MatchCursor, MatchPage, access_error,
     associations_out, clamp_page, deadline_exceeded, error, not_found, ok, overlong, page,
@@ -161,6 +161,9 @@ pub async fn labels(
     AppQuery(query): AppQuery<KeysetQuery>,
 ) -> Response {
     let started_at = Instant::now();
+    if let Some(refusal) = keyset_bounds(&query, started_at) {
+        return refusal;
+    }
     let limit = clamp_page(query.limit, MAX_MATCH_LIMIT, MAX_MATCH_LIMIT);
     if deadline.expired() {
         return deadline_exceeded(started_at);

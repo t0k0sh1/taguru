@@ -382,6 +382,42 @@ fn oversized_names_are_rejected_at_every_write_boundary() {
     );
 }
 
+/// `KeysetQuery`'s `prefix`/`after` reach every other listing string
+/// through `oversized` now (issue #623 finding 3) — the one door across
+/// `list_sources`/`list_aliases`/`labels`/`list_groups` that used to let
+/// an unbounded string straight through.
+#[test]
+fn oversized_prefix_and_after_are_rejected_on_every_keyset_listing() {
+    let server = Server::start("keysetcap");
+    server.ok("PUT", "/contexts/sake", Some(json!({})));
+    let long = "n".repeat(2000); // over MAX_CURSOR_BYTES either way
+
+    for path in [
+        format!("/contexts/sake/sources?prefix={long}"),
+        format!("/contexts/sake/aliases?prefix={long}"),
+        format!("/contexts/sake/labels?prefix={long}"),
+        format!("/groups?prefix={long}"),
+    ] {
+        let (status, body) = server.call("GET", &path, None);
+        assert_eq!(status, 400, "{path}: {body}");
+        assert_eq!(body["code"], "invalid_argument", "{path}: {body}");
+    }
+    for path in [
+        format!("/contexts/sake/sources?after={long}"),
+        format!("/contexts/sake/aliases?after={long}"),
+        format!("/contexts/sake/labels?after={long}"),
+        format!("/groups?after={long}"),
+    ] {
+        let (status, body) = server.call("GET", &path, None);
+        assert_eq!(status, 400, "{path}: {body}");
+        assert_eq!(body["code"], "invalid_argument", "{path}: {body}");
+    }
+
+    // The cap doesn't reject an ordinary, in-bounds prefix.
+    let ok = server.ok("GET", "/contexts/sake/sources?prefix=n", None);
+    assert_eq!(ok["total"], json!(0), "{ok}");
+}
+
 #[test]
 fn empty_names_are_rejected_at_the_write_boundary() {
     let server = Server::start("emptyname");
