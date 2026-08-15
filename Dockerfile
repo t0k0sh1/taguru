@@ -2,6 +2,13 @@
 # targets link statically by default — which is what lets the runtime
 # stage be `scratch`. No OpenSSL and no CA bundle are needed: TLS is
 # rustls with the webpki roots compiled into the binary.
+#
+# The base image and apk packages below are deliberately NOT digest-
+# pinned: dependabot.yml has no `docker` ecosystem entry, so a digest
+# would go stale with nothing to flag it. This intentionally trades
+# reproducible builds and reviewable supply-chain changes for automatic
+# upstream updates; both the mutable tag and live Alpine package index
+# can change the image without a source diff.
 FROM rust:1.96-alpine AS build
 RUN apk add --no-cache musl-dev cargo-auditable
 WORKDIR /src
