@@ -328,6 +328,21 @@ fn promotion_refusals_name_their_cause_before_anything_applies() {
     );
     assert_eq!(db["total"], json!(0), "nothing may have applied: {db}");
 
+    // Past MAX_LISTED_ISSUES (20) mistyped ids: `issues_total` (25)
+    // must survive `truncate_issues`, not collapse to the listed
+    // count (20) — the two agree at a single mistyped id above, so
+    // that case alone cannot tell `issues_total` apart from
+    // `issues.len()`.
+    let fake_sources: Vec<String> = (0..25).map(|i| format!("session:claude:typo{i}")).collect();
+    let (status, refused) = server.call(
+        "POST",
+        "/contexts/scratch-claude/promote",
+        Some(json!({"into": "perm", "sources": fake_sources})),
+    );
+    assert_eq!(status, 404, "{refused}");
+    assert_eq!(refused["issues_total"], json!(25), "{refused}");
+    assert_eq!(refused["issues"].as_array().unwrap().len(), 20, "{refused}");
+
     // A fully-retracted source is no longer promotable: its dead
     // attribution rows (count 0) must not count as "exists here".
     server.ok(

@@ -663,6 +663,28 @@ fn store_passages_issue_paths_name_the_source_and_item_index() {
     assert_eq!(issues[0]["path"], json!("sections['ghost.md']"), "{body}");
     assert_eq!(issues[0]["kind"], json!("unknown_reference"), "{body}");
 
+    // Past MAX_LISTED_ISSUES (20) wrong-typed questions in one call:
+    // `issues_total` (25) must survive `truncate_issues`, not collapse
+    // to the listed count (20) — the single-issue case above cannot
+    // tell `issues_total` apart from `issues.len()`.
+    // Distinct paragraph indices: same-paragraph questions past 8 also
+    // trip the per-paragraph question cap, adding a second issue per
+    // item and muddying the count this asserts.
+    let bad_questions: Vec<serde_json::Value> = (0..25)
+        .map(|i| json!({"paragraph": i, "question": 123}))
+        .collect();
+    let (status, body) = server.call(
+        "POST",
+        "/contexts/sake/sources",
+        Some(json!({
+            "passages": {"doc.md": "text"},
+            "questions": {"doc.md": bad_questions},
+        })),
+    );
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["issues_total"], json!(25), "{body}");
+    assert_eq!(body["issues"].as_array().unwrap().len(), 20, "{body}");
+
     let lookup = server.ok(
         "POST",
         "/contexts/sake/sources/lookup",
