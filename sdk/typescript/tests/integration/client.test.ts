@@ -422,6 +422,28 @@ describe("sources and citations", () => {
     expect((error as EmbeddingUnavailableError).code).toBe("embeddings_unconfigured");
     await client.contexts.delete(name);
   });
+
+  it("reports no embedding provider configured", async () => {
+    const name = fresh();
+    await client.contexts.create(name);
+    const status = await client.context(name).embeddingsStatus();
+    expect(status.provider_model).toBeNull();
+    expect(status.glosses).toBeUndefined();
+    expect(status.passages).toBeUndefined();
+    await client.contexts.delete(name);
+  });
+
+  it("analyzeCommunities returns NDJSON with a header line", async () => {
+    const name = fresh();
+    await seed(name);
+    const body = await client.context(name).analyzeCommunities();
+    const lines = body.split("\n").filter((line) => line.length > 0);
+    expect(lines.length).toBeGreaterThan(0);
+    const header = JSON.parse(lines[0]!);
+    expect(header.taguru_communities).toBe(1);
+    expect(header.context).toBe(name);
+    await client.contexts.delete(name);
+  });
 });
 
 describe("transfer and maintenance", () => {
@@ -465,6 +487,30 @@ describe("transfer and maintenance", () => {
     await ctx.retractSource("docs/aomine.md");
     const outcome = await ctx.compact();
     expect(outcome.bytes_after).toBeLessThanOrEqual(outcome.bytes_before);
+    await client.contexts.delete(name);
+  });
+
+  it("promotes a source and previews with dry_run", async () => {
+    const name = fresh();
+    const destination = `${name}-dest`;
+    await seed(name);
+    await client.contexts.create(destination);
+    const scratch = client.context(name);
+
+    const preview = await scratch.promote(destination, ["docs/aomine.md"], { dry_run: true });
+    expect(preview.batches).toHaveLength(1);
+    expect(preview.audit).toBeUndefined();
+    // A dry run writes nothing.
+    expect((await client.context(destination).listSources()).total).toBe(0);
+
+    const outcome = await scratch.promote(destination, ["docs/aomine.md"]);
+    expect(outcome.batches[0]!.source).toBe("docs/aomine.md");
+    expect(outcome.batches[0]!.context).toBe(destination);
+    expect(outcome.audit).toBeDefined();
+    expect(outcome.audit!.detector).toBe("consolidation/1");
+    expect((await client.context(destination).listSources()).total).toBe(1);
+
+    await client.contexts.delete(destination);
     await client.contexts.delete(name);
   });
 

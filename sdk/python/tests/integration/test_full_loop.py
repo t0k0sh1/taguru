@@ -351,6 +351,15 @@ def test_embeddings_refresh_501_without_provider(client: Taguru, fresh_name: str
     client.contexts.delete(fresh_name)
 
 
+def test_embeddings_status_reports_no_provider_configured(client: Taguru, fresh_name: str) -> None:
+    client.contexts.create(fresh_name)
+    status = client.context(fresh_name).embeddings_status()
+    assert status.provider_model is None
+    assert status.glosses is None
+    assert status.passages is None
+    client.contexts.delete(fresh_name)
+
+
 def test_vocabulary_audit_surfaces_lexical_twins(client: Taguru, fresh_name: str) -> None:
     client.contexts.create(fresh_name)
     ctx = client.context(fresh_name)
@@ -412,6 +421,29 @@ def test_compact_reports_shed_bytes(client: Taguru, fresh_name: str) -> None:
     ctx.retract_source("docs/aomine.md")
     outcome = ctx.compact()
     assert outcome.bytes_after <= outcome.bytes_before
+    client.contexts.delete(fresh_name)
+
+
+def test_promote_moves_a_source_and_previews_with_dry_run(client: Taguru, fresh_name: str) -> None:
+    destination = f"{fresh_name}-dest"
+    seed(client, fresh_name)
+    client.contexts.create(destination)
+    scratch = client.context(fresh_name)
+
+    preview = scratch.promote(destination, ["docs/aomine.md"], dry_run=True)
+    assert len(preview.batches) == 1
+    assert preview.audit is None
+    # A dry run writes nothing.
+    assert client.context(destination).list_sources().total == 0
+
+    outcome = scratch.promote(destination, ["docs/aomine.md"])
+    assert outcome.batches[0].source == "docs/aomine.md"
+    assert outcome.batches[0].context == destination
+    assert outcome.audit is not None
+    assert outcome.audit["detector"] == "consolidation/1"
+    assert client.context(destination).list_sources().total == 1
+
+    client.contexts.delete(destination)
     client.contexts.delete(fresh_name)
 
 
@@ -484,6 +516,22 @@ def test_search_communities_verdicts_staleness_over_an_artifact(
     assert page.revision.current_graph > page.revision.recorded_graph
 
     client.contexts.delete(derived)
+    client.contexts.delete(fresh_name)
+
+
+def test_analyze_communities_returns_ndjson_with_a_header_line(
+    client: Taguru, fresh_name: str
+) -> None:
+    seed(client, fresh_name)
+    ctx = client.context(fresh_name)
+
+    body = ctx.analyze_communities()
+    lines = body.splitlines()
+    assert lines
+    header = json.loads(lines[0])
+    assert header["taguru_communities"] == 1
+    assert header["context"] == fresh_name
+
     client.contexts.delete(fresh_name)
 
 

@@ -912,6 +912,33 @@ export interface RefreshOutcome {
   passages?: RefreshBreakdown;
 }
 
+/** The gloss vector sidecar's identity and size. */
+export interface EmbeddingsGlossesStatus {
+  model: string;
+  width: number;
+  concepts: number;
+  labels: number;
+}
+
+/** The passage vector sidecar's identity and size. */
+export interface EmbeddingsPassagesStatus {
+  model: string;
+  width: number;
+  rows: number;
+}
+
+/**
+ * `GET /contexts/{name}/embeddings`: the provider configured now beside the
+ * (model, width) each vector sidecar was actually built with.
+ * `provider_model` is `null` when embeddings are off; a missing lane means
+ * nothing of that kind has been embedded yet.
+ */
+export interface EmbeddingsStatus {
+  provider_model: string | null;
+  glosses?: EmbeddingsGlossesStatus;
+  passages?: EmbeddingsPassagesStatus;
+}
+
 export interface TwinPair {
   a: string;
   b: string;
@@ -1042,6 +1069,22 @@ export interface ImportResult {
   schemas: SchemaImportOutcome[];
   issues: Issue[];
   schema_violations: number;
+}
+
+/**
+ * What `POST /contexts/{name}/promote` accomplished (ADR 0018): each named
+ * source moved whole from this (scratch) context into `into`, `/import`'s
+ * own per-batch outcome shape.
+ *
+ * `audit` mirrors `auditConsolidation`'s own untyped shape — absent on a
+ * dry run, on `audit: false`, and when the audit itself could not run
+ * (`audit_skipped` then says why).
+ */
+export interface PromoteOutcome {
+  batches: ImportOutcome[];
+  aliases_dropped: number;
+  audit?: Record<string, unknown>;
+  audit_skipped?: string;
 }
 
 /**

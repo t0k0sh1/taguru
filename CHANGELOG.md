@@ -7,6 +7,14 @@ Entries that change an on-disk format or a response shape say so.
 
 ## [Unreleased]
 
+### Added
+- Python/TypeScript SDKs: `promote`/`analyze_communities`/`embeddings_status`
+  — the last three HTTP endpoints with no client-side coverage
+  (`POST /contexts/{name}/promote`, `GET /contexts/{name}/communities`,
+  `GET /contexts/{name}/embeddings`), all three already documented in
+  `src/llm-protocol.md` but missing from `sdk/spec/surface.yaml` and
+  both SDKs (issue #625).
+
 ### Changed
 - `ApiError` gains an additive `issues_total: usize` field (present only
   when nonzero) — the failure-side counterpart to

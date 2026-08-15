@@ -12,6 +12,7 @@ raw cumulative sum.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 __all__ = [
     "LabelUsage",
@@ -65,12 +66,16 @@ __all__ = [
     "RetractAssociationOutcome",
     "RefreshBreakdown",
     "RefreshOutcome",
+    "EmbeddingsGlossesStatus",
+    "EmbeddingsPassagesStatus",
+    "EmbeddingsStatus",
     "TwinPair",
     "VocabularyAudit",
     "UnsourcedEdge",
     "DriftAudit",
     "CompactOutcome",
     "ImportOutcome",
+    "PromoteOutcome",
     "BatchApplyResult",
     "RetrievalResult",
 ]
@@ -868,6 +873,38 @@ class RefreshOutcome:
 
 
 @dataclass(slots=True, frozen=True)
+class EmbeddingsGlossesStatus:
+    """The gloss vector sidecar's identity and size."""
+
+    model: str
+    width: int
+    concepts: int
+    labels: int
+
+
+@dataclass(slots=True, frozen=True)
+class EmbeddingsPassagesStatus:
+    """The passage vector sidecar's identity and size."""
+
+    model: str
+    width: int
+    rows: int
+
+
+@dataclass(slots=True, frozen=True)
+class EmbeddingsStatus:
+    """``GET /contexts/{name}/embeddings``: the provider configured now
+    beside the (model, width) each vector sidecar was actually built
+    with. ``provider_model`` is ``None`` when embeddings are off; a
+    missing lane means nothing of that kind has been embedded yet.
+    """
+
+    provider_model: str | None
+    glosses: EmbeddingsGlossesStatus | None = None
+    passages: EmbeddingsPassagesStatus | None = None
+
+
+@dataclass(slots=True, frozen=True)
 class TwinPair:
     a: str
     b: str
@@ -1019,6 +1056,24 @@ class ImportResult:
     schemas: list[SchemaImportOutcome] = field(default_factory=list)
     issues: list[Issue] = field(default_factory=list)
     schema_violations: int = 0
+
+
+@dataclass(slots=True, frozen=True)
+class PromoteOutcome:
+    """What ``POST /contexts/{name}/promote`` accomplished (ADR 0018):
+    each named source moved whole from this (scratch) context into
+    ``into``, ``/import``'s own per-batch outcome shape.
+
+    ``audit`` mirrors :meth:`AsyncContext.audit_consolidation`'s own
+    untyped shape (a ``ConsolidationAudit`` server-side) — absent on a
+    dry run, on ``audit=False``, and when the audit itself could not
+    run (``audit_skipped`` then says why).
+    """
+
+    batches: list[ImportOutcome]
+    aliases_dropped: int
+    audit: dict[str, Any] | None = None
+    audit_skipped: str | None = None
 
 
 @dataclass(slots=True, frozen=True)

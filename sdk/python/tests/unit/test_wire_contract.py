@@ -36,11 +36,13 @@ from taguru._models import (
     ChangesPage,
     CommunityPage,
     ContextPage,
+    EmbeddingsStatus,
     EvidencePackage,
     ExplorePage,
     MatchPage,
     PassagePage,
     PathsPage,
+    PromoteOutcome,
 )
 from tests.unit._repo import repo_root
 
@@ -77,6 +79,9 @@ TYPED_OPERATIONS = {
     "paths": PathsPage,
     "changes": ChangesPage,
     "communities_search": CommunityPage,
+    "embeddings_status": EmbeddingsStatus,
+    "promote": PromoteOutcome,
+    "promote_dry_run": PromoteOutcome,
     "evidence_mixed_lanes": EvidencePackage,
     "evidence_budget_constrained": EvidencePackage,
     "evidence_duplicate_passage": EvidencePackage,

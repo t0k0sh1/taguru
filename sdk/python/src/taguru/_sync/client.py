@@ -40,6 +40,7 @@ from .._models import (
     CrossPassagePage,
     DirectoryEntry,
     DriftAudit,
+    EmbeddingsStatus,
     EvidencePackage,
     ExplorePage,
     GroupEntry,
@@ -52,6 +53,7 @@ from .._models import (
     PassageLookup,
     PassagePage,
     PathsPage,
+    PromoteOutcome,
     RefreshOutcome,
     ResolveExplanation,
     RetractAssociationOutcome,
@@ -1344,6 +1346,18 @@ class Context:
         result = self._post("/communities/search", body)
         return decode(CommunityPage, result)  # type: ignore[no-any-return]
 
+    def analyze_communities(self) -> str:
+        """Community detection on the live graph (NDJSON text: a header
+        line, then one line per community, leaves first).
+
+        Compute-heavy (heavy-ops gated) — most callers want
+        :meth:`search_communities` instead, which serves a pre-built
+        summary artifact. This is the derivation half ``taguru
+        communities`` itself orchestrates.
+        """
+        response = self._client._send("GET", self._path + "/communities")
+        return response.text
+
     def explain_search_passages(
         self,
         query: str,
@@ -1576,10 +1590,54 @@ class Context:
         result = self._post("/embeddings/refresh")
         return decode(RefreshOutcome, result)  # type: ignore[no-any-return]
 
+    def embeddings_status(self) -> EmbeddingsStatus:
+        """The embedding identity: the provider configured now beside
+        the (model, width) each vector sidecar was actually built with.
+
+        ``provider_model`` is ``None`` when embeddings are off; a
+        missing lane means nothing of that kind has been embedded yet
+        (the two models disagreeing means a refresh is needed).
+        """
+        result = self._client._request_json("GET", self._path + "/embeddings")
+        return decode(EmbeddingsStatus, result)  # type: ignore[no-any-return]
+
     def compact(self) -> CompactOutcome:
         """Rebuild the image without dead records (admin role)."""
         result = self._post("/compact")
         return decode(CompactOutcome, result)  # type: ignore[no-any-return]
+
+    # -- promotion -----------------------------------------------------------------
+
+    def promote(
+        self,
+        into: str,
+        sources: Sequence[str],
+        *,
+        audit: bool | None = None,
+        dry_run: bool = False,
+    ) -> PromoteOutcome:
+        """Move named scratch sources whole into the established
+        context ``into`` (ADR 0018) — the export/import round trip in
+        one call, without re-extraction.
+
+        Each source moves whole (passage, date, tags, only its own
+        share of every edge's weight); source ids survive, and
+        applying is per-source retract-then-apply — re-promoting is
+        idempotent. ``into`` must already exist (never created here).
+        A named source missing from this (scratch) context refuses the
+        WHOLE request. ``audit`` omitted means ``True``: after a real
+        apply, the destination gets the default consolidation audit
+        (all three checks) riding back as candidates, never applied.
+        ``dry_run=True`` previews the same ``batches`` shape and
+        writes nothing.
+        """
+        result = self._client._request_json(
+            "POST",
+            self._path + "/promote",
+            params=drop_none({"dry_run": True if dry_run else None}),
+            json_body=drop_none({"into": into, "sources": list(sources), "audit": audit}),
+        )
+        return decode(PromoteOutcome, result)  # type: ignore[no-any-return]
 
     # -- export ------------------------------------------------------------------------
 
