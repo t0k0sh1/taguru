@@ -447,12 +447,23 @@ pub(super) fn source_filter(
         // this function's own top): both are "a list-shaped field
         // carries too many items," and a client branching on
         // `over_limit` to pick a retry strategy must not see one of the
-        // two silently fall back to `invalid_argument`. Not reused as
-        // `overlong(...)` itself: that helper hardcodes `MAX_INPUT_ITEMS`
-        // (no cap parameter) and its advice ("split the request") would
-        // be wrong here — splitting the request doesn't reduce how many
-        // *distinct* tags one source names; naming fewer tags does,
-        // which the message below already says.
+        // two silently fall back to `invalid_argument`. `tags` is an
+        // any-of filter (`SourceFilter::matches`, `src/passages.rs`),
+        // so splitting the distinct set across two calls and unioning
+        // the results client-side IS equivalent to one call with the
+        // full set — `OverLimit`'s "split and resend" contract holds,
+        // the same as `cross_targets`' own any-of `contexts`/`groups`
+        // cap (`recall.rs`) already reusing `overlong`. Confirmed
+        // against this exact constant's OTHER enforcement point too:
+        // `interpret_tags` (below, a source's own stored tag list,
+        // write side) already reports an over-cap count as
+        // `Issue::over_limit`, not a type/argument issue — read and
+        // write sides of `MAX_TAGS_PER_SOURCE` agreeing on the kind is
+        // the more direct precedent. Not reused as `overlong(...)`
+        // itself: that helper hardcodes `MAX_INPUT_ITEMS` (no cap
+        // parameter) and its advice ("split the request") would read
+        // oddly here — the message below already names the right fix
+        // (name fewer distinct tags) more precisely than "split".
         return Err(Box::new(error(
             ErrorCode::OverLimit,
             format!(
