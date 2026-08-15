@@ -18,15 +18,18 @@ use taguru::deadline::Deadline;
 use crate::registry::{AppState, ChangeEvent, ChangesOutcome};
 
 use super::{
-    AppPath, AppQuery, DEFAULT_MATCH_LIMIT, ErrorCode, MAX_MATCH_LIMIT, access_error, clamp,
+    AppPath, AppQuery, DEFAULT_MATCH_LIMIT, ErrorCode, MAX_MATCH_LIMIT, access_error, clamp_page,
     deadline_exceeded, error, ok,
 };
 
 /// `?since=&limit=`. `since` is the opaque cursor a previous page's
 /// `next` handed back; omitted means "start tailing now" — an empty
 /// page whose `next` is the current position, the bootstrap for a
-/// client that just finished a full sync. `limit` follows the match
-/// endpoints' clamp (default 100, ceiling 1000).
+/// client that just finished a full sync. `limit` follows the same
+/// default/ceiling as the match endpoints (100/1000) but floors an
+/// explicit `0` to `1` (`clamp_page`, not `clamp`): a page size of
+/// zero here would produce a `more: true` page with no progress,
+/// so a client honoring "poll again immediately" would busy-loop.
 #[derive(Debug, Deserialize)]
 pub struct ChangesQuery {
     pub since: Option<String>,
@@ -57,7 +60,7 @@ pub async fn changes(
     match state.context_changes(
         &name,
         query.since.as_deref(),
-        clamp(query.limit, DEFAULT_MATCH_LIMIT, MAX_MATCH_LIMIT),
+        clamp_page(query.limit, DEFAULT_MATCH_LIMIT, MAX_MATCH_LIMIT),
     ) {
         Ok(ChangesOutcome::Page { events, next, more }) => {
             state.note_read(&name, events.is_empty());

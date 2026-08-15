@@ -174,6 +174,39 @@ fn limit_pages_with_more_and_the_cursor_walks_the_gap() {
     assert_eq!(second["more"], json!(false));
 }
 
+/// #676: `?limit=0` must floor to 1 (`clamp_page`), not serve an
+/// empty, non-advancing page — a client honoring "more:true means
+/// poll again immediately" would busy-loop against the same cursor
+/// forever otherwise.
+#[test]
+fn limit_zero_is_floored_to_one_not_left_as_a_non_advancing_page() {
+    let server = Server::start("changes-limit-zero");
+    server.ok("PUT", "/contexts/sake", None);
+    let cursor = tail_cursor(&server, "sake");
+    for index in 0..2 {
+        server.ok(
+            "POST",
+            "/contexts/sake/associations",
+            Some(json!([
+                {"subject": format!("s{index}"), "label": "r", "object": "o", "weight": 1.0},
+            ])),
+        );
+    }
+
+    let page = server.ok(
+        "GET",
+        &format!("/contexts/sake/changes?since={cursor}&limit=0"),
+        None,
+    );
+    assert_eq!(page["events"].as_array().unwrap().len(), 1, "{page}");
+    assert_eq!(page["more"], json!(true), "{page}");
+    assert_ne!(
+        page["next"].as_str().unwrap(),
+        cursor,
+        "the cursor must advance past the served event: {page}"
+    );
+}
+
 #[test]
 fn lost_positions_answer_stale_cursor_and_unknown_contexts_404() {
     let server = Server::start("changes-stale");
