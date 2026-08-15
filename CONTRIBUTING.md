@@ -48,11 +48,15 @@ checked mechanically so the two languages cannot drift apart:
 python sdk/python/scripts/check_surface.py       # Python vs. the spec
 npm run check:surface --workspace=taguru         # from sdk/: TypeScript vs. the spec
 python sdk/spec/check_versions.py                # SDK package versions vs. the server's Cargo.toml
+python sdk/spec/check_surface_completeness.py    # the spec vs. src/main.rs's HTTP router
 ```
 
-All three run in CI ([.github/workflows/sdk.yml](.github/workflows/sdk.yml));
-a change that adds or renames a public SDK method updates
-`surface.yaml` in the same commit.
+All four run in CI ([.github/workflows/sdk.yml](.github/workflows/sdk.yml),
+[.github/workflows/ci.yml](.github/workflows/ci.yml)); a change that
+adds or renames a public SDK method, or a route in `fn routes()`,
+updates `surface.yaml` in the same commit — or, for a route
+deliberately excluded from the SDK surface, adds a reasoned entry to
+`check_surface_completeness.py`'s own `ALLOWLIST`.
 
 ## Wire-contract fixtures
 
