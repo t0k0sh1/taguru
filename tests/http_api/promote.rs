@@ -944,54 +944,47 @@ fn audit_degrades_to_deadline_exceeded_when_the_destination_vocabulary_is_too_la
 /// `export_context` would raise (a different message: that one never
 /// reaches render at all).
 ///
-/// The pipeline is export -> render -> parse -> apply, and only
-/// render's own loop checks the deadline per item; `parse_stream` has
-/// none (unreachable by construction — the stream is our own render).
-/// Measured directly (temporary `eprintln!`s around each phase, since
-/// removed): for 400_000 one-source associations, export took ~155ms,
-/// render alone ~1.8s, and parse alone ~1.5s more — so a budget that
-/// export clears easily but render's own cost alone exceeds is what
-/// reaches this branch specifically; too small a corpus lets render
-/// finish just under the wire and `parse_stream`'s unchecked cost is
-/// what actually crosses it, landing on `budget_refusal` at the next
-/// checkpoint instead. 500_000 gives comfortable margin over a 2s
-/// budget.
-///
-/// Seeding runs on a GENEROUS-timeout server first, then the process
-/// restarts onto the tight one — a single shared timeout for both
-/// seeding and the measured call is not viable: `scratch`'s registry
-/// entry starts `Cold` on every fresh process (`ensure_hot`'s WAL
-/// replay, `src/registry.rs`), and that one-time load (measured at
-/// ~10s for this corpus, uninterruptible — `ensure_hot` takes no
-/// `Deadline` at all) would otherwise dominate `export_context`
-/// itself and trip `AccessError::DeadlineExceeded` before render is
-/// ever reached — a real failure mode hit while widening this test's
-/// margin for CI (the same restart, without a warm-up, reproduced
-/// export's OWN timeout message instead of render's). A throwaway
-/// warm-up call after the restart (ignored status: `ensure_hot` has
-/// no deadline check to trip, so it always runs to completion and
-/// leaves the entry `Hot` regardless of how long it takes) pays that
-/// cost under room to spare, so the timed `promote` call that follows
-/// sees the same fast, warm `export_context` this test's margin was
-/// measured against.
+/// One association, reasserted from the SAME source many times —
+/// `repeated_assertions_from_one_source_accumulate_into_one_attribution`
+/// — rather than many distinct associations: a repeated key is an O(1)
+/// lookup on the write side (measured constant at ~150ms per 10k-item
+/// chunk regardless of how large the total already is), where distinct
+/// names make each chunk progressively slower as the corpus grows
+/// (measured up to ~2s per chunk near 500k items — this test's very
+/// first design, since widened for CI margin, actually hit exactly
+/// that: some individual seed calls exceeded a shared tight timeout).
+/// `push_assertions`'s own per-count loop (`export.rs:648`, checked
+/// every DEADLINE_CHECK_STRIDE=4096) then does render's real work N
+/// times over for this ONE association — `export_context` itself
+/// stays under a millisecond (nothing per-item to do: nothing to scan
+/// for it — the whole cost is repeated count, not accumulated rows),
+/// so the deadline dies squarely inside render's own loop as long as
+/// the budget is smaller than render's own full-count duration
+/// (COUNT * ~1.9us/assertion here) — no delicate margin against
+/// `parse_stream`'s unchecked cost the way distinct-item corpora
+/// needed, since a budget this far under render's own completion time
+/// interrupts it long before parse is ever reached.
 #[test]
 fn render_refusal_reports_timeout_when_the_export_alone_outlasts_the_budget() {
-    let server = Server::start("promote-render-timeout");
+    let server = Server::start_with_env(
+        "promote-render-timeout",
+        &[("TAGURU_REQUEST_TIMEOUT_SECS", "2")],
+    );
     server.ok(
         "PUT",
         "/contexts/scratch",
         Some(json!({"description": "d"})),
     );
     server.ok("PUT", "/contexts/perm5", Some(json!({"description": "d"})));
-    const N: usize = 500_000;
+    const COUNT: usize = 1_500_000;
     const CHUNK: usize = 10_000;
     let mut k = 0usize;
-    while k < N {
-        let end = (k + CHUNK).min(N);
+    while k < COUNT {
+        let end = (k + CHUNK).min(COUNT);
         let batch: Vec<serde_json::Value> = (k..end)
-            .map(|i| {
+            .map(|_| {
                 json!({
-                    "subject": format!("s{i}"), "label": "l", "object": format!("o{i}"),
+                    "subject": "s", "label": "l", "object": "o",
                     "weight": 1.0, "source": "a.md",
                 })
             })
@@ -1003,17 +996,6 @@ fn render_refusal_reports_timeout_when_the_export_alone_outlasts_the_budget() {
         );
         k = end;
     }
-    let data_dir = server.stop_gracefully();
-    let server = Server::start_on_with_env(
-        "promote-render-timeout",
-        data_dir,
-        &[("TAGURU_REQUEST_TIMEOUT_SECS", "2")],
-    );
-    server.call(
-        "POST",
-        "/contexts/scratch/query",
-        Some(json!({"subject": "s0"})),
-    );
 
     let (status, refused) = server.call(
         "POST",
