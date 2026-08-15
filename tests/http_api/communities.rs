@@ -457,3 +457,272 @@ fn the_cli_derives_incrementally_and_dry_run_writes_nothing() {
         "the repaired artifact serves again: {page}"
     );
 }
+
+// --- community_hits: untested refusal/degradation branches -----------------
+
+/// The artifact's own manifest builder, `search_refuses_without_an_
+/// artifact_and_verdicts_staleness_with_one`'s setup factored out so
+/// the branches below can each mutate one field of an otherwise valid
+/// artifact.
+fn seed_manifest_artifact(server: &Server, derived: &str, manifest: &Value) {
+    server.ok("PUT", &format!("/contexts/{derived}"), None);
+    server.ok(
+        "POST",
+        &format!("/contexts/{derived}/sources"),
+        Some(json!({"passages": {
+            "community:L0-0": "夏目漱石と明治の文学者たちの交流についての要約。",
+            "communities:manifest": manifest.to_string(),
+        }})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{derived}/associations"),
+        Some(json!([
+            {"subject": "community:L0-0", "label": "contains", "object": "a1", "weight": 6.0},
+            {"subject": "community:L0-0", "label": "contains", "object": "a2", "weight": 4.0},
+        ])),
+    );
+}
+
+/// A `communities:manifest` record that fails to parse as JSON — the
+/// artifact exists, but its identity record is corrupt, distinct from
+/// no artifact at all (which answers "build one", not a 409).
+#[test]
+fn search_reports_conflict_when_the_manifest_record_does_not_parse() {
+    let server = Server::start("communities-manifest-corrupt");
+    seed_two_cliques(&server, "sci");
+    server.ok("PUT", "/contexts/sci::communities", None);
+    server.ok(
+        "POST",
+        "/contexts/sci::communities/sources",
+        Some(json!({"passages": {
+            "communities:manifest": "{not valid json",
+        }})),
+    );
+
+    let (status, refused) = server.call(
+        "POST",
+        "/contexts/sci/communities/search",
+        Some(json!({"query": "夏目漱石"})),
+    );
+    assert_eq!(status, 409, "{refused}");
+    assert_eq!(refused["code"], json!("conflict"), "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("does not parse"),
+        "{refused}"
+    );
+}
+
+/// A manifest whose `source_context` names a DIFFERENT context than
+/// the one the search was made against — the artifact answers for
+/// somebody else's graph, so serving it would silently mislabel it.
+#[test]
+fn search_reports_conflict_when_the_manifest_names_a_different_source_context() {
+    let server = Server::start("communities-manifest-mismatch");
+    seed_two_cliques(&server, "sci");
+    let revision = server.ok("GET", "/contexts/sci", None)["revision"].clone();
+    let manifest = json!({
+        "taguru_communities": 1,
+        "algorithm": "louvain-cc/1",
+        "source_context": "elsewhere",
+        "revision": revision,
+        "levels": 1,
+        "communities": [
+            {"id": "L0-0", "level": 0, "fingerprint": "00aa00aa00aa00aa", "concept_count": 4},
+        ],
+    });
+    seed_manifest_artifact(&server, "sci::communities", &manifest);
+
+    let (status, refused) = server.call(
+        "POST",
+        "/contexts/sci/communities/search",
+        Some(json!({"query": "夏目漱石"})),
+    );
+    assert_eq!(status, 409, "{refused}");
+    assert_eq!(refused["code"], json!("conflict"), "{refused}");
+    let message = refused["error"].as_str().unwrap();
+    assert!(message.contains("elsewhere"), "{message}");
+    assert!(message.contains("sci"), "{message}");
+}
+
+/// `check_derived_scope`'s Forbidden: the auth middleware already
+/// cleared the PATH context ('sci'), but the DERIVED artifact context
+/// ('sci::communities') is a second read target named in the body, and
+/// a scoped key without a grant on it must be refused just as it would
+/// be for the path context — otherwise a scoped key could read any
+/// context by aiming a search's `derived` field at it.
+#[test]
+fn search_reports_forbidden_when_the_scoped_key_has_no_grant_on_the_derived_context() {
+    let server = Server::start_with_env(
+        "communities-derived-scope",
+        &[
+            ("TAGURU_API_TOKENS", "boss:atok,reader:rtok"),
+            (
+                "TAGURU_KEY_SCOPES",
+                r#"{"reader": {"role": "read", "contexts": ["sci"]}}"#,
+            ),
+        ],
+    );
+    let admin = |method: &str, path: &str, body: Option<Value>| {
+        server.call_with_token(method, path, body, Some("atok"))
+    };
+    admin("PUT", "/contexts/sci", None);
+    // The same 4-clique graph `seed_two_cliques` seeds, over an
+    // authenticated admin token so the derived-scope grant below can
+    // be scoped to a real, non-empty source graph.
+    let members: Vec<String> = (1..=4).map(|index| format!("a{index}")).collect();
+    let mut ops = Vec::new();
+    for (index, subject) in members.iter().enumerate() {
+        for object in &members[index + 1..] {
+            ops.push(json!({"subject": subject, "label": "近い", "object": object, "weight": 2.0}));
+        }
+    }
+    admin(
+        "POST",
+        "/contexts/sci/associations",
+        Some(Value::Array(ops)),
+    );
+    let revision = admin("GET", "/contexts/sci", None).1["revision"].clone();
+    let manifest = json!({
+        "taguru_communities": 1,
+        "algorithm": "louvain-cc/1",
+        "source_context": "sci",
+        "revision": revision,
+        "levels": 1,
+        "communities": [
+            {"id": "L0-0", "level": 0, "fingerprint": "00aa00aa00aa00aa", "concept_count": 4},
+        ],
+    });
+    admin("PUT", "/contexts/sci::communities", None);
+    admin(
+        "POST",
+        "/contexts/sci::communities/sources",
+        Some(json!({"passages": {
+            "community:L0-0": "夏目漱石と明治の文学者たちの交流についての要約。",
+            "communities:manifest": manifest.to_string(),
+        }})),
+    );
+    admin(
+        "POST",
+        "/contexts/sci::communities/associations",
+        Some(json!([
+            {"subject": "community:L0-0", "label": "contains", "object": "a1", "weight": 6.0},
+        ])),
+    );
+
+    let (status, refused) = server.call_with_token(
+        "POST",
+        "/contexts/sci/communities/search",
+        Some(json!({"query": "夏目漱石"})),
+        Some("rtok"),
+    );
+    assert_eq!(status, 403, "{refused}");
+    assert_eq!(refused["code"], json!("forbidden"), "{refused}");
+    let message = refused["error"].as_str().unwrap();
+    assert!(message.contains("sci::communities"), "{message}");
+}
+
+/// `MEMBERS_PER_HIT` (12): a community's `contains` membership beyond
+/// the cap is truncated, `members_truncated` says so rather than
+/// silently dropping the tail — `community_hits` reads membership
+/// straight off the artifact's own graph, so this needs no community
+/// DETECTION run at all, just `contains` edges asserted directly.
+#[test]
+fn search_truncates_membership_past_members_per_hit_and_flags_it() {
+    let server = Server::start("communities-members-cap");
+    seed_two_cliques(&server, "sci");
+    let revision = server.ok("GET", "/contexts/sci", None)["revision"].clone();
+    let manifest = json!({
+        "taguru_communities": 1,
+        "algorithm": "louvain-cc/1",
+        "source_context": "sci",
+        "revision": revision,
+        "levels": 1,
+        "communities": [
+            {"id": "L0-0", "level": 0, "fingerprint": "00aa00aa00aa00aa", "concept_count": 13},
+        ],
+    });
+    server.ok("PUT", "/contexts/sci::communities", None);
+    server.ok(
+        "POST",
+        "/contexts/sci::communities/sources",
+        Some(json!({"passages": {
+            "community:L0-0": "夏目漱石と明治の文学者たちの交流についての要約。",
+            "communities:manifest": manifest.to_string(),
+        }})),
+    );
+    // 13 members, strongest first by weight — one past MEMBERS_PER_HIT.
+    let members: Vec<Value> = (0..13)
+        .map(|i| {
+            json!({
+                "subject": "community:L0-0", "label": "contains",
+                "object": format!("m{i:02}"), "weight": (13 - i) as f64,
+            })
+        })
+        .collect();
+    server.ok(
+        "POST",
+        "/contexts/sci::communities/associations",
+        Some(Value::Array(members)),
+    );
+
+    let page = server.ok(
+        "POST",
+        "/contexts/sci/communities/search",
+        Some(json!({"query": "夏目漱石"})),
+    );
+    let hit = &page["hits"][0];
+    assert_eq!(hit["members_truncated"], json!(true), "{page}");
+    let served = hit["members"].as_array().unwrap();
+    let names: Vec<&str> = served
+        .iter()
+        .map(|member| member["name"].as_str().unwrap())
+        .collect();
+    let expected: Vec<String> = (0..12).map(|i| format!("m{i:02}")).collect();
+    assert_eq!(
+        names, expected,
+        "strongest-first order, m12 excluded: {page}"
+    );
+}
+
+/// A community summary is searchable (its passage and `contains`
+/// membership exist in the artifact) but the manifest's `communities`
+/// array does not list it — a torn artifact, one write behind the
+/// other. `level`/`parent`/`concept_count` all come from the manifest
+/// fact lookup (`facts.get(summary.id)`), so absence there must
+/// degrade those three fields to null rather than panic or fabricate
+/// zeros.
+#[test]
+fn search_omits_manifest_facts_for_a_community_the_manifest_does_not_list() {
+    let server = Server::start("communities-manifest-torn");
+    seed_two_cliques(&server, "sci");
+    let revision = server.ok("GET", "/contexts/sci", None)["revision"].clone();
+    // The manifest's own `communities` array is empty — L0-0 is
+    // searchable (passage + contains edges below) but unlisted.
+    let manifest = json!({
+        "taguru_communities": 1,
+        "algorithm": "louvain-cc/1",
+        "source_context": "sci",
+        "revision": revision,
+        "levels": 1,
+        "communities": [],
+    });
+    seed_manifest_artifact(&server, "sci::communities", &manifest);
+
+    let page = server.ok(
+        "POST",
+        "/contexts/sci/communities/search",
+        Some(json!({"query": "夏目漱石"})),
+    );
+    let hit = &page["hits"][0];
+    assert_eq!(hit["community"], json!("L0-0"), "{page}");
+    assert!(hit["level"].is_null(), "{page}");
+    assert!(hit["parent"].is_null(), "{page}");
+    assert!(hit["concept_count"].is_null(), "{page}");
+    // Membership itself is unaffected — it comes straight off the
+    // graph, not the manifest.
+    assert_eq!(hit["members"].as_array().unwrap().len(), 2, "{page}");
+}
