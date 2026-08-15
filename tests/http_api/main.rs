@@ -43,6 +43,7 @@ mod remote_compact;
 mod remote_export;
 mod remote_import;
 mod replication;
+mod resolve;
 mod resolve_match;
 mod retract_erasure;
 mod retrieval_cache;
