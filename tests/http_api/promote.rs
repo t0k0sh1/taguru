@@ -598,9 +598,15 @@ fn quota_refusal_reports_a_durable_prefix_when_the_first_landed_batch_tips_the_c
     assert!(message.contains("batch 2 of 2"), "{message}");
     assert!(message.contains("storage quota"), "{message}");
 
-    // The first batch landed for real before the second was refused.
+    // The first batch landed for real before the second was refused —
+    // specifically batch 0's source, not just any one source.
     let sources = server.ok("GET", "/contexts/perm/sources", None);
     assert_eq!(sources["total"], json!(1), "{sources}");
+    assert_eq!(
+        sources["sources"],
+        json!(["session:claude:a/note"]),
+        "{sources}"
+    );
 }
 
 /// A `warn`-mode destination schema lets the promoted batches land and
