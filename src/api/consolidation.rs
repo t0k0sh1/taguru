@@ -2,8 +2,10 @@
 //! contradiction, and staleness candidates in one response, sections
 //! selected by the caller's `checks` — every candidate carrying a
 //! content fingerprint over its own evidence, because the fingerprint
-//! is the judgment artifact's identity and its staleness mechanism at
-//! once (ADR 0012 §5). Candidates for review, never verdicts: nothing
+//! stands in for the judgment artifact's identity and doubles as its
+//! staleness mechanism (ADR 0012 §5) — a 64-bit FNV-1a digest, so a
+//! collision could in principle reuse a stale judgment, not a
+//! collision-resistant hash. Candidates for review, never verdicts: nothing
 //! here applies anything, and the server never judges — the judging
 //! client reuses stored judgments for unchanged fingerprints and pays
 //! an LLM only for what moved.

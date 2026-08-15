@@ -517,13 +517,12 @@ const QUOTA_NEXT_STEP: (&str, &str) = (
 
 /// The destination-over-quota refusal, `/import`'s own batch-granular
 /// pre-check report. Every promote batch targets ONE destination and
-/// always carries growth, so the deterministic firing shape is batch 1
-/// against a destination already over its ceiling (`landed` 0,
-/// `nothing_written` — tested); the `durable_prefix` shape needs the
-/// stream itself to cross the ceiling mid-loop, a live-lane timing no
-/// test can pin.
-#[mutants::skip]
-// the durable>0 half of stream_integrity's output is reachable only via mid-stream timing; the landed==0 half is asserted in tests
+/// always carries growth: the `nothing_written` shape fires when the
+/// destination is already over its ceiling before batch 1 (tested),
+/// and the `durable_prefix` shape fires when an earlier batch's own
+/// growth tips the ceiling for the batch after it (also tested) —
+/// `storage_quota_refusal` reads only the destination's current disk
+/// usage, never wall-clock time, so both shapes are deterministic.
 #[allow(clippy::too_many_arguments)]
 fn quota_refusal(
     index: usize,

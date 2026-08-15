@@ -146,6 +146,10 @@ pub async fn explore(
     }
 }
 
+/// Unlike [`ExploreRequest`]/`ActivateRequest`, this has no
+/// `since`/`until` — ADR 0011's assertion-time window was never
+/// extended to `paths`. Not a deliberate exclusion, just unconsidered:
+/// nothing here rules a window out.
 #[derive(Debug, Deserialize)]
 pub struct PathsRequest {
     pub origins: Vec<String>,

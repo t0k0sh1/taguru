@@ -1627,12 +1627,14 @@ pub struct CrossSearchPassagesRequest {
 /// same rank-fusion posture the endpoint already takes across its two
 /// lanes. `score` stays what it was, per-context evidence. Every
 /// target's search runs concurrently, bounded by
-/// [`cross_search_concurrency`] — on a stone-cold cache, up to that
-/// many targets may each pay for the query embedding before the first
-/// resolution lands in the cue cache, instead of exactly one target
-/// paying and the rest reusing it; the cache is still the single
-/// source of truth (a `Mutex`), so this is wasted provider calls, not
-/// a correctness risk, and every request after the first is unaffected.
+/// [`cross_search_concurrency`] — with the retrieval cache enabled (the
+/// default), a probe warms the cue cache before the fan-out starts, so
+/// only that probe pays for the query embedding. With the cache
+/// disabled, there is no probe to warm anything, so up to that many
+/// targets may each pay for the query embedding independently; the
+/// cache is still the single source of truth when it exists (a
+/// `Mutex`), so even the disabled-cache case is wasted provider calls,
+/// not a correctness risk.
 pub async fn cross_search_passages(
     State(state): State<AppState>,
     scope: Option<axum::Extension<crate::auth::KeyScope>>,
