@@ -81,6 +81,11 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      # No actions/setup-python: check_contract.py and
+      # check_surface_completeness.py (and check_versions.py, which the
+      # former imports) use only the standard library, so the runner's
+      # default python3 is fine — nothing here depends on a pinned
+      # interpreter version.
       - name: Fixtures <-> shapes.json self-consistency
         run: python3 sdk/spec/check_contract.py --check
       - name: Router <-> surface.yaml completeness

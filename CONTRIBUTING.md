@@ -36,7 +36,9 @@ Running the same diff-scoped check locally before pushing turns the
 CI job into confirmation — CI's own conditions are
 `cargo mutants --profile=mutants --in-diff <diff> --jobs 3`; locally,
 add `CARGO_INCREMENTAL=1` (the profile disables incremental for CI's
-disk budget, at 4× per-mutant rebuild cost on a dev machine).
+disk budget, at 4× per-mutant rebuild cost on a dev machine) and raise
+`--jobs` to 4 — CI's 3 is sized for its own 4-vCPU runner (issue
+#518), not a local machine.
 
 ## SDK surface parity
 
