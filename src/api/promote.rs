@@ -27,8 +27,8 @@ use super::consolidation::{
     DEFAULT_EVIDENCE_CAP, contradiction_section, merge_section, staleness_section,
 };
 use super::import::{
-    ImportOutcome, import_batch_note, import_outcome, import_refusal, schema_issues_in_batch,
-    stream_refusal,
+    ImportOutcome, import_batch_note, import_outcome, import_refusal, quota_refusal_from_apply,
+    schema_issues_in_batch, stream_refusal,
 };
 use super::{
     AppJson, AppPath, AppQuery, ErrorCode, Issue, RefusalDetail, access_error, deadline_exceeded,
@@ -332,6 +332,30 @@ pub async fn promote_sources(
                     warn_issues.truncate(crate::api::MAX_LISTED_ISSUES);
                 }
                 Err(refusal) => {
+                    // Caught here, not by the generic Access arm below
+                    // (issue #623 finding 6), for the same reason
+                    // `import.rs`'s own loop catches it: `quota_refusal`
+                    // above only pre-checks, so a concurrent writer on
+                    // the same destination can still cross the ceiling
+                    // between that read and this batch's actual WAL
+                    // append. That race deserves the SAME advisory and
+                    // structured detail the pre-check gives, not the
+                    // generic Access arm's bare message and
+                    // correction-shaped "fixing the scratch" wording,
+                    // which does not fit a condition no request edit
+                    // can correct.
+                    if let Some(response) = quota_refusal_from_apply(
+                        &refusal,
+                        index,
+                        total,
+                        batch,
+                        outcomes.len(),
+                        query.dry_run,
+                        QUOTA_NEXT_STEP,
+                        started_at,
+                    ) {
+                        return Err(Box::new(response));
+                    }
                     let note = import_batch_note(
                         index,
                         total,
@@ -467,6 +491,22 @@ fn render_refusal(message: String, deadline: Deadline, started_at: Instant) -> R
     }
 }
 
+/// The advisory `stream_refusal`'s two halves take when a promote
+/// batch was refused for being over its destination's storage quota
+/// (issue #623 finding 6) — shared between `quota_refusal` below and
+/// the deep-write-path interceptor in the apply loop, which reaches
+/// the same condition mid-apply, after `quota_refusal`'s own pre-check
+/// window has passed. `import.rs`'s own `QUOTA_NEXT_STEP` says
+/// "context"/"re-POSTing the remaining stream"; this says
+/// "destination"/"re-calling promote" — the two never merge into one
+/// shared constant since promote's target is never the source stream's
+/// own context.
+const QUOTA_NEXT_STEP: (&str, &str) = (
+    "re-running the preview against a shrunk destination is exact",
+    "retracting or compacting the destination (or raising its quota), then \
+     re-calling promote is exact (each batch replaces its own source)",
+);
+
 /// The destination-over-quota refusal, `/import`'s own batch-granular
 /// pre-check report. Every promote batch targets ONE destination and
 /// always carries growth, so the deterministic firing shape is batch 1
@@ -494,11 +534,7 @@ fn quota_refusal(
         false,
         ErrorCode::StorageFull,
         crate::registry::storage_quota_message(&batch.context, used, ceiling),
-        (
-            "re-running the preview against a shrunk destination is exact",
-            "retracting or compacting the destination (or raising its quota), then \
-             re-calling promote is exact (each batch replaces its own source)",
-        ),
+        QUOTA_NEXT_STEP,
         started_at,
     )
 }
