@@ -73,6 +73,14 @@ fn routes() -> Router<AppState> {
     }
 
 
+def test_extract_router_paths_handles_fn_routes_as_the_files_last_line() -> None:
+    # Rust does not require a trailing newline — `fn routes()` being the
+    # last item in the file, with no newline after its closing `}`,
+    # must not raise instead of reporting the route difference.
+    text = 'fn routes() -> Router<AppState> {\n    Router::new().route("/health", get(x))\n}'
+    assert check_surface_completeness.extract_router_paths(text) == {"/health"}
+
+
 # --- extract_surface_paths(): both YAML block/flow styles, query strings stripped ---
 
 

@@ -55,18 +55,24 @@ ALLOWLIST: dict[str, str] = {
 ROUTE_CALL = re.compile(r'\.route\(\s*"([^"]+)"')
 ROUTE_YAML_VALUE = re.compile(r'route:\s*"(?:[A-Z]+ )?([^"?]+)')
 ROUTES_FN_START = re.compile(r"^fn routes\(", re.MULTILINE)
+# A bare `}` (column 0) followed by another line or straight to EOF —
+# Rust does not require a trailing newline, so `\n}\n` alone would miss
+# `fn routes()` were it ever the file's last item.
+ROUTES_FN_END = re.compile(r"\n}(?:\n|$)")
 
 
 def routes_fn_body(text: str) -> str:
-    match = ROUTES_FN_START.search(text)
-    if match is None:
+    start_match = ROUTES_FN_START.search(text)
+    if start_match is None:
         raise ValueError("no top-level `fn routes(` found")
-    start = match.start()
+    start = start_match.start()
     # `fn routes()` is the only top-level item in this range, so its own
     # closing brace is the first bare `}` (column 0) after the opening —
     # unambiguous without a real brace-matching parser.
-    end = text.index("\n}\n", start)
-    return text[start:end]
+    end_match = ROUTES_FN_END.search(text, start)
+    if end_match is None:
+        raise ValueError("no closing `}` found for `fn routes(`")
+    return text[start : end_match.start()]
 
 
 def extract_router_paths(main_rs_text: str) -> set[str]:
