@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::io;
 use std::sync::atomic::Ordering;
 
+use taguru::context::Context;
 use taguru::deadline::Deadline;
 
 use crate::storage::{remove_persisted_file, write_atomic};
@@ -32,13 +33,9 @@ impl AppState {
             label: label.to_string(),
             object: object.to_string(),
         };
-        self.logged_write(
-            name,
-            std::slice::from_ref(&op),
-            |context| context.retract_association(subject, label, object),
-            // The single RetractAssociation op never fails to apply.
-            |_| 1,
-        )
+        self.retract_single_op(name, op, false, |context| {
+            context.retract_association(subject, label, object)
+        })
     }
 
     /// The read-only twin of [`Self::retract_source`]'s edge count —
@@ -140,13 +137,33 @@ impl AppState {
         let op = WalOp::RetractSource {
             source: source.to_string(),
         };
-        let touched = self.logged_write(
-            name,
-            std::slice::from_ref(&op),
-            |context| context.retract_source(source).unwrap_or(0),
-            // The single RetractSource op never fails to apply.
-            |_| 1,
-        )?;
+        // A source can still carry a live passage after its last graph
+        // edge was independently retracted (e.g. by a prior
+        // `retract_association` call) — the graph side alone reporting
+        // "no live edge" must not be treated as "this call changed
+        // nothing" when the passage removal below is about to remove
+        // something real. Checked up front, same fence-holding shape
+        // as `retract_source_preview`, so `retract_single_op`'s
+        // `applied` decision (which only ever sees the graph side's
+        // result) can fold this in too. A source created between this
+        // check and the write is the ordinary "raced with a
+        // concurrent write" case every other read-then-write path here
+        // already lives with.
+        let passage_present = match self.lookup(name) {
+            Some(entry) => match entry.read_unless_deleted() {
+                Some(_fence) => match self.entry_passages(&entry, &file_stem(name)) {
+                    Ok(store) => store.get(source).is_some(),
+                    Err(_) => false,
+                },
+                None => false,
+            },
+            None => false,
+        };
+        let touched = self
+            .retract_single_op(name, op, passage_present, |context| {
+                context.retract_source(source)
+            })?
+            .unwrap_or(0);
 
         let Some(entry) = self.lookup(name) else {
             // Raced with a delete; there is nothing left to clean up.
@@ -373,6 +390,36 @@ impl AppState {
             applied_count,
         )
     }
+
+    /// Shared shape of [`Self::retract_association`] and
+    /// [`Self::retract_source_unmarked`]: a single WAL op whose
+    /// `operate` closure reports whether it actually touched a live
+    /// edge/source via `Option<usize>` — `None` names no live target,
+    /// nothing changed. Unlike `logged_write`'s other callers (whole
+    /// batches, where a fixed `applied_count` of the op count is
+    /// correct because a batch write either lands wholesale or fails),
+    /// a single retract op can itself be a genuine no-op, so `applied`
+    /// here honestly reflects that instead of the `|_| 1` every
+    /// earlier version of these two callers hardcoded — the bug this
+    /// helper fixes (#676): a no-op retract must not advance
+    /// `graph_revision` or emit a change-feed event for a change that
+    /// never happened.
+    /// `already_changed` covers a caller whose op can still be a real
+    /// change even when `operate`'s own `Option` is `None` (see
+    /// [`Self::retract_source_unmarked`]'s passage-presence check) —
+    /// `false` for a caller like [`Self::retract_association`] where
+    /// `operate`'s result is the whole story.
+    fn retract_single_op(
+        &self,
+        name: &str,
+        op: WalOp,
+        already_changed: bool,
+        operate: impl FnOnce(&mut Context) -> Option<usize>,
+    ) -> Result<Option<usize>, AccessError> {
+        self.logged_write(name, std::slice::from_ref(&op), operate, |result| {
+            (result.is_some() || already_changed) as usize
+        })
+    }
 }
 
 #[cfg(test)]
@@ -381,6 +428,7 @@ mod tests {
 
     use super::*;
     use crate::registry::ContextMeta;
+    use crate::registry::changes::ChangesOutcome;
     use crate::registry::paths::import_marker_paths;
     use crate::registry::test_support::{assoc_op, plain, scratch_dir};
     use crate::storage::{clear_persistence_fault, fail_persistence_ops_after};
@@ -540,6 +588,104 @@ mod tests {
             import_marker_paths(&dir, "sake").is_empty(),
             "delete sweeps markers"
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// #676: `retract_association` naming no live edge must report
+    /// `None` (already covered by the type) AND leave `graph_revision`
+    /// and the change feed untouched — before `retract_single_op`,
+    /// the hardcoded `|_| 1` `applied` count advanced both for a
+    /// retraction that changed nothing.
+    #[test]
+    fn a_no_op_retract_association_does_not_advance_the_graph_revision_or_change_feed() {
+        let dir = scratch_dir("retract-association-no-op-revision");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state.create("sake", ContextMeta::default()).unwrap();
+        state
+            .add_associations(
+                "sake",
+                vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("doc"))],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+
+        let before = state.directory_entry("sake").unwrap().revision.graph;
+        let cursor = match state.context_changes("sake", None, 100).unwrap() {
+            ChangesOutcome::Page { next, .. } => next,
+            ChangesOutcome::Stale => panic!("a fresh context's cursor must not be stale"),
+        };
+
+        // Names no live edge: "蔵" and "杜氏" are real, but this
+        // triple was never asserted.
+        let outcome = state
+            .retract_association("sake", "蔵", "杜氏", "存在しない")
+            .unwrap();
+        assert_eq!(outcome, None, "a no-op retract must report None honestly");
+
+        let after = state.directory_entry("sake").unwrap().revision.graph;
+        assert_eq!(
+            before, after,
+            "a no-op retract_association must not advance graph_revision"
+        );
+        match state.context_changes("sake", Some(&cursor), 100).unwrap() {
+            ChangesOutcome::Page { events, more, .. } => {
+                assert!(
+                    events.is_empty(),
+                    "a no-op retract_association must not emit a change-feed event"
+                );
+                assert!(!more);
+            }
+            ChangesOutcome::Stale => panic!("the cursor must still be live"),
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The `retract_source`/`retract_source_unmarked` twin of
+    /// `a_no_op_retract_association_does_not_advance_the_graph_revision_or_change_feed`
+    /// (#676).
+    #[test]
+    fn a_no_op_retract_source_does_not_advance_the_graph_revision_or_change_feed() {
+        let dir = scratch_dir("retract-source-no-op-revision");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state.create("sake", ContextMeta::default()).unwrap();
+        state
+            .add_associations(
+                "sake",
+                vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("doc"))],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+
+        let before = state.directory_entry("sake").unwrap().revision.graph;
+        let cursor = match state.context_changes("sake", None, 100).unwrap() {
+            ChangesOutcome::Page { next, .. } => next,
+            ChangesOutcome::Stale => panic!("a fresh context's cursor must not be stale"),
+        };
+
+        // Names a source that was never ingested.
+        let (touched, passage_removed) = state.retract_source("sake", "never-existed").unwrap();
+        assert_eq!(touched, 0);
+        assert!(!passage_removed);
+
+        let after = state.directory_entry("sake").unwrap().revision.graph;
+        assert_eq!(
+            before, after,
+            "a no-op retract_source must not advance graph_revision"
+        );
+        match state.context_changes("sake", Some(&cursor), 100).unwrap() {
+            ChangesOutcome::Page { events, more, .. } => {
+                assert!(
+                    events.is_empty(),
+                    "a no-op retract_source must not emit a change-feed event"
+                );
+                assert!(!more);
+            }
+            ChangesOutcome::Stale => panic!("the cursor must still be live"),
+        }
+
         let _ = fs::remove_dir_all(&dir);
     }
 }
