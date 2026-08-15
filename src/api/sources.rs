@@ -2398,6 +2398,7 @@ pub async fn store_passages(
                 message,
                 RefusalDetail {
                     issues,
+                    issues_total: Some(total),
                     integrity: Some("nothing_written"),
                     retryable_after_correction: Some(true),
                     ..Default::default()

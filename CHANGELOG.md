@@ -7,6 +7,15 @@ Entries that change an on-disk format or a response shape say so.
 
 ## [Unreleased]
 
+### Changed
+- `ApiError` gains an additive `issues_total: usize` field (present only
+  when nonzero) — the failure-side counterpart to
+  `ApiResponse.schema_violations`: `issues`' true count surviving
+  `validation_error`'s own `MAX_LISTED_ISSUES` truncation, machine
+  readable rather than only ever parseable out of the refusal's prose
+  ("N issues total; showing the first 20"), which stays as-is alongside
+  it (issue #623). Every other response is byte-identical to before.
+
 ## [0.9.0] - 2026-08-09
 
 ### Added

@@ -587,6 +587,46 @@ fn add_associations_collects_every_issue_in_one_pass() {
     assert_eq!(directory["contexts"][0]["stats"]["associations"], json!(0));
 }
 
+/// A refusal's true issue count now survives `MAX_LISTED_ISSUES`
+/// truncation in a machine-readable field, not just in prose (issue
+/// #623 finding 5) — `issues_total`, the failure side's counterpart to
+/// `ApiResponse::schema_violations` (`schema.rs`'s
+/// `warn_mode_schema_violations_survives_truncation_past_the_listed_issue_cap`
+/// pins the success side of the same cap).
+#[test]
+fn refusal_issues_total_survives_truncation_past_the_listed_issue_cap() {
+    let server = Server::start("collectall-truncation");
+    server.ok("PUT", "/contexts/sake", Some(json!({})));
+
+    // 25 independent bad associations, each an empty subject — one
+    // more than MAX_LISTED_ISSUES (20).
+    let batch: Vec<serde_json::Value> = (0..25)
+        .map(|_| json!({"subject": "", "label": "l", "object": "o", "weight": 1.0}))
+        .collect();
+    let (status, body) = server.call(
+        "POST",
+        "/contexts/sake/associations",
+        Some(serde_json::Value::Array(batch)),
+    );
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["code"], json!("invalid_argument"), "{body}");
+    assert_eq!(
+        body["issues_total"],
+        json!(25),
+        "the true count survives truncation: {body}"
+    );
+    let issues = body["issues"].as_array().expect("issues array");
+    assert_eq!(
+        issues.len(),
+        20,
+        "MAX_LISTED_ISSUES caps the listed issues: {body}"
+    );
+
+    // Nothing landed.
+    let directory = server.ok("GET", "/contexts", None);
+    assert_eq!(directory["contexts"][0]["stats"]["associations"], json!(0));
+}
+
 /// issue #182: a business-rule-invalid item never silently disappears
 /// into a subset write — the write boundary and the response shape
 /// documented for the acceptance criteria stay true even for the
@@ -632,6 +672,8 @@ fn store_passages_issue_paths_name_the_source_and_item_index() {
     assert_eq!(status, 400, "{body}");
     assert_eq!(body["code"], json!("invalid_argument"), "{body}");
     assert_eq!(body["integrity"], json!("nothing_written"), "{body}");
+    // The true count survives truncation (issue #623 finding 5).
+    assert_eq!(body["issues_total"], json!(1), "{body}");
     let issues = body["issues"].as_array().expect("issues array");
     assert_eq!(issues.len(), 1, "{body}");
     assert_eq!(
@@ -656,6 +698,28 @@ fn store_passages_issue_paths_name_the_source_and_item_index() {
     assert_eq!(issues.len(), 1, "{body}");
     assert_eq!(issues[0]["path"], json!("sections['ghost.md']"), "{body}");
     assert_eq!(issues[0]["kind"], json!("unknown_reference"), "{body}");
+
+    // Past MAX_LISTED_ISSUES (20) wrong-typed questions in one call:
+    // `issues_total` (25) must survive `truncate_issues`, not collapse
+    // to the listed count (20) — the single-issue case above cannot
+    // tell `issues_total` apart from `issues.len()`.
+    // Distinct paragraph indices: same-paragraph questions past 8 also
+    // trip the per-paragraph question cap, adding a second issue per
+    // item and muddying the count this asserts.
+    let bad_questions: Vec<serde_json::Value> = (0..25)
+        .map(|i| json!({"paragraph": i, "question": 123}))
+        .collect();
+    let (status, body) = server.call(
+        "POST",
+        "/contexts/sake/sources",
+        Some(json!({
+            "passages": {"doc.md": "text"},
+            "questions": {"doc.md": bad_questions},
+        })),
+    );
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["issues_total"], json!(25), "{body}");
+    assert_eq!(body["issues"].as_array().unwrap().len(), 20, "{body}");
 
     let lookup = server.ok(
         "POST",
