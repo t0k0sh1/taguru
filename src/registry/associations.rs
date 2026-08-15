@@ -9,8 +9,8 @@ use crate::storage::{remove_persisted_file, write_atomic};
 use crate::wal::WalOp;
 
 use super::{
-    AccessError, AppState, AssocOp, ImportMarker, PartialWrite, applied_count, apply_in_order,
-    file_stem, import_marker_path,
+    AccessError, AppState, AssocOp, ChangeKind, ImportMarker, PartialWrite, applied_count,
+    apply_in_order, file_stem, import_marker_path,
 };
 
 impl AppState {
@@ -33,7 +33,7 @@ impl AppState {
             label: label.to_string(),
             object: object.to_string(),
         };
-        self.retract_single_op(name, op, false, |context| {
+        self.retract_single_op(name, op, |context| {
             context.retract_association(subject, label, object)
         })
     }
@@ -137,32 +137,16 @@ impl AppState {
         let op = WalOp::RetractSource {
             source: source.to_string(),
         };
-        // A source can still carry a live passage after its last graph
-        // edge was independently retracted (e.g. by a prior
-        // `retract_association` call) — the graph side alone reporting
-        // "no live edge" must not be treated as "this call changed
-        // nothing" when the passage removal below is about to remove
-        // something real. Checked up front, same fence-holding shape
-        // as `retract_source_preview`, so `retract_single_op`'s
-        // `applied` decision (which only ever sees the graph side's
-        // result) can fold this in too. A source created between this
-        // check and the write is the ordinary "raced with a
-        // concurrent write" case every other read-then-write path here
-        // already lives with.
-        let passage_present = match self.lookup(name) {
-            Some(entry) => match entry.read_unless_deleted() {
-                Some(_fence) => match self.entry_passages(&entry, &file_stem(name)) {
-                    Ok(store) => store.get(source).is_some(),
-                    Err(_) => false,
-                },
-                None => false,
-            },
-            None => false,
-        };
+        // The graph side's own honest no-op/real-change signal — see
+        // `retract_single_op`. Deliberately NOT widened by a
+        // passage-presence check taken before this write: presence is
+        // not removal, and folding a snapshot into `applied` here
+        // would advance `graph_revision`/the change feed for a call
+        // whose passage-side removal, below, hasn't happened yet and
+        // could still fail (#676 review). The passage side instead
+        // reports its own real outcome directly to the feed, below.
         let touched = self
-            .retract_single_op(name, op, passage_present, |context| {
-                context.retract_source(source)
-            })?
+            .retract_single_op(name, op, |context| context.retract_source(source))?
             .unwrap_or(0);
 
         let Some(entry) = self.lookup(name) else {
@@ -195,6 +179,22 @@ impl AppState {
                             entry
                                 .passage_revision
                                 .fetch_max(store.watermark(), Ordering::Relaxed);
+                            // A source whose graph edge was already
+                            // gone (`touched == 0`, retracted
+                            // independently earlier) but whose passage
+                            // genuinely comes off now is still a real
+                            // content change a polling client should
+                            // see. `touched > 0` already got this event
+                            // from `retract_single_op`'s own write
+                            // above (`events_of_ops`) — push it again
+                            // only for the touched-nothing-in-the-graph
+                            // case, or a real graph retraction would
+                            // double up.
+                            if touched == 0 {
+                                entry.changes.lock().push(ChangeKind::SourceRetracted {
+                                    source: source.to_string(),
+                                });
+                            }
                         }
                         (removed, false)
                     }
@@ -404,20 +404,14 @@ impl AppState {
     /// helper fixes (#676): a no-op retract must not advance
     /// `graph_revision` or emit a change-feed event for a change that
     /// never happened.
-    /// `already_changed` covers a caller whose op can still be a real
-    /// change even when `operate`'s own `Option` is `None` (see
-    /// [`Self::retract_source_unmarked`]'s passage-presence check) —
-    /// `false` for a caller like [`Self::retract_association`] where
-    /// `operate`'s result is the whole story.
     fn retract_single_op(
         &self,
         name: &str,
         op: WalOp,
-        already_changed: bool,
         operate: impl FnOnce(&mut Context) -> Option<usize>,
     ) -> Result<Option<usize>, AccessError> {
         self.logged_write(name, std::slice::from_ref(&op), operate, |result| {
-            (result.is_some() || already_changed) as usize
+            result.is_some() as usize
         })
     }
 }
@@ -589,6 +583,99 @@ mod tests {
             "delete sweeps markers"
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// CodeRabbit review on PR #681 (issue #676): a source the graph
+    /// side never saw (`Context::retract_source` returns `None` for a
+    /// source this context never associated anything from, per its own
+    /// doc — a genuine graph-side no-op, distinct from a `Some(0)` for
+    /// a source that WAS seen but now carries zero live edges) but
+    /// whose passage removal genuinely fails must not advance
+    /// `graph_revision` or the change feed either. An earlier version
+    /// of the fix took a passage-PRESENCE snapshot before the graph
+    /// write and folded that into `applied` — which would still
+    /// advance both here, since presence isn't removal. The current
+    /// design instead has the passage side push its own event only
+    /// once its removal actually lands (see `retract_source_unmarked`),
+    /// so this failure path never reaches the feed at all. Sweeps
+    /// `fail_persistence_ops_after` to land on "the graph write itself
+    /// lands (as a no-op), but the passage removal right after it
+    /// fails."
+    #[test]
+    fn a_failed_passage_removal_after_an_already_gone_graph_edge_does_not_advance_the_revision_or_feed()
+     {
+        let mut exercised_target_case = false;
+        let mut exhausted = false;
+        for failure in 0..24 {
+            let dir = scratch_dir(&format!("retract-source-passage-fault-{failure}"));
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state.create("sake", ContextMeta::default()).unwrap();
+            // No association ever names this source: the graph side
+            // has never seen it, so `Context::retract_source` returns
+            // `None`, not `Some(0)`. `store_passages` is its own store,
+            // independent of the graph's `source_ids` — this is the
+            // only way to get a passage present with the graph side
+            // still a genuine no-op.
+            let mut passages = BTreeMap::new();
+            passages.insert("doc".to_string(), "杜氏は高瀬。".to_string());
+            state
+                .store_passages("sake", plain(passages))
+                .unwrap()
+                .unwrap();
+
+            let before = state.directory_entry("sake").unwrap().revision.graph;
+            let cursor = match state.context_changes("sake", None, 100).unwrap() {
+                ChangesOutcome::Page { next, .. } => next,
+                ChangesOutcome::Stale => panic!("a fresh context's cursor must not be stale"),
+            };
+
+            fail_persistence_ops_after(failure);
+            let outcome = state.retract_source_unmarked("sake", "doc");
+            let past_end = clear_persistence_fault();
+
+            if past_end {
+                exhausted = true;
+                drop(state);
+                let _ = fs::remove_dir_all(&dir);
+                break;
+            }
+
+            // Only "the graph write landed (a genuine no-op), the
+            // passage removal failed" is this test's target — a
+            // graph-write failure itself short-circuits above (`?`),
+            // and a case where the passage removal actually succeeded
+            // isn't a failure to guard against.
+            if let Ok((touched, passage_removed, passage_removal_errored)) = outcome
+                && touched == 0
+                && !passage_removed
+                && passage_removal_errored
+            {
+                exercised_target_case = true;
+                let after = state.directory_entry("sake").unwrap().revision.graph;
+                assert_eq!(
+                    before, after,
+                    "failure {failure}: a failed passage removal after an \
+                     already-gone graph edge must not advance graph_revision"
+                );
+                match state.context_changes("sake", Some(&cursor), 100).unwrap() {
+                    ChangesOutcome::Page { events, .. } => assert!(
+                        events.is_empty(),
+                        "failure {failure}: must not emit a change-feed event"
+                    ),
+                    ChangesOutcome::Stale => panic!("the cursor must still be live"),
+                }
+            }
+
+            drop(state);
+            let _ = fs::remove_dir_all(&dir);
+        }
+        assert!(exhausted, "the fault sweep never reached completion");
+        assert!(
+            exercised_target_case,
+            "the fault sweep never hit the target case (graph no-op, \
+             passage removal failed) — widen the range or check the \
+             fault-injection points still line up"
+        );
     }
 
     /// #676: `retract_association` naming no live edge must report
