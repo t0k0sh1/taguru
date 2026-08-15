@@ -29,6 +29,7 @@ import type {
   CrossPassagePage,
   DirectoryEntry,
   DriftAudit,
+  EmbeddingsStatus,
   EvidencePackage,
   ExploreCursor,
   ExplorePage,
@@ -45,6 +46,7 @@ import type {
   PassageLookup,
   PassagePage,
   PathsPage,
+  PromoteOutcome,
   QuestionSpec,
   RefreshOutcome,
   RerankRequest,
@@ -1394,6 +1396,17 @@ export class Context {
   }
 
   /**
+   * Community detection on the live graph (NDJSON text: a header line,
+   * then one line per community, leaves first). Compute-heavy
+   * (heavy-ops gated) — most callers want `searchCommunities` instead,
+   * which serves a pre-built summary artifact. This is the derivation
+   * half `taguru communities` itself orchestrates.
+   */
+  async analyzeCommunities(): Promise<string> {
+    return (await this.client.send("GET", `${this.path}/communities`)).text;
+  }
+
+  /**
    * Why `source` did (or didn't) surface for `query`. Omit `paragraph` to
    * explain the source's best showing; name one (0-based) to interrogate it.
    * Pass the `semantic_floor` — and the `tags`/`since`/`until` filter — of
@@ -1639,10 +1652,52 @@ export class Context {
     return result as RefreshOutcome;
   }
 
+  /**
+   * The embedding identity: the provider configured now beside the
+   * (model, width) each vector sidecar was actually built with.
+   * `provider_model` is `null` when embeddings are off; a missing lane
+   * means nothing of that kind has been embedded yet (the two models
+   * disagreeing means a refresh is needed).
+   */
+  async embeddingsStatus(): Promise<EmbeddingsStatus> {
+    const result = await this.client.requestJson("GET", `${this.path}/embeddings`);
+    return result as EmbeddingsStatus;
+  }
+
   /** Rebuild the image without dead records (admin role). */
   async compact(): Promise<CompactOutcome> {
     const result = await this.post("/compact");
     return result as CompactOutcome;
+  }
+
+  // -- promotion -----------------------------------------------------------------
+
+  /**
+   * Move named scratch sources whole into the established context
+   * `into` (ADR 0018) — the export/import round trip in one call,
+   * without re-extraction.
+   *
+   * Each source moves whole (passage, date, tags, only its own share
+   * of every edge's weight); source ids survive, and applying is
+   * per-source retract-then-apply — re-promoting is idempotent. `into`
+   * must already exist (never created here). A named source missing
+   * from this (scratch) context refuses the WHOLE request.
+   * `options.audit` omitted means `true`: after a real apply, the
+   * destination gets the default consolidation audit (all three
+   * checks) riding back as candidates, never applied.
+   * `options.dry_run: true` previews the same `batches` shape and
+   * writes nothing.
+   */
+  async promote(
+    into: string,
+    sources: string[],
+    options: { audit?: boolean; dry_run?: boolean } = {},
+  ): Promise<PromoteOutcome> {
+    const result = await this.client.requestJson("POST", `${this.path}/promote`, {
+      params: { dry_run: options.dry_run ? true : undefined },
+      jsonBody: dropUndefined({ into, sources, audit: options.audit }),
+    });
+    return result as PromoteOutcome;
   }
 
   // -- export ------------------------------------------------------------------------

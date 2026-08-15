@@ -148,6 +148,7 @@ classes:
       route: "POST /contexts/{name}/communities/search"
       args: [query]
       options: [limit, semantic_floor, derived]
+    analyze_communities: { route: "GET /contexts/{name}/communities" }
     explain_search_passages:
       route: "POST /contexts/{name}/sources/search/explain"
       args: [query, source]
@@ -174,7 +175,12 @@ classes:
       args: [checks]
       options: [limit, evidence_cap, dice_floor, cosine_floor, floor_secs]
     refresh_embeddings: { route: "POST /contexts/{name}/embeddings/refresh" }
+    embeddings_status: { route: "GET /contexts/{name}/embeddings" }
     compact: { route: "POST /contexts/{name}/compact" }
+    promote:
+      route: "POST /contexts/{name}/promote"
+      args: [into, sources]
+      options: [audit, dry_run]
     export: { route: "GET /contexts/{name}/export" }
     export_stream: { route: "GET /contexts/{name}/export" }
     export_to_file: { route: "GET /contexts/{name}/export", args: [path] }
