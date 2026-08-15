@@ -177,6 +177,11 @@ fn retract_association_rejects_empty_and_oversized_fields_and_stops_at_the_first
             "subject",
         ),
         (
+            "oversized label",
+            json!({"subject": "s", "label": long.clone(), "object": "o"}),
+            "label",
+        ),
+        (
             "oversized object",
             json!({"subject": "s", "label": "l", "object": long.clone()}),
             "object",
