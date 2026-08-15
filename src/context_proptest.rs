@@ -168,6 +168,14 @@ pub(crate) enum GeneratedGroupOp {
         remove_groups: Vec<&'static str>,
     },
     DeleteGroup(&'static str),
+    /// `(name, contexts, groups)` per record — `AppState::restore_groups`'s
+    /// own shape without pulling `GroupRecord` into this module; the
+    /// dispatch site builds the record.
+    RestoreGroups(Vec<(&'static str, Vec<&'static str>, Vec<&'static str>)>),
+    RenameGroup {
+        from: &'static str,
+        to: &'static str,
+    },
 }
 
 /// Generates arbitrary registry operation sequences over a small, reusable
@@ -211,6 +219,20 @@ pub(crate) fn group_op_strategy() -> impl Strategy<Value = GeneratedGroupOp> {
                 },
             ),
         prop::sample::select(GROUP_NAMES).prop_map(GeneratedGroupOp::DeleteGroup),
+        prop::collection::vec(
+            (
+                prop::sample::select(GROUP_NAMES),
+                context_set(),
+                group_set(),
+            ),
+            0..4,
+        )
+        .prop_map(GeneratedGroupOp::RestoreGroups),
+        (
+            prop::sample::select(GROUP_NAMES),
+            prop::sample::select(GROUP_NAMES),
+        )
+            .prop_map(|(from, to)| GeneratedGroupOp::RenameGroup { from, to }),
     ]
 }
 
