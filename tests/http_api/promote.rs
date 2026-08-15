@@ -816,14 +816,24 @@ fn seed_dense_vocabulary(server: &Server, context: &str) {
     );
 }
 
+/// Each passage carries a few KB of filler so a batch's own write cost
+/// (WAL bytes, not just per-batch bookkeeping) is what the budget test
+/// below leans on for margin — a trivial one-line passage per source
+/// left too little headroom on faster (CI) hardware, where 600 tiny
+/// batches landed comfortably inside a 1s budget (824ms observed) even
+/// though the same fixture took over a second for ~50 batches on a
+/// slower machine.
 fn seed_many_sources(server: &Server, context: &str, count: usize) {
     server.ok(
         "PUT",
         &format!("/contexts/{context}"),
         Some(json!({"description": "d"})),
     );
+    // ~6.6KB/passage: at `count` == MAX_MATCH_LIMIT (1000) the whole
+    // seeding POST stays comfortably under the 8MiB body cap.
+    let filler = "本文".repeat(1100);
     let passages: serde_json::Map<String, serde_json::Value> = (0..count)
-        .map(|i| (format!("s{i:04}"), json!(format!("本文{i}。"))))
+        .map(|i| (format!("s{i:04}"), json!(format!("{i}: {filler}"))))
         .collect();
     server.ok(
         "POST",
@@ -842,7 +852,9 @@ fn budget_refusal_cuts_a_multi_batch_promotion_short() {
         "promote-budget-refusal",
         &[("TAGURU_REQUEST_TIMEOUT_SECS", "1")],
     );
-    const COUNT: usize = 600;
+    // MAX_MATCH_LIMIT (1000, `overlong`'s own ceiling on `sources`) —
+    // as many batches as the request can carry, maximizing margin.
+    const COUNT: usize = 1000;
     seed_many_sources(&server, "scratch", COUNT);
     server.ok("PUT", "/contexts/perm2", Some(json!({"description": "d"})));
 
