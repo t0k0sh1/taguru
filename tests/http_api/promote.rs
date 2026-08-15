@@ -859,12 +859,14 @@ fn budget_refusal_cuts_a_multi_batch_promotion_short() {
     server.ok("PUT", "/contexts/perm2", Some(json!({"description": "d"})));
 
     let sources: Vec<String> = (0..COUNT).map(|i| format!("s{i:04}")).collect();
+    let start = std::time::Instant::now();
     let (status, refused) = server.call(
         "POST",
         "/contexts/scratch/promote",
         Some(json!({"into": "perm2", "sources": sources, "audit": false})),
     );
-    assert_eq!(status, 408, "{refused}");
+    let elapsed = start.elapsed();
+    assert_eq!(status, 408, "{refused} (elapsed {elapsed:?})");
     assert_eq!(refused["code"], json!("timeout"), "{refused}");
     assert!(
         refused["error"]
@@ -873,11 +875,18 @@ fn budget_refusal_cuts_a_multi_batch_promotion_short() {
             .contains("budget partway through the promotion"),
         "{refused}"
     );
-    // A resumable prefix, `/import`'s own discipline: some batches
-    // landed (durable), the rest did not — never all-or-nothing, and
-    // never silently the full count either.
+    // A resumable prefix, `/import`'s own discipline: never
+    // all-or-nothing, and never silently the full count either. Not
+    // asserting `landed > 0` too: on a CI machine slow enough that
+    // even the first batch hasn't landed by the 1s budget, that's
+    // still a valid (if maximally early) resumable-prefix outcome —
+    // the elapsed time in the failure message is what would actually
+    // explain a `landed == COUNT` failure (the budget never bit).
     let landed = refused["durable_batches"].as_u64().unwrap();
-    assert!(landed > 0 && landed < COUNT as u64, "{refused}");
+    assert!(
+        landed < COUNT as u64,
+        "{refused} (elapsed {elapsed:?}, landed {landed})"
+    );
 }
 
 // --- audit_skip_reason: deadline_exceeded, driven through HTTP --------------
@@ -1096,11 +1105,25 @@ fn audit_degrades_to_overloaded_when_a_concurrent_promotion_holds_the_only_heavy
     assert_eq!(first["batches"][0]["source"], json!("a.md"), "{first}");
     assert_eq!(second["batches"][0]["source"], json!("b.md"), "{second}");
 
-    // The first request started the audit well before the second
-    // could contend for the permit, so the second is the one that
-    // degrades — not a race between the two.
-    assert!(first["audit"].is_object(), "{first}");
-    assert!(first.get("audit_skipped").is_none(), "{first}");
-    assert!(second["audit"].is_null(), "{second}");
-    assert_eq!(second["audit_skipped"], json!("overloaded"), "{second}");
+    // The 200ms head start makes the first request the LIKELY one to
+    // hold the permit, but it isn't a guarantee (a slow enough CI
+    // could still let the second's export/render/apply/fsync finish
+    // first) — so the assertion checks the invariant the permit
+    // ceiling actually promises (exactly one of the two degrades)
+    // rather than which specific request lost the race.
+    let skipped: Vec<&serde_json::Value> = [&first, &second]
+        .into_iter()
+        .filter_map(|response| response.get("audit_skipped"))
+        .collect();
+    assert_eq!(skipped.len(), 1, "first={first} second={second}");
+    assert_eq!(
+        skipped[0],
+        &json!("overloaded"),
+        "first={first} second={second}"
+    );
+    let audited = [&first, &second]
+        .into_iter()
+        .filter(|response| response["audit"].is_object())
+        .count();
+    assert_eq!(audited, 1, "first={first} second={second}");
 }
