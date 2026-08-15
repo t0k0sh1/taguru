@@ -1,8 +1,8 @@
 # Scrapes taguru's own exposition (README.md, "Health and metrics"):
 # GET /metrics needs no bearer token. A 15s interval is cheap: unlike
 # most exporters, TAGURU_METRICS_PER_CONTEXT's per-context gauges are
-# computed at flush time, not at scrape time, so scraping often adds
-# no extra cost.
+# computed at flush time, not at scrape time; scraping still incurs
+# HTTP, exposition, serialization, and per-context response costs.
 #
 # taguru running elsewhere than the host: replace the target below
 # with that address (a `deploy/docker-compose.yml` taguru joined to

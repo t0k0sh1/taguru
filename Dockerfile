@@ -5,10 +5,10 @@
 #
 # The base image and apk packages below are deliberately NOT digest-
 # pinned: dependabot.yml has no `docker` ecosystem entry, so a digest
-# would go stale with nothing to flag it — worse than the current
-# mutable tag, which Docker Hub keeps patched in place (a rust:1.96-
-# alpine rebuild reuses the same tag) and apk resolves against the
-# live Alpine package index at build time.
+# would go stale with nothing to flag it. This intentionally trades
+# reproducible builds and reviewable supply-chain changes for automatic
+# upstream updates; both the mutable tag and live Alpine package index
+# can change the image without a source diff.
 FROM rust:1.96-alpine AS build
 RUN apk add --no-cache musl-dev cargo-auditable
 WORKDIR /src
