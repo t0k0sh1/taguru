@@ -9,6 +9,7 @@
 
 mod support;
 
+mod associations;
 mod auth;
 mod benchmark;
 mod benchmark_search;
