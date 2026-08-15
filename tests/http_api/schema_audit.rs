@@ -488,3 +488,120 @@ fn validate_refuses_an_invalid_proposed_document() {
     assert_eq!(status, 400, "{body}");
     assert_eq!(body["code"], "invalid_argument", "{body}");
 }
+
+// --- MAX_AUDIT_NAMES (100): each name-list section truncates -----------
+
+/// `untyped_concepts` past `MAX_AUDIT_NAMES` (100): `total` reports the
+/// true count, `names` is a name-ordered (`BTreeSet`) prefix capped at
+/// 100 — zero-padded objects keep lexicographic and numeric order
+/// identical, so the excluded one is deterministically the highest.
+#[test]
+fn audit_untyped_concepts_truncates_past_max_audit_names() {
+    let server = Server::start("schema-audit-untyped-cap");
+    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    let mut ops: Vec<serde_json::Value> = vec![json!({
+        "subject": "青嶺酒造", "label": "schema:type", "object": "Brewery",
+        "weight": 1.0, "source": "a.md",
+    })];
+    ops.extend((0..101).map(|i| {
+        json!({
+            "subject": "青嶺酒造", "label": "所在地", "object": format!("個人{i:03}"),
+            "weight": 1.0, "source": "a.md",
+        })
+    }));
+    server.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(serde_json::Value::Array(ops)),
+    );
+    server.ok("PUT", "/contexts/sake/schema", Some(strict_document()));
+
+    let audit = server.ok("POST", "/contexts/sake/schema/audit", None);
+    assert_eq!(audit["untyped_concepts"]["total"], json!(101), "{audit}");
+    let names: Vec<String> = audit["untyped_concepts"]["names"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    let expected: Vec<String> = (0..100).map(|i| format!("個人{i:03}")).collect();
+    assert_eq!(
+        names, expected,
+        "the full name-ordered prefix, 個人100 excluded: {audit}"
+    );
+}
+
+/// `undeclared_types` past `MAX_AUDIT_NAMES` (100) — same truncation
+/// contract, over asserted `schema:type` objects instead.
+#[test]
+fn audit_undeclared_types_truncates_past_max_audit_names() {
+    let server = Server::start("schema-audit-undeclared-cap");
+    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    let ops: Vec<serde_json::Value> = (0..101)
+        .map(|i| {
+            json!({
+                "subject": format!("組織{i:03}"), "label": "schema:type", "object": format!("型{i:03}"),
+                "weight": 1.0, "source": "a.md",
+            })
+        })
+        .collect();
+    server.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(serde_json::Value::Array(ops)),
+    );
+    server.ok("PUT", "/contexts/sake/schema", Some(strict_document()));
+
+    let audit = server.ok("POST", "/contexts/sake/schema/audit", None);
+    assert_eq!(audit["undeclared_types"]["total"], json!(101), "{audit}");
+    let names: Vec<String> = audit["undeclared_types"]["names"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    let expected: Vec<String> = (0..100).map(|i| format!("型{i:03}")).collect();
+    assert_eq!(
+        names, expected,
+        "the full name-ordered prefix, 型100 excluded: {audit}"
+    );
+}
+
+/// `unknown_labels` past `MAX_AUDIT_NAMES` (100) — only populated under
+/// `closed_labels`, same truncation contract as the other two sections.
+#[test]
+fn audit_unknown_labels_truncates_past_max_audit_names() {
+    let server = Server::start("schema-audit-unknown-labels-cap");
+    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+    let ops: Vec<serde_json::Value> = (0..101)
+        .map(|i| {
+            json!({
+                "subject": format!("s{i:03}"), "label": format!("未知{i:03}"), "object": format!("o{i:03}"),
+                "weight": 1.0, "source": "a.md",
+            })
+        })
+        .collect();
+    server.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(serde_json::Value::Array(ops)),
+    );
+    let mut document = strict_document();
+    document["mode"] = json!("warn");
+    document["closed_labels"] = json!(true);
+    server.ok("PUT", "/contexts/sake/schema", Some(document));
+
+    let audit = server.ok("POST", "/contexts/sake/schema/audit", None);
+    assert_eq!(audit["unknown_labels"]["total"], json!(101), "{audit}");
+    let names: Vec<String> = audit["unknown_labels"]["names"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    let expected: Vec<String> = (0..100).map(|i| format!("未知{i:03}")).collect();
+    assert_eq!(
+        names, expected,
+        "the full name-ordered prefix, 未知100 excluded: {audit}"
+    );
+}
