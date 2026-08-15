@@ -3478,4 +3478,103 @@ mod tests {
         assert_eq!(issues[0].path, "p.key");
         assert_eq!(issues[0].kind, "missing");
     }
+
+    async fn body_json(response: Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    fn fixture_issues(count: usize) -> Vec<Issue> {
+        (0..count)
+            .map(|i| Issue::missing(format!("x[{i}]"), "a value"))
+            .collect()
+    }
+
+    /// `validation_error`'s own truncate-and-annotate only fires past
+    /// [`MAX_LISTED_ISSUES`] (issue #623 finding 5's `>`, not `>=`/`==`)
+    /// and only when the caller hasn't already truncated — pins both
+    /// the exact boundary and the `issues_total` field it now sets
+    /// either way.
+    #[tokio::test]
+    async fn validation_error_truncates_and_annotates_only_past_the_cap() {
+        let response = validation_error(
+            ErrorCode::InvalidArgument,
+            "refused",
+            RefusalDetail {
+                issues: fixture_issues(MAX_LISTED_ISSUES),
+                issues_total: None,
+                ..Default::default()
+            },
+            Instant::now(),
+        );
+        let body = body_json(response).await;
+        assert_eq!(body["issues"].as_array().unwrap().len(), MAX_LISTED_ISSUES);
+        assert_eq!(
+            body["issues_total"],
+            serde_json::json!(MAX_LISTED_ISSUES),
+            "{body}"
+        );
+        assert!(
+            !body["error"]
+                .as_str()
+                .unwrap()
+                .contains("showing the first"),
+            "exactly at the cap must not append the truncation notice: {body}"
+        );
+
+        let response = validation_error(
+            ErrorCode::InvalidArgument,
+            "refused",
+            RefusalDetail {
+                issues: fixture_issues(MAX_LISTED_ISSUES + 1),
+                issues_total: None,
+                ..Default::default()
+            },
+            Instant::now(),
+        );
+        let body = body_json(response).await;
+        assert_eq!(body["issues"].as_array().unwrap().len(), MAX_LISTED_ISSUES);
+        assert_eq!(
+            body["issues_total"],
+            serde_json::json!(MAX_LISTED_ISSUES + 1),
+            "{body}"
+        );
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("showing the first 20"),
+            "one past the cap must append the truncation notice: {body}"
+        );
+    }
+
+    /// A caller that already truncated (`issues_total: Some(...)`,
+    /// `associations_refusal`/`store_passages`/promote's unknown-source
+    /// refusal) must not get a second truncation pass or a duplicate
+    /// notice appended on top of its own message.
+    #[tokio::test]
+    async fn validation_error_does_not_re_truncate_a_pre_truncated_caller() {
+        let response = validation_error(
+            ErrorCode::InvalidArgument,
+            "refused",
+            RefusalDetail {
+                issues: fixture_issues(MAX_LISTED_ISSUES),
+                issues_total: Some(999),
+                ..Default::default()
+            },
+            Instant::now(),
+        );
+        let body = body_json(response).await;
+        assert_eq!(body["issues"].as_array().unwrap().len(), MAX_LISTED_ISSUES);
+        assert_eq!(body["issues_total"], serde_json::json!(999), "{body}");
+        assert!(
+            !body["error"]
+                .as_str()
+                .unwrap()
+                .contains("showing the first"),
+            "the caller's own message must not get a second notice appended: {body}"
+        );
+    }
 }

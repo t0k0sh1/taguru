@@ -636,6 +636,8 @@ fn store_passages_issue_paths_name_the_source_and_item_index() {
     assert_eq!(status, 400, "{body}");
     assert_eq!(body["code"], json!("invalid_argument"), "{body}");
     assert_eq!(body["integrity"], json!("nothing_written"), "{body}");
+    // The true count survives truncation (issue #623 finding 5).
+    assert_eq!(body["issues_total"], json!(1), "{body}");
     let issues = body["issues"].as_array().expect("issues array");
     assert_eq!(issues.len(), 1, "{body}");
     assert_eq!(

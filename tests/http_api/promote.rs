@@ -312,6 +312,9 @@ fn promotion_refusals_name_their_cause_before_anything_applies() {
         json!("sources[1]"),
         "{refused}"
     );
+    // The true count survives (issue #623 finding 5), and the message
+    // above already names it once — not twice.
+    assert_eq!(refused["issues_total"], json!(1), "{refused}");
     assert_eq!(refused["integrity"], json!("nothing_written"), "{refused}");
     assert_eq!(
         refused["retryable_after_correction"],
