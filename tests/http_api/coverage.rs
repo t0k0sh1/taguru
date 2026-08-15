@@ -292,6 +292,17 @@ fn refresh_reports_timeout_on_the_passage_half_after_glosses_land() {
             .starts_with("passage embedding refresh failed partway (progress is saved): "),
         "{body}"
     );
+
+    // The gloss half's own success is not undone by the passage
+    // half's timeout either — same partial-progress guarantee as the
+    // 502 test above.
+    let status_body = server.ok("GET", "/contexts/sake/embeddings", None);
+    assert_eq!(
+        status_body["glosses"]["concepts"],
+        json!(2),
+        "{status_body}"
+    );
+    assert_eq!(status_body["glosses"]["labels"], json!(1), "{status_body}");
 }
 
 /// `RefreshBreakdown.skipped_over_limit` (`coverage.rs:37`, set at the
@@ -329,9 +340,13 @@ fn refresh_reports_passages_skipped_over_the_row_limit() {
     // the gloss half (`coverage.rs`'s own `RefreshOutcome`
     // construction), so it never appears on the wire there.
     assert_eq!(refreshed["glosses"]["embedded"], json!(0), "{refreshed}");
-    assert_eq!(
-        refreshed["glosses"]["skipped_over_limit"],
-        json!(null),
+    // `.get(...).is_none()`, not an indexed `== json!(null)` compare:
+    // the field is `#[serde(skip_serializing_if = "Option::is_none")]`
+    // — indexing a genuinely ABSENT key also reads as `Value::Null`,
+    // so an indexed compare cannot tell "omitted" from a regression
+    // that started sending the field as an explicit JSON `null`.
+    assert!(
+        refreshed["glosses"].get("skipped_over_limit").is_none(),
         "{refreshed}"
     );
     assert_eq!(
