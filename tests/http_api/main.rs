@@ -61,4 +61,5 @@ mod source_metadata;
 mod temporal_window;
 mod tracing_pipeline;
 mod tracing_router;
+mod vocabulary;
 mod width_probe;
