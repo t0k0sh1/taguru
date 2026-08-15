@@ -30,20 +30,40 @@ use crate::support::*;
 /// floor between the two bands has room to sit.
 fn spawn_semantic_embeddings() -> String {
     const AXES: [&str; 3] = ["使用米", "水系", "schema:type"];
-    const WIDTH: usize = AXES.len() + 1;
+    // One extra dimension beyond AXES + the shared component: an
+    // "impurity" axis, spent only by 白鷺の里's own gloss (matched by
+    // its name prefix, not by a fact keyword, so it never collides
+    // with anything else). Landing 白鷺の里 off-axis by a controlled
+    // amount gives a cosine of EXACTLY 0.8 against 鶴の井 — deliberately
+    // between the default floor (0.6) and 1.0, not the ~0.99999994 an
+    // identical-vector pair produces from ordinary float rounding.
+    // Asserting a clamped ceiling of 1.0 excludes a pair must not lean
+    // on that rounding accident.
+    const WIDTH: usize = AXES.len() + 2;
+    const IMPURITY: usize = WIDTH - 1;
+    const SHARED: usize = WIDTH - 2;
 
     fn vector(text: &str) -> Vec<f32> {
         let mut vector = vec![0.0f32; WIDTH];
+        if text.starts_with("白鷺の里。") {
+            // (0.75, 0.6614, 0.5) against a pure axis0 (1, 0, 0.5):
+            // dot = 0.75 + 0.25 = 1.0, both norms sqrt(1.25) ->
+            // cosine = 1.0 / 1.25 = 0.8 exactly.
+            vector[0] = 0.75;
+            vector[IMPURITY] = 0.6614;
+            vector[SHARED] = 0.5;
+            return vector;
+        }
         let axis = AXES.iter().position(|keyword| text.contains(keyword));
         if let Some(axis) = axis {
             vector[axis] = 1.0;
-            vector[WIDTH - 1] = 0.5;
+            vector[SHARED] = 0.5;
         } else {
             // Unrecognized text (including bare relation-label
             // glosses with no matching keyword) still needs a unit
             // vector — put it on its own axis-free direction so it
             // never accidentally collides with either band.
-            vector[WIDTH - 1] = 1.0;
+            vector[SHARED] = 1.0;
         }
         vector
     }
@@ -113,9 +133,10 @@ fn semantic_server(tag: &str) -> Server {
 }
 
 /// Two concept pairs the stub resolves to two distinct bands: 鶴の井
-/// and 白鷺の里 share the "使用米" fact (cosine ~1.0, the "upper"
-/// band any floor up to 1.0 should keep), 鶴の井 and 遠山川 share only
-/// the low-weight component (cosine ~0.2, the "lower" band a
+/// and 白鷺の里 share the "使用米" fact (cosine 0.8 — the stub's
+/// deliberate impurity override on 白鷺の里 — the "upper" band a
+/// floor up to 0.8 should keep), 鶴の井 and 遠山川 share only the
+/// low-weight component (cosine ~0.2, the "lower" band a
 /// default-or-higher floor should drop). The one "使用米"/"水系" label
 /// pair rides the same two bands.
 fn seed_semantic_corpus(server: &Server, name: &str) {
@@ -200,9 +221,16 @@ fn cosine_floor_filters_the_semantic_sweep_and_clamps_out_of_range_input() {
         has_pair(&low["semantic_concepts"], "鶴の井", "遠山川"),
         "{low}"
     );
+    // The label sweep is a second, independent pairwise walk over the
+    // same corpus (`sweep(&store.labels, ...)` beside
+    // `sweep(&store.concepts, ...)`) — a regression that always
+    // returns an empty `semantic_labels` would pass every assertion
+    // above unnoticed, so the low floor must show its one real pair
+    // too, not just an absence.
+    assert!(has_pair(&low["semantic_labels"], "使用米", "水系"), "{low}");
 
     // Default floor (0.6): the tight band survives, the loose one
-    // (~0.2) does not.
+    // (~0.2) does not — for both the concept and the label sweep.
     let default = server.ok("POST", "/contexts/sake/vocabulary/audit", None);
     assert!(
         has_pair(&default["semantic_concepts"], "鶴の井", "白鷺の里"),
@@ -212,12 +240,17 @@ fn cosine_floor_filters_the_semantic_sweep_and_clamps_out_of_range_input() {
         !has_pair(&default["semantic_concepts"], "鶴の井", "遠山川"),
         "{default}"
     );
+    assert!(
+        !has_pair(&default["semantic_labels"], "使用米", "水系"),
+        "{default}"
+    );
 
     // An out-of-range floor is accepted (200), not refused as invalid
-    // input — `cosine_floor.clamp(0.0, 1.0)` in `embeddings.rs`.
-    // Above 1.0 clamps to exactly 1.0: even the tight band's cosine
-    // (0.999999..., never exactly 1.0 in floating point) no longer
-    // clears it, so the sweep comes back empty rather than erroring.
+    // input — `cosine_floor.clamp(0.0, 1.0)` in `embeddings.rs`. Above
+    // 1.0 clamps to exactly 1.0: 鶴の井/白鷺の里's cosine is a
+    // deliberate 0.8 (the stub's impurity override, not float
+    // rounding near 1.0), so it no longer clears the clamped ceiling
+    // and the sweep comes back empty rather than erroring.
     let clamped_high = server.ok(
         "POST",
         "/contexts/sake/vocabulary/audit",
@@ -269,6 +302,10 @@ fn drift_audit_include_twins_propagates_cosine_floor() {
         !has_pair(&twins["semantic_concepts"], "鶴の井", "遠山川"),
         "{strict}"
     );
+    assert!(
+        !has_pair(&twins["semantic_labels"], "使用米", "水系"),
+        "{strict}"
+    );
 
     let loose = server.ok(
         "POST",
@@ -277,6 +314,10 @@ fn drift_audit_include_twins_propagates_cosine_floor() {
     );
     assert!(
         has_pair(&loose["twins"]["semantic_concepts"], "鶴の井", "遠山川"),
+        "{loose}"
+    );
+    assert!(
+        has_pair(&loose["twins"]["semantic_labels"], "使用米", "水系"),
         "{loose}"
     );
 }
@@ -372,14 +413,15 @@ fn semantic_note_explains_the_sweep_cap_skip() {
     let server = semantic_server("vocab-sweep-cap");
     server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
 
-    // A chain of 2001 concepts (v0000 next v0001, ..., v1999 next
-    // v2000) — one association batch, one embeddings refresh, well
-    // under MAX_ASSOCIATIONS_PER_REQUEST (10_000).
+    // A chain of 2001 concepts (v0000 next/続く v0001, ..., v1999
+    // next/続く v2000), alternating between two labels — one
+    // association batch, one embeddings refresh, well under
+    // MAX_ASSOCIATIONS_PER_REQUEST (10_000).
     let chain: Vec<Value> = (0..2000)
         .map(|i| {
             json!({
                 "subject": format!("v{i:04}"),
-                "label": "次",
+                "label": if i % 2 == 0 { "次" } else { "続く" },
                 "object": format!("v{:04}", i + 1),
                 "weight": 1.0,
                 "source": "a.md",
@@ -404,10 +446,12 @@ fn semantic_note_explains_the_sweep_cap_skip() {
         "{audit}"
     );
     assert_eq!(audit["semantic_concepts"], json!([]), "{audit}");
-    // The label table (one label, "次") never approaches the cap, so
-    // its own sweep runs — proving the skip is concept-table-scoped,
-    // not a blanket "sweep failed" shortcut.
-    assert!(audit["semantic_labels"].as_array().unwrap().is_empty());
+    // The label table (two labels, nowhere near the cap) never
+    // approaches SWEEP_CAP, so its own sweep still runs and still
+    // finds its one real pair — an empty `semantic_labels` alone
+    // would not distinguish this concept-table-scoped skip from a
+    // bug that short-circuited the whole semantic half.
+    assert!(has_pair(&audit["semantic_labels"], "次", "続く"), "{audit}");
 }
 
 /// `dice_floor`/`cosine_floor` share `/vocabulary/audit`'s body with
