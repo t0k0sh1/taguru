@@ -83,6 +83,8 @@ jobs:
           persist-credentials: false
       - name: Fixtures <-> shapes.json self-consistency
         run: python3 sdk/spec/check_contract.py --check
+      - name: Router <-> surface.yaml completeness
+        run: python3 sdk/spec/check_surface_completeness.py
       - name: Determine base ref
         id: base
         env:
