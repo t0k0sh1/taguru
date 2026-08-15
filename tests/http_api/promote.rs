@@ -956,12 +956,27 @@ fn audit_degrades_to_deadline_exceeded_when_the_destination_vocabulary_is_too_la
 /// what actually crosses it, landing on `budget_refusal` at the next
 /// checkpoint instead. 500_000 gives comfortable margin over a 2s
 /// budget.
+///
+/// Seeding runs on a GENEROUS-timeout server first, then the process
+/// restarts onto the tight one — a single shared timeout for both
+/// seeding and the measured call is not viable: `scratch`'s registry
+/// entry starts `Cold` on every fresh process (`ensure_hot`'s WAL
+/// replay, `src/registry.rs`), and that one-time load (measured at
+/// ~10s for this corpus, uninterruptible — `ensure_hot` takes no
+/// `Deadline` at all) would otherwise dominate `export_context`
+/// itself and trip `AccessError::DeadlineExceeded` before render is
+/// ever reached — a real failure mode hit while widening this test's
+/// margin for CI (the same restart, without a warm-up, reproduced
+/// export's OWN timeout message instead of render's). A throwaway
+/// warm-up call after the restart (ignored status: `ensure_hot` has
+/// no deadline check to trip, so it always runs to completion and
+/// leaves the entry `Hot` regardless of how long it takes) pays that
+/// cost under room to spare, so the timed `promote` call that follows
+/// sees the same fast, warm `export_context` this test's margin was
+/// measured against.
 #[test]
 fn render_refusal_reports_timeout_when_the_export_alone_outlasts_the_budget() {
-    let server = Server::start_with_env(
-        "promote-render-timeout",
-        &[("TAGURU_REQUEST_TIMEOUT_SECS", "2")],
-    );
+    let server = Server::start("promote-render-timeout");
     server.ok(
         "PUT",
         "/contexts/scratch",
@@ -988,6 +1003,17 @@ fn render_refusal_reports_timeout_when_the_export_alone_outlasts_the_budget() {
         );
         k = end;
     }
+    let data_dir = server.stop_gracefully();
+    let server = Server::start_on_with_env(
+        "promote-render-timeout",
+        data_dir,
+        &[("TAGURU_REQUEST_TIMEOUT_SECS", "2")],
+    );
+    server.call(
+        "POST",
+        "/contexts/scratch/query",
+        Some(json!({"subject": "s0"})),
+    );
 
     let (status, refused) = server.call(
         "POST",
