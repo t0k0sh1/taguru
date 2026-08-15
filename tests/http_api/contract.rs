@@ -1334,3 +1334,250 @@ fn mcp_tools_list_audit_consolidation_schema() {
         json!({"tools": [tool]}),
     );
 }
+
+// --- HTTP: aliases, coverage, vocabulary/drift audits, and a plain
+// associations write (issue #625 finding 2) — these modules previously
+// had no wire-contract pin at all, so a breaking response-shape change
+// in any of them would have shipped undetected. ---
+
+/// The ordinary (schema-free) associations write — distinct from
+/// `add_associations_warn_mode_response_shape` above, which pins the
+/// `issues`/`schema_violations` fields a `warn`-mode schema adds.
+/// Neither field appears here (both are `skip_serializing_if`-omitted
+/// with nothing to say), so the two fixtures together pin both shapes
+/// the same response envelope can take.
+#[test]
+fn associations_store_response_shape() {
+    let server = Server::start("contract-associations-store");
+    server.ok("PUT", "/contexts/corpus-l", None);
+
+    let request = json!([
+        {"subject": "alpha", "label": "connects_to", "object": "beta", "weight": 1.0, "source": "doc.md"},
+    ]);
+    let (status, body) = server.call(
+        "POST",
+        "/contexts/corpus-l/associations",
+        Some(request.clone()),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["result"], json!(1), "{body}");
+    http_fixture(
+        "associations_store",
+        "POST",
+        "/contexts/{name}/associations",
+        Some(request),
+        status,
+        body,
+    );
+}
+
+fn seed_aliases_corpus(server: &Server, name: &str) {
+    server.ok(
+        "PUT",
+        &format!("/contexts/{name}"),
+        Some(json!({"description": "wire-contract aliases corpus"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{name}/associations"),
+        Some(json!([
+            {"subject": "PostgreSQL 16", "label": "採用", "object": "DB", "weight": 1.0,
+             "source": "doc.md"},
+        ])),
+    );
+}
+
+#[test]
+fn aliases_register_list_and_remove() {
+    let server = Server::start("contract-aliases");
+    seed_aliases_corpus(&server, "corpus-h");
+
+    let request = json!({"concepts": {"Postgres": "PostgreSQL 16"}});
+    let (status, body) = server.call("POST", "/contexts/corpus-h/aliases", Some(request.clone()));
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["result"], json!(1), "{body}");
+    http_fixture(
+        "aliases_register",
+        "POST",
+        "/contexts/{name}/aliases",
+        Some(request),
+        status,
+        body,
+    );
+
+    let (status, body) = server.call("GET", "/contexts/corpus-h/aliases", None);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["result"]["total"], json!(1), "{body}");
+    http_fixture(
+        "aliases_list",
+        "GET",
+        "/contexts/{name}/aliases",
+        None,
+        status,
+        body,
+    );
+
+    let request = json!({"concepts": ["Postgres"]});
+    let (status, body) = server.call(
+        "DELETE",
+        "/contexts/corpus-h/aliases",
+        Some(request.clone()),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["result"], json!(1), "{body}");
+    http_fixture(
+        "aliases_remove",
+        "DELETE",
+        "/contexts/{name}/aliases",
+        Some(request),
+        status,
+        body,
+    );
+}
+
+#[test]
+fn coverage_labels_embeddings_and_unreachable() {
+    let server = Server::start("contract-coverage");
+    server.ok(
+        "PUT",
+        "/contexts/corpus-i",
+        Some(json!({"description": "wire-contract coverage corpus"})),
+    );
+    server.ok(
+        "POST",
+        "/contexts/corpus-i/associations",
+        Some(json!([
+            {"subject": "alpha", "label": "connects_to", "object": "beta", "weight": 1.0,
+             "source": "doc.md"},
+        ])),
+    );
+
+    let (status, body) = server.call("GET", "/contexts/corpus-i/labels", None);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["result"]["labels"], json!(["connects_to"]), "{body}");
+    http_fixture(
+        "labels",
+        "GET",
+        "/contexts/{name}/labels",
+        None,
+        status,
+        body,
+    );
+
+    // No embedding provider configured in this harness — pins the
+    // `provider_model: null` shape, the common no-embeddings deployment.
+    let (status, body) = server.call("GET", "/contexts/corpus-i/embeddings", None);
+    assert_eq!(status, 200, "{body}");
+    http_fixture(
+        "embeddings_status",
+        "GET",
+        "/contexts/{name}/embeddings",
+        None,
+        status,
+        body,
+    );
+
+    // "gamma" names no concept in this corpus, so nothing is reachable
+    // from it — every edge in the graph counts as unreachable.
+    let request = json!({"origins": ["gamma"]});
+    let (status, body) = server.call(
+        "POST",
+        "/contexts/corpus-i/unreachable_from",
+        Some(request.clone()),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        !body["result"]["matches"].as_array().unwrap().is_empty(),
+        "{body}"
+    );
+    http_fixture(
+        "unreachable_from",
+        "POST",
+        "/contexts/{name}/unreachable_from",
+        Some(request),
+        status,
+        body,
+    );
+}
+
+/// Two spellings of the same brewery (青嶺酒造/青嶺酒蔵) for the lexical
+/// twin detector, and an edge with no `source` (so no attribution
+/// explains its weight) for the drift audit's `unsourced` section.
+fn seed_vocabulary_corpus(server: &Server, name: &str) {
+    server.ok(
+        "PUT",
+        &format!("/contexts/{name}"),
+        Some(json!({"description": "wire-contract vocabulary corpus"})),
+    );
+    server.ok(
+        "POST",
+        &format!("/contexts/{name}/associations"),
+        Some(json!([
+            {"subject": "青嶺酒造", "label": "銘柄", "object": "青嶺", "weight": 1.0, "source": "doc-a"},
+            {"subject": "青嶺酒蔵", "label": "銘柄", "object": "青嶺", "weight": 1.0, "source": "doc-b"},
+            {"subject": "蔵", "label": "行う", "object": "醸造", "weight": 3.0},
+        ])),
+    );
+}
+
+#[test]
+fn vocabulary_audit_shape() {
+    let server = Server::start("contract-vocabulary");
+    seed_vocabulary_corpus(&server, "corpus-j");
+
+    let request = json!({});
+    let (status, body) = server.call(
+        "POST",
+        "/contexts/corpus-j/vocabulary/audit",
+        Some(request.clone()),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        !body["result"]["lexical_concepts"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "{body}"
+    );
+    http_fixture(
+        "vocabulary_audit",
+        "POST",
+        "/contexts/{name}/vocabulary/audit",
+        Some(request),
+        status,
+        body,
+    );
+}
+
+#[test]
+fn drift_audit_shape() {
+    let server = Server::start("contract-drift");
+    seed_vocabulary_corpus(&server, "corpus-k");
+
+    let request = json!({"include_twins": true});
+    let (status, body) = server.call(
+        "POST",
+        "/contexts/corpus-k/drift/audit",
+        Some(request.clone()),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        !body["result"]["unsourced"].as_array().unwrap().is_empty(),
+        "{body}"
+    );
+    assert!(
+        !body["result"]["twins"]["lexical_concepts"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "{body}"
+    );
+    http_fixture(
+        "drift_audit",
+        "POST",
+        "/contexts/{name}/drift/audit",
+        Some(request),
+        status,
+        body,
+    );
+}

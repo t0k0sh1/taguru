@@ -1,0 +1,15 @@
+{
+  "contract": "http_contract",
+  "method": "GET",
+  "operation": "embeddings_status",
+  "request": null,
+  "response": {
+    "result": {
+      "provider_model": null
+    },
+    "status": "ok",
+    "time": 0.0
+  },
+  "route": "/contexts/{name}/embeddings",
+  "status": 200
+}

@@ -1,0 +1,38 @@
+{
+  "contract": "http_contract",
+  "method": "POST",
+  "operation": "unreachable_from",
+  "request": {
+    "origins": [
+      "gamma"
+    ]
+  },
+  "response": {
+    "result": {
+      "matches": [
+        {
+          "attributions": [
+            {
+              "count": 1,
+              "locator": null,
+              "paragraph": null,
+              "section": null,
+              "source": "doc.md",
+              "weight": 1.0
+            }
+          ],
+          "count": 1,
+          "label": "connects_to",
+          "object": "beta",
+          "subject": "alpha",
+          "weight": 1.0
+        }
+      ],
+      "total": 1
+    },
+    "status": "ok",
+    "time": 0.0
+  },
+  "route": "/contexts/{name}/unreachable_from",
+  "status": 200
+}

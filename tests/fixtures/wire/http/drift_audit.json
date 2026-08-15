@@ -1,0 +1,46 @@
+{
+  "contract": "http_contract",
+  "method": "POST",
+  "operation": "drift_audit",
+  "request": {
+    "include_twins": true
+  },
+  "response": {
+    "result": {
+      "dead_concept_aliases": {},
+      "dead_label_aliases": {},
+      "total": 1,
+      "twins": {
+        "lexical_concepts": [
+          {
+            "a": "青嶺酒造",
+            "b": "青嶺酒蔵",
+            "score": 0.6666666666666666
+          }
+        ],
+        "lexical_labels": [],
+        "semantic_concepts": [],
+        "semantic_labels": [],
+        "semantic_note": "ベクトル未生成のため意味的検出はスキップ (POST embeddings/refresh を実行)"
+      },
+      "unsourced": [
+        {
+          "association": {
+            "attributions": [],
+            "count": 1,
+            "label": "行う",
+            "object": "醸造",
+            "subject": "蔵",
+            "weight": 3.0
+          },
+          "unsourced_count": 1,
+          "unsourced_weight": 3.0
+        }
+      ]
+    },
+    "status": "ok",
+    "time": 0.0
+  },
+  "route": "/contexts/{name}/drift/audit",
+  "status": 200
+}

@@ -1,0 +1,25 @@
+{
+  "contract": "http_contract",
+  "method": "POST",
+  "operation": "vocabulary_audit",
+  "request": {},
+  "response": {
+    "result": {
+      "lexical_concepts": [
+        {
+          "a": "青嶺酒造",
+          "b": "青嶺酒蔵",
+          "score": 0.6666666666666666
+        }
+      ],
+      "lexical_labels": [],
+      "semantic_concepts": [],
+      "semantic_labels": [],
+      "semantic_note": "ベクトル未生成のため意味的検出はスキップ (POST embeddings/refresh を実行)"
+    },
+    "status": "ok",
+    "time": 0.0
+  },
+  "route": "/contexts/{name}/vocabulary/audit",
+  "status": 200
+}

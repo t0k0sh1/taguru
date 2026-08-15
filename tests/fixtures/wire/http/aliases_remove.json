@@ -1,0 +1,17 @@
+{
+  "contract": "http_contract",
+  "method": "DELETE",
+  "operation": "aliases_remove",
+  "request": {
+    "concepts": [
+      "Postgres"
+    ]
+  },
+  "response": {
+    "result": 1,
+    "status": "ok",
+    "time": 0.0
+  },
+  "route": "/contexts/{name}/aliases",
+  "status": 200
+}
