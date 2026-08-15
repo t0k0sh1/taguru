@@ -755,3 +755,375 @@ fn the_mcp_promote_tool_reaches_the_endpoint() {
         "dry_run through the tool writes nothing"
     );
 }
+
+// --- budget_refusal: a deadline dying mid-apply-loop -------------------------
+
+/// A scratch context with `count` distinct one-passage sources, each
+/// promotable on its own — one batch per source, so a large `count`
+/// gives the apply loop enough fsync-bearing iterations to spend a
+/// tight budget partway through, the same shape
+/// `server_ops.rs`'s `a_tight_timeout_cuts_a_multi_batch_import_short_
+/// instead_of_running_it_to_completion` uses for `/import`.
+/// A destination vocabulary dense enough to make `merge_section`'s
+/// lexical twin sweep (`vocabulary_audit`, O(n^2) over live concepts)
+/// take real wall-clock time — reused by both the `deadline_exceeded`
+/// and `overloaded` `audit_skip_reason` tests below. `scored_twins`
+/// (`src/context/entry_index.rs`) is a posting-list sweep, not a naive
+/// all-pairs scan: any bigram shared by more than `stop_gram`
+/// (spans.len() / 20) concepts is skipped outright, so a chain of
+/// merely-numbered names (a shared long common substring plus a unique
+/// digit tail) never gets slow — the shared substring's postings blow
+/// past stop_gram and the whole thing is skipped. To actually engage
+/// the O(len^2) pass per bigram, names are built in 20 buckets of 47
+/// concepts each (47 == stop_gram at this total, so postings stay
+/// exactly at the skip boundary, not over it); every concept in a
+/// bucket shares the same 300-character run of distinct CJK code
+/// points (299 unique bigrams, all with a 47-long posting list), so
+/// each bigram alone contributes C(47,2) pair updates — measured at
+/// roughly 3s of unchecked work in total (a full free run, not cut
+/// short by a deadline), while staying under SWEEP_CAP (2000) so the
+/// sweep runs its real pass instead of bailing out early (see
+/// vocabulary.rs's own sweep-cap test in issue #626, a different —
+/// semantic, not lexical — cap).
+fn seed_dense_vocabulary(server: &Server, context: &str) {
+    const BUCKET_COUNT: usize = 20;
+    const BUCKET_SIZE: usize = 47;
+    const PREFIX_LEN: usize = 300;
+    fn dense_name(k: usize) -> String {
+        let bucket = k / BUCKET_SIZE;
+        let item = k % BUCKET_SIZE;
+        let base = 0x4E00u32 + (bucket * PREFIX_LEN) as u32;
+        let prefix: String = (0..PREFIX_LEN)
+            .map(|i| char::from_u32(base + i as u32).unwrap())
+            .collect();
+        format!("{prefix}{item:03}")
+    }
+    let total = BUCKET_COUNT * BUCKET_SIZE;
+    let chain: Vec<serde_json::Value> = (0..total - 1)
+        .map(|k| {
+            json!({
+                "subject": dense_name(k),
+                "label": "次",
+                "object": dense_name(k + 1),
+                "weight": 1.0, "source": "seed.md",
+            })
+        })
+        .collect();
+    server.ok(
+        "POST",
+        &format!("/contexts/{context}/associations"),
+        Some(serde_json::Value::Array(chain)),
+    );
+}
+
+/// Each passage carries a few KB of filler so a batch's own write cost
+/// (WAL bytes, not just per-batch bookkeeping) is what the budget test
+/// below leans on for margin — a trivial one-line passage per source
+/// left too little headroom on faster (CI) hardware, where 600 tiny
+/// batches landed comfortably inside a 1s budget (824ms observed) even
+/// though the same fixture took over a second for ~50 batches on a
+/// slower machine.
+fn seed_many_sources(server: &Server, context: &str, count: usize) {
+    server.ok(
+        "PUT",
+        &format!("/contexts/{context}"),
+        Some(json!({"description": "d"})),
+    );
+    // ~6.6KB/passage: at `count` == MAX_MATCH_LIMIT (1000) the whole
+    // seeding POST stays comfortably under the 8MiB body cap.
+    let filler = "本文".repeat(1100);
+    let passages: serde_json::Map<String, serde_json::Value> = (0..count)
+        .map(|i| (format!("s{i:04}"), json!(format!("{i}: {filler}"))))
+        .collect();
+    server.ok(
+        "POST",
+        &format!("/contexts/{context}/sources"),
+        Some(json!({"passages": passages})),
+    );
+}
+
+/// `budget_refusal` (`promote.rs:552-576`): the apply loop's own
+/// per-iteration deadline check trips before all batches land — a
+/// resumable-prefix 408, distinct from `deadline_exceeded`'s top-of-
+/// handler refusal (which fires before anything runs at all).
+#[test]
+fn budget_refusal_cuts_a_multi_batch_promotion_short() {
+    let server = Server::start_with_env(
+        "promote-budget-refusal",
+        &[("TAGURU_REQUEST_TIMEOUT_SECS", "1")],
+    );
+    // MAX_MATCH_LIMIT (1000, `overlong`'s own ceiling on `sources`) —
+    // as many batches as the request can carry, maximizing margin.
+    const COUNT: usize = 1000;
+    seed_many_sources(&server, "scratch", COUNT);
+    server.ok("PUT", "/contexts/perm2", Some(json!({"description": "d"})));
+
+    let sources: Vec<String> = (0..COUNT).map(|i| format!("s{i:04}")).collect();
+    let start = std::time::Instant::now();
+    let (status, refused) = server.call(
+        "POST",
+        "/contexts/scratch/promote",
+        Some(json!({"into": "perm2", "sources": sources, "audit": false})),
+    );
+    let elapsed = start.elapsed();
+    assert_eq!(status, 408, "{refused} (elapsed {elapsed:?})");
+    assert_eq!(refused["code"], json!("timeout"), "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("budget partway through the promotion"),
+        "{refused}"
+    );
+    // A resumable prefix, `/import`'s own discipline: never
+    // all-or-nothing, and never silently the full count either. Not
+    // asserting `landed > 0` too: on a CI machine slow enough that
+    // even the first batch hasn't landed by the 1s budget, that's
+    // still a valid (if maximally early) resumable-prefix outcome —
+    // the elapsed time in the failure message is what would actually
+    // explain a `landed == COUNT` failure (the budget never bit).
+    let landed = refused["durable_batches"].as_u64().unwrap();
+    assert!(
+        landed < COUNT as u64,
+        "{refused} (elapsed {elapsed:?}, landed {landed})"
+    );
+}
+
+// --- audit_skip_reason: deadline_exceeded, driven through HTTP --------------
+
+/// `deadline_exceeded` (`promote.rs:579-585`, `AccessError::
+/// DeadlineExceeded` from any of the three consolidation sections):
+/// the write itself is a single small batch (fast, well inside a 1s
+/// budget), but the DESTINATION already carries a large enough
+/// vocabulary that `merge_section`'s lexical twin sweep
+/// (`vocabulary_audit`, O(n^2) over live concepts) alone outlasts
+/// what remains of the budget — the deadline dies INSIDE the audit,
+/// after every batch above is already durable, not before the write
+/// even starts (that is the ordinary top-of-handler check, a
+/// different code path).
+#[test]
+fn audit_degrades_to_deadline_exceeded_when_the_destination_vocabulary_is_too_large_to_audit_in_time()
+ {
+    let server = Server::start_with_env(
+        "promote-audit-deadline",
+        &[("TAGURU_REQUEST_TIMEOUT_SECS", "1")],
+    );
+    server.ok(
+        "PUT",
+        "/contexts/scratch",
+        Some(json!({"description": "d"})),
+    );
+    server.ok(
+        "POST",
+        "/contexts/scratch/associations",
+        Some(json!([
+            {"subject": "s", "label": "l", "object": "o", "weight": 1.0, "source": "a.md"}
+        ])),
+    );
+    server.ok("PUT", "/contexts/perm4", Some(json!({"description": "d"})));
+    // ~1-2s of unchecked lexical-sweep work, comfortably past whatever
+    // remains of a 1s request budget — see `seed_dense_vocabulary`.
+    seed_dense_vocabulary(&server, "perm4");
+
+    let promoted = server.ok(
+        "POST",
+        "/contexts/scratch/promote",
+        Some(json!({"into": "perm4", "sources": ["a.md"]})),
+    );
+    // The batch itself landed — only the audit degraded.
+    assert_eq!(
+        promoted["batches"][0]["source"],
+        json!("a.md"),
+        "{promoted}"
+    );
+    assert!(promoted["audit"].is_null(), "{promoted}");
+    assert_eq!(
+        promoted["audit_skipped"],
+        json!("deadline_exceeded"),
+        "{promoted}"
+    );
+}
+
+/// `render_refusal`'s Timeout arm (`promote.rs:494-500`): the deadline
+/// dies inside `export::render` itself — after `export_context`
+/// already succeeded, before the apply loop even starts, so nothing
+/// has been written. Distinct from `budget_refusal` (which fires
+/// between batches, after render/parse have already finished) and
+/// from the plain `AccessError::DeadlineExceeded` a slow
+/// `export_context` would raise (a different message: that one never
+/// reaches render at all).
+///
+/// One association, reasserted from the SAME source many times —
+/// `repeated_assertions_from_one_source_accumulate_into_one_attribution`
+/// — rather than many distinct associations: a repeated key is an O(1)
+/// lookup on the write side (measured constant at ~150ms per 10k-item
+/// chunk regardless of how large the total already is), where distinct
+/// names make each chunk progressively slower as the corpus grows
+/// (measured up to ~2s per chunk near 500k items — this test's very
+/// first design, since widened for CI margin, actually hit exactly
+/// that: some individual seed calls exceeded a shared tight timeout).
+/// `push_assertions`'s own per-count loop (`export.rs:648`, checked
+/// every DEADLINE_CHECK_STRIDE=4096) then does render's real work N
+/// times over for this ONE association — `export_context` itself
+/// stays under a millisecond (nothing per-item to do: nothing to scan
+/// for it — the whole cost is repeated count, not accumulated rows),
+/// so the deadline dies squarely inside render's own loop as long as
+/// the budget is smaller than render's own full-count duration
+/// (COUNT * ~1.9us/assertion here) — no delicate margin against
+/// `parse_stream`'s unchecked cost the way distinct-item corpora
+/// needed, since a budget this far under render's own completion time
+/// interrupts it long before parse is ever reached.
+#[test]
+fn render_refusal_reports_timeout_when_the_export_alone_outlasts_the_budget() {
+    let server = Server::start_with_env(
+        "promote-render-timeout",
+        &[("TAGURU_REQUEST_TIMEOUT_SECS", "2")],
+    );
+    server.ok(
+        "PUT",
+        "/contexts/scratch",
+        Some(json!({"description": "d"})),
+    );
+    server.ok("PUT", "/contexts/perm5", Some(json!({"description": "d"})));
+    const COUNT: usize = 1_500_000;
+    const CHUNK: usize = 10_000;
+    let mut k = 0usize;
+    while k < COUNT {
+        let end = (k + CHUNK).min(COUNT);
+        let batch: Vec<serde_json::Value> = (k..end)
+            .map(|_| {
+                json!({
+                    "subject": "s", "label": "l", "object": "o",
+                    "weight": 1.0, "source": "a.md",
+                })
+            })
+            .collect();
+        server.ok(
+            "POST",
+            "/contexts/scratch/associations",
+            Some(serde_json::Value::Array(batch)),
+        );
+        k = end;
+    }
+
+    let (status, refused) = server.call(
+        "POST",
+        "/contexts/scratch/promote",
+        Some(json!({"into": "perm5", "sources": ["a.md"], "audit": false})),
+    );
+    assert_eq!(status, 408, "{refused}");
+    assert_eq!(refused["code"], json!("timeout"), "{refused}");
+    // render_refusal's own wording ("before this operation could
+    // start") — distinct from budget_refusal's "partway through the
+    // promotion" and from export's own AccessError::DeadlineExceeded
+    // message, which lacks "before this operation could start".
+    let message = refused["error"].as_str().unwrap();
+    assert!(
+        message.contains("before this operation could start"),
+        "{message}"
+    );
+
+    let sources = server.ok("GET", "/contexts/perm5/sources", None);
+    assert_eq!(
+        sources["total"],
+        json!(0),
+        "nothing applies before render finishes: {sources}"
+    );
+}
+
+/// The other `audit_skip_reason` arm outside `metadata_unreadable`/
+/// `no_context`: `heavy_ops.try_acquire()` failing at the ceiling
+/// (`promote.rs:412-415`) — separate code entirely from
+/// `audit_skip_reason` itself (that function only maps
+/// `AccessError` arms; this one is a plain `Err(_shed)` match before
+/// `landing_audit` is ever called). `TAGURU_MAX_CONCURRENT_HEAVY_OPS=1`
+/// leaves exactly one permit; two promotions into the SAME
+/// dense-vocabulary destination fire from separate threads, staggered
+/// just enough that the first is reliably past its own `try_acquire`
+/// and into the slow audit before the second starts — the first holds
+/// the permit for the audit's whole (seconds-long) duration, so the
+/// second's own `try_acquire` finds none, degrading to `"overloaded"`
+/// rather than shedding its own already-durable write.
+#[test]
+fn audit_degrades_to_overloaded_when_a_concurrent_promotion_holds_the_only_heavy_ops_permit() {
+    let server = Server::start_with_env(
+        "promote-audit-overloaded",
+        &[("TAGURU_MAX_CONCURRENT_HEAVY_OPS", "1")],
+    );
+    server.ok(
+        "PUT",
+        "/contexts/scratch-a",
+        Some(json!({"description": "d"})),
+    );
+    server.ok(
+        "POST",
+        "/contexts/scratch-a/associations",
+        Some(json!([
+            {"subject": "s1", "label": "l", "object": "o1", "weight": 1.0, "source": "a.md"}
+        ])),
+    );
+    server.ok(
+        "PUT",
+        "/contexts/scratch-b",
+        Some(json!({"description": "d"})),
+    );
+    server.ok(
+        "POST",
+        "/contexts/scratch-b/associations",
+        Some(json!([
+            {"subject": "s2", "label": "l", "object": "o2", "weight": 1.0, "source": "b.md"}
+        ])),
+    );
+    server.ok("PUT", "/contexts/perm6", Some(json!({"description": "d"})));
+    seed_dense_vocabulary(&server, "perm6");
+
+    let (first, second) = std::thread::scope(|scope| {
+        let first = scope.spawn(|| {
+            server.ok(
+                "POST",
+                "/contexts/scratch-a/promote",
+                Some(json!({"into": "perm6", "sources": ["a.md"]})),
+            )
+        });
+        // Give the first request a head start into its (multi-second)
+        // audit before the second even tries to acquire the permit —
+        // wide margin against the sweep's own ~1-2s duration.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let second = scope.spawn(|| {
+            server.ok(
+                "POST",
+                "/contexts/scratch-b/promote",
+                Some(json!({"into": "perm6", "sources": ["b.md"]})),
+            )
+        });
+        (first.join().unwrap(), second.join().unwrap())
+    });
+
+    // Both batches land regardless of the audit outcome — the permit
+    // ceiling degrades the audit, it never sheds an already-applied
+    // write.
+    assert_eq!(first["batches"][0]["source"], json!("a.md"), "{first}");
+    assert_eq!(second["batches"][0]["source"], json!("b.md"), "{second}");
+
+    // The 200ms head start makes the first request the LIKELY one to
+    // hold the permit, but it isn't a guarantee (a slow enough CI
+    // could still let the second's export/render/apply/fsync finish
+    // first) — so the assertion checks the invariant the permit
+    // ceiling actually promises (exactly one of the two degrades)
+    // rather than which specific request lost the race.
+    let skipped: Vec<&serde_json::Value> = [&first, &second]
+        .into_iter()
+        .filter_map(|response| response.get("audit_skipped"))
+        .collect();
+    assert_eq!(skipped.len(), 1, "first={first} second={second}");
+    assert_eq!(
+        skipped[0],
+        &json!("overloaded"),
+        "first={first} second={second}"
+    );
+    let audited = [&first, &second]
+        .into_iter()
+        .filter(|response| response["audit"].is_object())
+        .count();
+    assert_eq!(audited, 1, "first={first} second={second}");
+}
