@@ -17,6 +17,7 @@ mod changes;
 mod communities;
 mod consolidation;
 mod contract;
+mod coverage;
 mod directory;
 mod directory_labels_compact;
 mod errors;
