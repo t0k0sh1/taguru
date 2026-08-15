@@ -1,0 +1,19 @@
+{
+  "contract": "http_contract",
+  "method": "GET",
+  "operation": "aliases_list",
+  "request": null,
+  "response": {
+    "result": {
+      "concepts": {
+        "Postgres": "PostgreSQL 16"
+      },
+      "labels": {},
+      "total": 1
+    },
+    "status": "ok",
+    "time": 0.0
+  },
+  "route": "/contexts/{name}/aliases",
+  "status": 200
+}

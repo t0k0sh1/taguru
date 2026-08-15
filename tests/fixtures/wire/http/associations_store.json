@@ -1,0 +1,21 @@
+{
+  "contract": "http_contract",
+  "method": "POST",
+  "operation": "associations_store",
+  "request": [
+    {
+      "label": "connects_to",
+      "object": "beta",
+      "source": "doc.md",
+      "subject": "alpha",
+      "weight": 1.0
+    }
+  ],
+  "response": {
+    "result": 1,
+    "status": "ok",
+    "time": 0.0
+  },
+  "route": "/contexts/{name}/associations",
+  "status": 200
+}

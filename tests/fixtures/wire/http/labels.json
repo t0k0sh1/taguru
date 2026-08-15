@@ -1,0 +1,18 @@
+{
+  "contract": "http_contract",
+  "method": "GET",
+  "operation": "labels",
+  "request": null,
+  "response": {
+    "result": {
+      "labels": [
+        "connects_to"
+      ],
+      "total": 1
+    },
+    "status": "ok",
+    "time": 0.0
+  },
+  "route": "/contexts/{name}/labels",
+  "status": 200
+}
