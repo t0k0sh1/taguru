@@ -250,10 +250,12 @@ fn parse_cursor(cursor: &str) -> Option<(u64, u64)> {
 /// The change events one applied prefix of a `logged_write` batch
 /// means: `Associate`/alias ops aggregate to per-call counts, the
 /// retract ops stay individual (they carry the identity a client acts
-/// on). Order within the batch is preserved where it matters —
-/// aggregates are emitted after the individual events of the same
-/// batch would only reorder within one write call, so aggregates come
-/// first for determinism.
+/// on). Aggregates always come first, in a fixed kind order
+/// (associations added, aliases added, aliases removed) — interleaving
+/// them with the individual events by their position in the batch
+/// would only reorder within one write call, so a fixed order is what
+/// makes the result deterministic. Individual events follow in the
+/// order their ops appeared in the batch.
 pub fn events_of_ops(ops: &[WalOp]) -> Vec<ChangeKind> {
     let mut associations = 0usize;
     let mut aliases_added = 0usize;

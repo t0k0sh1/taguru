@@ -16,6 +16,11 @@ use super::{
     dispatch_chunks_concurrently, file_stem, pvectors_path, vectors_path,
 };
 
+/// Rows per provider call, shared by both the gloss (`embed_stale`) and
+/// passage (`refresh_passage_embeddings`) refresh pipelines so the two
+/// stay in sync instead of drifting apart as separately hardcoded `128`s.
+const EMBED_CHUNK_SIZE: usize = 128;
+
 impl AppState {
     /// Whether the semantic entry tier has a provider at all.
     pub fn embeddings_configured(&self) -> bool {
@@ -84,8 +89,21 @@ impl AppState {
         Option<String>,
     )> {
         /// Past this many names a namespace's pairwise sweep is skipped.
+        /// The sweep below is O(N²) similarity comparisons with no index
+        /// to narrow it (unlike [`PassageVectorStore::top_matches`], this
+        /// is an explicit audit call, not a hot query path, so no ANN
+        /// structure exists for it) — at 2000 names that is ~2M
+        /// comparisons, the point past which an unbounded request could
+        /// tie up a request thread for an unpredictable stretch. No
+        /// calibration sweep backs this exact number (unlike
+        /// [`crate::embedding::PASSAGE_ANN_THRESHOLD`]); it is a
+        /// deliberately conservative round bound, not a measured knee.
         const SWEEP_CAP: usize = 2000;
-        /// At most this many pairs per namespace come back.
+        /// At most this many pairs per namespace come back — a response-size
+        /// bound, not a quality one: `pairs` is already sorted by score
+        /// descending before this truncates, so raising it only ever adds
+        /// weaker matches. Round number, not calibrated against a measured
+        /// cost like [`crate::embedding::PASSAGE_ANN_THRESHOLD`].
         const PAIR_CAP: usize = 100;
 
         let entry = self.lookup(name)?;
@@ -489,7 +507,7 @@ impl AppState {
     }
 
     /// Diffs one gloss table against its stored vectors and embeds what
-    /// is new or changed, 128 glosses per provider call. Each vector
+    /// is new or changed, `EMBED_CHUNK_SIZE` glosses per provider call. Each vector
     /// remembers the hash of the gloss it came from; `fresh_model`
     /// marks everything stale. Returns the vectors that landed alongside
     /// the first provider error, if any — the caller persists the former
@@ -523,7 +541,7 @@ impl AppState {
                 outdated.then(|| (name.clone(), gloss.clone(), hash))
             })
             .collect();
-        let stale_chunks: Vec<&[(String, String, u64)]> = stale.chunks(128).collect();
+        let stale_chunks: Vec<&[(String, String, u64)]> = stale.chunks(EMBED_CHUNK_SIZE).collect();
         let outcomes =
             dispatch_chunks_concurrently(&stale_chunks, self.0.embed_parallel, |chunk| {
                 if deadline.expired() {
@@ -608,7 +626,7 @@ impl AppState {
     /// hash already has a row under the current model is carried
     /// forward, a vanished paragraph's row is dropped (retraction
     /// pruning falls out of the rebuild), and only the rest go to the
-    /// provider, 128 per call. The sidecar is written AT MOST ONCE per
+    /// provider, `EMBED_CHUNK_SIZE` per call. The sidecar is written AT MOST ONCE per
     /// refresh: writing per batch would multiply a large store's bytes
     /// across the whole backfill. A provider failure partway persists
     /// what did land and reports the error — the next refresh continues
@@ -753,7 +771,8 @@ impl AppState {
                 }
             }
 
-            let to_embed_chunks: Vec<&[(PassageKey, String)]> = to_embed.chunks(128).collect();
+            let to_embed_chunks: Vec<&[(PassageKey, String)]> =
+                to_embed.chunks(EMBED_CHUNK_SIZE).collect();
             let outcomes =
                 dispatch_chunks_concurrently(&to_embed_chunks, self.0.embed_parallel, |chunk| {
                     if deadline.expired() {
