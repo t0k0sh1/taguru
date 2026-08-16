@@ -162,53 +162,7 @@ impl Metrics {
         let snapshot = self.embed_latency.snapshot();
         push_histogram(&mut out, "taguru_embedding_duration_seconds", "", &snapshot);
         if let Some(breaker) = &gauges.embed_breaker {
-            push_header(
-                &mut out,
-                "taguru_embedding_breaker_state",
-                "gauge",
-                "Embedding provider circuit breaker: 0 = closed, 1 = open \
-                 (calls refused until the cooldown lets a probe through), \
-                 2 = half-open (probing).",
-            );
-            out.push_str(&format!(
-                "taguru_embedding_breaker_state {}\n",
-                breaker.state
-            ));
-            push_header(
-                &mut out,
-                "taguru_embedding_breaker_consecutive_failures",
-                "gauge",
-                "Consecutive provider-attempt failures counted toward the \
-                 breaker's opening threshold (pinned at the threshold while \
-                 open or half-open).",
-            );
-            out.push_str(&format!(
-                "taguru_embedding_breaker_consecutive_failures {}\n",
-                breaker.consecutive_failures
-            ));
-            push_header(
-                &mut out,
-                "taguru_embedding_breaker_opened_total",
-                "counter",
-                "Times the breaker opened (threshold of consecutive attempt \
-                 failures reached, or a half-open probe failed).",
-            );
-            out.push_str(&format!(
-                "taguru_embedding_breaker_opened_total {}\n",
-                breaker.opened_total
-            ));
-            push_header(
-                &mut out,
-                "taguru_embedding_breaker_short_circuits_total",
-                "counter",
-                "Embedding calls refused without touching the provider \
-                 because the breaker was open (or a probe was already in \
-                 flight).",
-            );
-            out.push_str(&format!(
-                "taguru_embedding_breaker_short_circuits_total {}\n",
-                breaker.short_circuits_total
-            ));
+            push_breaker(&mut out, "taguru_embedding_breaker", "Embedding", breaker);
         }
 
         push_header(
@@ -245,50 +199,7 @@ impl Metrics {
             ));
         }
         if let Some(breaker) = &gauges.rerank_breaker {
-            push_header(
-                &mut out,
-                "taguru_rerank_breaker_state",
-                "gauge",
-                "Reranker provider circuit breaker: 0 = closed, 1 = open \
-                 (calls refused until the cooldown lets a probe through), \
-                 2 = half-open (probing).",
-            );
-            out.push_str(&format!("taguru_rerank_breaker_state {}\n", breaker.state));
-            push_header(
-                &mut out,
-                "taguru_rerank_breaker_consecutive_failures",
-                "gauge",
-                "Consecutive provider-attempt failures counted toward the \
-                 breaker's opening threshold (pinned at the threshold while \
-                 open or half-open).",
-            );
-            out.push_str(&format!(
-                "taguru_rerank_breaker_consecutive_failures {}\n",
-                breaker.consecutive_failures
-            ));
-            push_header(
-                &mut out,
-                "taguru_rerank_breaker_opened_total",
-                "counter",
-                "Times the breaker opened (threshold of consecutive attempt \
-                 failures reached, or a half-open probe failed).",
-            );
-            out.push_str(&format!(
-                "taguru_rerank_breaker_opened_total {}\n",
-                breaker.opened_total
-            ));
-            push_header(
-                &mut out,
-                "taguru_rerank_breaker_short_circuits_total",
-                "counter",
-                "Reranker calls refused without touching the provider \
-                 because the breaker was open (or a probe was already in \
-                 flight).",
-            );
-            out.push_str(&format!(
-                "taguru_rerank_breaker_short_circuits_total {}\n",
-                breaker.short_circuits_total
-            ));
+            push_breaker(&mut out, "taguru_rerank_breaker", "Reranker", breaker);
         }
 
         push_header(
@@ -935,6 +846,59 @@ fn escape_label(value: &str) -> String {
 fn push_value(out: &mut String, name: &str, kind: &str, help: &str, value: impl std::fmt::Display) {
     push_header(out, name, kind, help);
     out.push_str(&format!("{name} {value}\n"));
+}
+
+/// One provider circuit breaker's four families — `_state`,
+/// `_consecutive_failures`, `_opened_total`, `_short_circuits_total`
+/// under `prefix` (issue #700): the embed and rerank blocks were
+/// line-for-line identical but for the prefix and the `subject` word
+/// in two HELP sentences, and both read the same
+/// [`crate::breaker::BreakerSnapshot`].
+fn push_breaker(
+    out: &mut String,
+    prefix: &str,
+    subject: &str,
+    breaker: &crate::breaker::BreakerSnapshot,
+) {
+    push_value(
+        out,
+        &format!("{prefix}_state"),
+        "gauge",
+        &format!(
+            "{subject} provider circuit breaker: 0 = closed, 1 = open \
+             (calls refused until the cooldown lets a probe through), \
+             2 = half-open (probing)."
+        ),
+        breaker.state,
+    );
+    push_value(
+        out,
+        &format!("{prefix}_consecutive_failures"),
+        "gauge",
+        "Consecutive provider-attempt failures counted toward the \
+         breaker's opening threshold (pinned at the threshold while \
+         open or half-open).",
+        breaker.consecutive_failures,
+    );
+    push_value(
+        out,
+        &format!("{prefix}_opened_total"),
+        "counter",
+        "Times the breaker opened (threshold of consecutive attempt \
+         failures reached, or a half-open probe failed).",
+        breaker.opened_total,
+    );
+    push_value(
+        out,
+        &format!("{prefix}_short_circuits_total"),
+        "counter",
+        &format!(
+            "{subject} calls refused without touching the provider \
+             because the breaker was open (or a probe was already in \
+             flight)."
+        ),
+        breaker.short_circuits_total,
+    );
 }
 
 /// A latency histogram family — bucket counts, the +Inf bucket, sum,

@@ -4,9 +4,14 @@
 //! few atomics and one render function, not a metrics facade crate;
 //! the same reasoning that keeps BM25 and the vector store in-tree.
 //!
-//! Hot-path cost is one atomic increment per event. Histograms store
-//! per-bin counts and defer the cumulative `le` semantics to render
-//! (scrape) time.
+//! Hot-path cost is one atomic increment per event for the domain
+//! counters. The per-route HTTP counters additionally pay a
+//! read-locked map lookup whose `(method, route)` key allocates two
+//! small `String`s per request (issue #700: measured as negligible
+//! next to request work, and a borrowed tuple key can't index a
+//! `HashMap<(String, String), _>` — noted here so the doc doesn't
+//! promise less than the code does). Histograms store per-bin counts
+//! and defer the cumulative `le` semantics to render (scrape) time.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
