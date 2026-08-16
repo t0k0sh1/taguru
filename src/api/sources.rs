@@ -976,6 +976,7 @@ pub async fn search_passages(
         taguru.cache.semantic = tracing::field::Empty,
         taguru.search.lanes = tracing::field::Empty,
         taguru.search.vector.outcome = tracing::field::Empty,
+        taguru.search.floor = tracing::field::Empty,
         taguru.passage.hit_count = tracing::field::Empty,
         taguru.passage.bm25_only = tracing::field::Empty,
         taguru.passage.both_lanes = tracing::field::Empty,
@@ -1104,6 +1105,13 @@ pub async fn search_passages(
             span.record("taguru.search.lanes", found.lanes.code());
             if let crate::registry::PassageSearchLanes::Ran { vector } = &found.lanes {
                 span.record("taguru.search.vector.outcome", vector.code());
+                // The effective cosine floor the lane actually applied
+                // (override > context setting > server default) —
+                // carried only by the `Ran` arm, so recorded only when
+                // it exists (ADR 0008 §6 `taguru.search.floor`, #697).
+                if let crate::registry::VectorLaneStatus::Ran { floor } = vector {
+                    span.record("taguru.search.floor", f64::from(*floor));
+                }
             }
             span.record("taguru.passage.hit_count", found.hits.len());
             span.record("taguru.passage.bm25_only", lane_hits[0]);
@@ -1822,6 +1830,7 @@ pub async fn cross_search_passages(
                 taguru.target.index = index as i64,
                 taguru.search.lanes = tracing::field::Empty,
                 taguru.search.vector.outcome = tracing::field::Empty,
+                taguru.search.floor = tracing::field::Empty,
                 taguru.passage.hit_count = tracing::field::Empty,
                 taguru.filter.eligible = tracing::field::Empty,
                 taguru.filter.total = tracing::field::Empty,
@@ -1839,6 +1848,14 @@ pub async fn cross_search_passages(
                 target_span.record("taguru.search.lanes", found.lanes.code());
                 if let crate::registry::PassageSearchLanes::Ran { vector } = &found.lanes {
                     target_span.record("taguru.search.vector.outcome", vector.code());
+                    // Same rule as the single-context span: the
+                    // effective floor exists only on the `Ran` arm
+                    // (ADR 0008 §6 `taguru.search.floor`, #697) — and
+                    // it is a PER-TARGET fact (each context's own
+                    // setting can differ under one override).
+                    if let crate::registry::VectorLaneStatus::Ran { floor } = vector {
+                        target_span.record("taguru.search.floor", f64::from(*floor));
+                    }
                 }
                 // This target's own pre-merge count — what it OFFERED
                 // the merge; the parent span's `hit_count` is the

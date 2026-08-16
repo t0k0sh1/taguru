@@ -233,7 +233,7 @@ reuses the same `as_str()`, made `pub(crate)`:
 | `taguru.op` | `SearchOp::as_str()` (`src/metrics.rs`) | `resolve` `resolve_label` `recall` `query` `activate` `search_passages` `search_communities` `explore` |
 | `taguru.cache.result` | `RetrievalCacheOp` hit/miss | `hit` `miss` |
 | `taguru.cache.semantic` | `SemanticCacheOutcome::as_str()` | `hit` `stale` `guarded` `miss` |
-| `taguru.resolve.tier` | `ResolveTier::as_str()` (already `pub`) | `lexical` `semantic` `weak_lexical` `miss` |
+| `taguru.resolve.tier` | `ResolveTier::as_str()` (already `pub`) | `lexical` `semantic` `weak_lexical` `miss` — registered but deliberately metrics-only as of #697: the tier is a per-cue verdict and every resolve span covers an origin list (see `src/api/resolve.rs::resolve_served`) |
 | `taguru.search.lanes` | new `PassageSearchLanes::code()` | `no_query_terms` `zero_limit` `ran` |
 | `taguru.search.vector.outcome` | new `VectorLaneStatus::code()` | `off` `query_embedding_failed` `no_vectors` `model_changed` `width_changed` `ran` |
 | `taguru.passage.bm25_only` / `.both_lanes` / `.vector_only` | `taguru_passage_lane_contributions_total{lane}` | counts (`i64`) |
@@ -289,7 +289,12 @@ carrying `taguru.reason` from this closed vocabulary: `describe_disabled`,
 `semantic_cache_hit`/`_stale`/`_guarded`/`_miss`, `cue_cache_hit`,
 `zero_limit`, `no_query_terms`, `vector_off`, `vector_query_embedding_failed`,
 `vector_no_vectors`, `vector_model_changed`, `vector_width_changed`,
-`bridge_unreachable`.
+`bridge_unreachable` — plus, registered with #697: `origins_empty` and
+`communities_disabled` (both shipped with `assemble_evidence` but were
+missing from this list) and `no_communities_artifact` (the communities
+lane's ADR 0006 §11 degrade; the artifact-naming reason TEXT stays on
+the response plan alone, since it carries context names §8 forbids
+here).
 
 **No span-event field is ever named `error`.** `tracing-opentelemetry`
 special-cases exactly that name into an exception event and (by default) an

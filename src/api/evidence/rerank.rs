@@ -274,17 +274,13 @@ impl EvidenceReranker for HttpReranker {
         candidates: &[RerankCandidate],
         deadline: Deadline,
     ) -> Result<Vec<usize>, RerankFailure> {
-        // `taguru.`-prefixed per ADR 0008 §5 (renamed from the bare
-        // `"rerank"`/`rerank.*` this predates — no wire or test
-        // depends on the old spelling).
-        let span = crate::trace::span!(
-            "taguru.rerank",
-            otel.kind = "client",
-            taguru.rerank.model = %self.model,
-            taguru.rerank.candidates = candidates.len(),
-        );
-        let _guard = span.enter();
-
+        // No span here: `drive` owns `taguru.rerank` (issue #697) so
+        // one span covers the WHOLE §12 decision — the pre-flight
+        // refusals this method never sees included — and can record
+        // `taguru.rerank.outcome` after the permutation check that
+        // happens above this call. The retry warn! below still lands
+        // on that span as an event (drive holds its guard across this
+        // synchronous call).
         let mut attempt = 0;
         loop {
             if deadline.expired() {
@@ -435,7 +431,27 @@ pub(crate) fn drive(
     deadline: Deadline,
 ) -> (Option<Vec<usize>>, RerankerPlan, RerankOutcome) {
     let started = Instant::now();
+    // One `taguru.rerank` span per requested rerank, pre-flight
+    // refusals included (issue #697; `taguru.`-prefixed per ADR 0008
+    // §5, renamed from the bare `"rerank"` this predates): the span
+    // used to live inside `HttpReranker::rerank`, which made every
+    // refusal that never reaches the provider — and the permutation
+    // verdict decided after it returns — invisible on traces.
+    // `taguru.rerank.outcome` is the same token the caller records on
+    // `taguru_rerank_outcomes_total`, so a span alone now says ok vs.
+    // which degrade (ADR 0008 §6). Still `client`: the provider call
+    // is what this span exists to time, the refusal arms are just its
+    // zero-duration edge cases.
+    let span = crate::trace::span!(
+        "taguru.rerank",
+        otel.kind = "client",
+        taguru.rerank.model = tracing::field::Empty,
+        taguru.rerank.candidates = survivors.len() as i64,
+        taguru.rerank.outcome = tracing::field::Empty,
+    );
+    let _guard = span.enter();
     let finish = |order: Option<Vec<usize>>, plan: RerankerPlan, token: &'static str| {
+        span.record("taguru.rerank.outcome", token);
         let outcome = RerankOutcome {
             token,
             duration: started.elapsed(),
@@ -455,6 +471,7 @@ pub(crate) fn drive(
             REASON_NOT_CONFIGURED,
         );
     };
+    span.record("taguru.rerank.model", provider.model());
 
     if let Some(wanted) = &request.model
         && wanted != provider.model()

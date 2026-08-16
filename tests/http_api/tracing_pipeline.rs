@@ -436,6 +436,241 @@ fn a_provider_degrade_leaves_the_root_and_lane_span_unset_not_error() {
     );
 }
 
+/// issue #697: a requested rerank exports one `taguru.rerank` span
+/// whose `taguru.rerank.outcome` alone says ok-or-which-degrade —
+/// including the pre-flight refusals that never reach a provider,
+/// which previously produced no span at all.
+#[test]
+fn a_requested_rerank_without_a_provider_exports_outcome_not_configured() {
+    let collector = FakeCollector::start();
+    let server = Server::start_with_env(
+        "tracing-rerank-unconfigured",
+        &[
+            ("OTEL_EXPORTER_OTLP_ENDPOINT", collector.endpoint.as_str()),
+            ("OTEL_EXPORTER_OTLP_PROTOCOL", "http/json"),
+            ("OTEL_BSP_SCHEDULE_DELAY", "100"),
+        ],
+    );
+    seed_sake_context(&server);
+
+    server.ok(
+        "POST",
+        "/contexts/sake/evidence",
+        Some(json!({"origins": ["青嶺酒造"], "rerank": {}})),
+    );
+
+    let _ = server.stop_gracefully();
+    let tree = SpanTree::new(collector.spans());
+
+    let rerank = tree.one("taguru.rerank");
+    assert_eq!(
+        attribute(rerank, "taguru.rerank.outcome").map(|v| v["stringValue"].clone()),
+        Some(json!("not_configured")),
+        "{rerank:?}"
+    );
+    // The candidate count is on the span even for a refusal, as i64.
+    assert!(
+        attribute(rerank, "taguru.rerank.candidates").is_some_and(|v| v["intValue"].is_string()),
+        "{rerank:?}"
+    );
+    // No provider means no model to record.
+    assert!(
+        attribute(rerank, "taguru.rerank.model").is_none(),
+        "{rerank:?}"
+    );
+    // A refusal is a plan fact, not a span failure (ADR 0008 §9).
+    assert_eq!(status_code(rerank), 0, "{rerank:?}");
+}
+
+/// issue #697, provider half: a transport failure surfaces as
+/// `outcome = provider_error` with the model recorded — the span alone
+/// now distinguishes it from `ok`.
+#[test]
+fn a_rerank_provider_failure_exports_outcome_provider_error() {
+    let collector = FakeCollector::start();
+    let server = Server::start_with_env(
+        "tracing-rerank-provider-error",
+        &[
+            ("OTEL_EXPORTER_OTLP_ENDPOINT", collector.endpoint.as_str()),
+            ("OTEL_EXPORTER_OTLP_PROTOCOL", "http/json"),
+            ("OTEL_BSP_SCHEDULE_DELAY", "100"),
+            // Nothing listens on 9 (the discard service) — a
+            // synchronous connection refusal, not a hang.
+            ("TAGURU_RERANK_URL", "http://127.0.0.1:9"),
+            ("TAGURU_RERANK_MODEL", "unreachable-model"),
+            ("TAGURU_RERANK_TIMEOUT_SECS", "1"),
+        ],
+    );
+    seed_sake_context(&server);
+    // A second association so at least two candidates survive fusion —
+    // fewer would refuse as `empty_pool` before the provider is tried.
+    server.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([
+            {"subject": "青嶺酒造", "label": "所在", "object": "霧沢町", "weight": 0.9,
+             "source": "docs/kura.md", "paragraph": 0},
+        ])),
+    );
+
+    server.ok(
+        "POST",
+        "/contexts/sake/evidence",
+        Some(json!({"origins": ["青嶺酒造"], "rerank": {}})),
+    );
+
+    let _ = server.stop_gracefully();
+    let tree = SpanTree::new(collector.spans());
+
+    let rerank = tree.one("taguru.rerank");
+    assert_eq!(
+        attribute(rerank, "taguru.rerank.outcome").map(|v| v["stringValue"].clone()),
+        Some(json!("provider_error")),
+        "{rerank:?}"
+    );
+    assert_eq!(
+        attribute(rerank, "taguru.rerank.model").map(|v| v["stringValue"].clone()),
+        Some(json!("unreachable-model")),
+        "{rerank:?}"
+    );
+}
+
+/// issue #697: `taguru.communities` matches its sibling lanes' shape —
+/// `taguru.op`, a hit count when the lane ran, and a `taguru.skip`
+/// event with a STABLE reason code when the artifact is missing (the
+/// human-readable reason text names the context, which ADR 0008 §8
+/// keeps off every span and event).
+#[test]
+fn the_communities_lane_records_op_hit_count_and_a_skip_reason() {
+    let collector = FakeCollector::start();
+    let server = Server::start_with_env(
+        "tracing-communities-lane",
+        &[
+            ("OTEL_EXPORTER_OTLP_ENDPOINT", collector.endpoint.as_str()),
+            ("OTEL_EXPORTER_OTLP_PROTOCOL", "http/json"),
+            ("OTEL_BSP_SCHEDULE_DELAY", "100"),
+        ],
+    );
+    seed_sake_context(&server);
+
+    // First call: no artifact yet — the lane skips with the stable
+    // reason and records no hit count.
+    server.ok(
+        "POST",
+        "/contexts/sake/evidence",
+        Some(json!({"origins": ["青嶺酒造"], "include_communities": true})),
+    );
+
+    // Build the artifact by hand through the same API the CLI uses
+    // (the `communities.rs` test's recipe), then ask again.
+    let revision = server.ok("GET", "/contexts/sake", None)["revision"].clone();
+    server.ok("PUT", "/contexts/sake::communities", None);
+    let manifest = json!({
+        "taguru_communities": 1,
+        "algorithm": "louvain-cc/1",
+        "source_context": "sake",
+        "revision": revision,
+        "levels": 1,
+        "communities": [
+            {"id": "L0-0", "level": 0, "fingerprint": "00aa00aa00aa00aa", "concept_count": 2},
+        ],
+    });
+    server.ok(
+        "POST",
+        "/contexts/sake::communities/sources",
+        Some(json!({"passages": {
+            "community:L0-0": "青嶺酒造と杜氏たちの共同体についての要約。",
+            "communities:manifest": manifest.to_string(),
+        }})),
+    );
+    server.ok(
+        "POST",
+        "/contexts/sake/evidence",
+        Some(json!({"origins": ["青嶺酒造"], "include_communities": true})),
+    );
+
+    let _ = server.stop_gracefully();
+    let tree = SpanTree::new(collector.spans());
+
+    let spans = tree.by_name("taguru.communities");
+    assert_eq!(spans.len(), 2, "one span per call: {spans:?}");
+    for span in &spans {
+        assert_eq!(
+            attribute(span, "taguru.op").map(|v| v["stringValue"].clone()),
+            Some(json!("search_communities")),
+            "{span:?}"
+        );
+        // A missing artifact is this lane's documented degrade, never
+        // a span failure (ADR 0006 §11, ADR 0008 §9).
+        assert_eq!(status_code(span), 0, "{span:?}");
+    }
+    let skipped = spans
+        .iter()
+        .find(|span| attribute(span, "taguru.passage.hit_count").is_none())
+        .unwrap_or_else(|| panic!("no artifact-missing span among {spans:?}"));
+    let skip_reasons: Vec<&str> = skipped["events"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|event| event["name"] == "taguru.skip")
+        .filter_map(event_reason)
+        .collect();
+    assert_eq!(skip_reasons, vec!["no_communities_artifact"], "{skipped:?}");
+    let ran = spans
+        .iter()
+        .find(|span| attribute(span, "taguru.passage.hit_count").is_some())
+        .unwrap_or_else(|| panic!("no artifact-present span among {spans:?}"));
+    assert!(
+        ran["events"]
+            .as_array()
+            .is_none_or(|events| events.iter().all(|event| event["name"] != "taguru.skip")),
+        "{ran:?}"
+    );
+}
+
+/// issue #697: `taguru.search.floor` — the effective cosine floor the
+/// vector lane actually applied — lands on the span whenever that lane
+/// ran, as a double.
+#[test]
+fn a_ran_vector_lane_records_the_effective_floor() {
+    let provider = crate::semantic_cache::spawn_paired_embeddings();
+    let collector = FakeCollector::start();
+    let mut env = crate::semantic_cache::semantic_env(&provider);
+    env.push(("OTEL_EXPORTER_OTLP_ENDPOINT", collector.endpoint.clone()));
+    env.push(("OTEL_EXPORTER_OTLP_PROTOCOL", "http/json".to_string()));
+    env.push(("OTEL_BSP_SCHEDULE_DELAY", "100".to_string()));
+    let borrowed: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let server = Server::start_with_env("tracing-search-floor", &borrowed);
+    seed_sake_context(&server);
+    // Vectors must exist or the lane resolves `no_vectors` instead of
+    // running — the forced refresh covers the context deterministically
+    // (the `search_plan.rs` recipe).
+    server.ok("POST", "/contexts/sake/embeddings/refresh", None);
+
+    server.ok(
+        "POST",
+        "/contexts/sake/sources/search",
+        Some(json!({"query": "杜氏", "semantic_floor": 0.5})),
+    );
+
+    let _ = server.stop_gracefully();
+    let tree = SpanTree::new(collector.spans());
+
+    let search = tree.one("taguru.passage_search");
+    assert_eq!(
+        attribute(search, "taguru.search.vector.outcome").map(|v| v["stringValue"].clone()),
+        Some(json!("ran")),
+        "{search:?}"
+    );
+    // The one-call override IS the effective floor (clamped to [0,1]),
+    // exported as a real double, not text.
+    assert_eq!(
+        attribute(search, "taguru.search.floor"),
+        Some(&json!({"doubleValue": 0.5})),
+        "{search:?}"
+    );
+}
+
 #[test]
 fn no_question_concept_source_or_passage_text_reaches_the_collector() {
     let collector = FakeCollector::start();
