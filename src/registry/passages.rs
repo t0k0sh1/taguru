@@ -4,6 +4,43 @@ use std::sync::atomic::Ordering;
 
 use super::{AppState, CitationLookup, Markers, file_stem};
 
+// Test-only fault injection for `store_passages`'s quota-check-to-write
+// window — the same shape as `storage::fail_persistence_ops_after`
+// applied to a different boundary. A rigid two-party barrier at this
+// exact point would deadlock whenever `Entry::passages_admission` is
+// doing its job (it serializes entry to the boundary, so only one
+// thread is ever there at once); a one-sided sleep instead widens the
+// window on whichever thread reaches it, with no such requirement, so
+// it costs nothing when a concurrent write is genuinely still blocked
+// on the real lock.
+#[cfg(test)]
+thread_local! {
+    static QUOTA_WRITE_CHECKPOINT_SLEEP: std::cell::Cell<Option<std::time::Duration>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Arms [`hit_quota_write_checkpoint`] on the CALLING thread: its next
+/// `store_passages` call sleeps for `duration` right after its quota
+/// check passes, before it writes — impractical to construct the race
+/// `Entry::passages_admission` guards against any other way, since a
+/// `Barrier` wrapped around the whole call only synchronizes entry,
+/// not this specific internal boundary.
+#[cfg(test)]
+pub(super) fn arm_quota_write_checkpoint_sleep(duration: std::time::Duration) {
+    QUOTA_WRITE_CHECKPOINT_SLEEP.with(|cell| cell.set(Some(duration)));
+}
+
+#[cfg(test)]
+fn hit_quota_write_checkpoint() {
+    if let Some(duration) = QUOTA_WRITE_CHECKPOINT_SLEEP.with(std::cell::Cell::take) {
+        std::thread::sleep(duration);
+    }
+}
+
+#[cfg(not(test))]
+#[mutants::skip] // dead under cfg(test) — mirrors context/consolidation.rs's injected_merge_evidence_loop_expiry
+fn hit_quota_write_checkpoint() {}
+
 /// Why a passage store was refused — the write path's two failure
 /// families kept apart so a handler can answer 507 for the policy
 /// refusal and 500 for the disk one, instead of flattening both into
@@ -51,6 +88,7 @@ impl AppState {
                 super::storage_quota_message(name, used, ceiling),
             )));
         }
+        hit_quota_write_checkpoint();
         let outcome = match self.entry_passages(&entry, &file_stem(name)) {
             Ok(store) => {
                 let sources: Vec<String> = passages.keys().cloned().collect();
@@ -607,9 +645,23 @@ mod tests {
     /// deterministic under a genuine race: exactly one of two
     /// concurrent first-writes must land, whichever wins the lock, and
     /// the other must see the ceiling already crossed.
+    ///
+    /// A bare `Barrier` around the whole call only synchronizes entry
+    /// into `store_passages`, not the quota-check-to-write window
+    /// itself — with the real lock present, the two threads still
+    /// serialize a few instructions later, so a mutant that deleted
+    /// the lock could easily go uncaught (CodeRabbit review, PR #685).
+    /// `arm_quota_write_checkpoint_sleep` widens that exact window
+    /// deterministically: with the lock, the second thread cannot even
+    /// reach the checkpoint until the first has finished (checked,
+    /// slept, written, unlocked), so the sleep changes nothing; without
+    /// it, both threads pass the quota check, both then sleep, and
+    /// both write — turning "the lock is gone" into a reliably
+    /// observable `(2, 0)` instead of the same `(1, 1)` either way.
     #[test]
     fn concurrent_store_passages_calls_serialize_at_the_quota_gate() {
         use std::thread;
+        use std::time::Duration;
 
         let dir = scratch_dir("passages-admission-quota");
         let state = AppState::boot_with(
@@ -641,6 +693,7 @@ mod tests {
                 let barrier = Arc::clone(&barrier);
                 thread::spawn(move || {
                     barrier.wait();
+                    arm_quota_write_checkpoint_sleep(Duration::from_millis(200));
                     state.store_passages(
                         "sake",
                         BTreeMap::from([(
@@ -807,9 +860,22 @@ mod tests {
             .map_err(|_| "create")
             .unwrap();
 
+        // Checked before AND after: an empty result alone cannot tell
+        // "skipped the load" apart from "loaded an empty/failed store
+        // and got nothing back" — the store's own residency is the
+        // only witness that the short-circuit itself fired.
+        let entry = state.lookup("sake").unwrap();
+        assert!(
+            entry.passages.lock().is_none(),
+            "nothing has touched the store yet"
+        );
         assert!(
             state.resolve_markers("sake", std::iter::empty()).is_empty(),
             "an empty key iterator must skip the store load entirely"
+        );
+        assert!(
+            entry.passages.lock().is_none(),
+            "an empty key iterator must never have loaded the store"
         );
         assert!(
             state
@@ -822,9 +888,13 @@ mod tests {
         );
 
         // `section_for` walks back to the nearest preceding marker, so
-        // the marker sits on paragraph 1 (not 0): paragraph 0 then has
-        // genuinely no marker of either kind, the case this test needs
-        // to prove is dropped, not fabricated as an empty `Markers`.
+        // both markers sit on paragraph 1 (not 0): paragraph 0 then
+        // has genuinely no marker of either kind, the case this test
+        // needs to prove is dropped, not fabricated as an empty
+        // `Markers`. Combining section and locator on the same
+        // paragraph exercises `locator` actually resolving to
+        // `Some(_)` — the prior version of this test only ever
+        // asserted it `None`.
         state
             .store_passages(
                 "sake",
@@ -834,7 +904,13 @@ mod tests {
                         text: "第1段落。\n\n第2段落。".to_string(),
                         questions: Vec::new(),
                         sections: vec![(1, "はじめに".to_string())],
-                        locators: Vec::new(),
+                        locators: vec![(
+                            1,
+                            crate::passages::Locator {
+                                kind: "page".to_string(),
+                                value: "1".to_string(),
+                            },
+                        )],
                         meta: crate::passages::SourceMeta::default(),
                     },
                 )]),
@@ -843,7 +919,7 @@ mod tests {
             .unwrap();
 
         let keys = vec![
-            ("doc".to_string(), 1u32),  // carries a section marker
+            ("doc".to_string(), 1u32),  // carries both markers
             ("doc".to_string(), 0u32),  // no marker at all
             ("nope".to_string(), 0u32), // unknown source
         ];
@@ -855,7 +931,13 @@ mod tests {
         );
         let markers = &resolved[&("doc".to_string(), 1)];
         assert_eq!(markers.section.as_deref(), Some("はじめに"));
-        assert!(markers.locator.is_none());
+        assert_eq!(
+            markers.locator,
+            Some(crate::passages::Locator {
+                kind: "page".to_string(),
+                value: "1".to_string(),
+            })
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -907,23 +989,41 @@ mod tests {
             .create("sake", ContextMeta::default())
             .map_err(|_| "create")
             .unwrap();
+        // Two sources with distinct date/tags: a single source cannot
+        // catch a zipped-in-the-wrong-order id/metadata mismatch.
         state
             .store_passages(
                 "sake",
-                BTreeMap::from([(
-                    "doc".to_string(),
-                    crate::passages::PassageSubmission {
-                        text: "本文。".to_string(),
-                        questions: Vec::new(),
-                        sections: Vec::new(),
-                        locators: Vec::new(),
-                        meta: crate::passages::SourceMeta {
-                            stored_at: None,
-                            date: Some(1_700_000_000),
-                            tags: vec!["tag-a".to_string()],
+                BTreeMap::from([
+                    (
+                        "doc-a".to_string(),
+                        crate::passages::PassageSubmission {
+                            text: "文書A。".to_string(),
+                            questions: Vec::new(),
+                            sections: Vec::new(),
+                            locators: Vec::new(),
+                            meta: crate::passages::SourceMeta {
+                                stored_at: None,
+                                date: Some(1_700_000_000),
+                                tags: vec!["tag-a".to_string()],
+                            },
                         },
-                    },
-                )]),
+                    ),
+                    (
+                        "doc-b".to_string(),
+                        crate::passages::PassageSubmission {
+                            text: "文書B。".to_string(),
+                            questions: Vec::new(),
+                            sections: Vec::new(),
+                            locators: Vec::new(),
+                            meta: crate::passages::SourceMeta {
+                                stored_at: None,
+                                date: Some(1_800_000_000),
+                                tags: vec!["tag-b".to_string(), "tag-c".to_string()],
+                            },
+                        },
+                    ),
+                ]),
             )
             .unwrap()
             .unwrap();
@@ -935,9 +1035,12 @@ mod tests {
             sources,
             "passage_source_entries must name exactly what passage_sources does"
         );
-        let (_, meta) = entries.iter().find(|(id, _)| id == "doc").unwrap();
-        assert_eq!(meta.date, Some(1_700_000_000));
-        assert_eq!(meta.tags, vec!["tag-a".to_string()]);
+        let (_, meta_a) = entries.iter().find(|(id, _)| id == "doc-a").unwrap();
+        assert_eq!(meta_a.date, Some(1_700_000_000));
+        assert_eq!(meta_a.tags, vec!["tag-a".to_string()]);
+        let (_, meta_b) = entries.iter().find(|(id, _)| id == "doc-b").unwrap();
+        assert_eq!(meta_b.date, Some(1_800_000_000));
+        assert_eq!(meta_b.tags, vec!["tag-b".to_string(), "tag-c".to_string()]);
 
         assert!(
             state.passage_source_entries("nazo").is_none(),
