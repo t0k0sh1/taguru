@@ -72,6 +72,50 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
+    /// Issue #677 item 2, passage side: the auto-embed ticker's variant
+    /// skips its width probe when a recent embed (this pass or any
+    /// other context's) already confirmed the width — unlike an
+    /// explicit `refresh_passage_embeddings` call, which always probes
+    /// (see the test just above, and that function's own doc).
+    #[test]
+    fn a_no_op_auto_passage_refresh_right_after_a_real_one_makes_no_provider_call_at_all() {
+        let dir = scratch_dir("pvec-no-double-charge");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let state =
+            boot_for_passage_embedding(&dir, Arc::new(MockEmbeddings::fruity(&calls)), 20_000);
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        let mut passages = BTreeMap::new();
+        passages.insert("doc-a".to_string(), "最初の段落。".to_string());
+        state
+            .store_passages("sake", plain(passages))
+            .unwrap()
+            .unwrap();
+
+        let outcome = state
+            .auto_refresh_passage_embeddings("sake", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        assert_eq!(outcome.embedded, 1);
+        let after_real = calls.load(Ordering::Relaxed);
+
+        let again = state
+            .auto_refresh_passage_embeddings("sake", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        assert_eq!(again.embedded, 0);
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            after_real,
+            "the no-op ticker refresh's own width probe must be skipped \
+             entirely: the pass just above already confirmed this width"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn refresh_passage_embeddings_re_embeds_only_the_changed_paragraph() {
         let dir = scratch_dir("pvec-diff");

@@ -2300,6 +2300,14 @@ struct StateInner {
     /// fallback path. Valid for the whole process because the provider
     /// (and so the model) is fixed at boot.
     cue_cache: Mutex<CueCache>,
+    /// The output width the provider most recently produced, and when
+    /// — shared across every context because the width is a property
+    /// of the PROVIDER, not of any one context's data. Lets a refresh
+    /// skip its width probe (`embeddings.rs`) when a recent-enough
+    /// observation already agrees with what is carried, instead of
+    /// paying a provider round trip on every no-op pass. See
+    /// [`AppState::provider_width_recently_confirmed`].
+    observed_embed_width: Mutex<Option<(std::time::Instant, usize)>>,
     /// The exact-match retrieval cache (issue #150): an identical
     /// request against an identical corpus state answers from the
     /// stored response. Unlike `cue_cache`, validity is
@@ -2738,12 +2746,50 @@ impl AppState {
         match self.timed_embed(embedder, texts, EmbedPurpose::Index, deadline) {
             Ok(vectors) => {
                 self.0.metrics.record_embed_refresh(true);
+                // Every refresh embed call — probe included — lands
+                // here, so this is where the process-wide width
+                // observation `provider_width_recently_confirmed`
+                // reads gets refreshed, regardless of which context or
+                // table asked.
+                if let Some(width) = vectors.first().map(Vec::len) {
+                    *self.0.observed_embed_width.lock() = Some((std::time::Instant::now(), width));
+                }
                 Ok(vectors)
             }
             Err(error) => {
                 self.0.metrics.record_embed_refresh(false);
                 Err(error)
             }
+        }
+    }
+
+    /// Whether a refresh may skip its own width probe: the provider's
+    /// most recently observed output width, from ANY context's embed
+    /// call, is both fresh (`WIDTH_OBSERVATION_TRUST`) and equal to
+    /// `carried` — the width this refresh's own sidecar already holds.
+    /// Deliberately one-sided: a stale-or-absent observation, or one
+    /// that disagrees with `carried`, answers `false` and lets the
+    /// caller fall back to spending an actual provider round trip —
+    /// an unconfirmed skip could hide a real width change, but an
+    /// unconfirmed probe only ever costs one extra call.
+    fn provider_width_recently_confirmed(&self, carried: usize) -> bool {
+        self.0
+            .observed_embed_width
+            .lock()
+            .is_some_and(|(observed_at, width)| {
+                width == carried && width_observation_fresh(&observed_at)
+            })
+    }
+
+    /// Test-only: rewinds the remembered provider width observation so
+    /// `WIDTH_OBSERVATION_TRUST` can elapse without the test sleeping
+    /// through it — the same shape as `age_load_failures` below.
+    #[cfg(test)]
+    pub fn age_width_observation(&self, by: std::time::Duration) {
+        if let Some((observed_at, _)) = &mut *self.0.observed_embed_width.lock() {
+            *observed_at = observed_at
+                .checked_sub(by)
+                .expect("test ages within the Instant range");
         }
     }
 
@@ -3180,6 +3226,24 @@ const LOAD_FAILURE_RETRY: std::time::Duration = std::time::Duration::from_secs(3
 #[mutants::skip]
 fn still_quarantined(failed_at: &std::time::Instant) -> bool {
     failed_at.elapsed() < LOAD_FAILURE_RETRY
+}
+
+/// How long a provider's most recently observed output width is
+/// trusted for skipping a refresh's own width probe (issue #677 item
+/// 2). Long enough that a busy, gloss-stable context stops paying a
+/// provider round trip on every 5s flush tick; short enough that a
+/// genuine backend swap is still caught well within a minute even for
+/// a context whose own writes never trigger a real embed.
+const WIDTH_OBSERVATION_TRUST: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Whether a remembered width observation is still within its trust
+/// window. Same shape as `still_quarantined` above — the `<` boundary
+/// is not a gap a behavioral test can close (see that function's doc)
+/// — kept as its own predicate so both share the one place the
+/// boundary is decided.
+#[mutants::skip]
+fn width_observation_fresh(observed_at: &std::time::Instant) -> bool {
+    observed_at.elapsed() < WIDTH_OBSERVATION_TRUST
 }
 
 /// Loads the image behind a cold slot and replays whatever the WAL

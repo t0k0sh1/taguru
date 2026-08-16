@@ -204,6 +204,7 @@ impl AppState {
                 .unwrap_or(DEFAULT_SEMANTIC_FLOOR)
                 .clamp(0.0, 1.0),
             cue_cache: Mutex::new(CueCache::default()),
+            observed_embed_width: Mutex::new(None),
             retrieval_cache: Mutex::new(retrieval_cache::RetrievalCache::new(
                 retrieval_cache_bytes,
             )),
