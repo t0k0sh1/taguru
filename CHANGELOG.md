@@ -5,7 +5,7 @@ Notable changes to taguru. The format follows
 follow [SemVer](https://semver.org/) (pre-1.0: minor bumps may break).
 Entries that change an on-disk format or a response shape say so.
 
-## [Unreleased]
+## [0.9.1] - 2026-08-16
 
 ### Added
 - Python/TypeScript SDKs: `promote`/`analyze_communities`/`embeddings_status`
@@ -3110,7 +3110,8 @@ OTLP tracing, OAuth for remote MCP), the MCP stdio bridge, and the
 offline tooling (`import`, `extract`, `inspect`, `estimate`).
 Published to crates.io and GHCR.
 
-[Unreleased]: https://github.com/t0k0sh1/taguru/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/t0k0sh1/taguru/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/t0k0sh1/taguru/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/t0k0sh1/taguru/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/t0k0sh1/taguru/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/t0k0sh1/taguru/compare/v0.6.0...v0.7.0
