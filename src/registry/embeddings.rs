@@ -13,7 +13,7 @@ use crate::hash::fnv1a;
 use super::{
     AccessError, AppState, EmbeddingsStatus, Entry, GlossLaneReport, GlossSidecarStatus,
     PassageRefreshOutcome, PassageSidecarStatus, SEMANTIC_RESOLVE_LIMIT,
-    dispatch_chunks_concurrently, file_stem, pvectors_path, vectors_path,
+    dispatch_chunks_concurrently, file_stem, pvectors_path, still_quarantined, vectors_path,
 };
 
 /// Rows per provider call, shared by both the gloss (`embed_stale`) and
@@ -1190,14 +1190,39 @@ impl AppState {
 
     /// The entry's vector store, loaded from its sidecar on first use
     /// and held until refresh replaces it or eviction clears it.
+    ///
+    /// A genuine read failure (not simply "nothing embedded yet") is
+    /// quarantined exactly like `entry_passages`' load failure (issue
+    /// #677 item 3): the failed attempt is NOT cached into `vectors` —
+    /// only an empty, uncached default is handed back, and the next
+    /// call retries the disk once `LOAD_FAILURE_RETRY` has passed.
+    /// Before this, a transient disk hiccup at load time cached an
+    /// empty store forever (until an explicit refresh or eviction), so
+    /// semantic search silently found nothing for the rest of that
+    /// residency even after the disk recovered.
     fn entry_vectors(&self, entry: &Entry, stem: &str) -> Arc<VectorStore> {
         let mut cached = entry.vectors.lock();
-        match &*cached {
-            Some(store) => Arc::clone(store),
-            None => {
-                let store = Arc::new(VectorStore::load(&vectors_path(&self.0.data_dir, stem)));
+        if let Some(store) = &*cached {
+            return Arc::clone(store);
+        }
+        {
+            let failure = entry.vectors_load_failure.lock();
+            if let Some(failed_at) = &*failure
+                && still_quarantined(failed_at)
+            {
+                return Arc::new(VectorStore::default());
+            }
+        }
+        match VectorStore::load_checked(&vectors_path(&self.0.data_dir, stem)) {
+            Ok(store) => {
+                *entry.vectors_load_failure.lock() = None;
+                let store = Arc::new(store);
                 *cached = Some(Arc::clone(&store));
                 store
+            }
+            Err(()) => {
+                *entry.vectors_load_failure.lock() = Some(std::time::Instant::now());
+                Arc::new(VectorStore::default())
             }
         }
     }

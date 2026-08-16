@@ -962,13 +962,31 @@ impl VectorStore {
     /// [`crate::storage::read_sidecar`] — otherwise a permanently
     /// unreadable sidecar pays a full re-embed every residency with
     /// nothing in the logs to say why.
+    ///
+    /// A thin wrapper over [`VectorStore::load_checked`] for a test
+    /// reading a sidecar back to assert its contents, which does not
+    /// care whether an empty result would mean "nothing written yet"
+    /// or "a read failed" — production code always goes through
+    /// `load_checked` directly (`AppState::entry_vectors`), the caller
+    /// that does care.
+    #[cfg(test)]
     pub fn load(path: &Path) -> Self {
-        match crate::storage::read_sidecar(path, "vector store") {
-            Some(bytes) => Self::from_bytes(&bytes).unwrap_or_else(|| {
+        Self::load_checked(path).unwrap_or_default()
+    }
+
+    /// Like [`VectorStore::load`], but reports a genuine read failure
+    /// as `Err(())` instead of folding it into the same empty default
+    /// a cold, never-embedded context also returns — the distinction
+    /// [`AppState::entry_vectors`](crate::registry::AppState) needs to
+    /// quarantine a disk hiccup (issue #677 item 3) instead of caching
+    /// its empty answer as if the context were genuinely bare.
+    pub fn load_checked(path: &Path) -> Result<Self, ()> {
+        match crate::storage::read_sidecar_checked(path, "vector store")? {
+            Some(bytes) => Ok(Self::from_bytes(&bytes).unwrap_or_else(|| {
                 tracing::warn!("ignoring corrupt vector store at {}", path.display());
                 Self::default()
-            }),
-            None => Self::default(),
+            })),
+            None => Ok(Self::default()),
         }
     }
 
@@ -1302,9 +1320,29 @@ impl PassageVectorStore {
     /// [`crate::storage::read_sidecar`] — otherwise a permanently
     /// unreadable sidecar pays a full re-embed every residency with
     /// nothing in the logs to say why.
+    ///
+    /// A thin wrapper over [`PassageVectorStore::load_checked`] for a
+    /// test reading a sidecar back to assert its contents, which does
+    /// not care whether an empty result would mean "nothing written
+    /// yet" or "a read failed" — production code always goes through
+    /// `load_checked` directly (`AppState::entry_passage_vectors`), the
+    /// caller that does care.
+    #[cfg(test)]
     pub fn load(path: &Path) -> Self {
-        match crate::storage::read_sidecar(path, "passage vector store") {
-            Some(bytes) => Self::from_bytes(&bytes).unwrap_or_else(|| {
+        Self::load_checked(path).unwrap_or_default()
+    }
+
+    /// Like [`PassageVectorStore::load`], but reports a genuine read
+    /// failure as `Err(())` instead of folding it into the same empty
+    /// default a cold, never-embedded context also returns — the
+    /// distinction
+    /// [`AppState::entry_passage_vectors`](crate::registry::AppState)
+    /// needs to quarantine a disk hiccup (issue #677 item 3) instead of
+    /// caching its empty answer as if the context genuinely had no
+    /// passages embedded.
+    pub fn load_checked(path: &Path) -> Result<Self, ()> {
+        match crate::storage::read_sidecar_checked(path, "passage vector store")? {
+            Some(bytes) => Ok(Self::from_bytes(&bytes).unwrap_or_else(|| {
                 if bytes.get(..8) == Some(LEGACY_PASSAGE_VECTOR_MAGIC.as_slice()) {
                     tracing::info!(
                         "passage vectors at {} predate doc2query; re-embedding",
@@ -1317,8 +1355,8 @@ impl PassageVectorStore {
                     );
                 }
                 Self::default()
-            }),
-            None => Self::default(),
+            })),
+            None => Ok(Self::default()),
         }
     }
 

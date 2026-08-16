@@ -371,9 +371,25 @@ pub(crate) fn sidecar_read_worth_warning(error: &io::Error) -> bool {
 /// (which the caller already warns on for its own bytes), a read that
 /// never got bytes at all was silent everywhere before this: `what`
 /// names the sidecar kind for [`sidecar_read_worth_warning`]'s warning.
+///
+/// A thin wrapper over [`read_sidecar_checked`] that discards the
+/// missing-vs-failed distinction that function keeps — the right
+/// choice for a caller that already treats "nothing to load" and "an
+/// unreadable file" the same way (a derived cache rebuilds either way).
 pub(crate) fn read_sidecar(path: &Path, what: &str) -> Option<Vec<u8>> {
+    read_sidecar_checked(path, what).unwrap_or(None)
+}
+
+/// Like [`read_sidecar`], but keeps the one distinction that function
+/// discards: `Ok(None)` is the benign case (nothing written yet —
+/// nothing worth remembering), `Err(())` is a genuine read failure,
+/// already warned about here, that a caller wanting to QUARANTINE
+/// against (rather than silently re-treat as "empty" on every access)
+/// needs to tell apart — see `AppState::entry_vectors`/
+/// `entry_passage_vectors` (issue #677 item 3).
+pub(crate) fn read_sidecar_checked(path: &Path, what: &str) -> Result<Option<Vec<u8>>, ()> {
     match fs::read(path) {
-        Ok(bytes) => Some(bytes),
+        Ok(bytes) => Ok(Some(bytes)),
         Err(error) => {
             if sidecar_read_worth_warning(&error) {
                 // Never a bare `error` field — see the ADR 0008 note on
@@ -383,8 +399,10 @@ pub(crate) fn read_sidecar(path: &Path, what: &str) -> Option<Vec<u8>> {
                     read_error = %error,
                     "{what} sidecar unreadable; costing a full rebuild every residency until fixed",
                 );
+                Err(())
+            } else {
+                Ok(None)
             }
-            None
         }
     }
 }

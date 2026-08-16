@@ -1135,4 +1135,83 @@ mod tests {
 
         let _ = fs::remove_dir_all(dir);
     }
+
+    /// Issue #677 item 3, passage side — mirrors gloss_tests.rs's
+    /// `a_failed_vector_load_is_quarantined_then_recovers`: a genuine
+    /// read failure on the paragraph vector sidecar must not be cached
+    /// as if the context had no passages embedded, or the vector lane
+    /// stays silently empty for the rest of this residency even after
+    /// the disk recovers.
+    #[test]
+    fn a_failed_passage_vector_load_is_quarantined_then_recovers() {
+        let dir = scratch_dir("pvec-quarantine");
+        {
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let state =
+                boot_for_passage_embedding(&dir, Arc::new(MockEmbeddings::fruity(&calls)), 20_000);
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            let mut passages = BTreeMap::new();
+            passages.insert("doc-a".to_string(), "りんごの段落。".to_string());
+            state
+                .store_passages("sake", plain(passages))
+                .unwrap()
+                .unwrap();
+            state
+                .refresh_passage_embeddings("sake", Deadline::unbounded())
+                .unwrap()
+                .unwrap();
+            state.flush_dirty();
+        }
+
+        // A directory at the sidecar's path is unreadable as a file
+        // regardless of the running process's own privileges — unlike
+        // a permission bit, which root or `CAP_DAC_OVERRIDE` (common
+        // in CI containers) simply ignores, making that approach
+        // non-deterministic (CodeRabbit, PR #689).
+        let path = pvectors_path(&dir, &file_stem("sake"));
+        let healthy = fs::read(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+
+        let state = boot_for_passage_embedding(
+            &dir,
+            Arc::new(MockEmbeddings::fruity(&Arc::new(
+                std::sync::atomic::AtomicUsize::new(0),
+            ))),
+            20_000,
+        );
+        let entry = state.lookup("sake").unwrap();
+
+        let degraded = state.entry_passage_vectors(&entry, &file_stem("sake"));
+        assert_eq!(degraded.len(), 0);
+        assert!(
+            entry.passage_vectors.lock().is_none(),
+            "a load failure must not be cached as if the context were genuinely empty"
+        );
+
+        fs::remove_dir(&path).unwrap();
+        fs::write(&path, &healthy).unwrap();
+
+        // Still within the quarantine window: the disk is not re-read
+        // yet even though it has already recovered.
+        let still_degraded = state.entry_passage_vectors(&entry, &file_stem("sake"));
+        assert_eq!(still_degraded.len(), 0);
+
+        state.age_load_failures("sake", crate::registry::LOAD_FAILURE_RETRY);
+        let recovered = state.entry_passage_vectors(&entry, &file_stem("sake"));
+        assert_eq!(
+            recovered.len(),
+            1,
+            "the quarantine window passing must trigger a real retry, not stay stuck empty forever"
+        );
+        assert!(
+            entry.passage_vectors.lock().is_some(),
+            "a genuinely successful load must be cached like any other"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
 }

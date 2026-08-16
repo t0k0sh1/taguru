@@ -465,6 +465,15 @@ pub struct Entry {
     /// by refresh, cleared by eviction, and counted against the cache
     /// budget. Lock order: `inner` before `vectors`, never the reverse.
     vectors: Mutex<Option<Arc<VectorStore>>>,
+    /// The vector sidecar's last failed load, while it is being
+    /// remembered — `passages_load_failure`'s counterpart, so a
+    /// transient disk hiccup at load time quarantines and later
+    /// retries (`AppState::entry_vectors`) instead of caching an empty
+    /// store into `vectors` above for the rest of this residency
+    /// (issue #677 item 3). Only ever locked while `vectors` is held
+    /// (or alone by the test aging helper), so it adds no lock-order
+    /// edge.
+    vectors_load_failure: Mutex<Option<std::time::Instant>>,
     /// Serializes whole gloss-embedding refreshes — the same reason as
     /// `passage_refresh` below: a diff computed outside the entry lock
     /// (provider round trips can take seconds) races on which of two
@@ -511,6 +520,9 @@ pub struct Entry {
     /// vector lane's mirror of `vectors`, in its own slot so resolve's
     /// small hot gloss store never shares a fate with this big one.
     passage_vectors: Mutex<Option<Arc<PassageVectorStore>>>,
+    /// `vectors_load_failure`'s mirror for `passage_vectors` — see that
+    /// field's doc.
+    passage_vectors_load_failure: Mutex<Option<std::time::Instant>>,
     /// Set when a passage store/retract lands, cleared when a passage
     /// embedding refresh claims it — the auto-refresh ticker's signal
     /// (passage writes do not mark the GRAPH dirty, so the flush list
@@ -645,12 +657,14 @@ impl Entry {
             flushing: AtomicBool::new(false),
             last_touch: AtomicU64::new(0),
             vectors: Mutex::new(None),
+            vectors_load_failure: Mutex::new(None),
             vectors_refresh: Mutex::new(()),
             vectors_save_pending: AtomicBool::new(false),
             passages: Mutex::new(None),
             bm25: RwLock::new(None),
             bm25_dirty: AtomicBool::new(false),
             passage_vectors: Mutex::new(None),
+            passage_vectors_load_failure: Mutex::new(None),
             passages_embed_dirty: AtomicBool::new(false),
             passage_refresh: Mutex::new(()),
             usage: UsageCounters::seeded(&usage),
@@ -2848,17 +2862,36 @@ impl AppState {
 
     /// The paragraph vector sidecar, loaded on first use and held until
     /// refresh replaces it or eviction clears it.
+    ///
+    /// Mirrors `entry_vectors`'s quarantine (issue #677 item 3, see
+    /// that function's doc): a genuine read failure is not cached into
+    /// `passage_vectors`, only handed back as an uncached empty
+    /// default, so the next call retries the disk once
+    /// `LOAD_FAILURE_RETRY` has passed instead of serving a stale
+    /// "empty" answer for the rest of this residency.
     fn entry_passage_vectors(&self, entry: &Entry, stem: &str) -> Arc<PassageVectorStore> {
         let mut cached = entry.passage_vectors.lock();
-        match &*cached {
-            Some(store) => Arc::clone(store),
-            None => {
-                let store = Arc::new(PassageVectorStore::load(&pvectors_path(
-                    &self.0.data_dir,
-                    stem,
-                )));
+        if let Some(store) = &*cached {
+            return Arc::clone(store);
+        }
+        {
+            let failure = entry.passage_vectors_load_failure.lock();
+            if let Some(failed_at) = &*failure
+                && still_quarantined(failed_at)
+            {
+                return Arc::new(PassageVectorStore::default());
+            }
+        }
+        match PassageVectorStore::load_checked(&pvectors_path(&self.0.data_dir, stem)) {
+            Ok(store) => {
+                *entry.passage_vectors_load_failure.lock() = None;
+                let store = Arc::new(store);
                 *cached = Some(Arc::clone(&store));
                 store
+            }
+            Err(()) => {
+                *entry.passage_vectors_load_failure.lock() = Some(std::time::Instant::now());
+                Arc::new(PassageVectorStore::default())
             }
         }
     }
@@ -2986,9 +3019,9 @@ impl AppState {
         Ok(result)
     }
 
-    /// Test-only: rewinds any remembered load failure (graph image and
-    /// passage store both) so the quarantine window can elapse without
-    /// the test sleeping through it.
+    /// Test-only: rewinds any remembered load failure (graph image,
+    /// passage store, and both vector sidecars) so the quarantine
+    /// window can elapse without the test sleeping through it.
     #[cfg(test)]
     pub fn age_load_failures(&self, name: &str, by: std::time::Duration) {
         let entry = self.lookup(name).expect("the context must be registered");
@@ -2998,6 +3031,16 @@ impl AppState {
                 .expect("test ages within the Instant range");
         }
         if let Some((failed_at, _)) = &mut *entry.passages_load_failure.lock() {
+            *failed_at = failed_at
+                .checked_sub(by)
+                .expect("test ages within the Instant range");
+        }
+        if let Some(failed_at) = &mut *entry.vectors_load_failure.lock() {
+            *failed_at = failed_at
+                .checked_sub(by)
+                .expect("test ages within the Instant range");
+        }
+        if let Some(failed_at) = &mut *entry.passage_vectors_load_failure.lock() {
             *failed_at = failed_at
                 .checked_sub(by)
                 .expect("test ages within the Instant range");

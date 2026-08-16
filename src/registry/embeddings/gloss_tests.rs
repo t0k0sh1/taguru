@@ -2682,4 +2682,83 @@ mod tests {
 
         let _ = fs::remove_dir_all(dir);
     }
+
+    /// Issue #677 item 3: a genuine read failure on the vector sidecar
+    /// must not be cached as if the context were simply empty — that
+    /// would silently degrade semantic search for the rest of this
+    /// residency even after the disk recovers. Mirrors
+    /// `a_failed_passage_load_is_quarantined_like_the_image`
+    /// (`registry/passages.rs`), the same TTL quarantine
+    /// `entry_passages` already had.
+    #[test]
+    fn a_failed_vector_load_is_quarantined_then_recovers() {
+        let dir = scratch_dir("vectors-quarantine");
+        {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let embedder =
+                Some(Arc::new(MockEmbeddings::fruity(&calls)) as Arc<dyn EmbeddingProvider>);
+            let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
+            state
+                .create("fruit", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .write_context("fruit", |context| {
+                    context.associate("りんご", "l", "アップル", 1.0).unwrap();
+                })
+                .map_err(|_| "write")
+                .unwrap();
+            state
+                .refresh_embeddings("fruit", Deadline::unbounded())
+                .unwrap()
+                .unwrap();
+            state.flush_dirty();
+        }
+
+        // A directory at the sidecar's path is unreadable as a file
+        // (`fs::read` fails with `IsADirectory`/`ENOENT`-adjacent
+        // errors) regardless of the running process's own privileges —
+        // unlike a permission bit, which root or `CAP_DAC_OVERRIDE`
+        // (common in CI containers) simply ignores, making that
+        // approach non-deterministic (CodeRabbit, PR #689).
+        let path = vectors_path(&dir, &file_stem("fruit"));
+        let healthy = fs::read(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let entry = state.lookup("fruit").unwrap();
+
+        // Unreadable: an empty store, degraded rather than a panic or
+        // a propagated error — but NOT cached, unlike a genuinely
+        // empty context.
+        let degraded = state.entry_vectors(&entry, &file_stem("fruit"));
+        assert!(degraded.concepts.is_empty() && degraded.labels.is_empty());
+        assert!(
+            entry.vectors.lock().is_none(),
+            "a load failure must not be cached as if the context were genuinely empty"
+        );
+
+        fs::remove_dir(&path).unwrap();
+        fs::write(&path, &healthy).unwrap();
+
+        // Still within the quarantine window: the disk is not re-read
+        // yet even though it has already recovered — same posture as
+        // `entry_passages`.
+        let still_degraded = state.entry_vectors(&entry, &file_stem("fruit"));
+        assert!(still_degraded.concepts.is_empty() && still_degraded.labels.is_empty());
+
+        state.age_load_failures("fruit", crate::registry::LOAD_FAILURE_RETRY);
+        let recovered = state.entry_vectors(&entry, &file_stem("fruit"));
+        assert!(
+            !recovered.concepts.is_empty() || !recovered.labels.is_empty(),
+            "the quarantine window passing must trigger a real retry, not stay stuck empty forever"
+        );
+        assert!(
+            entry.vectors.lock().is_some(),
+            "a genuinely successful load must be cached like any other"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
