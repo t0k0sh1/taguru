@@ -129,6 +129,8 @@ impl AppState {
         *entry.passage_vectors.lock() = None;
         *entry.vectors.lock() = None;
         *entry.passages_load_failure.lock() = None;
+        *entry.passage_vectors_load_failure.lock() = None;
+        *entry.vectors_load_failure.lock() = None;
         if inner.meta.pinned {
             if let Err(error) = ensure_hot(
                 &self.0.data_dir,
