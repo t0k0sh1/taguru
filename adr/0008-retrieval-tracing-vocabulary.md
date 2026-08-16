@@ -209,7 +209,7 @@ call, and hide the router's own elapsed time from the trace. **Decision:
 | `taguru.passage_search` | internal | `src/api/sources.rs::search_passages` |
 | `taguru.search.bm25` / `taguru.search.ann` / `taguru.search.fuse` | internal | `src/registry/search.rs`, `src/embedding.rs::top_matches` |
 | `taguru.embed` / `taguru.rerank` | client | renamed from `"embed"`/`"rerank"` |
-| `taguru.shard_call` | client | `src/route.rs::call_shard`; also `src/route/proxy.rs::proxy_context` since #696 (the transparent proxy hop, same shape) |
+| `taguru.shard_call` | client | `src/route/state.rs::call_shard`; also `src/route/proxy.rs::proxy_context` since #696 (the transparent proxy hop, same shape) |
 | `taguru.tool_call` | server | `src/bin/taguru-mcp.rs::run_tool_worker` |
 
 **No `taguru.search.embed`.** The query embedding already runs inside

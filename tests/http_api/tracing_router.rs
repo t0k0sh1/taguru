@@ -317,6 +317,21 @@ fn the_proxy_injects_its_own_span_and_forwards_tracestate() {
         !forwarded.contains("b7ad6b7169203331"),
         "span id must be the router's OWN span, not the caller's: {forwarded}"
     );
+    // Not just "different from the caller's" (any minted id would pass
+    // that): the forwarded parent span-id must be exactly the exported
+    // `taguru.shard_call` span — which is what makes a real shard
+    // parent its request span under the proxy's own hop.
+    let tree = SpanTree::new(collector.spans());
+    let shard_call = tree.one("GET -> shard 0");
+    let forwarded_span_id = forwarded
+        .split('-')
+        .nth(2)
+        .unwrap_or_else(|| panic!("malformed traceparent: {forwarded}"));
+    assert_eq!(
+        Some(forwarded_span_id),
+        shard_call["spanId"].as_str(),
+        "the forwarded parent span-id must be the shard_call span: {shard_call:?}"
+    );
 }
 
 /// issue #696: the proxy path shares `inject_current_trace`'s
