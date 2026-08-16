@@ -2208,4 +2208,213 @@ mod tests {
         assert_eq!(state.embed_parallel(), 3);
         let _ = fs::remove_dir_all(dir);
     }
+
+    /// #678: `PAIR_CAP` truncates a namespace's returned pairs at
+    /// exactly 100, the same asymmetry `semantic_twins_sweep_cap_skips_past_the_cap_not_at_it`
+    /// already covers for the sibling `SWEEP_CAP`. A hub vector paired
+    /// with 101 spokes at strictly increasing, distinct cosines makes
+    /// the truncated-away pair unambiguous: spoke-spoke cosines are
+    /// engineered (via each spoke's own orthogonal axis) to stay under
+    /// the floor, so only the 101 hub-spoke pairs ever clear it, and
+    /// `truncate(100)` after the descending sort drops exactly the
+    /// single lowest-scoring one.
+    #[test]
+    fn semantic_twins_pair_cap_truncates_at_exactly_one_hundred_pairs() {
+        let dir = scratch_dir("twins-pair-cap");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("fruit", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+
+        const SPOKES: usize = 101;
+        let dims = SPOKES + 1;
+        let mut store = VectorStore {
+            model: "mock".to_string(),
+            ..Default::default()
+        };
+        let mut hub = vec![0.0f32; dims];
+        hub[0] = 1.0;
+        store.concepts.insert("hub".to_string(), (0, hub));
+        let mut scores = Vec::with_capacity(SPOKES);
+        for i in 0..SPOKES {
+            // Strictly increasing, all inside [0.5, 0.55): any two
+            // spokes' pairwise cosine is their product (only the hub
+            // axis overlaps between them), which tops out around
+            // 0.55*0.55 ≈ 0.30 — comfortably under the 0.5 floor —
+            // while each hub-spoke pair clears it alone.
+            let cosine = 0.50003 + i as f32 * 0.00049;
+            let theta = cosine.acos();
+            let mut spoke = vec![0.0f32; dims];
+            spoke[0] = cosine;
+            spoke[1 + i] = theta.sin();
+            store
+                .concepts
+                .insert(format!("spoke{i:03}"), (i as u64 + 1, spoke));
+            scores.push(cosine);
+        }
+        store
+            .save(&vectors_path(&dir, &file_stem("fruit")))
+            .unwrap();
+
+        let (concepts, labels, note) = state
+            .semantic_twins("fruit", 0.5, Deadline::unbounded())
+            .unwrap();
+        assert!(note.is_none(), "{note:?}");
+        assert!(labels.is_empty());
+        assert_eq!(
+            concepts.len(),
+            100,
+            "PAIR_CAP must truncate 101 floor-clearing pairs down to 100: {concepts:?}"
+        );
+        assert!(
+            concepts.iter().all(|(a, b, _)| a == "hub" || b == "hub"),
+            "no spoke-spoke pair should ever clear the floor: {concepts:?}"
+        );
+        let min_score = scores.iter().cloned().fold(f32::INFINITY, f32::min);
+        let max_score = scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            !concepts
+                .iter()
+                .any(|(_, _, score)| (*score - min_score).abs() < 1e-6),
+            "the single lowest-scoring pair is exactly what truncate(100) must drop: {concepts:?}"
+        );
+        assert!(
+            concepts
+                .iter()
+                .any(|(_, _, score)| (*score - max_score).abs() < 1e-6),
+            "the highest-scoring pair must survive the truncation"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// #678: the sentinel guard between `ModelChanged` and `Ran` — a
+    /// same-named model that quietly started answering wider vectors
+    /// must not let `similarity`'s width-mismatch 0.0 read as a
+    /// measured cosine (the doc comment on `WidthChanged`'s own
+    /// variant). `tests/http_api/width_probe.rs` covers this
+    /// end-to-end via `semantic.reason`; this pins the report type
+    /// itself at the registry layer.
+    #[test]
+    fn explain_semantic_resolve_reports_a_width_change_under_the_same_model_name() {
+        struct WidthEmbeddings(usize);
+        impl EmbeddingProvider for WidthEmbeddings {
+            fn model(&self) -> &str {
+                "stable-name"
+            }
+            fn embed(
+                &self,
+                texts: &[&str],
+                _purpose: EmbedPurpose,
+                _deadline: Deadline,
+            ) -> Result<Vec<Vec<f32>>, String> {
+                Ok(texts
+                    .iter()
+                    .map(|_| {
+                        let mut vector = vec![0.0; self.0];
+                        vector[0] = 1.0;
+                        vector
+                    })
+                    .collect())
+            }
+        }
+
+        let dir = scratch_dir("explain-width-change");
+        {
+            let embedder = Some(Arc::new(WidthEmbeddings(2)) as Arc<dyn EmbeddingProvider>);
+            let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
+            state
+                .create("w", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .write_context("w", |context| {
+                    context.associate("a", "l", "b", 1.0).unwrap();
+                })
+                .map_err(|_| "write")
+                .unwrap();
+            state
+                .refresh_embeddings("w", Deadline::unbounded())
+                .unwrap()
+                .unwrap();
+            state.flush_dirty();
+        }
+
+        // Same model name, wider query vectors: the sidecar is still
+        // width 2, the cue now comes back at width 3.
+        let embedder = Some(Arc::new(WidthEmbeddings(3)) as Arc<dyn EmbeddingProvider>);
+        let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
+        let Some(GlossLaneReport::WidthChanged { stored, current }) =
+            state.explain_semantic_resolve("w", "cue", "a", false, None, Deadline::unbounded())
+        else {
+            panic!("a same-named model's wider query vectors must report WidthChanged");
+        };
+        assert_eq!((stored, current), (2, 3));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// #678: the provider-refusal arm of `explain_semantic_resolve` —
+    /// distinct from `cue_vector` itself being unit-tested
+    /// (`cue_vector_rejects_an_empty_embedding_and_never_caches_it`)
+    /// in that this pins the `Err` actually surfacing as
+    /// `QueryEmbeddingFailed` rather than silently folding into some
+    /// other arm.
+    #[test]
+    fn explain_semantic_resolve_reports_a_failed_cue_embedding() {
+        struct FailingEmbeddings;
+        impl EmbeddingProvider for FailingEmbeddings {
+            fn model(&self) -> &str {
+                "mock"
+            }
+            fn embed(
+                &self,
+                _texts: &[&str],
+                _purpose: EmbedPurpose,
+                _deadline: Deadline,
+            ) -> Result<Vec<Vec<f32>>, String> {
+                Err("provider down".to_string())
+            }
+        }
+
+        let dir = scratch_dir("explain-query-embed-failed");
+        let calls = Arc::new(AtomicUsize::new(0));
+        {
+            let embedder =
+                Some(Arc::new(MockEmbeddings::fruity(&calls)) as Arc<dyn EmbeddingProvider>);
+            let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
+            state
+                .create("fruit", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .write_context("fruit", |context| {
+                    context.associate("りんご", "分類", "果物", 1.0).unwrap();
+                })
+                .map_err(|_| "write")
+                .unwrap();
+            state
+                .refresh_embeddings("fruit", Deadline::unbounded())
+                .unwrap()
+                .unwrap();
+            state.flush_dirty();
+        }
+
+        let embedder = Some(Arc::new(FailingEmbeddings) as Arc<dyn EmbeddingProvider>);
+        let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
+        let Some(GlossLaneReport::QueryEmbeddingFailed(message)) = state.explain_semantic_resolve(
+            "fruit",
+            "アップル",
+            "りんご",
+            false,
+            None,
+            Deadline::unbounded(),
+        ) else {
+            panic!("a failed cue embedding must be reported, not folded elsewhere");
+        };
+        assert!(message.contains("provider down"), "{message}");
+
+        let _ = fs::remove_dir_all(dir);
+    }
 }
