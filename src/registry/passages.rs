@@ -293,12 +293,14 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::sync::Arc;
 
     use super::*;
     use crate::registry::ContextMeta;
     use crate::registry::LOAD_FAILURE_RETRY;
     use crate::registry::paths::{passages_path, passages_wal_path, sources_path};
     use crate::registry::test_support::{plain, scratch_dir};
+    use crate::registry::{BootOptions, ContextQuota};
 
     #[test]
     fn passages_store_lookup_and_survive_restart() {
@@ -595,5 +597,353 @@ mod tests {
         assert!(state.source_effective_times("nope").is_none());
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    /// #678: `store_passages`'s own comment explains why the
+    /// `passages_admission` lock is load-bearing — without it, two
+    /// concurrent writes could both read the same pre-write usage and
+    /// both pass a ceiling only one of them should cross. A one-byte
+    /// ceiling (any real write crosses it) makes the outcome
+    /// deterministic under a genuine race: exactly one of two
+    /// concurrent first-writes must land, whichever wins the lock, and
+    /// the other must see the ceiling already crossed.
+    #[test]
+    fn concurrent_store_passages_calls_serialize_at_the_quota_gate() {
+        use std::thread;
+
+        let dir = scratch_dir("passages-admission-quota");
+        let state = AppState::boot_with(
+            dir.clone(),
+            usize::MAX,
+            None,
+            BootOptions {
+                context_quotas: HashMap::from([(
+                    "sake".to_string(),
+                    ContextQuota {
+                        storage_bytes: Some(1),
+                        cache_bytes: None,
+                    },
+                )]),
+                ..BootOptions::default()
+            },
+        )
+        .unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+
+        let state = Arc::new(state);
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let handles: Vec<_> = (0..2)
+            .map(|i| {
+                let state = Arc::clone(&state);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    state.store_passages(
+                        "sake",
+                        BTreeMap::from([(
+                            format!("race-{i}.md"),
+                            crate::passages::PassageSubmission::plain("本文。"),
+                        )]),
+                    )
+                })
+            })
+            .collect();
+        let outcomes: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        let successes = outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, Some(Ok(_))))
+            .count();
+        let refusals = outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, Some(Err(PassagesWriteError::QuotaExceeded(_)))))
+            .count();
+        assert_eq!(
+            (successes, refusals),
+            (1, 1),
+            "the admission lock must serialize the race so exactly one of two \
+             concurrent first-writes past a one-byte ceiling lands: {outcomes:?}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// #678: `citation`'s three ordinary answers — a resolvable
+    /// index (with and without markers), an unknown source, and an
+    /// index past the source's stored range — had no dedicated
+    /// coverage; only its HTTP-layer callers were exercised.
+    #[test]
+    fn citation_reports_found_unknown_source_and_out_of_range_index() {
+        let dir = scratch_dir("citation");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        // `section_for` walks back to the nearest marker at or before
+        // `index` (a heading applies to every paragraph until the
+        // next one); `locator_for` is an exact match only, never
+        // extending to the next paragraph. The marker placement below
+        // (section on paragraph 1, locator on paragraph 0) exercises
+        // both semantics distinctly.
+        state
+            .store_passages(
+                "sake",
+                BTreeMap::from([(
+                    "doc".to_string(),
+                    crate::passages::PassageSubmission {
+                        text: "第1段落。\n\n第2段落。".to_string(),
+                        questions: Vec::new(),
+                        sections: vec![(1, "はじめに".to_string())],
+                        locators: vec![(
+                            0,
+                            crate::passages::Locator {
+                                kind: "page".to_string(),
+                                value: "1".to_string(),
+                            },
+                        )],
+                        meta: crate::passages::SourceMeta::default(),
+                    },
+                )]),
+            )
+            .unwrap()
+            .unwrap();
+
+        let Some(Ok(CitationLookup::Found {
+            text,
+            section,
+            locator,
+        })) = state.citation("sake", "doc", 0)
+        else {
+            panic!("index 0 must resolve");
+        };
+        assert_eq!(text, "第1段落。");
+        assert!(section.is_none(), "before the first section marker");
+        assert_eq!(
+            locator,
+            Some(crate::passages::Locator {
+                kind: "page".to_string(),
+                value: "1".to_string(),
+            })
+        );
+
+        let Some(Ok(CitationLookup::Found {
+            text,
+            section,
+            locator,
+        })) = state.citation("sake", "doc", 1)
+        else {
+            panic!("index 1 must resolve");
+        };
+        assert_eq!(text, "第2段落。");
+        assert_eq!(section.as_deref(), Some("はじめに"));
+        assert!(
+            locator.is_none(),
+            "a locator does not extend past its own paragraph"
+        );
+
+        assert!(matches!(
+            state.citation("sake", "nope", 0),
+            Some(Ok(CitationLookup::UnknownSource))
+        ));
+        assert!(matches!(
+            state.citation("sake", "doc", 99),
+            Some(Ok(CitationLookup::IndexOutOfRange))
+        ));
+        assert!(
+            state.citation("nazo", "doc", 0).is_none(),
+            "an unknown context is the outer None"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// #678: `citation`'s load-failure arm — same corrupt-log
+    /// technique as `a_failed_passage_load_is_quarantined_like_the_image`.
+    #[test]
+    fn citation_reports_a_load_failure_as_err() {
+        let dir = scratch_dir("citation-load-failure");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .store_passages(
+                    "sake",
+                    plain(BTreeMap::from([("doc".to_string(), "本文。".to_string())])),
+                )
+                .unwrap()
+                .unwrap();
+            state.flush_dirty();
+        }
+        let log = dir.join("sake.passages.wal.jsonl");
+        let mut corrupt = fs::read(&log).unwrap();
+        corrupt.splice(0..0, *b"not json\n");
+        fs::write(&log, &corrupt).unwrap();
+
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        assert!(matches!(state.citation("sake", "doc", 0), Some(Err(_))));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// #678: `resolve_markers`'s best-effort degrades — an empty key
+    /// iterator skips the store load entirely (the "graph-only
+    /// response never touches passages" contract), an unknown context
+    /// degrades to an empty map — and the null-means-nothing contract:
+    /// a key with no covering marker simply never lands in the result,
+    /// it is not fabricated as `Markers::default()`.
+    #[test]
+    fn resolve_markers_only_maps_keys_that_actually_carry_a_marker() {
+        let dir = scratch_dir("resolve-markers");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+
+        assert!(
+            state.resolve_markers("sake", std::iter::empty()).is_empty(),
+            "an empty key iterator must skip the store load entirely"
+        );
+        assert!(
+            state
+                .resolve_markers(
+                    "no-such-context",
+                    std::iter::once(("doc".to_string(), 0u32))
+                )
+                .is_empty(),
+            "a non-empty iterator against an unknown context degrades to empty"
+        );
+
+        // `section_for` walks back to the nearest preceding marker, so
+        // the marker sits on paragraph 1 (not 0): paragraph 0 then has
+        // genuinely no marker of either kind, the case this test needs
+        // to prove is dropped, not fabricated as an empty `Markers`.
+        state
+            .store_passages(
+                "sake",
+                BTreeMap::from([(
+                    "doc".to_string(),
+                    crate::passages::PassageSubmission {
+                        text: "第1段落。\n\n第2段落。".to_string(),
+                        questions: Vec::new(),
+                        sections: vec![(1, "はじめに".to_string())],
+                        locators: Vec::new(),
+                        meta: crate::passages::SourceMeta::default(),
+                    },
+                )]),
+            )
+            .unwrap()
+            .unwrap();
+
+        let keys = vec![
+            ("doc".to_string(), 1u32),  // carries a section marker
+            ("doc".to_string(), 0u32),  // no marker at all
+            ("nope".to_string(), 0u32), // unknown source
+        ];
+        let resolved = state.resolve_markers("sake", keys.into_iter());
+        assert_eq!(
+            resolved.len(),
+            1,
+            "only the keyed marker survives: {resolved:?}"
+        );
+        let markers = &resolved[&("doc".to_string(), 1)];
+        assert_eq!(markers.section.as_deref(), Some("はじめに"));
+        assert!(markers.locator.is_none());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// #678: `resolve_markers`'s load-failure degrade — an empty map,
+    /// not an error, since the markers it resolves are enrichment on
+    /// top of an association read, never a hard dependency.
+    #[test]
+    fn resolve_markers_degrades_to_an_empty_map_on_a_load_failure() {
+        let dir = scratch_dir("resolve-markers-load-failure");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state
+                .create("sake", ContextMeta::default())
+                .map_err(|_| "create")
+                .unwrap();
+            state
+                .store_passages(
+                    "sake",
+                    plain(BTreeMap::from([("doc".to_string(), "本文。".to_string())])),
+                )
+                .unwrap()
+                .unwrap();
+            state.flush_dirty();
+        }
+        let log = dir.join("sake.passages.wal.jsonl");
+        let mut corrupt = fs::read(&log).unwrap();
+        corrupt.splice(0..0, *b"not json\n");
+        fs::write(&log, &corrupt).unwrap();
+
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        assert!(
+            state
+                .resolve_markers("sake", std::iter::once(("doc".to_string(), 0u32)))
+                .is_empty()
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// #678: `passage_source_entries` — `passage_sources` with each
+    /// source's metadata beside it, what `list_sources` renders its
+    /// `entries` from. Had no dedicated coverage of its own.
+    #[test]
+    fn passage_source_entries_pairs_ids_with_their_metadata() {
+        let dir = scratch_dir("passage-source-entries");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state
+            .create("sake", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .store_passages(
+                "sake",
+                BTreeMap::from([(
+                    "doc".to_string(),
+                    crate::passages::PassageSubmission {
+                        text: "本文。".to_string(),
+                        questions: Vec::new(),
+                        sections: Vec::new(),
+                        locators: Vec::new(),
+                        meta: crate::passages::SourceMeta {
+                            stored_at: None,
+                            date: Some(1_700_000_000),
+                            tags: vec!["tag-a".to_string()],
+                        },
+                    },
+                )]),
+            )
+            .unwrap()
+            .unwrap();
+
+        let sources = state.passage_sources("sake").unwrap().unwrap();
+        let entries = state.passage_source_entries("sake").unwrap().unwrap();
+        assert_eq!(
+            entries.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(),
+            sources,
+            "passage_source_entries must name exactly what passage_sources does"
+        );
+        let (_, meta) = entries.iter().find(|(id, _)| id == "doc").unwrap();
+        assert_eq!(meta.date, Some(1_700_000_000));
+        assert_eq!(meta.tags, vec!["tag-a".to_string()]);
+
+        assert!(
+            state.passage_source_entries("nazo").is_none(),
+            "an unknown context is the outer None"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
