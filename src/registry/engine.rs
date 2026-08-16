@@ -521,9 +521,9 @@ impl AppState {
                             // close that crash window now rather
                             // than waiting out the flush interval.
                             tracing::warn!(
-                                "WAL re-append after a partial apply failed for \
-                                 '{name}': {error}; flushing the image now to \
-                                 re-cover memory"
+                                context = %name, %error,
+                                "WAL re-append after a partial apply failed; \
+                                 flushing the image now to re-cover memory"
                             );
                             inner.wal_bytes = len_before;
                             inner.wal_seq = first_seq;
@@ -547,9 +547,9 @@ impl AppState {
                         // landed, and a successful flush resets
                         // both anyway.
                         tracing::warn!(
-                            "WAL truncate after a partial apply failed for \
-                             '{name}': {error}; flushing the image now to \
-                             retire the untried tail"
+                            context = %name, %error,
+                            "WAL truncate after a partial apply failed; \
+                             flushing the image now to retire the untried tail"
                         );
                         wal_behind = true;
                     }
@@ -913,7 +913,8 @@ impl AppState {
 fn warn_if_recovery_flush_missed(name: &str, flushed: bool) {
     if !flushed {
         tracing::warn!(
-            "post-write recovery flush did not land immediately for '{name}'; \
+            context = %name,
+            "post-write recovery flush did not land immediately; \
              the WAL for this write is no longer trustworthy and durability \
              now depends on the next periodic flush landing before a crash"
         );
