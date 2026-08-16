@@ -256,7 +256,7 @@ fn retrieve_inner(
         "taguru.resolve",
         otel.kind = "internal",
         taguru.op = "resolve",
-        taguru.origin.count = origins.len(),
+        taguru.origin.count = origins.len() as i64,
         taguru.anchor.count = tracing::field::Empty,
     );
     let mut resolved = serde_json::Map::new();
@@ -296,10 +296,10 @@ fn retrieve_inner(
                 anchors.push(picked);
             }
         }
-        resolve_span.record("taguru.anchor.count", anchors.len());
+        resolve_span.record("taguru.anchor.count", anchors.len() as i64);
     }
-    root.record("taguru.origin.count", origins.len());
-    root.record("taguru.anchor.count", anchors.len());
+    root.record("taguru.origin.count", origins.len() as i64);
+    root.record("taguru.anchor.count", anchors.len() as i64);
 
     // Step 2: describe every anchor — skippable via describe_first: false.
     let mut outline = serde_json::Map::new();
@@ -307,7 +307,7 @@ fn retrieve_inner(
         let describe_span = span!(
             "taguru.describe",
             otel.kind = "internal",
-            taguru.anchor.count = anchors.len(),
+            taguru.anchor.count = anchors.len() as i64,
         );
         let _guard = describe_span.enter();
         for anchor in &anchors {
@@ -337,7 +337,7 @@ fn retrieve_inner(
                 "taguru.query",
                 otel.kind = "internal",
                 taguru.op = "query",
-                taguru.anchor.count = anchors.len(),
+                taguru.anchor.count = anchors.len() as i64,
                 taguru.association.count = tracing::field::Empty,
             );
             let _guard = query_span.enter();
@@ -361,7 +361,7 @@ fn retrieve_inner(
                     None => associations.push(entry.clone()),
                 }
             }
-            query_span.record("taguru.association.count", associations.len());
+            query_span.record("taguru.association.count", associations.len() as i64);
         } else {
             tracing::info!(taguru.reason = SKIP_LABELS_ABSENT, "taguru.skip");
         }
@@ -369,7 +369,7 @@ fn retrieve_inner(
             "taguru.activate",
             otel.kind = "internal",
             taguru.op = "activate",
-            taguru.anchor.count = anchors.len(),
+            taguru.anchor.count = anchors.len() as i64,
             taguru.activation.count = tracing::field::Empty,
         );
         let _guard = activate_span.enter();
@@ -401,10 +401,10 @@ fn retrieve_inner(
                 None => associations.push(association),
             }
         }
-        activate_span.record("taguru.activation.count", activations.len());
+        activate_span.record("taguru.activation.count", activations.len() as i64);
     }
-    root.record("taguru.association.count", associations.len());
-    root.record("taguru.activation.count", activations.len());
+    root.record("taguru.association.count", associations.len() as i64);
+    root.record("taguru.activation.count", activations.len() as i64);
 
     // Step 4: fetch a citation for every located attribution,
     // deduplicated by (source, paragraph). A locator whose passage was
@@ -442,7 +442,7 @@ fn retrieve_inner(
                 }
             }
         }
-        citations_span.record("taguru.citation.requested", wanted.len());
+        citations_span.record("taguru.citation.requested", wanted.len() as i64);
         // Not a per-item event for each 404 — ADR 0008 §8's per-item
         // rule keeps citations aggregate-only; `missing` becomes one
         // count, recorded once below.
@@ -464,19 +464,19 @@ fn retrieve_inner(
                 Err(message) => return Err(message),
             }
         }
-        citations_span.record("taguru.citation.returned", citations.len());
+        citations_span.record("taguru.citation.returned", citations.len() as i64);
         if missing > 0 {
-            citations_span.record("taguru.citation.missing", missing);
+            citations_span.record("taguru.citation.missing", missing as i64);
             tracing::info!(
                 taguru.reason = SKIP_CITATION_PASSAGE_MISSING,
-                taguru.citation.missing = missing,
+                taguru.citation.missing = missing as i64,
                 "taguru.skip",
             );
         }
     } else {
         tracing::info!(taguru.reason = SKIP_CITATIONS_DISABLED, "taguru.skip");
     }
-    root.record("taguru.citation.returned", citations.len());
+    root.record("taguru.citation.returned", citations.len() as i64);
 
     // Step 5: text-lane fallback — only when the caller named a
     // fallback query, and (by default) only when no associations were
@@ -551,7 +551,7 @@ fn retrieve_inner(
     // number — the composed JSON's true serialized size, known only
     // after `to_string()` back in the caller — this is the raw sum of
     // every dispatched call's response, before composition.
-    root.record("taguru.dispatch.bytes", spent);
+    root.record("taguru.dispatch.bytes", spent as i64);
 
     Ok(json!({
         "resolved": resolved,

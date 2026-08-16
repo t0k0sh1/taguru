@@ -260,12 +260,9 @@ fn a_cross_search_exports_one_span_with_a_child_per_target() {
 
     let cross = tree.one("taguru.passage_search");
     // The whole-request facts live here: the fan-out width, the cache
-    // outcome, and the served (merged, truncated) counts. The two NEW
-    // attributes (`context.count` here, `target.index` below) are
-    // recorded `as i64` and land as intValue; the ones shared with
-    // `search_passages`' span keep its raw `usize`/`u64` types, which
-    // export as text in this stack (the `src/metrics.rs` u16 trap) —
-    // retyping them all in one sweep is issue #697's call.
+    // outcome, and the served (merged, truncated) counts — all counts
+    // as intValue since #697's i64 sweep (a raw `usize`/`u64` would
+    // export as text, the `src/metrics.rs` u16 trap).
     assert_eq!(
         attribute(cross, "taguru.context.count").map(|v| v["intValue"].clone()),
         Some(json!("2")),
@@ -276,7 +273,7 @@ fn a_cross_search_exports_one_span_with_a_child_per_target() {
         Some(json!("miss"))
     );
     assert_eq!(
-        attribute(cross, "taguru.passage.hit_count").map(|v| v["stringValue"].clone()),
+        attribute(cross, "taguru.passage.hit_count").map(|v| v["intValue"].clone()),
         Some(json!(found["hits"].as_array().unwrap().len().to_string())),
         "{cross:?}"
     );

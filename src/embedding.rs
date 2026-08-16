@@ -419,7 +419,7 @@ mod local {
                 "taguru.embed",
                 otel.kind = "client",
                 taguru.embed.model = %self.model_name,
-                taguru.embed.inputs = texts.len(),
+                taguru.embed.inputs = texts.len() as i64,
                 taguru.embed.purpose = purpose.as_str(),
             );
             let _guard = span.enter();
@@ -561,7 +561,7 @@ impl EmbeddingProvider for HttpEmbeddings {
             "taguru.embed",
             otel.kind = "client",
             taguru.embed.model = %self.model,
-            taguru.embed.inputs = texts.len(),
+            taguru.embed.inputs = texts.len() as i64,
             taguru.embed.purpose = purpose.as_str(),
         );
         let _guard = span.enter();
@@ -1240,8 +1240,8 @@ impl PassageVectorStore {
         let span = crate::trace::span!(
             "taguru.search.ann",
             otel.kind = "internal",
-            taguru.search.pool = limit,
-            taguru.search.rows = self.len(),
+            taguru.search.pool = limit as i64,
+            taguru.search.rows = self.len() as i64,
             taguru.search.exact = tracing::field::Empty,
             taguru.search.hits = tracing::field::Empty,
         );
@@ -1255,7 +1255,7 @@ impl PassageVectorStore {
             span.record("taguru.search.exact", true);
             self.exact_top_matches(query, limit, eligible)
         };
-        span.record("taguru.search.hits", hits.len());
+        span.record("taguru.search.hits", hits.len() as i64);
         hits
     }
 

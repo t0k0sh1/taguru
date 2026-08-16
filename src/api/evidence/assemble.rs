@@ -179,8 +179,8 @@ pub async fn assemble_evidence(
         "taguru.assemble_evidence",
         otel.kind = "internal",
         taguru.operation = "assemble_evidence",
-        taguru.origin.count = origins.len(),
-        taguru.label.count = labels.len(),
+        taguru.origin.count = origins.len() as i64,
+        taguru.label.count = labels.len() as i64,
         taguru.anchor.count = tracing::field::Empty,
         taguru.association.count = tracing::field::Empty,
         taguru.citation.returned = tracing::field::Empty,
@@ -219,7 +219,7 @@ pub async fn assemble_evidence(
         "taguru.resolve",
         otel.kind = "internal",
         taguru.op = "resolve",
-        taguru.origin.count = origins.len(),
+        taguru.origin.count = origins.len() as i64,
         taguru.anchor.count = tracing::field::Empty,
     );
     let mut anchors: Vec<String> = Vec::new();
@@ -252,7 +252,7 @@ pub async fn assemble_evidence(
                 anchors.push(top.name.clone());
             }
         }
-        resolve_span.record("taguru.anchor.count", anchors.len());
+        resolve_span.record("taguru.anchor.count", anchors.len() as i64);
     }
     let resolve_plan = if origins_is_empty {
         tracing::info!(taguru.reason = "origins_empty", "taguru.skip");
@@ -260,7 +260,7 @@ pub async fn assemble_evidence(
     } else {
         LanePlan::ran()
     };
-    root.record("taguru.anchor.count", anchors.len());
+    root.record("taguru.anchor.count", anchors.len() as i64);
     let anchor_refs: Vec<&str> = anchors.iter().map(String::as_str).collect();
     const NO_ANCHORS_REASON: &str = "no anchors resolved from 'origins'";
 
@@ -282,7 +282,7 @@ pub async fn assemble_evidence(
             "taguru.query",
             otel.kind = "internal",
             taguru.op = "query",
-            taguru.anchor.count = anchors.len(),
+            taguru.anchor.count = anchors.len() as i64,
             taguru.association.count = tracing::field::Empty,
         );
         let _guard = query_span.enter();
@@ -301,7 +301,7 @@ pub async fn assemble_evidence(
                         rank + 1,
                     ));
                 }
-                query_span.record("taguru.association.count", association_pool.len());
+                query_span.record("taguru.association.count", association_pool.len() as i64);
                 LanePlan::ran()
             }
             Err(failure) => return access_error(&state, failure, &name, started_at),
@@ -321,7 +321,7 @@ pub async fn assemble_evidence(
             "taguru.activate",
             otel.kind = "internal",
             taguru.op = "activate",
-            taguru.anchor.count = anchors.len(),
+            taguru.anchor.count = anchors.len() as i64,
             taguru.activation.count = tracing::field::Empty,
         );
         let _guard = activate_span.enter();
@@ -343,7 +343,7 @@ pub async fn assemble_evidence(
             Ok((total, matches)) => {
                 state.note_search(SearchOp::Activate, &name, total == 0);
                 let matches = activations_out(&state, &name, matches);
-                activate_span.record("taguru.activation.count", matches.len());
+                activate_span.record("taguru.activation.count", matches.len() as i64);
                 for (rank, activation) in matches.into_iter().enumerate() {
                     association_pool.push(EvidenceCandidate::from_activation(
                         &name,
@@ -356,7 +356,7 @@ pub async fn assemble_evidence(
             Err(failure) => return access_error(&state, failure, &name, started_at),
         }
     };
-    root.record("taguru.association.count", association_pool.len());
+    root.record("taguru.association.count", association_pool.len() as i64);
 
     // --- Step 4: passages — always, over the canonical query. Unlike
     // `retrieve`'s own text-fallback lane (opt-in, and only when
@@ -375,7 +375,7 @@ pub async fn assemble_evidence(
         "taguru.passages",
         otel.kind = "internal",
         taguru.op = "search_passages",
-        taguru.limit = search_limit,
+        taguru.limit = search_limit as i64,
         taguru.passage.hit_count = tracing::field::Empty,
     );
     // Scoped tightly to Step 4 alone — Steps 5/6 below must not nest
@@ -408,7 +408,7 @@ pub async fn assemble_evidence(
             }
             Some(Ok(found)) => {
                 state.note_search(SearchOp::SearchPassages, &name, found.hits.is_empty());
-                passages_span.record("taguru.passage.hit_count", found.hits.len());
+                passages_span.record("taguru.passage.hit_count", found.hits.len() as i64);
                 for hit in &found.hits {
                     state
                         .metrics()
@@ -464,7 +464,7 @@ pub async fn assemble_evidence(
             "taguru.communities",
             otel.kind = "internal",
             taguru.op = "search_communities",
-            taguru.limit = search_limit,
+            taguru.limit = search_limit as i64,
             taguru.passage.hit_count = tracing::field::Empty,
         );
         let _guard = communities_span.enter();
@@ -480,7 +480,7 @@ pub async fn assemble_evidence(
             started_at,
         ) {
             Ok(CommunityLaneOutcome::Found(found)) => {
-                communities_span.record("taguru.passage.hit_count", found.hits.len());
+                communities_span.record("taguru.passage.hit_count", found.hits.len() as i64);
                 for (rank, hit) in found.hits.into_iter().enumerate() {
                     community_candidates.push(EvidenceCandidate::from_community(
                         &name,
@@ -523,7 +523,7 @@ pub async fn assemble_evidence(
     let citations_span = crate::trace::span!(
         "taguru.citations",
         otel.kind = "internal",
-        taguru.citation.requested = wanted.len(),
+        taguru.citation.requested = wanted.len() as i64,
         taguru.citation.returned = tracing::field::Empty,
     );
     let citation_lookup;
@@ -541,8 +541,8 @@ pub async fn assemble_evidence(
                 Err(response) => return response,
             };
         }
-        citations_span.record("taguru.citation.returned", citation_lookup.len());
-        root.record("taguru.citation.returned", citation_lookup.len());
+        citations_span.record("taguru.citation.returned", citation_lookup.len() as i64);
+        root.record("taguru.citation.returned", citation_lookup.len() as i64);
     }
     let citations_plan = LanePlan::ran();
 
