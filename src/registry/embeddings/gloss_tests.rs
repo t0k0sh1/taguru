@@ -603,6 +603,271 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
+    /// Issue #677 item 2: a busy, gloss-stable context used to pay one
+    /// provider round trip (the width probe) on every single no-op
+    /// refresh, forever — expensive under a write-driven auto-embed
+    /// ticker. The real embed a pass just paid for already answers
+    /// "what width does the provider speak right now" just as well as
+    /// a dedicated probe would, so the very next no-op TICKER refresh
+    /// must not pay for one of its own. This throttle is scoped to
+    /// `auto_refresh_embeddings` only — the public `refresh_embeddings`
+    /// an explicit caller uses always probes, so it reliably heals a
+    /// width change in one call (see that function's own doc, and
+    /// `tests/http_api/width_probe.rs`, for why that contract must
+    /// hold).
+    #[test]
+    fn a_no_op_auto_refresh_right_after_a_real_one_makes_no_provider_call_at_all() {
+        struct CountingEmbeddings(usize, Arc<AtomicUsize>);
+        impl EmbeddingProvider for CountingEmbeddings {
+            fn model(&self) -> &str {
+                "stable-name"
+            }
+            fn embed(
+                &self,
+                texts: &[&str],
+                _purpose: EmbedPurpose,
+                _deadline: Deadline,
+            ) -> Result<Vec<Vec<f32>>, String> {
+                self.1.fetch_add(1, Ordering::Relaxed);
+                Ok(texts
+                    .iter()
+                    .map(|_| {
+                        let mut vector = vec![0.0; self.0];
+                        vector[0] = 1.0;
+                        vector
+                    })
+                    .collect())
+            }
+        }
+
+        let dir = scratch_dir("no-double-charge");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let embedder =
+            Some(Arc::new(CountingEmbeddings(2, Arc::clone(&calls))) as Arc<dyn EmbeddingProvider>);
+        let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
+        state
+            .create("w", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .write_context("w", |context| {
+                context.associate("a", "l", "b", 1.0).unwrap();
+            })
+            .map_err(|_| "write")
+            .unwrap();
+
+        let (embedded, _) = state
+            .auto_refresh_embeddings("w", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        assert!(
+            embedded > 0,
+            "the first pass must genuinely embed something"
+        );
+        let after_real = calls.load(Ordering::Relaxed);
+
+        let (embedded_again, _) = state
+            .auto_refresh_embeddings("w", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        assert_eq!(embedded_again, 0);
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            after_real,
+            "the no-op ticker refresh's own width probe must be skipped \
+             entirely, not just cheap: the pass just above already \
+             confirmed this width"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The throttle only ever defers detection, never cancels it: once
+    /// a confirmed observation ages past `WIDTH_OBSERVATION_TRUST`, the
+    /// ticker's next no-op refresh probes again and still catches a
+    /// genuine backend swap — the same swap an explicit refresh would
+    /// have caught immediately, just later.
+    #[test]
+    fn a_ticker_probe_re_arms_once_its_observation_ages_past_the_trust_window() {
+        struct SwappableWidthEmbeddings(Arc<AtomicUsize>, Arc<AtomicUsize>);
+        impl EmbeddingProvider for SwappableWidthEmbeddings {
+            fn model(&self) -> &str {
+                "stable-name"
+            }
+            fn embed(
+                &self,
+                texts: &[&str],
+                _purpose: EmbedPurpose,
+                _deadline: Deadline,
+            ) -> Result<Vec<Vec<f32>>, String> {
+                self.1.fetch_add(1, Ordering::Relaxed);
+                let width = self.0.load(Ordering::Relaxed);
+                Ok(texts
+                    .iter()
+                    .map(|_| {
+                        let mut vector = vec![0.0; width];
+                        vector[0] = 1.0;
+                        vector
+                    })
+                    .collect())
+            }
+        }
+
+        let dir = scratch_dir("ticker-probe-re-arms");
+        let width = Arc::new(AtomicUsize::new(2));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let embedder = Some(Arc::new(SwappableWidthEmbeddings(
+            Arc::clone(&width),
+            Arc::clone(&calls),
+        )) as Arc<dyn EmbeddingProvider>);
+        let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
+        state
+            .create("w", ContextMeta::default())
+            .map_err(|_| "create")
+            .unwrap();
+        state
+            .write_context("w", |context| {
+                context.associate("a", "l", "b", 1.0).unwrap();
+            })
+            .map_err(|_| "write")
+            .unwrap();
+        let (embedded, _) = state
+            .auto_refresh_embeddings("w", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        assert!(embedded > 0);
+
+        // The provider now speaks width 3 behind the same model name.
+        // Within the trust window, the ticker's probe stays skipped —
+        // this is the cost saving item 2 exists for.
+        width.store(3, Ordering::Relaxed);
+        let calls_before_stale_no_op = calls.load(Ordering::Relaxed);
+        let (embedded, total) = state
+            .auto_refresh_embeddings("w", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        assert_eq!((embedded, total), (0, 3), "still within the trust window");
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            calls_before_stale_no_op,
+            "no probe yet — the observation is still trusted"
+        );
+
+        // Once the observation ages out, the very next ticker refresh
+        // probes again and this time catches the swap.
+        state.age_width_observation(crate::registry::WIDTH_OBSERVATION_TRUST);
+        let (embedded, total) = state
+            .auto_refresh_embeddings("w", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (embedded, total),
+            (3, 3),
+            "the aged-out observation must not suppress detection forever"
+        );
+        let store = VectorStore::load(&vectors_path(&dir, &file_stem("w")));
+        assert!(
+            store
+                .concepts
+                .values()
+                .chain(store.labels.values())
+                .all(|(_, vector)| vector.len() == 3),
+            "the swap must actually heal, not just get noticed"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The width observation is shared by the whole process, not scoped
+    /// to one context — because the width is the PROVIDER's property.
+    /// A context that has never itself embedded anything this boot
+    /// still skips its own ticker probe once some OTHER context's
+    /// ticker probe has already confirmed the width.
+    #[test]
+    fn a_probe_confirmed_by_one_context_lets_a_sibling_skip_its_own() {
+        struct CountingWidthEmbeddings(usize, Arc<AtomicUsize>);
+        impl EmbeddingProvider for CountingWidthEmbeddings {
+            fn model(&self) -> &str {
+                "stable-name"
+            }
+            fn embed(
+                &self,
+                texts: &[&str],
+                _purpose: EmbedPurpose,
+                _deadline: Deadline,
+            ) -> Result<Vec<Vec<f32>>, String> {
+                self.1.fetch_add(1, Ordering::Relaxed);
+                Ok(texts
+                    .iter()
+                    .map(|_| {
+                        let mut vector = vec![0.0; self.0];
+                        vector[0] = 1.0;
+                        vector
+                    })
+                    .collect())
+            }
+        }
+
+        let dir = scratch_dir("cross-context-width-confirm");
+        {
+            let embedder = Some(
+                Arc::new(CountingWidthEmbeddings(2, Arc::new(AtomicUsize::new(0))))
+                    as Arc<dyn EmbeddingProvider>,
+            );
+            let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
+            for name in ["a", "b"] {
+                state
+                    .create(name, ContextMeta::default())
+                    .map_err(|_| "create")
+                    .unwrap();
+                state
+                    .write_context(name, |context| {
+                        context.associate("x", "l", "y", 1.0).unwrap();
+                    })
+                    .map_err(|_| "write")
+                    .unwrap();
+                state
+                    .refresh_embeddings(name, Deadline::unbounded())
+                    .unwrap()
+                    .unwrap();
+            }
+            state.flush_dirty();
+        }
+
+        // Fresh boot: no observation yet. Both contexts already carry
+        // width 2 on disk and neither has new content this pass.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let embedder =
+            Some(Arc::new(CountingWidthEmbeddings(2, Arc::clone(&calls)))
+                as Arc<dyn EmbeddingProvider>);
+        let state = AppState::boot(dir.clone(), usize::MAX, embedder).unwrap();
+
+        // "a"'s own no-op ticker refresh has no observation to lean on
+        // yet, so it pays for its own probe.
+        let (embedded_a, _) = state
+            .auto_refresh_embeddings("a", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        assert_eq!(embedded_a, 0);
+        assert_eq!(calls.load(Ordering::Relaxed), 1, "a's own probe");
+
+        // "b" was never touched this boot — but the width is the
+        // provider's, not "a"'s, so "a"'s probe already answers for
+        // "b" too: no second provider call.
+        let (embedded_b, _) = state
+            .auto_refresh_embeddings("b", Deadline::unbounded())
+            .unwrap()
+            .unwrap();
+        assert_eq!(embedded_b, 0);
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            1,
+            "b's probe is skipped: a's already confirmed the width this boot"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
     /// A width change that rides alongside genuinely new content (rather
     /// than being caught only by the no-op probe) is noticed from the
     /// freshly embedded rows directly — but the redo it triggers must

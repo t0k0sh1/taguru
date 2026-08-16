@@ -209,10 +209,43 @@ impl AppState {
     /// operator calls this after ingesting, so embedding spend stays
     /// intentional. Returns (newly embedded, total vectors), or `None`
     /// for an unknown context.
+    ///
+    /// Always pays for its own width probe when one is needed — see
+    /// [`AppState::auto_refresh_embeddings`] for the throttled variant
+    /// the auto-embed ticker uses instead. An explicit call (this one)
+    /// is rare and deliberate, often an operator diagnosing a stale
+    /// result, so it must reliably detect and heal a width change in
+    /// ONE call — the contract `tests/http_api/width_probe.rs` pins.
     pub fn refresh_embeddings(
         &self,
         name: &str,
         deadline: Deadline,
+    ) -> Option<Result<(usize, usize), String>> {
+        self.refresh_embeddings_inner(name, deadline, false)
+    }
+
+    /// The auto-embed ticker's variant of [`AppState::refresh_embeddings`]
+    /// (issue #677 item 2): identical, except its width probe is
+    /// skipped when a recent embed from ANY context already confirmed
+    /// the provider's current width (`provider_width_recently_confirmed`
+    /// — the width is the provider's property, not this context's). A
+    /// busy, gloss-stable context would otherwise pay one provider
+    /// round trip per flush tick forever; an explicit caller still gets
+    /// the unthrottled [`AppState::refresh_embeddings`] instead, so a
+    /// deliberate refresh always heals a width change in one call.
+    pub(crate) fn auto_refresh_embeddings(
+        &self,
+        name: &str,
+        deadline: Deadline,
+    ) -> Option<Result<(usize, usize), String>> {
+        self.refresh_embeddings_inner(name, deadline, true)
+    }
+
+    fn refresh_embeddings_inner(
+        &self,
+        name: &str,
+        deadline: Deadline,
+        throttle_probe: bool,
     ) -> Option<Result<(usize, usize), String>> {
         let Some(embedder) = self.0.embedder.clone() else {
             return Some(Err(
@@ -338,12 +371,28 @@ impl AppState {
         let mut fresh_width = width(&embedded_concepts).or_else(|| width(&embedded_labels));
         // Unchanged hashes embed nothing, which would leave the width
         // change of exactly this scenario — backend swap, no gloss
-        // edits — undetectable forever. One probe embedding per no-op
-        // refresh keeps that from hiding.
+        // edits — undetectable forever. A probe embedding keeps that
+        // from hiding, UNLESS this is the throttled ticker path AND a
+        // recent embed from any context (this one or another) already
+        // confirmed the provider is still producing `carried`'s width
+        // — the width is the provider's property, not this context's,
+        // so that confirmation is just as good as one bought here. An
+        // explicit caller (`throttle_probe: false`) always probes, so
+        // it reliably heals a width change in this one call. Both
+        // tables must be confirmed (whichever carry a width), matching
+        // the mismatch check just below: a probe confined to labels
+        // alone would miss a change confined to concepts, so a skip
+        // confined to labels alone must not happen either.
+        let width_confirmed = |carried: Option<usize>| {
+            carried.is_none_or(|w| self.provider_width_recently_confirmed(w))
+        };
         if failure.is_none()
             && !fresh_model
             && (carried_concepts_width.is_some() || carried_labels_width.is_some())
             && fresh_width.is_none()
+            && !(throttle_probe
+                && width_confirmed(carried_concepts_width)
+                && width_confirmed(carried_labels_width))
             && let Some((_, gloss)) = concepts.first().or_else(|| labels.first())
         {
             match self.timed_embed_for_refresh(embedder.as_ref(), &[gloss.as_str()], deadline) {
@@ -631,10 +680,36 @@ impl AppState {
     /// across the whole backfill. A provider failure partway persists
     /// what did land and reports the error — the next refresh continues
     /// from there instead of re-buying the same vectors.
+    ///
+    /// Always pays for its own width probe when one is needed — see
+    /// [`AppState::auto_refresh_passage_embeddings`] for the throttled
+    /// variant the auto-embed ticker uses instead, and
+    /// [`AppState::refresh_embeddings`]'s doc for why the split exists.
     pub fn refresh_passage_embeddings(
         &self,
         name: &str,
         deadline: Deadline,
+    ) -> Option<Result<PassageRefreshOutcome, String>> {
+        self.refresh_passage_embeddings_inner(name, deadline, false)
+    }
+
+    /// The auto-embed ticker's variant of
+    /// [`AppState::refresh_passage_embeddings`] — see
+    /// [`AppState::auto_refresh_embeddings`]'s doc for the throttle
+    /// this mirrors (issue #677 item 2).
+    pub(crate) fn auto_refresh_passage_embeddings(
+        &self,
+        name: &str,
+        deadline: Deadline,
+    ) -> Option<Result<PassageRefreshOutcome, String>> {
+        self.refresh_passage_embeddings_inner(name, deadline, true)
+    }
+
+    fn refresh_passage_embeddings_inner(
+        &self,
+        name: &str,
+        deadline: Deadline,
+        throttle_probe: bool,
     ) -> Option<Result<PassageRefreshOutcome, String>> {
         let Some(embedder) = self.0.embedder.clone() else {
             return Some(Err(
@@ -827,11 +902,17 @@ impl AppState {
             }
             // Unchanged hashes embed nothing, which would leave the width
             // change of exactly this scenario — backend swap, no passage
-            // edits — undetectable. One probe embedding per no-op refresh
-            // keeps it from hiding, matching the concept refresh.
+            // edits — undetectable. A probe embedding keeps it from
+            // hiding, matching the concept refresh — including the same
+            // ticker-only skip when a recent embed from any context
+            // already confirmed the provider is still producing
+            // `carried_width` (see `provider_width_recently_confirmed`'s
+            // doc: the width is the provider's property, not this
+            // context's). An explicit caller always probes.
             if failure.is_none()
                 && !fresh_model
-                && carried_width.is_some()
+                && carried_width
+                    .is_some_and(|w| !(throttle_probe && self.provider_width_recently_confirmed(w)))
                 && fresh_width.is_none()
                 && let Some(probe) = records
                     .iter()

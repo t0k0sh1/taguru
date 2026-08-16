@@ -1175,7 +1175,7 @@ fn run_flush_tick(
         let workers = state.embed_parallel();
         tokio::task::block_in_place(|| {
             parallel_map(flushed, workers, |name| {
-                match state.refresh_embeddings(&name, Deadline::unbounded()) {
+                match state.auto_refresh_embeddings(&name, Deadline::unbounded()) {
                     None | Some(Ok((0, _))) => {}
                     Some(Ok((embedded, _))) => {
                         info!(context = %name, embedded, "auto-embedded glosses");
@@ -1199,7 +1199,7 @@ fn run_flush_tick(
             let workers = state.embed_parallel();
             tokio::task::block_in_place(|| {
                 parallel_map(stale, workers, |name| {
-                    match state.refresh_passage_embeddings(&name, Deadline::unbounded()) {
+                    match state.auto_refresh_passage_embeddings(&name, Deadline::unbounded()) {
                         None => {}
                         Some(Ok(outcome)) if outcome.embedded == 0 => {}
                         Some(Ok(outcome)) => {
