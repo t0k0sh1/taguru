@@ -1587,9 +1587,10 @@ impl PassageSearchLanes {
     /// `ModelChanged`/`WidthChanged` fill stays pinned indefinitely.
     /// That is a correct (if stale-until-fixed) answer, not a
     /// correctness bug, and it is observable: `timed_embed_for_refresh`
-    /// records every attempt in `taguru_embed_refresh_total{outcome=
-    /// "failed"}`, so an operator diagnosing a persistently
-    /// lexical-only result set has a signal to look at.
+    /// records every attempt in `taguru_embedding_requests_total{
+    /// operation="refresh",outcome="failed"}`, so an operator
+    /// diagnosing a persistently lexical-only result set has a signal
+    /// to look at.
     pub(crate) fn embedding_failed(&self) -> bool {
         matches!(
             self,

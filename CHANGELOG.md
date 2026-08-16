@@ -14,6 +14,24 @@ Entries that change an on-disk format or a response shape say so.
   `GET /contexts/{name}/embeddings`), all three already documented in
   `src/llm-protocol.md` but missing from `sdk/spec/surface.yaml` and
   both SDKs (issue #625).
+- `/metrics` gains four series: `taguru_embed_slot_waiters`,
+  `taguru_embed_slot_waits_total`, and `taguru_embed_slot_timeouts_total`
+  expose contention on the embed concurrency slots (issue #563), and
+  `taguru_replication_permanent_errors_total` counts shipper/tailer
+  errors classified as permanent deployment problems
+  (`PermissionDenied`/`Unauthenticated`/`NotSupported`/
+  `UnknownConfigurationKey` — escalated to `taguru::audit` instead of
+  being retried forever as if they were network blips) (issue #616).
+- Compaction outcomes say whether the rebuilt image actually landed
+  on disk: `CompactOutcome` gains `image_persisted: bool` and
+  maintenance-compaction reports gain `skipped` (a context whose entry
+  failed to load surfaces as a skip, not silence). Both additive with
+  serde defaults, so payloads written before the upgrade still parse
+  (issue #586).
+- `sources/search/explain` responses gain `limit_to_reach_reason`
+  (omitted unless set): `"unreachable"` distinguishes "no limit would
+  surface this paragraph" from a merely absent `limit_to_reach`
+  (issue #601).
 
 ### Changed
 - `ApiError` gains an additive `issues_total: usize` field (present only
@@ -22,7 +40,44 @@ Entries that change an on-disk format or a response shape say so.
   `validation_error`'s own `MAX_LISTED_ISSUES` truncation, machine
   readable rather than only ever parseable out of the refusal's prose
   ("N issues total; showing the first 20"), which stays as-is alongside
-  it (issue #623). Every other response is byte-identical to before.
+  it (issue #623). The same series also tightens the error surface: the
+  source-filter tag-count refusal now answers `over_limit` instead of
+  `invalid_argument`; `POST /contexts/{name}/schema/audit` rejects
+  unknown body fields with `400 malformed_request` instead of silently
+  ignoring them; the keyset listings' `prefix`/`after` cursor strings
+  are capped at 1032 bytes (previously unbounded, the one request
+  string that never reached a length gate); and a capacity-exceeded
+  race deep inside `/import`/`/promote` apply streams now answers with
+  the structured `stream_refusal` shape instead of a bare access
+  message.
+- `taguru restore`'s exit codes now follow the documented house rule
+  end to end: a malformed URL, unrecognized scheme, or bad flag exits
+  2 (usage), while a store that parsed fine but refused to open — bad
+  or missing credentials, a rejected cloud config, an unusable local
+  path — exits 1 (bucket unusable) alongside "no fence, no complete
+  generation". A failed restore also cleans up what it already wrote
+  under `--out`, so a retry no longer needs the operator to empty the
+  directory by hand (issue #616).
+- `taguru restore` refuses a generation whose `complete` marker
+  predates the manifest format instead of attempting the legacy
+  segment-listing restore, which has been removed (issues #618/#619).
+
+### Fixed
+- `DELETE /contexts/{name}` racing a rename of the same context now
+  returns `409 conflict` ("mid-rename; retry after it completes")
+  instead of `500`, and no longer writes a "context deleted" audit
+  line for a delete that did not happen (issue #561).
+- `limit=0` on the paged listings — the context directory,
+  source/alias/group/coverage listings, and
+  `GET /contexts/{name}/changes` — now returns one item instead of an
+  empty page, so `0` no longer reads as EOF to a cursor loop
+  (issues #585, #676).
+- `sources/search/explain` contract repairs: early-return refusals now
+  still carry the `filter` report (previously always absent on those
+  paths), and `score`'s scale switch and `cutoff_score` both derive
+  from whether the vector lane actually ran — explain can no longer
+  claim a fused scale for a search that scored lexical-only
+  (issue #601).
 
 ## [0.9.0] - 2026-08-09
 

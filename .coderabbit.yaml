@@ -39,6 +39,13 @@ reviews:
         - HTTP/MCPレスポンス形状の変更が `HTTP_CONTRACT`/`MCP_CONTRACT`
           (`src/api.rs`) や `tests/fixtures/wire/` のgolden fixture更新を
           伴っているか(ADR 0005の互換性ルール)。
+        - 公開契約を変える変更 — レスポンス形状・フィールドの追加/削除、
+          エラーコードやHTTPステータスの変更、`/metrics` の系列追加/改名、
+          CLIの終了コード、オンディスク形式 — が `CHANGELOG.md` の
+          `[Unreleased]` に記載されているか。記載がある場合も、その記述が
+          diffの実際の変更内容と一致しているか(例:「他は変更なし」と
+          書きながら同じPRで別のコード値やバリデーションも変えていないか)
+          を確認してください。
         - 並行処理・ロックの取得順序・breaker/timeout/retryの境界条件。
 
         以下は指摘しないでください:
