@@ -87,26 +87,60 @@ async fn proxy_context(
         .map(|paq| paq.as_str().to_string())
         .unwrap_or_else(|| parts.uri.path().to_string());
     let url = format!("{}{}", map.url(shard), path_and_query);
-    let mut outbound = state
-        .inner
-        .client
-        .request(parts.method.clone(), url)
-        .headers(hop_headers(&parts.headers))
-        .body(reqwest::Body::wrap_stream(body.into_data_stream()));
+    // A causal child of the router's request span, same shape as the
+    // fan-out's `call_shard` (issue #696): the shard's BYTES stay
+    // untouched, but the trace headers are the router's own outbound
+    // call — `inject_current_trace` overwrites the W3C pair so the
+    // shard's request span parents under this hop instead of skipping
+    // it (and, with no inbound `traceparent`, instead of starting a
+    // parentless trace of its own). A no-op with export off, which is
+    // what keeps the bare pass-through in that mode. Unlike
+    // `call_shard`, the response is streamed, not buffered: this span
+    // closes once the shard's status and headers are in, so it times
+    // the dispatch, not the body transfer.
+    let span = crate::trace::span!(
+        "taguru.shard_call",
+        otel.kind = "client",
+        otel.name = %format!("{} -> shard {shard}", parts.method),
+        taguru.shard.index = shard,
+        http.request.method = %parts.method,
+        http.response.status_code = tracing::field::Empty,
+        taguru.shard.outcome = tracing::field::Empty,
+        otel.status_code = tracing::field::Empty,
+    );
+    // Header injection has to see `span`, and building the request is
+    // synchronous — so it happens inside `in_scope`, while the
+    // dispatch below rides `.instrument` (same split as `call_shard`).
+    let mut outbound = span.in_scope(|| {
+        let mut forwarded = hop_headers(&parts.headers);
+        inject_current_trace(&mut forwarded);
+        state
+            .inner
+            .client
+            .request(parts.method.clone(), url)
+            .headers(forwarded)
+            .body(reqwest::Body::wrap_stream(body.into_data_stream()))
+    });
     if let Some(limit) = budget(deadline) {
         outbound = outbound.timeout(limit);
     }
-    match outbound.send().await {
+    match outbound.send().instrument(span.clone()).await {
         Ok(answer) => {
-            state.inner.metrics.record_shard(
-                map.url(shard),
-                if answer.status().is_success() {
-                    "ok"
-                } else {
-                    "http_error"
-                },
-            );
+            let shard_outcome = if answer.status().is_success() {
+                "ok"
+            } else {
+                "http_error"
+            };
+            state
+                .inner
+                .metrics
+                .record_shard(map.url(shard), shard_outcome);
             let status = answer.status();
+            span.record("http.response.status_code", i64::from(status.as_u16()));
+            // An HTTP error status from the shard is an answer this
+            // proxy relays verbatim, not a client-span failure — only
+            // the transport arm below marks this span ERROR.
+            span.record("taguru.shard.outcome", shard_outcome);
             let headers = hop_headers(answer.headers());
             let mut response = Response::builder().status(status);
             if let Some(response_headers) = response.headers_mut() {
@@ -127,6 +161,8 @@ async fn proxy_context(
                 .inner
                 .metrics
                 .record_shard(map.url(shard), "unreached");
+            span.record("taguru.shard.outcome", "unreached");
+            span.record("otel.status_code", "ERROR");
             api::error(
                 ErrorCode::ShardUnreachable,
                 format!(

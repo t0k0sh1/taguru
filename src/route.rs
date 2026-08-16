@@ -156,7 +156,7 @@ use scatter::abort_rank;
 use scatter::{gather, plan_scatter, shard_body};
 use server::budget;
 pub(crate) use server::run;
-use state::{RouterInner, RouterMetrics, RouterState};
+use state::{RouterInner, RouterMetrics, RouterState, inject_current_trace};
 
 /// One reached shard's answer, body buffered — the fan-out verbs all
 /// carry small JSON bodies. The streaming path ([`proxy_to_shard`])
