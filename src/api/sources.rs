@@ -1703,7 +1703,12 @@ pub async fn cross_search_passages(
         otel.kind = "internal",
         taguru.op = SearchOp::SearchPassages.as_str(),
         taguru.limit = limit,
-        taguru.context.count = targets.len(),
+        // `as i64` so OTel backends see a number, not text (ADR 0008
+        // §6's count rule; a targets list is nowhere near overflow).
+        // The attributes shared with `search_passages`' span keep its
+        // raw types — retyping only this copy would fork one attribute
+        // into two wire types.
+        taguru.context.count = targets.len() as i64,
         taguru.cache.result = tracing::field::Empty,
         taguru.cache.semantic = tracing::field::Empty,
         taguru.passage.hit_count = tracing::field::Empty,
@@ -1814,7 +1819,7 @@ pub async fn cross_search_passages(
             let target_span = crate::trace::span!(
                 "taguru.passage_search.target",
                 otel.kind = "internal",
-                taguru.target.index = index,
+                taguru.target.index = index as i64,
                 taguru.search.lanes = tracing::field::Empty,
                 taguru.search.vector.outcome = tracing::field::Empty,
                 taguru.passage.hit_count = tracing::field::Empty,

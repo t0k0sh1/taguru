@@ -260,12 +260,14 @@ fn a_cross_search_exports_one_span_with_a_child_per_target() {
 
     let cross = tree.one("taguru.passage_search");
     // The whole-request facts live here: the fan-out width, the cache
-    // outcome, and the served (merged, truncated) counts. `usize`/
-    // `u64` fields export as text in this stack (only an explicit
-    // `i64` lands as intValue — the `src/metrics.rs` u16 trap, which
-    // the single-context span shares), so these assert stringValue.
+    // outcome, and the served (merged, truncated) counts. The two NEW
+    // attributes (`context.count` here, `target.index` below) are
+    // recorded `as i64` and land as intValue; the ones shared with
+    // `search_passages`' span keep its raw `usize`/`u64` types, which
+    // export as text in this stack (the `src/metrics.rs` u16 trap) —
+    // retyping them all in one sweep is issue #697's call.
     assert_eq!(
-        attribute(cross, "taguru.context.count").map(|v| v["stringValue"].clone()),
+        attribute(cross, "taguru.context.count").map(|v| v["intValue"].clone()),
         Some(json!("2")),
         "{cross:?}"
     );
@@ -292,7 +294,7 @@ fn a_cross_search_exports_one_span_with_a_child_per_target() {
         );
         indexes.push(
             attribute(target, "taguru.target.index")
-                .and_then(|v| v["stringValue"].as_str().map(str::to_string)),
+                .and_then(|v| v["intValue"].as_str().map(str::to_string)),
         );
         assert_eq!(
             attribute(target, "taguru.search.lanes").map(|v| v["stringValue"].clone()),
