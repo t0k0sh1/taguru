@@ -775,4 +775,204 @@ mod tests {
 
         let _ = fs::remove_dir_all(&dir);
     }
+
+    /// #678: the graph half of the preview is load-bearing (its own
+    /// `read_context` call fails outright on a bad context), but a
+    /// passage-store load failure degrades to "no passage" rather than
+    /// failing the whole preview — the doc comment's own contract.
+    /// The `read_unless_deleted` early return between those two is a
+    /// genuine race window (a concurrent delete landing between the
+    /// graph read above it and this fresh `lookup`) that no
+    /// single-threaded test can hit deterministically without a new
+    /// fault-injection hook; not exercised here.
+    #[test]
+    fn retract_source_preview_reports_the_graph_count_and_degrades_passage_presence_on_a_load_failure()
+     {
+        let dir = scratch_dir("retract-source-preview");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state.create("sake", ContextMeta::default()).unwrap();
+        state
+            .add_associations(
+                "sake",
+                vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("doc"))],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        state
+            .store_passages(
+                "sake",
+                plain(BTreeMap::from([(
+                    "doc".to_string(),
+                    "杜氏は高瀬。".to_string(),
+                )])),
+            )
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            state.retract_source_preview("sake", "doc").unwrap(),
+            (1, true),
+            "a resident passage store reports the edge count and presence honestly"
+        );
+
+        state.flush_dirty();
+        drop(state);
+        let log = dir.join("sake.passages.wal.jsonl");
+        let mut corrupt = fs::read(&log).unwrap();
+        corrupt.splice(0..0, *b"not json\n"); // a corrupt INTERIOR line
+        fs::write(&log, &corrupt).unwrap();
+
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        assert_eq!(
+            state.retract_source_preview("sake", "doc").unwrap(),
+            (1, false),
+            "a passage-store load failure degrades to no-passage, not an error"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// #678: `add_associations` itself, standalone — every other test
+    /// in this file only calls it as setup and `.unwrap().unwrap()`s
+    /// past the return value.
+    #[test]
+    fn add_associations_refuses_an_already_expired_deadline_and_otherwise_reports_its_own_applied_count()
+     {
+        let dir = scratch_dir("add-associations-contract");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        state.create("sake", ContextMeta::default()).unwrap();
+
+        let already_expired = Deadline::after(std::time::Duration::ZERO);
+        let refused = state.add_associations(
+            "sake",
+            vec![assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("doc"))],
+            already_expired,
+        );
+        assert!(
+            matches!(refused, Err(AccessError::DeadlineExceeded)),
+            "an already-expired deadline must refuse before any op runs: {refused:?}"
+        );
+        let untouched = state
+            .read_context("sake", |context| {
+                context.query(Some("蔵"), None, Some("高瀬")).is_empty()
+            })
+            .unwrap();
+        assert!(untouched, "a refused batch must not have written anything");
+
+        let applied = state
+            .add_associations(
+                "sake",
+                vec![
+                    assoc_op("蔵", "杜氏", "高瀬", 1.0, Some("doc")),
+                    assoc_op("蔵", "銘柄", "青嶺", 1.0, Some("doc")),
+                ],
+                Deadline::unbounded(),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(applied, 2, "a fully-applied batch reports its own op count");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// #678: every early return in `clamp_out_of_range_paragraphs` is
+    /// best-effort per its own doc — an unknown context, a deleted
+    /// entry, and a passage-store load failure all leave `paragraph`
+    /// as given rather than fail the write. Only a paragraph this
+    /// function can positively prove out of range against a resident,
+    /// healthy store gets cleared.
+    #[test]
+    fn clamp_out_of_range_paragraphs_only_clears_what_it_can_positively_prove_out_of_range() {
+        fn op_with_paragraph(paragraph: u32) -> AssocOp {
+            AssocOp {
+                subject: "蔵".to_string(),
+                label: "杜氏".to_string(),
+                object: "高瀬".to_string(),
+                weight: 1.0,
+                source: Some("doc".to_string()),
+                paragraph: Some(paragraph),
+            }
+        }
+
+        // (a) Unknown context: `lookup` fails, the op passes through.
+        let dir = scratch_dir("clamp-paragraphs");
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let unchanged =
+            state.clamp_out_of_range_paragraphs("no-such-context", vec![op_with_paragraph(99)]);
+        assert_eq!(
+            unchanged[0].paragraph,
+            Some(99),
+            "an unknown context must not clamp anything"
+        );
+
+        // (b) A deleted entry: `lookup` still finds it (the directory
+        // entry survives tombstoning) but `read_unless_deleted` refuses.
+        state.create("sake", ContextMeta::default()).unwrap();
+        {
+            let entry = state.lookup("sake").unwrap();
+            let mut inner = entry.inner.write();
+            state.tombstone_locked(&mut inner, &entry);
+        }
+        let unchanged = state.clamp_out_of_range_paragraphs("sake", vec![op_with_paragraph(99)]);
+        assert_eq!(
+            unchanged[0].paragraph,
+            Some(99),
+            "a deleted entry must not clamp anything"
+        );
+        let _ = fs::remove_dir_all(&dir);
+
+        // (c) A passage-store load failure: same corrupt-log technique
+        // as `a_failed_passage_load_is_quarantined_like_the_image`.
+        let dir = scratch_dir("clamp-paragraphs-load-failure");
+        {
+            let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+            state.create("sake", ContextMeta::default()).unwrap();
+            state
+                .store_passages(
+                    "sake",
+                    plain(BTreeMap::from([(
+                        "doc".to_string(),
+                        "段落1\n\n段落2".to_string(),
+                    )])),
+                )
+                .unwrap()
+                .unwrap();
+            state.flush_dirty();
+        }
+        let log = dir.join("sake.passages.wal.jsonl");
+        let healthy = fs::read(&log).unwrap();
+        let mut corrupt = healthy.clone();
+        corrupt.splice(0..0, *b"not json\n");
+        fs::write(&log, &corrupt).unwrap();
+
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let unchanged = state.clamp_out_of_range_paragraphs("sake", vec![op_with_paragraph(1)]);
+        assert_eq!(
+            unchanged[0].paragraph,
+            Some(1),
+            "a load failure must not clamp anything"
+        );
+        drop(state);
+
+        // (d) A healthy, resident store: the in-range paragraph
+        // survives untouched, only the out-of-range one is cleared.
+        fs::write(&log, &healthy).unwrap();
+        let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+        let clamped = state.clamp_out_of_range_paragraphs(
+            "sake",
+            vec![op_with_paragraph(1), op_with_paragraph(2)],
+        );
+        assert_eq!(
+            clamped[0].paragraph,
+            Some(1),
+            "index 1 is the store's last paragraph, still in range"
+        );
+        assert_eq!(
+            clamped[1].paragraph, None,
+            "index 2 is past the store's two paragraphs"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
