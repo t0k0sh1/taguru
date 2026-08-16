@@ -104,19 +104,27 @@ fn forward_headers(headers: &HeaderMap) -> HeaderMap {
     // AWS form is left as the caller sent it, since Taguru never mints
     // that spelling. A no-op with export off, which is what keeps the
     // copy above meaningful in that mode (ADR 0008 §10).
-    crate::trace::inject_current(&mut forwarded);
-    // `TraceContextPropagator::inject_context` always sets `tracestate`
-    // alongside `traceparent`, even when there is none to carry — an
-    // empty-but-present header rather than an absent one. Drop it in
-    // that case so a shard that got no inbound `tracestate` doesn't
-    // receive an empty one just because export happens to be on.
+    inject_current_trace(&mut forwarded);
+    forwarded
+}
+
+/// Overwrites `traceparent`/`tracestate` with the router's current
+/// span via [`crate::trace::inject_current`], then drops the
+/// empty-but-present `tracestate` that
+/// `TraceContextPropagator::inject_context` always sets alongside
+/// `traceparent` even when it has nothing to carry — a shard that got
+/// no inbound `tracestate` must not receive an empty one just because
+/// export happens to be on. Shared by the fan-out's
+/// [`forward_headers`] and the transparent proxy's outbound hop
+/// (issue #696) — the two places the router speaks to a shard.
+pub(super) fn inject_current_trace(forwarded: &mut HeaderMap) {
+    crate::trace::inject_current(forwarded);
     if forwarded
         .get(header::HeaderName::from_static("tracestate"))
         .is_some_and(|value| value.is_empty())
     {
         forwarded.remove(header::HeaderName::from_static("tracestate"));
     }
-    forwarded
 }
 
 impl RouterState {
