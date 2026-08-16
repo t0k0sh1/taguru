@@ -258,11 +258,94 @@ impl Server {
             .args([signal, &pid])
             .status()
             .expect("kill must run");
-        let _ = self.child.wait();
+        if signal == "-TERM" {
+            self.reap_gracefully(&pid);
+        } else {
+            let _ = self.child.wait();
+        }
         let data_dir = self.data_dir.clone();
         // Drop must not re-kill or delete the directory we hand back.
         std::mem::forget(self);
         data_dir
+    }
+
+    /// Bounded reap for the graceful path. Every step of a healthy
+    /// SIGTERM stop is itself bounded — the request drain by the
+    /// request timeout, the OTLP flush by the SDK's 5s shutdown
+    /// deadline — so a server still alive after
+    /// [`GRACEFUL_EXIT_DEADLINE`] is wedged, and a bare `wait()` would
+    /// sit until nextest's 120s kill with nothing to show for it
+    /// (issue #693). Escalating names the wedge instead: the server's
+    /// second-signal handler force-exits with code 130, so a second
+    /// SIGTERM answered by 130 means the signal path was alive and the
+    /// drain/flush is what stuck, a clean exit means the first SIGTERM
+    /// never reached the handler, and needing SIGKILL after both means
+    /// the process was not taking signals at all. Panics with that
+    /// verdict either way — the caller's assertions assume a graceful
+    /// flush that did not happen.
+    fn reap_gracefully(&mut self, pid: &str) {
+        if wait_with_deadline(&mut self.child, GRACEFUL_EXIT_DEADLINE).is_some() {
+            return;
+        }
+        Command::new("kill")
+            .args(["-TERM", pid])
+            .status()
+            .expect("kill must run");
+        if let Some(status) = wait_with_deadline(&mut self.child, SECOND_TERM_DEADLINE) {
+            let verdict = if status.code() == Some(130) {
+                "the second-signal force-exit fired, so signal delivery works — \
+                 the graceful drain or the shutdown flush is stuck"
+            } else {
+                "it ran a fresh graceful stop, so the first SIGTERM never reached \
+                 the shutdown handler"
+            };
+            panic!(
+                "server (pid {pid}) did not exit within {GRACEFUL_EXIT_DEADLINE:?} of \
+                 SIGTERM but exited on a second one ({status}): {verdict}"
+            );
+        }
+        Command::new("kill")
+            .args(["-KILL", pid])
+            .status()
+            .expect("kill must run");
+        let _ = self.child.wait();
+        panic!(
+            "server (pid {pid}) survived two SIGTERMs across \
+             {GRACEFUL_EXIT_DEADLINE:?} + {SECOND_TERM_DEADLINE:?} and needed \
+             SIGKILL — the process is not taking signals"
+        );
+    }
+}
+
+/// The graceful-stop escalation window (issue #693). Generous next to
+/// a healthy stop's worst case (a request drain bounded by the 30s
+/// default request timeout applies only when a call is in flight, and
+/// these synchronous tests never stop mid-call), tight next to
+/// nextest's 120s kill, so the escalation verdict lands well before
+/// the whole run is cancelled.
+const GRACEFUL_EXIT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// After a second SIGTERM the server either force-exits on the spot
+/// (its second-signal handler calls `exit(130)`) or is not handling
+/// signals — nothing legitimate takes longer than this.
+const SECOND_TERM_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Polls `child` until it exits or `deadline` passes — `try_wait` in a
+/// loop, never `wait`, so the caller keeps its escalation options
+/// against a wedged process (issue #693).
+fn wait_with_deadline(
+    child: &mut Child,
+    deadline: std::time::Duration,
+) -> Option<std::process::ExitStatus> {
+    let started = std::time::Instant::now();
+    loop {
+        if let Some(status) = child.try_wait().expect("try_wait must run") {
+            return Some(status);
+        }
+        if started.elapsed() >= deadline {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
     }
 }
 
