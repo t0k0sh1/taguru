@@ -259,7 +259,7 @@ impl Server {
             .status()
             .expect("kill must run");
         if signal == "-TERM" {
-            self.reap_gracefully(&pid);
+            self = self.reap_gracefully(&pid);
         } else {
             let _ = self.child.wait();
         }
@@ -278,14 +278,20 @@ impl Server {
     /// (issue #693). Escalating names the wedge instead: the server's
     /// second-signal handler force-exits with code 130, so a second
     /// SIGTERM answered by 130 means the signal path was alive and the
-    /// drain/flush is what stuck, a clean exit means the first SIGTERM
-    /// never reached the handler, and needing SIGKILL after both means
-    /// the process was not taking signals at all. Panics with that
-    /// verdict either way — the caller's assertions assume a graceful
-    /// flush that did not happen.
-    fn reap_gracefully(&mut self, pid: &str) {
+    /// drain/flush is what stuck; a clean exit means the first stop
+    /// either lost its SIGTERM or was merely slow (the two are
+    /// indistinguishable from out here — the first stop may complete
+    /// naturally just past the deadline, leaving the second SIGTERM
+    /// nothing to interrupt); needing SIGKILL after both means the
+    /// process was not taking signals at all. Panics with that verdict
+    /// either way — the caller's assertions assume a graceful flush
+    /// that did not happen. Consumes `self` so the unreapable branch
+    /// can leak the handle: a child in an uninterruptible kernel sleep
+    /// survives even SIGKILL, and `Drop`'s own unbounded `wait()`
+    /// would repeat the very hang this ladder exists to prevent.
+    fn reap_gracefully(mut self, pid: &str) -> Self {
         if wait_with_deadline(&mut self.child, GRACEFUL_EXIT_DEADLINE).is_some() {
-            return;
+            return self;
         }
         Command::new("kill")
             .args(["-TERM", pid])
@@ -296,23 +302,39 @@ impl Server {
                 "the second-signal force-exit fired, so signal delivery works — \
                  the graceful drain or the shutdown flush is stuck"
             } else {
-                "it ran a fresh graceful stop, so the first SIGTERM never reached \
-                 the shutdown handler"
+                "it exited cleanly — either the first SIGTERM never reached the \
+                 shutdown handler, or the first stop was merely slow and finished \
+                 just past the deadline"
             };
+            // Reaped: Drop's wait() is the cached status, so cleanup is safe.
+            drop(self);
             panic!(
                 "server (pid {pid}) did not exit within {GRACEFUL_EXIT_DEADLINE:?} of \
-                 SIGTERM but exited on a second one ({status}): {verdict}"
+                 SIGTERM but exited after a second one ({status}): {verdict}"
             );
         }
         Command::new("kill")
             .args(["-KILL", pid])
             .status()
             .expect("kill must run");
-        let _ = self.child.wait();
+        if wait_with_deadline(&mut self.child, SECOND_TERM_DEADLINE).is_some() {
+            drop(self);
+            panic!(
+                "server (pid {pid}) survived two SIGTERMs across \
+                 {GRACEFUL_EXIT_DEADLINE:?} + {SECOND_TERM_DEADLINE:?} and needed \
+                 SIGKILL — the process is not taking signals"
+            );
+        }
+        // Even SIGKILL did not reap it: an uninterruptible kernel
+        // sleep ignores every signal, and any further wait — Drop's
+        // included — would hang exactly like the bare `wait()` this
+        // ladder replaced. Leak the handle (one scratch dir under the
+        // OS temp dir) and let the kernel finish it whenever the sleep
+        // ends.
+        std::mem::forget(self);
         panic!(
-            "server (pid {pid}) survived two SIGTERMs across \
-             {GRACEFUL_EXIT_DEADLINE:?} + {SECOND_TERM_DEADLINE:?} and needed \
-             SIGKILL — the process is not taking signals"
+            "server (pid {pid}) is still unreaped {SECOND_TERM_DEADLINE:?} after \
+             SIGKILL — stuck in an uninterruptible kernel sleep; leaving it to the OS"
         );
     }
 }
