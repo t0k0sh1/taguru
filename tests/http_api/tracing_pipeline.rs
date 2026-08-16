@@ -433,6 +433,99 @@ fn a_provider_degrade_leaves_the_root_and_lane_span_unset_not_error() {
     );
 }
 
+/// issue #697 (i64 sweep regression): the aggregate citation-missing
+/// skip event fires exactly when at least one citation 404s — count
+/// recorded as intValue — and not at all when every citation resolves.
+#[test]
+fn the_citation_missing_event_fires_only_when_a_citation_404s() {
+    let collector = FakeCollector::start();
+    let server = Server::start_with_env(
+        "tracing-citation-missing",
+        &[
+            ("OTEL_EXPORTER_OTLP_ENDPOINT", collector.endpoint.as_str()),
+            ("OTEL_EXPORTER_OTLP_PROTOCOL", "http/json"),
+            ("OTEL_BSP_SCHEDULE_DELAY", "100"),
+        ],
+    );
+    seed_sake_context(&server);
+
+    // Every citation resolves: docs/kura.md paragraph 0 exists.
+    let result = server.call_tool(
+        1,
+        "retrieve",
+        json!({"context": "sake", "origins": ["青嶺酒造"]}),
+    );
+    assert!(result.get("isError").is_none(), "{result}");
+
+    // Attach a second, valid attribution (docs/uta.md paragraph 1),
+    // then re-store that source with ONE paragraph — storage replaces
+    // per source wholesale, so the stored attribution now points past
+    // the text and its citation 404s, which retrieve tolerates per
+    // item and reports once, in aggregate.
+    server.ok(
+        "POST",
+        "/contexts/sake/sources",
+        Some(json!({"passages": {"docs/uta.md": "杜氏の唄の第一段。\n\n杜氏の唄の第二段。"}})),
+    );
+    server.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([
+            {"subject": "青嶺酒造", "label": "唄", "object": "杜氏唄", "weight": 0.5,
+             "source": "docs/uta.md", "paragraph": 1},
+        ])),
+    );
+    server.ok(
+        "POST",
+        "/contexts/sake/sources",
+        Some(json!({"passages": {"docs/uta.md": "杜氏の唄の第一段。"}})),
+    );
+    let result = server.call_tool(
+        2,
+        "retrieve",
+        json!({"context": "sake", "origins": ["青嶺酒造"]}),
+    );
+    assert!(result.get("isError").is_none(), "{result}");
+
+    let _ = server.stop_gracefully();
+    let tree = SpanTree::new(collector.spans());
+
+    let citation_spans = tree.by_name("taguru.citations");
+    assert_eq!(citation_spans.len(), 2, "{citation_spans:?}");
+    let clean = citation_spans
+        .iter()
+        .find(|span| attribute(span, "taguru.citation.missing").is_none())
+        .unwrap_or_else(|| panic!("no all-resolved span among {citation_spans:?}"));
+    // Nothing missing: no attribute, and no skip event either.
+    assert!(
+        clean["events"]
+            .as_array()
+            .is_none_or(|events| events.iter().all(|event| event["name"] != "taguru.skip")),
+        "{clean:?}"
+    );
+    let degraded = citation_spans
+        .iter()
+        .find(|span| attribute(span, "taguru.citation.missing").is_some())
+        .unwrap_or_else(|| panic!("no citation-missing span among {citation_spans:?}"));
+    assert_eq!(
+        attribute(degraded, "taguru.citation.missing").map(|v| v["intValue"].clone()),
+        Some(json!("1")),
+        "{degraded:?}"
+    );
+    let skip_reasons: Vec<&str> = degraded["events"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|event| event["name"] == "taguru.skip")
+        .filter_map(event_reason)
+        .collect();
+    assert_eq!(
+        skip_reasons,
+        vec!["citation_passage_missing"],
+        "{degraded:?}"
+    );
+}
+
 /// issue #697: a requested rerank exports one `taguru.rerank` span
 /// whose `taguru.rerank.outcome` alone says ok-or-which-degrade —
 /// including the pre-flight refusals that never reach a provider,
