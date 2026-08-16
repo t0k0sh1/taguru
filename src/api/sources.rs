@@ -853,12 +853,10 @@ enum CacheProbe {
 /// `log_hit`/`log_semantic_hit` stay per-caller because `tracing`
 /// field names are macro-time identifiers, not runtime strings, so
 /// `context = %name` and `contexts = %targets.join(",")` cannot share
-/// one call; `on_hit` likewise stays per-caller because only
-/// `search_passages` carries a `taguru.passage_search` span to
-/// attribute a cache outcome onto — `cross_search_passages` has none
-/// today (found while extracting this block, not fixed here: giving
-/// cross searches their own span is a bigger design question than
-/// this duplication cleanup covers).
+/// one call; `on_hit` likewise stays per-caller because each caller
+/// records the outcome onto its own `taguru.passage_search` span, a
+/// local it alone can borrow (`cross_search_passages` gained its span
+/// with issue #690; before that it passed a no-op here).
 #[allow(clippy::too_many_arguments)]
 fn passage_search_cache_probe(
     state: &AppState,
@@ -1688,6 +1686,37 @@ pub async fn cross_search_passages(
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }
+    // One span for the whole fan-out — cache hits included, so a hit
+    // is a childless span of its own (ADR 0008 §5, §6), symmetric with
+    // `search_passages` at last (issue #690). One span at this level,
+    // not one per target: the cache probe, the merge, and the served
+    // page are whole-request facts, keyed on the resolved target list
+    // — `taguru.context.count` is what marks it as a cross search.
+    // Per-target facts (which lanes ran, what the vector lane did)
+    // live on the `taguru.passage_search.target` children created
+    // inside the fan-out jobs below. Unlike the single-context
+    // handler, this function has a real `.await` (the fan-out), so
+    // the guard is entered for the synchronous probe section, dropped
+    // before the await, and re-entered for the merge.
+    let span = crate::trace::span!(
+        "taguru.passage_search",
+        otel.kind = "internal",
+        taguru.op = SearchOp::SearchPassages.as_str(),
+        taguru.limit = limit,
+        // `as i64` so OTel backends see a number, not text (ADR 0008
+        // §6's count rule; a targets list is nowhere near overflow).
+        // The attributes shared with `search_passages`' span keep its
+        // raw types — retyping only this copy would fork one attribute
+        // into two wire types.
+        taguru.context.count = targets.len() as i64,
+        taguru.cache.result = tracing::field::Empty,
+        taguru.cache.semantic = tracing::field::Empty,
+        taguru.passage.hit_count = tracing::field::Empty,
+        taguru.passage.bm25_only = tracing::field::Empty,
+        taguru.passage.both_lanes = tracing::field::Empty,
+        taguru.passage.vector_only = tracing::field::Empty,
+    );
+    let entered = span.enter();
     // Resolved-target keying, minted before any fetch — the same
     // contract as `cross_recall`'s key (see there) with this op's
     // lanes.
@@ -1734,9 +1763,27 @@ pub async fn cross_search_passages(
                 "search",
             );
         },
-        // No span to record a cache outcome onto (issue #605): unlike
-        // `search_passages`, this handler carries none today.
-        |_hit| {},
+        |hit| match hit {
+            // A hit answers with THIS span and no target children —
+            // that zero-duration childless span is the signal (ADR
+            // 0008 §6.1).
+            CacheProbeHit::Exact => {
+                span.record("taguru.cache.result", "hit");
+                tracing::info!(taguru.reason = "retrieval_cache_hit", "taguru.cache");
+            }
+            // The exact tier missed (we are past that early return)
+            // but the semantic tier served — the two outcomes are
+            // independent attributes on purpose (ADR 0008 §6).
+            // `semantic_retrieval` already emitted its own
+            // `taguru.cache` event for the outcome.
+            CacheProbeHit::Semantic => {
+                span.record("taguru.cache.result", "miss");
+                span.record(
+                    "taguru.cache.semantic",
+                    crate::metrics::SemanticCacheOutcome::Hit.as_str(),
+                );
+            }
+        },
     ) {
         CacheProbe::Answered(response) => return response,
         CacheProbe::Fresh(fill) => fill,
@@ -1753,15 +1800,59 @@ pub async fn cross_search_passages(
     let semantic_floor = request.semantic_floor;
     let job_filter = filter.clone();
     let job_state = state.clone();
+    // A held guard must never cross an await point — dropped here,
+    // re-entered after the fan-out lands.
+    drop(entered);
+    // `spawn_blocking` threads have no current span, so each job
+    // re-enters the handler span explicitly (ADR 0008 §10 — the same
+    // boundary rule as the lanes' own `thread::scope`) and runs under
+    // a per-target child, mirroring the router's per-shard
+    // `taguru.shard_call`: the child groups that target's lane spans
+    // (which would otherwise export as parentless traces of their
+    // own) and carries the per-target facts one merged span cannot —
+    // which lanes ran, and what the vector lane did. The index is a
+    // position in the request's resolved target list, never the
+    // context name (ADR 0008 §8).
+    let parent = span.clone();
     let fetched = match bounded_parallel_map(targets.len(), permits, move |index| {
-        job_state.search_passages(
-            &owned_targets[index],
-            &query,
-            limit,
-            semantic_floor,
-            job_filter.as_ref(),
-            deadline,
-        )
+        parent.in_scope(|| {
+            let target_span = crate::trace::span!(
+                "taguru.passage_search.target",
+                otel.kind = "internal",
+                taguru.target.index = index as i64,
+                taguru.search.lanes = tracing::field::Empty,
+                taguru.search.vector.outcome = tracing::field::Empty,
+                taguru.passage.hit_count = tracing::field::Empty,
+                taguru.filter.eligible = tracing::field::Empty,
+                taguru.filter.total = tracing::field::Empty,
+            );
+            let _entered = target_span.enter();
+            let outcome = job_state.search_passages(
+                &owned_targets[index],
+                &query,
+                limit,
+                semantic_floor,
+                job_filter.as_ref(),
+                deadline,
+            );
+            if let Some(Ok(found)) = &outcome {
+                target_span.record("taguru.search.lanes", found.lanes.code());
+                if let crate::registry::PassageSearchLanes::Ran { vector } = &found.lanes {
+                    target_span.record("taguru.search.vector.outcome", vector.code());
+                }
+                // This target's own pre-merge count — what it OFFERED
+                // the merge; the parent span's `hit_count` is the
+                // served number (issue #621's rule applies to the
+                // metric and the merged page, not to this per-target
+                // evidence).
+                target_span.record("taguru.passage.hit_count", found.hits.len());
+                if let Some(filter_report) = &found.filter {
+                    target_span.record("taguru.filter.eligible", filter_report.eligible);
+                    target_span.record("taguru.filter.total", filter_report.total);
+                }
+            }
+            outcome
+        })
     })
     .await
     {
@@ -1770,6 +1861,9 @@ pub async fn cross_search_passages(
             return cross_job_panic(&state, &targets[panicked.index], started_at);
         }
     };
+    // Synchronous from here to the response — the guard can hold
+    // again, so the merge's own time lands on this span.
+    let _entered = span.enter();
 
     // Sequential merge: every fetch has already landed, so nothing
     // here blocks. The first per-context failure aborts the whole
@@ -1839,6 +1933,14 @@ pub async fn cross_search_passages(
             "search",
         );
     }
+    // Both tiers missed (an exact hit or a semantic hit would already
+    // have returned above) — this is a fresh compute, and the counts
+    // describe the merged, truncated pool the client actually gets.
+    span.record("taguru.cache.result", "miss");
+    span.record("taguru.passage.hit_count", pool.len());
+    span.record("taguru.passage.bm25_only", lane_hits[0]);
+    span.record("taguru.passage.both_lanes", lane_hits[1]);
+    span.record("taguru.passage.vector_only", lane_hits[2]);
     // One target's transient embedding failure uncaches the whole
     // response — see `PassageSearchLanes::embedding_failed`.
     let key = key.filter(|_| !embedding_failed);

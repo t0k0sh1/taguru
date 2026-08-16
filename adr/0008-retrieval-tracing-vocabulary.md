@@ -206,7 +206,8 @@ call, and hide the router's own elapsed time from the trace. **Decision:
 | `taguru.retrieve` | internal | `src/mcp/retrieve.rs::run_retrieve_bounded` |
 | `taguru.resolve` / `taguru.describe` / `taguru.query` / `taguru.activate` / `taguru.citations` / `taguru.passage_fallback` | internal | same, one per Step 1–5 |
 | `taguru.assemble_evidence` + the same six phase names | internal | `src/api/evidence/assemble.rs` |
-| `taguru.passage_search` | internal | `src/api/sources.rs::search_passages` |
+| `taguru.passage_search` | internal | `src/api/sources.rs::search_passages`; also `cross_search_passages` since #690 (one span for the whole fan-out, `taguru.context.count` marks it) |
+| `taguru.passage_search.target` | internal | `src/api/sources.rs::cross_search_passages` since #690 — one per fan-out target, carrying `taguru.target.index` and that target's lane facts; parents the target's own `taguru.search.*` spans across the blocking-pool boundary (§10) |
 | `taguru.search.bm25` / `taguru.search.ann` / `taguru.search.fuse` | internal | `src/registry/search.rs`, `src/embedding.rs::top_matches` |
 | `taguru.embed` / `taguru.rerank` | client | renamed from `"embed"`/`"rerank"` |
 | `taguru.shard_call` | client | `src/route/state.rs::call_shard`; also `src/route/proxy.rs::proxy_context` since #696 (the transparent proxy hop, same shape) |
@@ -252,7 +253,10 @@ text — `src/metrics.rs:2199` already documents this trap): `taguru.operation`,
 `taguru.fallback.reason`, `taguru.search.terms` / `.pool` / `.hits` /
 `.floor` / `.exact` / `.rows`, `taguru.filter.eligible` / `.total`,
 `taguru.limit`, `taguru.dispatch.bytes`, `taguru.result.bytes`,
-`taguru.embed.inputs`, `taguru.shard.index` / `.outcome`, `taguru.error.kind`.
+`taguru.embed.inputs`, `taguru.shard.index` / `.outcome`,
+`taguru.target.index` (a position in a cross search's resolved target
+list, added with #690 — the fan-out analog of `taguru.shard.index`),
+`taguru.error.kind`.
 
 Semconv wins where it already exists — `http.request.method`, `http.route`,
 `http.response.status_code` — and is never duplicated under `taguru.*`.

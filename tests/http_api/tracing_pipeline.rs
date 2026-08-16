@@ -221,6 +221,163 @@ fn a_cache_hit_answers_with_one_span_and_no_lane_children() {
     );
 }
 
+/// issue #690: `cross_search_passages` exports one
+/// `taguru.passage_search` span for the whole fan-out (marked by
+/// `taguru.context.count`) with one `taguru.passage_search.target`
+/// child per target — and each target child parents that target's own
+/// lane spans, which the `spawn_blocking` boundary would otherwise
+/// export as parentless traces of their own.
+#[test]
+fn a_cross_search_exports_one_span_with_a_child_per_target() {
+    let collector = FakeCollector::start();
+    let server = Server::start_with_env(
+        "tracing-cross-search-tree",
+        &[
+            ("OTEL_EXPORTER_OTLP_ENDPOINT", collector.endpoint.as_str()),
+            ("OTEL_EXPORTER_OTLP_PROTOCOL", "http/json"),
+            ("OTEL_BSP_SCHEDULE_DELAY", "100"),
+        ],
+    );
+    seed_sake_context(&server);
+    server.ok("PUT", "/contexts/kura", Some(json!({"description": "d"})));
+    server.ok(
+        "POST",
+        "/contexts/kura/sources",
+        Some(json!({"passages": {
+            "docs/toji.md": "杜氏の高瀬は霧沢町の生まれである。"
+        }})),
+    );
+
+    let found = server.ok(
+        "POST",
+        "/sources/search",
+        Some(json!({"contexts": ["sake", "kura"], "query": "杜氏"})),
+    );
+    assert!(!found["hits"].as_array().unwrap().is_empty(), "{found}");
+
+    let _ = server.stop_gracefully();
+    let tree = SpanTree::new(collector.spans());
+
+    let cross = tree.one("taguru.passage_search");
+    // The whole-request facts live here: the fan-out width, the cache
+    // outcome, and the served (merged, truncated) counts. The two NEW
+    // attributes (`context.count` here, `target.index` below) are
+    // recorded `as i64` and land as intValue; the ones shared with
+    // `search_passages`' span keep its raw `usize`/`u64` types, which
+    // export as text in this stack (the `src/metrics.rs` u16 trap) —
+    // retyping them all in one sweep is issue #697's call.
+    assert_eq!(
+        attribute(cross, "taguru.context.count").map(|v| v["intValue"].clone()),
+        Some(json!("2")),
+        "{cross:?}"
+    );
+    assert_eq!(
+        attribute(cross, "taguru.cache.result").map(|v| v["stringValue"].clone()),
+        Some(json!("miss"))
+    );
+    assert_eq!(
+        attribute(cross, "taguru.passage.hit_count").map(|v| v["stringValue"].clone()),
+        Some(json!(found["hits"].as_array().unwrap().len().to_string())),
+        "{cross:?}"
+    );
+    // Under the request span, not a root of its own.
+    let request_span = tree.one("POST /sources/search");
+    assert_eq!(cross["parentSpanId"], request_span["spanId"], "{cross:?}");
+
+    let targets = tree.by_name("taguru.passage_search.target");
+    assert_eq!(targets.len(), 2, "one child per target: {targets:?}");
+    let mut indexes = Vec::new();
+    for target in &targets {
+        assert_eq!(
+            target["parentSpanId"], cross["spanId"],
+            "every target span must be the fan-out span's child: {target:?}"
+        );
+        indexes.push(
+            attribute(target, "taguru.target.index")
+                .and_then(|v| v["intValue"].as_str().map(str::to_string)),
+        );
+        assert_eq!(
+            attribute(target, "taguru.search.lanes").map(|v| v["stringValue"].clone()),
+            Some(json!("ran")),
+            "{target:?}"
+        );
+        // The lane spans continue the SAME trace under their target —
+        // before #690 they exported as parentless roots (the
+        // `spawn_blocking` jobs had no current span to parent under).
+        let lanes: Vec<&str> = tree
+            .children(target)
+            .into_iter()
+            .filter_map(|span| span["name"].as_str())
+            .collect();
+        assert!(
+            lanes.contains(&"taguru.search.bm25") && lanes.contains(&"taguru.search.fuse"),
+            "each target must parent its own lane spans: {lanes:?}"
+        );
+        assert_eq!(target["traceId"], cross["traceId"], "{target:?}");
+    }
+    indexes.sort();
+    assert_eq!(
+        indexes,
+        vec![Some("0".to_string()), Some("1".to_string())],
+        "target indexes must be positions in the resolved target list"
+    );
+}
+
+/// issue #690, cache half: the second identical cross search answers
+/// from the retrieval cache — same childless-span signal as the
+/// single-context test above (ADR 0008 §6.1).
+#[test]
+fn a_cross_cache_hit_answers_with_one_childless_span() {
+    let collector = FakeCollector::start();
+    let server = Server::start_with_env(
+        "tracing-cross-cache-hit",
+        &[
+            ("OTEL_EXPORTER_OTLP_ENDPOINT", collector.endpoint.as_str()),
+            ("OTEL_EXPORTER_OTLP_PROTOCOL", "http/json"),
+            ("OTEL_BSP_SCHEDULE_DELAY", "100"),
+        ],
+    );
+    seed_sake_context(&server);
+
+    let search = |server: &Server| {
+        server.ok(
+            "POST",
+            "/sources/search",
+            Some(json!({"contexts": ["sake"], "query": "杜氏"})),
+        )
+    };
+    let first = search(&server);
+    assert!(!first["hits"].as_array().unwrap().is_empty(), "{first}");
+    let second = search(&server);
+    assert_eq!(first, second);
+
+    let _ = server.stop_gracefully();
+    let tree = SpanTree::new(collector.spans());
+
+    let searches = tree.by_name("taguru.passage_search");
+    assert_eq!(searches.len(), 2, "one span per call: {searches:?}");
+    let hit = searches
+        .iter()
+        .find(|span| attribute(span, "taguru.cache.result") == Some(&json!({"stringValue": "hit"})))
+        .unwrap_or_else(|| panic!("no cache-hit span among {searches:?}"));
+    let miss = searches
+        .iter()
+        .find(|span| {
+            attribute(span, "taguru.cache.result") == Some(&json!({"stringValue": "miss"}))
+        })
+        .unwrap_or_else(|| panic!("no cache-miss span among {searches:?}"));
+    assert!(
+        !tree.children(miss).is_empty(),
+        "a cache miss must run target children: {:?}",
+        tree.children(miss)
+    );
+    assert!(
+        tree.children(hit).is_empty(),
+        "a cache hit must answer with no target children: {:?}",
+        tree.children(hit)
+    );
+}
+
 #[test]
 fn a_provider_degrade_leaves_the_root_and_lane_span_unset_not_error() {
     let collector = FakeCollector::start();
