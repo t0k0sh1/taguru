@@ -2691,10 +2691,7 @@ mod tests {
     /// (`registry/passages.rs`), the same TTL quarantine
     /// `entry_passages` already had.
     #[test]
-    #[cfg(unix)]
     fn a_failed_vector_load_is_quarantined_then_recovers() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = scratch_dir("vectors-quarantine");
         {
             let calls = Arc::new(AtomicUsize::new(0));
@@ -2718,8 +2715,16 @@ mod tests {
             state.flush_dirty();
         }
 
+        // A directory at the sidecar's path is unreadable as a file
+        // (`fs::read` fails with `IsADirectory`/`ENOENT`-adjacent
+        // errors) regardless of the running process's own privileges —
+        // unlike a permission bit, which root or `CAP_DAC_OVERRIDE`
+        // (common in CI containers) simply ignores, making that
+        // approach non-deterministic (CodeRabbit, PR #689).
         let path = vectors_path(&dir, &file_stem("fruit"));
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+        let healthy = fs::read(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
 
         let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
         let entry = state.lookup("fruit").unwrap();
@@ -2734,7 +2739,8 @@ mod tests {
             "a load failure must not be cached as if the context were genuinely empty"
         );
 
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::remove_dir(&path).unwrap();
+        fs::write(&path, &healthy).unwrap();
 
         // Still within the quarantine window: the disk is not re-read
         // yet even though it has already recovered — same posture as
