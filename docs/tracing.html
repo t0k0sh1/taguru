@@ -200,8 +200,11 @@
         <code>communities_disabled</code>, <code>no_communities_artifact</code>,
         <code>deadline_exceeded_before_start</code> (a retrieve refused whole because the
         budget was spent before any step ran).</li>
-      <li><code>taguru.degrade</code> — a step ran, but in a reduced form. Reasons are the
-        <code>vector_*</code> outcomes above, prefixed the same way, plus
+      <li><code>taguru.degrade</code> — a step ran, but in a reduced form. Reasons are
+        <code>vector_off</code>, <code>vector_query_embedding_failed</code>,
+        <code>vector_no_vectors</code>, <code>vector_model_changed</code>,
+        <code>vector_width_changed</code> (every vector-lane outcome except <code>ran</code> — a
+        lane that ran has nothing to confess), plus
         <code>bridge_unreachable</code> — the stdio bridge answering a tool call with a transport
         error instead of the fronted server's reply.</li>
       <li><code>taguru.cache</code> — a cache tier decided the result. Reasons include
