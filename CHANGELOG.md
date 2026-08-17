@@ -14,6 +14,15 @@ Entries that change an on-disk format or a response shape say so.
   hold — no behavior change on 64-bit hosts, but a corrupted or
   hostile snapshot can no longer wrap `pos` around instead of being
   refused (#709).
+- `PassageVectorStore::ensure_ann_index` no longer blocks a concurrent
+  search through another thread's whole ANN build (0.6–1.3s at
+  `PASSAGE_ANN_THRESHOLD`) with no visibility into its own deadline.
+  The wait is now chopped into deadline-aware slices, and a search
+  that runs out of budget while waiting falls back to the exact sweep
+  for that call — the same substitute `top_matches` already takes
+  when the deadline is too tight to build the index at all (#709).
+  This is an internal behavior change; it does not change public
+  declarations, wire formats, or response shapes.
 
 ### Fixed
 - Hydration's published-file fetcher (`fetch_published_if_stale`) now

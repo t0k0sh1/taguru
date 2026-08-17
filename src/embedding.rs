@@ -1101,6 +1101,12 @@ const LEGACY_PASSAGE_VECTOR_MAGIC: &[u8; 8] = b"TAGURUP1";
 /// `const` assertion beside that limit pins the relationship).
 pub const PASSAGE_ANN_THRESHOLD: usize = 10_000;
 
+/// How often a search waiting on someone ELSE's ANN build (the lock
+/// in [`PassageVectorStore::ensure_ann_index`]) re-checks its own
+/// deadline — the same shape as `LocalEmbeddings::embed`'s
+/// `SHUTDOWN_POLL` wait on its engine lock.
+const ANN_LOCK_POLL: Duration = Duration::from_millis(50);
+
 /// Paragraph vectors for one context, `{stem}.pvectors.bin`. Unlike
 /// the gloss [`VectorStore`] this is a FLAT table — one contiguous
 /// `Vec<f32>` of unit rows — because every query scans all of it (a
@@ -1123,7 +1129,11 @@ pub struct PassageVectorStore {
     /// the index's lifetime is tied to the exact rows it was built
     /// from: a refresh replaces the whole `Arc<PassageVectorStore>`
     /// rather than mutating this one, so there is no separate
-    /// generation to invalidate this against.
+    /// generation to invalidate this against. A concurrent search
+    /// waits on this lock only up to [`ANN_LOCK_POLL`] slices of its
+    /// OWN deadline (see [`Self::ensure_ann_index`]) rather than
+    /// blocking through the whole build — the exact sweep it falls
+    /// back to is a fine substitute, never a degraded one.
     ann: Mutex<Option<Arc<PassageAnnIndex>>>,
 }
 
@@ -1301,11 +1311,31 @@ impl PassageVectorStore {
     }
 
     /// The cached index, building it first if this is the first search
-    /// to need one. `None` only when `deadline` is already spent —
-    /// the caller falls back to the exact sweep for just this call and
-    /// tries again next time.
+    /// to need one. `None` when `deadline` is already spent, or when
+    /// it runs out while waiting on a build already in progress on
+    /// another thread — either way the caller falls back to the exact
+    /// sweep for just this call and tries again next time.
     fn ensure_ann_index(&self, deadline: Deadline) -> Option<Arc<PassageAnnIndex>> {
-        let mut cached = self.ann.lock();
+        // Try FIRST, check the deadline only on a miss: an
+        // uncontended lock always wins immediately regardless of the
+        // slice passed, so a spent deadline still gets the CACHED
+        // index rather than being pushed onto the exact sweep for
+        // nothing. Only a genuine wait — someone else is mid-build —
+        // is what a spent deadline should cut short, so this caller
+        // can fall back to its own exact sweep instead of blocking
+        // through a build (0.6–1.3 s at [`PASSAGE_ANN_THRESHOLD`]) it
+        // has no visibility into.
+        let mut cached = loop {
+            if let Some(guard) = self
+                .ann
+                .try_lock_for(ANN_LOCK_POLL.min(deadline.remaining()))
+            {
+                break guard;
+            }
+            if deadline.expired() {
+                return None;
+            }
+        };
         if let Some(index) = &*cached {
             return Some(Arc::clone(index));
         }
@@ -2656,6 +2686,49 @@ mod tests {
         assert!(
             store.ann.lock().is_none(),
             "a spent deadline must skip building the index, not error"
+        );
+    }
+
+    #[test]
+    fn ensure_ann_index_gives_up_waiting_once_its_own_deadline_expires() {
+        let dim = 12;
+        let store = synthetic_passage_store(PASSAGE_ANN_THRESHOLD, dim);
+
+        // Stands in for a build already in progress on another
+        // thread: `parking_lot::Mutex` is not reentrant, so this
+        // thread's own `try_lock_for` behaves exactly like a real
+        // contended wait would — it can never win the lock while the
+        // guard below is held, deadline or not.
+        let guard = store.ann.lock();
+        let waited = Deadline::after(Duration::from_millis(20));
+        let result = store.ensure_ann_index(waited);
+        drop(guard);
+
+        assert!(
+            result.is_none(),
+            "a wait that outlasts its own deadline must give up rather than block through \
+             someone else's build"
+        );
+    }
+
+    #[test]
+    fn ensure_ann_index_returns_the_cached_index_even_past_an_already_expired_deadline() {
+        let dim = 12;
+        let store = synthetic_passage_store(PASSAGE_ANN_THRESHOLD, dim);
+        assert!(
+            store.ensure_ann_index(Deadline::unbounded()).is_some(),
+            "the first call builds the index"
+        );
+
+        // Try-first, deadline-second: an UNCONTENDED lock must win
+        // immediately no matter how spent the deadline already is —
+        // only a genuine wait should be what a deadline cuts short.
+        let spent = Deadline::after(Duration::ZERO);
+        std::thread::sleep(Duration::from_millis(1));
+        assert!(spent.expired());
+        assert!(
+            store.ensure_ann_index(spent).is_some(),
+            "an uncontended lock must still hand back the cached index past a spent deadline"
         );
     }
 
