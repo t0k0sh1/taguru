@@ -15,6 +15,16 @@ Entries that change an on-disk format or a response shape say so.
   hostile snapshot can no longer wrap `pos` around instead of being
   refused (#709).
 
+### Fixed
+- Hydration's published-file fetcher (`fetch_published_if_stale`) now
+  sends only `InvalidData`/`NotFound` errors through the manifest
+  re-read arbiter, matching the log-lane fetcher's existing
+  selection. A permanent failure (a permission error, or anything
+  else `ship::fetch` collapses to `io::ErrorKind::Other`) used to
+  burn all `FETCH_REFRESH_ROUNDS` re-reads (~600ms) before surfacing;
+  it now fails on the first attempt (#709). This does not change
+  public declarations, wire formats, or response shapes.
+
 ## [0.9.2] - 2026-08-17
 
 An observability release: the #549 audit of the metrics/tracing layer
