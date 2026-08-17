@@ -21,6 +21,8 @@ Entries that change an on-disk format or a response shape say so.
   that runs out of budget while waiting falls back to the exact sweep
   for that call — the same substitute `top_matches` already takes
   when the deadline is too tight to build the index at all (#709).
+  This is an internal behavior change; it does not change public
+  declarations, wire formats, or response shapes.
 
 ### Fixed
 - Hydration's published-file fetcher (`fetch_published_if_stale`) now
