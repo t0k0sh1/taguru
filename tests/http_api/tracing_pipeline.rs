@@ -104,6 +104,15 @@ fn a_composed_retrieve_exports_one_root_with_a_phase_span_per_step() {
         tree.by_name("taguru.query").is_empty(),
         "no labels were given; taguru.query must not exist"
     );
+    // #704 review: the composed path's two `taguru.passage.hit_count`
+    // records (the fallback phase and the root's copy) are `i64` — a
+    // raw `usize` would export as text, not intValue.
+    for span in [root, tree.one("taguru.passage_fallback")] {
+        assert!(
+            attribute(span, "taguru.passage.hit_count").is_some_and(|v| v["intValue"].is_string()),
+            "{span:?}"
+        );
+    }
 }
 
 #[test]
@@ -260,12 +269,9 @@ fn a_cross_search_exports_one_span_with_a_child_per_target() {
 
     let cross = tree.one("taguru.passage_search");
     // The whole-request facts live here: the fan-out width, the cache
-    // outcome, and the served (merged, truncated) counts. The two NEW
-    // attributes (`context.count` here, `target.index` below) are
-    // recorded `as i64` and land as intValue; the ones shared with
-    // `search_passages`' span keep its raw `usize`/`u64` types, which
-    // export as text in this stack (the `src/metrics.rs` u16 trap) —
-    // retyping them all in one sweep is issue #697's call.
+    // outcome, and the served (merged, truncated) counts — all counts
+    // as intValue since #697's i64 sweep (a raw `usize`/`u64` would
+    // export as text, the `src/metrics.rs` u16 trap).
     assert_eq!(
         attribute(cross, "taguru.context.count").map(|v| v["intValue"].clone()),
         Some(json!("2")),
@@ -276,7 +282,7 @@ fn a_cross_search_exports_one_span_with_a_child_per_target() {
         Some(json!("miss"))
     );
     assert_eq!(
-        attribute(cross, "taguru.passage.hit_count").map(|v| v["stringValue"].clone()),
+        attribute(cross, "taguru.passage.hit_count").map(|v| v["intValue"].clone()),
         Some(json!(found["hits"].as_array().unwrap().len().to_string())),
         "{cross:?}"
     );
@@ -433,6 +439,99 @@ fn a_provider_degrade_leaves_the_root_and_lane_span_unset_not_error() {
     assert!(
         degrade_reasons.contains(&"vector_query_embedding_failed"),
         "{degrade_reasons:?}"
+    );
+}
+
+/// issue #697 (i64 sweep regression): the aggregate citation-missing
+/// skip event fires exactly when at least one citation 404s — count
+/// recorded as intValue — and not at all when every citation resolves.
+#[test]
+fn the_citation_missing_event_fires_only_when_a_citation_404s() {
+    let collector = FakeCollector::start();
+    let server = Server::start_with_env(
+        "tracing-citation-missing",
+        &[
+            ("OTEL_EXPORTER_OTLP_ENDPOINT", collector.endpoint.as_str()),
+            ("OTEL_EXPORTER_OTLP_PROTOCOL", "http/json"),
+            ("OTEL_BSP_SCHEDULE_DELAY", "100"),
+        ],
+    );
+    seed_sake_context(&server);
+
+    // Every citation resolves: docs/kura.md paragraph 0 exists.
+    let result = server.call_tool(
+        1,
+        "retrieve",
+        json!({"context": "sake", "origins": ["青嶺酒造"]}),
+    );
+    assert!(result.get("isError").is_none(), "{result}");
+
+    // Attach a second, valid attribution (docs/uta.md paragraph 1),
+    // then re-store that source with ONE paragraph — storage replaces
+    // per source wholesale, so the stored attribution now points past
+    // the text and its citation 404s, which retrieve tolerates per
+    // item and reports once, in aggregate.
+    server.ok(
+        "POST",
+        "/contexts/sake/sources",
+        Some(json!({"passages": {"docs/uta.md": "杜氏の唄の第一段。\n\n杜氏の唄の第二段。"}})),
+    );
+    server.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([
+            {"subject": "青嶺酒造", "label": "唄", "object": "杜氏唄", "weight": 0.5,
+             "source": "docs/uta.md", "paragraph": 1},
+        ])),
+    );
+    server.ok(
+        "POST",
+        "/contexts/sake/sources",
+        Some(json!({"passages": {"docs/uta.md": "杜氏の唄の第一段。"}})),
+    );
+    let result = server.call_tool(
+        2,
+        "retrieve",
+        json!({"context": "sake", "origins": ["青嶺酒造"]}),
+    );
+    assert!(result.get("isError").is_none(), "{result}");
+
+    let _ = server.stop_gracefully();
+    let tree = SpanTree::new(collector.spans());
+
+    let citation_spans = tree.by_name("taguru.citations");
+    assert_eq!(citation_spans.len(), 2, "{citation_spans:?}");
+    let clean = citation_spans
+        .iter()
+        .find(|span| attribute(span, "taguru.citation.missing").is_none())
+        .unwrap_or_else(|| panic!("no all-resolved span among {citation_spans:?}"));
+    // Nothing missing: no attribute, and no skip event either.
+    assert!(
+        clean["events"]
+            .as_array()
+            .is_none_or(|events| events.iter().all(|event| event["name"] != "taguru.skip")),
+        "{clean:?}"
+    );
+    let degraded = citation_spans
+        .iter()
+        .find(|span| attribute(span, "taguru.citation.missing").is_some())
+        .unwrap_or_else(|| panic!("no citation-missing span among {citation_spans:?}"));
+    assert_eq!(
+        attribute(degraded, "taguru.citation.missing").map(|v| v["intValue"].clone()),
+        Some(json!("1")),
+        "{degraded:?}"
+    );
+    let skip_reasons: Vec<&str> = degraded["events"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|event| event["name"] == "taguru.skip")
+        .filter_map(event_reason)
+        .collect();
+    assert_eq!(
+        skip_reasons,
+        vec!["citation_passage_missing"],
+        "{degraded:?}"
     );
 }
 
@@ -625,6 +724,43 @@ fn the_communities_lane_records_op_hit_count_and_a_skip_reason() {
             .as_array()
             .is_none_or(|events| events.iter().all(|event| event["name"] != "taguru.skip")),
         "{ran:?}"
+    );
+}
+
+/// #704 review: explain's vector sweep passes `usize::MAX` as its
+/// pool ("everything") — the ann span must record the EFFECTIVE cap,
+/// clamped to the row count, not the raw request wrapped to -1.
+#[test]
+fn an_unbounded_explain_records_the_effective_ann_pool() {
+    let provider = crate::semantic_cache::spawn_paired_embeddings();
+    let collector = FakeCollector::start();
+    let mut env = crate::semantic_cache::semantic_env(&provider);
+    env.push(("OTEL_EXPORTER_OTLP_ENDPOINT", collector.endpoint.clone()));
+    env.push(("OTEL_EXPORTER_OTLP_PROTOCOL", "http/json".to_string()));
+    env.push(("OTEL_BSP_SCHEDULE_DELAY", "100".to_string()));
+    let borrowed: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let server = Server::start_with_env("tracing-explain-ann-pool", &borrowed);
+    seed_sake_context(&server);
+    server.ok("POST", "/contexts/sake/embeddings/refresh", None);
+
+    server.ok(
+        "POST",
+        "/contexts/sake/sources/search/explain",
+        Some(json!({"query": "杜氏", "source": "docs/kura.md"})),
+    );
+
+    let _ = server.stop_gracefully();
+    let tree = SpanTree::new(collector.spans());
+
+    // The only vector sweep in this test is explain's own unbounded
+    // one — seeding and the refresh never open an ann span.
+    let ann = tree.one("taguru.search.ann");
+    let rows = attribute(ann, "taguru.search.rows").map(|v| v["intValue"].clone());
+    assert!(rows.as_ref().is_some_and(|v| v.is_string()), "{ann:?}");
+    assert_eq!(
+        attribute(ann, "taguru.search.pool").map(|v| v["intValue"].clone()),
+        rows,
+        "an unbounded sweep's pool must clamp to the row count, not wrap negative: {ann:?}"
     );
 }
 

@@ -454,7 +454,7 @@ fn run_tool_worker(
         }
         match &outcome {
             Ok(text) => {
-                span.record("taguru.result.bytes", text.len());
+                span.record("taguru.result.bytes", text.len() as i64);
             }
             Err(error) => {
                 span.record("otel.status_code", "ERROR");

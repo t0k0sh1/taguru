@@ -102,7 +102,7 @@ async fn proxy_context(
         "taguru.shard_call",
         otel.kind = "client",
         otel.name = %format!("{} -> shard {shard}", parts.method),
-        taguru.shard.index = shard,
+        taguru.shard.index = shard as i64,
         http.request.method = %parts.method,
         http.response.status_code = tracing::field::Empty,
         taguru.shard.outcome = tracing::field::Empty,

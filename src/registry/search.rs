@@ -175,13 +175,13 @@ impl AppState {
                 let span = crate::trace::span!(
                     "taguru.search.bm25",
                     otel.kind = "internal",
-                    taguru.search.terms = query_grams.len(),
-                    taguru.search.pool = pool,
+                    taguru.search.terms = query_grams.len() as i64,
+                    taguru.search.pool = pool as i64,
                     taguru.search.hits = tracing::field::Empty,
                 );
                 let _guard = span.enter();
                 let hits = index.search(&query_grams, pool, eligible);
-                span.record("taguru.search.hits", hits.len());
+                span.record("taguru.search.hits", hits.len() as i64);
                 hits
             })
         };
@@ -246,8 +246,8 @@ impl AppState {
         let fuse_span = crate::trace::span!(
             "taguru.search.fuse",
             otel.kind = "internal",
-            taguru.search.lexical_pool = lexical.len(),
-            taguru.search.semantic_pool = semantic.len(),
+            taguru.search.lexical_pool = lexical.len() as i64,
+            taguru.search.semantic_pool = semantic.len() as i64,
             taguru.passage.hit_count = tracing::field::Empty,
         );
         let _fuse_guard = fuse_span.enter();
@@ -258,7 +258,7 @@ impl AppState {
         // plan that reports `vector.ran = true` (#601).
         let vector_ran = matches!(vector, VectorLaneStatus::Ran { .. });
         let hits = fuse_passage_lanes(&store, lexical, semantic, limit, vector_ran);
-        fuse_span.record("taguru.passage.hit_count", hits.len());
+        fuse_span.record("taguru.passage.hit_count", hits.len() as i64);
 
         Some(Ok(PassageSearch {
             hits,

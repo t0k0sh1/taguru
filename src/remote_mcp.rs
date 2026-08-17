@@ -227,7 +227,7 @@ pub async fn serve(
                 // reason the stdio bridge records its own copy of this
                 // field on `taguru.tool_call` rather than `taguru.retrieve`.
                 .inspect(|text| {
-                    tracing::Span::current().record("taguru.result.bytes", text.len());
+                    tracing::Span::current().record("taguru.result.bytes", text.len() as i64);
                 })
                 .map_err(mcp::ToolError::from)
             };

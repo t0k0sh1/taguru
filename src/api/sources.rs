@@ -971,7 +971,7 @@ pub async fn search_passages(
         "taguru.passage_search",
         otel.kind = "internal",
         taguru.op = SearchOp::SearchPassages.as_str(),
-        taguru.limit = limit,
+        taguru.limit = limit as i64,
         taguru.cache.result = tracing::field::Empty,
         taguru.cache.semantic = tracing::field::Empty,
         taguru.search.lanes = tracing::field::Empty,
@@ -1113,13 +1113,13 @@ pub async fn search_passages(
                     span.record("taguru.search.floor", f64::from(*floor));
                 }
             }
-            span.record("taguru.passage.hit_count", found.hits.len());
-            span.record("taguru.passage.bm25_only", lane_hits[0]);
-            span.record("taguru.passage.both_lanes", lane_hits[1]);
-            span.record("taguru.passage.vector_only", lane_hits[2]);
+            span.record("taguru.passage.hit_count", found.hits.len() as i64);
+            span.record("taguru.passage.bm25_only", lane_hits[0] as i64);
+            span.record("taguru.passage.both_lanes", lane_hits[1] as i64);
+            span.record("taguru.passage.vector_only", lane_hits[2] as i64);
             if let Some(filter_report) = found.filter {
-                span.record("taguru.filter.eligible", filter_report.eligible);
-                span.record("taguru.filter.total", filter_report.total);
+                span.record("taguru.filter.eligible", filter_report.eligible as i64);
+                span.record("taguru.filter.total", filter_report.total as i64);
             }
             // A transiently degraded fill must not be pinned — see
             // `PassageSearchLanes::embedding_failed` (the semantic
@@ -1710,7 +1710,7 @@ pub async fn cross_search_passages(
         "taguru.passage_search",
         otel.kind = "internal",
         taguru.op = SearchOp::SearchPassages.as_str(),
-        taguru.limit = limit,
+        taguru.limit = limit as i64,
         // `as i64` so OTel backends see a number, not text (ADR 0008
         // §6's count rule; a targets list is nowhere near overflow).
         // The attributes shared with `search_passages`' span keep its
@@ -1862,10 +1862,10 @@ pub async fn cross_search_passages(
                 // served number (issue #621's rule applies to the
                 // metric and the merged page, not to this per-target
                 // evidence).
-                target_span.record("taguru.passage.hit_count", found.hits.len());
+                target_span.record("taguru.passage.hit_count", found.hits.len() as i64);
                 if let Some(filter_report) = &found.filter {
-                    target_span.record("taguru.filter.eligible", filter_report.eligible);
-                    target_span.record("taguru.filter.total", filter_report.total);
+                    target_span.record("taguru.filter.eligible", filter_report.eligible as i64);
+                    target_span.record("taguru.filter.total", filter_report.total as i64);
                 }
             }
             outcome
@@ -1954,10 +1954,10 @@ pub async fn cross_search_passages(
     // have returned above) — this is a fresh compute, and the counts
     // describe the merged, truncated pool the client actually gets.
     span.record("taguru.cache.result", "miss");
-    span.record("taguru.passage.hit_count", pool.len());
-    span.record("taguru.passage.bm25_only", lane_hits[0]);
-    span.record("taguru.passage.both_lanes", lane_hits[1]);
-    span.record("taguru.passage.vector_only", lane_hits[2]);
+    span.record("taguru.passage.hit_count", pool.len() as i64);
+    span.record("taguru.passage.bm25_only", lane_hits[0] as i64);
+    span.record("taguru.passage.both_lanes", lane_hits[1] as i64);
+    span.record("taguru.passage.vector_only", lane_hits[2] as i64);
     // One target's transient embedding failure uncaches the whole
     // response — see `PassageSearchLanes::embedding_failed`.
     let key = key.filter(|_| !embedding_failed);
