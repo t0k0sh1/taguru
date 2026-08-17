@@ -5,6 +5,17 @@ Notable changes to taguru. The format follows
 follow [SemVer](https://semver.org/) (pre-1.0: minor bumps may break).
 Entries that change an on-disk format or a response shape say so.
 
+## [Unreleased]
+
+### Changed
+- `PassageVectorStore::ensure_ann_index` no longer blocks a concurrent
+  search through another thread's whole ANN build (0.6–1.3s at
+  `PASSAGE_ANN_THRESHOLD`) with no visibility into its own deadline.
+  The wait is now chopped into deadline-aware slices, and a search
+  that runs out of budget while waiting falls back to the exact sweep
+  for that call — the same substitute `top_matches` already takes
+  when the deadline is too tight to build the index at all (#709).
+
 ## [0.9.2] - 2026-08-17
 
 An observability release: the #549 audit of the metrics/tracing layer
