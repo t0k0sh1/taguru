@@ -2,7 +2,8 @@
 #
 # `Taguru.context(...).retrieve()` composes a client-side retrieval loop
 # (resolve -> describe -> query -> activate -> citations -> passage
-# fallback) the way `taguru.mcp.retrieve` does server-side. This spec
+# fallback) the way the server's own composed retrieve does (its root
+# span is also named `taguru.retrieve` — src/mcp/retrieve.rs). This spec
 # binds the span names, attribute keys, and reason codes both language
 # SDKs use to describe that composition, so the two implementations stay
 # one vocabulary rather than two that happen to look similar.
@@ -47,10 +48,12 @@ root_attributes:
 # event on the ROOT span (not on a phase span — a skipped step has no span
 # to attach it to), carrying one of these stable reason codes in the
 # `taguru.reason` field. This is the SDK's full vocabulary; server-side
-# ADR 0008 §7 has more (fallback_suppressed's near-cousin
-# `fallback_graph_empty`, lane-level `vector_*` codes, ...) that describe
+# ADR 0008 §7 has more (lane-level `vector_*` codes, the cache-tier
+# codes, `deadline_exceeded_before_start`, ...) that describe
 # server-internal mechanics the SDK cannot observe and therefore never
-# emits.
+# emits. (The server also records WHY a fallback did run — `graph_empty`
+# / `unconditional` — but as `taguru.fallback.reason` attribute values,
+# never as skip reasons: a lane that ran has nothing to skip.)
 skip_event: taguru.skip
 reason_field: taguru.reason
 skip_reasons:

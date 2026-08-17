@@ -107,23 +107,35 @@
    │  └─ taguru.skip (event)               <span class="c"># reason=citation_passage_missing — one aggregate event carrying the miss count, not one per miss</span>
    └─ taguru.passage_fallback              <span class="c"># absent unless the text lane actually ran</span>
       └─ taguru.passage_search             <span class="c"># same span search_passages emits directly</span>
+         ├─ taguru.embed (client)          <span class="c"># query embedding, exactly one per search — cue-cache hits skip it; the ANN sweep receives the pre-embedded cue</span>
          ├─ taguru.search.bm25
          ├─ taguru.search.ann              <span class="c"># absent: cache hit, or vector lane didn't run</span>
-         │  └─ taguru.embed (client)       <span class="c"># query embedding — cue-cache hits skip this</span>
          └─ taguru.search.fuse</code></pre>
     <p>
       <code>taguru.passage_search</code> is also the whole answer for a cache hit: one childless
       span, <code>taguru.cache.result=hit</code>, no lanes underneath — the absence of children
-      <i>is</i> the signal, not a separate flag to check. <code>assemble_evidence</code> composes
-      the identical five phases (minus <code>query</code>'s special-casing) under its own root,
-      <code>taguru.assemble_evidence</code>.
+      <i>is</i> the signal, not a separate flag to check. A cross-context search
+      (<code>POST /sources/search</code>) emits the same <code>taguru.passage_search</code> span
+      once for the whole fan-out (<code>taguru.context.count</code> marks it), with one
+      <code>taguru.passage_search.target</code> child per target — indexed by
+      <code>taguru.target.index</code>, never the context name — each parenting that target's own
+      lane spans.
+    </p>
+    <p>
+      <code>assemble_evidence</code> composes its own tree under
+      <code>taguru.assemble_evidence</code>: the same <code>resolve</code> / <code>query</code>
+      (labels-gated) / <code>activate</code> / <code>citations</code> phases, but no
+      <code>taguru.describe</code>, the unconditional passage lane under its own name
+      <code>taguru.passages</code> (this endpoint's passage search is a first-class lane, not a
+      fallback), and — opt-in — <code>taguru.communities</code>.
     </p>
     <p>
       Two more span kinds sit outside the retrieval tree proper:
     </p>
     <ul>
       <li><code>taguru.shard_call</code> (client, <code>otel.name</code> overridden to
-        <code>"{method} -&gt; shard {n}"</code>) — the router's fan-out to each shard, parenting that
+        <code>"{method} -&gt; shard {n}"</code>) — the router's dispatch to a shard, fan-out and
+        transparent per-context proxy hops alike (#696), parenting that
         shard's own <code>{method} {route}</code> span. A router deployment gets end-to-end traces
         across every shard, not just its own hop.</li>
       <li><code>taguru.tool_call</code> (server) — the stdio bridge's (<code>taguru-mcp</code>)
@@ -149,10 +161,27 @@
           <tr><td><code>taguru.rerank.outcome</code></td><td><code>ok</code> <code>not_configured</code> <code>model_mismatch</code> <code>empty_pool</code> <code>invalid_permutation</code> <code>circuit_open</code> <code>timeout</code> <code>provider_error</code></td></tr>
           <tr><td><code>taguru.search.lanes</code></td><td><code>no_query_terms</code> <code>zero_limit</code> <code>ran</code></td></tr>
           <tr><td><code>taguru.search.vector.outcome</code></td><td><code>off</code> <code>query_embedding_failed</code> <code>no_vectors</code> <code>model_changed</code> <code>width_changed</code> <code>ran</code></td></tr>
+          <tr><td><code>taguru.fallback.reason</code></td><td><code>fallback_not_requested</code> <code>fallback_suppressed</code> <code>graph_empty</code> <code>unconditional</code> — why the text fallback did or didn't run, on the <code>taguru.retrieve</code> root whether or not it ran (the first two double as <code>taguru.skip</code> reasons; the last two are attribute-only — a lane that ran has nothing to skip)</td></tr>
           <tr><td><code>taguru.error.kind</code></td><td><code>deadline_exceeded</code> <code>result_too_large</code> <code>cancelled</code> <code>invalid_argument</code> <code>not_found</code> <code>unauthorized</code> <code>upstream_error</code> <code>transport</code> <code>provider_error</code></td></tr>
         </tbody>
       </table>
     </div>
+    <p>
+      Count and size attributes ride alongside the enum-valued ones above, all exported as real
+      numbers (<code>i64</code> / <code>f64</code>): the <code>taguru.*.count</code> family
+      (<code>origin</code> / <code>label</code> / <code>anchor</code> / <code>association</code> /
+      <code>activation</code> / <code>context</code>), <code>taguru.citation.requested</code> /
+      <code>.returned</code> / <code>.missing</code>, <code>taguru.passage.hit_count</code> and
+      the per-lane hit split, <code>taguru.limit</code>, <code>taguru.search.terms</code> /
+      <code>.pool</code> / <code>.rows</code> / <code>.hits</code> / <code>.lexical_pool</code> /
+      <code>.semantic_pool</code> / <code>.floor</code>, <code>taguru.rerank.candidates</code>,
+      <code>taguru.embed.inputs</code>, <code>taguru.dispatch.bytes</code> /
+      <code>taguru.result.bytes</code>, and <code>taguru.shard.index</code> /
+      <code>taguru.target.index</code>. The only identity strings are
+      <code>taguru.rerank.model</code> and <code>taguru.embed.model</code> /
+      <code>.purpose</code> — operator configuration, never user data. ADR 0008 §6 is the
+      binding registry.
+    </p>
     <p>
       Three span-event names carry a <code>taguru.reason</code> field instead of a free-form
       message — <code>tracing-opentelemetry</code> maps a log line's <code>message</code> field to
@@ -172,11 +201,19 @@
         <code>deadline_exceeded_before_start</code> (a retrieve refused whole because the
         budget was spent before any step ran).</li>
       <li><code>taguru.degrade</code> — a step ran, but in a reduced form. Reasons are the
-        <code>vector_*</code> outcomes above, prefixed the same way.</li>
+        <code>vector_*</code> outcomes above, prefixed the same way, plus
+        <code>bridge_unreachable</code> — the stdio bridge answering a tool call with a transport
+        error instead of the fronted server's reply.</li>
       <li><code>taguru.cache</code> — a cache tier decided the result. Reasons include
         <code>retrieval_cache_hit</code>, <code>semantic_cache_hit</code> /
         <code>_stale</code> / <code>_guarded</code> / <code>_miss</code>, <code>cue_cache_hit</code>.</li>
     </ul>
+    <p class="note">
+      One producer sits outside those three event names: a batch import whose schema record
+      cannot be applied warns with <code>taguru.reason=schema_load_failed</code> /
+      <code>schema_write_failed</code> on its own <code>import schema record failed</code>
+      event — the same stable-code discipline, a different event name.
+    </p>
   </section>
 
   <section id="errors">
@@ -256,8 +293,9 @@
   <section id="sdks">
     <h2>SDK tracing (opt-in, zero required dependencies)</h2>
     <p class="section-sub">
-      <code>retrieve()</code> composes the identical client-side loop server-side
-      <code>taguru.mcp.retrieve</code> does — resolve → describe → query → activate → citations →
+      <code>retrieve()</code> composes the identical client-side loop the server's own composed
+      retrieve (<code>taguru.retrieve</code>, <code>src/mcp/retrieve.rs</code>) does — resolve →
+      describe → query → activate → citations →
       passage fallback — under its own <code>taguru.retrieve</code> root, with the same
       <code>taguru.skip</code> reason vocabulary. <code>sdk/spec/tracing.yaml</code> pins the exact
       span names, attribute keys, and reason codes both SDKs share; each language's own test suite

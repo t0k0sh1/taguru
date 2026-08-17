@@ -299,6 +299,13 @@ lane's ADR 0006 §11 degrade; the artifact-naming reason TEXT stays on
 the response plan alone, since it carries context names §8 forbids
 here).
 
+One producer carries `taguru.reason` outside the three event names above
+(noted with #698): `src/api/import.rs`'s schema-record failure warns with
+`schema_load_failed` / `schema_write_failed` on its own
+`import schema record failed` event — the same stable-code discipline,
+a different event name, kept because neither "skipped" nor "degraded"
+describes an import that FAILED whole.
+
 **No span-event field is ever named `error`.** `tracing-opentelemetry`
 special-cases exactly that name into an exception event and (by default) an
 ERROR status; §9's `.with_error_events_to_status(false)` makes an accidental
