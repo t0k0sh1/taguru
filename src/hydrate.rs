@@ -1190,7 +1190,12 @@ impl Hydrator {
                     }
                     return Ok(true);
                 }
-                Err(error) => {
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::InvalidData | io::ErrorKind::NotFound
+                    ) =>
+                {
                     if let Some(refreshed) = self
                         .refreshed_extent(root, name, round, error, |manifest| {
                             manifest.files.get(name).copied()
@@ -1201,6 +1206,13 @@ impl Hydrator {
                     }
                     round += 1;
                 }
+                // Anything else (a permission error, a transport
+                // failure `ship::fetch` collapsed to `Other`, ...) is
+                // not the lineage moving mid-hydration — the SAME
+                // selection `fetch_lane_if_stale` already applies —
+                // so it is not worth 4 rounds of paced manifest
+                // re-reads (~600ms) before surfacing.
+                Err(error) => return Err(error),
             }
         }
     }
@@ -1887,6 +1899,152 @@ mod tests {
             error.to_string().contains("do not match"),
             "unexpected error: {error}"
         );
+        let _ = std::fs::remove_dir_all(&bucket);
+        let _ = std::fs::remove_dir_all(&writer);
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    /// Delegates every call to `inner` except reads of one specific
+    /// key, which always answer a non-`NotFound`, non-`InvalidData`
+    /// error (`ship::fetch` collapses everything but a 404 to
+    /// `io::ErrorKind::Other`) — a permanent failure shape, counted so
+    /// the test below can assert it is tried exactly once rather than
+    /// spending `FETCH_REFRESH_ROUNDS` retries on something that will
+    /// never heal.
+    #[derive(Debug)]
+    struct PermanentGetFailStore {
+        inner: Arc<dyn ObjectStore>,
+        fails_on: StorePath,
+        attempts: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl std::fmt::Display for PermanentGetFailStore {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "PermanentGetFailStore({})", self.inner)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for PermanentGetFailStore {
+        async fn put_opts(
+            &self,
+            location: &StorePath,
+            payload: object_store::PutPayload,
+            opts: object_store::PutOptions,
+        ) -> object_store::Result<object_store::PutResult> {
+            self.inner.put_opts(location, payload, opts).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &StorePath,
+            opts: object_store::PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+            self.inner.put_multipart_opts(location, opts).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &StorePath,
+            options: object_store::GetOptions,
+        ) -> object_store::Result<object_store::GetResult> {
+            if *location == self.fails_on {
+                self.attempts
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                return Err(object_store::Error::Generic {
+                    store: "permanent-get-fail",
+                    source: "injected permanent failure (e.g. a revoked credential)".into(),
+                });
+            }
+            self.inner.get_opts(location, options).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: futures_util::stream::BoxStream<'static, object_store::Result<StorePath>>,
+        ) -> futures_util::stream::BoxStream<'static, object_store::Result<StorePath>> {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&StorePath>,
+        ) -> futures_util::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&StorePath>,
+        ) -> object_store::Result<object_store::ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &StorePath,
+            to: &StorePath,
+            options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+    }
+
+    /// A permanent fetch failure (a permission error, a collapsed
+    /// transport failure — anything that is not the lineage moving)
+    /// must not be handed to [`Hydrator::refreshed_extent`]: that
+    /// arbiter's whole premise is "maybe the writer just shipped a
+    /// newer generation", which spending `FETCH_REFRESH_ROUNDS` re-
+    /// reads (~600ms) cannot help with something that will never
+    /// heal. Before the fix, `fetch_published_if_stale` sent every
+    /// error through the arbiter regardless of kind — this asserts
+    /// the published-file fetcher now selects the SAME retryable
+    /// kinds `fetch_lane_if_stale` always has (`InvalidData` /
+    /// `NotFound`), so a permanent failure fails on the first
+    /// attempt.
+    #[tokio::test]
+    async fn a_permanent_published_fetch_failure_is_not_spent_on_the_reread_arbiter() {
+        let (bucket, writer) = shipped_bucket("published-permanent-fail", false).await;
+        let inner = local_store(&bucket);
+        let root = ship::gen_root(&StorePath::default(), 1);
+        let manifest = ship::read_manifest(inner.as_ref(), &root)
+            .await
+            .unwrap()
+            .expect("generation 1 shipped a manifest");
+
+        let fails_on = root.clone().join("files").join("ctx_a.meta.json");
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let store: Arc<dyn ObjectStore> = Arc::new(PermanentGetFailStore {
+            inner,
+            fails_on,
+            attempts: Arc::clone(&attempts),
+        });
+
+        let target = scratch("published-permanent-fail-target");
+        let hydrator = Hydrator::new(
+            Arc::clone(&store),
+            1,
+            root,
+            target.clone(),
+            manifest,
+            LanePolicy::ShippedExact,
+        );
+        let error = hydrator
+            .hydrate_shared()
+            .await
+            .expect_err("a permanent failure must surface, not heal");
+        assert_eq!(
+            error.kind(),
+            io::ErrorKind::Other,
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a non-retryable error kind must not be spent on the reread arbiter's rounds"
+        );
+
         let _ = std::fs::remove_dir_all(&bucket);
         let _ = std::fs::remove_dir_all(&writer);
         let _ = std::fs::remove_dir_all(&target);

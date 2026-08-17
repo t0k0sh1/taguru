@@ -8,6 +8,12 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Changed
+- `passages.rs`'s snapshot decoder now `checked_add`s every wire-length
+  offset before slicing, matching the discipline `embedding.rs::take`
+  and `context::image`'s `Reader::take`/`checked_arena_str` already
+  hold — no behavior change on 64-bit hosts, but a corrupted or
+  hostile snapshot can no longer wrap `pos` around instead of being
+  refused (#709).
 - `PassageVectorStore::ensure_ann_index` no longer blocks a concurrent
   search through another thread's whole ANN build (0.6–1.3s at
   `PASSAGE_ANN_THRESHOLD`) with no visibility into its own deadline.
@@ -15,6 +21,16 @@ Entries that change an on-disk format or a response shape say so.
   that runs out of budget while waiting falls back to the exact sweep
   for that call — the same substitute `top_matches` already takes
   when the deadline is too tight to build the index at all (#709).
+
+### Fixed
+- Hydration's published-file fetcher (`fetch_published_if_stale`) now
+  sends only `InvalidData`/`NotFound` errors through the manifest
+  re-read arbiter, matching the log-lane fetcher's existing
+  selection. A permanent failure (a permission error, or anything
+  else `ship::fetch` collapses to `io::ErrorKind::Other`) used to
+  burn all `FETCH_REFRESH_ROUNDS` re-reads (~600ms) before surfacing;
+  it now fails on the first attempt (#709). This does not change
+  public declarations, wire formats, or response shapes.
 
 ## [0.9.2] - 2026-08-17
 
