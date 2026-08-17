@@ -104,6 +104,15 @@ fn a_composed_retrieve_exports_one_root_with_a_phase_span_per_step() {
         tree.by_name("taguru.query").is_empty(),
         "no labels were given; taguru.query must not exist"
     );
+    // #704 review: the composed path's two `taguru.passage.hit_count`
+    // records (the fallback phase and the root's copy) are `i64` — a
+    // raw `usize` would export as text, not intValue.
+    for span in [root, tree.one("taguru.passage_fallback")] {
+        assert!(
+            attribute(span, "taguru.passage.hit_count").is_some_and(|v| v["intValue"].is_string()),
+            "{span:?}"
+        );
+    }
 }
 
 #[test]
@@ -715,6 +724,43 @@ fn the_communities_lane_records_op_hit_count_and_a_skip_reason() {
             .as_array()
             .is_none_or(|events| events.iter().all(|event| event["name"] != "taguru.skip")),
         "{ran:?}"
+    );
+}
+
+/// #704 review: explain's vector sweep passes `usize::MAX` as its
+/// pool ("everything") — the ann span must record the EFFECTIVE cap,
+/// clamped to the row count, not the raw request wrapped to -1.
+#[test]
+fn an_unbounded_explain_records_the_effective_ann_pool() {
+    let provider = crate::semantic_cache::spawn_paired_embeddings();
+    let collector = FakeCollector::start();
+    let mut env = crate::semantic_cache::semantic_env(&provider);
+    env.push(("OTEL_EXPORTER_OTLP_ENDPOINT", collector.endpoint.clone()));
+    env.push(("OTEL_EXPORTER_OTLP_PROTOCOL", "http/json".to_string()));
+    env.push(("OTEL_BSP_SCHEDULE_DELAY", "100".to_string()));
+    let borrowed: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let server = Server::start_with_env("tracing-explain-ann-pool", &borrowed);
+    seed_sake_context(&server);
+    server.ok("POST", "/contexts/sake/embeddings/refresh", None);
+
+    server.ok(
+        "POST",
+        "/contexts/sake/sources/search/explain",
+        Some(json!({"query": "杜氏", "source": "docs/kura.md"})),
+    );
+
+    let _ = server.stop_gracefully();
+    let tree = SpanTree::new(collector.spans());
+
+    // The only vector sweep in this test is explain's own unbounded
+    // one — seeding and the refresh never open an ann span.
+    let ann = tree.one("taguru.search.ann");
+    let rows = attribute(ann, "taguru.search.rows").map(|v| v["intValue"].clone());
+    assert!(rows.as_ref().is_some_and(|v| v.is_string()), "{ann:?}");
+    assert_eq!(
+        attribute(ann, "taguru.search.pool").map(|v| v["intValue"].clone()),
+        rows,
+        "an unbounded sweep's pool must clamp to the row count, not wrap negative: {ann:?}"
     );
 }
 

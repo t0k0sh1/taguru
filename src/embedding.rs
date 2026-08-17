@@ -1240,7 +1240,12 @@ impl PassageVectorStore {
         let span = crate::trace::span!(
             "taguru.search.ann",
             otel.kind = "internal",
-            taguru.search.pool = limit as i64,
+            // The EFFECTIVE pool cap, not the raw request: explain's
+            // sweep passes `usize::MAX` for "everything"
+            // (`registry/search.rs`), which a bare `as i64` would
+            // record as -1. Clamping to the row count loses nothing —
+            // a sweep can never return more rows than exist.
+            taguru.search.pool = limit.min(self.len()) as i64,
             taguru.search.rows = self.len() as i64,
             taguru.search.exact = tracing::field::Empty,
             taguru.search.hits = tracing::field::Empty,

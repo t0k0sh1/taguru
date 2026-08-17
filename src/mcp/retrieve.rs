@@ -529,7 +529,7 @@ fn retrieve_inner(
             Some(hits @ Value::Array(_)) => {
                 fallback_span.record(
                     "taguru.passage.hit_count",
-                    hits.as_array().map(Vec::len).unwrap_or(0),
+                    hits.as_array().map(Vec::len).unwrap_or(0) as i64,
                 );
                 passage_hits = hits;
                 search_plan = page.get_mut("plan").map(Value::take).unwrap_or(Value::Null);
@@ -545,7 +545,7 @@ fn retrieve_inner(
     }
     root.record(
         "taguru.passage.hit_count",
-        passage_hits.as_array().map(Vec::len).unwrap_or(0),
+        passage_hits.as_array().map(Vec::len).unwrap_or(0) as i64,
     );
     // The transport's own cap (`taguru.result.bytes`) is a separate
     // number — the composed JSON's true serialized size, known only
