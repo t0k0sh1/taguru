@@ -5,6 +5,81 @@ Notable changes to taguru. The format follows
 follow [SemVer](https://semver.org/) (pre-1.0: minor bumps may break).
 Entries that change an on-disk format or a response shape say so.
 
+## [0.9.2] - 2026-08-17
+
+An observability release: the #549 audit of the metrics/tracing layer
+and everything it surfaced, plus the cross-search span asymmetry #690
+had flagged since v0.9.1. No wire format or API response shape
+changes; the Prometheus exposition is byte-identical (the breaker
+families' renderer was deduplicated, not reworded). Alongside the
+fixes, the audit's measured test gaps closed (issue #699): the
+assemble-evidence tree, the search lanes' cross-thread span hand-off,
+and the stdio bridge's `taguru.tool_call` span are now verified
+against a real OTLP collector, and the embedding/hydrate/passages
+modules got their own audited mutation sweep (issue #550, findings
+tracked in #708–#710).
+
+### Added
+- Cross-context passage search (`POST /sources/search`) now traces:
+  one `taguru.passage_search` span per request (`taguru.context.count`
+  marks the fan-out width, cache outcomes recorded exactly as the
+  single-context span does) with one `taguru.passage_search.target`
+  child per target — which also re-parents each target's BM25/ANN/fuse
+  lane spans into the request's trace; previously they exported as
+  parentless traces of their own (issue #690).
+- The router's transparent per-context proxy routes
+  (`/contexts/{name}`, `/contexts/{name}/{*rest}`) now dispatch under
+  the same `taguru.shard_call` client span the fan-out verbs use, and
+  inject the router's own span into the forwarded trace headers — the
+  one hop where a trace still stopped dead at a process boundary.
+  Response bytes stay untouched, and with OTLP export off the
+  pass-through is bit-identical to before (issue #696).
+- ADR 0008's registered-but-unimplemented vocabulary now ships (issue
+  #697): `taguru.rerank.outcome` (the `taguru.rerank` span moved into
+  the §12 decision driver, so pre-flight refusals and the permutation
+  verdict reach traces too), `taguru.search.floor` (the effective
+  cosine floor, on the single and per-target search spans),
+  the `deadline_exceeded_before_start` skip event on the remote-MCP
+  pre-flight refusal, and the communities lane's `taguru.op`/
+  hit-count attributes plus a stable `no_communities_artifact` skip
+  reason. `taguru.resolve.tier` is documented as deliberately
+  metrics-only (a per-cue verdict has no per-cue span to ride).
+
+### Changed
+- Every `taguru.*` count/index/bytes span attribute now exports as a
+  real OTLP intValue (issue #697): the code recorded raw `usize`/`u64`,
+  which this tracing stack serializes as text — backends could neither
+  aggregate nor compare any count. 66 sites swept to explicit `i64`.
+- `taguru.search.ann`'s `taguru.search.pool` records the EFFECTIVE
+  pool cap (clamped to the row count) instead of the raw request —
+  explain's unbounded sweep passes `usize::MAX`, which previously
+  wrapped to `-1` on the wire.
+- With OTLP export enabled, the proxy hop rewrites `traceparent` to
+  the router's own span (see Added); a deployment that relied on the
+  bare pass-through of the caller's header will now see the router's
+  hop in its traces — which is the fix, but worth knowing when
+  comparing traces across the upgrade.
+
+### Fixed
+- The flaky `tracing_router` shutdown hang (issue #693): the test
+  harness's `stop_gracefully` now escalates — 30s grace, a second
+  SIGTERM, then SIGKILL with bounded reaping — and self-diagnoses
+  which shutdown stage wedged, so a recurrence names its cause
+  instead of timing out the whole suite.
+- `Histogram::observe` computed `elapsed.as_micros()` twice per
+  observation; the metrics module doc no longer claims a cheaper
+  hot path than the per-route counters actually have (issue #700).
+- docs/tracing.html and sdk/spec/tracing.yaml realigned with the
+  shipped vocabulary (issue #698): the never-existent
+  `taguru.mcp.retrieve` span name corrected to `taguru.retrieve`, the
+  assemble-evidence tree described as it actually nests (no
+  `describe`, `taguru.passages` as a first-class lane, opt-in
+  `taguru.communities`), `taguru.embed` placed as
+  `taguru.passage_search`'s direct child (not under the ANN span), and
+  the reason/attribute tables completed (`bridge_unreachable`,
+  `taguru.fallback.reason`'s four values, `schema_load_failed`/
+  `schema_write_failed`, the count-attribute family).
+
 ## [0.9.1] - 2026-08-16
 
 ### Added
@@ -3110,7 +3185,8 @@ OTLP tracing, OAuth for remote MCP), the MCP stdio bridge, and the
 offline tooling (`import`, `extract`, `inspect`, `estimate`).
 Published to crates.io and GHCR.
 
-[Unreleased]: https://github.com/t0k0sh1/taguru/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/t0k0sh1/taguru/compare/v0.9.2...HEAD
+[0.9.2]: https://github.com/t0k0sh1/taguru/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/t0k0sh1/taguru/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/t0k0sh1/taguru/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/t0k0sh1/taguru/compare/v0.7.0...v0.8.0
