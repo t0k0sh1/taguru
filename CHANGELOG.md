@@ -7,6 +7,14 @@ Entries that change an on-disk format or a response shape say so.
 
 ## [Unreleased]
 
+### Changed
+- `passages.rs`'s snapshot decoder now `checked_add`s every wire-length
+  offset before slicing, matching the discipline `embedding.rs::take`
+  and `context::image`'s `Reader::take`/`checked_arena_str` already
+  hold — no behavior change on 64-bit hosts, but a corrupted or
+  hostile snapshot can no longer wrap `pos` around instead of being
+  refused (#709).
+
 ### Fixed
 - Hydration's published-file fetcher (`fetch_published_if_stale`) now
   sends only `InvalidData`/`NotFound` errors through the manifest
