@@ -445,6 +445,11 @@ mod tests {
             "00-af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
             "00-+af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
             "00-0af7651916cd43dd8448eb211c80319c-b7ad6b716920333x-01",
+            // Right length but not hex, and hex but the wrong length —
+            // the version gate's two clauses each rejecting alone
+            // (issue #699: `||`→`&&` there survived every case above).
+            "zz-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+            "0-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
         ] {
             assert!(
                 parse_traceparent(bad, None).is_none(),
@@ -602,11 +607,45 @@ mod tests {
         assert!(outbound.is_empty());
     }
 
+    /// issue #699 (surfaced by its own mutation pass): only the
+    /// SAMPLED bit survives the flags mask — an unknown flag bit
+    /// (0x02, W3C's random-trace-id bit) must neither read as sampled
+    /// nor leak into the parent context.
+    #[test]
+    fn only_the_sampled_bit_survives_the_flags_mask() {
+        let unsampled = parse_traceparent(
+            "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-02",
+            None,
+        )
+        .expect("unknown flag bits still parse");
+        assert!(!unsampled.is_sampled(), "0x02 is not SAMPLED");
+        let sampled = parse_traceparent(
+            "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-03",
+            None,
+        )
+        .unwrap();
+        assert_eq!(sampled.trace_flags(), TraceFlags::SAMPLED);
+    }
+
     #[test]
     fn nonstandard_methods_fold_to_a_single_label() {
-        // Standard methods keep their identity...
-        assert_eq!(normalized_method(&http::Method::GET), "GET");
-        assert_eq!(normalized_method(&http::Method::DELETE), "DELETE");
+        // Every standard method keeps its identity — asserted
+        // exhaustively, or a deleted match arm silently folds that
+        // method into `<other>` (issue #699: five arm-deletion mutants
+        // survived a GET/DELETE-only version of this test).
+        for (method, label) in [
+            (http::Method::GET, "GET"),
+            (http::Method::POST, "POST"),
+            (http::Method::PUT, "PUT"),
+            (http::Method::DELETE, "DELETE"),
+            (http::Method::PATCH, "PATCH"),
+            (http::Method::HEAD, "HEAD"),
+            (http::Method::OPTIONS, "OPTIONS"),
+            (http::Method::TRACE, "TRACE"),
+            (http::Method::CONNECT, "CONNECT"),
+        ] {
+            assert_eq!(normalized_method(&method), label);
+        }
         // ...but an extension-method token — which a client can mint
         // without bound, ahead of auth — collapses to one series rather
         // than growing the metrics map (or a span name) per distinct

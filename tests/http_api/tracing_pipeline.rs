@@ -727,6 +727,197 @@ fn the_communities_lane_records_op_hit_count_and_a_skip_reason() {
     );
 }
 
+/// issue #699: the server-composed `taguru.assemble_evidence` tree —
+/// never wire-verified before — parents one phase span per lane that
+/// ran, under the request span, in one trace.
+#[test]
+fn an_assemble_evidence_call_exports_its_root_and_phase_tree() {
+    let collector = FakeCollector::start();
+    let server = Server::start_with_env(
+        "tracing-assemble-tree",
+        &[
+            ("OTEL_EXPORTER_OTLP_ENDPOINT", collector.endpoint.as_str()),
+            ("OTEL_EXPORTER_OTLP_PROTOCOL", "http/json"),
+            ("OTEL_BSP_SCHEDULE_DELAY", "100"),
+        ],
+    );
+    seed_sake_context(&server);
+
+    server.ok(
+        "POST",
+        "/contexts/sake/evidence",
+        Some(json!({"origins": ["青嶺酒造"], "labels": ["杜氏"]})),
+    );
+
+    let _ = server.stop_gracefully();
+    let tree = SpanTree::new(collector.spans());
+
+    let request_span = tree.one("POST /contexts/{name}/evidence");
+    let root = tree.one("taguru.assemble_evidence");
+    assert_eq!(
+        root["parentSpanId"], request_span["spanId"],
+        "the root must be the request span's child: {root:?}"
+    );
+    assert_eq!(
+        attribute(root, "taguru.operation").map(|v| v["stringValue"].clone()),
+        Some(json!("assemble_evidence"))
+    );
+    assert_eq!(
+        attribute(root, "taguru.origin.count").map(|v| v["intValue"].clone()),
+        Some(json!("1")),
+        "{root:?}"
+    );
+
+    // One phase span per lane that ran: resolve (always), query
+    // (labels were given), activate (anchors resolved), passages
+    // (always), citations (no opt-out on this endpoint). communities
+    // was not requested — no span, matching retrieve's absent-phase
+    // rule.
+    for phase in [
+        "taguru.resolve",
+        "taguru.query",
+        "taguru.activate",
+        "taguru.passages",
+        "taguru.citations",
+    ] {
+        let span = tree.one(phase);
+        assert_eq!(
+            span["traceId"], root["traceId"],
+            "{phase} must share the request's trace"
+        );
+        assert_eq!(
+            span["parentSpanId"], root["spanId"],
+            "{phase} must be taguru.assemble_evidence's child"
+        );
+    }
+    assert!(
+        tree.by_name("taguru.communities").is_empty(),
+        "include_communities was false; taguru.communities must not exist"
+    );
+    assert_eq!(
+        attribute(tree.one("taguru.passages"), "taguru.op").map(|v| v["stringValue"].clone()),
+        Some(json!("search_passages"))
+    );
+}
+
+/// issue #699: the BM25/ANN/fuse lane spans cross a `thread::scope`
+/// boundary — the explicit parent hand-off (ADR 0008 §10) is the only
+/// thing keeping them in the search's trace, and no test pinned it
+/// before. Also ADR §5's "one search shows exactly one `taguru.embed`
+/// child, not two": the probe's cue embedding serves the lane through
+/// the process cue cache.
+#[test]
+fn the_lane_spans_ride_the_thread_scope_into_the_search_trace() {
+    let provider = crate::semantic_cache::spawn_paired_embeddings();
+    let collector = FakeCollector::start();
+    let mut env = crate::semantic_cache::semantic_env(&provider);
+    env.push(("OTEL_EXPORTER_OTLP_ENDPOINT", collector.endpoint.clone()));
+    env.push(("OTEL_EXPORTER_OTLP_PROTOCOL", "http/json".to_string()));
+    env.push(("OTEL_BSP_SCHEDULE_DELAY", "100".to_string()));
+    let borrowed: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let server = Server::start_with_env("tracing-lane-spans", &borrowed);
+    seed_sake_context(&server);
+    server.ok("POST", "/contexts/sake/embeddings/refresh", None);
+
+    server.ok(
+        "POST",
+        "/contexts/sake/sources/search",
+        Some(json!({"query": "杜氏"})),
+    );
+
+    let _ = server.stop_gracefully();
+    let tree = SpanTree::new(collector.spans());
+
+    let search = tree.one("taguru.passage_search");
+    let children: Vec<&str> = tree
+        .children(search)
+        .into_iter()
+        .filter_map(|span| span["name"].as_str())
+        .collect();
+    for lane in [
+        "taguru.search.bm25",
+        "taguru.search.ann",
+        "taguru.search.fuse",
+    ] {
+        assert!(
+            children.contains(&lane),
+            "{lane} must parent under the search span, not export as a \
+             parentless trace: {children:?}"
+        );
+    }
+    assert_eq!(
+        children
+            .iter()
+            .filter(|name| **name == "taguru.embed")
+            .count(),
+        1,
+        "exactly one taguru.embed child serves the whole search: {children:?}"
+    );
+}
+
+/// issue #699: the stdio bridge's `taguru.tool_call` span itself —
+/// cli.rs proves the header side (a fresh parent id reaches the
+/// server), but no test ever read the span off the wire.
+#[test]
+fn the_stdio_bridge_exports_its_tool_call_server_span() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::{Command, Stdio};
+
+    let collector = FakeCollector::start();
+    let server = Server::start("tracing-bridge-tool-call");
+    let mut bridge = Command::new(env!("CARGO_BIN_EXE_taguru-mcp"))
+        .env("TAGURU_URL", &server.base)
+        .env_remove("TAGURU_API_TOKEN")
+        .env("OTEL_EXPORTER_OTLP_ENDPOINT", &collector.endpoint)
+        .env("OTEL_EXPORTER_OTLP_PROTOCOL", "http/json")
+        .env("OTEL_BSP_SCHEDULE_DELAY", "100")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("bridge must spawn");
+
+    let mut stdin = bridge.stdin.take().unwrap();
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {{"name": "list_contexts", "arguments": {{}}}}}}"#
+    )
+    .unwrap();
+    // EOF ends the bridge loop, which flushes the batch exporter on
+    // its way out — killing the process instead would lose the span.
+    drop(stdin);
+    let stdout = BufReader::new(bridge.stdout.take().unwrap());
+    let reply = stdout
+        .lines()
+        .next()
+        .expect("one JSON-RPC response line")
+        .expect("the bridge must answer");
+    assert!(reply.contains(r#""id":1"#), "{reply}");
+    assert!(bridge.wait().expect("bridge must exit").success());
+
+    let tree = SpanTree::new(collector.spans());
+    let tool_call = tree.one("mcp.tools/call list_contexts");
+    assert_eq!(
+        tool_call["kind"], 2,
+        "otel.kind must be server: {tool_call:?}"
+    );
+    assert_eq!(
+        attribute(tool_call, "taguru.transport").map(|v| v["stringValue"].clone()),
+        Some(json!("stdio_mcp"))
+    );
+    assert_eq!(
+        attribute(tool_call, "taguru.tool").map(|v| v["stringValue"].clone()),
+        Some(json!("list_contexts"))
+    );
+    // The transport records the composed result's true byte length on
+    // this span (ADR 0008 §6's `taguru.result.bytes` rule).
+    assert!(
+        attribute(tool_call, "taguru.result.bytes").is_some_and(|v| v["intValue"].is_string()),
+        "{tool_call:?}"
+    );
+    assert_eq!(status_code(tool_call), 0, "{tool_call:?}");
+}
+
 /// #704 review: explain's vector sweep passes `usize::MAX` as its
 /// pool ("everything") — the ann span must record the EFFECTIVE cap,
 /// clamped to the row count, not the raw request wrapped to -1.

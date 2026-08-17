@@ -582,6 +582,89 @@ mod tests {
         );
     }
 
+    /// issue #699: the shipper-side counters and gauges nobody
+    /// asserted before — each observable on the scrape, so the
+    /// record-side mutants (`-> ()`, `-> 1`) all die here.
+    #[test]
+    fn the_replication_counters_and_gauges_render_what_was_recorded() {
+        let metrics = Metrics::default();
+        // `last_flush_success_epoch`: 0 until a flush succeeds, then
+        // the getter, the scrape, and the stored value agree.
+        assert_eq!(metrics.last_flush_success_epoch(), 0);
+        metrics.record_flush("sake", true);
+        let epoch = metrics.last_flush_success_epoch();
+        assert_ne!(epoch, 0, "a successful flush stamps the epoch");
+
+        let before = metrics.render_prometheus(&empty_gauges());
+        assert!(
+            before.contains("taguru_replication_uploads_total 0"),
+            "{before}"
+        );
+        assert!(
+            before.contains("taguru_replication_last_success_timestamp_seconds 0"),
+            "{before}"
+        );
+        metrics.record_replication_upload();
+        metrics.record_replication_upload();
+        metrics.record_replication_success();
+        let after = metrics.render_prometheus(&empty_gauges());
+        assert!(
+            after.contains("taguru_replication_uploads_total 2"),
+            "{after}"
+        );
+        assert!(
+            !after.contains("taguru_replication_last_success_timestamp_seconds 0"),
+            "a successful cycle must stamp the last-success gauge: {after}"
+        );
+
+        // A deleted context's lane rows leave the replicaTION scrape —
+        // the shipper-side twin of `forget_replica_context`'s test.
+        metrics.note_replication_lane("sake", "graph", 3, 60);
+        let with_lane = metrics.render_prometheus(&empty_gauges());
+        assert!(
+            with_lane.contains("taguru_replication_lag_records{context=\"sake\",lane=\"graph\"} 3"),
+            "{with_lane}"
+        );
+        metrics.forget_replication_lane("sake", "graph");
+        let without = metrics.render_prometheus(&empty_gauges());
+        assert!(
+            !without.contains("context=\"sake\""),
+            "ghost labels must not linger: {without}"
+        );
+    }
+
+    /// issue #699: the replica-side manifest gauge, and
+    /// `note_replica_lane`'s own behind-arm — the existing tests only
+    /// stamped the age through `note_replica_shipped`.
+    #[test]
+    fn a_replica_manifest_and_a_behind_lane_stamp_their_gauges() {
+        let metrics = Metrics::default();
+        metrics.set_replica_mode();
+        metrics.note_replica_manifest(UNIX_EPOCH + Duration::from_secs(1_234));
+        let rendered = metrics.render_prometheus(&empty_gauges());
+        assert!(
+            rendered.contains("taguru_replica_manifest_timestamp_seconds 1234"),
+            "{rendered}"
+        );
+
+        // A lane reported behind by `note_replica_lane` itself starts
+        // the age (the `== 0` first-stamp arm), and a repeat report
+        // keeps the ORIGINAL stamp rather than restamping.
+        let key = ("mill".to_string(), "graph");
+        metrics.note_replica_lane("mill", "graph", 1, 5);
+        let stamped = metrics.replica_lag.lock()[&key].behind_since_epoch;
+        assert_ne!(
+            stamped, 0,
+            "a gap reported by note_replica_lane starts the age"
+        );
+        metrics.note_replica_lane("mill", "graph", 2, 5);
+        let kept = metrics.replica_lag.lock()[&key].behind_since_epoch;
+        assert_eq!(kept, stamped, "still behind: the age keeps its origin");
+        // Catching up clears it.
+        metrics.note_replica_lane("mill", "graph", 5, 5);
+        assert_eq!(metrics.replica_lag.lock()[&key].behind_since_epoch, 0);
+    }
+
     /// The in-flight counter: a ceiling refuses at capacity, zero means
     /// count-only, release always returns the slot — and both series
     /// render on /metrics.
