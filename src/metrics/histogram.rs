@@ -71,7 +71,7 @@ impl Histogram {
         {
             state.counts[bin] += 1;
         }
-        state.sum_micros += elapsed.as_micros() as u64;
+        state.sum_micros += micros as u64;
         state.count += 1;
     }
 
