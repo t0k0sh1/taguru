@@ -14,7 +14,8 @@ Entries that change an on-disk format or a response shape say so.
   selection. A permanent failure (a permission error, or anything
   else `ship::fetch` collapses to `io::ErrorKind::Other`) used to
   burn all `FETCH_REFRESH_ROUNDS` re-reads (~600ms) before surfacing;
-  it now fails on the first attempt (#709).
+  it now fails on the first attempt (#709). This does not change
+  public declarations, wire formats, or response shapes.
 
 ## [0.9.2] - 2026-08-17
 
