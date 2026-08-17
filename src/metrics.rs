@@ -589,11 +589,18 @@ mod tests {
     fn the_replication_counters_and_gauges_render_what_was_recorded() {
         let metrics = Metrics::default();
         // `last_flush_success_epoch`: 0 until a flush succeeds, then
-        // the getter, the scrape, and the stored value agree.
+        // the getter carries the REAL clock, not just any nonzero
+        // value (CodeRabbit, PR #706: `!= 0` alone would pass a
+        // hardcoded stamp).
         assert_eq!(metrics.last_flush_success_epoch(), 0);
+        let lo = Metrics::unix_now();
         metrics.record_flush("sake", true);
+        let hi = Metrics::unix_now();
         let epoch = metrics.last_flush_success_epoch();
-        assert_ne!(epoch, 0, "a successful flush stamps the epoch");
+        assert!(
+            (lo..=hi).contains(&epoch),
+            "a successful flush stamps the current epoch: {lo} <= {epoch} <= {hi}"
+        );
 
         let before = metrics.render_prometheus(&empty_gauges());
         assert!(
@@ -606,15 +613,26 @@ mod tests {
         );
         metrics.record_replication_upload();
         metrics.record_replication_upload();
+        let lo = Metrics::unix_now();
         metrics.record_replication_success();
+        let hi = Metrics::unix_now();
         let after = metrics.render_prometheus(&empty_gauges());
         assert!(
             after.contains("taguru_replication_uploads_total 2"),
             "{after}"
         );
+        let stamped: u64 = after
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("taguru_replication_last_success_timestamp_seconds ")
+            })
+            .expect("the last-success gauge must render")
+            .trim()
+            .parse()
+            .expect("a numeric sample");
         assert!(
-            !after.contains("taguru_replication_last_success_timestamp_seconds 0"),
-            "a successful cycle must stamp the last-success gauge: {after}"
+            (lo..=hi).contains(&stamped),
+            "a successful cycle stamps the current epoch: {lo} <= {stamped} <= {hi}"
         );
 
         // A deleted context's lane rows leave the replicaTION scrape —
@@ -657,9 +675,19 @@ mod tests {
             stamped, 0,
             "a gap reported by note_replica_lane starts the age"
         );
+        // Pinned to a sentinel the clock can never produce again, so
+        // the keep-check is deterministic: two calls inside the same
+        // epoch second would otherwise let a restamping implementation
+        // pass (CodeRabbit, PR #706).
+        metrics
+            .replica_lag
+            .lock()
+            .get_mut(&key)
+            .unwrap()
+            .behind_since_epoch = 42;
         metrics.note_replica_lane("mill", "graph", 2, 5);
         let kept = metrics.replica_lag.lock()[&key].behind_since_epoch;
-        assert_eq!(kept, stamped, "still behind: the age keeps its origin");
+        assert_eq!(kept, 42, "still behind: the age keeps its origin");
         // Catching up clears it.
         metrics.note_replica_lane("mill", "graph", 5, 5);
         assert_eq!(metrics.replica_lag.lock()[&key].behind_since_epoch, 0);

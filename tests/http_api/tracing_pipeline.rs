@@ -910,9 +910,19 @@ fn the_stdio_bridge_exports_its_tool_call_server_span() {
         Some(json!("list_contexts"))
     );
     // The transport records the composed result's true byte length on
-    // this span (ADR 0008 §6's `taguru.result.bytes` rule).
-    assert!(
-        attribute(tool_call, "taguru.result.bytes").is_some_and(|v| v["intValue"].is_string()),
+    // this span (ADR 0008 §6's `taguru.result.bytes` rule) — compared
+    // against the reply's own `content[0].text`, the exact string the
+    // bridge measured (CodeRabbit, PR #706: presence alone would pass
+    // a hardcoded or zero value).
+    let reply: serde_json::Value = serde_json::from_str(&reply).expect("a JSON-RPC reply");
+    let text = reply["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no result text in {reply}"));
+    assert_eq!(
+        attribute(tool_call, "taguru.result.bytes")
+            .and_then(|v| v["intValue"].as_str())
+            .and_then(|v| v.parse::<usize>().ok()),
+        Some(text.len()),
         "{tool_call:?}"
     );
     assert_eq!(status_code(tool_call), 0, "{tool_call:?}");
