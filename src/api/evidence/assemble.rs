@@ -455,10 +455,17 @@ pub async fn assemble_evidence(
         if deadline.expired() {
             return deadline_exceeded(started_at);
         }
+        // Same shape as the sibling `taguru.passages` (issue #697):
+        // op, limit, and a hit count — the hits ARE passages of the
+        // derived artifact context, so the count reuses
+        // `taguru.passage.hit_count` rather than minting a
+        // communities-only spelling.
         let communities_span = crate::trace::span!(
             "taguru.communities",
             otel.kind = "internal",
+            taguru.op = "search_communities",
             taguru.limit = search_limit,
+            taguru.passage.hit_count = tracing::field::Empty,
         );
         let _guard = communities_span.enter();
         match community_hits(
@@ -473,6 +480,7 @@ pub async fn assemble_evidence(
             started_at,
         ) {
             Ok(CommunityLaneOutcome::Found(found)) => {
+                communities_span.record("taguru.passage.hit_count", found.hits.len());
                 for (rank, hit) in found.hits.into_iter().enumerate() {
                     community_candidates.push(EvidenceCandidate::from_community(
                         &name,
@@ -482,7 +490,15 @@ pub async fn assemble_evidence(
                 }
                 LanePlan::ran()
             }
-            Ok(CommunityLaneOutcome::NoArtifact(reason)) => LanePlan::skipped(reason),
+            Ok(CommunityLaneOutcome::NoArtifact(reason)) => {
+                // Every other skip arm in this function emits its
+                // event (issue #697); a fixed code, never `reason` —
+                // that text names the context (forbidden on any
+                // span/event, ADR 0008 §8) and belongs to the
+                // response's plan alone.
+                tracing::info!(taguru.reason = "no_communities_artifact", "taguru.skip");
+                LanePlan::skipped(reason)
+            }
             // A real failure (malformed manifest, IO error, deadline,
             // access) — not the "no artifact" degrade — aborts the
             // whole call, the same severity a direct

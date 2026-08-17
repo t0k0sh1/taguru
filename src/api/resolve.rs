@@ -334,6 +334,14 @@ pub(super) fn resolve_served(
     };
     let tier = resolve_tier_of(&served);
     state.note_search(op, name, served.is_empty());
+    // Metrics-only ON PURPOSE (issue #697): ADR 0008 §6 registers
+    // `taguru.resolve.tier`, but the tier is a per-CUE verdict and
+    // every span that could carry it (`taguru.resolve` in
+    // retrieve/assemble) covers an origin LIST — recording one tier
+    // there would be wrong for every multi-origin call, and a
+    // per-origin child span would grow every retrieve's span count
+    // for a fact `taguru_resolves_total{tier}` already exposes.
+    // Revisit only if a per-cue resolve span ever exists.
     state.metrics().record_resolve_tier(tier);
     if search_log_enabled() {
         tracing::info!(

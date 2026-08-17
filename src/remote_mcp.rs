@@ -155,6 +155,15 @@ pub async fn serve(
                 span.record("otel.status_code", "ERROR");
                 span.record("taguru.error.kind", "deadline_exceeded");
                 let _span = span.entered();
+                // Entered first, so the event lands ON the span. The
+                // reason distinguishes "refused before any step ran"
+                // from `budget_exhausted`, which names a composition
+                // that spent its byte budget partway (ADR 0008 §7,
+                // issue #697).
+                tracing::info!(
+                    taguru.reason = "deadline_exceeded_before_start",
+                    "taguru.skip"
+                );
                 Err(DEADLINE_EXCEEDED.to_string().into())
             } else {
                 tokio::task::block_in_place(|| {
@@ -970,6 +979,102 @@ mod tests {
         assert_eq!(reply["result"]["isError"], true, "{reply}");
         let text = reply["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("exceeded its budget"), "{text}");
+    }
+
+    /// Captures every event's `(message, taguru.reason)` pair while
+    /// it's the default subscriber — the same recorder shape
+    /// `src/registry/semantic_cache.rs`'s span-event test uses, plus
+    /// `record_str` because this module's skip event passes its reason
+    /// as a bare `&str` (which the `record_debug` fallback would wrap
+    /// in quotes).
+    #[derive(Clone)]
+    struct ReasonRecorder(Arc<std::sync::Mutex<Vec<(String, String)>>>);
+
+    impl tracing::Subscriber for ReasonRecorder {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            #[derive(Default)]
+            struct EventFields {
+                message: Option<String>,
+                reason: Option<String>,
+            }
+            impl tracing::field::Visit for EventFields {
+                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                    match field.name() {
+                        "message" => self.message = Some(value.to_string()),
+                        "taguru.reason" => self.reason = Some(value.to_string()),
+                        _ => {}
+                    }
+                }
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    match field.name() {
+                        "message" => self.message = Some(format!("{value:?}")),
+                        "taguru.reason" => self.reason = Some(format!("{value:?}")),
+                        _ => {}
+                    }
+                }
+            }
+            let mut visitor = EventFields::default();
+            event.record(&mut visitor);
+            if let (Some(message), Some(reason)) = (visitor.message, visitor.reason) {
+                self.0.lock().unwrap().push((message, reason));
+            }
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    /// issue #697: the pre-flight refusal above must also emit ADR
+    /// 0008 §7's `deadline_exceeded_before_start` skip event — the
+    /// code that distinguishes "refused whole before any step ran"
+    /// from `budget_exhausted`'s mid-composition cutoff.
+    #[tokio::test]
+    async fn an_expired_deadline_emits_the_before_start_skip_event() {
+        use tracing::instrument::WithSubscriber as _;
+        let already_expired = Deadline::after(std::time::Duration::ZERO);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "retrieve",
+                "arguments": { "context": "ctx", "origins": ["x"] },
+            },
+        });
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = ReasonRecorder(Arc::clone(&events));
+        let _ = serve(
+            Router::new(),
+            Arc::new(String::new()),
+            None,
+            None,
+            HeaderMap::new(),
+            Bytes::from(body.to_string()),
+            usize::MAX,
+            already_expired,
+        )
+        .with_subscriber(subscriber)
+        .await;
+        assert_eq!(
+            events.lock().unwrap().as_slice(),
+            [(
+                "taguru.skip".to_string(),
+                "deadline_exceeded_before_start".to_string()
+            )],
+            "the refusal must emit exactly the before-start skip event"
+        );
     }
 
     /// One serve() round trip with explicit headers, against a router

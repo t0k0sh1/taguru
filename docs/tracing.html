@@ -146,7 +146,7 @@
           <tr><td><code>taguru.op</code></td><td><code>resolve</code> <code>query</code> <code>activate</code> <code>search_passages</code> …</td></tr>
           <tr><td><code>taguru.cache.result</code></td><td><code>hit</code> <code>miss</code></td></tr>
           <tr><td><code>taguru.cache.semantic</code></td><td><code>hit</code> <code>stale</code> <code>guarded</code> <code>miss</code></td></tr>
-          <tr><td><code>taguru.resolve.tier</code></td><td><code>lexical</code> <code>semantic</code> <code>weak_lexical</code> <code>miss</code></td></tr>
+          <tr><td><code>taguru.rerank.outcome</code></td><td><code>ok</code> <code>not_configured</code> <code>model_mismatch</code> <code>empty_pool</code> <code>invalid_permutation</code> <code>circuit_open</code> <code>timeout</code> <code>provider_error</code></td></tr>
           <tr><td><code>taguru.search.lanes</code></td><td><code>no_query_terms</code> <code>zero_limit</code> <code>ran</code></td></tr>
           <tr><td><code>taguru.search.vector.outcome</code></td><td><code>off</code> <code>query_embedding_failed</code> <code>no_vectors</code> <code>model_changed</code> <code>width_changed</code> <code>ran</code></td></tr>
           <tr><td><code>taguru.error.kind</code></td><td><code>deadline_exceeded</code> <code>result_too_large</code> <code>cancelled</code> <code>invalid_argument</code> <code>not_found</code> <code>unauthorized</code> <code>upstream_error</code> <code>transport</code> <code>provider_error</code></td></tr>
@@ -167,7 +167,10 @@
         count as <code>taguru.citation.missing</code>), <code>budget_exhausted</code> (the
         composed result outgrew <code>TAGURU_MCP_MAX_RESULT_BYTES</code> mid-loop),
         <code>fallback_not_requested</code>, <code>fallback_suppressed</code>,
-        <code>zero_limit</code>, <code>no_query_terms</code>.</li>
+        <code>zero_limit</code>, <code>no_query_terms</code>, <code>origins_empty</code>,
+        <code>communities_disabled</code>, <code>no_communities_artifact</code>,
+        <code>deadline_exceeded_before_start</code> (a retrieve refused whole because the
+        budget was spent before any step ran).</li>
       <li><code>taguru.degrade</code> — a step ran, but in a reduced form. Reasons are the
         <code>vector_*</code> outcomes above, prefixed the same way.</li>
       <li><code>taguru.cache</code> — a cache tier decided the result. Reasons include

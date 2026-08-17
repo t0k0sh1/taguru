@@ -233,12 +233,13 @@ reuses the same `as_str()`, made `pub(crate)`:
 | `taguru.op` | `SearchOp::as_str()` (`src/metrics.rs`) | `resolve` `resolve_label` `recall` `query` `activate` `search_passages` `search_communities` `explore` |
 | `taguru.cache.result` | `RetrievalCacheOp` hit/miss | `hit` `miss` |
 | `taguru.cache.semantic` | `SemanticCacheOutcome::as_str()` | `hit` `stale` `guarded` `miss` |
-| `taguru.resolve.tier` | `ResolveTier::as_str()` (already `pub`) | `lexical` `semantic` `weak_lexical` `miss` |
+| `taguru.resolve.tier` | `ResolveTier::as_str()` (already `pub`) | `lexical` `semantic` `weak_lexical` `miss` — registered but deliberately metrics-only as of #697: the tier is a per-cue verdict and every resolve span covers an origin list (see `src/api/resolve.rs::resolve_served`) |
 | `taguru.search.lanes` | new `PassageSearchLanes::code()` | `no_query_terms` `zero_limit` `ran` |
 | `taguru.search.vector.outcome` | new `VectorLaneStatus::code()` | `off` `query_embedding_failed` `no_vectors` `model_changed` `width_changed` `ran` |
 | `taguru.passage.bm25_only` / `.both_lanes` / `.vector_only` | `taguru_passage_lane_contributions_total{lane}` | counts (`i64`) |
 | `taguru.rerank.outcome` | `RerankOutcomeKind` / `REASON_*` | `ok` `not_configured` `model_mismatch` `empty_pool` `invalid_permutation` `circuit_open` `timeout` `provider_error` |
 | `taguru.embed.model` | operator's `TAGURU_EMBED_MODEL` | the configured model name — operator-bounded config like §8's shard-list rule, never user data (shipping on `taguru.embed` since the span was introduced; registered here with #474's second provider) |
+| `taguru.rerank.model` | operator's `TAGURU_RERANK_MODEL` | the configured model name — same operator-bounded rule as `taguru.embed.model` (shipping on `taguru.rerank` since the span was introduced; registered here with #697) |
 | `taguru.embed.purpose` | `EmbedPurpose::as_str()` | `index` `query` |
 
 The two new `code()` methods follow the file's own `ALL` + exhaustive-`match`
@@ -253,7 +254,9 @@ text — `src/metrics.rs:2199` already documents this trap): `taguru.operation`,
 `taguru.fallback.reason`, `taguru.search.terms` / `.pool` / `.hits` /
 `.floor` / `.exact` / `.rows`, `taguru.filter.eligible` / `.total`,
 `taguru.limit`, `taguru.dispatch.bytes`, `taguru.result.bytes`,
-`taguru.embed.inputs`, `taguru.shard.index` / `.outcome`,
+`taguru.embed.inputs`, `taguru.rerank.candidates` (shipping since the
+span was introduced; registered here with #697), `taguru.shard.index` /
+`.outcome`,
 `taguru.target.index` (a position in a cross search's resolved target
 list, added with #690 — the fan-out analog of `taguru.shard.index`),
 `taguru.error.kind`.
@@ -289,7 +292,12 @@ carrying `taguru.reason` from this closed vocabulary: `describe_disabled`,
 `semantic_cache_hit`/`_stale`/`_guarded`/`_miss`, `cue_cache_hit`,
 `zero_limit`, `no_query_terms`, `vector_off`, `vector_query_embedding_failed`,
 `vector_no_vectors`, `vector_model_changed`, `vector_width_changed`,
-`bridge_unreachable`.
+`bridge_unreachable` — plus, registered with #697: `origins_empty` and
+`communities_disabled` (both shipped with `assemble_evidence` but were
+missing from this list) and `no_communities_artifact` (the communities
+lane's ADR 0006 §11 degrade; the artifact-naming reason TEXT stays on
+the response plan alone, since it carries context names §8 forbids
+here).
 
 **No span-event field is ever named `error`.** `tracing-opentelemetry`
 special-cases exactly that name into an exception event and (by default) an
