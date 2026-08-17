@@ -5,6 +5,16 @@ Notable changes to taguru. The format follows
 follow [SemVer](https://semver.org/) (pre-1.0: minor bumps may break).
 Entries that change an on-disk format or a response shape say so.
 
+## [Unreleased]
+
+### Changed
+- `passages.rs`'s snapshot decoder now `checked_add`s every wire-length
+  offset before slicing, matching the discipline `embedding.rs::take`
+  and `context::image`'s `Reader::take`/`checked_arena_str` already
+  hold — no behavior change on 64-bit hosts, but a corrupted or
+  hostile snapshot can no longer wrap `pos` around instead of being
+  refused (#709).
+
 ## [0.9.2] - 2026-08-17
 
 An observability release: the #549 audit of the metrics/tracing layer

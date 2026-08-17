@@ -1199,11 +1199,9 @@ fn snapshot_from_bytes(bytes: &[u8]) -> Option<(BTreeMap<String, Arc<PassageReco
     } else {
         bytes
     };
-    pos += 8;
-    let watermark = u64::from_le_bytes(bytes.get(pos..pos + 8)?.try_into().ok()?);
-    pos += 8;
-    let count = u32::from_le_bytes(bytes.get(pos..pos + 4)?.try_into().ok()?) as usize;
-    pos += 4;
+    take(bytes, &mut pos, 8)?;
+    let watermark = read_u64(bytes, &mut pos)?;
+    let count = read_u32(bytes, &mut pos)? as usize;
     let mut sources = BTreeMap::new();
     for _ in 0..count {
         let source = String::from_utf8(read_chunk(bytes, &mut pos)?.to_vec()).ok()?;
@@ -1212,24 +1210,18 @@ fn snapshot_from_bytes(bytes: &[u8]) -> Option<(BTreeMap<String, Arc<PassageReco
             .to_string();
         let mut questions = Vec::new();
         if questions_on_disk {
-            let question_count =
-                u32::from_le_bytes(bytes.get(pos..pos + 4)?.try_into().ok()?) as usize;
-            pos += 4;
+            let question_count = read_u32(bytes, &mut pos)? as usize;
             for _ in 0..question_count {
-                let paragraph = u32::from_le_bytes(bytes.get(pos..pos + 4)?.try_into().ok()?);
-                pos += 4;
+                let paragraph = read_u32(bytes, &mut pos)?;
                 let question = String::from_utf8(read_chunk(bytes, &mut pos)?.to_vec()).ok()?;
                 questions.push((paragraph, question));
             }
         }
         let mut sections = Vec::new();
         if sections_on_disk {
-            let section_count =
-                u32::from_le_bytes(bytes.get(pos..pos + 4)?.try_into().ok()?) as usize;
-            pos += 4;
+            let section_count = read_u32(bytes, &mut pos)? as usize;
             for _ in 0..section_count {
-                let paragraph = u32::from_le_bytes(bytes.get(pos..pos + 4)?.try_into().ok()?);
-                pos += 4;
+                let paragraph = read_u32(bytes, &mut pos)?;
                 let label = String::from_utf8(read_chunk(bytes, &mut pos)?.to_vec()).ok()?;
                 sections.push((paragraph, label));
             }
@@ -1238,8 +1230,7 @@ fn snapshot_from_bytes(bytes: &[u8]) -> Option<(BTreeMap<String, Arc<PassageReco
         if meta_on_disk {
             meta.stored_at = read_opt_u64(bytes, &mut pos)?;
             meta.date = read_opt_u64(bytes, &mut pos)?;
-            let tag_count = u32::from_le_bytes(bytes.get(pos..pos + 4)?.try_into().ok()?) as usize;
-            pos += 4;
+            let tag_count = read_u32(bytes, &mut pos)? as usize;
             for _ in 0..tag_count {
                 let tag = String::from_utf8(read_chunk(bytes, &mut pos)?.to_vec()).ok()?;
                 meta.tags.push(tag);
@@ -1247,12 +1238,9 @@ fn snapshot_from_bytes(bytes: &[u8]) -> Option<(BTreeMap<String, Arc<PassageReco
         }
         let mut locators = Vec::new();
         if locators_on_disk {
-            let locator_count =
-                u32::from_le_bytes(bytes.get(pos..pos + 4)?.try_into().ok()?) as usize;
-            pos += 4;
+            let locator_count = read_u32(bytes, &mut pos)? as usize;
             for _ in 0..locator_count {
-                let paragraph = u32::from_le_bytes(bytes.get(pos..pos + 4)?.try_into().ok()?);
-                pos += 4;
+                let paragraph = read_u32(bytes, &mut pos)?;
                 let kind = String::from_utf8(read_chunk(bytes, &mut pos)?.to_vec()).ok()?;
                 let value = String::from_utf8(read_chunk(bytes, &mut pos)?.to_vec()).ok()?;
                 locators.push((paragraph, Locator { kind, value }));
@@ -1285,25 +1273,37 @@ fn write_opt_u64(out: &mut Vec<u8>, value: Option<u64>) {
 }
 
 fn read_opt_u64(bytes: &[u8], pos: &mut usize) -> Option<Option<u64>> {
-    let flag = *bytes.get(*pos)?;
-    *pos += 1;
+    let flag = take(bytes, pos, 1)?[0];
     match flag {
         0 => Some(None),
-        1 => {
-            let value = u64::from_le_bytes(bytes.get(*pos..*pos + 8)?.try_into().ok()?);
-            *pos += 8;
-            Some(Some(value))
-        }
+        1 => Some(Some(read_u64(bytes, pos)?)),
         _ => None,
     }
 }
 
 fn read_chunk<'b>(bytes: &'b [u8], pos: &mut usize) -> Option<&'b [u8]> {
-    let len = u32::from_le_bytes(bytes.get(*pos..*pos + 4)?.try_into().ok()?) as usize;
-    *pos += 4;
-    let chunk = bytes.get(*pos..*pos + len)?;
-    *pos += len;
-    Some(chunk)
+    let len = read_u32(bytes, pos)? as usize;
+    take(bytes, pos, len)
+}
+
+/// Consumes `len` bytes at `*pos`, `checked_add`ed like every other
+/// arena/section reader in this codebase (`embedding`'s `take`,
+/// `context::image`'s `checked_arena_str`/`Reader::take`) — `len`
+/// comes straight off the wire (a parsed `u32`), so it must never be
+/// added to `*pos` unchecked.
+fn take<'b>(bytes: &'b [u8], pos: &mut usize, len: usize) -> Option<&'b [u8]> {
+    let end = pos.checked_add(len)?;
+    let slice = bytes.get(*pos..end)?;
+    *pos = end;
+    Some(slice)
+}
+
+fn read_u32(bytes: &[u8], pos: &mut usize) -> Option<u32> {
+    Some(u32::from_le_bytes(take(bytes, pos, 4)?.try_into().ok()?))
+}
+
+fn read_u64(bytes: &[u8], pos: &mut usize) -> Option<u64> {
+    Some(u64::from_le_bytes(take(bytes, pos, 8)?.try_into().ok()?))
 }
 
 #[cfg(test)]
@@ -2615,6 +2615,29 @@ mod tests {
             None,
             "past the end is None, not a panic"
         );
+    }
+
+    #[test]
+    fn take_refuses_a_length_that_would_overflow_pos_instead_of_wrapping() {
+        // `len` here stands in for a wire-supplied u32 chunk length —
+        // the exact value `read_chunk` would hand `take` for a
+        // corrupted or hostile snapshot. `pos + len` wrapping around
+        // usize::MAX would otherwise land back inside the slice and
+        // parse garbage as if it were a valid chunk.
+        let bytes = [0u8; 4];
+        let mut pos = usize::MAX - 1;
+        assert_eq!(take(&bytes, &mut pos, 4), None);
+        assert_eq!(pos, usize::MAX - 1, "a refused take must not move pos");
+    }
+
+    #[test]
+    fn read_chunk_refuses_a_wire_length_past_the_remaining_bytes() {
+        // A truncated chunk: the declared length (u32::MAX) vastly
+        // exceeds what follows the length prefix.
+        let mut bytes = u32::MAX.to_le_bytes().to_vec();
+        bytes.extend_from_slice(b"short");
+        let mut pos = 0usize;
+        assert_eq!(read_chunk(&bytes, &mut pos), None);
     }
 
     mod proptests {
