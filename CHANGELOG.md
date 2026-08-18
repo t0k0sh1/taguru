@@ -8,6 +8,14 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Changed
+- `fastembed` updated to 6.0.0 (from 5.17.4); its only breaking change
+  is an internal error-type refactor with no source-level impact here.
+  `LOCAL_MODELS.download_mib` (and `taguru-code models`'s
+  `download_mib` field) is re-measured against each model's actual
+  cache-directory footprint — weights plus tokenizer/config, not just
+  the ONNX file — and is slightly higher for all five models than
+  before; `dims`/`license`/`e5_prefix`/`multilingual` are unchanged
+  (#710).
 - `passages.rs`'s snapshot decoder now `checked_add`s every wire-length
   offset before slicing, matching the discipline `embedding.rs::take`
   and `context::image`'s `Reader::take`/`checked_arena_str` already
