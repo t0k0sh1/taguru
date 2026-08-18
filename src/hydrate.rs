@@ -1991,6 +1991,274 @@ mod tests {
         }
     }
 
+    /// Fails every read unconditionally, counted — for a test that
+    /// only needs "the underlying transport is dead" and does not care
+    /// which specific object was asked for (unlike
+    /// [`PermanentGetFailStore`], which targets one path so sibling
+    /// files still resolve normally).
+    #[derive(Debug)]
+    struct AlwaysFailsGetStore {
+        inner: Arc<dyn ObjectStore>,
+        attempts: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl std::fmt::Display for AlwaysFailsGetStore {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "AlwaysFailsGetStore({})", self.inner)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for AlwaysFailsGetStore {
+        async fn put_opts(
+            &self,
+            location: &StorePath,
+            payload: object_store::PutPayload,
+            opts: object_store::PutOptions,
+        ) -> object_store::Result<object_store::PutResult> {
+            self.inner.put_opts(location, payload, opts).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &StorePath,
+            opts: object_store::PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+            self.inner.put_multipart_opts(location, opts).await
+        }
+
+        async fn get_opts(
+            &self,
+            _location: &StorePath,
+            _options: object_store::GetOptions,
+        ) -> object_store::Result<object_store::GetResult> {
+            self.attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(object_store::Error::Generic {
+                store: "always-fails-get",
+                source: "injected permanent failure (e.g. a revoked credential)".into(),
+            })
+        }
+
+        fn delete_stream(
+            &self,
+            locations: futures_util::stream::BoxStream<'static, object_store::Result<StorePath>>,
+        ) -> futures_util::stream::BoxStream<'static, object_store::Result<StorePath>> {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&StorePath>,
+        ) -> futures_util::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&StorePath>,
+        ) -> object_store::Result<object_store::ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &StorePath,
+            to: &StorePath,
+            options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+    }
+
+    /// The lane-fetch twin of
+    /// `a_permanent_published_fetch_failure_is_not_spent_on_the_reread_arbiter`
+    /// (issue #708): `fetch_lane_if_stale`'s own retryable-kind guard
+    /// was always correct (the bug #713 fixed was
+    /// `fetch_published_if_stale` sending everything through the
+    /// arbiter), but nothing exercised a genuinely permanent lane
+    /// fetch failure directly — a `with true` mutant on this guard
+    /// would still pass every existing test.
+    #[tokio::test]
+    async fn fetch_lane_if_stale_a_permanent_failure_is_not_spent_on_the_reread_arbiter() {
+        let (bucket, _writer) = shipped_bucket("lane-permanent-fail", false).await;
+        let inner = local_store(&bucket);
+        let root = ship::gen_root(&StorePath::default(), 1);
+        let manifest = ship::read_manifest(inner.as_ref(), &root)
+            .await
+            .unwrap()
+            .expect("generation 1 shipped a manifest");
+        let lane = *manifest
+            .lanes
+            .get("ctx_a.wal.jsonl")
+            .expect("the family ships a wal lane");
+
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let store: Arc<dyn ObjectStore> = Arc::new(AlwaysFailsGetStore {
+            inner,
+            attempts: Arc::clone(&attempts),
+        });
+        let target = scratch("lane-permanent-fail-target");
+        let hydrator = Hydrator::new(
+            store,
+            1,
+            root.clone(),
+            target.clone(),
+            manifest,
+            LanePolicy::ShippedExact,
+        );
+
+        let error = hydrator
+            .fetch_lane_if_stale(&root, "ctx_a.wal.jsonl", lane)
+            .await
+            .expect_err("a permanent failure must surface, not heal");
+        assert_eq!(
+            error.kind(),
+            io::ErrorKind::Other,
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a non-retryable error kind must not be spent on the reread arbiter's rounds"
+        );
+
+        let _ = std::fs::remove_dir_all(&bucket);
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    /// Counts every `get_opts` call while otherwise behaving exactly
+    /// like `inner` — for a test asserting the store was never even
+    /// asked, not for injecting failures (unlike
+    /// [`PermanentGetFailStore`]/[`AlwaysFailsGetStore`]).
+    #[derive(Debug)]
+    struct CountingGetStore {
+        inner: Arc<dyn ObjectStore>,
+        gets: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl std::fmt::Display for CountingGetStore {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "CountingGetStore({})", self.inner)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for CountingGetStore {
+        async fn put_opts(
+            &self,
+            location: &StorePath,
+            payload: object_store::PutPayload,
+            opts: object_store::PutOptions,
+        ) -> object_store::Result<object_store::PutResult> {
+            self.inner.put_opts(location, payload, opts).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &StorePath,
+            opts: object_store::PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+            self.inner.put_multipart_opts(location, opts).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &StorePath,
+            options: object_store::GetOptions,
+        ) -> object_store::Result<object_store::GetResult> {
+            self.gets.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.get_opts(location, options).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: futures_util::stream::BoxStream<'static, object_store::Result<StorePath>>,
+        ) -> futures_util::stream::BoxStream<'static, object_store::Result<StorePath>> {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&StorePath>,
+        ) -> futures_util::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&StorePath>,
+        ) -> object_store::Result<object_store::ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &StorePath,
+            to: &StorePath,
+            options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+    }
+
+    /// `fetch_lane_if_stale`'s LOCAL read (unlike the remote fetch
+    /// below it) folds `NotFound` into "nothing local yet, go fetch" —
+    /// a `with true` mutant on that guard would fold EVERY local read
+    /// error the same way, silently treating "this path is not even a
+    /// regular file" as "not found" and proceeding to fetch. The
+    /// bucket genuinely holds this lane, so a bare `error.kind() !=
+    /// NotFound` check cannot tell the two paths apart (both end in a
+    /// non-`NotFound` error — the correct code's propagated read
+    /// error, or the mutant's later failure writing a real file over
+    /// the still-standing directory): whether the store was ever
+    /// asked is the one signal that does not coincide.
+    #[tokio::test]
+    async fn fetch_lane_if_stale_propagates_a_real_local_read_error_not_just_not_found() {
+        let (bucket, _writer) = shipped_bucket("lane-not-a-file", true).await;
+        let inner = local_store(&bucket);
+        let root = ship::gen_root(&StorePath::default(), 1);
+        let manifest = ship::read_manifest(inner.as_ref(), &root)
+            .await
+            .unwrap()
+            .expect("generation 1 shipped a manifest");
+        let lane = *manifest
+            .lanes
+            .get("ctx_a.wal.jsonl")
+            .expect("the family ships a wal lane");
+
+        let gets = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let store: Arc<dyn ObjectStore> = Arc::new(CountingGetStore {
+            inner,
+            gets: Arc::clone(&gets),
+        });
+        let target = scratch("lane-not-a-file-target");
+        std::fs::create_dir(target.join("ctx_a.wal.jsonl")).unwrap();
+        let hydrator = Hydrator::new(
+            store,
+            1,
+            root.clone(),
+            target.clone(),
+            manifest,
+            LanePolicy::ShippedExact,
+        );
+        let error = hydrator
+            .fetch_lane_if_stale(&root, "ctx_a.wal.jsonl", lane)
+            .await
+            .expect_err("a directory in place of the lane file is not NotFound");
+        assert_ne!(error.kind(), io::ErrorKind::NotFound, "{error}");
+        assert_eq!(
+            gets.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a real local read error must refuse before ever asking the store"
+        );
+
+        let _ = std::fs::remove_dir_all(&bucket);
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
     /// A permanent fetch failure (a permission error, a collapsed
     /// transport failure — anything that is not the lineage moving)
     /// must not be handed to [`Hydrator::refreshed_extent`]: that
@@ -2119,6 +2387,355 @@ mod tests {
         // A vetoed family stays vetoed (drained, but never refetched).
         hydrator.veto("ctx_a");
         assert!(hydrator.drained());
+        let _ = std::fs::remove_dir_all(&bucket);
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    /// `spawn_background_fill` has exactly one caller in the whole
+    /// crate — `main.rs`'s serve path — and nothing in this suite
+    /// exercised it before: every other test drives the pending state
+    /// straight through `ensure_context`. Deleting the whole function
+    /// body would leave every OTHER test green.
+    #[tokio::test]
+    async fn spawn_background_fill_drains_a_pending_family_on_its_own() {
+        let (bucket, _writer) = shipped_bucket("bgfill", true).await;
+        let target = scratch("bgfill-target");
+        let store = local_store(&bucket);
+
+        let hydrator = prepare(
+            &store,
+            &StorePath::default(),
+            &url_of("bgfill"),
+            &target,
+            false,
+        )
+        .await
+        .unwrap()
+        .expect("an empty directory against a complete generation hydrates");
+        assert!(!hydrator.drained());
+
+        hydrator.spawn_background_fill();
+        for _ in 0..150 {
+            if hydrator.drained() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            hydrator.drained(),
+            "the background fill thread must land the pending family on its own"
+        );
+        assert_eq!(
+            std::fs::read(target.join("ctx_a.ctx")).unwrap(),
+            b"image-v1"
+        );
+
+        let _ = std::fs::remove_dir_all(&bucket);
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    /// `failed |= hydrator.ensure_context(&stem).is_err()` picks the
+    /// fill thread's 30s-vs-200ms retry cadence — a `|=`->`&=` mutant
+    /// makes `failed` permanently stuck at `false` (its initial
+    /// value), so a family that can never heal gets hammered every
+    /// 200ms forever instead of backing off. Counting attempts over a
+    /// window well under 30s but well over a few 200ms ticks tells the
+    /// two cadences apart without needing to observe the sleep itself.
+    #[tokio::test]
+    async fn spawn_background_fill_backs_off_after_a_failed_attempt_not_every_200ms() {
+        let (bucket, writer) = shipped_bucket("bgfill-fail", false).await;
+        let inner_store = local_store(&bucket);
+        let root = ship::gen_root(&StorePath::default(), 1);
+        let manifest = ship::read_manifest(inner_store.as_ref(), &root)
+            .await
+            .unwrap()
+            .expect("generation 1 shipped a manifest");
+
+        let fails_on = root.clone().join("files").join("ctx_a.ctx");
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let store: Arc<dyn ObjectStore> = Arc::new(PermanentGetFailStore {
+            inner: inner_store,
+            fails_on,
+            attempts: Arc::clone(&attempts),
+        });
+
+        let target = scratch("bgfill-fail-target");
+        let hydrator = Arc::new(Hydrator::new(
+            store,
+            1,
+            root,
+            target.clone(),
+            manifest,
+            LanePolicy::ShippedExact,
+        ));
+        hydrator.spawn_background_fill();
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        let seen = attempts.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            seen <= 2,
+            "a family that never heals must back off to a slow retry, not spin every \
+             200ms: {seen} attempts in 1.5s"
+        );
+        assert!(!hydrator.drained());
+
+        let _ = std::fs::remove_dir_all(&bucket);
+        let _ = std::fs::remove_dir_all(&writer);
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    #[test]
+    fn essentially_empty_accepts_only_the_bookkeeping_files() {
+        // A `&&`->`||` mutation is invisible on a directory with a
+        // real file (either operand alone already forces `false`) —
+        // it only shows up on a directory that holds NOTHING but one
+        // of the two bookkeeping names, where the correct code must
+        // still call the directory empty.
+        let dir = scratch("essentially-empty-lock-only");
+        std::fs::write(dir.join(".taguru.lock"), b"").unwrap();
+        assert!(essentially_empty(&dir).unwrap());
+
+        std::fs::write(dir.join("ctx_a.ctx"), b"real data").unwrap();
+        assert!(!essentially_empty(&dir).unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn essentially_empty_propagates_a_real_io_error_not_just_not_found() {
+        // The `NotFound` guard's `with true` mutant folds EVERY
+        // `read_dir` error into "empty" — a path that exists but is
+        // not a directory produces a non-`NotFound` error the correct
+        // code must propagate instead.
+        let path = scratch("essentially-empty-not-a-dir-parent").join("not-a-dir");
+        std::fs::write(&path, b"a plain file, not a directory").unwrap();
+        let error = essentially_empty(&path).expect_err("a file is not a directory");
+        assert_ne!(error.kind(), io::ErrorKind::NotFound, "{error}");
+    }
+
+    #[tokio::test]
+    async fn hydrate_shared_reports_fetched_then_reused_then_removed() {
+        let (bucket, _writer) = shipped_bucket("shared-counters", true).await;
+        let store = local_store(&bucket);
+        let root = ship::gen_root(&StorePath::default(), 1);
+        let manifest = ship::read_manifest(store.as_ref(), &root)
+            .await
+            .unwrap()
+            .expect("generation 1 shipped a manifest");
+        let target = scratch("shared-counters-target");
+        let hydrator = Hydrator::new(
+            Arc::clone(&store),
+            1,
+            root.clone(),
+            target.clone(),
+            manifest.clone(),
+            LanePolicy::ShippedExact,
+        );
+
+        let first = hydrator.hydrate_shared().await.unwrap();
+        assert_eq!((first.fetched, first.reused, first.removed), (1, 0, 0));
+
+        let second = hydrator.hydrate_shared().await.unwrap();
+        assert_eq!((second.fetched, second.reused, second.removed), (0, 1, 0));
+
+        std::fs::write(target.join("orphan.txt"), b"a relic").unwrap();
+        let third = hydrator.hydrate_shared().await.unwrap();
+        assert_eq!((third.fetched, third.reused, third.removed), (0, 1, 1));
+        assert!(!target.join("orphan.txt").exists());
+
+        let _ = std::fs::remove_dir_all(&bucket);
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    /// The non-UTF-8-filename removal arm is a SEPARATE `report.removed
+    /// += 1` site from the "manifest does not carry this name" one
+    /// `hydrate_shared_reports_fetched_then_reused_then_removed`
+    /// already covers — a name that cannot even be read as a manifest
+    /// key (those are JSON strings) can only be a relic. Skips itself
+    /// on a filesystem that refuses to create the fixture (APFS/HFS+
+    /// enforce valid UTF-8 filenames; ext4 does not) — CI's
+    /// Linux runners still exercise it.
+    #[tokio::test]
+    async fn hydrate_shared_counts_a_non_utf8_relic_as_removed() {
+        use std::os::unix::ffi::OsStrExt;
+        let target = scratch("shared-non-utf8-target");
+        let bogus_name = std::ffi::OsStr::from_bytes(b"bogus-\xff-name");
+        if std::fs::write(target.join(bogus_name), b"x").is_err() {
+            eprintln!(
+                "skipping: this filesystem refuses a non-UTF-8 filename \
+                 (expected on APFS/HFS+)"
+            );
+            let _ = std::fs::remove_dir_all(&target);
+            return;
+        }
+
+        let (bucket, _writer) = shipped_bucket("shared-non-utf8", true).await;
+        let store = local_store(&bucket);
+        let root = ship::gen_root(&StorePath::default(), 1);
+        let manifest = ship::read_manifest(store.as_ref(), &root)
+            .await
+            .unwrap()
+            .expect("generation 1 shipped a manifest");
+        let hydrator = Hydrator::new(
+            store,
+            1,
+            root.clone(),
+            target.clone(),
+            manifest,
+            LanePolicy::ShippedExact,
+        );
+
+        let report = hydrator.hydrate_shared().await.unwrap();
+        assert_eq!(report.removed, 1);
+        assert!(!target.join(bogus_name).exists());
+
+        let _ = std::fs::remove_dir_all(&bucket);
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    #[tokio::test]
+    async fn hydrate_family_reports_fetched_then_reused() {
+        let (bucket, _writer) = shipped_bucket("family-counters", true).await;
+        let store = local_store(&bucket);
+        let root = ship::gen_root(&StorePath::default(), 1);
+        let manifest = ship::read_manifest(store.as_ref(), &root)
+            .await
+            .unwrap()
+            .expect("generation 1 shipped a manifest");
+        let sig = FamilySig::of(&manifest, "ctx_a");
+        let target = scratch("family-counters-target");
+        let hydrator = Hydrator::new(
+            store,
+            1,
+            root.clone(),
+            target.clone(),
+            manifest,
+            LanePolicy::ShippedExact,
+        );
+
+        let (fetched, reused) = hydrator.hydrate_family("ctx_a", &root, &sig).await.unwrap();
+        assert_eq!((fetched, reused), (3, 0), "image + meta + wal lane");
+
+        let (fetched, reused) = hydrator.hydrate_family("ctx_a", &root, &sig).await.unwrap();
+        assert_eq!((fetched, reused), (0, 3), "every file already matches");
+
+        let _ = std::fs::remove_dir_all(&bucket);
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    #[tokio::test]
+    async fn prepare_continues_on_local_truth_when_a_non_cache_directory_cannot_reach_the_bucket() {
+        // The `!empty && !cache_mode` guard (issue #708): a directory
+        // with real data and NO replication record — the pre-#128
+        // posture — must boot on local truth when the bucket cannot be
+        // reached, not refuse. The sibling case (cache_mode OR empty)
+        // DOES refuse and is already covered by
+        // a_phase_one_record_with_no_verified_generation_refuses_an_unreachable_bucket.
+        let target = scratch("prepare-local-truth-unreachable");
+        std::fs::write(target.join("ctx_a.ctx"), b"pre-existing local data").unwrap();
+
+        let gone = scratch("prepare-local-truth-unreachable-bucket");
+        let unreachable = local_store(&gone);
+        std::fs::remove_dir_all(&gone).unwrap();
+        std::fs::write(&gone, b"not a directory").unwrap();
+
+        let hydrator = prepare(
+            &unreachable,
+            &StorePath::default(),
+            &url_of("prepare-local-truth-unreachable"),
+            &target,
+            false,
+        )
+        .await
+        .expect("an unreachable bucket must not block booting on local truth here");
+        assert!(
+            hydrator.is_none(),
+            "no cache posture is established when local truth wins"
+        );
+
+        let _ = std::fs::remove_file(&gone);
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    #[tokio::test]
+    async fn prepare_starts_fresh_when_the_bucket_has_a_claim_but_no_complete_generation() {
+        let bucket = scratch("no-complete-yet-bucket-prepare");
+        let writer = scratch("no-complete-yet-writer-prepare");
+        let writer_state = AppState::boot(writer.clone(), 64 * 1024 * 1024, None).unwrap();
+        let url = url_of("no-complete-yet-prepare");
+        // A claim writes the fence eagerly, before any cycle — no
+        // `cycle()` call here, so nothing ever completes a baseline,
+        // which is exactly what drives `newest_complete_generation`
+        // into its NotFound arm.
+        let _shipper = Shipper::claim(
+            local_store(&bucket),
+            StorePath::default(),
+            url.clone(),
+            writer.clone(),
+            Arc::new(ShipProgress::new(crate::registry::DEFAULT_WAL_MAX_BYTES)),
+            writer_state,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let store = local_store(&bucket);
+        let target = scratch("no-complete-yet-target-prepare");
+        let hydrator = prepare(&store, &StorePath::default(), &url, &target, true)
+            .await
+            .expect("a claim with no complete generation must not be an error");
+        assert!(
+            hydrator.is_none(),
+            "nothing to hydrate from yet; start fresh from local disk"
+        );
+
+        for dir in [bucket, writer, target] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    /// The sibling of `prepare_starts_fresh_when_the_bucket_has_a_claim_but_no_complete_generation`:
+    /// a genuine, non-`NotFound` failure while CHECKING for a complete
+    /// generation (the fence lookup itself succeeds) must propagate,
+    /// not masquerade as "nothing shipped yet". `take_over: true`
+    /// skips the liveness check, which also calls the store — the only
+    /// store call between a successful fence lookup and
+    /// `newest_complete_generation` must be this one.
+    #[tokio::test]
+    async fn prepare_propagates_a_real_generation_check_failure_not_just_not_found() {
+        let (bucket, _writer) = shipped_bucket("generation-check-fail", true).await;
+        let inner = local_store(&bucket);
+        let store: Arc<dyn ObjectStore> = Arc::new(AlwaysFailsGetStore {
+            inner,
+            attempts: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        });
+        let url = url_of("generation-check-fail");
+        let target = scratch("generation-check-fail-target");
+
+        let error = prepare(&store, &StorePath::default(), &url, &target, true)
+            .await
+            .expect_err("a real head() failure must propagate, not masquerade as nothing shipped");
+        assert_ne!(error.kind(), io::ErrorKind::NotFound, "{error}");
+
+        let _ = std::fs::remove_dir_all(&bucket);
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    /// The `prepare_replica` twin of the test above.
+    #[tokio::test]
+    async fn prepare_replica_propagates_a_real_generation_check_failure_not_just_not_found() {
+        let (bucket, _writer) = shipped_bucket("replica-generation-check-fail", true).await;
+        let inner = local_store(&bucket);
+        let store: Arc<dyn ObjectStore> = Arc::new(AlwaysFailsGetStore {
+            inner,
+            attempts: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        });
+        let url = url_of("replica-generation-check-fail");
+        let target = scratch("replica-generation-check-fail-target");
+
+        let error = prepare_replica(&store, &StorePath::default(), &url, &target)
+            .await
+            .expect_err("a real head() failure must propagate, not masquerade as nothing shipped");
+        assert_ne!(error.kind(), io::ErrorKind::NotFound, "{error}");
+
         let _ = std::fs::remove_dir_all(&bucket);
         let _ = std::fs::remove_dir_all(&target);
     }
@@ -2892,6 +3509,52 @@ mod tests {
             shipped_wal,
             "a replica serves the shipped stream exactly: the tail is truncated away"
         );
+
+        for dir in [bucket, writer, target] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    /// The exact-length boundary of the test above: a local tail that
+    /// matches the shipped extent BYTE FOR BYTE (`local.len() ==
+    /// shipped`, not `>`) must not be truncated — a `>`->`>=` mutant
+    /// would still open the file for writing (to `set_len` it to the
+    /// same length). Read-only permissions turn "would touch it" into
+    /// a loud failure instead of a silent same-size no-op, matching
+    /// the read-only-directory pattern this suite already uses
+    /// elsewhere (e.g. `registry/lifecycle.rs`'s permission tests) —
+    /// same technique, a file instead of a directory.
+    #[tokio::test]
+    async fn fetch_lane_if_stale_does_not_touch_a_tail_that_exactly_matches_the_shipped_extent() {
+        use std::os::unix::fs::PermissionsExt;
+        let (bucket, writer) = shipped_bucket("replica-tail-exact", true).await;
+        let store = local_store(&bucket);
+        let url = url_of("replica-tail-exact");
+
+        let target = scratch("replica-tail-exact-target");
+        let shipped_wal = std::fs::read(writer.join("ctx_a.wal.jsonl")).unwrap();
+        let wal_path = target.join("ctx_a.wal.jsonl");
+        std::fs::write(&wal_path, &shipped_wal).unwrap();
+        ship::write_replication_record(
+            &target,
+            &ship::ReplicationRecord {
+                url: url.clone(),
+                claimed_generation: None,
+                hydrated_from: Some(1),
+            },
+        )
+        .unwrap();
+
+        let hydrator = prepare_replica(&store, &StorePath::default(), &url, &target)
+            .await
+            .expect("a cache re-verifies");
+
+        std::fs::set_permissions(&wal_path, std::fs::Permissions::from_mode(0o444)).unwrap();
+        hydrator
+            .ensure_context("ctx_a")
+            .expect("an exact-length match must never try to open the file for writing");
+        std::fs::set_permissions(&wal_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(std::fs::read(&wal_path).unwrap(), shipped_wal);
 
         for dir in [bucket, writer, target] {
             let _ = std::fs::remove_dir_all(dir);
