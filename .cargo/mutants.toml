@@ -133,4 +133,29 @@ exclude_re = [
     # whether the warn fires changes nothing but which log line
     # appears. This suite has no log-capture facility.
     "replace != with == in PassageStore::compact_locked",
+    # `PassageAnnIndex::build`'s seed-reselection gate (issue #708):
+    # `if built < target { seed = ... }` guards a recompute that is
+    # only ever READ by the next loop iteration. On the very last
+    # iteration (`built == target` after incrementing), `built <=
+    # target` is a tautology (`built` never exceeds `target` inside
+    # this loop), so the `<=` mutant performs one extra recompute of
+    # `seed` right before the outer `while built < target` exits —
+    # unmutated there too, so the loop ends regardless and that
+    # recomputed `seed` is never read. Both arms return the identical
+    # `centroids`/`lists`; no test can observe a difference because
+    # there is none to observe. The sibling `==` and `>` mutants on
+    # the same line ARE caught (see
+    # passage_ann_index_build_breaks_similarity_ties_toward_the_earlier_centroid,
+    # which pins the seed reselection actually firing).
+    "replace < with <= in PassageAnnIndex::build",
+    # `PassageVectorStore::load_checked`'s legacy-vs-corrupt branch
+    # (issue #708): both arms of `if bytes.get(..8) ==
+    # LEGACY_PASSAGE_VECTOR_MAGIC { .. } else { .. }` return the exact
+    # same `Self::default()` — the only difference is which
+    # `tracing::` macro fires (`info!` for the legacy case, `warn!`
+    # for genuine corruption), and this suite has no log-capture
+    # facility (`tracing_test`/`logs_contain` are not dependencies).
+    # No black-box test — return value or otherwise — can distinguish
+    # the two arms.
+    "replace == with != in PassageVectorStore::load_checked",
 ]
