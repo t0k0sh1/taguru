@@ -175,4 +175,13 @@ exclude_re = [
     # No black-box test — return value or otherwise — can distinguish
     # the two arms.
     "replace == with != in PassageVectorStore::load_checked",
+    # `prepare`'s takeover-liveness guard (issue #708):
+    # `live < ship::TAKEOVER_GRACE` (TAKEOVER_GRACE = 300s) is computed
+    # from `SystemTime::now().duration_since(at)` with no clock
+    # injection — the only input the `<`/`<=` mutants disagree on is
+    # `live` landing at exactly the 300s mark, which would require a
+    # unit test to either sleep 300 real seconds or control the wall
+    # clock, neither of which this suite does anywhere else. No
+    # black-box test can deterministically hit that single instant.
+    "src/hydrate\\.rs:165:17: replace < with <= in prepare",
 ]
