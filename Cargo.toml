@@ -104,7 +104,7 @@ tree-sitter-rust = "0.24.2"
 # (exr/rav1e, one of the two RUSTSEC-2024-0436 `paste` paths) for
 # CLIP-style models this crate never runs, and the TLS pair goes
 # rustls like every other client in this tree (reqwest, ureq).
-fastembed = { version = "5.17.4", optional = true, default-features = false, features = [
+fastembed = { version = "6.0.0", optional = true, default-features = false, features = [
     "hf-hub-rustls-tls",
     "ort-download-binaries-rustls-tls",
 ] }
