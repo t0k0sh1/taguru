@@ -2681,20 +2681,15 @@ mod tests {
         )
         .0;
         assert_eq!(record.paragraphs.len(), 3);
-        let span_size = std::mem::size_of::<ParagraphSpan>();
-        let expected = source.len()
-            + text.len()
-            + 3 * span_size
-            + (1 + 8)
-            + (2 + 8)
-            + (2 + 8)
-            + (4 + 8)
-            + (4 + 2 + 8)
-            + (1 + 8)
-            + (1 + 8)
-            + 16
-            + SOURCE_OVERHEAD;
-        assert_eq!(record_bytes(source, &record), expected);
+        // Hand-derived literal, not a re-derivation of the formula:
+        // 5 (source) + 45 (text) + 3*24 (ParagraphSpan, index+start+end:
+        // u32 + hash: u64, padded to 24) + 9 + 10 + 10 + 12 + 14 + 9 + 9
+        // (per-entry lengths + 8 overhead each) + 16 (the two epoch
+        // stamps) + 64 (SOURCE_OVERHEAD) = 275. Referencing
+        // `std::mem::size_of::<ParagraphSpan>()` or `SOURCE_OVERHEAD`
+        // here instead would couple this side of the assertion to the
+        // same symbols `record_bytes` uses, hiding a mutation to either.
+        assert_eq!(record_bytes(source, &record), 275);
     }
 
     #[test]
