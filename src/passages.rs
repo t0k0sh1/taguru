@@ -2540,6 +2540,65 @@ mod tests {
     }
 
     #[test]
+    fn load_propagates_a_real_snapshot_read_error_not_just_not_found() {
+        // The `NotFound` guard (only `NotFound` means "no snapshot
+        // yet, fall back to legacy/empty") — a `with true` mutant
+        // would fold ANY read error into that same fallback, silently
+        // starting from an empty map instead of refusing the boot.
+        // The next compaction would then overwrite the real snapshot
+        // with the truncated map: silent data loss.
+        let dir = scratch_dir("load-snapshot-not-a-file");
+        let snapshot_path = dir.join("t.passages.bin");
+        fs::create_dir(&snapshot_path).unwrap();
+        let error = PassageStore::load(
+            snapshot_path,
+            &dir.join("t.sources.json"),
+            dir.join("t.passages.wal.jsonl"),
+            0,
+            true,
+        )
+        .expect_err("a directory in place of the snapshot is not NotFound");
+        assert_ne!(error.kind(), io::ErrorKind::NotFound, "{error}");
+    }
+
+    #[test]
+    fn compact_truncates_the_log_to_zero_pending_bytes_in_the_normal_case() {
+        // `compact_locked`'s `next_seq == seen_seq` guard: existing
+        // tests only check the on-disk WAL file length after compact,
+        // never the in-memory `pending_log_bytes()` a `with false`-
+        // style flip on this guard (never truncating in memory, even
+        // though the disk truncation itself may still run) would
+        // leave stale.
+        let dir = scratch_dir("compact-zeroes-pending-bytes");
+        let store = open(&dir);
+        store.store(batch(&[("a", "本文")])).unwrap();
+        assert!(store.pending_log_bytes() > 0);
+        store.compact().unwrap();
+        assert_eq!(store.pending_log_bytes(), 0);
+    }
+
+    #[test]
+    fn filter_markers_drops_exactly_at_the_paragraph_count_boundary() {
+        // 2 paragraphs (indices 0, 1); a marker naming index 2 (==
+        // count) must drop — only strictly-less-than count is valid.
+        // Existing marker tests use a far-out-of-range index (9),
+        // which a `<`->`<=`/`==` mutant would also (correctly) drop,
+        // masking the exact boundary this pins.
+        let (record, drops) = PassageRecord::new(
+            Arc::from("一つ目。\n\n二つ目。"),
+            Vec::new(),
+            vec![
+                (1, "後編".to_string()),
+                (2, "存在しない段落への見出し".to_string()),
+            ],
+            Vec::new(),
+            SourceMeta::default(),
+        );
+        assert_eq!(record.sections, vec![(1, "後編".to_string())]);
+        assert_eq!(drops.sections, 1);
+    }
+
+    #[test]
     fn a_corrupt_snapshot_is_a_load_error_not_an_empty_store() {
         let dir = scratch_dir("strict");
         fs::write(dir.join("t.passages.bin"), b"not a snapshot").unwrap();
@@ -2575,6 +2634,125 @@ mod tests {
         store.compact().unwrap();
         store.store(batch(&[("c", "本文C")])).unwrap();
         assert_eq!(text(&store, "c").as_deref(), Some("本文C"));
+    }
+
+    #[test]
+    fn store_refuses_growth_only_past_both_the_cap_and_twice_the_snapshot() {
+        // The backstop's SECOND condition is `log_bytes >= 2 *
+        // snapshot_bytes`, not `2 + snapshot_bytes` or any other
+        // arithmetic — set the accounting directly (real byte counts
+        // are fiddly to hand-compute exactly) to a point past the cap
+        // and past `2 + snapshot_bytes` but still under `2 *
+        // snapshot_bytes`, where only the correct formula must NOT
+        // refuse.
+        let dir = scratch_dir("store-backstop-factor");
+        let store = open_capped(&dir, 100);
+        {
+            let mut inner = store.inner.write();
+            inner.snapshot_bytes = 200;
+            inner.log_bytes = 250;
+        }
+        store
+            .store(batch(&[("a", "x")]))
+            .expect("log_bytes (250) is under 2x snapshot_bytes (400); must not be refused");
+    }
+
+    #[test]
+    fn append_and_apply_locked_triggers_compaction_only_past_the_ratio_not_a_flat_addition() {
+        // `COMPACT_RATIO * inner.snapshot_bytes` with COMPACT_RATIO ==
+        // 1 disagrees with a `+` mutant by exactly one byte — measure
+        // the real WAL bytes one store() of this shape appends (a
+        // fresh store, seq 1) from an independent probe store, then
+        // land log_bytes at exactly `snapshot_bytes + 1` on a second,
+        // matching first-ever store() so only the multiplication
+        // formula triggers compaction there.
+        let probe_dir = scratch_dir("append-compact-trigger-factor-probe");
+        let probe = open(&probe_dir);
+        probe.store(batch(&[("a", "x")])).unwrap();
+        let appended = probe.pending_log_bytes();
+        assert!(appended > 0);
+
+        let dir = scratch_dir("append-compact-trigger-factor");
+        let store = open(&dir);
+        let snapshot_bytes = 5_000_000u64; // past COMPACT_FLOOR_BYTES (4 MiB)
+        {
+            let mut inner = store.inner.write();
+            inner.snapshot_bytes = snapshot_bytes;
+            inner.log_bytes = snapshot_bytes + 1 - appended;
+        }
+        store.store(batch(&[("a", "x")])).unwrap();
+        assert_eq!(
+            store.compaction_totals().0,
+            1,
+            "log_bytes landing at snapshot_bytes + 1 must trigger past the ratio threshold"
+        );
+    }
+
+    #[test]
+    fn append_and_apply_locked_does_not_compact_when_log_bytes_exactly_equals_the_threshold() {
+        // The OUTER comparison itself is strict `>`, not `>=` — same
+        // technique as the sibling test above, but landing log_bytes
+        // at EXACTLY the threshold (not one past it), where only `>`
+        // must NOT trigger.
+        let probe_dir = scratch_dir("append-compact-trigger-strict-probe");
+        let probe = open(&probe_dir);
+        probe.store(batch(&[("a", "x")])).unwrap();
+        let appended = probe.pending_log_bytes();
+        assert!(appended > 0);
+
+        let dir = scratch_dir("append-compact-trigger-strict");
+        let store = open(&dir);
+        let snapshot_bytes = 5_000_000u64; // past COMPACT_FLOOR_BYTES (4 MiB)
+        {
+            let mut inner = store.inner.write();
+            inner.snapshot_bytes = snapshot_bytes;
+            inner.log_bytes = snapshot_bytes - appended;
+        }
+        store.store(batch(&[("a", "x")])).unwrap();
+        assert_eq!(
+            store.compaction_totals().0,
+            0,
+            "log_bytes landing exactly at the threshold must not trigger a compaction"
+        );
+    }
+
+    #[test]
+    fn compact_if_log_outgrew_snapshot_multiplies_by_the_ratio_not_adds_it() {
+        // Same `COMPACT_RATIO * inner.snapshot_bytes` formula as
+        // `append_and_apply_locked`'s trigger, but reached through the
+        // caller-supplied-floor entrance instead — a pure read (no
+        // append happens here), so the accounting can be set directly
+        // with no probe needed. `floor_bytes: 0` removes the `.max`
+        // floor from the picture entirely.
+        let dir = scratch_dir("compact-if-outgrew-factor");
+        let store = open(&dir);
+        {
+            let mut inner = store.inner.write();
+            inner.snapshot_bytes = 5_000_000;
+            inner.log_bytes = 5_000_001; // > 1*5_000_000, == 1+5_000_000
+        }
+        assert!(
+            store.compact_if_log_outgrew_snapshot(0).unwrap(),
+            "log_bytes (snapshot_bytes + 1) must exceed the RATIO*snapshot_bytes threshold"
+        );
+    }
+
+    #[test]
+    fn compact_locked_accumulates_snapshot_bytes_written_not_a_no_op_multiply() {
+        // `inner.snapshot_bytes_written += bytes.len() as u64` starts
+        // at 0 — a `+=`->`*=` mutant would leave it stuck at 0
+        // forever, indistinguishable from a store that never compacted
+        // unless a test actually reads the accessor after a real
+        // compaction.
+        let dir = scratch_dir("compact-snapshot-bytes-written");
+        let store = open(&dir);
+        store.store(batch(&[("a", "本文")])).unwrap();
+        store.compact().unwrap();
+        let (_, written) = store.compaction_totals();
+        assert!(
+            written > 0,
+            "the first compaction must add its snapshot size, not multiply by it"
+        );
     }
 
     #[test]
