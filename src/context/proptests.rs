@@ -264,7 +264,15 @@ proptest! {
 
     #[test]
     fn from_bytes_never_panics_on_arbitrary_bytes(
-        bytes in prop::collection::vec(any::<u8>(), 0..512),
+        // A real image's header alone (magic, version, padding,
+        // applied_seq, footer) is 28 bytes, and every subsequent table
+        // costs at least its own 8-byte count field; capping the corpus
+        // at 512 bytes left random inputs unlikely to clear the header
+        // and reach a second or third table's own count/size checks
+        // (`load_table`'s NIL and byte-size guards among them) at all.
+        // 4096 gives the shrinker much more room to walk deeper into
+        // the structure while still running fast.
+        bytes in prop::collection::vec(any::<u8>(), 0..4096),
     ) {
         let _ = Context::from_bytes(&bytes);
     }

@@ -301,13 +301,15 @@ mod tests {
         assert_eq!(index.posting_entries, 3);
         index.push("aaaa", 1); // aa repeats, but one spelling posts once
         assert_eq!(index.posting_entries, 4);
-        assert_eq!(
-            index.footprint(),
-            index.arena.len()
-                + index.spans.len() * size_of::<EntrySpan>()
-                + index.bigrams.len() * (size_of::<u64>() + 48)
-                + index.posting_entries * size_of::<u32>()
-        );
+        // Hand-computed, not re-derived from the same formula: arena
+        // "abcd"+"aaaa" = 8 bytes, 2 spans * 32 bytes (size_of::<EntrySpan>
+        // on a 64-bit target), 4 distinct bigrams (ab, bc, cd, aa) * 56
+        // bytes (8 + the 48-byte map-entry overhead), 4 posting entries *
+        // 4 bytes. A symbolic recomputation here would pass under any
+        // `+`/`-`/`*` mutation of footprint() itself, since it repeats
+        // the exact same expression.
+        assert_eq!(index.footprint(), 8 + 2 * 32 + 4 * 56 + 4 * 4);
+        assert_eq!(index.footprint(), 312);
     }
 
     #[test]

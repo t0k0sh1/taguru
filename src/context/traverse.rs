@@ -1165,6 +1165,54 @@ mod tests {
     }
 
     #[test]
+    fn paths_finds_the_exact_max_depth_boundary_not_one_hop_short() {
+        let mut context = Context::default();
+        // A 4-edge chain: o -> n1 -> n2 -> n3 -> t.
+        context.associate("o", "r", "n1", 1.0).unwrap();
+        context.associate("n1", "r", "n2", 1.0).unwrap();
+        context.associate("n2", "r", "n3", 1.0).unwrap();
+        context.associate("n3", "r", "t", 1.0).unwrap();
+
+        assert_eq!(
+            context.paths(&["o"], &["t"], 3, 10).total,
+            0,
+            "one hop short of the only trail must find nothing"
+        );
+        let exact = context.paths(&["o"], &["t"], 4, 10);
+        assert_eq!(exact.total, 1);
+        assert_eq!(exact.trails[0].path, vec!["o", "n1", "n2", "n3", "t"]);
+    }
+
+    #[test]
+    fn paths_does_not_loop_forever_on_a_graph_cycle() {
+        let mut context = Context::default();
+        // A genuine multi-node cycle (a -> b -> c -> a), distinct from
+        // the self-loop and single-node-back-to-start cases already
+        // covered — plus a spur off the cycle so there is a real trail
+        // to find. Enumeration that did not track the concepts already
+        // on the current trail would walk the triangle forever instead
+        // of terminating. Paths walk against edge direction too (as
+        // `paths_walks_against_edge_direction_too` establishes), so the
+        // c->a edge also makes a and c directly adjacent — two simple
+        // paths reach t, not one.
+        context.associate("a", "r", "b", 1.0).unwrap();
+        context.associate("b", "r", "c", 1.0).unwrap();
+        context.associate("c", "r", "a", 1.0).unwrap();
+        context.associate("c", "r", "t", 1.0).unwrap();
+
+        let result = context.paths(&["a"], &["t"], Context::UNBOUNDED, 10);
+        assert!(
+            !result.capped,
+            "a 3-node cycle must not blow the enumeration budget"
+        );
+        assert_eq!(result.total, 2);
+        // Shortest first: the direct a-c hop (via the reversed c->a
+        // edge) beats the long way around through b.
+        assert_eq!(result.trails[0].path, vec!["a", "c", "t"]);
+        assert_eq!(result.trails[1].path, vec!["a", "b", "c", "t"]);
+    }
+
+    #[test]
     fn paths_excluding_hides_the_label_as_hop_and_bridge() {
         let mut context = Context::default();
         // The only connection runs over the hidden label — once as the

@@ -191,6 +191,19 @@ mod tests {
     }
 
     #[test]
+    fn zero_facts_or_examples_glosses_the_bare_name() {
+        let mut context = Context::default();
+        context.associate("青嶺酒造", "杜氏", "高瀬", 2.0).unwrap();
+
+        // `facts`/`examples: 0` is a legitimate caller choice (as
+        // `stats.rs`'s `top_concepts(0)` treats its own zero the same
+        // way), not an error — the concept/label must still resolve,
+        // just with no fact sentences appended.
+        assert_eq!(context.concept_gloss("青嶺酒造", 0).unwrap(), "青嶺酒造。");
+        assert_eq!(context.label_gloss("杜氏", 0).unwrap(), "杜氏。");
+    }
+
+    #[test]
     fn gloss_does_not_phrase_zero_weight_as_negative() {
         let mut context = Context::default();
         context.associate("A", "関係", "B", 0.0).unwrap();

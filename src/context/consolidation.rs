@@ -685,6 +685,32 @@ mod tests {
         assert!(after.iter().all(|g| g.label != "杜氏"), "{after:?}");
     }
 
+    #[test]
+    fn contradiction_groups_handle_three_or_more_live_objects() {
+        // Existing coverage only ever exercises exactly two live
+        // objects; the row-building logic below is a plain per-edge
+        // map with no cardinality special-casing, but the audit that
+        // filed this test explicitly asked for a >=3 case to be on
+        // record rather than inferred.
+        let mut context = Context::default();
+        context.associate("蔵A", "杜氏", "高瀬", 1.0).unwrap();
+        context.associate("蔵A", "杜氏", "青山", 1.0).unwrap();
+        context.associate("蔵A", "杜氏", "田中", 1.0).unwrap();
+        context.associate("蔵B", "杜氏", "佐藤", 1.0).unwrap();
+
+        let groups = context.contradiction_groups(Deadline::unbounded()).unwrap();
+        let toji = groups.iter().find(|g| g.label == "杜氏").unwrap();
+        assert_eq!(toji.subject, "蔵A");
+        assert_eq!(toji.objects.len(), 3);
+        let names: Vec<&str> = toji.objects.iter().map(|row| row.object.as_str()).collect();
+        assert_eq!(names, vec!["高瀬", "青山", "田中"]);
+        assert!(
+            toji.objects
+                .iter()
+                .all(|row| row.weight == 1.0 && row.count == 1)
+        );
+    }
+
     /// A source that asserted a triple and then cancelled its own
     /// assertion (net sum exactly zero, record still chain-linked —
     /// only a retraction unlinks) attests nothing: the evidence rows
