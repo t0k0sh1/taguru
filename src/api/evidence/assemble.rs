@@ -691,6 +691,15 @@ mod tests {
         std::fs::write(path, b"not a valid passages snapshot").unwrap();
     }
 
+    /// A deadline that has already elapsed by the time it is checked —
+    /// mirrors `api::recall`/`api::groups`'s own `already_expired_deadline`.
+    fn already_expired_deadline() -> Deadline {
+        let deadline = Deadline::after(std::time::Duration::ZERO);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        assert!(deadline.expired(), "a zero budget must read as expired");
+        deadline
+    }
+
     fn minimal_request() -> AssembleEvidenceRequest {
         AssembleEvidenceRequest {
             origins: OneOrMany::Many(Vec::new()),
@@ -765,6 +774,42 @@ mod tests {
             crate::api::ErrorCode::Timeout.as_str(),
             "a budget spent by the time the read failed must reclassify as a \
              timeout — {body}"
+        );
+    }
+
+    /// The front-of-handler deadline gate (line 190, before `resolve`
+    /// ever runs): none of the seven `deadline.expired()` early returns
+    /// in this handler had a direct test — the two tests above only
+    /// exercise `expire_deadline_race`'s io-error reclassification,
+    /// a different mechanism entirely. Naming a context that does not
+    /// exist makes the ordering observable without a fault-injection
+    /// hook: if this gate ran only after the context-existence check
+    /// (the pre-fix order for a bug of this shape elsewhere in the
+    /// tree, #620), this would answer 404 `no_context` instead of the
+    /// timeout asserted below.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn assemble_evidence_refuses_an_already_expired_deadline_before_any_lane_runs() {
+        let (state, _dir) = scratch_state("expired-deadline");
+        let deadline = already_expired_deadline();
+
+        let response = assemble_evidence(
+            State(state),
+            AppPath("ghost".to_string()),
+            None,
+            axum::Extension(deadline),
+            AppJson(minimal_request()),
+        )
+        .await;
+
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body["code"],
+            crate::api::ErrorCode::Timeout.as_str(),
+            "an already-expired deadline must be refused before the \
+             context-existence check ever runs — {body}"
         );
     }
 }

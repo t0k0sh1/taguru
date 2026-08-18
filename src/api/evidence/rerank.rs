@@ -187,8 +187,27 @@ const MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 
 impl HttpReranker {
     pub(crate) fn from_env() -> Option<Self> {
-        let url = std::env::var("TAGURU_RERANK_URL").ok()?;
-        let model = std::env::var("TAGURU_RERANK_MODEL").ok()?;
+        let url = std::env::var("TAGURU_RERANK_URL").ok();
+        let model = std::env::var("TAGURU_RERANK_MODEL").ok();
+        // Partial configuration is almost certainly a typo, not an
+        // operator's deliberate choice — warn the same way
+        // `embedding::provider_from_env` flags its own analogous
+        // misconfiguration, rather than degrading silently to
+        // `plan.reranker.reason: "not_configured"` with nothing in the
+        // boot log to say why.
+        let (url, model) = match (url, model) {
+            (Some(url), Some(model)) => (url, model),
+            (None, None) => return None,
+            (url, model) => {
+                tracing::warn!(
+                    "TAGURU_RERANK_URL and TAGURU_RERANK_MODEL must both be set \
+                     (url set: {}, model set: {}); the reranker stays off",
+                    url.is_some(),
+                    model.is_some()
+                );
+                return None;
+            }
+        };
         let timeout_secs = crate::env::env_number("TAGURU_RERANK_TIMEOUT_SECS", 5).max(1);
         let timeout = Duration::from_secs(timeout_secs as u64);
         Some(Self {

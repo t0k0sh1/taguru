@@ -1341,6 +1341,53 @@ mod tests {
         assert!(result.citations.is_empty());
     }
 
+    /// ADR 0006 §9 Admission's last sentence: "a citation locator
+    /// already present in the package … costs nothing extra when a
+    /// later unit reuses it." Two distinct association candidates
+    /// (different `(subject, label, object)`, so two separate admission
+    /// units) that cite the same `(source, paragraph)` must only add
+    /// that citation's bytes/tokens once — a budget sized exactly to
+    /// the correctly-deduped usage still admits both, which would fail
+    /// if the second unit's citation were billed again.
+    #[test]
+    fn a_shared_citation_locator_is_not_double_counted_across_two_admission_units() {
+        fn two_candidates_sharing_one_citation() -> Vec<EvidenceCandidate> {
+            let a = sourced_association("cats", "is_a", "mammals", 1.0, "book.txt", 1);
+            let b = sourced_association("dogs", "is_a", "mammals", 1.0, "book.txt", 1);
+            vec![
+                EvidenceCandidate::from_association("ctx", a, 1),
+                EvidenceCandidate::from_association("ctx", b, 2),
+            ]
+        }
+        let mut lookup = empty_lookup();
+        lookup.insert(("book.txt".to_string(), 1), citation_for("book.txt", None));
+
+        let generous = select_all(two_candidates_sharing_one_citation(), &lookup);
+        assert_eq!(generous.items.len(), 2);
+        assert_eq!(
+            generous.citations.len(),
+            1,
+            "one shared citation entry, not two"
+        );
+
+        // A byte budget set to exactly the generous run's usage: if the
+        // second item's shared citation were billed again, this tight
+        // budget would only have room for one item.
+        let (fused, dropped) = super::super::fuse(two_candidates_sharing_one_citation());
+        let tight = select(
+            fused,
+            dropped,
+            &limits(10, generous.budget.bytes_used, 100_000),
+            &lookup,
+        );
+        assert_eq!(
+            tight.items.len(),
+            2,
+            "both items still fit — the reused citation cost nothing extra"
+        );
+        assert_eq!(tight.budget.bytes_used, generous.budget.bytes_used);
+    }
+
     // --- I4: corroboration never truncated ---
 
     #[test]
@@ -1629,6 +1676,96 @@ mod tests {
             .map(|item| item.passage.as_ref().unwrap().source.as_str())
             .collect();
         assert_eq!(sources, vec!["dominant", "other", "dominant"]);
+    }
+
+    /// ADR 0006 §12: `select_with_reorder` re-checks a reorder hook's
+    /// permutation itself (`is_valid_permutation`, doc comment above it
+    /// says this duplicates rerank.rs's own check "so this function
+    /// never trusts a permutation's validity to whichever caller
+    /// happened to construct it"). rerank.rs's tests exercise its own
+    /// copy of this check with all three invalid shapes, but nothing
+    /// exercised select.rs's independent copy of the same defense — a
+    /// proptest reorder hook here only ever returns a genuine
+    /// permutation. Each invalid shape below must be silently ignored,
+    /// falling back to the un-reordered baseline.
+    #[test]
+    fn an_invalid_reorder_permutation_falls_back_to_the_unreordered_order() {
+        fn three_candidates() -> Vec<EvidenceCandidate> {
+            vec![
+                EvidenceCandidate::from_passage("ctx", passage_hit("a", 0, "alpha"), 1),
+                EvidenceCandidate::from_passage("ctx", passage_hit("b", 0, "beta"), 2),
+                EvidenceCandidate::from_passage("ctx", passage_hit("c", 0, "gamma"), 3),
+            ]
+        }
+        fn candidate_ids(result: &SelectedEvidence) -> Vec<String> {
+            result
+                .items
+                .iter()
+                .map(|item| item.candidate_id.clone())
+                .collect()
+        }
+
+        let baseline = select_all(three_candidates(), &empty_lookup());
+        assert_eq!(baseline.items.len(), 3);
+
+        let cases: Vec<(&str, Vec<usize>)> = vec![
+            ("wrong length", vec![0, 1]),
+            ("out of range index", vec![0, 1, 99]),
+            ("repeated index", vec![0, 0, 1]),
+        ];
+        for (name, order) in cases {
+            let (fused, dropped) = super::super::fuse(three_candidates());
+            let result = select_with_reorder(
+                fused,
+                dropped,
+                &generous_limits(),
+                &empty_lookup(),
+                Some(&mut |_survivors: &[FusedCandidate]| Some(order.clone())),
+            );
+            assert_eq!(
+                candidate_ids(&result),
+                candidate_ids(&baseline),
+                "invalid permutation ({name}) must fall back to the unreordered order"
+            );
+        }
+    }
+
+    /// ADR 0006 §9: a source counts as "seen" for diversity purposes
+    /// once it has appeared "anywhere in the package-so-far" — across
+    /// every prior tier, not just push-backs within the current one.
+    /// `diversity_tiering_prefers_a_novel_source_within_a_tier` only
+    /// ever tests one tier; this pins the cross-tier case, where
+    /// "alpha" was already admitted in tier 0 and must still be pushed
+    /// behind a fresh source when it reappears in tier 1.
+    #[test]
+    fn diversity_tiering_remembers_a_source_seen_in_an_earlier_tier() {
+        // tier_width for max_items=8 is 2: tier 0 = [alpha#0, beta],
+        // tier 1 = [alpha#1, gamma]. Within tier 0 both sources are
+        // novel, so order is unchanged. In tier 1, "alpha" was already
+        // admitted in tier 0 — it must be pushed behind "gamma", the
+        // tier's only genuinely novel source.
+        let alpha_0 =
+            EvidenceCandidate::from_passage("ctx", passage_hit("alpha", 0, "alpha content"), 1);
+        let beta =
+            EvidenceCandidate::from_passage("ctx", passage_hit("beta", 0, "beta content"), 2);
+        let alpha_1 =
+            EvidenceCandidate::from_passage("ctx", passage_hit("alpha", 1, "alpha content two"), 3);
+        let gamma =
+            EvidenceCandidate::from_passage("ctx", passage_hit("gamma", 0, "gamma content"), 4);
+        let (fused, dropped) = super::super::fuse(vec![alpha_0, beta, alpha_1, gamma]);
+        let result = select(
+            fused,
+            dropped,
+            &limits(8, 10_000_000, 10_000_000),
+            &empty_lookup(),
+        );
+        assert_eq!(result.items.len(), 4);
+        let sources: Vec<&str> = result
+            .items
+            .iter()
+            .map(|item| item.passage.as_ref().unwrap().source.as_str())
+            .collect();
+        assert_eq!(sources, vec!["alpha", "beta", "gamma", "alpha"]);
     }
 
     #[test]
