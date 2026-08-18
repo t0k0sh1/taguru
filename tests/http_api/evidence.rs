@@ -322,10 +322,10 @@ fn activate_limit_forwards_into_the_activate_call() {
         .iter()
         .filter(|item| item["kind"] == json!("association"))
         .count();
-    assert!(
-        limited_associations < unlimited_associations,
-        "activate_limit: 1 must cap the activate lane's own contribution: \
-         unlimited={unlimited_associations}, limited={limited_associations}"
+    assert_eq!(
+        limited_associations, 1,
+        "activate_limit: 1 must cap the activate lane's own contribution to \
+         exactly one association: {limited}"
     );
 }
 

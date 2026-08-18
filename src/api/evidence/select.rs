@@ -1370,14 +1370,15 @@ mod tests {
             "one shared citation entry, not two"
         );
 
-        // A byte budget set to exactly the generous run's usage: if the
-        // second item's shared citation were billed again, this tight
-        // budget would only have room for one item.
+        // A byte AND token budget set to exactly the generous run's
+        // usage: if the second item's shared citation were billed
+        // again on either axis, this tight budget would only have room
+        // for one item.
         let (fused, dropped) = super::super::fuse(two_candidates_sharing_one_citation());
         let tight = select(
             fused,
             dropped,
-            &limits(10, generous.budget.bytes_used, 100_000),
+            &limits(10, generous.budget.bytes_used, generous.budget.tokens_used),
             &lookup,
         );
         assert_eq!(
@@ -1386,6 +1387,7 @@ mod tests {
             "both items still fit — the reused citation cost nothing extra"
         );
         assert_eq!(tight.budget.bytes_used, generous.budget.bytes_used);
+        assert_eq!(tight.budget.tokens_used, generous.budget.tokens_used);
     }
 
     // --- I4: corroboration never truncated ---
