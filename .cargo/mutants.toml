@@ -116,6 +116,23 @@ exclude_re = [
     "src/ship/shipper\\.rs:426:31: replace match guard vanished_mid_cycle\\(&error\\) with false in Shipper::ship_lane",
     "src/ship/shipper\\.rs:459:35: replace match guard vanished_mid_cycle\\(&error\\) with true in Shipper::ship_lane",
     "src/ship/shipper\\.rs:459:35: replace match guard vanished_mid_cycle\\(&error\\) with false in Shipper::ship_lane",
+    # `PassageStore::store`'s and `bounded_text`'s 4 GiB text-length
+    # guards (issue #708): `>`, `>=`, and `==` all disagree only at
+    # exactly `u32::MAX` bytes — allocating a ~4 GiB string to pin
+    # that one value is impractical for a unit test (and every real
+    # ingress path is already capped far below it: the 8 MiB import
+    # cap, the HTTP body cap).
+    "replace > with >= in PassageStore::store",
+    "replace > with == in PassageStore::store",
+    "replace > with >= in bounded_text",
+    "replace > with == in bounded_text",
+    # `compact_locked`'s legacy-file-unlink warning guard (issue
+    # #708): `if let Err(error) = remove_persisted_file(..) &&
+    # error.kind() != NotFound { tracing::warn!(..) }` is dead-end —
+    # the `Err` is never propagated (no `?`, no early return), so
+    # whether the warn fires changes nothing but which log line
+    # appears. This suite has no log-capture facility.
+    "replace != with == in PassageStore::compact_locked",
     # `Hydrator::fetch_lane_if_stale`'s two "why we're refetching" log
     # branches (issue #708): once the earlier `if local.len() >=
     # shipped && crc matches` check is false, EITHER `local.len() <
