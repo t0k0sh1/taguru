@@ -1879,10 +1879,17 @@ mod tests {
 
         // Version 0 must be refused too — the range check's lower bound,
         // not just its upper one (existing coverage above only pushes
-        // the version above IMAGE_VERSION).
-        let mut zero_version = image.clone();
-        zero_version[8..12].copy_from_slice(&0u32.to_le_bytes());
-        assert!(Context::from_bytes(&zero_version).is_err());
+        // the version above IMAGE_VERSION). `to_bytes_as_version` writes
+        // a structurally consistent image with version 0 stamped in
+        // (unlike hand-patching a byte offset, this survives a header
+        // layout change), so this reaches the same version-range check
+        // `from_bytes` runs before trusting anything else.
+        let v0 = context.to_bytes_as_version(0);
+        let error = Context::from_bytes(&v0).unwrap_err();
+        assert!(
+            error.to_string().contains("version is not supported"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -1949,8 +1956,9 @@ mod tests {
         at_boundary[24..32].copy_from_slice(&boundary_count.to_le_bytes());
         let error = Context::from_bytes(&resealed(at_boundary)).unwrap_err();
         assert!(
-            !error.to_string().contains("exceeds the u32 id space"),
-            "{error}"
+            error.to_string().contains("table is truncated"),
+            "count == NIL must clear the id-space guard and fail later, on \
+             the (absent) bytes the forged count promises: {error}"
         );
     }
 
