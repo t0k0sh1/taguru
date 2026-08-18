@@ -213,8 +213,10 @@ pub fn provider_from_env(shutdown: ShutdownFlag) -> Option<Arc<dyn EmbeddingProv
 #[allow(dead_code)]
 pub struct LocalModelInfo {
     pub name: &'static str,
-    /// Size of the one-time download, in MiB (the ONNX file fastembed
-    /// actually fetches — measured off the Hub, not the model card).
+    /// Size of the one-time download, in MiB: the full cache-directory
+    /// footprint fastembed leaves behind (ONNX weights plus tokenizer
+    /// and config files), measured empirically rather than read off
+    /// the model card (issue #710, fastembed 6.0.0).
     pub download_mib: u32,
     pub dims: u32,
     pub multilingual: bool,
@@ -237,7 +239,7 @@ pub struct LocalModelInfo {
 pub const LOCAL_MODELS: [LocalModelInfo; 5] = [
     LocalModelInfo {
         name: "paraphrase-multilingual-minilm-l12-v2-q",
-        download_mib: 224,
+        download_mib: 241,
         dims: 384,
         multilingual: true,
         license: "Apache-2.0",
@@ -246,7 +248,7 @@ pub const LOCAL_MODELS: [LocalModelInfo; 5] = [
     },
     LocalModelInfo {
         name: "multilingual-e5-small",
-        download_mib: 448,
+        download_mib: 465,
         dims: 384,
         multilingual: true,
         license: "MIT",
@@ -255,7 +257,7 @@ pub const LOCAL_MODELS: [LocalModelInfo; 5] = [
     },
     LocalModelInfo {
         name: "all-minilm-l6-v2-q",
-        download_mib: 21,
+        download_mib: 23,
         dims: 384,
         multilingual: false,
         license: "Apache-2.0",
@@ -264,7 +266,7 @@ pub const LOCAL_MODELS: [LocalModelInfo; 5] = [
     },
     LocalModelInfo {
         name: "bge-small-en-v1.5",
-        download_mib: 126,
+        download_mib: 128,
         dims: 384,
         multilingual: false,
         license: "MIT",
@@ -273,7 +275,7 @@ pub const LOCAL_MODELS: [LocalModelInfo; 5] = [
     },
     LocalModelInfo {
         name: "multilingual-e5-base",
-        download_mib: 1058,
+        download_mib: 1075,
         dims: 768,
         multilingual: true,
         license: "MIT",
