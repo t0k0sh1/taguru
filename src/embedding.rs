@@ -1774,6 +1774,25 @@ mod tests {
         assert!(VectorStore::from_bytes(&bytes[..bytes.len() - 1]).is_none());
     }
 
+    #[test]
+    fn vector_store_footprint_pins_the_byte_estimate_formula() {
+        // Distinct, coprime-ish sizes per entry so a `+`<->`*` or
+        // `*`<->`/` mutation anywhere in `footprint` changes the
+        // total; the expected value is hand-derived, not re-derived
+        // from the same formula, so the assertion cannot mask the
+        // mutation it targets.
+        let mut store = VectorStore {
+            model: "test-model".into(),
+            ..Default::default()
+        };
+        store.concepts.insert("c1".into(), (0, vec![0.0; 3])); // 2 + 3*4 + 64 = 78
+        store
+            .concepts
+            .insert("concept-two".into(), (0, vec![0.0; 5])); // 11 + 5*4 + 64 = 95
+        store.labels.insert("L".into(), (0, vec![0.0; 2])); // 1 + 2*4 + 64 = 73
+        assert_eq!(store.footprint(), 78 + 95 + 73);
+    }
+
     /// A legacy TAGURUV2 sidecar (model only, no width field) loads as
     /// it always did — the upgrade must not cost a re-embed — and the
     /// next save writes the current header, width included.
@@ -2350,6 +2369,34 @@ mod tests {
             .unwrap_err();
         served.join().unwrap();
         assert!(error.contains("non-numeric"), "{error}");
+    }
+
+    #[test]
+    fn passage_vector_store_footprint_pins_the_byte_estimate_formula() {
+        // Same rationale as vector_store_footprint_pins_the_byte_estimate_formula:
+        // distinct sizes per row, hand-derived expected total.
+        let mut store = PassageVectorStore::new("test-model");
+        store.push(
+            PassageKey {
+                source: "src-a".into(), // 5
+                index: 0,
+                hash: 1,
+                question_hash: None,
+            },
+            vec![0.0; 3],
+        );
+        store.push(
+            PassageKey {
+                source: "source-two".into(), // 10
+                index: 1,
+                hash: 2,
+                question_hash: None,
+            },
+            vec![0.0; 3],
+        );
+        // data.len() = 6 (2 rows * dim 3) -> 6*4 = 24
+        // keys: (5 + 48) + (10 + 48) = 111
+        assert_eq!(store.footprint(), 24 + 111);
     }
 
     #[test]

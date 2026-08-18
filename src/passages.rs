@@ -1368,6 +1368,41 @@ mod tests {
     }
 
     #[test]
+    fn resident_bytes_tracks_upsert_and_retract_exactly_not_cumulatively() {
+        // A stale `+=`/`-=` (e.g. mutated to `*=` or dropped) would
+        // leave the running total either accumulating the replaced
+        // record's bytes or never shrinking on retract — footprint()
+        // is checked against record_bytes() of the CURRENT record
+        // after every step, not just watched for non-zero.
+        let dir = scratch_dir("resident-bytes-accounting");
+        let store = open(&dir);
+
+        store.store(batch(&[("s1", "short")])).unwrap();
+        let s1_short = record_bytes("s1", &store.get("s1").unwrap());
+        assert_eq!(store.footprint(), s1_short);
+
+        // Upsert with a longer text: if the old record's bytes were
+        // not subtracted first, this would double-count instead of
+        // replacing.
+        store
+            .store(batch(&[("s1", "a much longer replacement passage")]))
+            .unwrap();
+        let s1_long = record_bytes("s1", &store.get("s1").unwrap());
+        assert_ne!(s1_short, s1_long, "the two texts must differ in cost");
+        assert_eq!(store.footprint(), s1_long);
+
+        store.store(batch(&[("s2", "another one")])).unwrap();
+        let s2 = record_bytes("s2", &store.get("s2").unwrap());
+        assert_eq!(store.footprint(), s1_long + s2);
+
+        store.retract("s1").unwrap();
+        assert_eq!(store.footprint(), s2);
+
+        store.retract("s2").unwrap();
+        assert_eq!(store.footprint(), 0);
+    }
+
+    #[test]
     fn passage_store_retract_removes_and_is_a_noop_if_the_source_is_absent() {
         let dir = scratch_dir("retract");
         let store = open(&dir);
@@ -2615,6 +2650,51 @@ mod tests {
             None,
             "past the end is None, not a panic"
         );
+    }
+
+    #[test]
+    fn record_bytes_pins_the_byte_estimate_formula() {
+        // Every component below has a distinct, coprime-ish size so a
+        // `+`<->`*`, `+`<->`-`, or `*`<->`/` mutation anywhere in
+        // `record_bytes` changes the total — a hand-derived literal,
+        // not a re-derivation of the same formula, is the expected
+        // value, so the assertion cannot mask the mutation it targets.
+        let source = "abcde"; // 5 bytes
+        let text = "para one text\n\npara two text\n\npara three text"; // 45 bytes, 3 paragraphs
+        assert_eq!(text.len(), 45);
+        let record = PassageRecord::new(
+            Arc::from(text),
+            vec![(0, "a".to_string()), (1, "bb".to_string())], // 1+8, 2+8
+            vec![(0, "S1".to_string()), (2, "Sec3".to_string())], // 2+8, 4+8
+            vec![(
+                1,
+                Locator {
+                    kind: "page".to_string(),
+                    value: "12".to_string(),
+                },
+            )], // 4+2+8
+            SourceMeta {
+                stored_at: Some(1),
+                date: Some(2),
+                tags: vec!["b".to_string(), "a".to_string()], // sorted+deduped: 1+8, 1+8
+            },
+        )
+        .0;
+        assert_eq!(record.paragraphs.len(), 3);
+        // Hand-derived literal, not a re-derivation of the formula:
+        // 5 (source) + 45 (text) + 3*24 (ParagraphSpan, index+start+end:
+        // u32 + hash: u64, padded to 24) + 9 + 10 + 10 + 12 + 14 + 9 + 9
+        // (per-entry lengths + 8 overhead each) + 16 (the two epoch
+        // stamps) + 64 (SOURCE_OVERHEAD) = 275. Referencing
+        // `std::mem::size_of::<ParagraphSpan>()` or `SOURCE_OVERHEAD`
+        // here instead would couple this side of the assertion to the
+        // same symbols `record_bytes` uses, hiding a mutation to either.
+        assert_eq!(record_bytes(source, &record), 275);
+    }
+
+    #[test]
+    fn compact_floor_bytes_is_four_mebibytes() {
+        assert_eq!(COMPACT_FLOOR_BYTES, 4_194_304);
     }
 
     #[test]
