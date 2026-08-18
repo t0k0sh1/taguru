@@ -2446,6 +2446,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn passage_vector_store_from_bytes_refuses_rows_claiming_a_zero_dimension() {
+        // Rows without a dimension cannot exist through `push()` (a
+        // width mismatch is dropped loudly, never stored) — a file
+        // that declares `dim == 0` alongside `count > 0` can only be
+        // hand-corrupted, and must be refused even when the rest of
+        // the bytes would otherwise parse cleanly.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(PASSAGE_VECTOR_MAGIC);
+        write_string(&mut bytes, "test-model");
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // dim = 0
+        bytes.extend_from_slice(&1u32.to_le_bytes()); // count = 1
+        write_string(&mut bytes, "docs/a.md"); // key.source
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // key.index
+        bytes.extend_from_slice(&0u64.to_le_bytes()); // key.hash
+        bytes.push(0); // question_hash = None
+        // dim == 0, so no data floats follow — these bytes parse
+        // cleanly end-to-end if the count>0-and-dim==0 guard is
+        // bypassed.
+        assert!(PassageVectorStore::from_bytes(&bytes).is_none());
+    }
+
     // -----------------------------------------------------------------
     // Passage ANN index
     // -----------------------------------------------------------------
@@ -2587,6 +2609,72 @@ mod tests {
     }
 
     #[test]
+    fn passage_ann_index_build_stops_after_one_centroid_when_the_deadline_is_already_spent() {
+        // The `built > 0` half of the break guard exists so the FIRST
+        // centroid always gets built even on an already-spent deadline
+        // (the doc comment's "without this gate the seed row would
+        // slice an empty `data` and panic") — the deadline only cuts
+        // the loop short starting from the second centroid onward.
+        let dim = 4;
+        let rows = 25; // centroid_count(25) == 5, so a full run would
+        // build 5 centroids; an expired deadline must stop at 1.
+        let store = synthetic_passage_store(rows, dim);
+        let deadline = Deadline::after(Duration::ZERO);
+        std::thread::sleep(Duration::from_millis(1));
+        assert!(deadline.expired());
+
+        let index = PassageAnnIndex::build(&store, deadline);
+        assert_eq!(index.centroids.len(), dim, "exactly one centroid");
+        assert_eq!(index.lists.len(), 1);
+        assert_eq!(index.lists[0].len(), rows, "every row lands in it");
+    }
+
+    #[test]
+    fn passage_ann_index_build_breaks_similarity_ties_toward_the_earlier_centroid() {
+        // A dim-1 store where the THIRD row scores an EXACT tie
+        // (`0.0`, bit-identical since one factor is always zero)
+        // against both centroids — `sim > *slot` (strict) must keep
+        // the row on the earlier (first-built) centroid rather than
+        // reassigning it on the tie, and the farthest-row reselection
+        // between centroids must actually run (not stay stuck on the
+        // first seed).
+        let mut store = PassageVectorStore::new("tie-test");
+        for (i, value) in [1.0f32, -1.0, 0.0].into_iter().enumerate() {
+            store.push(
+                PassageKey {
+                    source: format!("r{i}"),
+                    index: 0,
+                    hash: i as u64,
+                    question_hash: None,
+                },
+                vec![value],
+            );
+        }
+        assert_eq!(PassageAnnIndex::centroid_count(3), 2);
+        let index = PassageAnnIndex::build(&store, Deadline::unbounded());
+        assert_eq!(index.lists.len(), 2);
+        assert_eq!(index.lists[0], vec![0, 2], "row 2 keeps the earlier tie");
+        assert_eq!(index.lists[1], vec![1], "seed reselection must fire");
+    }
+
+    #[test]
+    fn passage_ann_index_build_slices_each_rows_own_vector_not_a_neighbors() {
+        // Every centroid pushed is `row(seed)` — a wrong start offset
+        // for `seed != 0` would push a wrong-length slice (or panic),
+        // silently corrupting the flat `centroids` layout while still
+        // partitioning every row somewhere. The total length is the
+        // one assertion no accidental partition coincidence can pass
+        // by luck.
+        let dim = 8;
+        let rows = 50;
+        let store = synthetic_passage_store(rows, dim);
+        let index = PassageAnnIndex::build(&store, Deadline::unbounded());
+        let target = PassageAnnIndex::centroid_count(rows);
+        assert_eq!(index.lists.len(), target);
+        assert_eq!(index.centroids.len(), target * dim);
+    }
+
+    #[test]
     fn passage_ann_index_search_is_sorted_descending_and_respects_limit() {
         let store = synthetic_passage_store(2_000, 8);
         let index = PassageAnnIndex::build(&store, Deadline::unbounded());
@@ -2596,6 +2684,21 @@ mod tests {
         for window in hits.windows(2) {
             assert!(window[0].1 >= window[1].1, "{hits:?}");
         }
+    }
+
+    #[test]
+    fn top_matches_returns_nothing_for_a_width_mismatched_query_not_a_zero_scored_sweep() {
+        // A `||`->`&&` mutation on the width gate is invisible on an
+        // empty store (nothing to score either way) — the store here
+        // must be non-empty so a mismatched query that slips past the
+        // gate would otherwise fall through to `exact_top_matches`,
+        // whose `similarity` returns 0.0 for every mismatched row
+        // instead of the empty result the doc comment promises.
+        let dim = 6;
+        let store = synthetic_passage_store(5, dim);
+        let query = deterministic_unit_vector(1, dim + 1);
+        let hits = store.top_matches(&query, 10, Deadline::unbounded(), None);
+        assert!(hits.is_empty(), "{hits:?}");
     }
 
     #[test]
