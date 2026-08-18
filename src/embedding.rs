@@ -292,13 +292,25 @@ pub const LOCAL_MODELS: [LocalModelInfo; 5] = [
 /// dark.
 #[allow(dead_code)]
 pub fn model_cache_dir() -> Option<std::path::PathBuf> {
-    if let Some(hf_home) = std::env::var_os("HF_HOME").filter(|value| !value.is_empty()) {
-        return Some(std::path::PathBuf::from(hf_home));
-    }
     #[cfg(unix)]
     let home = std::env::var_os("HOME");
     #[cfg(not(unix))]
     let home = std::env::var_os("USERPROFILE");
+    cache_dir_from(std::env::var_os("HF_HOME"), home)
+}
+
+/// [`model_cache_dir`]'s precedence, pulled out as a pure function of
+/// its two env values: real env vars are process-global and shared
+/// across every test nextest runs in parallel, so setting them from a
+/// test is flaky by construction — this is what a test can call
+/// instead.
+fn cache_dir_from(
+    hf_home: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Option<std::path::PathBuf> {
+    if let Some(hf_home) = hf_home.filter(|value| !value.is_empty()) {
+        return Some(std::path::PathBuf::from(hf_home));
+    }
     home.filter(|home| !home.is_empty()).map(|home| {
         std::path::PathBuf::from(home)
             .join(".taguru")
@@ -488,6 +500,24 @@ mod local {
                     info.name
                 );
             }
+        }
+
+        #[test]
+        fn supported_lists_every_local_model_by_name() {
+            let listed = supported();
+            for info in &LOCAL_MODELS {
+                assert!(
+                    listed.contains(info.name),
+                    "{} missing from supported(): {listed}",
+                    info.name
+                );
+            }
+            assert_eq!(
+                listed.matches(", ").count(),
+                LOCAL_MODELS.len() - 1,
+                "expected {} comma-separated entries: {listed}",
+                LOCAL_MODELS.len()
+            );
         }
 
         fn cosine(a: &[f32], b: &[f32]) -> f32 {
@@ -1755,6 +1785,55 @@ mod tests {
         }
     }
 
+    /// `registry/boot.rs` wires `/metrics`' embed-breaker gauge and
+    /// the fast-fail gate through `EmbeddingProvider::breaker()`, not
+    /// the struct field directly — every other breaker test here
+    /// reaches `provider.breaker` straight, which would stay green
+    /// even if `breaker()` were disconnected from it (issue #708).
+    /// Pointer identity (not just `is_some()`) pins that it is the
+    /// SAME breaker, not a fresh stand-in.
+    #[test]
+    fn breaker_is_reachable_through_the_trait_method_not_only_the_field() {
+        let provider = stub_provider("127.0.0.1:1".parse().unwrap(), Duration::from_millis(1));
+        let field_ptr = std::ptr::addr_of!(provider.breaker);
+        let via_trait: &dyn EmbeddingProvider = &provider;
+        let breaker = via_trait
+            .breaker()
+            .expect("HttpEmbeddings must wire its breaker through the trait method");
+        assert_eq!(breaker as *const EmbedBreaker, field_ptr);
+    }
+
+    #[test]
+    fn cache_dir_from_treats_an_empty_hf_home_as_absent() {
+        let empty_hf_home = Some(std::ffi::OsString::from(""));
+        let home = Some(std::ffi::OsString::from("/home/x"));
+        assert_eq!(
+            cache_dir_from(empty_hf_home, home),
+            Some(std::path::PathBuf::from("/home/x/.taguru/models")),
+            "an empty HF_HOME must fall through to the HOME-based default, not win as a real override"
+        );
+    }
+
+    #[test]
+    fn cache_dir_from_treats_an_empty_home_as_absent() {
+        assert_eq!(
+            cache_dir_from(None, Some(std::ffi::OsString::from(""))),
+            None,
+            "an empty HOME must not produce a bogus /.taguru/models path"
+        );
+    }
+
+    #[test]
+    fn cache_dir_from_prefers_a_real_hf_home_over_home() {
+        assert_eq!(
+            cache_dir_from(
+                Some(std::ffi::OsString::from("/hf-cache")),
+                Some(std::ffi::OsString::from("/home/x")),
+            ),
+            Some(std::path::PathBuf::from("/hf-cache")),
+        );
+    }
+
     #[test]
     fn vector_store_roundtrips_and_rejects_garbage() {
         let mut store = VectorStore {
@@ -2018,6 +2097,57 @@ mod tests {
         assert_eq!(hits.load(Ordering::SeqCst), 1, "a 4xx never retries");
     }
 
+    /// `backoff *= 5` between retries (issue #708) — a `*=`->`/=`
+    /// mutant would shrink the wait instead of growing it. Same
+    /// 503/503/200 ladder as the test above (whose hit-count
+    /// assertions don't observe timing at all), but timed: two
+    /// backoff sleeps of RETRY_INITIAL_BACKOFF (100ms) then 5x that
+    /// (500ms) is at least 550ms; the mutant's 100ms then 20ms is
+    /// under 150ms.
+    #[test]
+    fn retry_backoff_grows_five_fold_not_shrinks() {
+        use std::io::Write;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let counted = std::sync::Arc::clone(&hits);
+        std::thread::spawn(move || {
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let _ = read_full_request(&mut stream);
+                let attempt = counted.fetch_add(1, Ordering::SeqCst);
+                if attempt < 2 {
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\
+                          Connection: close\r\n\r\n",
+                    );
+                } else {
+                    let body = br#"{"data":[{"embedding":[3.0,4.0]}]}"#;
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(head.as_bytes());
+                    let _ = stream.write_all(body);
+                }
+            }
+        });
+        let provider = stub_provider(addr, Duration::from_secs(5));
+        let started = std::time::Instant::now();
+        let vectors = provider
+            .embed(&["x"], EmbedPurpose::Query, Deadline::unbounded())
+            .unwrap();
+        let elapsed = started.elapsed();
+        assert_eq!(vectors, vec![vec![0.6, 0.8]]);
+        assert!(
+            elapsed >= Duration::from_millis(550),
+            "backoff must grow 5x between retries, not shrink: {elapsed:?}"
+        );
+    }
+
     /// A listener that accepts, reads the request, and never answers —
     /// the black-holed provider every cancellation test needs. Held
     /// open (not closed) so the client sees silence, not a reset.
@@ -2267,6 +2397,46 @@ mod tests {
             .embed(&["こんにちは"], EmbedPurpose::Query, Deadline::unbounded())
             .unwrap_err();
         assert!(error.contains("refusing to buffer"), "{error}");
+    }
+
+    /// The exact-boundary sibling of the test above: `MAX_RESPONSE_BYTES`
+    /// (64 MiB) itself is honest, legitimate size, not the first byte
+    /// refused — a `>`->`>=` mutant on the cap check would refuse an
+    /// exactly-64-MiB reply too.
+    #[test]
+    fn a_response_of_exactly_64_mib_is_accepted_not_refused() {
+        use std::io::Write;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        const CAP: usize = 64 * 1024 * 1024;
+        let prefix = br#"{"data":[{"embedding":[3.0,4.0]}],"pad":""#;
+        let suffix = br#""}"#;
+        let pad_len = CAP - prefix.len() - suffix.len();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_full_request(&mut stream);
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                 Content-Length: {CAP}\r\nConnection: close\r\n\r\n"
+            );
+            stream.write_all(head.as_bytes()).unwrap();
+            stream.write_all(prefix).unwrap();
+            let chunk = vec![b'x'; 1024 * 1024];
+            let mut remaining = pad_len;
+            while remaining > 0 {
+                let n = remaining.min(chunk.len());
+                stream.write_all(&chunk[..n]).unwrap();
+                remaining -= n;
+            }
+            stream.write_all(suffix).unwrap();
+        });
+
+        let provider = stub_provider(addr, Duration::from_secs(15));
+        let vectors = provider
+            .embed(&["x"], EmbedPurpose::Query, Deadline::unbounded())
+            .unwrap();
+        assert_eq!(vectors, vec![vec![0.6, 0.8]]);
     }
 
     /// A provider that returns `data` out of input order is realigned by
