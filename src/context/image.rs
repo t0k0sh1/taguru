@@ -1876,6 +1876,20 @@ mod tests {
         let mut wrong_version = image.clone();
         wrong_version[8] = 0xFF;
         assert!(Context::from_bytes(&wrong_version).is_err());
+
+        // Version 0 must be refused too — the range check's lower bound,
+        // not just its upper one (existing coverage above only pushes
+        // the version above IMAGE_VERSION). `to_bytes_as_version` writes
+        // a structurally consistent image with version 0 stamped in
+        // (unlike hand-patching a byte offset, this survives a header
+        // layout change), so this reaches the same version-range check
+        // `from_bytes` runs before trusting anything else.
+        let v0 = context.to_bytes_as_version(0);
+        let error = Context::from_bytes(&v0).unwrap_err();
+        assert!(
+            error.to_string().contains("version is not supported"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -1915,6 +1929,37 @@ mod tests {
 
         // Bytes that never were an image have no version to report.
         assert_eq!(Context::image_generation(b"junk"), None);
+    }
+
+    #[test]
+    fn load_table_refuses_a_count_past_the_u32_id_space() {
+        let mut context = Context::default();
+        context.associate("i", "likes", "apple", 1.0).unwrap();
+        let image = context.to_bytes();
+
+        // magic(8) + version(4) + padding(4) + applied_seq(8) = 24: the
+        // edges table's own u64 record count starts right there.
+        let mut forged = image.clone();
+        let bogus_count = u64::from(NIL) + 1;
+        forged[24..32].copy_from_slice(&bogus_count.to_le_bytes());
+        let error = Context::from_bytes(&resealed(forged)).unwrap_err();
+        assert!(
+            error.to_string().contains("exceeds the u32 id space"),
+            "{error}"
+        );
+
+        // The boundary itself (count == NIL) is legitimate and must not
+        // be rejected by this same guard — it fails later, on the
+        // (absent) bytes the forged count promises, not here.
+        let mut at_boundary = image.clone();
+        let boundary_count = u64::from(NIL);
+        at_boundary[24..32].copy_from_slice(&boundary_count.to_le_bytes());
+        let error = Context::from_bytes(&resealed(at_boundary)).unwrap_err();
+        assert!(
+            error.to_string().contains("table is truncated"),
+            "count == NIL must clear the id-space guard and fail later, on \
+             the (absent) bytes the forged count promises: {error}"
+        );
     }
 
     #[test]

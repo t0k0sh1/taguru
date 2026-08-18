@@ -1099,6 +1099,27 @@ mod tests {
     }
 
     #[test]
+    fn normalize_is_idempotent_on_its_own_documented_counterexamples() {
+        // "J" + COMBINING CARON (U+030C): NFKC-then-lowercase alone is
+        // not a fixed point here — see normalize's doc comment. A
+        // single pass folds the two code points to the precomposed
+        // U+01F0 ("ǰ"); a second pass must leave that untouched.
+        let j_caron = "J\u{030C}";
+        let once = normalize(j_caron);
+        assert_eq!(once, "\u{01F0}");
+        assert_eq!(normalize(&once), once);
+
+        // "🄐" (U+1F110, PARENTHESIZED LATIN CAPITAL LETTER A):
+        // lowercase-then-NFKC alone is not a fixed point here — its
+        // NFKC decomposition "(A)" still has an uppercase letter that
+        // a first lowercase pass never touched.
+        let parenthesized_a = "\u{1F110}";
+        let once = normalize(parenthesized_a);
+        assert_eq!(once, "(a)");
+        assert_eq!(normalize(&once), once);
+    }
+
+    #[test]
     fn a_retracted_fact_is_excluded_from_gloss_and_describe() {
         let mut context = Context::default();
         context.associate("A", "関係", "B", 1.0).unwrap();

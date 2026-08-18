@@ -97,6 +97,43 @@ fn lookalike_candidates_carry_the_evidence_to_tell_them_apart() {
     );
 }
 
+/// A cue that normalizes to the empty string (here, simply the empty
+/// string itself — `Context::normalize`'s NFKC+lowercase+kana-fold
+/// chain never shrinks a non-empty input to nothing) must degrade to
+/// an empty result list, not an error: `EntryIndex::resolve` refuses
+/// an empty needle outright, and both HTTP handlers pass it straight
+/// through with no validation of their own.
+#[test]
+fn an_empty_cue_resolves_to_no_candidates_not_an_error() {
+    let server = Server::start("empty-cue");
+    server.ok(
+        "PUT",
+        "/contexts/empty-cue",
+        Some(json!({"description": "d"})),
+    );
+    server.ok(
+        "POST",
+        "/contexts/empty-cue/associations",
+        Some(json!([
+            {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0},
+        ])),
+    );
+
+    let resolved = server.ok(
+        "POST",
+        "/contexts/empty-cue/resolve",
+        Some(json!({"cue": ""})),
+    );
+    assert_eq!(resolved, json!([]), "{resolved}");
+
+    let labels = server.ok(
+        "POST",
+        "/contexts/empty-cue/resolve_label",
+        Some(json!({"cue": ""})),
+    );
+    assert_eq!(labels, json!([]), "{labels}");
+}
+
 #[test]
 fn oversized_input_lists_are_refused_before_any_work() {
     let server = Server::start("input-caps");
