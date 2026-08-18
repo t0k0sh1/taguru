@@ -133,6 +133,23 @@ exclude_re = [
     # whether the warn fires changes nothing but which log line
     # appears. This suite has no log-capture facility.
     "replace != with == in PassageStore::compact_locked",
+    # `Hydrator::fetch_lane_if_stale`'s two "why we're refetching" log
+    # branches (issue #708): once the earlier `if local.len() >=
+    # shipped && crc matches` check is false, EITHER `local.len() <
+    # shipped` (the shipped stream grew) OR `local.len() >= shipped`
+    # with a CRC mismatch (genuine divergence) — the `if local.len() <
+    # shipped {...} else if !local.is_empty() {...}` pair below only
+    # decides which `tracing::` message fires; both arms fall through
+    # to the identical fetch either way, and this suite has no
+    # log-capture facility. Every mutant on the `<` operator (`>`,
+    # `==`, `<=` — all three swap which log line fires for at least
+    # one input, never anything else) and deleting the `!` pick the
+    # same fetch path with a different log line — no black-box test
+    # can observe the difference.
+    "replace < with > in Hydrator::fetch_lane_if_stale",
+    "replace < with == in Hydrator::fetch_lane_if_stale",
+    "replace < with <= in Hydrator::fetch_lane_if_stale",
+    "delete ! in Hydrator::fetch_lane_if_stale",
     # `PassageAnnIndex::build`'s seed-reselection gate (issue #708):
     # `if built < target { seed = ... }` guards a recompute that is
     # only ever READ by the next loop iteration. On the very last
