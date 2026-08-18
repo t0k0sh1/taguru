@@ -182,6 +182,200 @@ fn selection_is_deterministic_across_repeated_calls() {
     assert_eq!(first, second);
 }
 
+/// ADR 0006 §5.1's `query` lane runs only when `labels` pins a facet —
+/// this is the only test in this file (or `assemble.rs`'s own `mod
+/// tests`) that ever sends a non-empty `labels`, so the lane's own
+/// contribution (`query_span`'s association count, and the
+/// `labels.is_empty()` branch itself) was otherwise never exercised.
+/// The same edge the graph-only `activate` lane already finds is also
+/// reachable through `query` when `labels` names its own relation —
+/// `fuse`'s exact-key dedup then collapses the two lane appearances
+/// into one candidate, so a labeled call's `dedup_dropped` is strictly
+/// greater than an unlabeled one's: proof the `query` lane actually
+/// ran and returned real evidence, not merely that the response flag
+/// flipped.
+#[test]
+fn the_query_lane_runs_only_when_labels_pins_a_facet_and_contributes_real_evidence() {
+    let server = Server::start("evidence-query-lane");
+    seed_mixed_corpus(&server, "sake");
+
+    let unlabeled = server.ok(
+        "POST",
+        "/contexts/sake/evidence",
+        Some(json!({"origins": ["青嶺酒造"]})),
+    );
+    assert_eq!(
+        unlabeled["plan"]["lanes"]["query"]["ran"],
+        json!(false),
+        "{unlabeled}"
+    );
+
+    let labeled = server.ok(
+        "POST",
+        "/contexts/sake/evidence",
+        Some(json!({"origins": ["青嶺酒造"], "labels": ["杜氏"]})),
+    );
+    assert_eq!(
+        labeled["plan"]["lanes"]["query"]["ran"],
+        json!(true),
+        "{labeled}"
+    );
+    assert!(
+        labeled["plan"]["selection"]["dedup_dropped"]
+            .as_u64()
+            .unwrap()
+            > unlabeled["plan"]["selection"]["dedup_dropped"]
+                .as_u64()
+                .unwrap(),
+        "the query lane's own copy of the 杜氏 edge must fold into the \
+         activate lane's copy — unlabeled: {unlabeled}, labeled: {labeled}"
+    );
+}
+
+/// ADR 0006 §5.1's `dice_floor`/`resolve_limit`/`semantic_floor` all
+/// forward into the same `ResolveRequest` `assemble_evidence` builds
+/// per origin cue — a typo cue resolves under the default floor but is
+/// refused under a tightened one, the same fuzzy-tier/floor behavior
+/// `POST /contexts/{name}/resolve` itself exercises directly.
+/// Confirms the field actually reaches the resolve call rather than
+/// being silently dropped on the way there.
+#[test]
+fn dice_floor_forwards_into_the_per_origin_resolve_call() {
+    let server = Server::start("evidence-dice-floor");
+    seed_mixed_corpus(&server, "sake");
+
+    let lenient = server.ok(
+        "POST",
+        "/contexts/sake/evidence",
+        // A typo of the stored concept "青嶺酒造" — the fuzzy tier
+        // resolves it under the default floor.
+        Some(json!({"origins": ["青嶺酒蔵"]})),
+    );
+    assert!(
+        lenient["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["kind"] == json!("association")),
+        "the default floor must resolve the typo to an anchor: {lenient}"
+    );
+
+    let strict = server.ok(
+        "POST",
+        "/contexts/sake/evidence",
+        Some(json!({"origins": ["青嶺酒蔵"], "dice_floor": 0.9})),
+    );
+    assert!(
+        !strict["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["kind"] == json!("association")),
+        "a tightened floor must refuse the typo, leaving no anchor for \
+         query/activate to run from: {strict}"
+    );
+    assert_eq!(
+        strict["plan"]["lanes"]["activate"]["reason"],
+        json!("no anchors resolved from 'origins'"),
+        "{strict}"
+    );
+}
+
+/// ADR 0006 §5.1's `activate_limit` forwards into `activate_excluding`'s
+/// own limit argument (`assemble.rs`: `clamp(request.activate_limit,
+/// 20, MAX_MATCH_LIMIT)`) — a corpus with two facts from the same
+/// anchor returns both by default but only one when capped.
+#[test]
+fn activate_limit_forwards_into_the_activate_call() {
+    let server = Server::start("evidence-activate-limit");
+    seed_mixed_corpus(&server, "sake");
+    server.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([
+            {"subject": "青嶺酒造", "label": "所在地", "object": "雲居県",
+             "weight": 1.0, "source": "docs/kura.md", "paragraph": 0},
+        ])),
+    );
+
+    let unlimited = server.ok(
+        "POST",
+        "/contexts/sake/evidence",
+        Some(json!({"origins": ["青嶺酒造"]})),
+    );
+    let unlimited_associations = unlimited["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["kind"] == json!("association"))
+        .count();
+    assert!(unlimited_associations >= 2, "{unlimited}");
+
+    let limited = server.ok(
+        "POST",
+        "/contexts/sake/evidence",
+        Some(json!({"origins": ["青嶺酒造"], "activate_limit": 1})),
+    );
+    let limited_associations = limited["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["kind"] == json!("association"))
+        .count();
+    assert_eq!(
+        limited_associations, 1,
+        "activate_limit: 1 must cap the activate lane's own contribution to \
+         exactly one association: {limited}"
+    );
+}
+
+/// ADR 0006 §9 I1: an association attribution whose `(source,
+/// paragraph)` was never stored as a passage (`CitationLookup::
+/// UnknownSource`) is silently dropped from that item's own
+/// `citation_refs` rather than ever creating an orphan reference — the
+/// item itself is still admitted, only the unresolvable locator is
+/// missing.
+#[test]
+fn an_attribution_to_a_never_stored_source_is_dropped_not_orphaned() {
+    let server = Server::start("evidence-unresolvable-citation");
+    seed_mixed_corpus(&server, "sake");
+    server.ok(
+        "POST",
+        "/contexts/sake/associations",
+        Some(json!([
+            {"subject": "青嶺酒造", "label": "受賞歴", "object": "金賞",
+             "weight": 1.0, "source": "ghost.md", "paragraph": 0},
+        ])),
+    );
+
+    let package = server.ok(
+        "POST",
+        "/contexts/sake/evidence",
+        Some(json!({"origins": ["青嶺酒造"]})),
+    );
+    let item = package["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| {
+            item["kind"] == json!("association") && item["association"]["label"] == json!("受賞歴")
+        })
+        .unwrap_or_else(|| panic!("expected a 受賞歴 item: {package}"));
+    assert!(
+        item["citation_refs"].as_array().unwrap().is_empty(),
+        "an unresolvable locator must be dropped, not left as an orphan \
+         reference: {item}"
+    );
+    assert!(
+        !package["citations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["source"] == json!("ghost.md")),
+        "ghost.md must never appear in the package's citations: {package}"
+    );
+}
+
 /// The MCP tool routes onto the same endpoint and answers the same
 /// package.
 #[test]
