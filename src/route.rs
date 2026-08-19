@@ -315,11 +315,31 @@ mod tests {
     /// no line; the parse must refuse it up front instead.
     #[test]
     fn the_route_map_refuses_shard_urls_naming_no_host() {
-        for line in ["sake = http://\n", "sake = https:///path\n"] {
+        for line in [
+            "sake = http://\n",
+            "sake = https:///path\n",
+            // A port-only authority is just as hostless as a bare
+            // scheme — the split must isolate the host, not accept
+            // ':8248' as one.
+            "sake = http://:8248\n",
+            "sake = https://:443/path\n",
+            // The refusal must not echo the URL: a hostless spelling
+            // can still carry a secret in its query, and this error
+            // prints at boot and reload.
+            "sake = http://?token=hunter2\n",
+        ] {
             let refused = RouteMap::parse(line).expect_err("a host-less URL routes nowhere");
-            assert!(refused.contains("names no shard host"), "{refused}");
+            assert!(refused.contains("names no host"), "{refused}");
             assert!(refused.contains("line 1"), "{refused}");
+            assert!(
+                !refused.contains("hunter2") && !refused.contains("http://"),
+                "the refusal must not echo the URL: {refused}"
+            );
         }
+        // The IPv6 literal's brackets are not a port colon — a
+        // bracketed host with a port must keep parsing.
+        let map = RouteMap::parse("sake = http://[::1]:8248\n").unwrap();
+        assert_eq!(map.url(0), "http://[::1]:8248");
     }
 
     /// Shard URLs surface in logs and /metrics labels, so userinfo is

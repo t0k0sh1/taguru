@@ -352,6 +352,17 @@ fn the_router_over_split_shards_answers_exactly_like_one_instance() {
         "/groups/jp",
         Some(json!({"remove_contexts": ["never-existed"]})),
     );
+    // ADDITIONS keep the existence check — `project_body`'s refusal
+    // for an unplaced member must be the shard's own nonexistent-member
+    // answer, byte for byte, and leave the group unchanged.
+    assert_equivalent(
+        &single,
+        &router,
+        "PATCH",
+        "/groups/jp",
+        Some(json!({"add_contexts": ["never-existed"]})),
+    );
+    assert_equivalent(&single, &router, "GET", "/groups/jp", None);
 
     // Refusals: naming nothing, an unknown context (first in list
     // order), an unknown group — same code, same message, same status.
@@ -772,6 +783,19 @@ fn group_import_outcome_reflects_the_union_not_any_one_shard() {
     );
     router.ok("PUT", "/contexts/ctx_a", Some(json!({})));
     router.ok("PUT", "/contexts/ctx_b", Some(json!({})));
+
+    // A record NO shard holds answers "created" — every projection is
+    // created, and a created projection carrying members must not slip
+    // into the "replaced" arm (this pins the branch order too).
+    let stream = "{\"taguru_group\": 1, \"name\": \"g0\", \"contexts\": [\"ctx_a\"]}\n";
+    let (status, body) = post_import(&router, stream, None);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body["result"]["groups"][0]["outcome"],
+        json!("created"),
+        "a brand-new record is created everywhere: {body}"
+    );
+
     // Shard A already holds g's projection; shard B has never heard of
     // it — the drifted state a re-import heals.
     shard_a.ok("PUT", "/groups/g", Some(json!({"contexts": ["ctx_a"]})));
@@ -986,12 +1010,16 @@ fn a_group_refusal_after_a_landed_batch_rewraps_with_the_durable_count() {
         &[],
     );
     router.ok("PUT", "/contexts/ctx_a", Some(json!({})));
-    // The batch lands on shard A; the group names `ghost`, which is
-    // routable (so the router accepts the stream) but never created,
-    // so shard B's live-state validation refuses on the real run.
+    // The batch AND a schema land first; the group names `ghost`,
+    // which is routable (so the router accepts the stream) but never
+    // created, so shard B's live-state validation refuses on the real
+    // run — and the rewrap must name BOTH landed counts, the
+    // both-nonzero arm of its landed message.
     let stream = concat!(
         "{\"taguru_batch\": 1, \"context\": \"ctx_a\", \"source\": \"a.md\"}\n",
         "{\"subject\": \"x\", \"label\": \"y\", \"object\": \"z\", \"weight\": 1.0}\n",
+        "{\"taguru_schema\": 1, \"context\": \"ctx_a\", \"mode\": \"warn\", \
+         \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n",
         "{\"taguru_group\": 1, \"name\": \"g\", \"contexts\": [\"ctx_a\", \"ghost\"]}\n",
     );
     let (status, body) = post_import(&router, stream, None);
@@ -1001,8 +1029,8 @@ fn a_group_refusal_after_a_landed_batch_rewraps_with_the_durable_count() {
     assert!(
         body["error"]
             .as_str()
-            .is_some_and(|error| error.contains("1 batch(es)")),
-        "{body}"
+            .is_some_and(|error| error.contains("1 batch(es) and 1 schema record(s)")),
+        "both landed counts must ride the rewrap: {body}"
     );
 }
 
