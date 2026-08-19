@@ -13,21 +13,24 @@ import { TransientStoreError } from "../../src/ingest-connectors/objectstore.js"
 
 function storeWhoseTaggingThrows(error: unknown): S3ObjectStore {
   const client = {
-    async getObjectTagging(): Promise<Record<string, string>> {
+    async getObjectTagging(_bucket: string, _key: string): Promise<Record<string, string>> {
       throw error;
     },
   } as unknown as S3ClientLike;
   return new S3ObjectStore("bucket", { client });
 }
 
-test("objectTags maps the object's tag set", async () => {
+test("objectTags maps the object's tag set and passes the bucket and key through", async () => {
+  const seen: Array<[string, string]> = [];
   const client = {
-    async getObjectTagging(): Promise<Record<string, string>> {
+    async getObjectTagging(bucket: string, key: string): Promise<Record<string, string>> {
+      seen.push([bucket, key]);
       return { team: "ingest", quarter: "q1" };
     },
   } as unknown as S3ClientLike;
   const store = new S3ObjectStore("bucket", { client });
   expect(await store.objectTags("a.txt")).toEqual({ team: "ingest", quarter: "q1" });
+  expect(seen).toEqual([["bucket", "a.txt"]]);
 });
 
 test("objectTags degrades to empty for a vanished object", async () => {

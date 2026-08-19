@@ -195,6 +195,8 @@ describe("ingestConnectorDocuments raise_on_error branches (issue #737)", () => 
     for (const outcome of outcomes) {
       expect(outcome.error).toBeTruthy();
     }
+    const importCalls = server.calls.filter(([path]) => path.startsWith("/import"));
+    expect(importCalls).toHaveLength(3);
   });
 
   it("re-raises the first failure with raise_on_error=true and attempts nothing after it", async () => {
