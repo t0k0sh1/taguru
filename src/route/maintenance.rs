@@ -41,7 +41,10 @@ pub(super) async fn broadcast_flush(
             }),
         }
     }
-    if flushed.is_empty() && unreached.len() == shards.len() && !shards.is_empty() {
+    // Every shard unreached implies `flushed` stayed empty, and a
+    // zero-shard fleet cannot happen (`RouteMap::parse` refuses a map
+    // naming no shards) — the one condition IS the whole guard.
+    if unreached.len() == shards.len() {
         return unreachable_refusal(&unreached, started_at);
     }
     router_ok(flushed, unreached, started_at)
@@ -89,10 +92,12 @@ pub(super) async fn broadcast_maintenance(
             }),
         }
     }
-    // The same guard as `broadcast_flush` above: a fleet where NO shard
-    // could be asked answers a 502 refusal, never an empty-but-200
-    // sweep report that reads as "nothing needed compacting".
-    if contexts.is_empty() && unreached.len() == shard_count && shard_count > 0 {
+    // The same guard as `broadcast_flush` above: a fleet where NO
+    // shard could be asked answers a 502 refusal, never an
+    // empty-but-200 sweep report that reads as "nothing needed
+    // compacting". (All-unreached implies `contexts` stayed empty,
+    // and a zero-shard fleet cannot happen — one condition suffices.)
+    if unreached.len() == shard_count {
         return unreachable_refusal(&unreached, started_at);
     }
     router_ok(
