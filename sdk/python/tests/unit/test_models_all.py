@@ -25,6 +25,15 @@ def test_models_all_names_every_defined_class() -> None:
             for target in node.targets
         ):
             assert isinstance(node.value, ast.List)
+            # Every element must BE a string literal — a stray
+            # non-string entry would break `import *` at runtime, and
+            # silently skipping it here would hide exactly that.
+            non_strings = [
+                element
+                for element in node.value.elts
+                if not (isinstance(element, ast.Constant) and isinstance(element.value, str))
+            ]
+            assert not non_strings, f"__all__ carries non-string elements: {non_strings}"
             declared = {
                 element.value
                 for element in node.value.elts
