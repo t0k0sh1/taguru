@@ -1760,23 +1760,26 @@ fn lane_cross_tab_counts_each_combination_and_skips_undeclared_cases() {
         });
         case
     };
+    // Deliberately unbalanced — (false, false) twice — so a `neither`
+    // that miscounts any OTHER combination lands on a different total.
     let cases = vec![
         with(true, true),
         with(true, false),
         with(false, true),
         with(false, false),
+        with(false, false),
         searched_case(None, None, None), // undeclared: outside every tally
     ];
     let tab = lane_cross_tab(&cases);
-    assert_eq!(tab.n, 4);
+    assert_eq!(tab.n, 5);
     assert_eq!(tab.structural_hit, 2);
     assert_eq!(tab.passage_hit, 2);
     assert_eq!(tab.both, 1, "only (true, true)");
-    assert_eq!(tab.neither, 1, "only (false, false)");
+    assert_eq!(tab.neither, 2, "exactly the two (false, false)");
 
-    let line = lane_cross_summary_line(&cases).expect("4 declaring cases print the line");
-    assert!(line.contains("over 4 case(s)"), "{line}");
-    assert!(line.contains("1 both, 1 neither"), "{line}");
+    let line = lane_cross_summary_line(&cases).expect("5 declaring cases print the line");
+    assert!(line.contains("over 5 case(s)"), "{line}");
+    assert!(line.contains("1 both, 2 neither"), "{line}");
     assert_eq!(
         lane_cross_summary_line(&[searched_case(None, None, None)]),
         None,
