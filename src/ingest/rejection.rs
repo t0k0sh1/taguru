@@ -448,7 +448,11 @@ enum CheckPurpose {
 /// and [`preview_batch`] for the same reason `predicted_alias_rejection`
 /// is: a dry run can never disagree about this call either. `purpose`
 /// distinguishes them for metrics only — the judgment itself is
-/// identical either way.
+/// identical either way. `ops` is the corrected association list the
+/// caller built with `corrected_associations(batch, None)` (ADR 0009
+/// §7.2 step 2 — no paragraph count exists yet at prediction time for
+/// either entrance): passing it in lets `apply_batch` build the list
+/// once for prediction and apply alike, so the two can never drift.
 ///
 /// No schema installed for this context — including one that does not
 /// exist yet — returns `Ok` before a single lock is taken
@@ -461,6 +465,7 @@ enum CheckPurpose {
 fn predicted_schema_rejection(
     state: &AppState,
     batch: &Batch,
+    ops: &[AssocOp],
     purpose: CheckPurpose,
 ) -> Result<SchemaWarnings, ApplyRefusal> {
     let schema = match state.schema_of(&batch.context) {
@@ -474,20 +479,13 @@ fn predicted_schema_rejection(
         }
     };
 
-    // The exact ops the write will apply, not the raw batch (ADR 0009
-    // §7.2 step 2) — `None` here (not the paragraph count `apply_batch`
-    // does not have yet either) matches `apply_batch`'s own call
-    // (`corrected_associations(batch, None)`), so the two entrances
-    // build this from the identical input.
-    let (ops, _) = corrected_associations(batch, None);
-
     let check = state
         .read_context(&batch.context, |context| {
             let env = crate::schema::SchemaEnv::build(
                 context,
                 crate::schema::SchemaCheckInput {
                     schema: schema.clone(),
-                    ops: &ops,
+                    ops,
                     declared_labels: &batch.labels,
                     // `apply_batch` retracts `batch.source` before
                     // applying (`:2354-2357` at the time of writing) —
@@ -500,7 +498,7 @@ fn predicted_schema_rejection(
             );
             crate::schema::schema_issues(
                 &env,
-                &ops,
+                ops,
                 crate::schema::IssuePath::Request { prefix: "" },
             )
         })
@@ -561,13 +559,23 @@ fn predicted_schema_rejection(
 /// attempted for what prediction cannot catch: per-source
 /// retract-then-apply idempotency already makes the repair exact, so
 /// detection is the remaining gap.
-pub(crate) fn apply_batch(state: &AppState, batch: &Batch) -> Result<Applied, ApplyRefusal> {
+pub(crate) fn apply_batch(
+    state: &AppState,
+    batch: &Batch,
+    deadline: Deadline,
+) -> Result<Applied, ApplyRefusal> {
     // No seeds: earlier batches of a real stream have actually landed,
     // so the live context already holds whatever they interned.
     if let Some(rejection) = predicted_alias_rejection(state, batch, None) {
         return Err(ApplyRefusal::Rejected(rejection));
     }
-    let schema_warnings = predicted_schema_rejection(state, batch, CheckPurpose::Apply)?;
+    // Built once, judged and applied alike: the same silent paragraph
+    // clamp `corrected_associations` documents below, shared with the
+    // schema prediction so the two see the identical op list (and the
+    // passage is paragraph-split once, not twice).
+    let (corrected, association_paragraphs_dropped) = corrected_associations(batch, None);
+    let schema_warnings =
+        predicted_schema_rejection(state, batch, &corrected, CheckPurpose::Apply)?;
 
     let mut created = false;
     if state.directory_entry(&batch.context).is_none() {
@@ -683,17 +691,18 @@ pub(crate) fn apply_batch(state: &AppState, batch: &Batch) -> Result<Applied, Ap
     // Same rule as questions/sections above, applied silently: a
     // paragraph naming a spot this batch's own passage does not have
     // is meaningless, so it is dropped rather than persisted — the
-    // association itself (subject/label/object/weight) still lands.
-    // Only checked against a passage this same batch carries; an
-    // associations-only batch has nothing to check against, exactly
-    // like questions/sections above.
-    let (corrected, association_paragraphs_dropped) = corrected_associations(batch, None);
+    // association itself (subject/label/object/weight) still lands
+    // (`corrected`, built once above, before the schema prediction).
+    // The caller's deadline rides into every chunk: a long batch on a
+    // spent budget refuses here (the marker stays, the retry is
+    // exact) instead of writing unbounded past the checkpoints the
+    // HTTP import loop keeps between batches.
     let associations_to_apply: &[AssocOp] = &corrected;
 
     let mut associations = 0;
     for chunk in associations_to_apply.chunks(MAX_ASSOCIATIONS_PER_REQUEST) {
         match state
-            .add_associations(&batch.context, chunk.to_vec(), Deadline::unbounded())
+            .add_associations(&batch.context, chunk.to_vec(), deadline)
             .map_err(ApplyRefusal::Access)?
         {
             Ok(applied) => associations += applied,
@@ -788,7 +797,12 @@ pub(crate) fn preview_batch(
     if let Some(rejection) = predicted_alias_rejection(state, batch, Some(seeds)) {
         return Err(ApplyRefusal::Rejected(rejection));
     }
-    let schema_warnings = predicted_schema_rejection(state, batch, CheckPurpose::Preview)?;
+    // The prediction judges the SAME list `apply_batch`'s own
+    // prediction judges — `None`, not this preview's `paragraph_count`
+    // below, which exists only here (ADR 0009 §7.2 step 2).
+    let (predicted_ops, _) = corrected_associations(batch, None);
+    let schema_warnings =
+        predicted_schema_rejection(state, batch, &predicted_ops, CheckPurpose::Preview)?;
 
     let exists = state.directory_entry(&batch.context).is_some();
     // An earlier batch of this previewed stream reaching the context

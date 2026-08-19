@@ -2200,7 +2200,9 @@ fn a_paragraph_survives_extract_through_ingest_into_a_queried_attribution() {
     let dir = std::env::temp_dir().join(format!("taguru-extract-e2e-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     let state = crate::registry::AppState::boot(dir, usize::MAX, None).unwrap();
-    if let Err(refusal) = crate::ingest::apply_batch(&state, &batch) {
+    if let Err(refusal) =
+        crate::ingest::apply_batch(&state, &batch, taguru::deadline::Deadline::unbounded())
+    {
         panic!("the rendered batch must apply cleanly: {}", refusal.text());
     }
 

@@ -309,7 +309,7 @@ pub async fn promote_sources(
                 }
                 previewed
             } else {
-                crate::ingest::apply_batch(&state, batch)
+                crate::ingest::apply_batch(&state, batch, deadline)
             };
             match applied {
                 Ok(applied) => {

@@ -49,6 +49,16 @@ Entries that change an on-disk format or a response shape say so.
   an unreadable envelope still landed), and `TAGURU_ROUTE_MAP` refuses
   a host-less shard URL (`http://`) at parse time with its line
   number.
+- `apply_batch` (the shared write path behind `POST /import`, `POST
+  /contexts/{name}/promote`, `taguru import`, and `taguru-code sync`)
+  now threads its caller's deadline into the association writes
+  instead of writing under `Deadline::unbounded()` between the HTTP
+  loop's own checkpoints — a spent budget refuses inside the batch
+  (`deadline_exceeded`; the import marker stays and the retry is
+  exact). The offline CLI entrances keep their unbounded runs (#728).
+- `taguru import --url`'s mid-stream refusal diagnostics now count
+  unsent GROUP records beside the existing batch and schema tallies
+  (#728).
 - Hydration's published-file fetcher (`fetch_published_if_stale`) now
   sends only `InvalidData`/`NotFound` errors through the manifest
   re-read arbiter, matching the log-lane fetcher's existing
