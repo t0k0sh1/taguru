@@ -1869,6 +1869,21 @@ struct ExtractionSettings {
     /// the same fingerprint extract folds into its own manifests.
     #[serde(default)]
     vocabulary_sha256: String,
+    /// Issue #734 (ADR 0003 §5): the remaining TAGURU_EXTRACT_* knobs
+    /// `run_cell` pins explicitly — today all at extract's own
+    /// defaults, recorded so the manifest names every resolved value
+    /// the cells ran under, defaults included. Keep these five in
+    /// step with `run_cell`'s scrub-then-pin env block.
+    #[serde(default)]
+    corrective_context_bytes: Option<usize>,
+    #[serde(default)]
+    coverage: bool,
+    #[serde(default)]
+    diagnostics: String,
+    #[serde(default)]
+    diagnostics_raw_bytes: Option<usize>,
+    #[serde(default)]
+    context_schema: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
@@ -2549,6 +2564,18 @@ fn run_cell(
         Some(path) => cmd.env("TAGURU_EXTRACT_VOCABULARY", path),
         None => cmd.env("TAGURU_EXTRACT_VOCABULARY", ""),
     };
+    // ADR 0003 §5 (issue #734): the remaining TAGURU_EXTRACT_* knobs,
+    // pinned EXPLICITLY at extract's own defaults ("" = unset for
+    // every one of them) so a cell's whole extraction environment is
+    // this block — never the launching shell — and the manifest's
+    // `extraction_settings` mirror of these values stays honest.
+    // (Keep this block and `ExtractionSettings`' matching fields in
+    // step with config.rs's TAGURU_EXTRACT_* inventory.)
+    cmd.env("TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES", "");
+    cmd.env("TAGURU_EXTRACT_COVERAGE", "0");
+    cmd.env("TAGURU_EXTRACT_DIAGNOSTICS", "");
+    cmd.env("TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES", "");
+    cmd.env("TAGURU_EXTRACT_SCHEMA", "");
 
     cmd.arg("--context").arg(&bench_args.context);
     if bench_args.questions > 0 {
@@ -2914,6 +2941,14 @@ fn run_extract(args: &[String]) -> i32 {
         lossy: args.lossy,
         candidates: args.candidates,
         vocabulary_sha256,
+        // The five knobs run_cell pins at extract's defaults (issue
+        // #734) — mirrored here verbatim; "" / None / false all mean
+        // "explicitly the default".
+        corrective_context_bytes: None,
+        coverage: false,
+        diagnostics: String::new(),
+        diagnostics_raw_bytes: None,
+        context_schema: String::new(),
     };
 
     if let Err(error) = fs::create_dir_all(&args.out) {

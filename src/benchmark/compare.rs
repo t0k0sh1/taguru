@@ -84,6 +84,9 @@ pub(super) fn run_compare(args: &[String]) -> i32 {
 /// read twice for one `compare` invocation.
 fn run_compare_inner(args: &CompareArgs) -> Result<(), String> {
     let manifest = super::load_bench_manifest(&args.dir.join("manifest.json"))?;
+    for warning in rung_drift_warnings(&manifest) {
+        eprintln!("taguru: benchmark: compare: {warning}");
+    }
     let loaded = load_results(&args.dir, &manifest)?;
     let measurements = measurements_from(&manifest, &loaded);
     let differences_text = differences::compute_differences(
@@ -94,6 +97,36 @@ fn run_compare_inner(args: &CompareArgs) -> Result<(), String> {
         },
     )?;
     write_artifacts(&args.dir, &measurements, &differences_text)
+}
+
+/// ADR 0003 §6 (issue #734): the structured-output rung each cell
+/// RESOLVED is a measurement condition — one model answering some runs
+/// on `json_schema` and others on prompted JSON is not one population,
+/// and its aggregates silently mix the two. `run_cell` records the
+/// resolved rung per cell in `manifest.json`; this is the reader that
+/// turns a drift into a visible WARNING. Cells whose rung was never
+/// recorded (interrupted before resolution, or a pre-#238 manifest)
+/// are left out rather than counted as their own "rung".
+fn rung_drift_warnings(manifest: &super::BenchManifest) -> Vec<String> {
+    let mut rungs_by_model: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for cell in &manifest.cells {
+        if let Some(rung) = &cell.structured_output_resolved {
+            rungs_by_model
+                .entry(cell.model_id.as_str())
+                .or_default()
+                .insert(rung.as_str());
+        }
+    }
+    rungs_by_model
+        .into_iter()
+        .filter(|(_, rungs)| rungs.len() > 1)
+        .map(|(model, rungs)| {
+            format!(
+                "WARNING: model '{model}' resolved different structured-output rungs                  across its runs ({}) — its aggregated numbers mix measurement                  conditions (ADR 0003 §6)",
+                rungs.into_iter().collect::<Vec<_>>().join(", ")
+            )
+        })
+        .collect()
 }
 
 struct CompareArgs {

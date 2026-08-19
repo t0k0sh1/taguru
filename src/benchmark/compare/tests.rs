@@ -2254,3 +2254,38 @@ fn write_artifacts_cleans_up_staged_files_when_a_later_commit_fails() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// ADR 0003 §6 (issue #734): a model whose runs resolved DIFFERENT
+/// structured-output rungs earns one warning naming them; a model
+/// consistent across runs — or with unresolved (None) cells beside
+/// one recorded rung — earns none.
+#[test]
+fn rung_drift_warns_per_model_only_on_a_real_mix() {
+    let cell = |model_id: &str, rung: Option<&str>| super::super::ManifestCell {
+        model_id: model_id.to_string(),
+        structured_output_resolved: rung.map(str::to_string),
+        ..Default::default()
+    };
+    let manifest = super::super::BenchManifest {
+        cells: vec![
+            cell("drifty", Some("json_schema")),
+            cell("drifty", Some("prompted")),
+            cell("steady", Some("json_schema")),
+            cell("steady", Some("json_schema")),
+            cell("halfway", Some("json_object")),
+            cell("halfway", None), // interrupted before resolution: not a rung
+        ],
+        ..Default::default()
+    };
+    let warnings = rung_drift_warnings(&manifest);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("'drifty'"), "{warnings:?}");
+    assert!(
+        warnings[0].contains("json_schema, prompted"),
+        "the warning names the mixed rungs: {warnings:?}"
+    );
+    assert!(
+        rung_drift_warnings(&super::super::BenchManifest::default()).is_empty(),
+        "no cells, no warnings"
+    );
+}

@@ -62,6 +62,19 @@ Entries that change an on-disk format or a response shape say so.
   re-import (the path secrets would leak in by). A candidate outside
   the universe now retracts instead, sweeping out whatever an earlier
   sync had imported for it.
+- `taguru benchmark` pins the remaining five `TAGURU_EXTRACT_*` knobs
+  explicitly per cell (ADR 0003 §5, issue #734):
+  `CORRECTIVE_CONTEXT_BYTES`, `COVERAGE`, `DIAGNOSTICS`,
+  `DIAGNOSTICS_RAW_BYTES`, and `SCHEMA` are now set (at extract's own
+  defaults) after the namespace scrub and recorded in
+  `manifest.json`'s `extraction_settings`. The two numeric knobs read
+  `""` as unset now, matching the path-valued keys, so "explicitly the
+  default" has a spelling.
+- `taguru benchmark compare` warns when one model's runs resolved
+  DIFFERENT structured-output rungs (`structured_output_resolved` in
+  the manifest) — the ADR 0003 §6 safety mechanism that had a writer
+  but no reader; mixed-rung aggregates are called out instead of
+  passing silently (#734).
 - `taguru router` closes four divergences from a single instance
   (#727): `GET /groups`/`GET /contexts` floor an explicit `limit=0` to
   one row (`clamp_page`), matching the shard's own keyset-page
