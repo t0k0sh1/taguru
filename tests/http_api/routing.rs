@@ -1034,6 +1034,37 @@ fn a_group_refusal_after_a_landed_batch_rewraps_with_the_durable_count() {
     );
 }
 
+/// The batch half of the landed condition on its own: a group refusal
+/// after ONE landed batch — no schema anywhere in the stream — still
+/// rewraps with the durable count, and the landed message names the
+/// batch alone.
+#[test]
+fn a_group_refusal_after_only_a_landed_batch_rewraps_with_the_durable_count() {
+    let shard_a = Server::start("batch-only-rewrap-a");
+    let shard_b = Server::start("batch-only-rewrap-b");
+    let router = Server::start_router(
+        "batch-only-rewrap",
+        &format!("ctx_a = {}\nghost = {}\n", shard_a.base, shard_b.base),
+        &[],
+    );
+    router.ok("PUT", "/contexts/ctx_a", Some(json!({})));
+    let stream = concat!(
+        "{\"taguru_batch\": 1, \"context\": \"ctx_a\", \"source\": \"a.md\"}\n",
+        "{\"subject\": \"x\", \"label\": \"y\", \"object\": \"z\", \"weight\": 1.0}\n",
+        "{\"taguru_group\": 1, \"name\": \"g\", \"contexts\": [\"ctx_a\", \"ghost\"]}\n",
+    );
+    let (status, body) = post_import(&router, stream, None);
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(body["integrity"], json!("durable_prefix"), "{body}");
+    assert_eq!(body["durable_batches"], json!(1), "{body}");
+    let error = body["error"].as_str().unwrap_or_default();
+    assert!(error.contains("1 batch(es) landed"), "{body}");
+    assert!(
+        !error.contains("schema record"),
+        "no schema anywhere in this stream: {body}"
+    );
+}
+
 /// The schema half of the landed condition: a group refusal after a
 /// SCHEMA landed (and no batch anywhere in the stream) must still
 /// rewrap with the durable count, naming the schema record.
