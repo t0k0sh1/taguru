@@ -5,6 +5,19 @@
 
 use super::*;
 
+/// Re-serializes an extracted request into the base JSON each shard's
+/// body is projected from. A failure is a router bug (these types
+/// serialize by construction), surfaced as `internal`.
+fn reserialize<T: Serialize>(request: &T) -> Result<Value, Box<Response>> {
+    serde_json::to_value(request).map_err(|error| {
+        Box::new(api::error(
+            ErrorCode::Internal,
+            format!("could not re-serialize the request: {error}"),
+            Instant::now(),
+        ))
+    })
+}
+
 pub(super) async fn cross_recall(
     State(state): State<RouterState>,
     headers: HeaderMap,
@@ -14,15 +27,9 @@ pub(super) async fn cross_recall(
     let limit = request.limit;
     let contexts = request.contexts.clone();
     let groups = request.groups.clone();
-    let base = match serde_json::to_value(&request) {
+    let base = match reserialize(&request) {
         Ok(base) => base,
-        Err(error) => {
-            return api::error(
-                ErrorCode::Internal,
-                format!("could not re-serialize the request: {error}"),
-                Instant::now(),
-            );
-        }
+        Err(refusal) => return *refusal,
     };
     merge_matches(
         state, headers, deadline, "/recall", contexts, groups, limit, base,
@@ -39,15 +46,9 @@ pub(super) async fn cross_query(
     let limit = request.limit;
     let contexts = request.contexts.clone();
     let groups = request.groups.clone();
-    let base = match serde_json::to_value(&request) {
+    let base = match reserialize(&request) {
         Ok(base) => base,
-        Err(error) => {
-            return api::error(
-                ErrorCode::Internal,
-                format!("could not re-serialize the request: {error}"),
-                Instant::now(),
-            );
-        }
+        Err(refusal) => return *refusal,
     };
     merge_matches(
         state, headers, deadline, "/query", contexts, groups, limit, base,
@@ -170,15 +171,9 @@ pub(super) async fn cross_search_passages(
     api::AppJson(request): api::AppJson<api::CrossSearchPassagesRequest>,
 ) -> Response {
     let started_at = Instant::now();
-    let base = match serde_json::to_value(&request) {
+    let base = match reserialize(&request) {
         Ok(base) => base,
-        Err(error) => {
-            return api::error(
-                ErrorCode::Internal,
-                format!("could not re-serialize the request: {error}"),
-                started_at,
-            );
-        }
+        Err(refusal) => return *refusal,
     };
     let map = state.map();
     let scatter = match plan_scatter(&map, &request.contexts, &request.groups, started_at) {
@@ -339,14 +334,7 @@ pub(super) async fn merge_contexts(
                     }
                 }
             }
-            Ok(answer) => {
-                return (
-                    answer.status,
-                    [(header::CONTENT_TYPE, "application/json")],
-                    answer.body,
-                )
-                    .into_response();
-            }
+            Ok(answer) => return passthrough(answer),
             Err(error) => unreached.push(Unreached {
                 shard: map.url(shard).to_string(),
                 contexts: Vec::new(),
@@ -357,10 +345,13 @@ pub(super) async fn merge_contexts(
     if rows.is_empty() && !unreached.is_empty() && unreached.len() == shards.len() {
         return unreachable_refusal(&unreached, started_at);
     }
+    // `clamp_page`, exactly as the single instance's `list_contexts`
+    // cuts its own page: `limit=0` floors to one so the keyset
+    // listing's empty page keeps meaning "no more pages".
     let contexts: Vec<crate::registry::DirectoryEntry> = rows
         .into_values()
         .map(|(_, entry)| entry)
-        .take(api::clamp(
+        .take(api::clamp_page(
             query.limit,
             api::MAX_MATCH_LIMIT,
             api::MAX_MATCH_LIMIT,

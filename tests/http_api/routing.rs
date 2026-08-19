@@ -272,6 +272,19 @@ fn the_router_over_split_shards_answers_exactly_like_one_instance() {
     // single instance's own rows.
     assert_equivalent(&single, &router, "GET", "/contexts", None);
     assert_equivalent(&single, &router, "GET", "/groups", None);
+    // `limit=0` is a legitimate keyset query and must floor to a
+    // one-row page on both sides (`clamp_page`) — an empty page reads
+    // as end-of-collection to the SDK iterators.
+    let floored = assert_equivalent(&single, &router, "GET", "/contexts?limit=0", None);
+    assert!(
+        !floored["result"]["contexts"].as_array().unwrap().is_empty(),
+        "{floored}"
+    );
+    let floored = assert_equivalent(&single, &router, "GET", "/groups?limit=0", None);
+    assert!(
+        !floored["result"]["groups"].as_array().unwrap().is_empty(),
+        "{floored}"
+    );
     assert_equivalent(&single, &router, "GET", "/groups/jp", None);
     assert_equivalent(&single, &router, "GET", "/groups/all", None);
     // The export record: the router unions per-shard projections back
@@ -329,6 +342,27 @@ fn the_router_over_split_shards_answers_exactly_like_one_instance() {
         "/groups/jp",
         Some(json!({"add_contexts": ["glossary"]})),
     );
+    // Removals are an idempotent set difference on a single instance —
+    // never existence-checked — so a name no shard places must not be
+    // refused by the router's projection either.
+    assert_equivalent(
+        &single,
+        &router,
+        "PATCH",
+        "/groups/jp",
+        Some(json!({"remove_contexts": ["never-existed"]})),
+    );
+    // ADDITIONS keep the existence check — `project_body`'s refusal
+    // for an unplaced member must be the shard's own nonexistent-member
+    // answer, byte for byte, and leave the group unchanged.
+    assert_equivalent(
+        &single,
+        &router,
+        "PATCH",
+        "/groups/jp",
+        Some(json!({"add_contexts": ["never-existed"]})),
+    );
+    assert_equivalent(&single, &router, "GET", "/groups/jp", None);
 
     // Refusals: naming nothing, an unknown context (first in list
     // order), an unknown group — same code, same message, same status.
@@ -714,6 +748,386 @@ fn a_router_rewrap_keeps_structured_refusal_detail() {
     // "durable_prefix" claim is true, not just structurally present.
     let installed = router.ok("GET", "/contexts/ctx_ok/schema", None);
     assert_eq!(installed["mode"], "warn", "{installed}");
+}
+
+/// `POST /maintenance/compact` on a fleet where NO shard can be
+/// reached must refuse like `POST /flush` does, never answer an
+/// empty 200 sweep report that reads as "nothing needed compacting".
+#[test]
+fn maintenance_refuses_when_every_shard_is_unreachable() {
+    // Port 1 needs privileges to bind, so a dial is refused — a dead
+    // shard with no port-reuse race.
+    let router = Server::start_router("maint-all-down", "sake = http://127.0.0.1:1\n", &[]);
+
+    let (status, body) = router.call("POST", "/maintenance/compact", None);
+    assert_eq!(status, 502, "{body}");
+    assert_eq!(body["code"], "shard_unreachable", "{body}");
+    // The sibling verb's guard, for symmetry.
+    let (status, body) = router.call("POST", "/flush", None);
+    assert_eq!(status, 502, "{body}");
+    assert_eq!(body["code"], "shard_unreachable", "{body}");
+}
+
+/// A group record already present on one shard and created EMPTY on
+/// the rest (drift healing) replaces nothing in the union — the merged
+/// outcome must say "unchanged"; a created projection that actually
+/// carries members is what earns "replaced".
+#[test]
+fn group_import_outcome_reflects_the_union_not_any_one_shard() {
+    let shard_a = Server::start("gimp-outcome-a");
+    let shard_b = Server::start("gimp-outcome-b");
+    let router = Server::start_router(
+        "gimp-outcome",
+        &format!("ctx_a = {}\nctx_b = {}\n", shard_a.base, shard_b.base),
+        &[],
+    );
+    router.ok("PUT", "/contexts/ctx_a", Some(json!({})));
+    router.ok("PUT", "/contexts/ctx_b", Some(json!({})));
+
+    // A record NO shard holds answers "created" — every projection is
+    // created, and a created projection carrying members must not slip
+    // into the "replaced" arm (this pins the branch order too).
+    let stream = "{\"taguru_group\": 1, \"name\": \"g0\", \"contexts\": [\"ctx_a\"]}\n";
+    let (status, body) = post_import(&router, stream, None);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body["result"]["groups"][0]["outcome"],
+        json!("created"),
+        "a brand-new record is created everywhere: {body}"
+    );
+
+    // Shard A already holds g's projection; shard B has never heard of
+    // it — the drifted state a re-import heals.
+    shard_a.ok("PUT", "/groups/g", Some(json!({"contexts": ["ctx_a"]})));
+
+    // The same membership shard A already holds: A answers
+    // "unchanged", B "created" with an empty projection — nothing in
+    // the union changed.
+    let stream = "{\"taguru_group\": 1, \"name\": \"g\", \"contexts\": [\"ctx_a\"]}\n";
+    let (status, body) = post_import(&router, stream, None);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body["result"]["groups"][0]["outcome"],
+        json!("unchanged"),
+        "an empty created projection beside unchanged siblings replaced nothing: {body}"
+    );
+
+    // The record gains ctx_b: shard B's projection now carries a
+    // member, so the union's row really changed.
+    let stream = "{\"taguru_group\": 1, \"name\": \"g\", \"contexts\": [\"ctx_a\", \"ctx_b\"]}\n";
+    let (status, body) = post_import(&router, stream, None);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body["result"]["groups"][0]["outcome"],
+        json!("replaced"),
+        "{body}"
+    );
+
+    // The created-with-members clause on its own: a FRESH fleet where
+    // shard D never held g2 at all and the record brings D a member —
+    // "created" carrying contexts beside an "unchanged" sibling is
+    // what earns "replaced" here, with no shard answering "replaced"
+    // itself.
+    let shard_c = Server::start("gimp-outcome-c");
+    let shard_d = Server::start("gimp-outcome-d");
+    let router = Server::start_router(
+        "gimp-outcome-2",
+        &format!("ctx_c = {}\nctx_d = {}\n", shard_c.base, shard_d.base),
+        &[],
+    );
+    router.ok("PUT", "/contexts/ctx_c", Some(json!({})));
+    router.ok("PUT", "/contexts/ctx_d", Some(json!({})));
+    shard_c.ok("PUT", "/groups/g2", Some(json!({"contexts": ["ctx_c"]})));
+    let stream = "{\"taguru_group\": 1, \"name\": \"g2\", \"contexts\": [\"ctx_c\", \"ctx_d\"]}\n";
+    let (status, body) = post_import(&router, stream, None);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body["result"]["groups"][0]["outcome"],
+        json!("replaced"),
+        "a created projection CARRYING members changes the union: {body}"
+    );
+}
+
+/// The group union's three-way sort of shard answers: a 404 is drift
+/// healing (the other shard's projection still answers the row), but
+/// any OTHER error status fails the whole union and passes through
+/// verbatim — a 500 swallowed as "not found on that shard" would
+/// serve a thinned union that looks complete.
+#[test]
+fn a_group_union_passes_through_a_shard_error_but_heals_a_404() {
+    // Healing first: the group lives on shard A only (drift), shard B
+    // answers its own 404 — the union is still the whole group.
+    let shard_a = Server::start("gmf-heal-a");
+    let shard_b = Server::start("gmf-heal-b");
+    let router = Server::start_router(
+        "gmf-heal",
+        &format!("ctx_a = {}\nctx_b = {}\n", shard_a.base, shard_b.base),
+        &[],
+    );
+    shard_a.ok("PUT", "/contexts/ctx_a", Some(json!({})));
+    shard_a.ok("PUT", "/groups/g", Some(json!({"contexts": ["ctx_a"]})));
+    let healed = router.ok("GET", "/groups/g", None);
+    assert_eq!(healed["contexts"], json!(["ctx_a"]), "{healed}");
+
+    // An erroring shard: same fleet shape, but shard B answers 500 to
+    // everything — the union must refuse with the shard's own status,
+    // never a 200 built from the surviving projection.
+    let broken = FakeShard::start_with_status(500, json!({"code": "internal", "error": "boom"}));
+    let router = Server::start_router(
+        "gmf-error",
+        &format!("ctx_a = {}\nctx_b = {}\n", shard_a.base, broken.endpoint),
+        &[],
+    );
+    let (status, body) = router.call("GET", "/groups/g", None);
+    assert_eq!(status, 500, "{body}");
+    assert_eq!(body["code"], json!("internal"), "{body}");
+}
+
+/// The MCP manual comes from the FIRST shard that answers
+/// `GET /protocol` — a dead shard ahead of a live one must not take
+/// the manual down with it, and a fleet with no live shard at all
+/// still initializes with the router's own local text.
+#[test]
+fn mcp_instructions_skip_a_dead_shard_and_fall_back_to_local_text() {
+    let live = Server::start("mcp-manual-live");
+    let router = Server::start_router(
+        "mcp-manual",
+        &format!("a = http://127.0.0.1:1\nb = {}\n", live.base),
+        &[],
+    );
+    let initialize = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}});
+    let (status, init) = router.call("POST", "/mcp", Some(initialize.clone()));
+    assert_eq!(status, 200, "{init}");
+    let (_, manual) = live.call("GET", "/protocol", None);
+    assert_eq!(
+        init["result"]["instructions"], manual,
+        "the manual must be the live shard's own text, dead shard skipped"
+    );
+
+    // No shard alive anywhere: initialize still answers, with the
+    // router's local text instead of an error.
+    let all_dead = Server::start_router("mcp-manual-dead", "a = http://127.0.0.1:1\n", &[]);
+    let (status, init) = all_dead.call("POST", "/mcp", Some(initialize));
+    assert_eq!(status, 200, "{init}");
+    assert!(
+        init["result"]["instructions"]
+            .as_str()
+            .is_some_and(|text| !text.is_empty()),
+        "{init}"
+    );
+}
+
+/// The preflight is what makes a multi-chunk refusal all-or-nothing:
+/// a LATER chunk's dry-run refusal must stop the whole stream before
+/// the first chunk ever ships for real — nothing lands, and the
+/// refusal is the shard's own body, never a durable-prefix rewrap.
+#[test]
+fn a_later_chunks_preflight_refusal_leaves_the_earlier_chunk_unapplied() {
+    let shard_a = Server::start("preflight-a");
+    let shard_b = Server::start("preflight-b");
+    let router = Server::start_router(
+        "preflight",
+        &format!("ctx_a = {}\nctx_b = {}\n", shard_a.base, shard_b.base),
+        &[],
+    );
+    router.ok("PUT", "/contexts/ctx_a", Some(json!({})));
+    // ctx_b is never created, and its batch carries no create meta —
+    // stream-level parsing accepts it, so only the owning shard's own
+    // dry run can refuse it.
+    let stream = concat!(
+        "{\"taguru_batch\": 1, \"context\": \"ctx_a\", \"source\": \"a.md\"}\n",
+        "{\"subject\": \"x\", \"label\": \"y\", \"object\": \"z\", \"weight\": 1.0}\n",
+        "{\"taguru_batch\": 1, \"context\": \"ctx_b\", \"source\": \"b.md\"}\n",
+        "{\"subject\": \"p\", \"label\": \"q\", \"object\": \"r\", \"weight\": 1.0}\n",
+    );
+    let (status, body) = post_import(&router, stream, None);
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(
+        body["integrity"],
+        json!("nothing_written"),
+        "a preflight refusal precedes every real apply — the shard's own nothing-written \
+         verdict passes through, never a durable-prefix rewrap: {body}"
+    );
+    let (query_status, hits) = router.call(
+        "POST",
+        "/contexts/ctx_a/query",
+        Some(json!({"subject": "x"})),
+    );
+    assert_eq!(query_status, 200, "{hits}");
+    assert_eq!(
+        hits["result"]["total"],
+        json!(0),
+        "chunk 1 must never have shipped for real: {hits}"
+    );
+}
+
+/// A refusal with NOTHING landed anywhere must be the shard's own
+/// body, unedited — no `integrity` field, no durable-prefix rewrap —
+/// whether the refusing record was the stream's only schema or its
+/// only group. (Both pass the dry-run preflight — schema scope checks
+/// only, group validation runs against live state after the batches —
+/// and refuse on the real run with zero batches/schemas ahead of them.)
+#[test]
+fn a_refusal_with_nothing_landed_passes_the_shards_own_body_through() {
+    let shard = Server::start("nothing-landed");
+    let router = Server::start_router(
+        "nothing-landed-router",
+        &format!("ghost = {}\n* = {}\n", shard.base, shard.base),
+        &[],
+    );
+
+    let schema_only = "{\"taguru_schema\": 1, \"context\": \"ghost\", \"mode\": \"warn\", \
+         \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n";
+    let (status, body) = post_import(&router, schema_only, None);
+    assert_eq!(status, 404, "{body}");
+    assert_ne!(
+        body["integrity"],
+        json!("durable_prefix"),
+        "no batch and no schema landed before this refusal: {body}"
+    );
+
+    let group_only = "{\"taguru_group\": 1, \"name\": \"g\", \"contexts\": [\"ghost\"]}\n";
+    let (status, body) = post_import(&router, group_only, None);
+    assert_eq!(status, 404, "{body}");
+    assert_ne!(
+        body["integrity"],
+        json!("durable_prefix"),
+        "no batch and no schema landed before this refusal either: {body}"
+    );
+}
+
+/// The inverse: a group refusal AFTER a batch landed must rewrap with
+/// the true cross-shard count — `durable_prefix`, naming the one
+/// batch — never pass the failing shard's own "nothing reached me"
+/// view through.
+#[test]
+fn a_group_refusal_after_a_landed_batch_rewraps_with_the_durable_count() {
+    let shard_a = Server::start("group-rewrap-a");
+    let shard_b = Server::start("group-rewrap-b");
+    let router = Server::start_router(
+        "group-rewrap",
+        &format!("ctx_a = {}\nghost = {}\n", shard_a.base, shard_b.base),
+        &[],
+    );
+    router.ok("PUT", "/contexts/ctx_a", Some(json!({})));
+    // The batch AND a schema land first; the group names `ghost`,
+    // which is routable (so the router accepts the stream) but never
+    // created, so shard B's live-state validation refuses on the real
+    // run — and the rewrap must name BOTH landed counts, the
+    // both-nonzero arm of its landed message.
+    let stream = concat!(
+        "{\"taguru_batch\": 1, \"context\": \"ctx_a\", \"source\": \"a.md\"}\n",
+        "{\"subject\": \"x\", \"label\": \"y\", \"object\": \"z\", \"weight\": 1.0}\n",
+        "{\"taguru_schema\": 1, \"context\": \"ctx_a\", \"mode\": \"warn\", \
+         \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n",
+        "{\"taguru_group\": 1, \"name\": \"g\", \"contexts\": [\"ctx_a\", \"ghost\"]}\n",
+    );
+    let (status, body) = post_import(&router, stream, None);
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(body["integrity"], json!("durable_prefix"), "{body}");
+    assert_eq!(body["durable_batches"], json!(1), "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("1 batch(es) and 1 schema record(s)")),
+        "both landed counts must ride the rewrap: {body}"
+    );
+}
+
+/// The batch half of the landed condition on its own: a group refusal
+/// after ONE landed batch — no schema anywhere in the stream — still
+/// rewraps with the durable count, and the landed message names the
+/// batch alone.
+#[test]
+fn a_group_refusal_after_only_a_landed_batch_rewraps_with_the_durable_count() {
+    let shard_a = Server::start("batch-only-rewrap-a");
+    let shard_b = Server::start("batch-only-rewrap-b");
+    let router = Server::start_router(
+        "batch-only-rewrap",
+        &format!("ctx_a = {}\nghost = {}\n", shard_a.base, shard_b.base),
+        &[],
+    );
+    router.ok("PUT", "/contexts/ctx_a", Some(json!({})));
+    let stream = concat!(
+        "{\"taguru_batch\": 1, \"context\": \"ctx_a\", \"source\": \"a.md\"}\n",
+        "{\"subject\": \"x\", \"label\": \"y\", \"object\": \"z\", \"weight\": 1.0}\n",
+        "{\"taguru_group\": 1, \"name\": \"g\", \"contexts\": [\"ctx_a\", \"ghost\"]}\n",
+    );
+    let (status, body) = post_import(&router, stream, None);
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(body["integrity"], json!("durable_prefix"), "{body}");
+    assert_eq!(body["durable_batches"], json!(1), "{body}");
+    let error = body["error"].as_str().unwrap_or_default();
+    assert!(error.contains("1 batch(es) landed"), "{body}");
+    assert!(
+        !error.contains("schema record"),
+        "no schema anywhere in this stream: {body}"
+    );
+}
+
+/// The schema half of the landed condition: a group refusal after a
+/// SCHEMA landed (and no batch anywhere in the stream) must still
+/// rewrap with the durable count, naming the schema record.
+#[test]
+fn a_group_refusal_after_a_landed_schema_rewraps_with_the_durable_count() {
+    let shard_a = Server::start("schema-group-rewrap-a");
+    let shard_b = Server::start("schema-group-rewrap-b");
+    let router = Server::start_router(
+        "schema-group-rewrap",
+        &format!("ctx_a = {}\nghost = {}\n", shard_a.base, shard_b.base),
+        &[],
+    );
+    router.ok("PUT", "/contexts/ctx_a", Some(json!({})));
+    let stream = concat!(
+        "{\"taguru_schema\": 1, \"context\": \"ctx_a\", \"mode\": \"warn\", \
+         \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n",
+        "{\"taguru_group\": 1, \"name\": \"g\", \"contexts\": [\"ctx_a\", \"ghost\"]}\n",
+    );
+    let (status, body) = post_import(&router, stream, None);
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(body["integrity"], json!("durable_prefix"), "{body}");
+    assert!(
+        body.get("durable_batches").is_none(),
+        "no batch anywhere in this stream: {body}"
+    );
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("1 schema record(s)")),
+        "{body}"
+    );
+}
+
+/// A shard that answers success with an envelope the router cannot
+/// read still LANDED its chunk — a later refusal's rewrap must count
+/// it from the chunk's own batch ranges, not from the parsed
+/// outcomes.
+#[test]
+fn a_rewrap_counts_batches_landed_even_when_an_envelope_is_unreadable() {
+    let stub = FakeShard::start(json!({"ok": true}));
+    let shard = Server::start("rewrap-count-real");
+    let router = Server::start_router(
+        "rewrap-count",
+        &format!("stubbed = {}\nghost = {}\n", stub.endpoint, shard.base),
+        &[],
+    );
+    // `ghost` is never created: its schema record passes the dry-run
+    // preflight (scope checks only) and refuses on the real run —
+    // AFTER the stub shard's batch chunk landed.
+    let stream = concat!(
+        "{\"taguru_batch\": 1, \"context\": \"stubbed\", \"source\": \"doc\"}\n",
+        "{\"subject\": \"a\", \"label\": \"b\", \"object\": \"c\", \"weight\": 1.0}\n",
+        "{\"taguru_schema\": 1, \"context\": \"ghost\", \"mode\": \"warn\", \
+         \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n",
+    );
+    let (status, body) = post_import(&router, stream, None);
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(body["integrity"], json!("durable_prefix"), "{body}");
+    assert_eq!(
+        body["durable_batches"],
+        json!(1),
+        "the stub's chunk landed even though its envelope was unreadable: {body}"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -57,15 +57,28 @@ impl RouteMap {
             // The message deliberately does NOT echo the URL: the boot
             // and reload paths print this error.
             let authority = &url[url.find("//").expect("scheme checked above") + 2..];
-            if authority
-                .split(['/', '?', '#'])
-                .next()
-                .is_some_and(|host| host.contains('@'))
-            {
+            let head = authority.split(['/', '?', '#']).next().unwrap_or_default();
+            if head.contains('@') {
                 return Err(format!(
                     "line {number}: the shard URL carries userinfo ('user@host') — shard \
                      URLs appear in logs and metrics labels, so credentials are refused"
                 ));
+            }
+            // The HOST alone: an IPv6 literal keeps its brackets,
+            // anything else ends at the port colon — so a bare scheme
+            // ('http://', 'http:///path') AND a port-only authority
+            // ('http://:8248') both refuse here, with the line number,
+            // instead of storing a shard no dial can ever reach. The
+            // message deliberately does not echo the URL: a hostless
+            // spelling can still carry a secret in its query, and this
+            // error prints at boot and reload (the same posture as the
+            // userinfo refusal above).
+            let host = match head.strip_prefix('[') {
+                Some(rest) => rest.split(']').next().unwrap_or_default(),
+                None => head.split(':').next().unwrap_or_default(),
+            };
+            if host.is_empty() {
+                return Err(format!("line {number}: the shard URL names no host"));
             }
             if name == "*" {
                 if fallback.is_some() {

@@ -29,55 +29,42 @@ pub(super) async fn merge_groups(
     let mut rows: BTreeMap<String, api::GroupEntry> = BTreeMap::new();
     let mut total = 0usize;
     for (shard, outcome) in outcomes {
-        match outcome {
-            Ok(answer) if answer.status.is_success() => {
-                match serde_json::from_slice::<ShardEnvelope<api::GroupPage>>(&answer.body) {
-                    Ok(page) => {
-                        // Every shard holds every group, so any one
-                        // shard's directory count is the true count;
-                        // max rides out a half-created record.
-                        total = total.max(page.result.total);
-                        for entry in page.result.groups {
-                            merge_group_entry(&mut rows, entry);
-                        }
-                    }
-                    Err(error) => {
-                        return api::error(
-                            ErrorCode::Internal,
-                            format!(
-                                "shard {} answered an unreadable page: {error}",
-                                map.url(shard)
-                            ),
-                            started_at,
-                        );
-                    }
+        let answer = match merge_fate(&map, shard, outcome, started_at) {
+            Ok(MergeFate::Success(answer)) => answer,
+            // A directory read cannot 404 — pass a stray one through
+            // like any other error status.
+            Ok(MergeFate::NotFound(answer)) => return passthrough(answer),
+            Err(refusal) => return *refusal,
+        };
+        match serde_json::from_slice::<ShardEnvelope<api::GroupPage>>(&answer.body) {
+            Ok(page) => {
+                // Every shard holds every group, so any one
+                // shard's directory count is the true count;
+                // max rides out a half-created record.
+                total = total.max(page.result.total);
+                for entry in page.result.groups {
+                    merge_group_entry(&mut rows, entry);
                 }
             }
-            Ok(answer) => {
-                return (
-                    answer.status,
-                    [(header::CONTENT_TYPE, "application/json")],
-                    answer.body,
-                )
-                    .into_response();
-            }
             Err(error) => {
-                // A partially-unioned group row would look complete;
-                // the group surfaces refuse rather than thin out.
-                return unreachable_refusal(
-                    &[Unreached {
-                        shard: map.url(shard).to_string(),
-                        contexts: Vec::new(),
-                        error,
-                    }],
+                return api::error(
+                    ErrorCode::Internal,
+                    format!(
+                        "shard {} answered an unreadable page: {error}",
+                        map.url(shard)
+                    ),
                     started_at,
                 );
             }
         }
     }
+    // `clamp_page`, exactly as the single instance's `list_groups`
+    // cuts its own page: a keyset listing's empty page means "no more
+    // pages" to the SDK iterators, so an explicit `limit=0` must floor
+    // to one rather than answer a terminal-looking empty page.
     let groups: Vec<api::GroupEntry> = rows
         .into_values()
-        .take(api::clamp(
+        .take(api::clamp_page(
             query.limit,
             api::MAX_MATCH_LIMIT,
             api::MAX_MATCH_LIMIT,
@@ -145,7 +132,7 @@ where
 {
     let mut answers = Vec::new();
     for shard in map.all() {
-        match state
+        let outcome = state
             .call_shard(
                 map,
                 shard,
@@ -155,48 +142,41 @@ where
                 body_for(shard),
                 deadline,
             )
-            .await
-        {
-            Ok(answer) if answer.status.is_success() => answers.push(answer.body),
-            Ok(answer) => {
-                return Err(Box::new(
-                    (
-                        answer.status,
-                        [(header::CONTENT_TYPE, "application/json")],
-                        answer.body,
-                    )
-                        .into_response(),
-                ));
-            }
-            Err(error) => {
-                return Err(Box::new(unreachable_refusal(
-                    &[Unreached {
-                        shard: map.url(shard).to_string(),
-                        contexts: Vec::new(),
-                        error,
-                    }],
-                    started_at,
-                )));
-            }
+            .await;
+        match merge_fate(map, shard, outcome, started_at) {
+            Ok(MergeFate::Success(answer)) => answers.push(answer.body),
+            // Writes have no drift-healing 404 arm — a not-found stops
+            // the broadcast and passes through like any other refusal.
+            Ok(MergeFate::NotFound(answer)) => return Err(Box::new(passthrough(answer))),
+            Err(refusal) => return Err(refusal),
         }
     }
     Ok(answers)
 }
 
-/// Projects the named member-list fields of a JSON body per shard —
-/// any member the map does not place is refused up front with the
-/// single-instance nonexistent-member message, since a context no
-/// shard owns cannot exist on any of them.
+/// Projects the named member-list fields of a JSON body per shard.
+/// Members of a `checked` field (the create/add lists) that the map
+/// does not place are refused up front with the single-instance
+/// nonexistent-member message, since a context no shard owns cannot
+/// exist on any of them. `unchecked` fields (the remove lists) skip
+/// that gate: a single instance's `update_group` treats removals as an
+/// idempotent set difference and never validates their existence, so
+/// an unplaced member simply projects to no shard — the same no-op.
 fn project_body(
     map: &RouteMap,
     base: &Value,
-    fields: &[&str],
+    checked: &[&str],
+    unchecked: &[&str],
     started_at: Instant,
 ) -> Result<impl Fn(usize) -> Option<Bytes> + use<>, Box<Response>> {
     let mut lists: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for field in fields {
+    let fields = checked
+        .iter()
+        .map(|field| (*field, true))
+        .chain(unchecked.iter().map(|field| (*field, false)));
+    for (field, check) in fields {
         let members: Vec<String> = base
-            .get(*field)
+            .get(field)
             .and_then(Value::as_array)
             .map(|values| {
                 values
@@ -206,16 +186,18 @@ fn project_body(
                     .collect()
             })
             .unwrap_or_default();
-        for member in &members {
-            if map.shard_of(member).is_none() {
-                return Err(Box::new(api::error(
-                    ErrorCode::NoContext,
-                    format!("context '{member}' not found; nothing was applied"),
-                    started_at,
-                )));
+        if check {
+            for member in &members {
+                if map.shard_of(member).is_none() {
+                    return Err(Box::new(api::error(
+                        ErrorCode::NoContext,
+                        format!("context '{member}' not found; nothing was applied"),
+                        started_at,
+                    )));
+                }
             }
         }
-        lists.insert((*field).to_string(), members);
+        lists.insert(field.to_string(), members);
     }
     let base = base.clone();
     let shards_projection: Vec<BTreeMap<String, Vec<String>>> = map
@@ -272,7 +254,7 @@ pub(super) async fn create_group_broadcast(
         }
     };
     let path = format!("/groups/{}", urlencode(&name));
-    let body_for = match project_body(&map, &base, &["contexts"], started_at) {
+    let body_for = match project_body(&map, &base, &["contexts"], &[], started_at) {
         Ok(body_for) => body_for,
         Err(refusal) => return *refusal,
     };
@@ -321,7 +303,8 @@ pub(super) async fn update_group_broadcast(
     let body_for = match project_body(
         &map,
         &base,
-        &["add_contexts", "remove_contexts"],
+        &["add_contexts"],
+        &["remove_contexts"],
         started_at,
     ) {
         Ok(body_for) => body_for,
@@ -380,12 +363,7 @@ async fn forward_group_probe(
         .call_shard(map, 0, method, &path, &headers, Some(body), deadline)
         .await
     {
-        Ok(answer) => (
-            answer.status,
-            [(header::CONTENT_TYPE, "application/json")],
-            answer.body,
-        )
-            .into_response(),
+        Ok(answer) => passthrough(answer),
         Err(error) => unreachable_refusal(
             &[Unreached {
                 shard: map.url(0).to_string(),
@@ -445,7 +423,7 @@ async fn group_broadcast_simple(
     let mut not_found: Option<ShardAnswer> = None;
     let mut succeeded = false;
     for shard in map.all() {
-        match state
+        let outcome = state
             .call_shard(
                 &map,
                 shard,
@@ -455,38 +433,16 @@ async fn group_broadcast_simple(
                 body.clone(),
                 deadline,
             )
-            .await
-        {
-            Ok(answer) if answer.status.is_success() => succeeded = true,
-            Ok(answer) if answer.status == StatusCode::NOT_FOUND => not_found = Some(answer),
-            Ok(answer) => {
-                return (
-                    answer.status,
-                    [(header::CONTENT_TYPE, "application/json")],
-                    answer.body,
-                )
-                    .into_response();
-            }
-            Err(error) => {
-                return unreachable_refusal(
-                    &[Unreached {
-                        shard: map.url(shard).to_string(),
-                        contexts: Vec::new(),
-                        error,
-                    }],
-                    started_at,
-                );
-            }
+            .await;
+        match merge_fate(&map, shard, outcome, started_at) {
+            Ok(MergeFate::Success(_)) => succeeded = true,
+            Ok(MergeFate::NotFound(answer)) => not_found = Some(answer),
+            Err(refusal) => return *refusal,
         }
     }
     match (succeeded, not_found) {
         (true, _) => api::ok(true, started_at),
-        (false, Some(answer)) => (
-            answer.status,
-            [(header::CONTENT_TYPE, "application/json")],
-            answer.body,
-        )
-            .into_response(),
+        (false, Some(answer)) => passthrough(answer),
         (false, None) => api::ok(true, started_at),
     }
 }
@@ -515,8 +471,8 @@ pub(super) async fn union_group(
     let mut rows: BTreeMap<String, api::GroupEntry> = BTreeMap::new();
     let mut not_found: Option<ShardAnswer> = None;
     for (shard, outcome) in outcomes {
-        match outcome {
-            Ok(answer) if answer.status.is_success() => {
+        match merge_fate(&map, shard, outcome, started_at) {
+            Ok(MergeFate::Success(answer)) => {
                 match serde_json::from_slice::<ShardEnvelope<api::GroupEntry>>(&answer.body) {
                     Ok(envelope) => merge_group_entry(&mut rows, envelope.result),
                     Err(error) => {
@@ -531,35 +487,13 @@ pub(super) async fn union_group(
                     }
                 }
             }
-            Ok(answer) if answer.status == StatusCode::NOT_FOUND => not_found = Some(answer),
-            Ok(answer) => {
-                return (
-                    answer.status,
-                    [(header::CONTENT_TYPE, "application/json")],
-                    answer.body,
-                )
-                    .into_response();
-            }
-            Err(error) => {
-                return unreachable_refusal(
-                    &[Unreached {
-                        shard: map.url(shard).to_string(),
-                        contexts: Vec::new(),
-                        error,
-                    }],
-                    started_at,
-                );
-            }
+            Ok(MergeFate::NotFound(answer)) => not_found = Some(answer),
+            Err(refusal) => return *refusal,
         }
     }
     match (rows.into_values().next(), not_found) {
         (Some(entry), _) => api::ok(entry, started_at),
-        (None, Some(answer)) => (
-            answer.status,
-            [(header::CONTENT_TYPE, "application/json")],
-            answer.body,
-        )
-            .into_response(),
+        (None, Some(answer)) => passthrough(answer),
         (None, None) => api::error(
             ErrorCode::NoGroup,
             format!("group '{name}' not found"),
@@ -595,8 +529,8 @@ pub(super) async fn export_group_union(
     let mut merged: Option<crate::groups::GroupRecord> = None;
     let mut not_found: Option<ShardAnswer> = None;
     for (shard, outcome) in outcomes {
-        match outcome {
-            Ok(answer) if answer.status.is_success() => {
+        match merge_fate(&map, shard, outcome, started_at) {
+            Ok(MergeFate::Success(answer)) => {
                 let Some(record) = parse_group_export(&answer.body) else {
                     return api::error(
                         ErrorCode::Internal,
@@ -615,25 +549,8 @@ pub(super) async fn export_group_union(
                     None => merged = Some(record),
                 }
             }
-            Ok(answer) if answer.status == StatusCode::NOT_FOUND => not_found = Some(answer),
-            Ok(answer) => {
-                return (
-                    answer.status,
-                    [(header::CONTENT_TYPE, "application/json")],
-                    answer.body,
-                )
-                    .into_response();
-            }
-            Err(error) => {
-                return unreachable_refusal(
-                    &[Unreached {
-                        shard: map.url(shard).to_string(),
-                        contexts: Vec::new(),
-                        error,
-                    }],
-                    started_at,
-                );
-            }
+            Ok(MergeFate::NotFound(answer)) => not_found = Some(answer),
+            Err(refusal) => return *refusal,
         }
     }
     match (merged, not_found) {
@@ -643,12 +560,7 @@ pub(super) async fn export_group_union(
             crate::export::render_group(&name, &record),
         )
             .into_response(),
-        (None, Some(answer)) => (
-            answer.status,
-            [(header::CONTENT_TYPE, "application/json")],
-            answer.body,
-        )
-            .into_response(),
+        (None, Some(answer)) => passthrough(answer),
         (None, None) => api::error(
             ErrorCode::NoGroup,
             format!("group '{name}' not found"),

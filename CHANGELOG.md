@@ -33,6 +33,22 @@ Entries that change an on-disk format or a response shape say so.
   declarations, wire formats, or response shapes.
 
 ### Fixed
+- `taguru router` closes four divergences from a single instance
+  (#727): `GET /groups`/`GET /contexts` floor an explicit `limit=0` to
+  one row (`clamp_page`), matching the shard's own keyset-page
+  contract so SDK iterators never read a sized-zero page as
+  end-of-collection; `POST /maintenance/compact` answers 502
+  `shard_unreachable` when NO shard could be asked, like `/flush`,
+  instead of an empty 200 sweep report; a group PATCH's
+  `remove_contexts` members are no longer existence-checked (a single
+  instance treats removals as an idempotent set difference); and a
+  group import outcome is labeled from the union's view — an empty
+  created projection beside unchanged siblings answers `unchanged`,
+  never a false `replaced`. Import refusal rewraps also count landed
+  batches/schemas from each request's own ranges (a shard success with
+  an unreadable envelope still landed), and `TAGURU_ROUTE_MAP` refuses
+  a host-less shard URL (`http://`) at parse time with its line
+  number.
 - Hydration's published-file fetcher (`fetch_published_if_stale`) now
   sends only `InvalidData`/`NotFound` errors through the manifest
   re-read arbiter, matching the log-lane fetcher's existing

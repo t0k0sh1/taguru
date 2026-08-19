@@ -147,14 +147,7 @@ pub(super) async fn route_import(
                 .await
             {
                 Ok(answer) if answer.status.is_success() => {}
-                Ok(answer) => {
-                    return (
-                        answer.status,
-                        [(header::CONTENT_TYPE, "application/json")],
-                        answer.body,
-                    )
-                        .into_response();
-                }
+                Ok(answer) => return passthrough(answer),
                 Err(error) => {
                     return unreachable_refusal(
                         &[Unreached {
@@ -173,6 +166,12 @@ pub(super) async fn route_import(
     // here exactly as it stops a single instance partway: the batches
     // before it landed durably, and re-POSTing the stream is exact.
     let mut batches: Vec<Value> = Vec::new();
+    // Landed counts are tallied from each chunk's own batch ranges (and
+    // each schema request's own record indices below), never from the
+    // parsed outcome arrays: a shard that answered success with an
+    // envelope this router could not read still applied its chunk, and
+    // a later refusal's "N landed durably" note must count it.
+    let mut batches_landed = 0usize;
     for (index, (shard, ranges)) in chunks.iter().enumerate() {
         match state
             .call_shard(
@@ -187,6 +186,7 @@ pub(super) async fn route_import(
             .await
         {
             Ok(answer) if answer.status.is_success() => {
+                batches_landed += ranges.len();
                 if let Ok(envelope) = serde_json::from_slice::<ShardEnvelope<Value>>(&answer.body)
                     && let Some(outcomes) = envelope.result.get("batches").and_then(Value::as_array)
                 {
@@ -196,7 +196,7 @@ pub(super) async fn route_import(
             Ok(answer) => {
                 return rewrap_import_refusal(
                     answer,
-                    batches.len(),
+                    batches_landed,
                     0,
                     !query.dry_run && index > 0,
                     started_at,
@@ -229,6 +229,7 @@ pub(super) async fn route_import(
     // stream — the same equivalence `taguru router`'s own doc promises
     // for every other verb.
     let mut schemas_by_index: BTreeMap<usize, Value> = BTreeMap::new();
+    let mut schemas_landed = 0usize;
     for (&shard, indices) in &schema_shards {
         match state
             .call_shard(
@@ -243,6 +244,7 @@ pub(super) async fn route_import(
             .await
         {
             Ok(answer) if answer.status.is_success() => {
+                schemas_landed += indices.len();
                 if let Ok(envelope) = serde_json::from_slice::<ShardEnvelope<Value>>(&answer.body)
                     && let Some(outcomes) = envelope.result.get("schemas").and_then(Value::as_array)
                 {
@@ -257,9 +259,9 @@ pub(super) async fn route_import(
             Ok(answer) => {
                 return rewrap_import_refusal(
                     answer,
-                    batches.len(),
-                    schemas_by_index.len(),
-                    !query.dry_run && (!chunks.is_empty() || !schemas_by_index.is_empty()),
+                    batches_landed,
+                    schemas_landed,
+                    !query.dry_run && (batches_landed > 0 || schemas_landed > 0),
                     started_at,
                 );
             }
@@ -310,9 +312,9 @@ pub(super) async fn route_import(
                 Ok(answer) => {
                     return rewrap_import_refusal(
                         answer,
-                        batches.len(),
-                        schemas.len(),
-                        !query.dry_run && (!chunks.is_empty() || !schemas.is_empty()),
+                        batches_landed,
+                        schemas_landed,
+                        !query.dry_run && (batches_landed > 0 || schemas_landed > 0),
                         started_at,
                     );
                 }
@@ -332,12 +334,20 @@ pub(super) async fn route_import(
             let Some(first) = outcomes.first() else {
                 continue;
             };
-            let outcome = if outcomes.iter().all(|entry| entry.outcome == "unchanged") {
-                "unchanged"
-            } else if outcomes.iter().all(|entry| entry.outcome == "created") {
+            // The label is claimed from the UNION's view, not any one
+            // shard's: a projection created empty beside unchanged
+            // siblings adds nothing to the union, so the record as a
+            // whole is unchanged — while a created projection carrying
+            // members (or any shard actually replacing its own copy)
+            // means the union's row really changed.
+            let outcome = if outcomes.iter().all(|entry| entry.outcome == "created") {
                 "created"
-            } else {
+            } else if outcomes.iter().any(|entry| {
+                entry.outcome == "replaced" || (entry.outcome == "created" && entry.contexts > 0)
+            }) {
                 "replaced"
+            } else {
+                "unchanged"
             };
             groups.push(json!({
                 "name": first.name,
@@ -399,12 +409,7 @@ fn rewrap_import_refusal(
     started_at: Instant,
 ) -> Response {
     if !other_landed {
-        return (
-            answer.status,
-            [(header::CONTENT_TYPE, "application/json")],
-            answer.body,
-        )
-            .into_response();
+        return passthrough(answer);
     }
     let (code, message, issues, retryable) = match serde_json::from_slice::<Value>(&answer.body) {
         Ok(body) => (

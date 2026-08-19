@@ -211,6 +211,49 @@ fn router_ok<T: Serialize>(result: T, unreached: Vec<Unreached>, started_at: Ins
         .into_response()
 }
 
+/// A shard's non-success answer, passed through verbatim: the body is
+/// the shard's own refusal shape, never a router-invented one.
+fn passthrough(answer: ShardAnswer) -> Response {
+    (
+        answer.status,
+        [(header::CONTENT_TYPE, "application/json")],
+        answer.body,
+    )
+        .into_response()
+}
+
+/// One broadcast outcome sorted into the three fates every group
+/// surface shares: a success to fold in, a 404 to remember (mixed
+/// answers are drift healing), or a whole-merge refusal — an error
+/// status passes through verbatim, and an unreachable shard refuses
+/// the union outright, because a partially-unioned group row would
+/// look complete.
+enum MergeFate {
+    Success(ShardAnswer),
+    NotFound(ShardAnswer),
+}
+
+fn merge_fate(
+    map: &RouteMap,
+    shard: usize,
+    outcome: Result<ShardAnswer, String>,
+    started_at: Instant,
+) -> Result<MergeFate, Box<Response>> {
+    match outcome {
+        Ok(answer) if answer.status.is_success() => Ok(MergeFate::Success(answer)),
+        Ok(answer) if answer.status == StatusCode::NOT_FOUND => Ok(MergeFate::NotFound(answer)),
+        Ok(answer) => Err(Box::new(passthrough(answer))),
+        Err(error) => Err(Box::new(unreachable_refusal(
+            &[Unreached {
+                shard: map.url(shard).to_string(),
+                contexts: Vec::new(),
+                error,
+            }],
+            started_at,
+        ))),
+    }
+}
+
 /// 502 for a shard the router could not reach on a path that cannot
 /// serve partial results.
 fn unreachable_refusal(unreached: &[Unreached], started_at: Instant) -> Response {
@@ -265,6 +308,38 @@ mod tests {
         // Without a fallback, unmapped contexts have no shard at all.
         let map = RouteMap::parse("sake = http://a:1\n").unwrap();
         assert_eq!(map.shard_of("unmapped"), None);
+    }
+
+    /// A bare scheme passes the `http://` prefix check but names no
+    /// host — stored, it would fail every dial with a message naming
+    /// no line; the parse must refuse it up front instead.
+    #[test]
+    fn the_route_map_refuses_shard_urls_naming_no_host() {
+        for line in [
+            "sake = http://\n",
+            "sake = https:///path\n",
+            // A port-only authority is just as hostless as a bare
+            // scheme — the split must isolate the host, not accept
+            // ':8248' as one.
+            "sake = http://:8248\n",
+            "sake = https://:443/path\n",
+            // The refusal must not echo the URL: a hostless spelling
+            // can still carry a secret in its query, and this error
+            // prints at boot and reload.
+            "sake = http://?token=hunter2\n",
+        ] {
+            let refused = RouteMap::parse(line).expect_err("a host-less URL routes nowhere");
+            assert!(refused.contains("names no host"), "{refused}");
+            assert!(refused.contains("line 1"), "{refused}");
+            assert!(
+                !refused.contains("hunter2") && !refused.contains("http://"),
+                "the refusal must not echo the URL: {refused}"
+            );
+        }
+        // The IPv6 literal's brackets are not a port colon — a
+        // bracketed host with a port must keep parsing.
+        let map = RouteMap::parse("sake = http://[::1]:8248\n").unwrap();
+        assert_eq!(map.url(0), "http://[::1]:8248");
     }
 
     /// Shard URLs surface in logs and /metrics labels, so userinfo is
