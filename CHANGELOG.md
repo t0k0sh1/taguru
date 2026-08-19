@@ -54,6 +54,14 @@ Entries that change an on-disk format or a response shape say so.
 - `taguru-mcp`'s refusal for a tool call whose `params.name` is
   missing, empty, or not a string now says "tool name is required"
   instead of the baffling `unknown tool ''` (#732).
+- `taguru-code sync` re-checks every incremental candidate against the
+  current universe (`git ls-files --cached --others
+  --exclude-standard`) before importing (ADR 0010 §3, issue #733): a
+  file newly gitignored — `git rm --cached` plus a staged
+  `.gitignore`, nothing committed — still exists on disk and used to
+  re-import (the path secrets would leak in by). A candidate outside
+  the universe now retracts instead, sweeping out whatever an earlier
+  sync had imported for it.
 - `taguru router` closes four divergences from a single instance
   (#727): `GET /groups`/`GET /contexts` floor an explicit `limit=0` to
   one row (`clamp_page`), matching the shard's own keyset-page
