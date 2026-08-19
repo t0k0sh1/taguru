@@ -1108,10 +1108,11 @@ fn expected_file_names<'a>(
 /// would otherwise leave its old file behind, and a later directory
 /// import (`taguru import DIR` expands every `*.jsonl`) would
 /// resurrect the deleted entity (issue #751). Removes every `*.jsonl`
-/// direct child of `out` not named in `expected`, reporting each
-/// removal as its own stdout line. Subset exports never call this:
-/// they write a slice, not the whole truth. Returns how many removals
-/// failed.
+/// direct entry of `out` not named in `expected`, reporting each
+/// removal as its own stdout line and each entry it could not remove
+/// (a directory, a permissions refusal) as a counted failure. Subset
+/// exports never call this: they write a slice, not the whole truth.
+/// Returns how many removals failed.
 fn prune_stale_streams(out: &std::path::Path, expected: &BTreeSet<String>) -> usize {
     let entries = match fs::read_dir(out) {
         Ok(entries) => entries,
@@ -1130,10 +1131,12 @@ fn prune_stale_streams(out: &std::path::Path, expected: &BTreeSet<String>) -> us
         if !name.ends_with(".jsonl") || expected.contains(name) {
             continue;
         }
+        // No is_file() pre-filter: an unexpected DIRECTORY named
+        // `*.jsonl` makes `remove_file` fail (EISDIR — even for root),
+        // and that failure is the honest report: the export cannot
+        // converge `out` on the source's truth, and a directory import
+        // would trip over the entry too.
         let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
         match fs::remove_file(&path) {
             Ok(()) => println!(
                 "{}: removed — no longer exists at the source",
@@ -1265,9 +1268,8 @@ mod tests {
     }
 
     /// Issue #751's pruning contract at the unit level: everything a
-    /// full export names survives, every other `*.jsonl` goes, and
-    /// nothing else — not a non-stream file, not a directory whose
-    /// name happens to end in `.jsonl` — is ever touched.
+    /// full export names survives, every other `*.jsonl` goes, and a
+    /// non-stream file is never touched.
     #[test]
     fn prune_removes_exactly_the_unexpected_stream_files() {
         let dir = scratch_dir("prune");
@@ -1277,7 +1279,6 @@ mod tests {
         fs::write(dir.join("stale.jsonl"), b"{}").unwrap();
         fs::write(dir.join("stale.group.jsonl"), b"{}").unwrap();
         fs::write(dir.join("notes.txt"), b"bystander").unwrap();
-        fs::create_dir_all(dir.join("subdir.jsonl")).unwrap();
 
         let expected = expected_file_names(&["keep".to_string()], std::iter::once("keep"));
         assert_eq!(prune_stale_streams(&dir, &expected), 0);
@@ -1287,7 +1288,26 @@ mod tests {
         assert!(!dir.join("stale.jsonl").exists());
         assert!(!dir.join("stale.group.jsonl").exists());
         assert!(dir.join("notes.txt").exists());
-        assert!(dir.join("subdir.jsonl").exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// An unexpected `*.jsonl` entry the prune cannot unlink — forced
+    /// with a DIRECTORY, which `remove_file` refuses even for root —
+    /// is a counted failure, and each failure is counted exactly once
+    /// (two here, alongside one removal that still succeeds).
+    #[test]
+    fn prune_counts_every_entry_it_cannot_remove() {
+        let dir = scratch_dir("prune-fail");
+        fs::create_dir_all(dir.join("undead.jsonl")).unwrap();
+        fs::write(dir.join("undead.jsonl").join("inner"), b"x").unwrap();
+        fs::create_dir_all(dir.join("undead.group.jsonl")).unwrap();
+        fs::write(dir.join("stale.jsonl"), b"{}").unwrap();
+
+        let expected = expected_file_names(&[], std::iter::empty::<&str>());
+        assert_eq!(prune_stale_streams(&dir, &expected), 2);
+        assert!(dir.join("undead.jsonl").exists());
+        assert!(!dir.join("stale.jsonl").exists());
 
         let _ = fs::remove_dir_all(&dir);
     }

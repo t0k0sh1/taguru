@@ -394,6 +394,23 @@ fn a_full_remote_export_removes_stale_stream_files() {
     assert!(!contents.contains_key("zombie.jsonl"), "{contents:?}");
     assert!(!contents.contains_key("zombie.group.jsonl"), "{contents:?}");
 
+    // An unexpected `*.jsonl` entry the prune cannot unlink — forced
+    // with a DIRECTORY, which `remove_file` refuses even for root —
+    // is a failure the exit code and stderr both carry.
+    std::fs::create_dir_all(out.join("undead.jsonl")).expect("dir must be creatable");
+    let (code, stdout, stderr) = run_cli(
+        &[
+            "export",
+            "--url",
+            &server.base,
+            "--out",
+            out.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stderr.contains("cannot remove stale"), "{stderr}");
+
     let _ = std::fs::remove_dir_all(&out);
 }
 

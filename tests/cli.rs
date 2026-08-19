@@ -2082,6 +2082,17 @@ fn a_full_export_prunes_streams_for_deleted_contexts_and_groups() {
         "non-stream files are never touched"
     );
 
+    // An unexpected `*.jsonl` entry the prune cannot unlink — forced
+    // with a DIRECTORY, which `remove_file` refuses even for root —
+    // is a failure the exit code and stderr both carry.
+    std::fs::create_dir_all(out.join("undead.jsonl")).expect("dir must be creatable");
+    let third = run_in(&["export", "--out", &out.display().to_string()]);
+    assert_eq!(third.status.code(), Some(1), "{third:?}");
+    assert!(
+        String::from_utf8_lossy(&third.stderr).contains("cannot remove stale"),
+        "{third:?}"
+    );
+
     // A subset export writes its slice and removes nothing.
     std::fs::write(out.join("zombie.jsonl"), b"{}").expect("stale file must be writable");
     let subset = run_in(&["export", "--out", &out.display().to_string(), "sake"]);
