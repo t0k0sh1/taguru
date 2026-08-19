@@ -1378,6 +1378,12 @@ struct TerminateSignals {
     interrupt: Option<tokio::signal::unix::Signal>,
     #[cfg(unix)]
     terminate: Option<tokio::signal::unix::Signal>,
+    /// Windows (issue #730, same fix as extract's `StopSignals`):
+    /// `tokio::signal::ctrl_c()` only delivers to a live listener, so
+    /// a fresh future per recv would drop a Ctrl+C landing between the
+    /// first delivery and the second await — held instead.
+    #[cfg(windows)]
+    ctrl_c: Option<tokio::signal::windows::CtrlC>,
 }
 
 impl TerminateSignals {
@@ -1401,7 +1407,13 @@ impl TerminateSignals {
                 terminate: register(SignalKind::terminate()),
             }
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            Self {
+                ctrl_c: tokio::signal::windows::ctrl_c().ok(),
+            }
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             Self {}
         }
@@ -1422,10 +1434,21 @@ impl TerminateSignals {
                 () = terminate => {}
             }
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
         {
-            // No persistent Unix stream to drop here; ctrl_c()'s handler
-            // is a global that stays installed, so re-awaiting is safe.
+            // Held like the unix streams: the OS handler is global, but
+            // delivery needs a LIVE listener — re-awaiting a fresh
+            // ctrl_c() future would drop a signal landing in the gap
+            // between two awaits (issue #730).
+            match &mut self.ctrl_c {
+                Some(stream) => {
+                    stream.recv().await;
+                }
+                None => std::future::pending().await,
+            }
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
             let _ = tokio::signal::ctrl_c().await;
         }
     }

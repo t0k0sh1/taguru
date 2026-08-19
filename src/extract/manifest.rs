@@ -134,90 +134,64 @@ impl Manifest {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn matches(
-        &self,
-        source: &str,
-        sha256: &str,
-        model: &str,
-        context: &str,
-        questions_n: usize,
-        no_passage: bool,
-        description: &str,
-        fact_budget: usize,
-        structured_output: &str,
-        max_output_tokens: usize,
-        lossy: bool,
-        schema_digest: &str,
-        candidates: &str,
-        vocabulary_digest: &str,
-        source_id: &str,
-        date: u64,
-        tags: &[String],
-    ) -> bool {
+    /// Whether `source`'s recorded entry matches today's computation
+    /// inputs field for field (plus this build's own `PROMPT_VERSION`)
+    /// — any mismatch treats the entry as absent, so a settings change
+    /// can never silently reuse an incompatible output.
+    pub(super) fn matches(&self, source: &str, inputs: &ComputationInputs) -> bool {
         self.documents.get(source).is_some_and(|entry| {
-            entry.sha256 == sha256
-                && entry.model == model
+            entry.sha256 == inputs.sha256
+                && entry.model == inputs.model
                 && entry.prompt_version == PROMPT_VERSION
-                && entry.context == context
-                && entry.questions_n == questions_n
-                && entry.no_passage == no_passage
-                && entry.description == description
-                && entry.fact_budget == fact_budget
-                && entry.structured_output == structured_output
-                && entry.max_output_tokens == max_output_tokens
-                && entry.lossy == lossy
-                && entry.schema_digest == schema_digest
-                && entry.candidates == candidates
-                && entry.vocabulary_digest == vocabulary_digest
-                && entry.source_id == source_id
-                && entry.date == date
-                && entry.tags == tags
+                && entry.context == inputs.context
+                && entry.questions_n == inputs.questions_n
+                && entry.no_passage == inputs.no_passage
+                && entry.description == inputs.description
+                && entry.fact_budget == inputs.fact_budget
+                && entry.structured_output == inputs.structured_output
+                && entry.max_output_tokens == inputs.max_output_tokens
+                && entry.lossy == inputs.lossy
+                && entry.schema_digest == inputs.schema_digest
+                && entry.candidates == inputs.candidates
+                && entry.vocabulary_digest == inputs.vocabulary_digest
+                && entry.source_id == inputs.source_id
+                && entry.date == inputs.date
+                && entry.tags == inputs.tags
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn record(
-        &mut self,
-        source: &str,
-        sha256: &str,
-        model: &str,
-        context: &str,
-        questions_n: usize,
-        no_passage: bool,
-        description: &str,
-        fact_budget: usize,
-        structured_output: &str,
-        max_output_tokens: usize,
-        lossy: bool,
-        schema_digest: &str,
-        candidates: &str,
-        vocabulary_digest: &str,
-        source_id: &str,
-        date: u64,
-        tags: &[String],
-        output: &str,
-    ) {
+    /// The output file name the last completed run recorded for
+    /// `source` — the skip path reads the batch from THERE (issue
+    /// #730): identical to `batch_file_name(source)` for anything
+    /// written since, while a manifest from before the naming change
+    /// names the old un-hashed file, keeping its unchanged documents
+    /// skippable (and naming the stale file to remove once a changed
+    /// document re-extracts under the new name).
+    pub(super) fn output_of(&self, source: &str) -> Option<String> {
+        self.documents.get(source).map(|entry| entry.output.clone())
+    }
+
+    pub(super) fn record(&mut self, source: &str, inputs: &ComputationInputs, output: &str) {
         self.documents.insert(
             source.to_string(),
             ManifestEntry {
-                sha256: sha256.to_string(),
-                model: model.to_string(),
+                sha256: inputs.sha256.to_string(),
+                model: inputs.model.to_string(),
                 prompt_version: PROMPT_VERSION,
-                context: context.to_string(),
-                questions_n,
-                no_passage,
-                description: description.to_string(),
-                fact_budget,
-                structured_output: structured_output.to_string(),
-                max_output_tokens,
-                lossy,
-                schema_digest: schema_digest.to_string(),
-                candidates: candidates.to_string(),
-                vocabulary_digest: vocabulary_digest.to_string(),
-                source_id: source_id.to_string(),
-                date,
-                tags: tags.to_vec(),
+                context: inputs.context.to_string(),
+                questions_n: inputs.questions_n,
+                no_passage: inputs.no_passage,
+                description: inputs.description.to_string(),
+                fact_budget: inputs.fact_budget,
+                structured_output: inputs.structured_output.to_string(),
+                max_output_tokens: inputs.max_output_tokens,
+                lossy: inputs.lossy,
+                schema_digest: inputs.schema_digest.to_string(),
+                candidates: inputs.candidates.to_string(),
+                vocabulary_digest: inputs.vocabulary_digest.to_string(),
+                source_id: inputs.source_id.to_string(),
+                date: inputs.date,
+                tags: inputs.tags.to_vec(),
                 output: output.to_string(),
             },
         );
@@ -229,20 +203,65 @@ impl Manifest {
     }
 }
 
-/// Output name for a source path: separators flatten to `__` so the
-/// output directory stays flat — which is what `taguru import DIR`
-/// reads. Long paths would blow the OS filename limit, so they keep a
-/// head for the human and a hash for uniqueness.
+/// The computation inputs one document's extraction depends on — what
+/// [`Manifest::matches`] compares and [`Manifest::record`] stamps
+/// (issue #730: seventeen positional arguments, several sharing a
+/// type, made those call sites unreviewable — and `Run` passing the
+/// list twice let the two drift). Built once per document; field names
+/// mirror [`ManifestEntry`]'s, minus `prompt_version` (this build's
+/// own constant) and `output` (a result, not an input).
+pub(super) struct ComputationInputs<'a> {
+    pub(super) sha256: &'a str,
+    pub(super) model: &'a str,
+    pub(super) context: &'a str,
+    pub(super) questions_n: usize,
+    pub(super) no_passage: bool,
+    pub(super) description: &'a str,
+    pub(super) fact_budget: usize,
+    pub(super) structured_output: &'a str,
+    pub(super) max_output_tokens: usize,
+    pub(super) lossy: bool,
+    pub(super) schema_digest: &'a str,
+    pub(super) candidates: &'a str,
+    pub(super) vocabulary_digest: &'a str,
+    pub(super) source_id: &'a str,
+    pub(super) date: u64,
+    pub(super) tags: &'a [String],
+}
+
+/// The flatten-then-hash naming scheme [`batch_file_name`] and
+/// [`checkpoint_file_name`] share: separators flatten to `__` so the
+/// directory stays flat, and the hash suffix is ALWAYS appended —
+/// flattening alone is not injective (`"a/b"`, `"a:b"`, and `"a__b"`
+/// all flatten to `"a__b"`), so distinct sources could otherwise
+/// collide on one file. A flattened name over 120 UTF-8 bytes
+/// truncates to a <=96-byte prefix so long paths never blow a
+/// filesystem's name-length limit; the prefix is a human-readable
+/// label, the hash alone is what keeps names apart.
+fn flattened_hashed_name(source: &str, extension: &str) -> String {
+    let flattened = source.replace(['/', '\\', ':'], "__");
+    let prefix = if flattened.len() > 120 {
+        &flattened[..floor_char_boundary(&flattened, 96)]
+    } else {
+        flattened.as_str()
+    };
+    format!(
+        "{prefix}-{}.{extension}",
+        &sha256_hex(source.as_bytes())[..16]
+    )
+}
+
+/// Output name for a source path ([`flattened_hashed_name`], `.jsonl`)
+/// — what `taguru import DIR` reads. The suffix went unconditional in
+/// issue #730, the same injectivity fix [`checkpoint_file_name`] got
+/// in #227: one run's collisions were already caught by `Run::claimed`,
+/// but separate runs into the same `--out` know nothing of each other,
+/// so a later run's colliding document silently overwrote the earlier
+/// one's batch output. The skip path reads the file the MANIFEST
+/// recorded, so batches written under the pre-#730 naming stay
+/// skippable — see `Run::extract_document`.
 pub(super) fn batch_file_name(source: &str) -> String {
-    let mut name = source.replace(['/', '\\', ':'], "__");
-    if name.len() > 120 {
-        name = format!(
-            "{}-{}",
-            &name[..floor_char_boundary(&name, 96)],
-            &sha256_hex(source.as_bytes())[..16]
-        );
-    }
-    format!("{name}.jsonl")
+    flattened_hashed_name(source, "jsonl")
 }
 
 /// Directory (adjacent to `--out`, hidden like the manifest) holding
@@ -251,25 +270,12 @@ pub(super) fn batch_file_name(source: &str) -> String {
 /// or for a document with no checkpointable units yet.
 pub(super) const CHECKPOINT_DIR_NAME: &str = ".extract-checkpoints";
 
-/// Loosely based on [`batch_file_name`]'s flatten-then-hash scheme,
-/// `.json` instead of `.jsonl` — one checkpoint file per document,
-/// named from its source path so a `--out` directory listing stays
-/// legible. Unlike `batch_file_name`, the hash suffix is ALWAYS
-/// appended, not just past the 120-byte threshold: flattening alone is
-/// not injective (`"a/b"`, `"a:b"`, and `"a__b"` all flatten to
-/// `"a__b"`), so without an unconditional suffix, distinct short
-/// source ids could collide on the same file and silently share (and
-/// overwrite) each other's checkpoint progress. A flattened name over
-/// 120 UTF-8 bytes still truncates to a <=96-byte prefix so long
-/// source paths never blow a filesystem's name-length limit, but that
-/// truncated prefix is now purely a human-readable label — the hash
-/// suffix alone is what keeps names apart.
+/// One checkpoint file per document ([`flattened_hashed_name`],
+/// `.json`), named from its source path so a `--out` directory listing
+/// stays legible. The unconditional hash suffix arrived here first
+/// (issue #227): without it, distinct short source ids could collide
+/// on the same file and silently share (and overwrite) each other's
+/// checkpoint progress.
 pub(super) fn checkpoint_file_name(source: &str) -> String {
-    let flattened = source.replace(['/', '\\', ':'], "__");
-    let prefix = if flattened.len() > 120 {
-        &flattened[..floor_char_boundary(&flattened, 96)]
-    } else {
-        flattened.as_str()
-    };
-    format!("{prefix}-{}.json", &sha256_hex(source.as_bytes())[..16])
+    flattened_hashed_name(source, "json")
 }

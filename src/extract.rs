@@ -107,7 +107,7 @@ mod vocabulary;
 
 use args::{Args, CorrectionPolicy, LadderConfig, Outcome};
 use diagnostics::DiagnosticsSink;
-use manifest::Manifest;
+use manifest::{ComputationInputs, Manifest};
 use run::Run;
 use structured_output::resolve_response_format;
 
@@ -164,7 +164,10 @@ use candidates::{CANDIDATE_CAP, CANDIDATE_MAX_BYTES};
 #[cfg(test)]
 use chat_client::build_chat_body;
 #[cfg(test)]
-use chunking::{AttemptOutcome, MAX_LISTED_ISSUES, classify_attempt, corrective_message};
+use chunking::{
+    AttemptOutcome, MAX_LISTED_ISSUES, PieceContext, classify_attempt, corrective_message,
+    extract_piece,
+};
 #[cfg(test)]
 use coverage::GAP_QUOTE_MAX_BYTES;
 #[cfg(test)]
@@ -175,8 +178,8 @@ use documents::chunk_plan_with_cap;
 use parse::{ModelQuestion, parse_model_output};
 #[cfg(test)]
 use structured_output::{
-    RETRY_MAX_BACKOFF, conforms_to_model_output_shape, json_object_response_format,
-    random_duration_up_to,
+    ProbeVerdict, RETRY_MAX_BACKOFF, conforms_to_model_output_shape, json_object_response_format,
+    probe_structured_output, random_duration_up_to,
 };
 
 const USAGE: &str = "\

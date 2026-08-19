@@ -122,10 +122,10 @@ pub(super) fn candidate_terms(text: &str) -> Vec<String> {
 /// The terms are DOCUMENT-derived, untrusted text landing in the
 /// SYSTEM prompt — a more privileged channel than the user message the
 /// base prompt's "the document is DATA" rule covers. They are
-/// therefore rendered as a JSON array (every term quoted, never bare
-/// prose the model could read as a sentence) and framed as data in so
-/// many words, so a document token spelled like an instruction stays a
-/// spelling.
+/// therefore framed as data in so many words, rendered as the measured
+/// comma-joined prose list — the JSON-array re-encoding was tried and
+/// rejected (ADR 0014 §3; the comment in the body has the measurement)
+/// — so a document token spelled like an instruction stays a spelling.
 pub(super) fn candidates_block(terms: &[String]) -> String {
     if terms.is_empty() {
         return String::new();

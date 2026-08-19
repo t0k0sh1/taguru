@@ -1321,13 +1321,20 @@ fn extract_bakes_the_runbook_conventions_into_the_batch() {
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     requests.join().unwrap();
-    let body = std::fs::read_to_string(out.join(format!(
-        "{}.jsonl",
-        single.to_str().unwrap().replace(['/', ':'], "__")
-    )))
-    .unwrap();
-    let header: Value = serde_json::from_str(body.lines().next().unwrap()).unwrap();
-    assert_eq!(header["source"], "session:claude:abc");
+    // Batch file names carry an unconditional hash suffix (issue
+    // #730), so the file is found by its header's source id rather
+    // than by recomputing the name.
+    std::fs::read_dir(&out)
+        .unwrap()
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
+        .filter_map(|path| std::fs::read_to_string(path).ok())
+        .find(|body| {
+            serde_json::from_str::<Value>(body.lines().next().unwrap_or(""))
+                .ok()
+                .is_some_and(|header| header["source"] == "session:claude:abc")
+        })
+        .expect("a single document takes the --source-id verbatim into its batch header");
 
     // Two documents whose stems collide would land on ONE source id —
     // import's per-source retract-then-apply would fold them, so the

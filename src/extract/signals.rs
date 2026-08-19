@@ -134,14 +134,19 @@ impl StopSignal {
 }
 
 /// The extract-local twin of `main.rs`'s `TerminateSignals`: the
-/// SIGINT/SIGTERM streams held for [`StopSignal`]'s whole background
-/// thread so a second signal can be awaited without a re-registration
-/// gap that could lose it.
+/// signal streams held for [`StopSignal`]'s whole background thread so
+/// a second signal can be awaited without a re-registration gap that
+/// could lose it — on Windows too (issue #730): `tokio::signal::
+/// ctrl_c()` only delivers to a live listener, so awaiting a FRESH
+/// future per recv would drop a Ctrl+C landing between the first
+/// delivery and the second await.
 pub(super) struct StopSignals {
     #[cfg(unix)]
     pub(super) interrupt: Option<tokio::signal::unix::Signal>,
     #[cfg(unix)]
     pub(super) terminate: Option<tokio::signal::unix::Signal>,
+    #[cfg(windows)]
+    pub(super) ctrl_c: Option<tokio::signal::windows::CtrlC>,
 }
 
 impl StopSignals {
@@ -154,7 +159,13 @@ impl StopSignals {
                 terminate: signal(SignalKind::terminate()).ok(),
             }
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            Self {
+                ctrl_c: tokio::signal::windows::ctrl_c().ok(),
+            }
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             Self {}
         }
@@ -180,7 +191,20 @@ impl StopSignals {
                 () = wait(terminate) => {}
             }
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            // Held for the thread's life, like the unix pair: the OS
+            // handler is global, but delivery needs a LIVE listener —
+            // a fresh `ctrl_c()` future per recv would drop a signal
+            // landing in the gap between two awaits.
+            match &mut self.ctrl_c {
+                Some(stream) => {
+                    stream.recv().await;
+                }
+                None => std::future::pending().await,
+            }
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = tokio::signal::ctrl_c().await;
         }

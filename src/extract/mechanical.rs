@@ -142,20 +142,31 @@ fn association_mechanically(
         issues.append(&mut item_issues);
         return Some(parsed);
     }
-    for (field, name) in [("subject", &parsed.subject), ("object", &parsed.object)] {
-        let name = name
-            .as_deref()
-            .expect("no absence and no issue means the field parsed");
-        // ADR 0015: a spelling the target context already uses is not
-        // a fabrication, however the document spells the entity — the
-        // vocabulary allowlist is consulted before removal.
-        if !name_occurs(haystack, name) && !vocabulary.contains(&normalize_for_occurrence(name)) {
-            removed.push(format!(
-                "{path}.{field}: {} does not appear in the document text",
-                quote_for_issue(name)
-            ));
-            return None;
-        }
+    // Both positions are checked before anything is recorded, so an
+    // item fabricating subject AND object names them together — the
+    // one removal record is the complete diagnosis, not whichever
+    // field happened to be checked first (mirroring `absent` above).
+    let fabricated: Vec<String> = [("subject", &parsed.subject), ("object", &parsed.object)]
+        .into_iter()
+        .filter_map(|(field, name)| {
+            let name = name
+                .as_deref()
+                .expect("no absence and no issue means the field parsed");
+            // ADR 0015: a spelling the target context already uses is
+            // not a fabrication, however the document spells the entity
+            // — the vocabulary allowlist is consulted before removal.
+            (!name_occurs(haystack, name) && !vocabulary.contains(&normalize_for_occurrence(name)))
+                .then(|| {
+                    format!(
+                        "{field} {} does not appear in the document text",
+                        quote_for_issue(name)
+                    )
+                })
+        })
+        .collect();
+    if !fabricated.is_empty() {
+        removed.push(format!("{path}: {}", fabricated.join(", ")));
+        return None;
     }
     Some(parsed)
 }
