@@ -530,6 +530,87 @@ fn a_line_past_the_byte_cap_is_refused_without_buffering_it_whole() {
     assert!(error.contains("line cap"), "{error}");
 }
 
+/// The cap is inclusive: a line of exactly `MAX_LINE_BYTES` bytes
+/// parses — only the byte past it (the sibling test above) refuses.
+/// Padded with trailing whitespace (trimmed after the cap check) so
+/// the line sits ON the byte cap without any field crossing its own
+/// smaller cap (a passage caps at `MAX_PASSAGE_BYTES`, half this).
+#[test]
+fn a_line_exactly_at_the_byte_cap_is_accepted() {
+    let json = "{\"passage\": \"本文。\"}";
+    let line = format!("{json}{}", " ".repeat(MAX_LINE_BYTES - json.len()));
+    assert_eq!(
+        line.len(),
+        MAX_LINE_BYTES,
+        "the fixture must sit ON the cap"
+    );
+    let batch = parse(&format!("{HEADER}\n{line}\n")).unwrap();
+    assert_eq!(batch.passage.as_deref(), Some("本文。"));
+}
+
+/// A line `split_batches` cannot parse as JSON is skipped for BOUNDARY
+/// detection only — its bytes stay inside the enclosing batch's range,
+/// so the owning shard (or wire chunk) still receives them verbatim
+/// and answers the parse refusal itself.
+#[test]
+fn split_batches_keeps_unparseable_lines_inside_the_enclosing_range() {
+    let body = concat!(
+        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"s1\"}\n",
+        "not json at all\n",
+        "{\"taguru_batch\": 1, \"context\": \"beer\", \"source\": \"s2\"}\n",
+        "{\"assoc\": 1\n",
+    )
+    .as_bytes();
+    let ranges = split_batches(body);
+    assert_eq!(ranges.len(), 2, "{ranges:?}");
+    assert!(
+        body[ranges[0].clone()].ends_with(b"not json at all\n"),
+        "the garbage line belongs to the batch it interrupted"
+    );
+    assert!(
+        body[ranges[1].clone()].ends_with(b"{\"assoc\": 1\n"),
+        "a truncated trailing line still rides its own batch"
+    );
+}
+
+/// `apply_batch` threads its caller's deadline into the association
+/// writes (issue #728): a budget already spent refuses inside the
+/// batch (`deadline_exceeded`, marker left in place, retry exact)
+/// instead of writing unbounded between the HTTP loop's own
+/// checkpoints.
+#[test]
+fn apply_batch_threads_the_deadline_into_association_writes() {
+    let dir = std::env::temp_dir().join(format!(
+        "taguru-ingest-apply-deadline-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    let state = AppState::boot(dir.clone(), usize::MAX, None).unwrap();
+    let batch = parse(&format!(
+        "{}\n{}\n",
+        r#"{"taguru_batch": 1, "context": "sake", "source": "doc-1", "create": {"description": "d"}}"#,
+        r#"{"subject": "a", "label": "b", "object": "c", "weight": 1.0}"#,
+    ))
+    .unwrap();
+
+    let refused = apply_batch(&state, &batch, Deadline::after(std::time::Duration::ZERO))
+        .expect_err("a spent budget must refuse the association write");
+    assert!(
+        matches!(
+            refused,
+            ApplyRefusal::Access(crate::registry::AccessError::DeadlineExceeded)
+        ),
+        "{refused:?}"
+    );
+
+    // The same batch under no budget applies — the refusal above came
+    // from the deadline alone.
+    let applied = apply_batch(&state, &batch, Deadline::unbounded()).unwrap();
+    assert_eq!(applied.associations, 1);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /// Source metadata (#167) rides the passage line; a pre-metadata
 /// line still parses (all three fields default), and the tag
 /// vocabulary is the same one the HTTP store enforces.
@@ -947,7 +1028,7 @@ fn a_stripped_create_block_downgrades_creation_to_a_no_context_refusal() {
     .unwrap();
     batch.strip_create();
     assert!(batch.create.is_none());
-    let refusal = apply_batch(&state, &batch).unwrap_err();
+    let refusal = apply_batch(&state, &batch, Deadline::unbounded()).unwrap_err();
     assert!(
         matches!(refusal, ApplyRefusal::NoContext(ref context) if context == "perm"),
         "{refusal:?}"
@@ -985,7 +1066,7 @@ fn apply_batch_brackets_its_steps_with_the_import_marker() {
          {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n",
     )
     .unwrap();
-    apply_batch(&state, &happy).unwrap();
+    apply_batch(&state, &happy, Deadline::unbounded()).unwrap();
     assert!(
         crate::registry::import_marker_paths(&dir, "sake").is_empty(),
         "a completed batch clears its marker"
@@ -1000,7 +1081,7 @@ fn apply_batch_brackets_its_steps_with_the_import_marker() {
          {\"alias\": \"Aomine\", \"canonical\": \"存在しない\", \"kind\": \"concept\"}\n",
     )
     .unwrap();
-    let refusal = apply_batch(&state, &torn).unwrap_err();
+    let refusal = apply_batch(&state, &torn, Deadline::unbounded()).unwrap_err();
     assert!(matches!(refusal, ApplyRefusal::Rejected(_)));
     assert_eq!(
         crate::registry::import_marker_paths(&dir, "sake").len(),
@@ -1017,7 +1098,7 @@ fn apply_batch_brackets_its_steps_with_the_import_marker() {
          {\"alias\": \"Aomine\", \"canonical\": \"青嶺酒造\", \"kind\": \"concept\"}\n",
     )
     .unwrap();
-    apply_batch(&state, &fixed).unwrap();
+    apply_batch(&state, &fixed, Deadline::unbounded()).unwrap();
     assert!(
         crate::registry::import_marker_paths(&dir, "sake").is_empty(),
         "a normal import leaves no marker"
@@ -1067,7 +1148,7 @@ fn disabled_import_markers_write_nothing_but_still_heal_stale_ones() {
          {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n",
     )
     .unwrap();
-    apply_batch(&state, &batch).unwrap();
+    apply_batch(&state, &batch, Deadline::unbounded()).unwrap();
     assert!(
         !stale.exists(),
         "a completed batch still heals a stale marker"
@@ -1102,7 +1183,7 @@ fn apply_batch_refuses_when_an_unreplaced_passage_cannot_be_retracted() {
              {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n",
         )
         .unwrap();
-        apply_batch(&state, &seeded).unwrap();
+        apply_batch(&state, &seeded, Deadline::unbounded()).unwrap();
 
         let reimport = parse(
             "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-1\"}\n\
@@ -1111,7 +1192,7 @@ fn apply_batch_refuses_when_an_unreplaced_passage_cannot_be_retracted() {
         .unwrap();
 
         crate::storage::fail_persistence_ops_after(failure);
-        let result = apply_batch(&state, &reimport);
+        let result = apply_batch(&state, &reimport, Deadline::unbounded());
         let past_end = crate::storage::clear_persistence_fault();
 
         if let Err(ApplyRefusal::Io(message)) = &result
@@ -1128,7 +1209,7 @@ fn apply_batch_refuses_when_an_unreplaced_passage_cannot_be_retracted() {
             // same associations-only batch re-attempts the
             // retraction (idempotent per-source) with the fault
             // now cleared.
-            apply_batch(&state, &reimport).unwrap();
+            apply_batch(&state, &reimport, Deadline::unbounded()).unwrap();
             assert!(
                 crate::registry::import_marker_paths(&dir, "sake").is_empty(),
                 "step {failure}: repair did not clear the marker"
@@ -1171,7 +1252,7 @@ fn apply_and_preview_agree_that_a_replaced_passage_is_not_dropped() {
          {\"passage\": \"杜氏は高瀬。\"}\n",
     )
     .unwrap();
-    apply_batch(&state, &seeded).unwrap();
+    apply_batch(&state, &seeded, Deadline::unbounded()).unwrap();
 
     let reimport = parse(
         "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"doc-1\"}\n\
@@ -1185,7 +1266,7 @@ fn apply_and_preview_agree_that_a_replaced_passage_is_not_dropped() {
         "preview: a replacement passage was carried, so nothing was dropped"
     );
 
-    let applied = apply_batch(&state, &reimport).unwrap();
+    let applied = apply_batch(&state, &reimport, Deadline::unbounded()).unwrap();
     assert!(
         !applied.passage_dropped,
         "apply: a replacement passage was carried, so nothing was dropped, \
@@ -1217,7 +1298,7 @@ fn a_predicted_alias_rejection_creates_nothing_and_applies_nothing() {
          {\"alias\": \"Aomine\", \"canonical\": \"存在しない\", \"kind\": \"concept\"}\n",
     )
     .unwrap();
-    let refusal = apply_batch(&state, &torn).unwrap_err();
+    let refusal = apply_batch(&state, &torn, Deadline::unbounded()).unwrap_err();
     assert!(
         matches!(refusal, ApplyRefusal::Rejected(_)),
         "expected a predicted rejection, got {refusal:?}"
@@ -1290,7 +1371,7 @@ fn every_import_persistence_failure_is_detected_or_fully_repaired() {
         .unwrap();
 
         crate::storage::fail_persistence_ops_after(failure);
-        let first = apply_batch(&state, &batch);
+        let first = apply_batch(&state, &batch, Deadline::unbounded());
         let past_end = crate::storage::clear_persistence_fault();
         let marker = crate::registry::import_marker_path(&dir, "sake", "doc-1");
 
@@ -1320,7 +1401,7 @@ fn every_import_persistence_failure_is_detected_or_fully_repaired() {
             // Re-import is the documented repair and is exact even
             // when the injected error was swallowed after a fully
             // superseding write or only prevented marker cleanup.
-            apply_batch(&state, &batch).unwrap();
+            apply_batch(&state, &batch, Deadline::unbounded()).unwrap();
             assert!(
                 !marker.exists(),
                 "repair did not clear failure step {failure}"

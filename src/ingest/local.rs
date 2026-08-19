@@ -195,7 +195,9 @@ pub(super) fn run_local(files: &[PathBuf], dry_run: bool, no_embed: bool, as_jso
     let mut json_batches: Vec<crate::api::ImportOutcome> = Vec::new();
     let mut failed_batches: Vec<FailedBatch> = Vec::new();
     for (path, batch) in &batches {
-        match apply_batch(&state, batch) {
+        // Unbounded on purpose: the offline CLI runs one command to
+        // completion with no HTTP budget to honor.
+        match apply_batch(&state, batch, Deadline::unbounded()) {
             Ok(applied) => {
                 if as_json {
                     json_batches.push(crate::api::import_outcome(batch, &applied));

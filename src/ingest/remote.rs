@@ -12,10 +12,9 @@ use super::*;
 /// retrying at the same size.
 const REMOTE_IMPORT_BUDGET_BYTES: usize = DEFAULT_MAX_BODY_BYTES / 2;
 
-/// Which record kind a [`Unit`] carries — [`run_remote`]'s "batches
-/// not yet sent" tally (and its schema-record twin) reads this apart
-/// from group records, which restore through a separate path and are
-/// never counted as either.
+/// Which record kind a [`Unit`] carries — [`run_remote`]'s
+/// "never sent" tallies on a mid-stream refusal count each kind
+/// separately, group records included.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum UnitKind {
     Batch,
@@ -614,27 +613,25 @@ pub(super) fn run_remote(base: &str, files: &[PathBuf], dry_run: bool, as_json: 
                 if let Some(integrity) = body.get("integrity").and_then(Value::as_str) {
                     eprintln!("taguru: import: integrity: {integrity}");
                 }
-                let unsent_batches: usize = queue
-                    .iter()
-                    .flat_map(|chunk| &chunk.units)
-                    .filter(|unit| unit.kind == UnitKind::Batch)
-                    .count();
-                if unsent_batches > 0 {
-                    eprintln!(
-                        "taguru: import: {unsent_batches} batch(es) after this chunk were \
-                         never sent"
-                    );
-                }
-                let unsent_schemas: usize = queue
-                    .iter()
-                    .flat_map(|chunk| &chunk.units)
-                    .filter(|unit| unit.kind == UnitKind::Schema)
-                    .count();
-                if unsent_schemas > 0 {
-                    eprintln!(
-                        "taguru: import: {unsent_schemas} schema record(s) after this chunk \
-                         were never sent"
-                    );
+                // All three record kinds a chunk can carry, group
+                // records included: a refusal mid-stream leaves the
+                // queued groups exactly as unsent as the batches and
+                // schemas beside them.
+                for (kind, what) in [
+                    (UnitKind::Batch, "batch(es)"),
+                    (UnitKind::Schema, "schema record(s)"),
+                    (UnitKind::Group, "group record(s)"),
+                ] {
+                    let unsent = queue
+                        .iter()
+                        .flat_map(|chunk| &chunk.units)
+                        .filter(|unit| unit.kind == kind)
+                        .count();
+                    if unsent > 0 {
+                        eprintln!(
+                            "taguru: import: {unsent} {what} after this chunk were never sent"
+                        );
+                    }
                 }
                 if dry_run {
                     eprintln!(

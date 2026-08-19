@@ -3609,3 +3609,128 @@ fn communities_rejects_a_url_that_does_not_parse() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// Issue #728: a group record naming a member that STILL does not
+/// exist after every batch of the run applied refuses the whole group
+/// set — the batches stay landed, the exit code says failure, and
+/// `--json` carries the whole-set refusal in `error` (the ingest-layer
+/// glue over the registry's own whole-set judgment, which
+/// `restore_groups_judges_the_whole_set_before_writing_anything`
+/// already pins at its own layer).
+#[test]
+fn import_refuses_the_whole_group_set_but_keeps_batches_landed() {
+    let dir = common::scratch_dir("cli-group-set-refusal");
+    std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
+    let batch = dir.join("a.jsonl");
+    std::fs::write(
+        &batch,
+        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \
+          \"create\": {\"description\": \"酒\"}}\n\
+         {\"subject\": \"青嶺\", \"label\": \"銘柄\", \"object\": \"酒\", \"weight\": 1.0}\n",
+    )
+    .expect("fixture must be writable");
+    let group = dir.join("g.jsonl");
+    std::fs::write(
+        &group,
+        "{\"taguru_group\": 1, \"name\": \"kura\", \"contexts\": [\"sake\", \"ghost\"]}\n",
+    )
+    .expect("fixture must be writable");
+    let data_dir = dir.join("data");
+
+    let refused = run_with_env(
+        &[
+            "import",
+            "--json",
+            &batch.display().to_string(),
+            &group.display().to_string(),
+        ],
+        &[("TAGURU_DATA_DIR", &data_dir.display().to_string())],
+    );
+    assert_eq!(refused.status.code(), Some(1), "{refused:?}");
+    let report: serde_json::Value =
+        serde_json::from_slice(&refused.stdout).expect("--json must answer one document");
+    assert!(
+        report["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("ghost")),
+        "the whole-set refusal must name the missing member: {report}"
+    );
+    assert_eq!(
+        report["batches"][0]["context"],
+        serde_json::json!("sake"),
+        "the batch before the group refusal stays landed: {report}"
+    );
+    assert!(
+        report.get("groups").is_none() || report["groups"].as_array().is_some_and(Vec::is_empty),
+        "no group may report an outcome when the set refused whole: {report}"
+    );
+
+    // The batches really landed: create the missing member, re-run the
+    // same group record alone, and the restore now succeeds against
+    // the state the first run left behind.
+    let ghost = dir.join("ghost.jsonl");
+    std::fs::write(
+        &ghost,
+        "{\"taguru_batch\": 1, \"context\": \"ghost\", \"source\": \"g.md\", \"create\": {}}\n",
+    )
+    .expect("fixture must be writable");
+    let healed = run_with_env(
+        &[
+            "import",
+            &ghost.display().to_string(),
+            &group.display().to_string(),
+        ],
+        &[("TAGURU_DATA_DIR", &data_dir.display().to_string())],
+    );
+    assert_eq!(healed.status.code(), Some(0), "{healed:?}");
+    assert!(
+        String::from_utf8_lossy(&healed.stdout).contains("1 of 1 group record(s) restored"),
+        "{healed:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Issue #728: Pass 2 applies file by file — one file's APPLY-stage
+/// refusal (a context that does not exist and no create meta to make
+/// it, which Pass 1's parse-only validation cannot see) must not stop
+/// the files after it.
+#[test]
+fn a_failing_files_apply_does_not_stop_the_files_after_it() {
+    let dir = common::scratch_dir("cli-pass2-continues");
+    std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
+    let broken = dir.join("a.jsonl");
+    std::fs::write(
+        &broken,
+        "{\"taguru_batch\": 1, \"context\": \"missing\", \"source\": \"a.md\"}\n\
+         {\"subject\": \"x\", \"label\": \"y\", \"object\": \"z\", \"weight\": 1.0}\n",
+    )
+    .expect("fixture must be writable");
+    let healthy = dir.join("b.jsonl");
+    std::fs::write(
+        &healthy,
+        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"b.md\", \"create\": {}}\n\
+         {\"subject\": \"青嶺\", \"label\": \"銘柄\", \"object\": \"酒\", \"weight\": 1.0}\n",
+    )
+    .expect("fixture must be writable");
+    let data_dir = dir.join("data");
+
+    let output = run_with_env(
+        &[
+            "import",
+            &broken.display().to_string(),
+            &healthy.display().to_string(),
+        ],
+        &[("TAGURU_DATA_DIR", &data_dir.display().to_string())],
+    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("missing"), "{stderr}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("1 of 2 batch(es) applied"),
+        "the healthy file after the failure must still apply: {stdout}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

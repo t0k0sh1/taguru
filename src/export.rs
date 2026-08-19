@@ -1351,7 +1351,7 @@ mod tests {
                 "a.md, b.md, and the reserved batch"
             );
             for batch in &stream.batches {
-                ingest::apply_batch(&state_b, batch)
+                ingest::apply_batch(&state_b, batch, Deadline::unbounded())
                     .map_err(|r| r.text())
                     .unwrap();
             }
@@ -1374,7 +1374,7 @@ mod tests {
                 .unwrap()
                 .batches
             {
-                ingest::apply_batch(&state_c, &batch)
+                ingest::apply_batch(&state_c, &batch, Deadline::unbounded())
                     .map_err(|r| r.text())
                     .unwrap();
             }

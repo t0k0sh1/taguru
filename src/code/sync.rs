@@ -523,7 +523,7 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
     let mut partial_writes = false;
     let mut ops_since_flush = 0usize;
     for (path, batch, fingerprint) in &batches {
-        match crate::ingest::apply_batch(&state, batch) {
+        match crate::ingest::apply_batch(&state, batch, taguru::deadline::Deadline::unbounded()) {
             Ok(_) => {
                 imported += 1;
                 // Recorded only on success: a refused batch must stay
