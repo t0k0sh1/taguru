@@ -385,7 +385,10 @@ fn a_mid_stream_refusal_reports_the_prefix_and_what_was_never_sent() {
          {\"subject\": \"s2\", \"label\": \"l2\", \"object\": \"o2\", \"weight\": 1.0}\n\
          {\"taguru_batch\": 1, \"context\": \"c\", \"source\": \"c.md\", \
          \"create\": {\"description\": \"d\"}}\n\
-         {\"subject\": \"s3\", \"label\": \"l3\", \"object\": \"o3\", \"weight\": 1.0}\n",
+         {\"subject\": \"s3\", \"label\": \"l3\", \"object\": \"o3\", \"weight\": 1.0}\n\
+         {\"taguru_schema\": 1, \"context\": \"a\", \"mode\": \"warn\", \
+         \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n\
+         {\"taguru_group\": 1, \"name\": \"g\", \"contexts\": [\"a\"]}\n",
     )
     .expect("fixture must be writable");
 
@@ -399,8 +402,18 @@ fn a_mid_stream_refusal_reports_the_prefix_and_what_was_never_sent() {
     );
     assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
     assert!(stderr.contains("refused"), "{stderr}");
-    assert!(stderr.contains("never sent"), "{stderr}");
     assert!(stderr.contains("landed durably"), "{stderr}");
+    // Each unsent KIND is tallied separately — one batch (c), one
+    // schema record, one group record sat behind the refusal, so each
+    // line must carry ITS OWN count of exactly one, never another
+    // kind's (issue #728: groups used to be missing from this tally).
+    for line in [
+        "1 batch(es) after this chunk were never sent",
+        "1 schema record(s) after this chunk were never sent",
+        "1 group record(s) after this chunk were never sent",
+    ] {
+        assert!(stderr.contains(line), "missing {line:?} in: {stderr}");
+    }
 
     let (status, _) = server.call("GET", "/contexts/a", None);
     assert_eq!(status, 200, "the batch before the refusal must have landed");
