@@ -244,12 +244,113 @@ mod tests {
         );
     }
 
+    /// Issue #732: every advertised tool's `inputSchema.required`
+    /// list is cross-checked against `route_tool`'s own gates in both
+    /// directions — with every schema-required property supplied (plus
+    /// the first branch of each anyOf constraint group), routing must
+    /// never claim a required argument is missing; and omitting any
+    /// one schema-required property must refuse. This is the
+    /// mechanical version of the per-tool spot checks around it, so a
+    /// new tool (or an edited schema) cannot drift from its route.
+    #[test]
+    fn every_tool_schemas_required_list_matches_route_tools_gates() {
+        /// A syntactically plausible value for one property schema —
+        /// enough to pass `route_tool`'s own shape gates (the server
+        /// validates semantics).
+        fn example_of(property: &Value) -> Value {
+            match property["type"].as_str() {
+                Some("string") => json!("x"),
+                Some("integer") | Some("number") => json!(1),
+                Some("boolean") => json!(true),
+                Some("array") => {
+                    let item = example_of(&property["items"]);
+                    json!([item])
+                }
+                Some("object") => {
+                    let mut object = serde_json::Map::new();
+                    if let Some(required) = property["required"].as_array() {
+                        for key in required.iter().filter_map(Value::as_str) {
+                            object
+                                .insert(key.to_string(), example_of(&property["properties"][key]));
+                        }
+                    }
+                    Value::Object(object)
+                }
+                _ => json!("x"),
+            }
+        }
+        /// The first alternative of every anyOf constraint group on
+        /// this schema (bare `anyOf`, or several under `allOf`).
+        fn first_branches(schema: &Value) -> Vec<Vec<String>> {
+            let groups: Vec<&Value> = match schema.get("allOf").and_then(Value::as_array) {
+                Some(parts) => parts.iter().filter_map(|part| part.get("anyOf")).collect(),
+                None => schema.get("anyOf").into_iter().collect(),
+            };
+            groups
+                .iter()
+                .filter_map(|group| group.as_array()?.first())
+                .filter_map(|branch| branch.get("required")?.as_array())
+                .map(|keys| {
+                    keys.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .collect()
+        }
+        for tool in tool_definitions() {
+            let name = tool["name"].as_str().unwrap();
+            let schema = &tool["inputSchema"];
+            let properties = &schema["properties"];
+            let required: Vec<String> = schema["required"]
+                .as_array()
+                .map(|keys| {
+                    keys.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut complete = serde_json::Map::new();
+            for key in &required {
+                complete.insert(key.clone(), example_of(&properties[key.as_str()]));
+            }
+            for branch in first_branches(schema) {
+                for key in branch {
+                    let value = example_of(&properties[key.as_str()]);
+                    complete.entry(key).or_insert(value);
+                }
+            }
+            if let Err(error) = route_tool(name, &Value::Object(complete.clone())) {
+                assert!(
+                    !error.starts_with("missing required argument"),
+                    "{name}: schema-complete arguments still refused as missing — the \
+                     schema under-declares what the route needs: {error}"
+                );
+            }
+            for key in &required {
+                let mut omitted = complete.clone();
+                omitted.remove(key.as_str());
+                assert!(
+                    route_tool(name, &Value::Object(omitted)).is_err(),
+                    "{name}: the schema requires '{key}' but the route accepted its \
+                     omission — the schema over-declares"
+                );
+            }
+        }
+    }
+
     #[test]
     fn unknown_tools_and_missing_arguments_are_refused() {
         assert_eq!(
             route_tool("no_such_tool", &json!({})),
             Err("unknown tool 'no_such_tool'".to_string())
         );
+        // A request whose params.name was missing or not a string
+        // reaches here as "" — the refusal must say the name is
+        // required, never the baffling "unknown tool ''" (issue #732).
+        let refusal = route_tool("", &json!({})).unwrap_err();
+        assert!(refusal.contains("tool name is required"), "{refusal}");
         // A context-scoped tool without its context argument names what
         // is missing instead of building a broken path.
         assert_eq!(

@@ -1197,6 +1197,21 @@ mod tests {
                 .register_client("x", vec!["http://localhost:7777/cb".to_string()])
                 .is_ok()
         );
+        // The IPv6 loopback spelling — `Host::Ipv6(addr).is_loopback()`
+        // is a different arm from the IPv4/domain ones above, so it
+        // needs its own pin (issue #731).
+        assert!(
+            oauth
+                .register_client("x", vec!["http://[::1]:7777/cb".to_string()])
+                .is_ok()
+        );
+        // A routable IPv6 host is NOT loopback — the arm must judge
+        // the address, never just the bracket syntax.
+        assert!(
+            oauth
+                .register_client("x", vec!["http://[2001:db8::1]:7777/cb".to_string()])
+                .is_err()
+        );
         // A substring match on the prefix would wrongly accept these:
         // the host is an attacker-controlled domain, not the loopback
         // interface, even though it starts with the loopback text.

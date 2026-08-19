@@ -306,6 +306,7 @@ pub fn tools_result() -> Value {
 /// prose it always has, and `content`/`text` never lose the plain
 /// explanation just because the failure also carries path-addressed
 /// detail.
+#[derive(Debug)]
 pub struct ToolError {
     pub text: String,
     pub structured: Option<Value>,
