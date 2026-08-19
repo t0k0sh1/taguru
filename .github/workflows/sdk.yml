@@ -201,6 +201,13 @@ jobs:
       - name: Surface parity
         run: npm run check:surface --workspace=taguru
         working-directory: sdk
+      # typecheck/lint/test all exercise the sources or the ESM build;
+      # nothing above ever EXECUTED the CJS bundles, which is exactly
+      # how issue #740 (require("taguru/testing") crashing at load on
+      # import.meta) shipped past #556's machine checks.
+      - name: CJS entry points load under require()
+        run: npm run check:cjs --workspace=taguru
+        working-directory: sdk
       - name: Test (core)
         run: npm test --workspace=taguru
         working-directory: sdk

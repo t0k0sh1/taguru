@@ -46,6 +46,7 @@
     "test:unit": "vitest run tests/unit",
     "test:integration": "vitest run tests/integration",
     "check:surface": "tsx scripts/check-surface.ts",
+    "check:cjs": "node -e \"require('./dist/index.cjs'); require('./dist/testing.cjs');\"",
     "test:mutation": "stryker run"
   },
   "peerDependencies": {

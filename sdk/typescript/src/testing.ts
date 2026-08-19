@@ -7,9 +7,20 @@
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-export const REPO_ROOT = resolve(import.meta.dirname, "../../..");
+// This module ships as BOTH formats (package.json's "./testing"
+// exports), and tsup's esbuild leaves `import.meta` EMPTY in the CJS
+// output (its build prints exactly that WARN) — issue #740: deriving
+// the directory from `import.meta.dirname` unconditionally made
+// `require("taguru/testing")` crash at load on
+// `resolve(undefined, ...)`. Probe `import.meta.url` (present exactly
+// in the ESM output) and fall back to CJS's own `__dirname`, which
+// the fallback arm alone ever evaluates.
+const moduleDir = import.meta.url ? dirname(fileURLToPath(import.meta.url)) : __dirname;
+
+export const REPO_ROOT = resolve(moduleDir, "../../..");
 
 export const ADMIN_TOKEN = "test-admin-token";
 export const READER_TOKEN = "test-reader-token";
