@@ -182,6 +182,12 @@ impl StopSignals {
         }
         #[cfg(not(unix))]
         {
+            // Deliberately NOT held as a persistent stream like the
+            // unix pair above (checked for issue #730): ctrl_c()'s
+            // handler is a process global that stays installed across
+            // awaits, so re-awaiting opens no registration gap a
+            // second Ctrl+C could fall into — the same reasoning
+            // main.rs's `TerminateSignals::recv` documents.
             let _ = tokio::signal::ctrl_c().await;
         }
     }

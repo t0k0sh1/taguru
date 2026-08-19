@@ -19,6 +19,7 @@ pub(super) const MIN_SPLIT_CAP: usize = 512;
 /// the turn is rebuilt exactly like Stage 1's rebuild-not-accumulate
 /// retries) and the model's own final answer text (`answer`, replayed
 /// through [`corrective_assistant_turn`] as the prior bad turn).
+#[cfg_attr(test, derive(Debug))]
 pub(super) struct ChunkOutput {
     pub(super) output: ModelOutput,
     /// The ORIGINAL chunk's coordinates, even for a split sub-piece

@@ -33,6 +33,20 @@ Entries that change an on-disk format or a response shape say so.
   declarations, wire formats, or response shapes.
 
 ### Fixed
+- `taguru extract`'s batch output names carry an unconditional hash
+  suffix (`docs__aomine.md-<sha16>.jsonl`), the same injectivity fix
+  checkpoint names received in #227: path flattening is not injective
+  (`a/b`, `a:b`, and `a__b` all flatten to `a__b`), and while one
+  run's collisions were caught, separate runs into the same `--out`
+  silently overwrote each other's batch files (#730). Unchanged
+  documents recorded under the old naming stay skippable (the skip
+  path reads the manifest's recorded output name), and a changed
+  document re-extracting under the new name removes its recorded old
+  file so `taguru import DIR` never sees the pair as a duplicate
+  source.
+- `taguru extract`'s fabrication diagnostic names BOTH positions when
+  an association's subject and object are each absent from the
+  document, instead of only whichever field was checked first (#730).
 - `taguru router` closes four divergences from a single instance
   (#727): `GET /groups`/`GET /contexts` floor an explicit `limit=0` to
   one row (`clamp_page`), matching the shard's own keyset-page

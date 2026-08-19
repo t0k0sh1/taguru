@@ -250,29 +250,41 @@ impl Run {
         } else {
             ""
         };
+        // The batch an unchanged document skips FROM is the file the
+        // manifest recorded — identical to `out_path` for anything
+        // written under the post-#730 naming, but a manifest from
+        // before the naming change records the old un-hashed name, and
+        // re-extracting an unchanged document just because its file
+        // name scheme moved would spend real model calls.
+        let recorded_output = self.manifest.output_of(source);
+        // Built ONCE for the skip check and the post-write record
+        // alike, so the two can never drift field by field.
+        let inputs = ComputationInputs {
+            sha256: &hash,
+            model: &self.model_name,
+            context: &self.context,
+            questions_n: self.questions,
+            no_passage: self.no_passage,
+            description: self.description.as_deref().unwrap_or(""),
+            fact_budget: self.fact_budget,
+            structured_output: self.structured_output.manifest_value(),
+            max_output_tokens: self.max_output_tokens.unwrap_or(0),
+            lossy: self.lossy,
+            schema_digest: &self.schema_digest,
+            candidates: candidates_manifest_value(self.candidates),
+            vocabulary_digest: &self.vocabulary_digest,
+            source_id: source_id_value,
+            date: self.date.unwrap_or(0),
+            tags: &self.tags,
+        };
         if !self.force
-            && self.manifest.matches(
-                source,
-                &hash,
-                &self.model_name,
-                &self.context,
-                self.questions,
-                self.no_passage,
-                self.description.as_deref().unwrap_or(""),
-                self.fact_budget,
-                self.structured_output.manifest_value(),
-                self.max_output_tokens.unwrap_or(0),
-                self.lossy,
-                &self.schema_digest,
-                candidates_manifest_value(self.candidates),
-                &self.vocabulary_digest,
-                source_id_value,
-                self.date.unwrap_or(0),
-                &self.tags,
-            )
-            && out_path.is_file()
+            && self.manifest.matches(source, &inputs)
+            && let Some(recorded) = recorded_output
+                .as_deref()
+                .map(|name| self.out.join(name))
+                .filter(|path| path.is_file())
         {
-            let batch = self.absorb_vocabulary(source, &out_path);
+            let batch = self.absorb_vocabulary(source, &recorded);
             println!("{source}: unchanged, skipped (--force re-extracts)");
             // ADR 0016: coverage is a pure function of (document text,
             // written associations), so a skipped document is judged
@@ -415,26 +427,18 @@ impl Run {
         if let Err(error) = crate::storage::write_atomic(&out_path, body.as_bytes()) {
             return Err(format!("writing {}: {error}", out_path.display()));
         }
-        self.manifest.record(
-            source,
-            &hash,
-            &self.model_name,
-            &self.context,
-            self.questions,
-            self.no_passage,
-            self.description.as_deref().unwrap_or(""),
-            self.fact_budget,
-            self.structured_output.manifest_value(),
-            self.max_output_tokens.unwrap_or(0),
-            self.lossy,
-            &self.schema_digest,
-            candidates_manifest_value(self.candidates),
-            &self.vocabulary_digest,
-            source_id_value,
-            self.date.unwrap_or(0),
-            &self.tags,
-            &file_name,
-        );
+        self.manifest.record(source, &inputs, &file_name);
+        // A manifest from before #730's naming change recorded the
+        // un-hashed output name; the replacement just landed durably
+        // under the new name, so the old file — positively this
+        // source's own record, never a flatten-collision neighbor's —
+        // is removed before `taguru import DIR` could read both as a
+        // duplicate source.
+        if let Some(previous) = &recorded_output
+            && *previous != file_name
+        {
+            let _ = fs::remove_file(self.out.join(previous));
+        }
         // The batch is durably written and manifest-recorded — the
         // checkpoint's only purpose (resuming an incomplete document)
         // no longer applies. A document that fails Stage 2/merge/

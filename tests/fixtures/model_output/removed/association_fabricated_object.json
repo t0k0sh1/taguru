@@ -25,7 +25,7 @@
     "aliases": []
   },
   "removed": [
-    "associations[2].object: \"MongoDB\" does not appear in the document text"
+    "associations[2]: object \"MongoDB\" does not appear in the document text"
   ],
   "surviving_associations": 2,
   "surviving_aliases": 0

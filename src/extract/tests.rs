@@ -3,6 +3,30 @@
 
 use super::*;
 
+/// A [`ComputationInputs`] at the all-defaults run: each manifest test
+/// overrides the one field under test (struct-update syntax) instead
+/// of restating sixteen positional values.
+fn base_inputs<'a>(sha256: &'a str, model: &'a str) -> ComputationInputs<'a> {
+    ComputationInputs {
+        sha256,
+        model,
+        context: "sake",
+        questions_n: 0,
+        no_passage: false,
+        description: "",
+        fact_budget: 0,
+        structured_output: "",
+        max_output_tokens: 0,
+        lossy: false,
+        schema_digest: "",
+        candidates: "",
+        vocabulary_digest: "",
+        source_id: "",
+        date: 0,
+        tags: &[],
+    }
+}
+
 #[test]
 fn every_usage_variable_is_a_known_key() {
     // extract has its own USAGE, separate from cli.rs's, so
@@ -958,9 +982,6 @@ fn prune_resolves_canonicals_across_outputs_and_labels_chunks() {
     assert_eq!(outputs[0].output.aliases.len(), 1);
 }
 
-/// A pre-0013 checkpoint file has no `removed` field — its units
-/// validated fully under the old rules, so absence reads as "nothing
-/// removed" rather than invalidating the file.
 #[test]
 fn candidate_terms_segment_scripts_and_merge_adjacent_runs() {
     let terms = candidate_terms(
@@ -1096,124 +1117,33 @@ fn manifests_reextract_when_the_candidates_mode_changes() {
     let mut manifest = Manifest::default();
     manifest.record(
         "a.md",
-        "hash-1",
-        "model-1",
-        "sake",
-        0,
-        false,
-        "",
-        0,
-        "",
-        0,
-        false,
-        "",
-        candidates_manifest_value(true),
-        "",
-        "",
-        0,
-        &[],
+        &ComputationInputs {
+            candidates: candidates_manifest_value(true),
+            ..base_inputs("hash-1", "model-1")
+        },
         "a.md.jsonl",
     );
     assert!(manifest.matches(
         "a.md",
-        "hash-1",
-        "model-1",
-        "sake",
-        0,
-        false,
-        "",
-        0,
-        "",
-        0,
-        false,
-        "",
-        candidates_manifest_value(true),
-        "",
-        "",
-        0,
-        &[]
+        &ComputationInputs {
+            candidates: candidates_manifest_value(true),
+            ..base_inputs("hash-1", "model-1")
+        }
     ));
     // Turning the control off — or a future algorithm revision — is a
     // computation-input change like any other.
-    assert!(!manifest.matches(
-        "a.md",
-        "hash-1",
-        "model-1",
-        "sake",
-        0,
-        false,
-        "",
-        0,
-        "",
-        0,
-        false,
-        "",
-        "",
-        "",
-        "",
-        0,
-        &[]
-    ));
+    assert!(!manifest.matches("a.md", &base_inputs("hash-1", "model-1")));
     // Pre-S2 entries (no field) default to "" and keep matching
     // default-off runs.
     let mut legacy = Manifest::default();
-    legacy.record(
-        "b.md",
-        "hash-2",
-        "model-1",
-        "sake",
-        0,
-        false,
-        "",
-        0,
-        "",
-        0,
-        false,
-        "",
-        "",
-        "",
-        "",
-        0,
-        &[],
-        "b.md.jsonl",
-    );
-    assert!(legacy.matches(
-        "b.md",
-        "hash-2",
-        "model-1",
-        "sake",
-        0,
-        false,
-        "",
-        0,
-        "",
-        0,
-        false,
-        "",
-        "",
-        "",
-        "",
-        0,
-        &[]
-    ));
+    legacy.record("b.md", &base_inputs("hash-2", "model-1"), "b.md.jsonl");
+    assert!(legacy.matches("b.md", &base_inputs("hash-2", "model-1")));
     assert!(!legacy.matches(
         "b.md",
-        "hash-2",
-        "model-1",
-        "sake",
-        0,
-        false,
-        "",
-        0,
-        "",
-        0,
-        false,
-        "",
-        candidates_manifest_value(true),
-        "",
-        "",
-        0,
-        &[]
+        &ComputationInputs {
+            candidates: candidates_manifest_value(true),
+            ..base_inputs("hash-2", "model-1")
+        }
     ));
 }
 
@@ -1439,83 +1369,32 @@ fn manifests_reextract_when_the_vocabulary_digest_changes() {
     let mut manifest = Manifest::default();
     manifest.record(
         "a.md",
-        "hash-1",
-        "model-1",
-        "sake",
-        0,
-        false,
-        "",
-        0,
-        "",
-        0,
-        false,
-        "",
-        "",
-        "digest-a",
-        "",
-        0,
-        &[],
+        &ComputationInputs {
+            vocabulary_digest: "digest-a",
+            ..base_inputs("hash-1", "model-1")
+        },
         "a.md.jsonl",
     );
     assert!(manifest.matches(
         "a.md",
-        "hash-1",
-        "model-1",
-        "sake",
-        0,
-        false,
-        "",
-        0,
-        "",
-        0,
-        false,
-        "",
-        "",
-        "digest-a",
-        "",
-        0,
-        &[]
+        &ComputationInputs {
+            vocabulary_digest: "digest-a",
+            ..base_inputs("hash-1", "model-1")
+        }
     ));
     assert!(!manifest.matches(
         "a.md",
-        "hash-1",
-        "model-1",
-        "sake",
-        0,
-        false,
-        "",
-        0,
-        "",
-        0,
-        false,
-        "",
-        "",
-        "digest-b",
-        "",
-        0,
-        &[]
+        &ComputationInputs {
+            vocabulary_digest: "digest-b",
+            ..base_inputs("hash-1", "model-1")
+        }
     ));
-    assert!(!manifest.matches(
-        "a.md",
-        "hash-1",
-        "model-1",
-        "sake",
-        0,
-        false,
-        "",
-        0,
-        "",
-        0,
-        false,
-        "",
-        "",
-        "",
-        "",
-        0,
-        &[]
-    ));
+    assert!(!manifest.matches("a.md", &base_inputs("hash-1", "model-1")));
 }
 
+/// A pre-0013 checkpoint file has no `removed` field — its units
+/// validated fully under the old rules, so absence reads as "nothing
+/// removed" rather than invalidating the file.
 #[test]
 fn checkpoint_unit_without_a_removed_field_deserializes_empty() {
     let unit: CheckpointUnit = serde_json::from_str(
@@ -2223,246 +2102,71 @@ fn a_paragraph_survives_extract_through_ingest_into_a_queried_attribution() {
 #[test]
 fn manifests_skip_only_exact_recomputations() {
     let mut manifest = Manifest::default();
-    manifest.record(
-        "a.md",
-        "hash-1",
-        "model-1",
-        "sake",
-        0,
-        false,
-        "",
-        0,
-        "",
-        0,
-        false,
-        "",
-        "",
-        "",
-        "",
-        0,
-        &[],
-        "a.md.jsonl",
-    );
-    assert!(manifest.matches(
-        "a.md",
-        "hash-1",
-        "model-1",
-        "sake",
-        0,
-        false,
-        "",
-        0,
-        "",
-        0,
-        false,
-        "",
-        "",
-        "",
-        "",
-        0,
-        &[]
-    ));
-    assert!(!manifest.matches(
-        "a.md",
-        "hash-2",
-        "model-1",
-        "sake",
-        0,
-        false,
-        "",
-        0,
-        "",
-        0,
-        false,
-        "",
-        "",
-        "",
-        "",
-        0,
-        &[]
-    ));
-    assert!(!manifest.matches(
-        "a.md",
-        "hash-1",
-        "model-2",
-        "sake",
-        0,
-        false,
-        "",
-        0,
-        "",
-        0,
-        false,
-        "",
-        "",
-        "",
-        "",
-        0,
-        &[]
-    ));
-    assert!(!manifest.matches(
-        "b.md",
-        "hash-1",
-        "model-1",
-        "sake",
-        0,
-        false,
-        "",
-        0,
-        "",
-        0,
-        false,
-        "",
-        "",
-        "",
-        "",
-        0,
-        &[]
-    ));
+    manifest.record("a.md", &base_inputs("hash-1", "model-1"), "a.md.jsonl");
+    assert!(manifest.matches("a.md", &base_inputs("hash-1", "model-1")));
+    assert!(!manifest.matches("a.md", &base_inputs("hash-2", "model-1")));
+    assert!(!manifest.matches("a.md", &base_inputs("hash-1", "model-2")));
+    assert!(!manifest.matches("b.md", &base_inputs("hash-1", "model-1")));
     // A re-pointed --context must re-extract, not keep files whose
     // headers still name the old target.
     assert!(!manifest.matches(
         "a.md",
-        "hash-1",
-        "model-1",
-        "vats",
-        0,
-        false,
-        "",
-        0,
-        "",
-        0,
-        false,
-        "",
-        "",
-        "",
-        "",
-        0,
-        &[]
+        &ComputationInputs {
+            context: "vats",
+            ..base_inputs("hash-1", "model-1")
+        }
     ));
     // Toggling --no-passage changes whether the batch carries the
     // source passage at all — a skip would keep the stale shape.
     assert!(!manifest.matches(
         "a.md",
-        "hash-1",
-        "model-1",
-        "sake",
-        0,
-        true,
-        "",
-        0,
-        "",
-        0,
-        false,
-        "",
-        "",
-        "",
-        "",
-        0,
-        &[]
+        &ComputationInputs {
+            no_passage: true,
+            ..base_inputs("hash-1", "model-1")
+        }
     ));
     // A changed --description is baked into the batch header, so it
     // must re-extract too rather than skip with the old one.
     assert!(!manifest.matches(
         "a.md",
-        "hash-1",
-        "model-1",
-        "sake",
-        0,
-        false,
-        "new desc",
-        0,
-        "",
-        0,
-        false,
-        "",
-        "",
-        "",
-        "",
-        0,
-        &[]
+        &ComputationInputs {
+            description: "new desc",
+            ..base_inputs("hash-1", "model-1")
+        }
     ));
     // A changed --fact-budget is folded into the system prompt like
     // --questions, so it must re-extract too rather than skip.
     assert!(!manifest.matches(
         "a.md",
-        "hash-1",
-        "model-1",
-        "sake",
-        0,
-        false,
-        "",
-        5,
-        "",
-        0,
-        false,
-        "",
-        "",
-        "",
-        "",
-        0,
-        &[]
+        &ComputationInputs {
+            fact_budget: 5,
+            ..base_inputs("hash-1", "model-1")
+        }
     ));
     // A changed --structured-output or --max-output-tokens changes
     // what the model can answer — computation inputs like the rest.
     assert!(!manifest.matches(
         "a.md",
-        "hash-1",
-        "model-1",
-        "sake",
-        0,
-        false,
-        "",
-        0,
-        "auto",
-        0,
-        false,
-        "",
-        "",
-        "",
-        "",
-        0,
-        &[]
+        &ComputationInputs {
+            structured_output: "auto",
+            ..base_inputs("hash-1", "model-1")
+        }
     ));
     assert!(!manifest.matches(
         "a.md",
-        "hash-1",
-        "model-1",
-        "sake",
-        0,
-        false,
-        "",
-        0,
-        "",
-        2048,
-        false,
-        "",
-        "",
-        "",
-        "",
-        0,
-        &[]
+        &ComputationInputs {
+            max_output_tokens: 2048,
+            ..base_inputs("hash-1", "model-1")
+        }
     ));
     // Issue #199: a changed --lossy changes what the batch's facts
     // even are (dropped vs. corrected), so it must re-extract too.
     assert!(!manifest.matches(
         "a.md",
-        "hash-1",
-        "model-1",
-        "sake",
-        0,
-        false,
-        "",
-        0,
-        "",
-        0,
-        true,
-        "",
-        "",
-        "",
-        "",
-        0,
-        &[]
+        &ComputationInputs {
+            lossy: true,
+            ..base_inputs("hash-1", "model-1")
+        }
     ));
 
     // A prompt bump invalidates entries recorded under the old one.
@@ -2471,25 +2175,7 @@ fn manifests_skip_only_exact_recomputations() {
         .get_mut("a.md")
         .expect("just recorded")
         .prompt_version = PROMPT_VERSION + 1;
-    assert!(!manifest.matches(
-        "a.md",
-        "hash-1",
-        "model-1",
-        "sake",
-        0,
-        false,
-        "",
-        0,
-        "",
-        0,
-        false,
-        "",
-        "",
-        "",
-        "",
-        0,
-        &[]
-    ));
+    assert!(!manifest.matches("a.md", &base_inputs("hash-1", "model-1")));
 
     let dir = std::env::temp_dir().join(format!("taguru-manifest-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
@@ -2497,46 +2183,9 @@ fn manifests_skip_only_exact_recomputations() {
     let path = dir.join(MANIFEST_NAME);
     assert!(Manifest::load(&path).documents.is_empty());
     let mut manifest = Manifest::default();
-    manifest.record(
-        "a.md",
-        "hash-1",
-        "model-1",
-        "sake",
-        0,
-        false,
-        "",
-        0,
-        "",
-        0,
-        false,
-        "",
-        "",
-        "",
-        "",
-        0,
-        &[],
-        "a.md.jsonl",
-    );
+    manifest.record("a.md", &base_inputs("hash-1", "model-1"), "a.md.jsonl");
     manifest.save(&path).unwrap();
-    assert!(Manifest::load(&path).matches(
-        "a.md",
-        "hash-1",
-        "model-1",
-        "sake",
-        0,
-        false,
-        "",
-        0,
-        "",
-        0,
-        false,
-        "",
-        "",
-        "",
-        "",
-        0,
-        &[]
-    ));
+    assert!(Manifest::load(&path).matches("a.md", &base_inputs("hash-1", "model-1")));
     fs::write(&path, "not json").unwrap();
     assert!(Manifest::load(&path).documents.is_empty());
 
@@ -2551,25 +2200,7 @@ fn manifests_skip_only_exact_recomputations() {
     .unwrap();
     let legacy = Manifest::load(&path);
     assert_eq!(legacy.documents.len(), 1);
-    assert!(!legacy.matches(
-        "a.md",
-        "hash-1",
-        "model-1",
-        "sake",
-        0,
-        false,
-        "",
-        0,
-        "",
-        0,
-        false,
-        "",
-        "",
-        "",
-        "",
-        0,
-        &[]
-    ));
+    assert!(!legacy.matches("a.md", &base_inputs("hash-1", "model-1")));
 
     // An entry written before the structured_output/
     // max_output_tokens/lossy fields existed (all other fields
@@ -2586,64 +2217,22 @@ fn manifests_skip_only_exact_recomputations() {
     )
     .unwrap();
     let pre_ladder = Manifest::load(&path);
-    assert!(pre_ladder.matches(
-        "a.md",
-        "hash-1",
-        "model-1",
-        "sake",
-        0,
-        false,
-        "",
-        0,
-        "",
-        0,
-        false,
-        "",
-        "",
-        "",
-        "",
-        0,
-        &[]
-    ));
+    assert!(pre_ladder.matches("a.md", &base_inputs("hash-1", "model-1")));
     assert!(!pre_ladder.matches(
         "a.md",
-        "hash-1",
-        "model-1",
-        "sake",
-        0,
-        false,
-        "",
-        0,
-        "json-schema",
-        0,
-        false,
-        "",
-        "",
-        "",
-        "",
-        0,
-        &[]
+        &ComputationInputs {
+            structured_output: "json-schema",
+            ..base_inputs("hash-1", "model-1")
+        }
     ));
     // Issue #199: an entry from before --lossy existed defaults to
     // `false` (strict) and must NOT match a --lossy run.
     assert!(!pre_ladder.matches(
         "a.md",
-        "hash-1",
-        "model-1",
-        "sake",
-        0,
-        false,
-        "",
-        0,
-        "",
-        0,
-        true,
-        "",
-        "",
-        "",
-        "",
-        0,
-        &[]
+        &ComputationInputs {
+            lossy: true,
+            ..base_inputs("hash-1", "model-1")
+        }
     ));
     let _ = fs::remove_dir_all(&dir);
 }
@@ -2653,148 +2242,45 @@ fn manifests_reextract_when_the_schema_digest_changes() {
     let mut manifest = Manifest::default();
     manifest.record(
         "a.md",
-        "hash-1",
-        "model-1",
-        "sake",
-        0,
-        false,
-        "",
-        0,
-        "",
-        0,
-        false,
-        "digest-1",
-        "",
-        "",
-        "",
-        0,
-        &[],
+        &ComputationInputs {
+            schema_digest: "digest-1",
+            ..base_inputs("hash-1", "model-1")
+        },
         "a.md.jsonl",
     );
     assert!(manifest.matches(
         "a.md",
-        "hash-1",
-        "model-1",
-        "sake",
-        0,
-        false,
-        "",
-        0,
-        "",
-        0,
-        false,
-        "digest-1",
-        "",
-        "",
-        "",
-        0,
-        &[]
+        &ComputationInputs {
+            schema_digest: "digest-1",
+            ..base_inputs("hash-1", "model-1")
+        }
     ));
     // A different --schema document — even with everything else
     // identical — must re-extract: the prompt's schema block and
     // self-validation both changed under it.
     assert!(!manifest.matches(
         "a.md",
-        "hash-1",
-        "model-1",
-        "sake",
-        0,
-        false,
-        "",
-        0,
-        "",
-        0,
-        false,
-        "digest-2",
-        "",
-        "",
-        "",
-        0,
-        &[]
+        &ComputationInputs {
+            schema_digest: "digest-2",
+            ..base_inputs("hash-1", "model-1")
+        }
     ));
     // Dropping --schema entirely (querying with "") must also
     // re-extract a schema-recorded entry, not just swap it.
-    assert!(!manifest.matches(
-        "a.md",
-        "hash-1",
-        "model-1",
-        "sake",
-        0,
-        false,
-        "",
-        0,
-        "",
-        0,
-        false,
-        "",
-        "",
-        "",
-        "",
-        0,
-        &[]
-    ));
+    assert!(!manifest.matches("a.md", &base_inputs("hash-1", "model-1")));
 
     // An entry written before `--schema` existed defaults to "" —
     // matches a schema-less rerun, mismatches once --schema is
     // engaged, the same precedent structured_output/lossy set.
     let mut legacy = Manifest::default();
-    legacy.record(
-        "b.md",
-        "hash-2",
-        "model-1",
-        "sake",
-        0,
-        false,
-        "",
-        0,
-        "",
-        0,
-        false,
-        "",
-        "",
-        "",
-        "",
-        0,
-        &[],
-        "b.md.jsonl",
-    );
-    assert!(legacy.matches(
-        "b.md",
-        "hash-2",
-        "model-1",
-        "sake",
-        0,
-        false,
-        "",
-        0,
-        "",
-        0,
-        false,
-        "",
-        "",
-        "",
-        "",
-        0,
-        &[]
-    ));
+    legacy.record("b.md", &base_inputs("hash-2", "model-1"), "b.md.jsonl");
+    assert!(legacy.matches("b.md", &base_inputs("hash-2", "model-1")));
     assert!(!legacy.matches(
         "b.md",
-        "hash-2",
-        "model-1",
-        "sake",
-        0,
-        false,
-        "",
-        0,
-        "",
-        0,
-        false,
-        "digest-1",
-        "",
-        "",
-        "",
-        0,
-        &[]
+        &ComputationInputs {
+            schema_digest: "digest-1",
+            ..base_inputs("hash-2", "model-1")
+        }
     ));
 }
 
@@ -3273,7 +2759,9 @@ fn merge_tags_associations_with_a_paragraph_matching_the_source_text() {
 
 #[test]
 fn batch_file_names_flatten_paths_and_cap_their_length() {
-    assert_eq!(batch_file_name("docs/aomine.md"), "docs__aomine.md.jsonl");
+    let short = batch_file_name("docs/aomine.md");
+    assert!(short.starts_with("docs__aomine.md-"), "{short}");
+    assert!(short.ends_with(".jsonl"), "{short}");
     let long = format!("deep/{}/doc.md", "x".repeat(300));
     let name = batch_file_name(&long);
     assert!(name.len() <= 130, "{}", name.len());
@@ -3281,6 +2769,25 @@ fn batch_file_names_flatten_paths_and_cap_their_length() {
     // Two long paths differing at the tail stay distinct.
     let other = format!("deep/{}/doc2.md", "x".repeat(300));
     assert_ne!(name, batch_file_name(&other));
+}
+
+/// Issue #730 (the same injectivity fix checkpoint names got in #227):
+/// distinct short source ids that flatten to the same string must not
+/// collide — one run's collisions are caught by `Run::claimed`, but
+/// separate runs into the same `--out` know nothing of each other, so
+/// only the unconditional hash suffix keeps their outputs apart.
+#[test]
+fn batch_file_names_always_carry_a_hash_suffix() {
+    let a = batch_file_name("a/b");
+    let b = batch_file_name("a:b");
+    let c = batch_file_name("a__b");
+    assert_ne!(a, b);
+    assert_ne!(a, c);
+    assert_ne!(b, c);
+    for name in [&a, &b, &c] {
+        assert!(name.starts_with("a__b-"), "{name}");
+        assert!(name.ends_with(".jsonl"), "{name}");
+    }
 }
 
 #[test]
@@ -3754,28 +3261,23 @@ fn manifests_rewrite_when_the_runbook_metadata_changes() {
     let mut manifest = Manifest::default();
     manifest.record(
         "a.md",
-        "hash-1",
-        "model-1",
-        "sake",
-        0,
-        false,
-        "",
-        0,
-        "",
-        0,
-        false,
-        "",
-        "",
-        "",
-        "session:claude:abc",
-        1785974400,
-        &["ops".to_string()],
+        &ComputationInputs {
+            source_id: "session:claude:abc",
+            date: 1785974400,
+            tags: &["ops".to_string()],
+            ..base_inputs("hash-1", "model-1")
+        },
         "a.md.jsonl",
     );
     let matches_with = |source_id: &str, date: u64, tags: &[String]| {
         manifest.matches(
-            "a.md", "hash-1", "model-1", "sake", 0, false, "", 0, "", 0, false, "", "", "",
-            source_id, date, tags,
+            "a.md",
+            &ComputationInputs {
+                source_id,
+                date,
+                tags,
+                ..base_inputs("hash-1", "model-1")
+            },
         )
     };
     assert!(matches_with(
@@ -3795,26 +3297,7 @@ fn manifests_rewrite_when_the_runbook_metadata_changes() {
 
     // Pre-S1 entries (no fields) keep matching default runs.
     let mut legacy = Manifest::default();
-    legacy.record(
-        "b.md",
-        "hash-2",
-        "model-1",
-        "sake",
-        0,
-        false,
-        "",
-        0,
-        "",
-        0,
-        false,
-        "",
-        "",
-        "",
-        "",
-        0,
-        &[],
-        "b.md.jsonl",
-    );
+    legacy.record("b.md", &base_inputs("hash-2", "model-1"), "b.md.jsonl");
     let json = serde_json::to_string(&legacy).unwrap();
     let stripped = json
         .replace(r#""source_id":"","#, "")
@@ -3827,25 +3310,7 @@ fn manifests_rewrite_when_the_runbook_metadata_changes() {
         assert!(!stripped.contains(key), "{key} survived in: {stripped}");
     }
     let reloaded: Manifest = serde_json::from_str(&stripped).unwrap();
-    assert!(reloaded.matches(
-        "b.md",
-        "hash-2",
-        "model-1",
-        "sake",
-        0,
-        false,
-        "",
-        0,
-        "",
-        0,
-        false,
-        "",
-        "",
-        "",
-        "",
-        0,
-        &[]
-    ));
+    assert!(reloaded.matches("b.md", &base_inputs("hash-2", "model-1")));
 }
 
 #[test]
@@ -3927,4 +3392,311 @@ fn runbook_flag_boundaries_hold_exactly() {
     assert_eq!(parse_date("10000-01-01"), None);
     assert_eq!(parse_date("0000-01-01"), None);
     assert_eq!(parse_date("-0001-01-01"), None);
+}
+
+// ================== ADR 0001 §7 ladder orchestration (issue #730) ==================
+
+/// A scripted OpenAI-compatible `/chat/completions` endpoint: answers
+/// each request with the next queued body and records every request,
+/// so the tests below drive the REAL ladder — `extract_piece`, the
+/// corrective loops, the startup probes — over a live socket instead
+/// of unit-testing the classification predicates alone. The script
+/// must hold exactly as many responses as the code under test sends:
+/// an exhausted queue closes the connection, which the client would
+/// then slowly retry as transport trouble.
+struct ScriptedChat {
+    url: String,
+    requests: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+}
+
+fn chat_answer(content: &str, finish_reason: &str) -> String {
+    serde_json::json!({
+        "choices": [{"message": {"content": content}, "finish_reason": finish_reason}]
+    })
+    .to_string()
+}
+
+impl ScriptedChat {
+    fn start(responses: Vec<String>) -> Self {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("must bind");
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = std::sync::Arc::clone(&requests);
+        std::thread::spawn(move || {
+            let mut queue = responses.into_iter();
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    match stream.read(&mut byte) {
+                        Ok(1) => head.extend_from_slice(&byte),
+                        _ => return,
+                    }
+                }
+                let length: usize = String::from_utf8_lossy(&head)
+                    .to_ascii_lowercase()
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .and_then(|value| value.trim().parse().ok())
+                    .unwrap_or(0);
+                let mut body = vec![0u8; length];
+                if stream.read_exact(&mut body).is_err() {
+                    return;
+                }
+                if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) {
+                    seen.lock().unwrap().push(value);
+                }
+                let Some(answer) = queue.next() else { return };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                    answer.len()
+                );
+            }
+        });
+        Self { url, requests }
+    }
+
+    fn client(&self) -> ChatClient {
+        ChatClient {
+            url: self.url.clone(),
+            model: "scripted".to_string(),
+            api_key: None,
+            agent: ureq::Agent::config_builder()
+                .http_status_as_error(false)
+                .build()
+                .into(),
+        }
+    }
+
+    fn requests(&self) -> Vec<serde_json::Value> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+/// Drives one piece through the real §7 ladder against a scripted
+/// endpoint — `rules: None` (lossy) so the answers need no Stage 1
+/// staging, the ladder itself being what these tests pin.
+fn drive_ladder(
+    chat: &ScriptedChat,
+    tag: &str,
+    piece: &str,
+    max_output_tokens: Option<usize>,
+) -> Result<Vec<ChunkOutput>, String> {
+    let dir = std::env::temp_dir().join(format!("taguru-ladder-{tag}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let client = chat.client();
+    let ladder = LadderConfig {
+        response_format: None,
+        max_output_tokens,
+    };
+    let policy = CorrectionPolicy {
+        max_attempts: 3,
+        corrective_context_cap: None,
+    };
+    let vocabulary = HashSet::new();
+    let checkpoints = CheckpointStore::empty(
+        dir.join("unit.json"),
+        CheckpointFingerprint {
+            sha256: "h".to_string(),
+            model: "scripted".to_string(),
+            prompt_version: PROMPT_VERSION,
+            context: "sake".to_string(),
+            questions_n: 0,
+            no_passage: false,
+            description: String::new(),
+            fact_budget: 0,
+            structured_output: String::new(),
+            max_output_tokens: max_output_tokens.unwrap_or(0),
+            lossy: true,
+            schema_digest: String::new(),
+            candidates: String::new(),
+            vocabulary_digest: String::new(),
+        },
+    );
+    let context = PieceContext {
+        client: &client,
+        system: "You extract associations.",
+        source: "doc.md",
+        chunk_index: 0,
+        chunk_total: 1,
+        ladder: &ladder,
+        policy: &policy,
+        fact_budget: 0,
+        rules: None,
+        vocabulary: &vocabulary,
+        sink: None,
+        checkpoints: &checkpoints,
+    };
+    let outcome = extract_piece(&context, piece);
+    let _ = fs::remove_dir_all(&dir);
+    outcome
+}
+
+const VALID_ANSWER: &str =
+    r#"{"associations": [{"subject": "a", "label": "l", "object": "b", "weight": 2.0}]}"#;
+
+/// REFUSAL is terminal (ADR 0001 §7): one provider refusal ends the
+/// piece — no corrective turn, no budget escalation, no split.
+#[test]
+fn ladder_a_provider_refusal_is_terminal_with_no_further_calls() {
+    let chat = ScriptedChat::start(vec![chat_answer("", "content_filter")]);
+    let error = drive_ladder(&chat, "refusal", "本文。", Some(64)).unwrap_err();
+    assert!(error.contains("refused this content"), "{error}");
+    assert!(error.contains("content_filter"), "{error}");
+    assert_eq!(
+        chat.requests().len(),
+        1,
+        "a refusal must spend no corrective turn and no escalation"
+    );
+}
+
+/// EMPTY gets exactly one corrective in the whole round — however high
+/// `max_attempts` (3 here) — then the named thinking-budget diagnosis.
+/// The fenced-but-empty spelling counts as empty on the retry too.
+#[test]
+fn ladder_an_empty_answer_gets_one_corrective_then_the_named_diagnosis() {
+    let chat = ScriptedChat::start(vec![
+        chat_answer("", "stop"),
+        chat_answer("```json\n```", "stop"),
+    ]);
+    let error = drive_ladder(&chat, "empty", "本文。", None).unwrap_err();
+    assert!(error.contains("the answer was empty"), "{error}");
+    let requests = chat.requests();
+    assert_eq!(requests.len(), 2, "one corrective, not max_attempts");
+    assert_eq!(
+        requests[1]["messages"].as_array().unwrap().len(),
+        4,
+        "the corrective attempt rebuilds base + the one bad turn: {:?}",
+        requests[1]["messages"]
+    );
+}
+
+/// LENGTH_LIMITED's full ladder: the configured budget answers
+/// `length` → one escalation with the cap dropped (the truncated
+/// answer never replayed) → `length` again → the piece splits and each
+/// sub-piece runs its own ladder from the top.
+#[test]
+fn ladder_length_limited_escalates_once_then_splits_the_piece() {
+    let chat = ScriptedChat::start(vec![
+        chat_answer("truncated…", "length"),
+        chat_answer("truncated again…", "length"),
+        chat_answer(VALID_ANSWER, "stop"),
+        chat_answer(VALID_ANSWER, "stop"),
+    ]);
+    let block_a = "あ".repeat(200); // 600 UTF-8 bytes
+    let block_b = "い".repeat(200);
+    let piece = format!("{block_a}\n\n{block_b}");
+    let outputs = drive_ladder(&chat, "split", &piece, Some(64)).unwrap();
+    assert_eq!(outputs.len(), 2, "one output per split sub-piece");
+    let requests = chat.requests();
+    assert_eq!(
+        requests.len(),
+        4,
+        "budget round, escalated round, two sub-pieces"
+    );
+    assert_eq!(
+        requests[0]["max_tokens"],
+        serde_json::json!(64),
+        "round 1 runs at the configured budget: {:?}",
+        requests[0]
+    );
+    assert!(
+        requests[1].get("max_tokens").is_none(),
+        "the escalation drops the cap entirely: {:?}",
+        requests[1]
+    );
+    assert!(
+        requests[1]["messages"].as_array().unwrap().len() == 2,
+        "the escalated round resends the base ask neutrally — the truncated answer is \
+         never replayed: {:?}",
+        requests[1]["messages"]
+    );
+    // Each sub-piece's user turn carries its own half, not the whole.
+    let user_of = |request: &serde_json::Value| {
+        request["messages"][1]["content"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert!(user_of(&requests[2]).contains(&block_a));
+    assert!(!user_of(&requests[2]).contains(&block_b));
+    assert!(user_of(&requests[3]).contains(&block_b));
+}
+
+/// A piece already too small to split that still overruns the
+/// escalated budget fails the source with the named diagnosis rather
+/// than importing a truncated extraction.
+#[test]
+fn ladder_a_piece_at_the_split_floor_fails_the_source() {
+    let chat = ScriptedChat::start(vec![
+        chat_answer("truncated…", "length"),
+        chat_answer("truncated again…", "length"),
+    ]);
+    let error = drive_ladder(&chat, "floor", "短い本文。", Some(64)).unwrap_err();
+    assert!(error.contains("cannot split further"), "{error}");
+    assert_eq!(
+        chat.requests().len(),
+        2,
+        "budget round + escalation, then terminal"
+    );
+}
+
+/// The capability ladder's top rung: a json_schema probe whose answer
+/// conforms to the canonical `{associations, aliases}` shape resolves
+/// json_schema — one probe call, carrying the exact response_format
+/// and the bounded probe budget the real requests will send.
+#[test]
+fn capability_ladder_resolves_json_schema_when_the_probe_conforms() {
+    let chat = ScriptedChat::start(vec![chat_answer(
+        r#"{"associations": [], "aliases": []}"#,
+        "stop",
+    )]);
+    assert!(matches!(
+        probe_structured_output(&chat.client()),
+        ProbeVerdict::JsonSchema
+    ));
+    let requests = chat.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0]["response_format"]["type"],
+        serde_json::json!("json_schema")
+    );
+    assert_eq!(requests[0]["max_tokens"], serde_json::json!(256));
+}
+
+/// The fall-through rungs: a prose answer fails the json_schema probe
+/// (the endpoint accepted the parameter without honoring it), a JSON
+/// object of any shape then verifies json_object; both probes failing
+/// resolves to prompted JSON only.
+#[test]
+fn capability_ladder_falls_to_json_object_then_prompted() {
+    let chat = ScriptedChat::start(vec![
+        chat_answer("The sky is blue.", "stop"),
+        chat_answer(r#"{"color": "blue"}"#, "stop"),
+    ]);
+    assert!(matches!(
+        probe_structured_output(&chat.client()),
+        ProbeVerdict::JsonObject
+    ));
+    let requests = chat.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[1]["response_format"]["type"],
+        serde_json::json!("json_object")
+    );
+
+    let chat = ScriptedChat::start(vec![
+        chat_answer("The sky is blue.", "stop"),
+        chat_answer("blue", "stop"),
+    ]);
+    assert!(matches!(
+        probe_structured_output(&chat.client()),
+        ProbeVerdict::Prompted
+    ));
+    assert_eq!(chat.requests().len(), 2);
 }
