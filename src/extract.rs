@@ -482,6 +482,11 @@ pub fn run(args: &[String]) -> i32 {
     // this resolves to an Option directly instead of routing through a
     // sentinel-then-default step.
     let corrective_context_cap = match std::env::var("TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES") {
+        // "" reads as unset, matching the path-valued keys
+        // (VOCABULARY/DIAGNOSTICS/SCHEMA) — it is how `benchmark`'s
+        // scrub-then-pin block spells "explicitly the default"
+        // (issue #734, ADR 0003 §5).
+        Ok(value) if value.is_empty() => None,
         Ok(value) => match value.parse::<usize>() {
             Ok(n) => Some(n),
             Err(_) => {
@@ -624,6 +629,9 @@ pub fn run(args: &[String]) -> i32 {
     // `diagnostics_path` ends up `None`, so a typo'd cap is never a
     // silent no-op just because --diagnostics-out was left off too.
     let diagnostics_raw_bytes = match std::env::var("TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES") {
+        // "" reads as unset — same spelling as
+        // TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES above (issue #734).
+        Ok(value) if value.is_empty() => None,
         Ok(value) => match value.parse::<usize>() {
             Ok(n) => Some(n),
             Err(_) => {
