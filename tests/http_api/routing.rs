@@ -798,6 +798,30 @@ fn group_import_outcome_reflects_the_union_not_any_one_shard() {
         json!("replaced"),
         "{body}"
     );
+
+    // The created-with-members clause on its own: a FRESH fleet where
+    // shard D never held g2 at all and the record brings D a member —
+    // "created" carrying contexts beside an "unchanged" sibling is
+    // what earns "replaced" here, with no shard answering "replaced"
+    // itself.
+    let shard_c = Server::start("gimp-outcome-c");
+    let shard_d = Server::start("gimp-outcome-d");
+    let router = Server::start_router(
+        "gimp-outcome-2",
+        &format!("ctx_c = {}\nctx_d = {}\n", shard_c.base, shard_d.base),
+        &[],
+    );
+    router.ok("PUT", "/contexts/ctx_c", Some(json!({})));
+    router.ok("PUT", "/contexts/ctx_d", Some(json!({})));
+    shard_c.ok("PUT", "/groups/g2", Some(json!({"contexts": ["ctx_c"]})));
+    let stream = "{\"taguru_group\": 1, \"name\": \"g2\", \"contexts\": [\"ctx_c\", \"ctx_d\"]}\n";
+    let (status, body) = post_import(&router, stream, None);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body["result"]["groups"][0]["outcome"],
+        json!("replaced"),
+        "a created projection CARRYING members changes the union: {body}"
+    );
 }
 
 /// The group union's three-way sort of shard answers: a 404 is drift
@@ -978,6 +1002,39 @@ fn a_group_refusal_after_a_landed_batch_rewraps_with_the_durable_count() {
         body["error"]
             .as_str()
             .is_some_and(|error| error.contains("1 batch(es)")),
+        "{body}"
+    );
+}
+
+/// The schema half of the landed condition: a group refusal after a
+/// SCHEMA landed (and no batch anywhere in the stream) must still
+/// rewrap with the durable count, naming the schema record.
+#[test]
+fn a_group_refusal_after_a_landed_schema_rewraps_with_the_durable_count() {
+    let shard_a = Server::start("schema-group-rewrap-a");
+    let shard_b = Server::start("schema-group-rewrap-b");
+    let router = Server::start_router(
+        "schema-group-rewrap",
+        &format!("ctx_a = {}\nghost = {}\n", shard_a.base, shard_b.base),
+        &[],
+    );
+    router.ok("PUT", "/contexts/ctx_a", Some(json!({})));
+    let stream = concat!(
+        "{\"taguru_schema\": 1, \"context\": \"ctx_a\", \"mode\": \"warn\", \
+         \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n",
+        "{\"taguru_group\": 1, \"name\": \"g\", \"contexts\": [\"ctx_a\", \"ghost\"]}\n",
+    );
+    let (status, body) = post_import(&router, stream, None);
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(body["integrity"], json!("durable_prefix"), "{body}");
+    assert!(
+        body.get("durable_batches").is_none(),
+        "no batch anywhere in this stream: {body}"
+    );
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("1 schema record(s)")),
         "{body}"
     );
 }
