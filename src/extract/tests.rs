@@ -3700,3 +3700,23 @@ fn capability_ladder_falls_to_json_object_then_prompted() {
     ));
     assert_eq!(chat.requests().len(), 2);
 }
+
+/// The 120-byte threshold is exclusive: a flattened name of exactly
+/// 120 bytes rides whole; one byte more truncates to the 96-byte
+/// prefix label (the hash suffix keeps either unique).
+#[test]
+fn batch_file_names_truncate_only_past_the_threshold() {
+    let at = "x".repeat(120);
+    let name = batch_file_name(&at);
+    assert!(
+        name.starts_with(&at),
+        "exactly at the threshold stays whole: {name}"
+    );
+    let over = "x".repeat(121);
+    let name = batch_file_name(&over);
+    assert!(name.starts_with(&"x".repeat(96)), "{name}");
+    assert!(
+        !name.starts_with(&"x".repeat(97)),
+        "past the threshold, the prefix is 96 bytes: {name}"
+    );
+}
