@@ -3630,9 +3630,13 @@ fn import_refuses_the_whole_group_set_but_keeps_batches_landed() {
     )
     .expect("fixture must be writable");
     let group = dir.join("g.jsonl");
+    // A perfectly valid sibling rides the SAME set: the whole-set
+    // judgment must refuse it too — writing the valid record before
+    // judging the set would be exactly the defect this pins.
     std::fs::write(
         &group,
-        "{\"taguru_group\": 1, \"name\": \"kura\", \"contexts\": [\"sake\", \"ghost\"]}\n",
+        "{\"taguru_group\": 1, \"name\": \"kura\", \"contexts\": [\"sake\", \"ghost\"]}\n\
+         {\"taguru_group\": 1, \"name\": \"valid\", \"contexts\": [\"sake\"]}\n",
     )
     .expect("fixture must be writable");
     let data_dir = dir.join("data");
@@ -3677,15 +3681,33 @@ fn import_refuses_the_whole_group_set_but_keeps_batches_landed() {
     let healed = run_with_env(
         &[
             "import",
+            "--json",
             &ghost.display().to_string(),
             &group.display().to_string(),
         ],
         &[("TAGURU_DATA_DIR", &data_dir.display().to_string())],
     );
     assert_eq!(healed.status.code(), Some(0), "{healed:?}");
-    assert!(
-        String::from_utf8_lossy(&healed.stdout).contains("1 of 1 group record(s) restored"),
-        "{healed:?}"
+    let healed_report: serde_json::Value =
+        serde_json::from_slice(&healed.stdout).expect("--json must answer one document");
+    let outcomes: Vec<(&str, &str)> = healed_report["groups"]
+        .as_array()
+        .expect("both groups restore")
+        .iter()
+        .map(|group| {
+            (
+                group["name"].as_str().unwrap(),
+                group["outcome"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    // "created" for BOTH proves the refused run wrote neither — the
+    // valid sibling included, which a set-judged-after-writes defect
+    // would have left behind as "replaced"/"unchanged" here.
+    assert_eq!(
+        outcomes,
+        vec![("kura", "created"), ("valid", "created")],
+        "{healed_report}"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

@@ -602,11 +602,24 @@ fn apply_batch_threads_the_deadline_into_association_writes() {
         ),
         "{refused:?}"
     );
+    // The refusal came AFTER the marker opened (the retraction and any
+    // passage already ran) — the marker must survive it, saying the
+    // source may be half-applied until the documented repair runs.
+    assert_eq!(
+        crate::registry::import_marker_paths(&dir, "sake").len(),
+        1,
+        "a deadline refusal mid-batch keeps its import marker"
+    );
 
     // The same batch under no budget applies — the refusal above came
-    // from the deadline alone.
+    // from the deadline alone — and the completed retry clears the
+    // marker, exactly the retry-is-exact contract.
     let applied = apply_batch(&state, &batch, Deadline::unbounded()).unwrap();
     assert_eq!(applied.associations, 1);
+    assert!(
+        crate::registry::import_marker_paths(&dir, "sake").is_empty(),
+        "the completed retry clears the marker"
+    );
 
     let _ = fs::remove_dir_all(&dir);
 }
