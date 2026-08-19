@@ -413,7 +413,7 @@ function graphDocuments(
  * one call only, so ranks are the currency across contexts (the posture the
  * server's own cross-context passage merge takes).
  */
-function interleave(perTarget: Document[][]): Document[] {
+export function interleave(perTarget: Document[][]): Document[] {
   const indexed: Array<[number, number, Document]> = [];
   perTarget.forEach((documents, index) => {
     documents.forEach((document, rank) => {

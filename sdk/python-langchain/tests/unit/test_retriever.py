@@ -513,3 +513,19 @@ async def test_async_context_manager_closes_self_built_clients_on_exit() -> None
         assert async_client_ is not None
     assert client._http.is_closed
     assert async_client_._http.is_closed
+
+
+def test_interleave_breaks_rank_ties_by_target_order() -> None:
+    """Issue #736: ``_interleave``'s comparator is (rank, target index) —
+    every target's rank-0 document outranks every rank-1 document, and
+    WITHIN one rank the targets' own listing order decides, so the merge
+    is deterministic across runs."""
+    from langchain_core.documents import Document
+
+    from taguru_langchain.retrievers import _interleave
+
+    a0, a1 = Document(page_content="a0"), Document(page_content="a1")
+    b0, b1 = Document(page_content="b0"), Document(page_content="b1")
+    c0 = Document(page_content="c0")
+    merged = _interleave([[a0, a1], [b0, b1], [c0]])
+    assert [document.page_content for document in merged] == ["a0", "b0", "c0", "a1", "b1"]

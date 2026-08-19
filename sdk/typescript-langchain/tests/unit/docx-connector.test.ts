@@ -502,3 +502,20 @@ describe("missing OOXML dependencies", () => {
     );
   });
 });
+
+test("a real zip bomb is refused content_too_large by measured inflation (issue #737)", async () => {
+  // ~256 MiB of zeros deflates to well under the 64 MiB raw-file gate,
+  // so only the bounded streaming inflation (unzipWithinCap, capped at
+  // MAX_DECOMPRESSED_BYTES = 256 MiB) can catch it — this drives the
+  // real wiring end to end with an actual bomb, not a mocked unzip.
+  const { zipSync } = await import("fflate");
+  const inflated = new Uint8Array(256 * 1024 * 1024 + 1024);
+  const bomb = zipSync({ "word/document.xml": inflated }, { level: 1 });
+  const path = await write("bomb.docx", bomb);
+  const document = await new DocxConnector().read(path);
+
+  expect(document.text).toBe("");
+  expect(document.diagnostics.map((diagnostic) => diagnostic.code)).toEqual([
+    "content_too_large",
+  ]);
+});

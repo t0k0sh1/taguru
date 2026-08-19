@@ -491,3 +491,19 @@ describe("missing OOXML dependencies", () => {
     );
   });
 });
+
+test("a real zip bomb is refused content_too_large by measured inflation (issue #737)", async () => {
+  // The PPTX twin of the docx bomb test: same shared unzipWithinCap
+  // wiring, pinned per connector since each maps the refusal to its own
+  // content_too_large diagnostic.
+  const { zipSync } = await import("fflate");
+  const inflated = new Uint8Array(256 * 1024 * 1024 + 1024);
+  const bomb = zipSync({ "ppt/slides/slide1.xml": inflated }, { level: 1 });
+  const path = await write("bomb.pptx", bomb);
+  const document = await new PptxConnector().read(path);
+
+  expect(document.text).toBe("");
+  expect(document.diagnostics.map((diagnostic) => diagnostic.code)).toEqual([
+    "content_too_large",
+  ]);
+});

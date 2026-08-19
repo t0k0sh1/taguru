@@ -7,6 +7,17 @@
  * in sync deliberately), and merge/render mirror `merge()`/`render_batch()`.
  * Revising the prompt here without revising extract.rs is drift — treat them
  * as one artifact.
+ *
+ * One deliberate divergence (issue #737, mirroring #736's Python ruling):
+ * the port mirrors extract's ALL-DEFAULTS prompt. The Rust `system_prompt`
+ * additionally takes `context_names` (ADR 0015's `--vocabulary` harvest)
+ * and `candidates` (ADR 0014's `--candidates` document-derived name block)
+ * — both default-off, opt-in CLI controls whose empty value appends
+ * nothing, so the default prompts stay byte-identical across producers.
+ * Porting them would also mean porting `candidate_terms`' script-aware
+ * segmentation and the vocabulary harvest, three drift-prone copies of
+ * each; until a LangChain user needs the opt-ins, the gap stays a
+ * documented decision, not an oversight.
  */
 
 import type { LocatorSpec, SchemaDocument, SectionSpec, TypeDef } from "taguru";
@@ -450,6 +461,12 @@ function promptSafeLabels(labels: string[]): string[] {
   return labels.filter((label) => !hasUnsafePromptChar(label));
 }
 
+/**
+ * extract.rs `system_prompt` at its ALL-DEFAULTS controls: the Rust
+ * signature's extra `context_names`/`candidates` parameters (ADR 0015 /
+ * ADR 0014 — both default-off, opt-in flags whose empty value appends
+ * nothing) are deliberately not ported — see the module doc (issue #737).
+ */
 export function systemPrompt(
   vocabulary: string[],
   questions: number,

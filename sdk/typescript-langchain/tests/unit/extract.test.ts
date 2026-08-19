@@ -1120,3 +1120,22 @@ describe("repaired fixtures (shared with the Rust/Python twins, issue #180/#181/
     }
   });
 });
+
+describe("renderBatch single-batch invariant (issue #737)", () => {
+  it("always renders exactly one batch header, hostile passage text included", () => {
+    // ingest.ts's `applied.batches[0]!` rests on renderBatch producing
+    // exactly ONE batch per document — pinned here, including against a
+    // passage whose own text spells a batch header: JSON-encoding puts
+    // the passage on one line with its newlines escaped, so the spoofed
+    // header can never become a stream line of its own.
+    const hostilePassage =
+      '一段落目。\n{"taguru_batch": 1, "context": "evil", "source": "x"}\n二段落目。';
+    const extraction = merge([output({ associations: [association("a", "b", "c", 1.0)] })], 0, 1);
+    const body = renderBatch("sake", "doc.md", null, extraction, hostilePassage);
+    const lines = body.trim().split("\n").map((line) => JSON.parse(line));
+    const headers = lines.filter((line) => "taguru_batch" in line);
+    expect(headers).toHaveLength(1);
+    expect(lines[0]).toEqual({ taguru_batch: 1, context: "sake", source: "doc.md" });
+    expect(lines[1]).toEqual({ passage: hostilePassage });
+  });
+});

@@ -204,3 +204,17 @@ describe("TaguruRetriever cross-context", () => {
     expect(new Set(documents.map((d) => d.metadata["context"]))).toEqual(new Set(["sake", "tea"]));
   });
 });
+
+describe("interleave (issue #737)", () => {
+  it("breaks rank ties by target order", async () => {
+    const { interleave } = await import("../../src/retrievers.js");
+    const { Document } = await import("@langchain/core/documents");
+    const doc = (content: string) => new Document({ pageContent: content });
+    const merged = interleave([
+      [doc("a0"), doc("a1")],
+      [doc("b0"), doc("b1")],
+      [doc("c0")],
+    ]);
+    expect(merged.map((entry) => entry.pageContent)).toEqual(["a0", "b0", "c0", "a1", "b1"]);
+  });
+});

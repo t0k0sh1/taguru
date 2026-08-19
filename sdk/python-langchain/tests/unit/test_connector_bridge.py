@@ -201,3 +201,80 @@ async def test_aingest_connector_documents_continues_past_a_diagnostics_only_doc
     ]
     outcomes = await aingest_connector_documents(_ingester(sync_client, async_client), documents)
     assert [outcome.ok for outcome in outcomes] == [True, False]
+
+
+def _boom_wrapper(real, exploding_source: str):  # noqa: ANN001, ANN202
+    def flaky(ingester, document, **kwargs):  # noqa: ANN001, ANN202
+        if document.source == exploding_source:
+            raise RuntimeError("exploded mid-ingest")
+        return real(ingester, document, **kwargs)
+
+    return flaky
+
+
+def test_raise_on_error_false_records_the_failure_and_continues(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer, monkeypatch
+) -> None:
+    """Issue #736: the multi-document loop's error branch — the default
+    (``raise_on_error=False``) turns a document's own exception into a
+    failed outcome and keeps going."""
+    from taguru_langchain.ingest_connectors import bridge as bridge_module
+
+    monkeypatch.setattr(
+        bridge_module,
+        "ingest_connector_document",
+        _boom_wrapper(bridge_module.ingest_connector_document, "boom.md"),
+    )
+    documents = [_document(source="a.md"), _document(source="boom.md"), _document(source="c.md")]
+    outcomes = ingest_connector_documents(_ingester(sync_client, async_client), documents)
+    assert [outcome.ok for outcome in outcomes] == [True, False, True]
+    assert outcomes[1].error is not None and "exploded" in outcomes[1].error
+    assert len(fake_server.imported) == 2, "a.md and c.md still land"
+
+
+def test_raise_on_error_true_stops_at_the_first_failure(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer, monkeypatch
+) -> None:
+    """Issue #736: the fail-fast half — ``raise_on_error=True`` re-raises
+    the document's own exception, and nothing after it is attempted."""
+    import pytest
+
+    from taguru_langchain.ingest_connectors import bridge as bridge_module
+
+    monkeypatch.setattr(
+        bridge_module,
+        "ingest_connector_document",
+        _boom_wrapper(bridge_module.ingest_connector_document, "boom.md"),
+    )
+    ingester = _ingester(sync_client, async_client)
+    ingester.raise_on_error = True
+    documents = [_document(source="a.md"), _document(source="boom.md"), _document(source="c.md")]
+    with pytest.raises(RuntimeError, match="exploded"):
+        ingest_connector_documents(ingester, documents)
+    assert len(fake_server.imported) == 1, "only a.md landed before the raise"
+
+
+async def test_araise_on_error_branches_match_the_sync_loop(
+    sync_client: Taguru, async_client: AsyncTaguru, fake_server: FakeServer, monkeypatch
+) -> None:
+    """The async twin of both branches above (bridge.py's second loop)."""
+    import pytest
+
+    from taguru_langchain.ingest_connectors import bridge as bridge_module
+
+    monkeypatch.setattr(
+        bridge_module,
+        "aingest_connector_document",
+        _boom_wrapper(bridge_module.aingest_connector_document, "boom.md"),
+    )
+    documents = [_document(source="a.md"), _document(source="boom.md"), _document(source="c.md")]
+    outcomes = await aingest_connector_documents(_ingester(sync_client, async_client), documents)
+    assert [outcome.ok for outcome in outcomes] == [True, False, True]
+    assert outcomes[1].error is not None and "exploded" in outcomes[1].error
+
+    fake_server.imported.clear()
+    ingester = _ingester(sync_client, async_client)
+    ingester.raise_on_error = True
+    with pytest.raises(RuntimeError, match="exploded"):
+        await aingest_connector_documents(ingester, documents)
+    assert len(fake_server.imported) == 1, "only a.md landed before the raise"
