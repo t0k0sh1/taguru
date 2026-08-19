@@ -408,3 +408,27 @@ fn a_shapeless_judgment_fails_the_run_and_writes_nothing() {
         "a failed run must not have created the artifact"
     );
 }
+
+/// Issue #751: a base URL no request could leave on — unparseable, or
+/// a scheme ureq does not speak — is a usage error (exit 2), caught
+/// before drive() prints its "consolidation → URL" target line, the
+/// same upfront refusal every other client verb gives it.
+#[test]
+fn a_malformed_url_is_a_usage_error_caught_before_the_target_line() {
+    let (code, _stdout, stderr) =
+        run_consolidation(&["--context", "sake", "--url", "not a url at all"], &[]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("is not a usable base URL"), "{stderr}");
+    assert!(
+        !stderr.contains("consolidation →"),
+        "the refusal must land before the target line: {stderr}"
+    );
+
+    let (code, _stdout, stderr) =
+        run_consolidation(&["--context", "sake", "--url", "ftp://127.0.0.1:9"], &[]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains("--url only supports http/https"),
+        "{stderr}"
+    );
+}

@@ -33,6 +33,22 @@ Entries that change an on-disk format or a response shape say so.
   declarations, wire formats, or response shapes.
 
 ### Fixed
+- A full `taguru export` (no CONTEXT arguments, local or `--url`) now
+  owns `--out`'s `*.jsonl` files: a stream left by an earlier export
+  whose context or group no longer exists is removed (each removal
+  reported on stdout), so importing the directory can no longer
+  resurrect a deleted entity. Subset exports never prune, non-stream
+  files are never touched, and a remote run that could not enumerate
+  groups prunes nothing (#751).
+- `taguru export --url`'s per-group fetch now validates the response
+  through the same parser `taguru import` trusts — exactly one
+  `taguru_group` record — instead of "parses as JSON", so an
+  unexpected 200 body can no longer land as a `.group.jsonl` file
+  reporting 0 members (#751).
+- `export --url`, `compact --url` (both modes), and `consolidation
+  --url` now refuse an unparseable or non-http(s) base URL upfront as
+  a usage error (exit 2), the way `import --url` already did, instead
+  of failing mid-run with exit 1 after printing their preamble (#751).
 - `taguru extract`'s batch output names carry an unconditional hash
   suffix (`docs__aomine.md-<sha16>.jsonl`), the same injectivity fix
   checkpoint names received in #227: path flattening is not injective

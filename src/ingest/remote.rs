@@ -220,31 +220,8 @@ pub(super) fn run_remote(base: &str, files: &[PathBuf], dry_run: bool, as_json: 
     // groups (every batch failed the earlier owner-uniqueness check,
     // say) never enters that loop at all, so a bad URL would otherwise
     // go entirely undetected and exit 0.
-    // `http`/`https` only: `url::Url::parse` alone happily accepts
-    // `file://`/`ftp://` and anything else with a well-formed
-    // authority, but `ureq` (the transport underneath `Api`) speaks
-    // only HTTP — a non-http(s) scheme would otherwise sail through
-    // this check and only fail once the request reaches `ureq`, as
-    // `ImportFailure::Transport` (exit 1, "connection lost"), exactly
-    // the network-problem-shaped message this upfront check exists to
-    // avoid for a usage mistake.
-    match url::Url::parse(base) {
-        Ok(parsed) if matches!(parsed.scheme(), "http" | "https") => {}
-        Ok(parsed) => {
-            return crate::config::subcommand_usage_error(
-                "import",
-                &format!(
-                    "'{base}' uses '{}', but --url only supports http/https",
-                    parsed.scheme()
-                ),
-            );
-        }
-        Err(_) => {
-            return crate::config::subcommand_usage_error(
-                "import",
-                &format!("'{base}' is not a usable base URL"),
-            );
-        }
+    if let Err(message) = crate::remote::reject_unusable_base(base) {
+        return crate::config::subcommand_usage_error("import", &message);
     }
 
     // Pass 1 — every file parses, or nothing applies (same contract as

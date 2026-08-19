@@ -475,6 +475,12 @@ fn run_remote(base: &str, names: Vec<String>, parallel: usize, as_json: bool) ->
     if let Err(message) = crate::remote::reject_userinfo(base) {
         return crate::config::subcommand_usage_error("compact", &message);
     }
+    // A base no request could leave on is a usage error (exit 2, issue
+    // #751), caught before the target line below prints — the same
+    // upfront refusal `import --url` already gives it.
+    if let Err(message) = crate::remote::reject_unusable_base(base) {
+        return crate::config::subcommand_usage_error("compact", &message);
+    }
     let api = Api::new(base.to_string());
     // ADR 0002 §5: every remote, mutating invocation prints its target
     // before sending anything — the one line that lets an operator
@@ -630,6 +636,10 @@ fn run_remote_sweep(api: &Api, as_json: bool) -> i32 {
 /// each fetch their own `GET /contexts/{name}` instead.
 fn run_remote_dry_run(base: &str, names: Vec<String>, as_json: bool) -> i32 {
     if let Err(message) = crate::remote::reject_userinfo(base) {
+        return crate::config::subcommand_usage_error("compact", &message);
+    }
+    // Same upfront refusal as run_remote's: usage error, exit 2 (#751).
+    if let Err(message) = crate::remote::reject_unusable_base(base) {
         return crate::config::subcommand_usage_error("compact", &message);
     }
     let api = Api::new(base.to_string());

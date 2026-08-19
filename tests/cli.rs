@@ -2001,6 +2001,99 @@ fn export_round_trips_a_data_directory_through_batch_streams() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Issue #751: a FULL export owns `--out`'s `*.jsonl` files — one left
+/// by an earlier export whose context or group has since been deleted
+/// is removed, so `taguru import DIR` (which expands every `*.jsonl`)
+/// can never resurrect the deleted entity. A subset export never
+/// prunes, and a file that is not a stream is never touched.
+#[test]
+fn a_full_export_prunes_streams_for_deleted_contexts_and_groups() {
+    let dir = common::scratch_dir("cli-export-prune");
+    std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
+    std::fs::write(
+        dir.join("a.jsonl"),
+        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \
+         \"create\": {\"description\": \"d\"}}\n\
+         {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n\
+         {\"taguru_batch\": 1, \"context\": \"old\", \"source\": \"b.md\", \
+         \"create\": {\"description\": \"o\"}}\n\
+         {\"subject\": \"白鶴\", \"label\": \"所在地\", \"object\": \"神戸\", \"weight\": 1.0}\n\
+         {\"taguru_group\": 1, \"name\": \"kura\", \"description\": \"k\", \
+         \"contexts\": [\"sake\"]}\n\
+         {\"taguru_group\": 1, \"name\": \"dead\", \"description\": \"x\", \
+         \"contexts\": [\"sake\"]}\n",
+    )
+    .expect("fixture must be writable");
+    let data = dir.join("data");
+    let run_in = |args: &[&str]| -> Output {
+        Command::new(env!("CARGO_BIN_EXE_taguru"))
+            .args(args)
+            .env("TAGURU_DATA_DIR", &data)
+            .env_remove("TAGURU_CONFIG")
+            .env_remove("TAGURU_EMBED_URL")
+            .output()
+            .expect("binary must run")
+    };
+    let seeded = run_in(&["import", &dir.join("a.jsonl").display().to_string()]);
+    assert_eq!(seeded.status.code(), Some(0), "{seeded:?}");
+
+    let out = dir.join("out");
+    let first = run_in(&["export", "--out", &out.display().to_string()]);
+    assert_eq!(first.status.code(), Some(0), "{first:?}");
+    assert!(
+        out.join("old.jsonl").exists(),
+        "the first export must land it"
+    );
+    assert!(out.join("dead.group.jsonl").exists());
+    std::fs::write(out.join("notes.txt"), b"keep me").expect("bystander must be writable");
+
+    // Delete one context and one group from the data directory, the
+    // way an offline operator does — the export must converge on it.
+    for entry in std::fs::read_dir(&data).expect("data dir must list") {
+        let entry = entry.expect("entry must read");
+        let name = entry.file_name().into_string().expect("ascii stems");
+        if name.starts_with("old.") || name == "dead.group" {
+            std::fs::remove_file(entry.path()).expect("delete must work");
+        }
+    }
+
+    let second = run_in(&["export", "--out", &out.display().to_string()]);
+    assert_eq!(second.status.code(), Some(0), "{second:?}");
+    let stdout = String::from_utf8_lossy(&second.stdout);
+    assert_eq!(
+        stdout
+            .matches("removed — no longer exists at the source")
+            .count(),
+        2,
+        "{stdout}"
+    );
+    assert!(
+        !out.join("old.jsonl").exists(),
+        "stale context stream must go"
+    );
+    assert!(
+        !out.join("dead.group.jsonl").exists(),
+        "stale group stream must go"
+    );
+    assert!(out.join("sake.jsonl").exists());
+    assert!(out.join("kura.group.jsonl").exists());
+    assert!(
+        out.join("notes.txt").exists(),
+        "non-stream files are never touched"
+    );
+
+    // A subset export writes its slice and removes nothing.
+    std::fs::write(out.join("zombie.jsonl"), b"{}").expect("stale file must be writable");
+    let subset = run_in(&["export", "--out", &out.display().to_string(), "sake"]);
+    assert_eq!(subset.status.code(), Some(0), "{subset:?}");
+    assert!(
+        out.join("zombie.jsonl").exists(),
+        "a subset export must not prune"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// An unknown context in an explicit `export` list is a per-item
 /// failure: the named survivors still land, the summary counts them,
 /// and the exit code is nonzero — the offline twin of

@@ -76,7 +76,10 @@ when the context has one installed and its mode is not \"off\". No
 CONTEXT arguments means every context, plus every group as
 {out}/{group}.group.jsonl (one taguru_group record each; import
 restores groups after every batch and schema, so the files re-apply
-in any order). Naming CONTEXTs exports just those, groups omitted.
+in any order). A full export owns DIR's *.jsonl files: one left by a
+previous export whose context or group no longer exists is removed,
+so importing DIR never resurrects a deleted entity. Naming CONTEXTs
+exports just those, groups omitted and nothing removed.
 Re-importing a stream is idempotent (per-source retract-then-apply;
 per-group replace); `taguru import --dry-run` validates an exported
 file without touching anything.
@@ -842,6 +845,7 @@ fn run_local(out: &std::path::Path, names: Vec<String>) -> i32 {
     // shrink the group (a restore replaces the record).
     let mut group_count = 0usize;
     let mut group_failures = 0usize;
+    let mut stale_failures = 0usize;
     if !explicit {
         let (_, all_groups) = state.group_page(None, usize::MAX);
         group_count = all_groups.len();
@@ -854,6 +858,9 @@ fn run_local(out: &std::path::Path, names: Vec<String>) -> i32 {
                 }
             }
         }
+        let expected =
+            expected_file_names(&names, all_groups.iter().map(|(name, _)| name.as_str()));
+        stale_failures = prune_stale_streams(out, &expected);
     }
 
     println!(
@@ -866,7 +873,11 @@ fn run_local(out: &std::path::Path, names: Vec<String>) -> i32 {
             out,
         )
     );
-    if failures + group_failures > 0 { 1 } else { 0 }
+    if failures + group_failures + stale_failures > 0 {
+        1
+    } else {
+        0
+    }
 }
 
 /// The remote twin of [`run_local`]: enumerates a running server's
@@ -878,6 +889,13 @@ fn run_local(out: &std::path::Path, names: Vec<String>) -> i32 {
 fn run_remote(base: &str, out: &std::path::Path, names: Vec<String>) -> i32 {
     // ADR 0002 §7: caught before any request leaves the process.
     if let Err(message) = crate::remote::reject_userinfo(base) {
+        return crate::config::subcommand_usage_error("export", &message);
+    }
+    // A base no request could leave on is a usage error (exit 2, issue
+    // #751), caught before the snapshot note below prints — `import
+    // --url` already refuses it this way, and the two must not answer
+    // the same mistake with different shapes.
+    if let Err(message) = crate::remote::reject_unusable_base(base) {
         return crate::config::subcommand_usage_error("export", &message);
     }
     let api = Api::new(base.to_string());
@@ -939,6 +957,7 @@ fn run_remote(base: &str, out: &std::path::Path, names: Vec<String>) -> i32 {
     // Same rule as run_local: groups ride the FULL export only.
     let mut group_count = 0usize;
     let mut group_failures = 0usize;
+    let mut stale_failures = 0usize;
     if !explicit {
         match api.list_names("groups") {
             Ok(group_names) => {
@@ -952,11 +971,15 @@ fn run_remote(base: &str, out: &std::path::Path, names: Vec<String>) -> i32 {
                         }
                     }
                 }
+                let expected = expected_file_names(&names, group_names.iter().map(String::as_str));
+                stale_failures = prune_stale_streams(out, &expected);
             }
             Err(error) => {
                 // A full export that cannot even learn its group list
                 // is incomplete, whatever the context loop above did —
-                // reported the same way any other failure is.
+                // reported the same way any other failure is. No
+                // pruning either: without the group list, a stale
+                // `.group.jsonl` cannot be told from a live one.
                 eprintln!("taguru: export: groups: {error}");
                 group_failures += 1;
             }
@@ -973,7 +996,11 @@ fn run_remote(base: &str, out: &std::path::Path, names: Vec<String>) -> i32 {
             out,
         )
     );
-    if failures + group_failures > 0 { 1 } else { 0 }
+    if failures + group_failures + stale_failures > 0 {
+        1
+    } else {
+        0
+    }
 }
 
 /// One context's stream, fetched whole from `GET
@@ -1011,17 +1038,30 @@ fn remote_export_group(api: &Api, name: &str, out: &std::path::Path) -> Result<S
     // Validated before it touches disk: write_atomic's whole point is
     // that a crash mid-write must never shred a previously-good
     // backup, which a malformed response would defeat if it landed
-    // first and only then failed to parse.
-    let record: Value = serde_json::from_str(stream.trim_end())
+    // first and only then failed to parse. Run through the same parser
+    // `taguru import` trusts (issue #751) — "parses as JSON" alone
+    // would let any well-formed 200 body land as a group file — and
+    // required to be exactly one group record, since that is all this
+    // endpoint ever streams.
+    let parsed = crate::ingest::parse_stream(stream.as_bytes())
         .map_err(|error| format!("group '{name}': not a taguru group record: {error}"))?;
+    let record = match (&parsed.batches[..], &parsed.schemas[..], &parsed.groups[..]) {
+        ([], [], [(_, record)]) => record,
+        _ => {
+            return Err(format!(
+                "group '{name}': not a taguru group record: the response is not exactly one \
+                 taguru_group line"
+            ));
+        }
+    };
     let path = out.join(format!("{}.group.jsonl", crate::registry::file_stem(name)));
     crate::storage::write_atomic(&path, stream.as_bytes())
         .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
-    let contexts = record["contexts"].as_array().map_or(0, Vec::len);
-    let groups = record["groups"].as_array().map_or(0, Vec::len);
     Ok(format!(
-        "{}: group '{name}' → {contexts} member context(s), {groups} child group(s)",
-        path.display()
+        "{}: group '{name}' → {} member context(s), {} child group(s)",
+        path.display(),
+        record.contexts.len(),
+        record.groups.len()
     ))
 }
 
@@ -1045,6 +1085,70 @@ fn stream_counts(stream: &str) -> (usize, usize) {
         }
     }
     (batches, lines)
+}
+
+/// The file names a full export claims in `--out`: every context's
+/// `{stem}.jsonl` plus every group's `{stem}.group.jsonl` — the set
+/// [`prune_stale_streams`] preserves. Built from the run's full name
+/// lists (attempted, not just succeeded), so a context whose fetch
+/// failed keeps whatever file a previous run left for it.
+fn expected_file_names<'a>(
+    contexts: &[String],
+    groups: impl Iterator<Item = &'a str>,
+) -> BTreeSet<String> {
+    contexts
+        .iter()
+        .map(|name| format!("{}.jsonl", crate::registry::file_stem(name)))
+        .chain(groups.map(|name| format!("{}.group.jsonl", crate::registry::file_stem(name))))
+        .collect()
+}
+
+/// A FULL export owns its `--out` directory's stream files: a context
+/// or group deleted since the previous export into the same directory
+/// would otherwise leave its old file behind, and a later directory
+/// import (`taguru import DIR` expands every `*.jsonl`) would
+/// resurrect the deleted entity (issue #751). Removes every `*.jsonl`
+/// direct child of `out` not named in `expected`, reporting each
+/// removal as its own stdout line. Subset exports never call this:
+/// they write a slice, not the whole truth. Returns how many removals
+/// failed.
+fn prune_stale_streams(out: &std::path::Path, expected: &BTreeSet<String>) -> usize {
+    let entries = match fs::read_dir(out) {
+        Ok(entries) => entries,
+        Err(error) => {
+            eprintln!("taguru: export: cannot list {}: {error}", out.display());
+            return 1;
+        }
+    };
+    let mut failures = 0usize;
+    for entry in entries {
+        let Ok(entry) = entry else { continue };
+        let name = entry.file_name();
+        // Everything export writes is ASCII (`file_stem` percent-encodes
+        // the rest), so a non-UTF-8 name is never ours to touch.
+        let Some(name) = name.to_str() else { continue };
+        if !name.ends_with(".jsonl") || expected.contains(name) {
+            continue;
+        }
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        match fs::remove_file(&path) {
+            Ok(()) => println!(
+                "{}: removed — no longer exists at the source",
+                path.display()
+            ),
+            Err(error) => {
+                eprintln!(
+                    "taguru: export: cannot remove stale {}: {error}",
+                    path.display()
+                );
+                failures += 1;
+            }
+        }
+    }
+    failures
 }
 
 /// The final report line, identical whether the streams came from the
@@ -1158,6 +1262,53 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("taguru-export-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         dir
+    }
+
+    /// Issue #751's pruning contract at the unit level: everything a
+    /// full export names survives, every other `*.jsonl` goes, and
+    /// nothing else — not a non-stream file, not a directory whose
+    /// name happens to end in `.jsonl` — is ever touched.
+    #[test]
+    fn prune_removes_exactly_the_unexpected_stream_files() {
+        let dir = scratch_dir("prune");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("keep.jsonl"), b"{}").unwrap();
+        fs::write(dir.join("keep.group.jsonl"), b"{}").unwrap();
+        fs::write(dir.join("stale.jsonl"), b"{}").unwrap();
+        fs::write(dir.join("stale.group.jsonl"), b"{}").unwrap();
+        fs::write(dir.join("notes.txt"), b"bystander").unwrap();
+        fs::create_dir_all(dir.join("subdir.jsonl")).unwrap();
+
+        let expected = expected_file_names(&["keep".to_string()], std::iter::once("keep"));
+        assert_eq!(prune_stale_streams(&dir, &expected), 0);
+
+        assert!(dir.join("keep.jsonl").exists());
+        assert!(dir.join("keep.group.jsonl").exists());
+        assert!(!dir.join("stale.jsonl").exists());
+        assert!(!dir.join("stale.group.jsonl").exists());
+        assert!(dir.join("notes.txt").exists());
+        assert!(dir.join("subdir.jsonl").exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The expected set percent-encodes exactly like the writers do —
+    /// a name the stem encoding changes must protect the file the
+    /// export actually wrote, not the raw name.
+    #[test]
+    fn expected_file_names_match_the_writers_stem_encoding() {
+        let expected = expected_file_names(
+            &["酒".to_string(), "plain".to_string()],
+            std::iter::once("k.g"),
+        );
+        assert_eq!(
+            expected.iter().cloned().collect::<Vec<_>>(),
+            vec![
+                "%E9%85%92.jsonl".to_string(),
+                "k%2Eg.group.jsonl".to_string(),
+                "plain.jsonl".to_string(),
+            ]
+        );
     }
 
     fn op(
