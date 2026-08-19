@@ -884,10 +884,13 @@ fn elapsed_ms(started_at: Instant) -> u64 {
 /// let `rerank.ran`'s denominator count a `--rerank`-less run against a
 /// rerank-configured server, contradicting `build_definitions`' own
 /// "empty when `--rerank` was not given" contract for that metric.
-/// The lane cross-tab (cases declaring BOTH a structural and a source
-/// expectation), counted in one place: `build_metrics`' four `lanes.*`
-/// ratios and `print_summary`'s cross-tab line read the same counts,
-/// so the two surfaces can never drift.
+/// The lane cross-tab, counted in one place: `build_metrics`' four
+/// `lanes.*` ratios and `print_summary`'s cross-tab line read the same
+/// counts, so the two surfaces can never drift. The population is the
+/// cases whose `lane_cross` block EXISTS — declared both a structural
+/// and a source expectation AND their passage lane completed
+/// (`score_case` leaves the block `None` when the passage search
+/// failed, so a failed lane never counts as a miss here).
 struct LaneCrossTab {
     n: u64,
     structural_hit: u64,
@@ -1297,16 +1300,16 @@ fn assembly_summary_lines(inputs: &InputsBlock, metrics: &MetricsMap) -> Vec<Str
     lines
 }
 
-/// The cross-tab summary line, `None` when no case declared both a
-/// structural and a source expectation — split from `print_summary`
-/// so the n>0 gate and the counts are unit-testable without capturing
-/// stdout.
+/// The cross-tab summary line, `None` when no eligible case exists
+/// (declaring both expectations, passage lane completed — see
+/// [`lane_cross_tab`]) — split from `print_summary` so the n>0 gate
+/// and the counts are unit-testable without capturing stdout.
 fn lane_cross_summary_line(cases: &[CaseBlock]) -> Option<String> {
     let lanes = lane_cross_tab(cases);
     (lanes.n > 0).then(|| {
         format!(
             "  lane cross-tab over {} case(s) declaring both a structural and a source \
-             expectation: {} both, {} neither",
+             expectation (passage lane completed): {} both, {} neither",
             lanes.n, lanes.both, lanes.neither
         )
     })
