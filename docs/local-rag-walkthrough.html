@@ -191,7 +191,7 @@ services:
     <h2>Pin every layer to the same minor version</h2>
     <p class="section-sub">Server, SDK, and <code>langchain-taguru</code> ship from one repository in lockstep — read all three before trusting a shape.</p>
     <pre><code><span class="c"># the running server answers its own pin</span>
-curl -s localhost:8248/version   <span class="c"># {"server":"0.9.0","http_contract":1,"mcp_contract":1,...}</span>
+curl -s localhost:8248/version   <span class="c"># {"server":"0.9.0","http_contract":{"current":1,"supported":[1]},"mcp_contract":{"current":1,"supported":[1]},...}</span>
 grep <span class="s">'image:'</span> deploy/docker-compose.yml   <span class="c"># ghcr.io/t0k0sh1/taguru:0.9.0 — the deployed pin</span>
 
 <span class="c"># pin the Python side to the matching minor</span>

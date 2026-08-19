@@ -129,7 +129,7 @@ taguru version
 <span class="c"># server, without a shell in the container (the image is FROM scratch)</span>
 curl -s localhost:8248/metrics | grep taguru_build_info
 curl -s localhost:8248/health   <span class="c"># {"status": "ok", "version": "…"}</span>
-docker run --rm ghcr.io/t0k0sh1/taguru:0.4.0 version
+docker run --rm ghcr.io/t0k0sh1/taguru:0.9.0 version
 
 <span class="c"># the wire-contract versions this server speaks (ADR 0005 §6) —</span>
 <span class="c"># the machine-readable answer, ahead of any SDK connecting</span>
@@ -219,7 +219,7 @@ npm ls langchain-taguru</code></pre>
 docker compose up -d</code></pre>
     <p>
       The durable fix is to stop using <code>latest</code> at all. <code>deploy/docker-compose.yml</code>
-      pins on purpose (<code>image: ghcr.io/t0k0sh1/taguru:0.4.0 # pin; latest moves</code>) — see
+      pins on purpose (<code>image: ghcr.io/t0k0sh1/taguru:0.9.0 # pin; latest moves</code>) — see
       <a href="docker-compose.html#image">Docker Compose — the image</a> for the pin and digest-pin
       guidance.
     </p>
