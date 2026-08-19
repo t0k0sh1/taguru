@@ -219,3 +219,30 @@ def test_oversized_url_source_id_is_refused_before_any_fetch() -> None:
 
     assert document.text == ""
     assert [d.code for d in document.diagnostics] == ["source_id_too_long"]
+
+
+def test_a_redirect_to_a_private_address_is_refused_with_the_guard_on(
+    monkeypatch,  # noqa: ANN001 - pytest fixture
+) -> None:
+    """The SSRF guard re-runs per redirect hop (issue #736): with
+    ``allow_private_networks`` left at its ``False`` default, an origin
+    that answers a redirect INTO a private/internal address must be
+    refused before that hop ever connects. The loopback test server
+    plays the "public" origin by exempting exactly its own literal
+    address from the block verdict — every other address (the
+    ``127.0.0.2`` redirect target here, loopback and never listening)
+    keeps the real check, so the refusal below is the hook's own."""
+    from taguru_langchain.ingest_connectors import html as html_module
+
+    real_blocked = html_module._is_blocked_ip
+    monkeypatch.setattr(
+        html_module,
+        "_is_blocked_ip",
+        lambda address: address != "127.0.0.1" and real_blocked(address),
+    )
+    with serve({"/start": Route(location="http://127.0.0.2:9/held")}) as server:
+        document = HtmlConnector().read(f"{server.base_url}/start")
+
+    assert document.text == ""
+    assert [d.code for d in document.diagnostics] == ["unreadable"]
+    assert "private/internal" in document.diagnostics[0].message

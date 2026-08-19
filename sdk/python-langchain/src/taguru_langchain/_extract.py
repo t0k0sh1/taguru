@@ -6,6 +6,17 @@ module: the paragraph split mirrors src/paragraph.rs, the prompt mirrors
 merge/render mirror `merge()`/`render_batch()` so both producers emit the
 same batch contract. Revising the prompt here without revising extract.rs
 (or vice versa) is drift — treat the two as one artifact.
+
+One deliberate divergence (issue #736): the port mirrors extract's
+ALL-DEFAULTS prompt. The Rust `system_prompt` additionally takes
+`context_names` (ADR 0015's `--vocabulary` harvest) and `candidates`
+(ADR 0014's `--candidates` document-derived name block) — both
+default-off, opt-in CLI controls whose empty value appends nothing, so
+the default prompts stay byte-identical across producers. Porting them
+would also mean porting `candidate_terms`' script-aware segmentation
+and the vocabulary harvest, three drift-prone copies of each; until a
+LangChain user needs the opt-ins, the gap stays a documented decision,
+not an oversight.
 """
 
 from __future__ import annotations
@@ -422,6 +433,11 @@ def system_prompt(
     fact_budget: int = 0,
     schema: SchemaDocument | None = None,
 ) -> str:
+    """extract.rs `system_prompt` at its ALL-DEFAULTS controls: the Rust
+    signature's extra `context_names`/`candidates` parameters (ADR 0015 /
+    ADR 0014 — both default-off, opt-in flags whose empty value appends
+    nothing) are deliberately not ported — see the module docstring
+    (issue #736)."""
     vocabulary = _prompt_safe_labels(vocabulary)
     prompt = (
         "You extract knowledge from one document into an association graph.\n"

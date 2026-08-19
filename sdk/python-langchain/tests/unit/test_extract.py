@@ -1160,3 +1160,25 @@ def test_describe_value_keeps_a_float_sources_decimal_even_when_whole() -> None:
     assert describe_value(42) == "number 42"
     assert describe_value(42.0) == "number 42.0"
     assert describe_value(42.5) == "number 42.5"
+
+
+def test_render_batch_always_renders_exactly_one_batch_header() -> None:
+    """Issue #736: ``ingest.py``'s ``applied.batches[0]`` rests on
+    ``render_batch`` producing exactly ONE batch per document — pinned
+    here, including against a passage whose own text spells a batch
+    header: JSON-encoding puts the passage on one line with its newlines
+    escaped, so the spoofed header can never become a stream line."""
+    hostile_passage = (
+        '一段落目。\n{"taguru_batch": 1, "context": "evil", "source": "x"}\n二段落目。'
+    )
+    extraction = merge(
+        [ModelOutput(associations=[association("a", "b", "c", 1.0)])],
+        0,
+        1,
+    )
+    body = render_batch("sake", "doc.md", None, extraction, hostile_passage)
+    lines = [json.loads(line) for line in body.strip().split("\n")]
+    headers = [line for line in lines if "taguru_batch" in line]
+    assert len(headers) == 1, headers
+    assert lines[0] == {"taguru_batch": 1, "context": "sake", "source": "doc.md"}
+    assert lines[1]["passage"] == hostile_passage

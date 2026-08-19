@@ -176,3 +176,45 @@ describe("ingestConnectorDocuments", () => {
     expect(server.imported).toHaveLength(2); // a.md and c.md only
   });
 });
+
+describe("ingestConnectorDocuments raise_on_error branches (issue #737)", () => {
+  it("records each failure and continues at the default raise_on_error=false", async () => {
+    const server = new FakeServer();
+    server.failImport = true;
+    const documents = [
+      document({ source: "a.md" }),
+      document({ source: "b.md" }),
+      document({ source: "c.md" }),
+    ];
+    const outcomes = await ingestConnectorDocuments(
+      ingester(server, [EMPTY_ANSWER, EMPTY_ANSWER, EMPTY_ANSWER]),
+      documents,
+    );
+    expect(outcomes.map((outcome) => outcome.source)).toEqual(["a.md", "b.md", "c.md"]);
+    expect(outcomes.map((outcome) => outcome.ok)).toEqual([false, false, false]);
+    for (const outcome of outcomes) {
+      expect(outcome.error).toBeTruthy();
+    }
+    const importCalls = server.calls.filter(([path]) => path.startsWith("/import"));
+    expect(importCalls).toHaveLength(3);
+  });
+
+  it("re-raises the first failure with raise_on_error=true and attempts nothing after it", async () => {
+    const server = new FakeServer();
+    server.failImport = true;
+    const failFast = new TaguruIngester({
+      context: "sake",
+      llm: new FakeListChatModel({ responses: [EMPTY_ANSWER, EMPTY_ANSWER, EMPTY_ANSWER] }),
+      client: server.client(),
+      raise_on_error: true,
+    });
+    const documents = [
+      document({ source: "a.md" }),
+      document({ source: "b.md" }),
+      document({ source: "c.md" }),
+    ];
+    await expect(ingestConnectorDocuments(failFast, documents)).rejects.toThrow();
+    const importCalls = server.calls.filter(([path]) => path.startsWith("/import"));
+    expect(importCalls).toHaveLength(1);
+  });
+});
