@@ -42,6 +42,34 @@ const LIST_PAGE_LIMIT: usize = 1000;
 /// is what a caller sees past it.
 const REMOTE_RESPONSE_CAP_BYTES: u64 = 256 * 1024 * 1024;
 
+/// Import batches are packed into request bodies up to this size —
+/// comfortably under the server's default 8 MiB body cap.
+pub(crate) const IMPORT_CHUNK_BYTES: usize = 2 * 1024 * 1024;
+
+/// Packs whole rendered batches into `POST /import` bodies under
+/// [`IMPORT_CHUNK_BYTES`] — a batch is the import format's atom and
+/// never splits (ADR 0002 §9). One packer for `taguru communities`
+/// and `taguru consolidation` (issue #752); `import --url`'s own
+/// `split_batches` stays separate, slicing request bodies straight
+/// out of source-file bytes instead of joining rendered strings.
+pub(crate) fn pack_import_chunks(batches: &[String]) -> Vec<String> {
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    for batch in batches {
+        if !current.is_empty() && current.len() + batch.len() + 1 > IMPORT_CHUNK_BYTES {
+            chunks.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push('\n');
+        }
+        current.push_str(batch);
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
+}
+
 /// ADR 0002 §7: a URL carrying userinfo (`https://user:token@host/`)
 /// is refused — credentials on the command line are readable from
 /// `ps` and shell history for the lifetime of the terminal, the exact
@@ -845,8 +873,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::{
-        Api, ImportFailure, base_url_for, loopback_of, reject_unusable_base, reject_userinfo,
-        skew_warning, token_from_ring,
+        Api, IMPORT_CHUNK_BYTES, ImportFailure, base_url_for, loopback_of, pack_import_chunks,
+        reject_unusable_base, reject_userinfo, skew_warning, token_from_ring,
     };
 
     #[test]
@@ -1226,6 +1254,40 @@ mod tests {
         assert!(reject_userinfo("https://h").is_ok());
         // left for `reject_unusable_base`'s "not a usable base URL"
         assert!(reject_userinfo("not a url").is_ok());
+    }
+
+    #[test]
+    fn pack_import_chunks_never_splits_a_batch_and_packs_under_the_cap() {
+        let small = "a".repeat(100);
+        let big = "b".repeat(IMPORT_CHUNK_BYTES);
+        let chunks = pack_import_chunks(&[small.clone(), big.clone(), small.clone()]);
+        assert_eq!(chunks.len(), 3, "an oversized batch travels alone, unsplit");
+        assert_eq!(chunks[1], big);
+
+        let chunks = pack_import_chunks(&[small.clone(), small.clone()]);
+        assert_eq!(chunks.len(), 1, "two small batches share one chunk");
+        assert_eq!(chunks[0], format!("{small}\n{small}"));
+
+        assert!(pack_import_chunks(&[]).is_empty());
+    }
+
+    /// The byte budget accounts for the joining newline exactly: two
+    /// batches that fit with it share a chunk, one byte more splits
+    /// them — and the cap itself is pinned literally, so a drifted
+    /// constant fails here rather than in production against a
+    /// server's 8 MiB refusal.
+    #[test]
+    fn pack_import_chunks_counts_the_separator_against_a_pinned_cap() {
+        assert_eq!(IMPORT_CHUNK_BYTES, 2_097_152);
+        let first = "x".repeat(IMPORT_CHUNK_BYTES / 2);
+        let exactly = "y".repeat(IMPORT_CHUNK_BYTES - first.len() - 1);
+        let chunks = pack_import_chunks(&[first.clone(), exactly]);
+        assert_eq!(chunks.len(), 1, "len + 1 + len == cap still fits");
+        assert_eq!(chunks[0].len(), IMPORT_CHUNK_BYTES);
+
+        let over = "y".repeat(IMPORT_CHUNK_BYTES - first.len());
+        let chunks = pack_import_chunks(&[first.clone(), over.clone()]);
+        assert_eq!(chunks, vec![first, over], "one byte more splits");
     }
 
     #[test]
