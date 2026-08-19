@@ -1533,6 +1533,23 @@ fn build_missed_caps_at_three_and_counts_the_rest_as_truncated() {
     assert_eq!(truncated, 1, "4 misses total, 3 kept, 1 dropped");
 }
 
+/// The other side of the cap's boundary: exactly three misses fit
+/// whole — all three kept, `truncated` 0, never an off-by-one that
+/// drops the third or reports a phantom truncation.
+#[test]
+fn build_missed_keeps_exactly_three_misses_with_no_truncation() {
+    let mut case = base_case("c1");
+    case.expected_sources = vec![
+        expected_source("a.md", &[], 1),
+        expected_source("b.md", &[], 1),
+    ];
+    case.expected_concepts = vec!["x".to_string()];
+    let hits: Vec<HitLocator> = Vec::new();
+    let (missed, truncated) = build_missed(&case, Some(&hits), &[], &[], None, &[]);
+    assert_eq!(missed.len(), 3, "{missed:?}");
+    assert_eq!(truncated, 0, "exactly at the cap, nothing dropped");
+}
+
 #[test]
 fn build_missed_distinguishes_a_queried_zero_from_a_never_run_query() {
     let case = base_case("c1");

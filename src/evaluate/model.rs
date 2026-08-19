@@ -196,8 +196,8 @@ pub(crate) struct CaseBlock {
     pub(crate) diversity_sources: Option<usize>,
 }
 
-/// Recall@k/MRR/nDCG against `expected_sources`' graded relevance (ADR
-/// 0004 §274) — see [`score_recall`].
+/// Recall@k/MRR/nDCG against `expected_sources`' graded relevance
+/// (issue #274) — see [`score_recall`].
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct RecallBlock {
     pub(crate) recall_at_k: f64,
