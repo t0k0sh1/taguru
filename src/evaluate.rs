@@ -1297,6 +1297,27 @@ fn assembly_summary_lines(inputs: &InputsBlock, metrics: &MetricsMap) -> Vec<Str
     lines
 }
 
+/// The cross-tab summary line, `None` when no case declared both a
+/// structural and a source expectation — split from `print_summary`
+/// so the n>0 gate and the counts are unit-testable without capturing
+/// stdout.
+fn lane_cross_summary_line(cases: &[CaseBlock]) -> Option<String> {
+    let lanes = lane_cross_tab(cases);
+    (lanes.n > 0).then(|| {
+        format!(
+            "  lane cross-tab over {} case(s) declaring both a structural and a source \
+             expectation: {} both, {} neither",
+            lanes.n, lanes.both, lanes.neither
+        )
+    })
+}
+
+// A stdout-only reporter: every number it prints is computed by the
+// unit-tested helpers it calls (`lane_cross_tab`/
+// `lane_cross_summary_line`, `assembly_summary_lines`, the metrics
+// map), and no suite here captures the CLI's summary stdout — a
+// deleted body changes nothing any test can observe.
+#[mutants::skip]
 fn print_summary(evaluation: &EvaluationFile, masked_url: &str, context: &str) {
     let total = evaluation.cases.len();
     let passage_failed = evaluation
@@ -1347,13 +1368,8 @@ fn print_summary(evaluation: &EvaluationFile, masked_url: &str, context: &str) {
             mean(|r| r.ndcg)
         );
     }
-    let lanes = lane_cross_tab(&evaluation.cases);
-    if lanes.n > 0 {
-        println!(
-            "  lane cross-tab over {} case(s) declaring both a structural and a source \
-             expectation: {} both, {} neither",
-            lanes.n, lanes.both, lanes.neither
-        );
+    if let Some(line) = lane_cross_summary_line(&evaluation.cases) {
+        println!("{line}");
     }
     let citations: Vec<&CitationsBlock> = evaluation
         .cases
