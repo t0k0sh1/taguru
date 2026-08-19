@@ -73,6 +73,18 @@ Entries that change an on-disk format or a response shape say so.
 - `taguru import --url`'s mid-stream refusal diagnostics now count
   unsent GROUP records beside the existing batch and schema tallies
   (#728).
+- TypeScript SDK: `require("taguru/testing")` no longer crashes at
+  load — the CJS bundle derived its module directory from
+  `import.meta.dirname`, which tsup's esbuild leaves empty in CJS
+  output, so `REPO_ROOT` initialized from `resolve(undefined, ...)`.
+  The directory now comes from `import.meta.url` in the ESM output
+  and `__dirname` in the CJS one, and a new `check:cjs` step in the
+  SDK CI executes both CJS bundles under `require()` so this class of
+  break cannot ship silently again (#740).
+- Python SDK: `_models.py`'s `__all__` names all 102 defined model
+  classes (39 were missing); a new AST-based unit test keeps the list
+  and the definitions from drifting again. No runtime change —
+  `taguru`'s public re-exports were already complete (#735).
 - Hydration's published-file fetcher (`fetch_published_if_stale`) now
   sends only `InvalidData`/`NotFound` errors through the manifest
   re-read arbiter, matching the log-lane fetcher's existing
