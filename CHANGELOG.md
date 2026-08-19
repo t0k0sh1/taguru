@@ -47,6 +47,13 @@ Entries that change an on-disk format or a response shape say so.
 - `taguru extract`'s fabrication diagnostic names BOTH positions when
   an association's subject and object are each absent from the
   document, instead of only whichever field was checked first (#730).
+- Bearer credentials parse per RFC 7235's `auth-scheme 1*SP token68`:
+  one or MORE spaces between `Bearer` and the token authenticate
+  alike (strictly one space used to be required); no separator at all
+  is still refused (#731).
+- `taguru-mcp`'s refusal for a tool call whose `params.name` is
+  missing, empty, or not a string now says "tool name is required"
+  instead of the baffling `unknown tool ''` (#732).
 - `taguru router` closes four divergences from a single instance
   (#727): `GET /groups`/`GET /contexts` floor an explicit `limit=0` to
   one row (`clamp_page`), matching the shard's own keyset-page

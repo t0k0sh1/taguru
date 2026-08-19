@@ -77,6 +77,12 @@ async fn register(State(state): State<OauthState>, Json(body): Json<Value>) -> R
         .map(|uris| {
             uris.iter()
                 .filter_map(Value::as_str)
+                // The cap itself is `register_client`'s to judge; this
+                // unauthenticated endpoint just refuses to copy more
+                // than one-over-the-cap strings out of the parsed body
+                // first (issue #731) — `+ 1` keeps the over-cap
+                // refusal reachable downstream.
+                .take(crate::oauth::MAX_REDIRECT_URIS + 1)
                 .map(str::to_string)
                 .collect()
         })

@@ -1314,4 +1314,159 @@ mod tests {
             "every queued job must clear its own still-current active_by_id pointer"
         );
     }
+
+    /// A scripted one-request HTTP endpoint for the [`Bridge::call`]
+    /// round-trip tests (issue #732): records the request line, its
+    /// headers, and its raw body, then answers the given status and
+    /// JSON body. Real socket, no server binary — what the pure
+    /// `route_tool` tests deliberately cannot cover.
+    struct ScriptedEndpoint {
+        base: String,
+        seen: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    }
+
+    impl ScriptedEndpoint {
+        fn start(status: u16, answer: &str) -> Self {
+            use std::io::{Read, Write};
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("must bind");
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let sink = std::sync::Arc::clone(&seen);
+            let answer = answer.to_string();
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(mut stream) = stream else { break };
+                    let mut head = Vec::new();
+                    let mut byte = [0u8; 1];
+                    while !head.ends_with(b"\r\n\r\n") {
+                        match stream.read(&mut byte) {
+                            Ok(1) => head.extend_from_slice(&byte),
+                            _ => return,
+                        }
+                    }
+                    let head = String::from_utf8_lossy(&head).to_string();
+                    let length: usize = head
+                        .to_ascii_lowercase()
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length:"))
+                        .and_then(|value| value.trim().parse().ok())
+                        .unwrap_or(0);
+                    let mut body = vec![0u8; length];
+                    if stream.read_exact(&mut body).is_err() {
+                        return;
+                    }
+                    sink.lock()
+                        .unwrap()
+                        .push((head, String::from_utf8_lossy(&body).to_string()));
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 {status} Status\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                        answer.len()
+                    );
+                }
+            });
+            Self { base, seen }
+        }
+
+        fn bridge(&self, token: Option<&str>) -> Bridge {
+            Bridge {
+                base: self.base.clone(),
+                token: token.map(str::to_string),
+                agent: bridge_agent(Duration::from_secs(5)),
+            }
+        }
+
+        fn only_request(&self) -> (String, String) {
+            let seen = self.seen.lock().unwrap();
+            assert_eq!(seen.len(), 1, "exactly one request must have been sent");
+            seen[0].clone()
+        }
+    }
+
+    /// The happy path over a real socket: the response body comes back
+    /// verbatim, and the configured token rides as a Bearer header.
+    #[test]
+    fn bridge_call_round_trips_a_success_body_and_the_bearer_token() {
+        let endpoint = ScriptedEndpoint::start(200, r#"{"result": true}"#);
+        let answer = endpoint
+            .bridge(Some("sesame"))
+            .call("GET", "/health", None)
+            .expect("a 200 answer round-trips");
+        assert_eq!(answer, r#"{"result": true}"#);
+        let (head, body) = endpoint.only_request();
+        assert!(head.starts_with("GET /health HTTP/1.1"), "{head}");
+        assert!(
+            head.contains("authorization: Bearer sesame")
+                || head.contains("Authorization: Bearer sesame"),
+            "{head}"
+        );
+        assert!(body.is_empty(), "a bodiless GET sends no body: {body:?}");
+    }
+
+    /// The Content-Type fork: a `Value::String` body (the import
+    /// tool's NDJSON stream) rides RAW under the ndjson type — its
+    /// newlines real, never JSON-escaped — while any other JSON body
+    /// serializes under application/json.
+    #[test]
+    fn bridge_call_sends_ndjson_strings_raw_and_json_bodies_encoded() {
+        let endpoint = ScriptedEndpoint::start(200, "{}");
+        let stream = "{\"taguru_batch\": 1}\n{\"passage\": \"x\"}\n";
+        endpoint
+            .bridge(None)
+            .call("POST", "/import", Some(Value::String(stream.to_string())))
+            .expect("the stream posts");
+        let (head, body) = endpoint.only_request();
+        assert!(
+            head.to_ascii_lowercase()
+                .contains("content-type: application/x-ndjson"),
+            "{head}"
+        );
+        assert_eq!(body, stream, "the stream must arrive raw, newlines intact");
+
+        let endpoint = ScriptedEndpoint::start(200, "{}");
+        endpoint
+            .bridge(None)
+            .call("POST", "/recall", Some(serde_json::json!({"cue": "麹"})))
+            .expect("the JSON body posts");
+        let (head, body) = endpoint.only_request();
+        assert!(
+            head.to_ascii_lowercase()
+                .contains("content-type: application/json"),
+            "{head}"
+        );
+        assert_eq!(body, r#"{"cue":"麹"}"#);
+    }
+
+    /// An error status becomes `Err` carrying the server's own body as
+    /// prose AND — when that body is a JSON object — as
+    /// `ToolError::structured` (issue #182); a non-JSON error body
+    /// keeps the prose alone.
+    #[test]
+    fn bridge_call_extracts_the_structured_error_body_when_it_is_json() {
+        let endpoint = ScriptedEndpoint::start(507, r#"{"code": "quota", "error": "full"}"#);
+        let refusal = endpoint
+            .bridge(None)
+            .call("GET", "/contexts", None)
+            .expect_err("a 507 must refuse");
+        assert!(refusal.text.starts_with("HTTP 507: "), "{}", refusal.text);
+        assert!(refusal.text.contains("full"), "{}", refusal.text);
+        assert_eq!(
+            refusal
+                .structured
+                .as_ref()
+                .and_then(|body| body["code"].as_str()),
+            Some("quota"),
+            "{}",
+            refusal.text
+        );
+
+        let endpoint = ScriptedEndpoint::start(502, "bad gateway (not json)");
+        let refusal = endpoint
+            .bridge(None)
+            .call("GET", "/contexts", None)
+            .expect_err("a 502 must refuse");
+        assert_eq!(refusal.text, "HTTP 502: bad gateway (not json)");
+        assert!(refusal.structured.is_none(), "{}", refusal.text);
+    }
 }

@@ -26,6 +26,15 @@ pub fn route_tool(
     name: &str,
     arguments: &Value,
 ) -> Result<(&'static str, String, Option<Value>), String> {
+    // A missing or non-string `params.name` classifies as "" (the
+    // protocol layer keeps `Call::Tool` infallible) — name that
+    // precisely here instead of answering the baffling "unknown tool
+    // ''" (issue #732).
+    if name.is_empty() {
+        return Err(
+            "tool name is required — params.name was missing, empty, or not a string".to_string(),
+        );
+    }
     let context_path = |key: &str| -> Result<String, String> {
         Ok(format!("/contexts/{}", segment(need(arguments, key)?)))
     };

@@ -68,11 +68,16 @@ fn is_auth_exempt(path: &str, oauth_enabled: bool) -> bool {
 
 /// Strips the `Bearer` auth-scheme, RFC 7235 §2.1's case-insensitively
 /// (`bearer`, `BEARER`, `Bearer` alike) — only the scheme, never the
-/// token that follows it.
+/// token that follows it. The grammar is `auth-scheme 1*SP token68`:
+/// one or MORE spaces (issue #731), so a client padding the gap still
+/// authenticates; no space at all is not a Bearer credential.
 fn strip_bearer_prefix(value: &str) -> Option<&str> {
-    let prefix_len = "Bearer ".len();
-    let (scheme, rest) = value.split_at_checked(prefix_len)?;
-    scheme.eq_ignore_ascii_case("Bearer ").then_some(rest)
+    let (scheme, rest) = value.split_at_checked("Bearer".len())?;
+    if !scheme.eq_ignore_ascii_case("Bearer") {
+        return None;
+    }
+    let rest = rest.strip_prefix(' ')?;
+    Some(rest.trim_start_matches(' '))
 }
 
 /// The credential a key name is billed and scoped against: itself, or
@@ -1007,6 +1012,27 @@ mod tests {
                 "scheme {scheme} must authenticate"
             );
         }
+    }
+
+    /// RFC 7235 §2.1's `auth-scheme 1*SP token68`: one or MORE spaces
+    /// between scheme and token authenticate alike (issue #731), while
+    /// no separator at all — `Bearers3cret` — is not a Bearer
+    /// credential.
+    #[tokio::test]
+    async fn the_bearer_scheme_takes_one_or_more_spaces_never_zero() {
+        let keyring = ring(Some("s3cret"), None);
+        for padded in ["Bearer s3cret", "Bearer  s3cret", "Bearer    s3cret"] {
+            assert_eq!(
+                status_of(app(keyring.clone()), "/contexts", Some(padded)).await,
+                200,
+                "{padded:?} must authenticate"
+            );
+        }
+        assert_eq!(
+            status_of(app(keyring), "/contexts", Some("Bearers3cret")).await,
+            401,
+            "a missing separator is not a Bearer credential"
+        );
     }
 
     /// Every named key opens the gate, and the response carries WHICH —
