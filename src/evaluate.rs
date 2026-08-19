@@ -26,7 +26,7 @@
 //! is `Role::Read` and equally tempting to reach for; it is named here
 //! explicitly so a future reader does not assume it was overlooked.
 //!
-//! Recall@k/MRR/nDCG (graded relevance, ADR 0004 §274) and
+//! Recall@k/MRR/nDCG (graded relevance, issue #274) and
 //! concept/label/association retrieval coverage are scored here, from
 //! rank and label alone — no lane's raw graph/BM25/vector score is
 //! ever folded into another's (#215's own requirement). Citation recall
@@ -884,6 +884,39 @@ fn elapsed_ms(started_at: Instant) -> u64 {
 /// let `rerank.ran`'s denominator count a `--rerank`-less run against a
 /// rerank-configured server, contradicting `build_definitions`' own
 /// "empty when `--rerank` was not given" contract for that metric.
+/// The lane cross-tab, counted in one place: `build_metrics`' four
+/// `lanes.*` ratios and `print_summary`'s cross-tab line read the same
+/// counts, so the two surfaces can never drift. The population is the
+/// cases whose `lane_cross` block EXISTS — declared both a structural
+/// and a source expectation AND their passage lane completed
+/// (`score_case` leaves the block `None` when the passage search
+/// failed, so a failed lane never counts as a miss here).
+struct LaneCrossTab {
+    n: u64,
+    structural_hit: u64,
+    passage_hit: u64,
+    both: u64,
+    neither: u64,
+}
+
+fn lane_cross_tab(cases: &[CaseBlock]) -> LaneCrossTab {
+    let mut tab = LaneCrossTab {
+        n: 0,
+        structural_hit: 0,
+        passage_hit: 0,
+        both: 0,
+        neither: 0,
+    };
+    for cross in cases.iter().filter_map(|case| case.lane_cross.as_ref()) {
+        tab.n += 1;
+        tab.structural_hit += u64::from(cross.structural_hit);
+        tab.passage_hit += u64::from(cross.passage_hit);
+        tab.both += u64::from(cross.structural_hit && cross.passage_hit);
+        tab.neither += u64::from(!cross.structural_hit && !cross.passage_hit);
+    }
+    tab
+}
+
 fn build_metrics(cases: &[CaseBlock], rerank_requested_this_run: bool) -> MetricsMap {
     let mut passage_latencies = Vec::new();
     let mut resolve_latencies = Vec::new();
@@ -897,12 +930,6 @@ fn build_metrics(cases: &[CaseBlock], rerank_requested_this_run: bool) -> Metric
     let mut coverage_concepts = Vec::new();
     let mut coverage_labels = Vec::new();
     let mut coverage_associations = Vec::new();
-    let mut lane_cross_n = 0u64;
-    let mut structural_hit_n = 0u64;
-    let mut passage_hit_n = 0u64;
-    let mut both_n = 0u64;
-    let mut neither_n = 0u64;
-
     let mut citation_latencies = Vec::new();
     let mut citation_recall = Vec::new();
     let mut citation_validity = Vec::new();
@@ -971,13 +998,6 @@ fn build_metrics(cases: &[CaseBlock], rerank_requested_this_run: bool) -> Metric
             if let Some(associations) = &coverage.associations {
                 coverage_associations.push(associations.value);
             }
-        }
-        if let Some(cross) = &case.lane_cross {
-            lane_cross_n += 1;
-            structural_hit_n += u64::from(cross.structural_hit);
-            passage_hit_n += u64::from(cross.passage_hit);
-            both_n += u64::from(cross.structural_hit && cross.passage_hit);
-            neither_n += u64::from(!cross.structural_hit && !cross.passage_hit);
         }
         if let Some(citations) = &case.citations {
             citation_recall.push(citations.recall.value);
@@ -1167,21 +1187,22 @@ fn build_metrics(cases: &[CaseBlock], rerank_requested_this_run: bool) -> Metric
         "latency.citation_ms".to_string(),
         MetricValue::Distribution(Distribution::from_samples(citation_latencies)),
     );
+    let lanes = lane_cross_tab(cases);
     metrics.insert(
         "lanes.structural_hit".to_string(),
-        MetricValue::Ratio(ratio_metric(structural_hit_n, lane_cross_n)),
+        MetricValue::Ratio(ratio_metric(lanes.structural_hit, lanes.n)),
     );
     metrics.insert(
         "lanes.passage_hit".to_string(),
-        MetricValue::Ratio(ratio_metric(passage_hit_n, lane_cross_n)),
+        MetricValue::Ratio(ratio_metric(lanes.passage_hit, lanes.n)),
     );
     metrics.insert(
         "lanes.both".to_string(),
-        MetricValue::Ratio(ratio_metric(both_n, lane_cross_n)),
+        MetricValue::Ratio(ratio_metric(lanes.both, lanes.n)),
     );
     metrics.insert(
         "lanes.neither".to_string(),
-        MetricValue::Ratio(ratio_metric(neither_n, lane_cross_n)),
+        MetricValue::Ratio(ratio_metric(lanes.neither, lanes.n)),
     );
     // #308 (ADR 0006 §14)
     metrics.insert(
@@ -1279,6 +1300,27 @@ fn assembly_summary_lines(inputs: &InputsBlock, metrics: &MetricsMap) -> Vec<Str
     lines
 }
 
+/// The cross-tab summary line, `None` when no eligible case exists
+/// (declaring both expectations, passage lane completed — see
+/// [`lane_cross_tab`]) — split from `print_summary` so the n>0 gate
+/// and the counts are unit-testable without capturing stdout.
+fn lane_cross_summary_line(cases: &[CaseBlock]) -> Option<String> {
+    let lanes = lane_cross_tab(cases);
+    (lanes.n > 0).then(|| {
+        format!(
+            "  lane cross-tab over {} case(s) declaring both a structural and a source \
+             expectation (passage lane completed): {} both, {} neither",
+            lanes.n, lanes.both, lanes.neither
+        )
+    })
+}
+
+// A stdout-only reporter: every number it prints is computed by the
+// unit-tested helpers it calls (`lane_cross_tab`/
+// `lane_cross_summary_line`, `assembly_summary_lines`, the metrics
+// map), and no suite here captures the CLI's summary stdout — a
+// deleted body changes nothing any test can observe.
+#[mutants::skip]
 fn print_summary(evaluation: &EvaluationFile, masked_url: &str, context: &str) {
     let total = evaluation.cases.len();
     let passage_failed = evaluation
@@ -1311,12 +1353,6 @@ fn print_summary(evaluation: &EvaluationFile, masked_url: &str, context: &str) {
         .iter()
         .filter_map(|c| c.recall.as_ref())
         .collect();
-    let cross: Vec<&LaneCrossBlock> = evaluation
-        .cases
-        .iter()
-        .filter_map(|c| c.lane_cross.as_ref())
-        .collect();
-
     println!("taguru evaluate: {masked_url} / context '{context}'");
     println!(
         "  {total} case(s) — passage: {} ok, {passage_failed} failed; structural lane ran on \
@@ -1335,20 +1371,8 @@ fn print_summary(evaluation: &EvaluationFile, masked_url: &str, context: &str) {
             mean(|r| r.ndcg)
         );
     }
-    if !cross.is_empty() {
-        let both = cross
-            .iter()
-            .filter(|c| c.structural_hit && c.passage_hit)
-            .count();
-        let neither = cross
-            .iter()
-            .filter(|c| !c.structural_hit && !c.passage_hit)
-            .count();
-        println!(
-            "  lane cross-tab over {} case(s) declaring both a structural and a source \
-             expectation: {both} both, {neither} neither",
-            cross.len()
-        );
+    if let Some(line) = lane_cross_summary_line(&evaluation.cases) {
+        println!("{line}");
     }
     let citations: Vec<&CitationsBlock> = evaluation
         .cases

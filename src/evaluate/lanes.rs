@@ -453,8 +453,8 @@ fn check_citation(
 // invented scale" requirement). Pure functions, no network access, so
 // every rule here is unit-testable without a server.
 
-/// One case's recall@k/MRR/nDCG against `expected_sources` (ADR 0004
-/// §274). `None` when the case declares no `relevance >= 1` source —
+/// One case's recall@k/MRR/nDCG against `expected_sources` (issue
+/// #274). `None` when the case declares no `relevance >= 1` source —
 /// `relevance == 0` means "not evidence for this case," dropped from
 /// the denominator like `benchmark::search`'s own `resolve_expected_items`
 /// (`search.rs:1014-1016`).

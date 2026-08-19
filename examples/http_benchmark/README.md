@@ -24,7 +24,7 @@ non-2xx.
 
 ```sh
 # a scratch server to point at, if none is running:
-TAGURU_DATA_DIR=$(mktemp -d) cargo run --release &
+TAGURU_DATA_DIR=$(mktemp -d) cargo run --release --bin taguru &
 
 cargo run --release --example http_benchmark -- \
     --url http://127.0.0.1:8248 --concurrency 8 --requests 2000
