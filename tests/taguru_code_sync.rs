@@ -262,6 +262,44 @@ fn fact_model_rebuild_still_retracts_deleted_sources() {
     assert_eq!(code, 0, "survivors must re-import: {out}");
 }
 
+/// ADR 0010 §3 (issue #733): a file newly gitignored — `git rm
+/// --cached` plus a staged .gitignore, nothing committed — still
+/// exists on disk, but it has left the `git ls-files
+/// --exclude-standard` universe. The incremental sync must not
+/// re-import it (that path is how secrets would leak into the map),
+/// and whatever an earlier sync imported for it must retract.
+#[test]
+fn a_newly_gitignored_file_is_retracted_not_reimported() {
+    let repo = Repo::new();
+    repo.write("src/lib.rs", "pub fn survives() {}\n");
+    repo.write("src/secret.rs", "pub fn leaked_credential() {}\n");
+    repo.commit("base");
+    let (code, out) = repo.run(&["sync", "."]);
+    assert_eq!(code, 0, "{out}");
+    let (code, out) = repo.run(&["find", "leaked_credential"]);
+    assert_eq!(code, 0, "the tracked file syncs at first: {out}");
+
+    // The staged deletion keeps the path in the dirty set (so it IS a
+    // candidate), while the .gitignore removes it from the universe —
+    // exactly the disk-says-present, universe-says-gone split.
+    repo.git(&["rm", "--cached", "src/secret.rs"]);
+    repo.write(".gitignore", "src/secret.rs\n");
+    repo.git(&["add", ".gitignore"]);
+    assert!(
+        repo.dir.join("src/secret.rs").is_file(),
+        "the file must still exist on disk for this test to mean anything"
+    );
+    let (code, out) = repo.run(&["sync", "."]);
+    assert_eq!(code, 0, "{out}");
+    let (code, _) = repo.run(&["find", "leaked_credential"]);
+    assert_eq!(
+        code, 1,
+        "a newly-gitignored file's symbols must leave the map, not re-import"
+    );
+    let (code, out) = repo.run(&["find", "survives"]);
+    assert_eq!(code, 0, "the untouched file must survive the sweep: {out}");
+}
+
 /// A repo with nothing to import must still complete its first sync
 /// (the state file needs its directory created without the boot).
 #[test]
@@ -468,6 +506,41 @@ fn evalset_and_eval_gate_round_trip() {
         fail.to_str().unwrap(),
     ]);
     assert_eq!(code, 3, "violated gate must exit 3");
+
+    // Issue #733: the gate's own validation is what keeps it from
+    // going silently hollow — a typo'd key, a stringly-typed value,
+    // and a violation on the OTHER metrics must all be caught, not
+    // skipped as "not hit1_rate".
+    let gate = |name: &str, body: &str| -> (i32, String) {
+        let path = repo.dir.join(name);
+        fs::write(&path, body).unwrap();
+        repo.run(&[
+            "eval",
+            "--eval",
+            eval_path.to_str().unwrap(),
+            "--thresholds",
+            path.to_str().unwrap(),
+        ])
+    };
+    let (code, out) = gate("typo.json", "{\"hit1_rte\": 0.9}\n");
+    assert_eq!(code, 1, "an unknown key must refuse the run: {out}");
+    assert!(out.contains("unknown key 'hit1_rte'"), "{out}");
+
+    let (code, out) = gate("stringly.json", "{\"hit1_rate\": \"0.9\"}\n");
+    assert_eq!(code, 1, "a stringly-typed floor must refuse the run: {out}");
+    assert!(out.contains("must be a number"), "{out}");
+
+    let (code, out) = gate("drift-type.json", "{\"line_drift\": -1}\n");
+    assert_eq!(code, 1, "a negative ceiling is not a count: {out}");
+    assert!(out.contains("non-negative integer"), "{out}");
+
+    let (code, out) = gate("not-object.json", "[1, 2]\n");
+    assert_eq!(code, 1, "a non-object file must refuse the run: {out}");
+    assert!(out.contains("expected a JSON object"), "{out}");
+
+    let (code, out) = gate("hit10.json", "{\"hit10_rate\": 1.1}\n");
+    assert_eq!(code, 3, "a hit10_rate floor violation must gate too: {out}");
+    assert!(out.contains("below the 1.100 floor"), "{out}");
 }
 
 /// Offline syncs exit before the passage store's own compaction

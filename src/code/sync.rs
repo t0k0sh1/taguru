@@ -311,12 +311,18 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
         .into_iter()
         .filter(|path| !under_data_dir(path, walk.root(), &data_dir))
         .collect();
+    // The current universe — `git ls-files --cached --others
+    // --exclude-standard` — read once: it seeds the full-listing
+    // candidate paths below AND gates every candidate's fate (ADR
+    // 0010 §3: a gitignored file, secrets included, is never in the
+    // universe, however it became a candidate).
+    let universe: std::collections::BTreeSet<String> = walk.full_listing()?.into_iter().collect();
     // Candidates: every path whose truth may have moved since the
     // last sync. What each one becomes — re-import or retraction —
     // is decided by the disk below, not by which list found it.
     let mut candidates: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     match &previous {
-        None => candidates.extend(walk.full_listing()?),
+        None => candidates.extend(universe.iter().cloned()),
         Some(state)
             if !rebuild
                 && state.commit == head
@@ -330,7 +336,7 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
             if rebuild {
                 // Every survivor re-imports under the new model; the
                 // diff and dirty sets below still add the deletions.
-                candidates.extend(walk.full_listing()?);
+                candidates.extend(universe.iter().cloned());
             }
             let committed = if state.commit == head {
                 Vec::new()
@@ -345,7 +351,7 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
                             "taguru-code: sync: {message} — sync anchor unusable, \
                              falling back to a full re-sync"
                         );
-                        candidates.extend(walk.full_listing()?);
+                        candidates.extend(universe.iter().cloned());
                         Vec::new()
                     }
                 }
@@ -377,7 +383,12 @@ fn sync(args: &SyncArgs) -> Result<i32, String> {
         if under_data_dir(&path, walk.root(), &data_dir) {
             continue; // never index the map's own storage
         }
-        if !walk.root().join(&path).exists() {
+        // Membership first, disk second (issue #733, ADR 0010 §3):
+        // a file newly gitignored — `git rm --cached` plus a staged
+        // .gitignore, nothing committed — still exists on disk, but
+        // it has LEFT the universe, so it must never re-import and
+        // whatever an earlier sync imported for it retracts now.
+        if !universe.contains(&path) || !walk.root().join(&path).exists() {
             retractions.push(path);
             continue;
         }
