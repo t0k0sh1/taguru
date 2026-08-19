@@ -21,8 +21,7 @@ def test_models_all_names_every_defined_class() -> None:
     declared: set[str] = set()
     for node in tree.body:
         if isinstance(node, ast.Assign) and any(
-            isinstance(target, ast.Name) and target.id == "__all__"
-            for target in node.targets
+            isinstance(target, ast.Name) and target.id == "__all__" for target in node.targets
         ):
             assert isinstance(node.value, ast.List)
             # Every element must BE a string literal — a stray
@@ -35,9 +34,7 @@ def test_models_all_names_every_defined_class() -> None:
             ]
             assert not non_strings, f"__all__ carries non-string elements: {non_strings}"
             declared = {
-                element.value
-                for element in node.value.elts
-                if isinstance(element, ast.Constant)
+                element.value for element in node.value.elts if isinstance(element, ast.Constant)
             }
     assert declared, "_models.py must declare __all__"
     missing = sorted(classes - declared)
