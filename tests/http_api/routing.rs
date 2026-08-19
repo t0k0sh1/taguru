@@ -272,6 +272,19 @@ fn the_router_over_split_shards_answers_exactly_like_one_instance() {
     // single instance's own rows.
     assert_equivalent(&single, &router, "GET", "/contexts", None);
     assert_equivalent(&single, &router, "GET", "/groups", None);
+    // `limit=0` is a legitimate keyset query and must floor to a
+    // one-row page on both sides (`clamp_page`) — an empty page reads
+    // as end-of-collection to the SDK iterators.
+    let floored = assert_equivalent(&single, &router, "GET", "/contexts?limit=0", None);
+    assert!(
+        !floored["result"]["contexts"].as_array().unwrap().is_empty(),
+        "{floored}"
+    );
+    let floored = assert_equivalent(&single, &router, "GET", "/groups?limit=0", None);
+    assert!(
+        !floored["result"]["groups"].as_array().unwrap().is_empty(),
+        "{floored}"
+    );
     assert_equivalent(&single, &router, "GET", "/groups/jp", None);
     assert_equivalent(&single, &router, "GET", "/groups/all", None);
     // The export record: the router unions per-shard projections back
@@ -328,6 +341,16 @@ fn the_router_over_split_shards_answers_exactly_like_one_instance() {
         "PATCH",
         "/groups/jp",
         Some(json!({"add_contexts": ["glossary"]})),
+    );
+    // Removals are an idempotent set difference on a single instance —
+    // never existence-checked — so a name no shard places must not be
+    // refused by the router's projection either.
+    assert_equivalent(
+        &single,
+        &router,
+        "PATCH",
+        "/groups/jp",
+        Some(json!({"remove_contexts": ["never-existed"]})),
     );
 
     // Refusals: naming nothing, an unknown context (first in list
@@ -714,6 +737,133 @@ fn a_router_rewrap_keeps_structured_refusal_detail() {
     // "durable_prefix" claim is true, not just structurally present.
     let installed = router.ok("GET", "/contexts/ctx_ok/schema", None);
     assert_eq!(installed["mode"], "warn", "{installed}");
+}
+
+/// `POST /maintenance/compact` on a fleet where NO shard can be
+/// reached must refuse like `POST /flush` does, never answer an
+/// empty 200 sweep report that reads as "nothing needed compacting".
+#[test]
+fn maintenance_refuses_when_every_shard_is_unreachable() {
+    // Port 1 needs privileges to bind, so a dial is refused — a dead
+    // shard with no port-reuse race.
+    let router = Server::start_router("maint-all-down", "sake = http://127.0.0.1:1\n", &[]);
+
+    let (status, body) = router.call("POST", "/maintenance/compact", None);
+    assert_eq!(status, 502, "{body}");
+    assert_eq!(body["code"], "shard_unreachable", "{body}");
+    // The sibling verb's guard, for symmetry.
+    let (status, body) = router.call("POST", "/flush", None);
+    assert_eq!(status, 502, "{body}");
+    assert_eq!(body["code"], "shard_unreachable", "{body}");
+}
+
+/// A group record already present on one shard and created EMPTY on
+/// the rest (drift healing) replaces nothing in the union — the merged
+/// outcome must say "unchanged"; a created projection that actually
+/// carries members is what earns "replaced".
+#[test]
+fn group_import_outcome_reflects_the_union_not_any_one_shard() {
+    let shard_a = Server::start("gimp-outcome-a");
+    let shard_b = Server::start("gimp-outcome-b");
+    let router = Server::start_router(
+        "gimp-outcome",
+        &format!("ctx_a = {}\nctx_b = {}\n", shard_a.base, shard_b.base),
+        &[],
+    );
+    router.ok("PUT", "/contexts/ctx_a", Some(json!({})));
+    router.ok("PUT", "/contexts/ctx_b", Some(json!({})));
+    // Shard A already holds g's projection; shard B has never heard of
+    // it — the drifted state a re-import heals.
+    shard_a.ok("PUT", "/groups/g", Some(json!({"contexts": ["ctx_a"]})));
+
+    // The same membership shard A already holds: A answers
+    // "unchanged", B "created" with an empty projection — nothing in
+    // the union changed.
+    let stream = "{\"taguru_group\": 1, \"name\": \"g\", \"contexts\": [\"ctx_a\"]}\n";
+    let (status, body) = post_import(&router, stream, None);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body["result"]["groups"][0]["outcome"],
+        json!("unchanged"),
+        "an empty created projection beside unchanged siblings replaced nothing: {body}"
+    );
+
+    // The record gains ctx_b: shard B's projection now carries a
+    // member, so the union's row really changed.
+    let stream = "{\"taguru_group\": 1, \"name\": \"g\", \"contexts\": [\"ctx_a\", \"ctx_b\"]}\n";
+    let (status, body) = post_import(&router, stream, None);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body["result"]["groups"][0]["outcome"],
+        json!("replaced"),
+        "{body}"
+    );
+}
+
+/// The MCP manual comes from the FIRST shard that answers
+/// `GET /protocol` — a dead shard ahead of a live one must not take
+/// the manual down with it, and a fleet with no live shard at all
+/// still initializes with the router's own local text.
+#[test]
+fn mcp_instructions_skip_a_dead_shard_and_fall_back_to_local_text() {
+    let live = Server::start("mcp-manual-live");
+    let router = Server::start_router(
+        "mcp-manual",
+        &format!("a = http://127.0.0.1:1\nb = {}\n", live.base),
+        &[],
+    );
+    let initialize = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}});
+    let (status, init) = router.call("POST", "/mcp", Some(initialize.clone()));
+    assert_eq!(status, 200, "{init}");
+    let (_, manual) = live.call("GET", "/protocol", None);
+    assert_eq!(
+        init["result"]["instructions"], manual,
+        "the manual must be the live shard's own text, dead shard skipped"
+    );
+
+    // No shard alive anywhere: initialize still answers, with the
+    // router's local text instead of an error.
+    let all_dead = Server::start_router("mcp-manual-dead", "a = http://127.0.0.1:1\n", &[]);
+    let (status, init) = all_dead.call("POST", "/mcp", Some(initialize));
+    assert_eq!(status, 200, "{init}");
+    assert!(
+        init["result"]["instructions"]
+            .as_str()
+            .is_some_and(|text| !text.is_empty()),
+        "{init}"
+    );
+}
+
+/// A shard that answers success with an envelope the router cannot
+/// read still LANDED its chunk — a later refusal's rewrap must count
+/// it from the chunk's own batch ranges, not from the parsed
+/// outcomes.
+#[test]
+fn a_rewrap_counts_batches_landed_even_when_an_envelope_is_unreadable() {
+    let stub = FakeShard::start(json!({"ok": true}));
+    let shard = Server::start("rewrap-count-real");
+    let router = Server::start_router(
+        "rewrap-count",
+        &format!("stubbed = {}\nghost = {}\n", stub.endpoint, shard.base),
+        &[],
+    );
+    // `ghost` is never created: its schema record passes the dry-run
+    // preflight (scope checks only) and refuses on the real run —
+    // AFTER the stub shard's batch chunk landed.
+    let stream = concat!(
+        "{\"taguru_batch\": 1, \"context\": \"stubbed\", \"source\": \"doc\"}\n",
+        "{\"subject\": \"a\", \"label\": \"b\", \"object\": \"c\", \"weight\": 1.0}\n",
+        "{\"taguru_schema\": 1, \"context\": \"ghost\", \"mode\": \"warn\", \
+         \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n",
+    );
+    let (status, body) = post_import(&router, stream, None);
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(body["integrity"], json!("durable_prefix"), "{body}");
+    assert_eq!(
+        body["durable_batches"],
+        json!(1),
+        "the stub's chunk landed even though its envelope was unreadable: {body}"
+    );
 }
 
 // ---------------------------------------------------------------------------

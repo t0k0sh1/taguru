@@ -33,14 +33,7 @@ pub(super) async fn broadcast_flush(
                     flushed.extend(envelope.result);
                 }
             }
-            Ok(answer) => {
-                return (
-                    answer.status,
-                    [(header::CONTENT_TYPE, "application/json")],
-                    answer.body,
-                )
-                    .into_response();
-            }
+            Ok(answer) => return passthrough(answer),
             Err(error) => unreached.push(Unreached {
                 shard: map.url(shard).to_string(),
                 contexts: Vec::new(),
@@ -64,6 +57,7 @@ pub(super) async fn broadcast_maintenance(
     let path = full_path(&request);
     let map = state.map();
     let shards: Vec<usize> = map.all().collect();
+    let shard_count = shards.len();
     // Sequential on purpose: each shard's sweep drains its own
     // traffic; running them one at a time keeps the fleet from
     // pausing everywhere at once.
@@ -87,20 +81,19 @@ pub(super) async fn broadcast_maintenance(
                         .unwrap_or(false);
                 }
             }
-            Ok(answer) => {
-                return (
-                    answer.status,
-                    [(header::CONTENT_TYPE, "application/json")],
-                    answer.body,
-                )
-                    .into_response();
-            }
+            Ok(answer) => return passthrough(answer),
             Err(error) => unreached.push(Unreached {
                 shard: map.url(shard).to_string(),
                 contexts: Vec::new(),
                 error,
             }),
         }
+    }
+    // The same guard as `broadcast_flush` above: a fleet where NO shard
+    // could be asked answers a 502 refusal, never an empty-but-200
+    // sweep report that reads as "nothing needed compacting".
+    if contexts.is_empty() && unreached.len() == shard_count && shard_count > 0 {
+        return unreachable_refusal(&unreached, started_at);
     }
     router_ok(
         json!({"contexts": contexts, "deadline_exceeded": deadline_exceeded}),

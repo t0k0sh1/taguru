@@ -128,14 +128,7 @@ pub(super) fn gather(
     {
         // The shard's own bytes pass through — same code, same
         // message, same status a single instance would have answered.
-        return Err(Box::new(
-            (
-                answer.status,
-                [(header::CONTENT_TYPE, "application/json")],
-                answer.body,
-            )
-                .into_response(),
-        ));
+        return Err(Box::new(passthrough(answer)));
     }
     if answers.is_empty() && !unreached.is_empty() {
         return Err(Box::new(unreachable_refusal(&unreached, started_at)));

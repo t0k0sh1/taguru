@@ -57,15 +57,18 @@ impl RouteMap {
             // The message deliberately does NOT echo the URL: the boot
             // and reload paths print this error.
             let authority = &url[url.find("//").expect("scheme checked above") + 2..];
-            if authority
-                .split(['/', '?', '#'])
-                .next()
-                .is_some_and(|host| host.contains('@'))
-            {
+            let host = authority.split(['/', '?', '#']).next().unwrap_or_default();
+            if host.contains('@') {
                 return Err(format!(
                     "line {number}: the shard URL carries userinfo ('user@host') — shard \
                      URLs appear in logs and metrics labels, so credentials are refused"
                 ));
+            }
+            // A bare scheme ('http://', or 'http:///path') would store
+            // a shard no dial can reach — refuse it with the line
+            // number instead of failing every request later.
+            if host.is_empty() {
+                return Err(format!("line {number}: '{url}' names no shard host"));
             }
             if name == "*" {
                 if fallback.is_some() {

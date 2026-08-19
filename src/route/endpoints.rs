@@ -85,14 +85,7 @@ pub(super) async fn proxy_protocol(
                 )
                     .into_response();
             }
-            Ok(answer) => {
-                return (
-                    answer.status,
-                    [(header::CONTENT_TYPE, "application/json")],
-                    answer.body,
-                )
-                    .into_response();
-            }
+            Ok(answer) => return passthrough(answer),
             Err(error) => unreached.push(Unreached {
                 shard: map.url(shard).to_string(),
                 contexts: Vec::new(),
