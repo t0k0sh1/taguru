@@ -326,6 +326,27 @@ fn oauth_http_layer_refuses_bad_client_redirect_and_grant_parameters() {
     assert_eq!(status, 400);
     assert_eq!(empty_redirects["error"], "invalid_client_metadata");
 
+    // Over the redirect_uris cap: register() copies at most cap+1
+    // entries out of the body (issue #731's front-loaded bound), so
+    // the over-cap refusal downstream must still fire with the cap in
+    // its message.
+    let flood: Vec<String> = (0..=10)
+        .map(|i| format!("https://ok.example/cb{i}"))
+        .collect();
+    let (status, over_cap) = server.call(
+        "POST",
+        "/oauth/register",
+        Some(json!({"client_name": "c", "redirect_uris": flood})),
+    );
+    assert_eq!(status, 400, "{over_cap}");
+    assert!(
+        over_cap["error_description"]
+            .as_str()
+            .unwrap()
+            .contains("too many redirect_uris"),
+        "{over_cap}"
+    );
+
     let (status, insecure_redirect) = server.call(
         "POST",
         "/oauth/register",
