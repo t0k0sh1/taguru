@@ -48,7 +48,11 @@ pub(crate) const IMPORT_CHUNK_BYTES: usize = 2 * 1024 * 1024;
 
 /// Packs whole rendered batches into `POST /import` bodies under
 /// [`IMPORT_CHUNK_BYTES`] — a batch is the import format's atom and
-/// never splits (ADR 0002 §9). One packer for `taguru communities`
+/// never splits (ADR 0002 §9), so one batch alone LARGER than the
+/// ceiling travels as its own over-sized chunk: the server's body cap
+/// (8 MiB default, four times this ceiling) is the authority that
+/// refuses it, not a client-side split that would sever the batch's
+/// retract-then-apply record set. One packer for `taguru communities`
 /// and `taguru consolidation` (issue #752); `import --url`'s own
 /// `split_batches` stays separate, slicing request bodies straight
 /// out of source-file bytes instead of joining rendered strings.
@@ -1261,8 +1265,15 @@ mod tests {
         let small = "a".repeat(100);
         let big = "b".repeat(IMPORT_CHUNK_BYTES);
         let chunks = pack_import_chunks(&[small.clone(), big.clone(), small.clone()]);
-        assert_eq!(chunks.len(), 3, "an oversized batch travels alone, unsplit");
+        assert_eq!(chunks.len(), 3, "a cap-sized batch travels alone, unsplit");
         assert_eq!(chunks[1], big);
+
+        // One batch alone LARGER than the ceiling still travels whole:
+        // its chunk exceeds the ceiling on purpose — the server's body
+        // cap is the authority that refuses it, never a client split.
+        let over = "c".repeat(IMPORT_CHUNK_BYTES + 1);
+        let chunks = pack_import_chunks(&[small.clone(), over.clone(), small.clone()]);
+        assert_eq!(chunks, vec![small.clone(), over, small.clone()]);
 
         let chunks = pack_import_chunks(&[small.clone(), small.clone()]);
         assert_eq!(chunks.len(), 1, "two small batches share one chunk");
