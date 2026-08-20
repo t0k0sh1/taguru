@@ -414,6 +414,88 @@ fn a_full_remote_export_removes_stale_stream_files() {
     let _ = std::fs::remove_dir_all(&out);
 }
 
+/// Issue #751: a well-formed response naming a DIFFERENT context or
+/// group than the one requested is refused, and nothing lands on
+/// disk. Import applies each batch/record to its EMBEDDED name,
+/// whatever file it rode in on — saved under the wrong name, a later
+/// directory import would restore the wrong truth.
+#[test]
+fn a_response_naming_a_different_context_or_group_is_refused() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let responses = [
+            // /health, /version: no skew warning, no schema refusal.
+            ("HTTP/1.1 200 OK", r#"{"status":"ok"}"#.to_string()),
+            ("HTTP/1.1 200 OK", r#"{}"#.to_string()),
+            // GET /contexts, one page then the terminator.
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"result":{"total":1,"contexts":[{"name":"sake"}]}}"#.to_string(),
+            ),
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"result":{"total":1,"contexts":[]}}"#.to_string(),
+            ),
+            // GET /contexts/sake/export: a valid stream — for the
+            // WRONG context.
+            (
+                "HTTP/1.1 200 OK",
+                "{\"taguru_batch\":1,\"context\":\"other\",\"source\":\"a.md\",\
+                 \"create\":{\"description\":\"d\"}}\n{\"passage\":\"x\"}\n"
+                    .to_string(),
+            ),
+            // GET /groups, one page then the terminator.
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"result":{"total":1,"groups":[{"name":"g"}]}}"#.to_string(),
+            ),
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"result":{"total":1,"groups":[]}}"#.to_string(),
+            ),
+            // GET /groups/g/export: a valid record — for the WRONG
+            // group.
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"taguru_group":1,"name":"h","description":"x","contexts":["sake"]}"#
+                    .to_string(),
+            ),
+        ];
+        for (status_line, body) in responses {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut buffer = [0u8; 2048];
+            let _ = stream.read(&mut buffer);
+            let response = format!(
+                "{status_line}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    let base = format!("http://{addr}");
+
+    let out = crate::support::common::scratch_dir("remote-export-wrongname");
+    let (code, stdout, stderr) = run_cli(
+        &["export", "--url", &base, "--out", out.to_str().unwrap()],
+        &[],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("the response carries context 'other'"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("the response names group 'h'"), "{stderr}");
+    let contents = dir_contents(&out);
+    assert!(
+        !contents.contains_key("sake.jsonl") && !contents.contains_key("g.group.jsonl"),
+        "a wrong-name response must never land on disk: {contents:?}"
+    );
+    let _ = std::fs::remove_dir_all(&out);
+}
+
 /// Issue #751: `GET /groups/{name}/export` answering something that is
 /// not a group record — here a well-formed JSON object with a 200
 /// status — is a per-item failure, and nothing lands on disk for it.

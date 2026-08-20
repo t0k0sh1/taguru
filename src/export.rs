@@ -1019,8 +1019,32 @@ fn remote_export_one(api: &Api, name: &str, out: &std::path::Path) -> Result<Str
     // best-effort tally for the report line, not a validator — it
     // never errors on malformed input, so real validation has to run
     // through the same parser `taguru import` trusts.
-    crate::ingest::parse_stream(stream.as_bytes())
+    let parsed = crate::ingest::parse_stream(stream.as_bytes())
         .map_err(|error| format!("context '{name}': not a taguru export stream: {error}"))?;
+    // Same wrong-name refusal as remote_export_group's: import applies
+    // each batch to its EMBEDDED context name, whatever file it rode
+    // in on, so a stream for a different context saved under this
+    // name would poison that other context on a later directory
+    // import. A context export stream carries only this context's
+    // batches (and its own schema record) — never a group record.
+    if let Some(other) = parsed
+        .batches
+        .iter()
+        .map(|batch| batch.context.as_str())
+        .chain(parsed.schemas.iter().map(|(context, _)| context.as_str()))
+        .find(|context| *context != name)
+    {
+        return Err(format!(
+            "context '{name}': not a taguru export stream: the response carries context \
+             '{other}'"
+        ));
+    }
+    if !parsed.groups.is_empty() {
+        return Err(format!(
+            "context '{name}': not a taguru export stream: the response carries a \
+             taguru_group record"
+        ));
+    }
     let path = out.join(format!("{}.jsonl", crate::registry::file_stem(name)));
     crate::storage::write_atomic(&path, stream.as_bytes())
         .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
@@ -1046,7 +1070,16 @@ fn remote_export_group(api: &Api, name: &str, out: &std::path::Path) -> Result<S
     let parsed = crate::ingest::parse_stream(stream.as_bytes())
         .map_err(|error| format!("group '{name}': not a taguru group record: {error}"))?;
     let record = match (&parsed.batches[..], &parsed.schemas[..], &parsed.groups[..]) {
-        ([], [], [(_, record)]) => record,
+        ([], [], [(record_name, record)]) if record_name == name => record,
+        // A record for a DIFFERENT group written under this name would
+        // make a later directory import restore the wrong truth as
+        // `name` — refused like any other wrong shape.
+        ([], [], [(record_name, _)]) => {
+            return Err(format!(
+                "group '{name}': not a taguru group record: the response names group \
+                 '{record_name}'"
+            ));
+        }
         _ => {
             return Err(format!(
                 "group '{name}': not a taguru group record: the response is not exactly one \
@@ -1114,16 +1147,19 @@ fn expected_file_names<'a>(
 /// exports never call this: they write a slice, not the whole truth.
 /// Returns how many removals failed.
 fn prune_stale_streams(out: &std::path::Path, expected: &BTreeSet<String>) -> usize {
-    let entries = match fs::read_dir(out) {
-        Ok(entries) => entries,
-        Err(error) => {
-            eprintln!("taguru: export: cannot list {}: {error}", out.display());
-            return 1;
-        }
-    };
+    // Collected upfront so a listing that errors PARTWAY is a failure
+    // too — an unlisted stale file silently surviving to exit 0 would
+    // defeat the whole point.
+    let entries: Vec<fs::DirEntry> =
+        match fs::read_dir(out).and_then(|entries| entries.collect::<Result<_, _>>()) {
+            Ok(entries) => entries,
+            Err(error) => {
+                eprintln!("taguru: export: cannot list {}: {error}", out.display());
+                return 1;
+            }
+        };
     let mut failures = 0usize;
     for entry in entries {
-        let Ok(entry) = entry else { continue };
         let name = entry.file_name();
         // Everything export writes is ASCII (`file_stem` percent-encodes
         // the rest), so a non-UTF-8 name is never ours to touch.
@@ -1308,6 +1344,14 @@ mod tests {
         assert_eq!(prune_stale_streams(&dir, &expected), 2);
         assert!(dir.join("undead.jsonl").exists());
         assert!(!dir.join("stale.jsonl").exists());
+
+        // A directory that cannot be listed at all is one failure —
+        // an unlisted stale file surviving to exit 0 would defeat the
+        // pruning contract.
+        assert_eq!(
+            prune_stale_streams(&dir.join("does-not-exist"), &expected),
+            1
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
