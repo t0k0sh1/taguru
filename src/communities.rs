@@ -817,4 +817,45 @@ mod tests {
         assert!(text.contains("would update"));
         assert!(text.contains("graph revision 7"));
     }
+
+    /// Issue #753: a member with no intra-community strength (a
+    /// singleton) gets [`SINGLETON_MEMBER_WEIGHT`] — weight 0.0 would
+    /// read as a netted-out claim, which membership is not — while a
+    /// runaway positive strength is capped at 1e6.
+    #[test]
+    fn a_zero_strength_member_lands_at_the_singleton_weight() {
+        let header = r#"{"taguru_communities":1,"context":"c","algorithm":"louvain-cc/1","revision":{"graph":1,"passages":0,"config":0},"concept_count":2,"edge_count":1,"levels":1,"communities":1}"#;
+        let line = r#"{"id":"L0-0","level":0,"fingerprint":"00","concept_count":2,"members":[{"name":"solo","strength":0.0},{"name":"heavy","strength":2e7}]}"#;
+        let analysis = parse_analysis(&format!("{header}\n{line}\n")).unwrap();
+        let summaries = BTreeMap::from([("L0-0", "要約".to_string())]);
+        let manifest = CommunitiesManifest {
+            taguru_communities: COMMUNITIES_FORMAT,
+            algorithm: "louvain-cc/1".to_string(),
+            source_context: "c".to_string(),
+            revision: ContextRevision::default(),
+            levels: 1,
+            communities: Vec::new(),
+        };
+        let batches = render_batches("c", "c::communities", &analysis, &summaries, &manifest)
+            .expect("render");
+        let community_batch = &batches[0];
+        let weights: Vec<(String, f64)> = community_batch
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|value| value["label"] == json!(CONTAINS_LABEL))
+            .map(|value| {
+                (
+                    value["object"].as_str().unwrap().to_string(),
+                    value["weight"].as_f64().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            weights,
+            [
+                ("solo".to_string(), SINGLETON_MEMBER_WEIGHT),
+                ("heavy".to_string(), 1e6),
+            ]
+        );
+    }
 }

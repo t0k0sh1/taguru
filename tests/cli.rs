@@ -2249,6 +2249,57 @@ fn export_round_trips_a_data_directory_through_batch_streams() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Issue #753: the local twins of two remote refusals — an empty data
+/// directory refuses the full export by name (the remote sibling test
+/// is `an_empty_server_refuses_the_full_export`), and an `--out`
+/// whose parent is a FILE is a clean exit-1 "cannot create".
+#[test]
+fn export_refuses_an_empty_data_directory_and_an_uncreatable_out() {
+    let dir = common::scratch_dir("cli-export-empty");
+    std::fs::create_dir_all(dir.join("data")).expect("scratch dir must be creatable");
+    let run_in = |args: &[&str]| -> Output {
+        Command::new(env!("CARGO_BIN_EXE_taguru"))
+            .args(args)
+            .env("TAGURU_DATA_DIR", dir.join("data"))
+            .env_remove("TAGURU_CONFIG")
+            .env_remove("TAGURU_EMBED_URL")
+            .output()
+            .expect("binary must run")
+    };
+    let out = dir.join("out");
+    let output = run_in(&["export", "--out", &out.display().to_string()]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("the data directory holds no contexts"),
+        "{output:?}"
+    );
+    assert!(!out.exists(), "a refused export must not create --out");
+
+    // Seed one context so the run gets to --out creation, then block it.
+    std::fs::write(
+        dir.join("a.jsonl"),
+        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \
+         \"create\": {\"description\": \"d\"}}\n\
+         {\"subject\": \"蔵\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n",
+    )
+    .expect("fixture must be writable");
+    let seeded = run_in(&["import", &dir.join("a.jsonl").display().to_string()]);
+    assert_eq!(seeded.status.code(), Some(0), "{seeded:?}");
+    let blocker = dir.join("blocker");
+    std::fs::write(&blocker, b"a file where a directory must go").unwrap();
+    let output = run_in(&[
+        "export",
+        "--out",
+        &blocker.join("out").display().to_string(),
+    ]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("cannot create"),
+        "{output:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Issue #753: an unknown flag is named as one, never silently read
 /// as a CONTEXT name — `export --out d -x` used to be the guard's
 /// only reader, and nothing pinned it.

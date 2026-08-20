@@ -2147,4 +2147,81 @@ mod tests {
         let stream = "\n{\"taguru_batch\":1}\n\n\"just a string\"\n";
         assert_eq!(stream_counts(stream), (1, 2));
     }
+
+    fn plain_passage(text: &str) -> Arc<PassageRecord> {
+        let (record, _) = PassageRecord::new(
+            Arc::from(text),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            crate::passages::SourceMeta::default(),
+        );
+        record
+    }
+
+    /// Issue #753: a passage stored under EITHER reserved source id
+    /// refuses before anything is written — `||`, not `&&`.
+    #[test]
+    fn a_passage_under_a_reserved_source_refuses_each_reserved_name() {
+        for reserved in [UNSOURCED_SOURCE, EMPTY_SOURCE] {
+            let mut snap = snapshot(Vec::new());
+            snap.passages = vec![(reserved.to_string(), plain_passage("x"))];
+            let refusal = render("sake", &snap, Deadline::unbounded())
+                .expect_err("a reserved source id must refuse");
+            assert!(refusal.contains("reserved by export"), "{refusal}");
+        }
+    }
+
+    /// Issue #753: the report's passage count counts every passage the
+    /// stream carries — pinned against a snapshot with more than one.
+    #[test]
+    fn the_passage_count_reports_every_passage_written() {
+        let mut snap = snapshot(Vec::new());
+        snap.passages = vec![
+            ("a.md".to_string(), plain_passage("壱")),
+            ("b.md".to_string(), plain_passage("弐")),
+            ("c.md".to_string(), plain_passage("参")),
+        ];
+        let rendered = render("sake", &snap, Deadline::unbounded()).unwrap();
+        assert_eq!(rendered.passages, 3);
+        assert_eq!(rendered.batches, 3, "one batch per source");
+    }
+
+    /// Issue #753: every loop `render` runs checks the deadline — an
+    /// already-expired one refuses from whichever loop the snapshot's
+    /// shape reaches first, never rendering a partial stream.
+    #[test]
+    fn an_expired_deadline_refuses_from_every_reachable_loop() {
+        let expired = Deadline::after(std::time::Duration::ZERO);
+
+        let with_association = snapshot(vec![association(
+            1,
+            vec![Attribution {
+                source: "a.md".to_string(),
+                weight: 1.0,
+                count: 1,
+                paragraph: None,
+            }],
+        )]);
+        let mut with_passage = snapshot(Vec::new());
+        with_passage.passages = vec![("a.md".to_string(), plain_passage("x"))];
+        let mut with_concept_alias = snapshot(Vec::new());
+        with_concept_alias.concept_aliases = vec![("別名".to_string(), "青嶺".to_string())];
+        let mut with_label_alias = snapshot(Vec::new());
+        with_label_alias.label_aliases = vec![("略".to_string(), "所在地".to_string())];
+
+        for (reaches, snap) in [
+            ("the association loop", with_association),
+            ("the passage loop", with_passage),
+            ("the concept-alias loop", with_concept_alias),
+            ("the label-alias loop", with_label_alias),
+        ] {
+            let refusal = render("sake", &snap, expired)
+                .expect_err(&format!("{reaches} must refuse on an expired deadline"));
+            assert!(
+                refusal.contains("deadline exceeded"),
+                "{reaches}: {refusal}"
+            );
+        }
+    }
 }

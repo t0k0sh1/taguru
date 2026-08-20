@@ -696,3 +696,113 @@ fn a_failed_group_enumeration_is_a_failure_the_summary_names() {
     );
     let _ = std::fs::remove_dir_all(&out);
 }
+
+/// Issue #753: per-item failures counted independently mid-run — a
+/// context whose 200 body is not an export stream, and a group whose
+/// own fetch 404s, are each one failure; the group after them still
+/// lands, and the summary carries both denominators.
+#[test]
+fn per_item_failures_count_and_the_rest_still_lands() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let responses = [
+            ("HTTP/1.1 200 OK", r#"{"status":"ok"}"#.to_string()),
+            ("HTTP/1.1 200 OK", r#"{}"#.to_string()),
+            // GET /contexts: one context, then the terminator.
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"result":{"total":1,"contexts":[{"name":"sake"}]}}"#.to_string(),
+            ),
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"result":{"total":1,"contexts":[]}}"#.to_string(),
+            ),
+            // GET /contexts/sake/export: a 200 that is no stream.
+            ("HTTP/1.1 200 OK", "not an export stream".to_string()),
+            // GET /groups: two groups, then the terminator.
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"result":{"total":2,"groups":[{"name":"g"},{"name":"h"}]}}"#.to_string(),
+            ),
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"result":{"total":2,"groups":[]}}"#.to_string(),
+            ),
+            // GET /groups/g/export: gone between enumeration and fetch.
+            (
+                "HTTP/1.1 404 Not Found",
+                r#"{"status":"error","code":"no_context","error":"no such group"}"#.to_string(),
+            ),
+            // GET /groups/h/export: the survivor still lands.
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"taguru_group":1,"name":"h","description":"x","contexts":[]}"#.to_string(),
+            ),
+        ];
+        for (status_line, body) in responses {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut buffer = [0u8; 2048];
+            let _ = stream.read(&mut buffer);
+            let response = format!(
+                "{status_line}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    let base = format!("http://{addr}");
+
+    let out = crate::support::common::scratch_dir("remote-export-per-item");
+    let (code, stdout, stderr) = run_cli(
+        &["export", "--url", &base, "--out", out.to_str().unwrap()],
+        &[],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("context 'sake': not a taguru export stream"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("group 'g'"), "{stderr}");
+    assert!(
+        stdout.contains("export: 0 of 1 context(s) and 1 of 2 group(s)"),
+        "{stdout}"
+    );
+    let contents = dir_contents(&out);
+    assert!(!contents.contains_key("sake.jsonl"), "{contents:?}");
+    assert!(
+        contents.contains_key("h.group.jsonl"),
+        "the survivor must land: {contents:?}"
+    );
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// Issue #753: an `--out` that cannot be created — its parent is a
+/// FILE — is a clean exit-1 refusal naming the path, for the remote
+/// path exactly like the local one (`tests/cli.rs`'s twin).
+#[test]
+fn an_uncreatable_out_directory_refuses_the_remote_export() {
+    let server = Server::start("remote-export-outfail");
+    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+
+    let scratch = crate::support::common::scratch_dir("remote-export-outfail");
+    std::fs::create_dir_all(&scratch).expect("scratch dir must be creatable");
+    let blocker = scratch.join("blocker");
+    std::fs::write(&blocker, b"a file where a directory must go").unwrap();
+    let out = blocker.join("out");
+    let (code, _stdout, stderr) = run_cli(
+        &[
+            "export",
+            "--url",
+            &server.base,
+            "--out",
+            out.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("cannot create"), "{stderr}");
+    let _ = std::fs::remove_dir_all(&scratch);
+}

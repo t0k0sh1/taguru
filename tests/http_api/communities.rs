@@ -726,3 +726,320 @@ fn search_omits_manifest_facts_for_a_community_the_manifest_does_not_list() {
     // graph, not the manifest.
     assert_eq!(hit["members"].as_array().unwrap().len(), 2, "{page}");
 }
+
+// --- #753: derive-flow branches the #551 sweep found untested -------------
+
+/// Replaces the artifact's manifest passage wholesale through the same
+/// retract-then-apply door everything else uses.
+fn overwrite_manifest(server: &Server, derived: &str, manifest_text: &str) {
+    let batch = format!(
+        "{}\n{}\n",
+        json!({"taguru_batch": 1, "context": derived, "source": "communities:manifest"}),
+        json!({"passage": manifest_text}),
+    );
+    let (status, body) = server.call_raw(
+        "POST",
+        "/import",
+        Some(&batch),
+        Some("application/x-ndjson"),
+    );
+    assert_eq!(status, 200, "{body}");
+}
+
+/// A vanished community — present in the previous manifest, absent
+/// from the new analysis — retracts its stored source; the survivor's
+/// batch is rewritten in place and stays queryable. An unchanged
+/// re-run afterwards needs no extract env at all.
+#[test]
+fn a_vanished_community_is_retracted_and_the_survivor_kept() {
+    let server = Server::start("communities-vanish");
+    server.ok("PUT", "/contexts/corp", None);
+    let mut ops = Vec::new();
+    for (group, source) in [("a", "a.md"), ("b", "b.md")] {
+        let members: Vec<String> = (1..=4).map(|index| format!("{group}{index}")).collect();
+        for (index, subject) in members.iter().enumerate() {
+            for object in &members[index + 1..] {
+                ops.push(json!({
+                    "subject": subject, "label": "近い", "object": object,
+                    "weight": 2.0, "source": source,
+                }));
+            }
+        }
+    }
+    server.ok(
+        "POST",
+        "/contexts/corp/associations",
+        Some(Value::Array(ops)),
+    );
+
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let chat_url = stub_chat(Arc::clone(&requests));
+    let extract_env = [
+        ("TAGURU_EXTRACT_URL", chat_url.as_str()),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+    let (code, stdout, stderr) =
+        run_communities(&["--context", "corp", &server.base], &extract_env);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("2 generated, 0 reused"), "{stdout}");
+    assert!(
+        !stdout.contains("vanished") && !stdout.contains("algorithm changed"),
+        "a first run neither retracts nor rebuilds: {stdout}"
+    );
+
+    // An unchanged graph re-runs WITHOUT the extract env — the chat
+    // client only comes up when something actually needs summarizing.
+    let (code, stdout, stderr) = run_communities(&["--context", "corp", &server.base], &[]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("0 generated, 2 reused"), "{stdout}");
+
+    // Clique b's whole source retracts: the new analysis holds one
+    // community, and the run must retract exactly the vanished one.
+    server.ok(
+        "POST",
+        "/contexts/corp/sources/retract",
+        Some(json!({"source": "b.md"})),
+    );
+    let (code, stdout, stderr) =
+        run_communities(&["--context", "corp", &server.base], &extract_env);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains("1 vanished community retracted"),
+        "{stdout}"
+    );
+
+    // The survivor's membership still answers; the vanished id's
+    // source is gone from the artifact.
+    let survivors = server.ok(
+        "POST",
+        "/contexts/corp::communities/query",
+        Some(json!({"subject": "community:L0-0", "label": "contains"})),
+    );
+    assert_eq!(survivors["total"], 4, "{survivors}");
+    let looked = server.ok(
+        "POST",
+        "/contexts/corp::communities/sources/lookup",
+        Some(json!({"sources": ["community:L0-1"]})),
+    );
+    assert!(
+        looked["passages"]["community:L0-1"].is_null(),
+        "the vanished community's summary must be retracted: {looked}"
+    );
+}
+
+/// A manifest whose algorithm differs marks every fingerprint
+/// incomparable: the report says so and every summary regenerates. A
+/// manifest that does not PARSE is a refusal that names the way out —
+/// never a silent full rebuild.
+#[test]
+fn a_changed_algorithm_rebuilds_and_a_mangled_manifest_refuses() {
+    let server = Server::start("communities-rebuild");
+    seed_two_cliques(&server, "corp");
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let chat_url = stub_chat(Arc::clone(&requests));
+    let extract_env = [
+        ("TAGURU_EXTRACT_URL", chat_url.as_str()),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+    let (code, stdout, _) = run_communities(&["--context", "corp", &server.base], &extract_env);
+    assert_eq!(code, 0, "{stdout}");
+    assert_eq!(requests.lock().unwrap().len(), 2);
+
+    // A parseable manifest from a DIFFERENT algorithm.
+    overwrite_manifest(
+        &server,
+        "corp::communities",
+        &json!({
+            "taguru_communities": 1, "algorithm": "other/1", "source_context": "corp",
+            "revision": {"graph": 0, "passages": 0, "config": 0},
+            "levels": 1, "communities": [],
+        })
+        .to_string(),
+    );
+    let (code, stdout, stderr) =
+        run_communities(&["--context", "corp", &server.base], &extract_env);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains("algorithm changed: previous fingerprints incomparable"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("2 generated, 0 reused"), "{stdout}");
+    assert_eq!(requests.lock().unwrap().len(), 4);
+
+    // Mangled bytes where the manifest should be: a human's problem,
+    // said out loud.
+    overwrite_manifest(&server, "corp::communities", "not a manifest at all");
+    let (code, _stdout, stderr) =
+        run_communities(&["--context", "corp", &server.base], &extract_env);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("does not parse"), "{stderr}");
+    assert!(
+        stderr.contains("delete the artifact context to rebuild"),
+        "{stderr}"
+    );
+}
+
+/// A graph Louvain aggregates twice — two super-clusters of three
+/// 3-cliques each, ring-bridged inside — exercises the parent branch
+/// end to end: parent prompts quote child summaries, `includes` edges
+/// land in the artifact, and search serves parents alongside leaves.
+#[test]
+fn a_two_level_graph_summarizes_parents_from_their_children() {
+    let server = Server::start("communities-levels");
+    server.ok("PUT", "/contexts/deep", None);
+    let mut ops = Vec::new();
+    let sides = [["a", "b", "c"], ["d", "e", "f"]];
+    for cliques in &sides {
+        for prefix in cliques {
+            let members: Vec<String> = (1..=3).map(|index| format!("{prefix}{index}")).collect();
+            for (index, subject) in members.iter().enumerate() {
+                for object in &members[index + 1..] {
+                    ops.push(json!({
+                        "subject": subject, "label": "近い", "object": object, "weight": 1.0,
+                    }));
+                }
+            }
+        }
+        for index in 0..cliques.len() {
+            let (p, q) = (cliques[index], cliques[(index + 1) % cliques.len()]);
+            ops.push(json!({
+                "subject": format!("{p}1"), "label": "橋", "object": format!("{q}1"),
+                "weight": 1.5,
+            }));
+        }
+    }
+    server.ok(
+        "POST",
+        "/contexts/deep/associations",
+        Some(Value::Array(ops)),
+    );
+
+    // The graph really is two levels — the test's premise, pinned so a
+    // future algorithm change fails HERE and not in a prompt assert.
+    let (status, body) = get_ndjson(&server, "/contexts/deep/communities");
+    assert_eq!(status, 200, "{body}");
+    let header: Value = serde_json::from_str(body.lines().next().unwrap()).unwrap();
+    assert_eq!(header["levels"], 2, "{header}");
+    let parents = body
+        .lines()
+        .skip(1)
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|community| community["level"] == json!(1))
+        .collect::<Vec<_>>();
+    assert_eq!(parents.len(), 2, "{body}");
+    let total = header["communities"].as_u64().unwrap() as usize;
+
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let chat_url = stub_chat(Arc::clone(&requests));
+    let extract_env = [
+        ("TAGURU_EXTRACT_URL", chat_url.as_str()),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+    let (code, stdout, stderr) =
+        run_communities(&["--context", "deep", &server.base], &extract_env);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains(&format!("{total} generated, 0 reused")),
+        "{stdout}"
+    );
+
+    // Parent prompts are built FROM the child summaries — the leaves
+    // summarize first, and each parent prompt quotes their text.
+    let prompts = requests.lock().unwrap().clone();
+    assert_eq!(prompts.len(), total);
+    let parent_prompts: Vec<&String> = prompts
+        .iter()
+        .filter(|prompt| prompt.contains("sub-communities"))
+        .collect();
+    assert_eq!(parent_prompts.len(), 2, "one prompt per parent");
+    assert!(
+        parent_prompts.iter().all(|prompt| prompt.contains("主題")),
+        "a parent prompt quotes its children's summaries: {parent_prompts:?}"
+    );
+
+    // Hierarchy landed as queryable `includes` edges.
+    let parent_id = parents[0]["id"].as_str().unwrap();
+    let children = parents[0]["children"].as_array().unwrap().len() as u64;
+    let includes = server.ok(
+        "POST",
+        "/contexts/deep::communities/query",
+        Some(json!({"subject": format!("community:{parent_id}"), "label": "includes"})),
+    );
+    assert_eq!(includes["total"], json!(children), "{includes}");
+}
+
+/// `--group` derives one artifact per member context, child groups
+/// included transitively; a group reaching no contexts refuses by
+/// name; `--into` renames a single-context artifact.
+#[test]
+fn group_traversal_derives_each_member_and_into_renames() {
+    let server = Server::start("communities-group");
+    seed_two_cliques(&server, "m1");
+    seed_two_cliques(&server, "m2");
+    server.ok("PUT", "/groups/child", Some(json!({"contexts": ["m2"]})));
+    server.ok(
+        "PUT",
+        "/groups/kura",
+        Some(json!({"contexts": ["m1"], "groups": ["child"]})),
+    );
+    server.ok("PUT", "/groups/hollow", Some(json!({"contexts": []})));
+
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let chat_url = stub_chat(Arc::clone(&requests));
+    let extract_env = [
+        ("TAGURU_EXTRACT_URL", chat_url.as_str()),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+
+    let (code, _stdout, stderr) =
+        run_communities(&["--group", "hollow", &server.base], &extract_env);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("group 'hollow' reaches no contexts"),
+        "{stderr}"
+    );
+
+    let (code, stdout, stderr) = run_communities(&["--group", "kura", &server.base], &extract_env);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("context 'm1'"), "{stdout}");
+    assert!(stdout.contains("context 'm2'"), "{stdout}");
+    for derived in ["m1::communities", "m2::communities"] {
+        let (status, _) = server.call("GET", &format!("/contexts/{derived}"), None);
+        assert_eq!(status, 200, "the member artifact '{derived}' must exist");
+    }
+
+    // --into aims one context's artifact at a chosen name.
+    let (code, stdout, stderr) = run_communities(
+        &["--context", "m1", "--into", "renamed", &server.base],
+        &extract_env,
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("artifact 'renamed'"), "{stdout}");
+    let (status, _) = server.call("GET", "/contexts/renamed", None);
+    assert_eq!(status, 200);
+}
+
+/// `--json` serializes the reports themselves — one object per
+/// context, machine-readable counts, nothing human-formatted on
+/// stdout.
+#[test]
+fn json_mode_emits_the_report_structs() {
+    let server = Server::start("communities-json");
+    seed_two_cliques(&server, "corp");
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let chat_url = stub_chat(Arc::clone(&requests));
+    let extract_env = [
+        ("TAGURU_EXTRACT_URL", chat_url.as_str()),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+    let (code, stdout, stderr) =
+        run_communities(&["--context", "corp", "--json", &server.base], &extract_env);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let reports: Value = serde_json::from_str(&stdout).expect("stdout must be the JSON reports");
+    let report = &reports[0];
+    assert_eq!(report["context"], json!("corp"), "{report}");
+    assert_eq!(report["derived"], json!("corp::communities"), "{report}");
+    assert_eq!(report["summaries_generated"], json!(2), "{report}");
+    assert_eq!(report["summaries_reused"], json!(0), "{report}");
+    assert_eq!(report["dry_run"], json!(false), "{report}");
+}
