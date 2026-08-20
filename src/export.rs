@@ -2185,6 +2185,13 @@ mod tests {
         let rendered = render("sake", &snap, Deadline::unbounded()).unwrap();
         assert_eq!(rendered.passages, 3);
         assert_eq!(rendered.batches, 3, "one batch per source");
+        for text in ["壱", "弐", "参"] {
+            assert!(
+                rendered.stream.contains(text),
+                "the counted passage '{text}' must also be IN the stream: {}",
+                rendered.stream
+            );
+        }
     }
 
     /// Issue #753: every loop `render` runs checks the deadline — an

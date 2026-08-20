@@ -1283,7 +1283,7 @@ mod tests {
                 "dice_floor": null, "semantic_floor": null, "stats": {}, "usage": {}
             })
         }
-        let (base, _) = respond_in_order_capturing(vec![
+        let (base, requests) = respond_in_order_capturing(vec![
             (
                 "HTTP/1.1 200 OK",
                 json!({"result": {"total": 3, "contexts": [row("a"), row("b")]}}),
@@ -1305,6 +1305,11 @@ mod tests {
             .map(|entry| entry.name.clone())
             .collect();
         assert_eq!(names, ["a", "b", "c"]);
+        // The short page did not end the walk on its own say-so: a
+        // THIRD request went out, cursored past the short page's name.
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 3, "{requests:?}");
+        assert!(requests[2].contains("after=c"), "{requests:?}");
 
         let (base, _) = respond_in_order_capturing(vec![
             (

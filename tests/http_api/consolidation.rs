@@ -529,6 +529,8 @@ fn a_dismissal_is_counted_and_reused_like_any_judgment() {
 fn a_foreign_server_detector_is_refused_outright() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&requests);
     std::thread::spawn(move || {
         let responses = [
             // GET /health for the skew preflight, then the audit.
@@ -540,7 +542,11 @@ fn a_foreign_server_detector_is_refused_outright() {
                 return;
             };
             let mut buffer = [0u8; 4096];
-            let _ = stream.read(&mut buffer);
+            let read = stream.read(&mut buffer).unwrap_or(0);
+            let request = String::from_utf8_lossy(&buffer[..read]);
+            seen.lock()
+                .unwrap()
+                .push(request.lines().next().unwrap_or("").to_string());
             let response = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                 body.len()
@@ -556,6 +562,15 @@ fn a_foreign_server_detector_is_refused_outright() {
     assert!(
         stderr.contains("is not this build's (consolidation/1)"),
         "{stderr}"
+    );
+    // The refusal is side-effect free: the health preflight and the
+    // audit itself are the ONLY requests — nothing was written.
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2, "{requests:?}");
+    assert!(requests[0].starts_with("GET /health"), "{requests:?}");
+    assert!(
+        requests[1].starts_with("POST /contexts/sake/consolidation/audit"),
+        "{requests:?}"
     );
 }
 
@@ -596,6 +611,28 @@ fn a_changed_stored_detector_rejudges_and_a_bad_stamp_refuses() {
     );
     assert_eq!(*calls.lock().unwrap(), 10);
 
+    // The re-judge wrote a CURRENT manifest back — a third run reuses
+    // everything instead of re-costing five judgments per run.
+    let stored = server.ok(
+        "POST",
+        "/contexts/sake::consolidation/sources/lookup",
+        Some(json!({"sources": ["consolidation:manifest"]})),
+    );
+    let manifest: Value = serde_json::from_str(
+        stored["passages"]["consolidation:manifest"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(manifest["detector"], json!("consolidation/1"), "{manifest}");
+    let (code, stdout, _) = run_consolidation(&["--context", "sake", &server.base], &extract_env);
+    assert_eq!(code, 0, "{stdout}");
+    assert!(
+        stdout.contains("judgments up to date (5 reused, no LLM calls)"),
+        "{stdout}"
+    );
+    assert_eq!(*calls.lock().unwrap(), 10);
+
     // A format stamp from another program: refused by number.
     overwrite_manifest(
         &server,
@@ -608,6 +645,19 @@ fn a_changed_stored_detector_rejudges_and_a_bad_stamp_refuses() {
     assert!(
         stderr.contains("judgment artifact format 2 is not this build's 1"),
         "{stderr}"
+    );
+    assert_eq!(*calls.lock().unwrap(), 10, "a refusal judges nothing");
+    let stored = server.ok(
+        "POST",
+        "/contexts/sake::consolidation/sources/lookup",
+        Some(json!({"sources": ["consolidation:manifest"]})),
+    );
+    assert!(
+        stored["passages"]["consolidation:manifest"]
+            .as_str()
+            .unwrap()
+            .contains("\"taguru_consolidation\":2"),
+        "a refusal must not rewrite the manifest it refused: {stored}"
     );
 
     // No stamp at all: refused by name.
@@ -622,4 +672,5 @@ fn a_changed_stored_detector_rejudges_and_a_bad_stamp_refuses() {
         stderr.contains("carries no taguru_consolidation stamp"),
         "{stderr}"
     );
+    assert_eq!(*calls.lock().unwrap(), 10, "a refusal judges nothing");
 }

@@ -807,6 +807,15 @@ fn a_vanished_community_is_retracted_and_the_survivor_kept() {
         stdout.contains("1 vanished community retracted"),
         "{stdout}"
     );
+    assert!(
+        stdout.contains("0 generated, 1 reused"),
+        "the survivor's fingerprint is unchanged — no re-summarizing: {stdout}"
+    );
+    assert_eq!(
+        requests.lock().unwrap().len(),
+        2,
+        "retraction costs zero LLM calls"
+    );
 
     // The survivor's membership still answers; the vanished id's
     // source is gone from the artifact.
@@ -845,17 +854,19 @@ fn a_changed_algorithm_rebuilds_and_a_mangled_manifest_refuses() {
     assert_eq!(code, 0, "{stdout}");
     assert_eq!(requests.lock().unwrap().len(), 2);
 
-    // A parseable manifest from a DIFFERENT algorithm.
-    overwrite_manifest(
-        &server,
-        "corp::communities",
-        &json!({
-            "taguru_communities": 1, "algorithm": "other/1", "source_context": "corp",
-            "revision": {"graph": 0, "passages": 0, "config": 0},
-            "levels": 1, "communities": [],
-        })
-        .to_string(),
+    // The REAL stored manifest with ONLY its algorithm changed — the
+    // fingerprints inside would all match, so only the comparability
+    // rule forces the rebuild.
+    let stored = server.ok(
+        "POST",
+        "/contexts/corp::communities/sources/lookup",
+        Some(json!({"sources": ["communities:manifest"]})),
     );
+    let mut manifest: Value =
+        serde_json::from_str(stored["passages"]["communities:manifest"].as_str().unwrap())
+            .expect("the stored manifest parses");
+    manifest["algorithm"] = json!("other/1");
+    overwrite_manifest(&server, "corp::communities", &manifest.to_string());
     let (code, stdout, stderr) =
         run_communities(&["--context", "corp", &server.base], &extract_env);
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
@@ -959,13 +970,29 @@ fn a_two_level_graph_summarizes_parents_from_their_children() {
 
     // Hierarchy landed as queryable `includes` edges.
     let parent_id = parents[0]["id"].as_str().unwrap();
-    let children = parents[0]["children"].as_array().unwrap().len() as u64;
+    let children = parents[0]["children"].as_array().unwrap();
     let includes = server.ok(
         "POST",
         "/contexts/deep::communities/query",
         Some(json!({"subject": format!("community:{parent_id}"), "label": "includes"})),
     );
-    assert_eq!(includes["total"], json!(children), "{includes}");
+    assert_eq!(includes["total"], json!(children.len()), "{includes}");
+    let mut edge_objects: Vec<String> = includes["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|edge| edge["object"].as_str().unwrap().to_string())
+        .collect();
+    edge_objects.sort();
+    let mut child_sources: Vec<String> = children
+        .iter()
+        .map(|child| format!("community:{}", child.as_str().unwrap()))
+        .collect();
+    child_sources.sort();
+    assert_eq!(
+        edge_objects, child_sources,
+        "every child id has exactly its own includes edge"
+    );
 }
 
 /// `--group` derives one artifact per member context, child groups

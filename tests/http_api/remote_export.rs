@@ -776,6 +776,10 @@ fn per_item_failures_count_and_the_rest_still_lands() {
         contents.contains_key("h.group.jsonl"),
         "the survivor must land: {contents:?}"
     );
+    assert!(
+        !contents.contains_key("g.group.jsonl"),
+        "a failed fetch must leave nothing on disk: {contents:?}"
+    );
     let _ = std::fs::remove_dir_all(&out);
 }
 
@@ -804,5 +808,9 @@ fn an_uncreatable_out_directory_refuses_the_remote_export() {
     );
     assert_eq!(code, 1, "{stderr}");
     assert!(stderr.contains("cannot create"), "{stderr}");
+    assert!(
+        stderr.contains(out.to_str().unwrap()),
+        "the refusal must name the path it could not create: {stderr}"
+    );
     let _ = std::fs::remove_dir_all(&scratch);
 }

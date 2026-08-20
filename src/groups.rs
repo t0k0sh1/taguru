@@ -666,6 +666,10 @@ mod tests {
             groups.contains_key("a"),
             "the source file stays registered under its old name"
         );
+        assert!(
+            dir.join("a.grouprenaming").exists(),
+            "a stuck rename keeps its marker for the next boot to retry"
+        );
 
         let absent =
             std::env::temp_dir().join(format!("taguru-groups-scan-absent-{}", std::process::id()));

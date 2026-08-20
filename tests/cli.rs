@@ -2293,9 +2293,11 @@ fn export_refuses_an_empty_data_directory_and_an_uncreatable_out() {
         &blocker.join("out").display().to_string(),
     ]);
     assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("cannot create"), "{output:?}");
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("cannot create"),
-        "{output:?}"
+        stderr.contains(&blocker.join("out").display().to_string()),
+        "the refusal must name the path it could not create: {stderr}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
