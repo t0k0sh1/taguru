@@ -446,6 +446,254 @@ fn communities_refuses_both_url_flag_and_positional() {
     );
 }
 
+/// Issue #753 (the #551 audit's mutants sweep): `communities`'
+/// argument-parse guards one by one — every duplicate names its flag,
+/// every selection error names the rule, and an accepted flag proves
+/// itself by parsing through to the NEXT check, never its own error.
+#[test]
+fn communities_argument_parse_guards_answer_each_misuse_by_name() {
+    for (args, message) in [
+        (
+            vec!["communities", "--context", "a", "--context", "b"],
+            "--context given twice",
+        ),
+        (
+            vec!["communities", "--group", "a", "--group", "b"],
+            "--group given twice",
+        ),
+        (
+            vec![
+                "communities",
+                "--context",
+                "a",
+                "--into",
+                "x",
+                "--into",
+                "y",
+            ],
+            "--into given twice",
+        ),
+        (
+            vec![
+                "communities",
+                "--context",
+                "a",
+                "--config",
+                "x",
+                "--config",
+                "y",
+            ],
+            "--config given twice",
+        ),
+        (
+            vec![
+                "communities",
+                "--context",
+                "a",
+                "--url",
+                "http://a",
+                "--url",
+                "http://b",
+            ],
+            "either --url or a positional URL, not both",
+        ),
+        (
+            vec!["communities"],
+            "--context NAME (or --group NAME) is required",
+        ),
+        (
+            vec!["communities", "--context", "a", "--group", "b"],
+            "--context and --group are mutually exclusive",
+        ),
+        (
+            vec!["communities", "--group", "g", "--into", "x"],
+            "--into names one artifact; with --group each member gets its own",
+        ),
+        // An unknown flag is named, never silently read as the
+        // positional URL.
+        (
+            vec!["communities", "--context", "a", "-x"],
+            "unknown argument '-x'",
+        ),
+    ] {
+        let output = run(&args);
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(message), "{args:?}: {stderr}");
+    }
+
+    // An accepted --config parses through to the selection check —
+    // its own arm stays silent on first use.
+    let dir = common::scratch_dir("cli-communities-flags");
+    std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
+    let config = dir.join("empty.env");
+    std::fs::write(&config, "").expect("config must be writable");
+    let output = run(&["communities", "--config", &config.display().to_string()]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("--context NAME (or --group NAME) is required"),
+        "{output:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // --context with --into is legitimate (the exclusivity rule is
+    // into-with-GROUP): parsing succeeds and the run proceeds to the
+    // connection failure — exit 1, never a usage error.
+    let output = run(&[
+        "communities",
+        "--context",
+        "a",
+        "--into",
+        "b",
+        "--url",
+        "http://127.0.0.1:9",
+    ]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+}
+
+/// The `consolidation` twin of the guard battery above — plus
+/// `--help` (exit 0, the usage text itself) and the positional-URL
+/// arms `communities` shares but words differently.
+#[test]
+fn consolidation_argument_parse_guards_answer_each_misuse_by_name() {
+    for (args, message) in [
+        (
+            vec!["consolidation", "--context", "a", "--context", "b"],
+            "--context given twice",
+        ),
+        (
+            vec!["consolidation", "--context", "--into"],
+            "--context needs a name",
+        ),
+        (vec!["consolidation", "--context"], "--context needs a name"),
+        (
+            vec![
+                "consolidation",
+                "--context",
+                "a",
+                "--into",
+                "x",
+                "--into",
+                "y",
+            ],
+            "--into given twice",
+        ),
+        (
+            vec!["consolidation", "--context", "a", "--into", "--x"],
+            "--into needs a name",
+        ),
+        (
+            vec!["consolidation", "--context", "a", "--into"],
+            "--into needs a name",
+        ),
+        (
+            vec!["consolidation", "--context", "a", "--checks", "--x"],
+            "--checks needs a comma-separated list",
+        ),
+        (
+            vec!["consolidation", "--context", "a", "--checks"],
+            "--checks needs a comma-separated list",
+        ),
+        (
+            vec![
+                "consolidation",
+                "--context",
+                "a",
+                "--config",
+                "x",
+                "--config",
+                "y",
+            ],
+            "--config given twice",
+        ),
+        (
+            vec!["consolidation", "--context", "a", "--config", "--x"],
+            "--config needs a file path",
+        ),
+        (
+            vec!["consolidation", "--context", "a", "--config"],
+            "--config needs a file path",
+        ),
+        (
+            vec![
+                "consolidation",
+                "--context",
+                "a",
+                "--url",
+                "http://a",
+                "--url",
+                "http://b",
+            ],
+            "--url given twice",
+        ),
+        (
+            vec!["consolidation", "--context", "a", "--url", "--x"],
+            "--url needs a server URL",
+        ),
+        (
+            vec!["consolidation", "--context", "a", "--url"],
+            "--url needs a server URL",
+        ),
+        (
+            vec!["consolidation", "--context", "a", "http://a", "http://b"],
+            "the URL was already given",
+        ),
+        (
+            vec![
+                "consolidation",
+                "--context",
+                "a",
+                "--url",
+                "http://a",
+                "http://b",
+            ],
+            "the URL was already given",
+        ),
+        (
+            vec!["consolidation", "--context", "a", "-x"],
+            "unknown flag '-x'",
+        ),
+        (vec!["consolidation"], "--context is required"),
+    ] {
+        let output = run(&args);
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(message), "{args:?}: {stderr}");
+    }
+
+    // --help is the usage text on stdout, exit 0 — not a usage error.
+    let output = run(&["consolidation", "--help"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("usage: taguru consolidation"),
+        "{output:?}"
+    );
+
+    // Accepted flags parse through to the required-context check —
+    // none answers with its own arm's error on legitimate first use.
+    let dir = common::scratch_dir("cli-consolidation-flags");
+    std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
+    let config = dir.join("empty.env");
+    std::fs::write(&config, "").expect("config must be writable");
+    let output = run(&[
+        "consolidation",
+        "--into",
+        "x",
+        "--checks",
+        "merge",
+        "--config",
+        &config.display().to_string(),
+        "--dry-run",
+    ]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("--context is required"),
+        "{output:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn communities_url_flag_reaches_the_named_server() {
     // Not a full round trip (no context populated) — just proof --url
@@ -1999,6 +2247,19 @@ fn export_round_trips_a_data_directory_through_batch_streams() {
     );
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Issue #753: an unknown flag is named as one, never silently read
+/// as a CONTEXT name — `export --out d -x` used to be the guard's
+/// only reader, and nothing pinned it.
+#[test]
+fn export_names_an_unknown_flag_instead_of_reading_it_as_a_context() {
+    let output = run(&["export", "--out", "somewhere", "-x"]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("unknown flag '-x'"),
+        "{output:?}"
+    );
 }
 
 /// Issue #751: a FULL export owns `--out`'s `*.jsonl` files — one left

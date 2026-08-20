@@ -877,8 +877,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::{
-        Api, IMPORT_CHUNK_BYTES, ImportFailure, base_url_for, loopback_of, pack_import_chunks,
-        reject_unusable_base, reject_userinfo, skew_warning, token_from_ring,
+        Api, IMPORT_CHUNK_BYTES, ImportFailure, REMOTE_RESPONSE_CAP_BYTES, base_url_for,
+        loopback_of, pack_import_chunks, reject_unusable_base, reject_userinfo, skew_warning,
+        token_from_ring,
     };
 
     #[test]
@@ -886,6 +887,9 @@ mod tests {
         assert_eq!(loopback_of("0.0.0.0:8248"), "127.0.0.1:8248");
         assert_eq!(loopback_of("[::]:8248"), "[::1]:8248");
         assert_eq!(loopback_of("127.0.0.1:8248"), "127.0.0.1:8248");
+        // A CONCRETE non-loopback address passes through untouched —
+        // only the unspecified binds above are rewritten (#753).
+        assert_eq!(loopback_of("192.168.1.5:8248"), "192.168.1.5:8248");
         // Hostnames don't parse as socket addresses; pass them through.
         assert_eq!(loopback_of("localhost:8248"), "localhost:8248");
     }
@@ -1258,6 +1262,65 @@ mod tests {
         assert!(reject_userinfo("https://h").is_ok());
         // left for `reject_unusable_base`'s "not a usable base URL"
         assert!(reject_userinfo("not a url").is_ok());
+    }
+
+    /// Issue #753: the safety-net cap, pinned literally — a drifted
+    /// constant would silently change what "runaway response" means.
+    #[test]
+    fn the_remote_response_cap_is_pinned_literally() {
+        assert_eq!(REMOTE_RESPONSE_CAP_BYTES, 268_435_456);
+    }
+
+    /// Issue #753: the entries walk mirrors `list_names_paged`'s
+    /// contract — a short-but-nonempty page continues (only an empty
+    /// page ends the walk), and a page that does not advance past the
+    /// cursor is refused rather than looping on duplicates.
+    #[test]
+    fn context_entry_listing_walks_pages_and_refuses_a_non_advancing_one() {
+        fn row(name: &str) -> serde_json::Value {
+            json!({
+                "name": name, "description": "", "pinned": false, "loaded": false,
+                "dice_floor": null, "semantic_floor": null, "stats": {}, "usage": {}
+            })
+        }
+        let (base, _) = respond_in_order_capturing(vec![
+            (
+                "HTTP/1.1 200 OK",
+                json!({"result": {"total": 3, "contexts": [row("a"), row("b")]}}),
+            ),
+            (
+                "HTTP/1.1 200 OK",
+                json!({"result": {"total": 3, "contexts": [row("c")]}}),
+            ),
+            (
+                "HTTP/1.1 200 OK",
+                json!({"result": {"total": 3, "contexts": []}}),
+            ),
+        ]);
+        let api = Api::new(base);
+        let names: Vec<String> = api
+            .list_context_entries_paged(2)
+            .expect("a short page continues the walk")
+            .iter()
+            .map(|entry| entry.name.clone())
+            .collect();
+        assert_eq!(names, ["a", "b", "c"]);
+
+        let (base, _) = respond_in_order_capturing(vec![
+            (
+                "HTTP/1.1 200 OK",
+                json!({"result": {"total": 2, "contexts": [row("a"), row("b")]}}),
+            ),
+            (
+                "HTTP/1.1 200 OK",
+                json!({"result": {"total": 2, "contexts": [row("b")]}}),
+            ),
+        ]);
+        let api = Api::new(base);
+        let error = api
+            .list_context_entries_paged(2)
+            .expect_err("a stuck cursor must refuse, never loop");
+        assert!(error.contains("did not advance past 'b'"), "{error}");
     }
 
     #[test]
