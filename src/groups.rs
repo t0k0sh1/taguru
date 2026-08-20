@@ -537,4 +537,155 @@ mod tests {
         );
         assert!(context_closure(&groups, ["nope"]).is_empty());
     }
+
+    /// Issue #753: the trim warn reports exactly how many names fell
+    /// past the cap — sizes chosen so subtraction, addition, and
+    /// integer division all disagree (5-2=3 vs 5/2=2 vs 5+2=7).
+    #[test]
+    fn trim_membership_drops_past_the_cap_and_counts_the_drop_exactly() {
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct DroppedRecorder(Arc<Mutex<Vec<u64>>>);
+        impl tracing::Subscriber for DroppedRecorder {
+            fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+                true
+            }
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+            fn event(&self, event: &tracing::Event<'_>) {
+                struct Dropped<'a>(&'a Mutex<Vec<u64>>);
+                impl tracing::field::Visit for Dropped<'_> {
+                    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+                        if field.name() == "dropped" {
+                            self.0.lock().unwrap().push(value);
+                        }
+                    }
+                    fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {
+                    }
+                }
+                event.record(&mut Dropped(&self.0));
+            }
+            fn enter(&self, _: &tracing::span::Id) {}
+            fn exit(&self, _: &tracing::span::Id) {}
+        }
+
+        let mut groups = map(&[("g", &["a", "b", "c", "d", "e"], &["w", "x", "y", "z"])]);
+        let dropped = Arc::new(Mutex::new(Vec::new()));
+        tracing::subscriber::with_default(DroppedRecorder(Arc::clone(&dropped)), || {
+            trim_membership(&mut groups, 2)
+        });
+        let record = &groups["g"];
+        assert_eq!(
+            record
+                .contexts
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["a", "b"],
+            "the FIRST names in order survive"
+        );
+        assert_eq!(
+            record.groups.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["w", "x"]
+        );
+        assert_eq!(
+            dropped.lock().unwrap().as_slice(),
+            [3, 2],
+            "the warn counts exactly what fell past the cap"
+        );
+
+        // At or under the cap nothing moves and nothing warns.
+        let mut under = map(&[("g", &["a", "b"], &[])]);
+        let quiet = Arc::new(Mutex::new(Vec::new()));
+        tracing::subscriber::with_default(DroppedRecorder(Arc::clone(&quiet)), || {
+            trim_membership(&mut under, 2)
+        });
+        assert!(quiet.lock().unwrap().is_empty());
+        assert_eq!(under["g"].contexts.len(), 2);
+    }
+
+    /// Issue #753: a group file already gone counts as removed;
+    /// anything else — a directory squatting on the name, which
+    /// `remove_file` refuses even for root — surfaces as the error it
+    /// is instead of being swallowed as "already satisfied".
+    #[test]
+    fn remove_group_file_swallows_only_not_found() {
+        let dir = std::env::temp_dir().join(format!("taguru-groups-remove-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        assert!(remove_group_file(&dir, "ghost").is_ok());
+
+        fs::create_dir_all(dir.join("blocked.group").join("x")).unwrap();
+        assert!(
+            remove_group_file(&dir, "blocked").is_err(),
+            "a non-NotFound refusal must surface"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Issue #753: a resumed rename whose move fails for a real
+    /// reason (an injected commit failure) reports `complete: false` —
+    /// the guard swallows only NotFound, where both endpoints already
+    /// gone IS the rename having finished.
+    #[test]
+    fn scan_groups_reports_a_blocked_resume_incomplete_and_an_absent_one_done() {
+        let dir =
+            std::env::temp_dir().join(format!("taguru-groups-scan-blocked-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("a.group"),
+            b"{\"description\":\"\",\"contexts\":[],\"groups\":[]}",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("a.grouprenaming"),
+            b"{\"from\":\"a\",\"to\":\"b\"}",
+        )
+        .unwrap();
+
+        crate::storage::fail_persistence_ops_after(0);
+        let (groups, resumed) = scan_groups(&dir).expect("a stuck rename is reported, not fatal");
+        assert!(
+            !crate::storage::clear_persistence_fault(),
+            "the injected fault must have fired on the resume's commit"
+        );
+        assert_eq!(resumed.len(), 1);
+        assert!(
+            !resumed[0].complete,
+            "an injected commit failure is not 'already done'"
+        );
+        assert!(!resumed[0].landed);
+        assert!(
+            groups.contains_key("a"),
+            "the source file stays registered under its old name"
+        );
+        assert!(
+            dir.join("a.grouprenaming").exists(),
+            "a stuck rename keeps its marker for the next boot to retry"
+        );
+
+        let absent =
+            std::env::temp_dir().join(format!("taguru-groups-scan-absent-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&absent);
+        fs::create_dir_all(&absent).unwrap();
+        fs::write(
+            absent.join("c.grouprenaming"),
+            b"{\"from\":\"c\",\"to\":\"d\"}",
+        )
+        .unwrap();
+        let (_, resumed) = scan_groups(&absent).unwrap();
+        assert_eq!(resumed.len(), 1);
+        assert!(resumed[0].complete, "both endpoints gone IS completion");
+        assert!(!resumed[0].landed);
+
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&absent);
+    }
 }

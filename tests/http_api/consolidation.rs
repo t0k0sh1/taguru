@@ -432,3 +432,245 @@ fn a_malformed_url_is_a_usage_error_caught_before_the_target_line() {
         "{stderr}"
     );
 }
+
+// --- #753: judge-flow branches the #551 sweep found untested ---------------
+
+/// A chat stub that dismisses everything — the counter twin of
+/// `stub_judge`'s all-apply answers.
+fn stub_dismiss(calls: Arc<Mutex<usize>>) -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut content_length = 0usize;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).is_err() || line.trim().is_empty() {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    content_length = value.trim().parse().unwrap_or(0);
+                }
+            }
+            let mut body = vec![0u8; content_length];
+            if reader.read_exact(&mut body).is_err() {
+                continue;
+            }
+            *calls.lock().unwrap() += 1;
+            let content = "{\"verdict\": \"dismiss\", \"action\": \"benign twins\", \
+                           \"rationale\": \"別の蔵\"}";
+            let payload =
+                json!({"choices": [{"message": {"role": "assistant", "content": content}}]})
+                    .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                payload.len(),
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    url
+}
+
+/// Replaces the judgment artifact's manifest passage wholesale — the
+/// same retract-then-apply door the CLI itself writes through.
+fn overwrite_manifest(server: &Server, manifest_text: &str) {
+    let batch = format!(
+        "{}\n{}\n",
+        json!({"taguru_batch": 1, "context": "sake::consolidation",
+               "source": "consolidation:manifest"}),
+        json!({"passage": manifest_text}),
+    );
+    let (status, body) = server.call_raw(
+        "POST",
+        "/import",
+        Some(&batch),
+        Some("application/x-ndjson"),
+    );
+    assert_eq!(status, 200, "{body}");
+}
+
+/// A dismissal is a first-class judgment: counted as one in the
+/// report and reused without an LLM call exactly like an apply.
+#[test]
+fn a_dismissal_is_counted_and_reused_like_any_judgment() {
+    let server = Server::start("consolidation-dismiss");
+    seed(&server);
+    let calls = Arc::new(Mutex::new(0usize));
+    let chat_url = stub_dismiss(Arc::clone(&calls));
+    let extract_env = [
+        ("TAGURU_EXTRACT_URL", chat_url.as_str()),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+    let (code, stdout, stderr) =
+        run_consolidation(&["--context", "sake", &server.base], &extract_env);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains("judged 5 (0 apply, 5 dismiss), 0 reused"),
+        "{stdout}"
+    );
+    assert_eq!(*calls.lock().unwrap(), 5);
+
+    let (code, stdout, _) = run_consolidation(&["--context", "sake", &server.base], &extract_env);
+    assert_eq!(code, 0, "{stdout}");
+    assert!(
+        stdout.contains("judgments up to date (5 reused, no LLM calls)"),
+        "{stdout}"
+    );
+    assert_eq!(*calls.lock().unwrap(), 5);
+}
+
+/// A server whose audit answers a different detector is refused
+/// before anything is judged or written — fingerprints from another
+/// detector would be incomparable.
+#[test]
+fn a_foreign_server_detector_is_refused_outright() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&requests);
+    std::thread::spawn(move || {
+        let responses = [
+            // GET /health for the skew preflight, then the audit.
+            json!({"status": "ok"}).to_string(),
+            json!({"result": {"detector": "consolidation/999"}}).to_string(),
+        ];
+        for body in responses {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut buffer = [0u8; 4096];
+            let read = stream.read(&mut buffer).unwrap_or(0);
+            let request = String::from_utf8_lossy(&buffer[..read]);
+            seen.lock()
+                .unwrap()
+                .push(request.lines().next().unwrap_or("").to_string());
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    let (code, _stdout, stderr) = run_consolidation(
+        &["--context", "sake", "--url", &format!("http://{addr}")],
+        &[],
+    );
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("is not this build's (consolidation/1)"),
+        "{stderr}"
+    );
+    // The refusal is side-effect free: the health preflight and the
+    // audit itself are the ONLY requests — nothing was written.
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2, "{requests:?}");
+    assert!(requests[0].starts_with("GET /health"), "{requests:?}");
+    assert!(
+        requests[1].starts_with("POST /contexts/sake/consolidation/audit"),
+        "{requests:?}"
+    );
+}
+
+/// A stored manifest naming another detector re-judges everything,
+/// loudly; a wrong or missing format stamp refuses outright — a
+/// mangled artifact must never be silently diffed against.
+#[test]
+fn a_changed_stored_detector_rejudges_and_a_bad_stamp_refuses() {
+    let server = Server::start("consolidation-restamp");
+    seed(&server);
+    let calls = Arc::new(Mutex::new(0usize));
+    let chat_url = stub_judge(Arc::clone(&calls));
+    let extract_env = [
+        ("TAGURU_EXTRACT_URL", chat_url.as_str()),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+    let (code, stdout, _) = run_consolidation(&["--context", "sake", &server.base], &extract_env);
+    assert_eq!(code, 0, "{stdout}");
+    assert_eq!(*calls.lock().unwrap(), 5);
+
+    // Same format, different detector: every judgment re-costs, and
+    // stderr says why.
+    overwrite_manifest(
+        &server,
+        &json!({"taguru_consolidation": 1, "detector": "consolidation/0", "context": "sake"})
+            .to_string(),
+    );
+    let (code, stdout, stderr) =
+        run_consolidation(&["--context", "sake", &server.base], &extract_env);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("detector changed (consolidation/0 → consolidation/1)"),
+        "{stderr}"
+    );
+    assert!(
+        stdout.contains("judged 5 (5 apply, 0 dismiss), 0 reused"),
+        "{stdout}"
+    );
+    assert_eq!(*calls.lock().unwrap(), 10);
+
+    // The re-judge wrote a CURRENT manifest back — a third run reuses
+    // everything instead of re-costing five judgments per run.
+    let stored = server.ok(
+        "POST",
+        "/contexts/sake::consolidation/sources/lookup",
+        Some(json!({"sources": ["consolidation:manifest"]})),
+    );
+    let manifest: Value = serde_json::from_str(
+        stored["passages"]["consolidation:manifest"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(manifest["detector"], json!("consolidation/1"), "{manifest}");
+    let (code, stdout, _) = run_consolidation(&["--context", "sake", &server.base], &extract_env);
+    assert_eq!(code, 0, "{stdout}");
+    assert!(
+        stdout.contains("judgments up to date (5 reused, no LLM calls)"),
+        "{stdout}"
+    );
+    assert_eq!(*calls.lock().unwrap(), 10);
+
+    // A format stamp from another program: refused by number.
+    overwrite_manifest(
+        &server,
+        &json!({"taguru_consolidation": 2, "detector": "consolidation/1", "context": "sake"})
+            .to_string(),
+    );
+    let (code, _stdout, stderr) =
+        run_consolidation(&["--context", "sake", &server.base], &extract_env);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("judgment artifact format 2 is not this build's 1"),
+        "{stderr}"
+    );
+    assert_eq!(*calls.lock().unwrap(), 10, "a refusal judges nothing");
+    let stored = server.ok(
+        "POST",
+        "/contexts/sake::consolidation/sources/lookup",
+        Some(json!({"sources": ["consolidation:manifest"]})),
+    );
+    assert!(
+        stored["passages"]["consolidation:manifest"]
+            .as_str()
+            .unwrap()
+            .contains("\"taguru_consolidation\":2"),
+        "a refusal must not rewrite the manifest it refused: {stored}"
+    );
+
+    // No stamp at all: refused by name.
+    overwrite_manifest(
+        &server,
+        &json!({"detector": "consolidation/1", "context": "sake"}).to_string(),
+    );
+    let (code, _stdout, stderr) =
+        run_consolidation(&["--context", "sake", &server.base], &extract_env);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("carries no taguru_consolidation stamp"),
+        "{stderr}"
+    );
+    assert_eq!(*calls.lock().unwrap(), 10, "a refusal judges nothing");
+}
