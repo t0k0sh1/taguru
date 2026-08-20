@@ -8,6 +8,15 @@ Entries that change an on-disk format or a response shape say so.
 ## [Unreleased]
 
 ### Changed
+- `taguru communities` and `taguru consolidation` share one
+  `POST /import` chunk packer (`remote::pack_import_chunks`) instead
+  of two near-identical private copies; consolidation's bodies now
+  join batches with `"\n"` like communities' (was `"\n\n"` — the
+  import parser skips blank lines, so the wire behavior is
+  identical), and its `create` block now rides only the run's first
+  batch, the communities pattern (`create` is consumed only when the
+  artifact context does not exist yet, so repeating it on every batch
+  was pure payload) (#752).
 - `fastembed` updated to 6.0.0 (from 5.17.4); its only breaking change
   is an internal error-type refactor with no source-level impact here.
   `LOCAL_MODELS.download_mib` (and `taguru-code models`'s

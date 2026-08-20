@@ -279,12 +279,18 @@ fn drive(
             judgment["verdict"].as_str().unwrap_or("?"),
             judgment["action"].as_str().unwrap_or("-"),
         ));
-        batches.push(judgment_batch(&artifact, context, candidate, &judgment));
+        batches.push(judgment_batch(
+            &artifact,
+            context,
+            candidate,
+            &judgment,
+            batches.is_empty(),
+        ));
     }
     // The manifest travels LAST, the communities ordering: its
     // presence at the new stamp means every judgment before it landed.
     batches.push(manifest_batch(&artifact, context));
-    for chunk in pack_batches(&batches) {
+    for chunk in crate::remote::pack_import_chunks(&batches) {
         api.import(&chunk)?;
     }
     report.push_str(&format!(
@@ -465,11 +471,16 @@ fn parse_judgment(content: &str) -> Option<Value> {
 /// One judgment as one import batch: retract-then-apply idempotent,
 /// the passage carrying the normalized judgment JSON, one association
 /// recording the verdict so the artifact is queryable as a graph too.
+/// Only the run's FIRST batch carries the create block (`create:
+/// true`) — the `taguru communities` pattern: create is consumed only
+/// when the artifact context does not exist yet, so repeating it on
+/// every batch was pure payload (issue #752).
 fn judgment_batch(
     artifact: &str,
     context: &str,
     candidate: &Candidate,
     judgment: &Value,
+    create: bool,
 ) -> String {
     let source = judgment_source(&candidate.fingerprint);
     let text = json!({
@@ -478,12 +489,18 @@ fn judgment_batch(
         "judgment": judgment,
         "evidence": candidate.payload,
     });
-    let header = json!({
+    let mut header = json!({
         "taguru_batch": 1,
         "context": artifact,
         "source": source,
-        "create": {"description": format!("Consolidation judgments for '{context}' (ADR 0012); derived, safe to delete")},
     });
+    if create {
+        header["create"] = json!({
+            "description": format!(
+                "Consolidation judgments for '{context}' (ADR 0012); derived, safe to delete"
+            ),
+        });
+    }
     let association = json!({
         "subject": candidate.headline,
         "label": judgment["verdict"],
@@ -495,13 +512,15 @@ fn judgment_batch(
 }
 
 /// The manifest batch — written LAST so its stamp attests a complete
-/// artifact, never a torn one.
+/// artifact, never a torn one. No create block: at least one judgment
+/// batch always precedes it in the same run (`fresh.is_empty()`
+/// returns before any import), so the artifact context exists by the
+/// time this lands.
 fn manifest_batch(artifact: &str, context: &str) -> String {
     let header = json!({
         "taguru_batch": 1,
         "context": artifact,
         "source": MANIFEST_SOURCE,
-        "create": {"description": format!("Consolidation judgments for '{context}' (ADR 0012); derived, safe to delete")},
     });
     let manifest = json!({
         "taguru_consolidation": CONSOLIDATION_FORMAT,
@@ -510,28 +529,6 @@ fn manifest_batch(artifact: &str, context: &str) -> String {
     });
     let passage = json!({"passage": manifest.to_string()});
     format!("{header}\n{passage}")
-}
-
-/// Packs whole batches into bodies under the same chunk ceiling
-/// `taguru communities` uses — a batch is the import format's atom
-/// and never splits.
-fn pack_batches(batches: &[String]) -> Vec<String> {
-    const IMPORT_CHUNK_BYTES: usize = 2 * 1024 * 1024;
-    let mut chunks = Vec::new();
-    let mut current = String::new();
-    for batch in batches {
-        if !current.is_empty() && current.len() + batch.len() + 2 > IMPORT_CHUNK_BYTES {
-            chunks.push(std::mem::take(&mut current));
-        }
-        if !current.is_empty() {
-            current.push_str("\n\n");
-        }
-        current.push_str(batch);
-    }
-    if !current.is_empty() {
-        chunks.push(current);
-    }
-    chunks
 }
 
 #[cfg(test)]
@@ -573,25 +570,40 @@ mod tests {
             "sake",
             &candidate,
             &json!({"verdict": "apply", "action": "alias", "rationale": "同一"}),
+            true,
         );
         let lines: Vec<&str> = batch.lines().collect();
         assert_eq!(lines.len(), 3, "header + association + passage");
         let header: Value = serde_json::from_str(lines[0]).unwrap();
         assert_eq!(header["taguru_batch"], 1);
         assert_eq!(header["source"], "judgment:00ff");
+        assert!(
+            header["create"]["description"].is_string(),
+            "the run's first batch carries the create block: {header}"
+        );
+
+        let later = judgment_batch(
+            "sake::consolidation",
+            "sake",
+            &candidate,
+            &json!({"verdict": "apply", "action": "alias", "rationale": "同一"}),
+            false,
+        );
+        let header: Value = serde_json::from_str(later.lines().next().unwrap()).unwrap();
+        assert!(
+            header.get("create").is_none(),
+            "create rides the first batch only (issue #752): {header}"
+        );
+
         let manifest = manifest_batch("sake::consolidation", "sake");
+        let header: Value = serde_json::from_str(manifest.lines().next().unwrap()).unwrap();
+        assert!(
+            header.get("create").is_none(),
+            "a judgment batch always precedes the manifest: {header}"
+        );
         let passage: Value = serde_json::from_str(manifest.lines().nth(1).unwrap()).unwrap();
         let stored: Value = serde_json::from_str(passage["passage"].as_str().unwrap()).unwrap();
         assert_eq!(stored["taguru_consolidation"], 1);
         assert_eq!(stored["detector"], CONSOLIDATION_DETECTOR);
-    }
-
-    #[test]
-    fn pack_batches_never_splits_a_batch() {
-        let big = "x".repeat(3 * 1024 * 1024);
-        let chunks = pack_batches(&[big.clone(), "small".to_string()]);
-        assert_eq!(chunks.len(), 2);
-        assert_eq!(chunks[0], big);
-        assert_eq!(chunks[1], "small");
     }
 }

@@ -81,10 +81,6 @@ const PROMPT_MEMBERS: usize = 40;
 /// Characters of each child summary quoted in a parent prompt.
 const PROMPT_CHILD_EXCERPT: usize = 500;
 
-/// Import batches are packed into request bodies up to this size —
-/// comfortably under the server's default 8 MiB body cap.
-const IMPORT_CHUNK_BYTES: usize = 2 * 1024 * 1024;
-
 /// A membership edge for a member with no intra-community strength (a
 /// singleton community): weight 0.0 would read as a netted-out,
 /// contested claim, which membership is not.
@@ -382,7 +378,7 @@ fn derive(api: &Api, name: &str, derived: &str, dry_run: bool) -> Result<Report,
             .collect(),
     };
     let batches = render_batches(name, derived, &analysis, &summaries, &manifest)?;
-    for chunk in pack_chunks(batches) {
+    for chunk in crate::remote::pack_import_chunks(&batches) {
         api.import(&chunk)?;
     }
 
@@ -548,26 +544,6 @@ fn render_batches(
         .join("\n"),
     );
     Ok(batches)
-}
-
-/// Packs whole batches into request bodies under [`IMPORT_CHUNK_BYTES`]
-/// — a batch is the import format's atom and never splits.
-fn pack_chunks(batches: Vec<String>) -> Vec<String> {
-    let mut chunks = Vec::new();
-    let mut current = String::new();
-    for batch in batches {
-        if !current.is_empty() && current.len() + batch.len() + 1 > IMPORT_CHUNK_BYTES {
-            chunks.push(std::mem::take(&mut current));
-        }
-        if !current.is_empty() {
-            current.push('\n');
-        }
-        current.push_str(&batch);
-    }
-    if !current.is_empty() {
-        chunks.push(current);
-    }
-    chunks
 }
 
 /// The previous artifact's manifest: `None` when the artifact context
@@ -803,21 +779,6 @@ fn retract_source(api: &Api, context: &str, source: &str) -> Result<(), String> 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn pack_chunks_never_splits_a_batch_and_packs_under_the_cap() {
-        let small = "a".repeat(100);
-        let big = "b".repeat(IMPORT_CHUNK_BYTES);
-        let chunks = pack_chunks(vec![small.clone(), big.clone(), small.clone()]);
-        assert_eq!(chunks.len(), 3);
-        assert_eq!(chunks[0], small);
-        assert_eq!(chunks[1], big);
-        assert_eq!(chunks[2], small);
-
-        let chunks = pack_chunks(vec![small.clone(), small.clone()]);
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0], format!("{small}\n{small}"));
-    }
 
     #[test]
     fn parse_analysis_refuses_a_torn_stream_and_a_newer_format() {
