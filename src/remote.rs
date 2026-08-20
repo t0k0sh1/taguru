@@ -46,10 +46,9 @@ const REMOTE_RESPONSE_CAP_BYTES: u64 = 256 * 1024 * 1024;
 /// is refused — credentials on the command line are readable from
 /// `ps` and shell history for the lifetime of the terminal, the exact
 /// leak the existing `TAGURU_API_TOKEN` environment variable already
-/// avoids. An unparseable `base` is left alone here: `Api::url`
-/// already produces its own "not a usable base URL" message for that
-/// case, on the first real request, and duplicating it here would
-/// give one fault two different error surfaces.
+/// avoids. An unparseable `base` is left alone here: that is
+/// [`reject_unusable_base`]'s job, so one fault keeps one error
+/// surface.
 pub(crate) fn reject_userinfo(base: &str) -> Result<(), String> {
     let Ok(url) = url::Url::parse(base) else {
         return Ok(());
@@ -62,6 +61,28 @@ pub(crate) fn reject_userinfo(base: &str) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+/// Refuses a base URL no request could ever leave on: unparseable, or
+/// a scheme `ureq` (the transport underneath [`Api`]) does not speak.
+/// `url::Url::parse` alone happily accepts `file://`/`ftp://` and
+/// anything else with a well-formed authority, but a non-http(s)
+/// scheme would only fail once the request reaches `ureq` — as a
+/// transport error (exit 1), exactly the network-problem-shaped
+/// message an upfront check exists to avoid for a usage mistake.
+/// Every verb entry point calls this before printing anything or
+/// touching any file, and maps the message to a usage error (exit 2),
+/// the same #248-item-8 pattern `calibrate`/`communities`/`evaluate`/
+/// `benchmark search` follow.
+pub(crate) fn reject_unusable_base(base: &str) -> Result<(), String> {
+    match url::Url::parse(base) {
+        Ok(parsed) if matches!(parsed.scheme(), "http" | "https") => Ok(()),
+        Ok(parsed) => Err(format!(
+            "'{base}' uses '{}', but --url only supports http/https",
+            parsed.scheme()
+        )),
+        Err(_) => Err(format!("'{base}' is not a usable base URL")),
+    }
 }
 
 /// A failure from the envelope surface, with 404 told apart — "no
@@ -824,8 +845,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::{
-        Api, ImportFailure, base_url_for, loopback_of, reject_userinfo, skew_warning,
-        token_from_ring,
+        Api, ImportFailure, base_url_for, loopback_of, reject_unusable_base, reject_userinfo,
+        skew_warning, token_from_ring,
     };
 
     #[test]
@@ -1203,8 +1224,21 @@ mod tests {
         // password-only userinfo (`https://:tok@h`) is still userinfo
         assert!(reject_userinfo("https://:tok@h").is_err());
         assert!(reject_userinfo("https://h").is_ok());
-        // left for `Api::url`'s own "not a usable base URL" message
+        // left for `reject_unusable_base`'s "not a usable base URL"
         assert!(reject_userinfo("not a url").is_ok());
+    }
+
+    #[test]
+    fn an_unusable_base_is_rejected_with_the_fault_named() {
+        assert_eq!(reject_unusable_base("http://h"), Ok(()));
+        assert_eq!(reject_unusable_base("https://h:8248/prefix"), Ok(()));
+        let error = reject_unusable_base("not a url").expect_err("unparseable");
+        assert_eq!(error, "'not a url' is not a usable base URL");
+        let error = reject_unusable_base("ftp://h").expect_err("wrong scheme");
+        assert_eq!(
+            error,
+            "'ftp://h' uses 'ftp', but --url only supports http/https"
+        );
     }
 
     #[test]

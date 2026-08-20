@@ -165,6 +165,12 @@ pub fn run(args: &[String]) -> i32 {
             return 2;
         }
     };
+    // A base no request could leave on is a usage error (exit 2, issue
+    // #751), caught before drive() prints its target line — the same
+    // upfront refusal every other client verb gives it.
+    if let Err(message) = crate::remote::reject_unusable_base(&base) {
+        return usage(&message);
+    }
     match drive(&base, &context, into.as_deref(), &checks, dry_run) {
         Ok(report) => {
             print!("{report}");

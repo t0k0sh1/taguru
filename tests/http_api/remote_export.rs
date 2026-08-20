@@ -295,6 +295,281 @@ fn a_userinfo_url_or_a_valueless_url_flag_is_a_usage_error() {
     );
     assert_eq!(code, 2, "{stderr}");
     assert!(stderr.contains("TAGURU_API_TOKEN"), "{stderr}");
+
+    // Issue #751: a base no request could leave on — unparseable, or a
+    // scheme ureq does not speak — is the same upfront usage error
+    // `import --url` already gives it, caught before the snapshot note
+    // prints (it used to be an exit-1 runtime failure after it).
+    let (code, _stdout, stderr) = run_cli(
+        &[
+            "export",
+            "--url",
+            "not a url at all",
+            "--out",
+            out.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("is not a usable base URL"), "{stderr}");
+    assert!(
+        !stderr.contains("not a point-in-time snapshot"),
+        "the refusal must land before the note: {stderr}"
+    );
+
+    let (code, _stdout, stderr) = run_cli(
+        &[
+            "export",
+            "--url",
+            "ftp://127.0.0.1:9",
+            "--out",
+            out.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains("--url only supports http/https"),
+        "{stderr}"
+    );
+}
+
+/// Issue #751: a FULL export owns `--out`'s `*.jsonl` files — one left
+/// by an earlier export whose context or group no longer exists on the
+/// server is removed, so a directory import can never resurrect the
+/// deleted entity. A subset export never prunes, and a file that is
+/// not a stream (`notes.txt`) is never touched by either.
+#[test]
+fn a_full_remote_export_removes_stale_stream_files() {
+    let server = Server::start("remote-export-prune");
+    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+
+    let out = crate::support::common::scratch_dir("remote-export-prune");
+    std::fs::create_dir_all(&out).expect("out dir must be creatable");
+    std::fs::write(out.join("zombie.jsonl"), b"{}").expect("stale file must be writable");
+    std::fs::write(out.join("zombie.group.jsonl"), b"{}").expect("stale file must be writable");
+    std::fs::write(out.join("notes.txt"), b"keep me").expect("bystander must be writable");
+
+    // Subset export: writes its slice, removes nothing.
+    let (code, stdout, stderr) = run_cli(
+        &[
+            "export",
+            "--url",
+            &server.base,
+            "--out",
+            out.to_str().unwrap(),
+            "sake",
+        ],
+        &[],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(!stdout.contains("removed"), "{stdout}");
+    assert!(
+        out.join("zombie.jsonl").exists(),
+        "a subset export must not prune"
+    );
+
+    // Full export: both stale stream files go, each named on stdout.
+    let (code, stdout, stderr) = run_cli(
+        &[
+            "export",
+            "--url",
+            &server.base,
+            "--out",
+            out.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert_eq!(
+        stdout
+            .matches("removed — no longer exists at the source")
+            .count(),
+        2,
+        "{stdout}"
+    );
+    let contents = dir_contents(&out);
+    assert!(contents.contains_key("sake.jsonl"), "{contents:?}");
+    assert!(contents.contains_key("notes.txt"), "{contents:?}");
+    assert!(!contents.contains_key("zombie.jsonl"), "{contents:?}");
+    assert!(!contents.contains_key("zombie.group.jsonl"), "{contents:?}");
+
+    // An unexpected `*.jsonl` entry the prune cannot unlink — forced
+    // with a DIRECTORY, which `remove_file` refuses even for root —
+    // is a failure the exit code and stderr both carry.
+    std::fs::create_dir_all(out.join("undead.jsonl")).expect("dir must be creatable");
+    let (code, stdout, stderr) = run_cli(
+        &[
+            "export",
+            "--url",
+            &server.base,
+            "--out",
+            out.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stderr.contains("cannot remove stale"), "{stderr}");
+
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// Issue #751: a well-formed response naming a DIFFERENT context or
+/// group than the one requested is refused, and nothing lands on
+/// disk. Import applies each batch/record to its EMBEDDED name,
+/// whatever file it rode in on — saved under the wrong name, a later
+/// directory import would restore the wrong truth.
+#[test]
+fn a_response_naming_a_different_context_or_group_is_refused() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let responses = [
+            // /health, /version: no skew warning, no schema refusal.
+            ("HTTP/1.1 200 OK", r#"{"status":"ok"}"#.to_string()),
+            ("HTTP/1.1 200 OK", r#"{}"#.to_string()),
+            // GET /contexts, one page then the terminator.
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"result":{"total":1,"contexts":[{"name":"sake"}]}}"#.to_string(),
+            ),
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"result":{"total":1,"contexts":[]}}"#.to_string(),
+            ),
+            // GET /contexts/sake/export: a valid stream — for the
+            // WRONG context.
+            (
+                "HTTP/1.1 200 OK",
+                "{\"taguru_batch\":1,\"context\":\"other\",\"source\":\"a.md\",\
+                 \"create\":{\"description\":\"d\"}}\n{\"passage\":\"x\"}\n"
+                    .to_string(),
+            ),
+            // GET /groups, one page then the terminator.
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"result":{"total":1,"groups":[{"name":"g"}]}}"#.to_string(),
+            ),
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"result":{"total":1,"groups":[]}}"#.to_string(),
+            ),
+            // GET /groups/g/export: a valid record — for the WRONG
+            // group.
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"taguru_group":1,"name":"h","description":"x","contexts":["sake"]}"#
+                    .to_string(),
+            ),
+        ];
+        for (status_line, body) in responses {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut buffer = [0u8; 2048];
+            let _ = stream.read(&mut buffer);
+            let response = format!(
+                "{status_line}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    let base = format!("http://{addr}");
+
+    let out = crate::support::common::scratch_dir("remote-export-wrongname");
+    let (code, stdout, stderr) = run_cli(
+        &["export", "--url", &base, "--out", out.to_str().unwrap()],
+        &[],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("the response carries context 'other'"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("the response names group 'h'"), "{stderr}");
+    let contents = dir_contents(&out);
+    assert!(
+        !contents.contains_key("sake.jsonl") && !contents.contains_key("g.group.jsonl"),
+        "a wrong-name response must never land on disk: {contents:?}"
+    );
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// Issue #751: `GET /groups/{name}/export` answering something that is
+/// not a group record — here a well-formed JSON object with a 200
+/// status — is a per-item failure, and nothing lands on disk for it.
+/// "Parses as JSON" alone used to let any such body through as a
+/// `.group.jsonl` file reporting 0 members.
+#[test]
+fn a_group_export_response_that_is_not_a_group_record_is_refused() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let responses = [
+            // /health, /version: no skew warning, no schema refusal.
+            ("HTTP/1.1 200 OK", r#"{"status":"ok"}"#.to_string()),
+            ("HTTP/1.1 200 OK", r#"{}"#.to_string()),
+            // GET /contexts, first page then the terminating empty one.
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"result":{"total":1,"contexts":[{"name":"sake"}]}}"#.to_string(),
+            ),
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"result":{"total":1,"contexts":[]}}"#.to_string(),
+            ),
+            // GET /contexts/sake/export: a real batch stream.
+            (
+                "HTTP/1.1 200 OK",
+                "{\"taguru_batch\":1,\"context\":\"sake\",\"source\":\"a.md\",\
+                 \"create\":{\"description\":\"d\"}}\n{\"passage\":\"x\"}\n"
+                    .to_string(),
+            ),
+            // GET /groups, one page then the terminator.
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"result":{"total":1,"groups":[{"name":"g"}]}}"#.to_string(),
+            ),
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"result":{"total":1,"groups":[]}}"#.to_string(),
+            ),
+            // GET /groups/g/export: valid JSON, but no group record.
+            ("HTTP/1.1 200 OK", r#"{"status":"ok"}"#.to_string()),
+        ];
+        for (status_line, body) in responses {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut buffer = [0u8; 2048];
+            let _ = stream.read(&mut buffer);
+            let response = format!(
+                "{status_line}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    let base = format!("http://{addr}");
+
+    let out = crate::support::common::scratch_dir("remote-export-badgroup");
+    let (code, stdout, stderr) = run_cli(
+        &["export", "--url", &base, "--out", out.to_str().unwrap()],
+        &[],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("group 'g': not a taguru group record"),
+        "{stderr}"
+    );
+    let contents = dir_contents(&out);
+    assert!(contents.contains_key("sake.jsonl"), "{contents:?}");
+    assert!(
+        !contents.contains_key("g.group.jsonl"),
+        "a refused response must never land on disk: {contents:?}"
+    );
+    let _ = std::fs::remove_dir_all(&out);
 }
 
 /// A minimal stub answering exactly two requests in order: `GET
@@ -401,6 +676,10 @@ fn a_failed_group_enumeration_is_a_failure_the_summary_names() {
     let base = format!("http://{addr}");
 
     let out = crate::support::common::scratch_dir("remote-export-groups-fail");
+    // Issue #751: without the group list, a stale `.group.jsonl` cannot
+    // be told from a live one — a failed enumeration must prune nothing.
+    std::fs::create_dir_all(&out).expect("out dir must be creatable");
+    std::fs::write(out.join("zombie.group.jsonl"), b"{}").expect("stale file must be writable");
     let (code, stdout, stderr) = run_cli(
         &["export", "--url", &base, "--out", out.to_str().unwrap()],
         &[],
@@ -411,5 +690,9 @@ fn a_failed_group_enumeration_is_a_failure_the_summary_names() {
         "{stdout}"
     );
     assert!(stderr.contains("taguru: export: groups:"), "{stderr}");
+    assert!(
+        out.join("zombie.group.jsonl").exists(),
+        "a failed group enumeration must not prune"
+    );
     let _ = std::fs::remove_dir_all(&out);
 }

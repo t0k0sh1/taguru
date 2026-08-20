@@ -325,6 +325,29 @@ fn a_userinfo_url_or_a_valueless_url_flag_is_a_usage_error() {
     );
     assert_eq!(code, 2, "{stderr}");
     assert!(stderr.contains("TAGURU_API_TOKEN"), "{stderr}");
+
+    // Issue #751: a base no request could leave on is the same upfront
+    // usage error `import --url` already gives it, caught before the
+    // "compact → URL" target line prints — in both remote modes.
+    for args in [
+        &["compact", "--url", "not a url at all", "sake"][..],
+        &["compact", "--dry-run", "--url", "not a url at all"][..],
+    ] {
+        let (code, _stdout, stderr) = run_cli(args, &[]);
+        assert_eq!(code, 2, "{args:?}: {stderr}");
+        assert!(stderr.contains("is not a usable base URL"), "{stderr}");
+        assert!(
+            !stderr.contains("compact →") && !stderr.contains("compact --dry-run →"),
+            "the refusal must land before the target line: {stderr}"
+        );
+    }
+
+    let (code, _stdout, stderr) = run_cli(&["compact", "--url", "ftp://127.0.0.1:9", "sake"], &[]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains("--url only supports http/https"),
+        "{stderr}"
+    );
 }
 
 /// The bearer rides the same environment variables the server reads
