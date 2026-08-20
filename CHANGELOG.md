@@ -5,7 +5,22 @@ Notable changes to taguru. The format follows
 follow [SemVer](https://semver.org/) (pre-1.0: minor bumps may break).
 Entries that change an on-disk format or a response shape say so.
 
-## [Unreleased]
+## [0.9.3] - 2026-08-20
+
+A hardening release: the codebase-wide audit series finished (#538
+through #560), and every real bug it surfaced ships fixed here — the
+router's single-instance divergences (#727), ingest deadline threading
+(#728), the MCP bridge's tool-name refusal (#732), `taguru-code sync`'s
+gitignore re-check (#733), benchmark's extraction-knob pinning (#734),
+Bearer parsing per RFC 7235 (#731), both SDKs' packaging fixes
+(#735/#740), extract's batch-name injectivity (#730), and the
+export/remote/communities fixes (#751/#752). The
+passages/hydrate/embedding consistency follow-ups (#709) and the
+fastembed 6.0.0 upgrade (#710) round it out; the audits' test-gap
+findings closed alongside, with the touched modules' mutation sweeps
+back at zero missed (#708, #723/#724). One on-disk naming change:
+`taguru extract`'s batch output files now carry a hash suffix (see
+Fixed).
 
 ### Changed
 - `taguru communities` and `taguru consolidation` share one
@@ -3327,7 +3342,8 @@ OTLP tracing, OAuth for remote MCP), the MCP stdio bridge, and the
 offline tooling (`import`, `extract`, `inspect`, `estimate`).
 Published to crates.io and GHCR.
 
-[Unreleased]: https://github.com/t0k0sh1/taguru/compare/v0.9.2...HEAD
+[Unreleased]: https://github.com/t0k0sh1/taguru/compare/v0.9.3...HEAD
+[0.9.3]: https://github.com/t0k0sh1/taguru/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/t0k0sh1/taguru/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/t0k0sh1/taguru/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/t0k0sh1/taguru/compare/v0.8.0...v0.9.0
