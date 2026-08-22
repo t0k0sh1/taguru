@@ -136,7 +136,8 @@ use coverage::coverage_gaps;
 use diagnostics::DiagnosticsAttempt;
 use manifest::{CHECKPOINT_DIR_NAME, batch_file_name, checkpoint_file_name};
 use mechanical::{
-    mechanical_interpret, name_occurs, normalize_for_occurrence, prune_unresolvable_aliases,
+    ClaimedNames, mechanical_interpret, name_occurs, normalize_for_occurrence,
+    prune_claimed_aliases, prune_unresolvable_aliases,
 };
 use parse::{
     ItemRules, ModelAlias, ModelAssociation, ModelOutput, candidate_json, describe_value,
@@ -746,6 +747,12 @@ pub fn run(args: &[String]) -> i32 {
         vocabulary: context_vocabulary
             .as_ref()
             .map(|vocabulary| vocabulary.labels.clone())
+            .unwrap_or_default(),
+        // #758: the context's settled spellings are claimed from the
+        // first document, the way its labels seed the prompt above.
+        claimed_names: context_vocabulary
+            .as_ref()
+            .map(|vocabulary| ClaimedNames::seeded(&vocabulary.concepts, &vocabulary.labels))
             .unwrap_or_default(),
         source_id: args.source_id,
         date: args.date,

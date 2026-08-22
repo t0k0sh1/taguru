@@ -70,7 +70,12 @@ removal cannot judge.**
 2. **Mechanically removed (Stage 2, per document)** — after any
    cross-chunk corrective turns, so corrective messages' item indices
    still match the replayed answers: an alias whose `canonical` names
-   nothing any output's associations contain. Shadowing and conflicting
+   nothing any output's associations contain; and (#758) an alias whose
+   spelling an EARLIER document of the run, or the `--vocabulary`
+   context, already settled on as a different record — import's
+   `Conflict` refusal replayed at extraction time, since the model can
+   re-judge its own associations but never un-claim a previous
+   document's name. Within one document, shadowing and conflicting
    aliases stay corrective — both carry real content whose resolution is
    a judgment, not a mechanic.
 3. **Still corrective (the last resort)**: wrong-typed fields, oversized

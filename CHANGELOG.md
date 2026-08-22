@@ -5,6 +5,23 @@ Notable changes to taguru. The format follows
 follow [SemVer](https://semver.org/) (pre-1.0: minor bumps may break).
 Entries that change an on-disk format or a response shape say so.
 
+## [Unreleased]
+
+### Fixed
+
+- `taguru extract` no longer writes an alias whose spelling an earlier
+  document of the same run (or the `--vocabulary` context) already
+  settled on as a different concept or label. Import refuses that
+  rewire (`409 … already resolves to a different record`) and stops
+  the stream with the earlier batches applied; the alias is now
+  removed by the mechanical pass (ADR 0013) with the usual
+  accounting — named on stderr, counted on the report line, in the
+  diagnostics sidecar — and the consolidation audit proposes the
+  merge later if the two spellings really are one entity. Names are
+  claimed exactly where the label vocabulary accumulates: when a
+  document lands and when a manifest-skipped document's batch is
+  reread (#758).
+
 ## [0.9.3] - 2026-08-20
 
 A hardening release: the codebase-wide audit series finished (#538

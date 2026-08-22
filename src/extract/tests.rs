@@ -982,6 +982,220 @@ fn prune_resolves_canonicals_across_outputs_and_labels_chunks() {
     assert_eq!(outputs[0].output.aliases.len(), 1);
 }
 
+/// #758: an alias whose spelling an earlier document already interned
+/// as a different record is import's Conflict — removed here, named
+/// path-first. The same mapping claimed again is import's idempotent
+/// no-op and survives, as does an alias naming nothing claimed yet.
+#[test]
+fn prune_claimed_removes_an_alias_that_would_rewire_an_earlier_documents_name() {
+    let mut claimed = ClaimedNames::default();
+    claimed.absorb_extraction(&merge(
+        vec![ModelOutput {
+            associations: vec![association("東雲電機株式会社(架空)", "所在地", "新潟", 1.0)],
+            aliases: vec![alias("東雲電機", "東雲電機株式会社(架空)", "concept")],
+            questions: Vec::new(),
+        }],
+        0,
+        1,
+    ));
+    let mut outputs = [chunk_output(ModelOutput {
+        associations: vec![association("東雲電機株式会社", "製品", "SN-SEN70", 1.0)],
+        aliases: vec![
+            // Document A's concept, now offered as a spelling of a
+            // different name — the issue's exact shape.
+            alias("東雲電機株式会社(架空)", "東雲電機株式会社", "concept"),
+            // Document A's alias spelling, rewired to a different record.
+            alias("東雲電機", "東雲電機株式会社", "concept"),
+            // Nothing claimed this spelling: kept.
+            alias("SN-SEN70センサー", "SN-SEN70", "concept"),
+        ],
+        questions: Vec::new(),
+    })];
+    let removed = prune_claimed_aliases(&mut outputs, 1, &claimed);
+    assert_eq!(
+        removed,
+        vec![
+            "aliases[0]: alias \"東雲電機株式会社(架空)\" already names a concept an earlier \
+             document or the target context settled on; an alias cannot rewire it (import \
+             would refuse the batch)"
+                .to_string(),
+            "aliases[1]: alias \"東雲電機\" already names a concept an earlier document or \
+             the target context settled on; an alias cannot rewire it (import would refuse \
+             the batch)"
+                .to_string(),
+        ]
+    );
+    assert_eq!(outputs[0].output.aliases.len(), 1);
+    assert_eq!(
+        outputs[0].output.aliases[0].alias.as_deref(),
+        Some("SN-SEN70センサー")
+    );
+}
+
+/// The survivors of the claim check: the same mapping again (idempotent
+/// at import), an alias whose canonical is itself a claimed alias
+/// (routes to the same record — `add_alias` resolves through the
+/// lookup map), a label alias judged in the label namespace only, and
+/// the Stage 1 shapes (missing field, unknown kind) left to their own
+/// checks. Nothing is claimed across namespaces.
+#[test]
+fn prune_claimed_keeps_idempotent_routed_and_foreign_namespace_aliases() {
+    let mut claimed = ClaimedNames::default();
+    claimed.absorb_extraction(&merge(
+        vec![ModelOutput {
+            associations: vec![association("青嶺酒造", "杜氏", "高瀬", 1.0)],
+            aliases: vec![alias("Aomine", "青嶺酒造", "concept")],
+            questions: Vec::new(),
+        }],
+        0,
+        1,
+    ));
+    let mut outputs = [chunk_output(ModelOutput {
+        associations: vec![association("青嶺酒造", "創業年", "1907", 1.0)],
+        aliases: vec![
+            alias("Aomine", "青嶺酒造", "concept"), // same mapping again
+            alias("青嶺", "Aomine", "concept"),     // canonical is an alias: same record
+            alias("杜氏", "創業年", "label"),       // claimed as a LABEL → removed below
+            alias("高瀬", "創業年", "label"),       // "高瀬" is a concept, not a label: kept
+            alias("青嶺酒造", "創業年", "unknown"), // unknown kind: Stage 1's finding
+            ModelAlias {
+                alias: None,
+                canonical: Some("青嶺酒造".into()),
+                kind: Some("concept".into()),
+            },
+        ],
+        questions: Vec::new(),
+    })];
+    let removed = prune_claimed_aliases(&mut outputs, 1, &claimed);
+    assert_eq!(
+        removed,
+        vec![
+            "aliases[2]: alias \"杜氏\" already names a label an earlier document or the \
+             target context settled on; an alias cannot rewire it (import would refuse the \
+             batch)"
+                .to_string()
+        ]
+    );
+    let kept: Vec<Option<&str>> = outputs[0]
+        .output
+        .aliases
+        .iter()
+        .map(|alias| alias.alias.as_deref())
+        .collect();
+    assert_eq!(
+        kept,
+        vec![
+            Some("Aomine"),
+            Some("青嶺"),
+            Some("高瀬"),
+            Some("青嶺酒造"),
+            None
+        ]
+    );
+}
+
+/// Claims come from three places and all three must agree with what
+/// import interns: a written extraction, a skipped document's batch
+/// file, and `--vocabulary`'s seeds. A multi-chunk document labels its
+/// removals with the chunk coordinates, like the dangling prune.
+#[test]
+fn claimed_names_absorb_extractions_batches_and_vocabulary_alike() {
+    let written = merge(
+        vec![ModelOutput {
+            associations: vec![association("青嶺酒造", "杜氏", "高瀬", 1.0)],
+            aliases: vec![
+                alias("Aomine", "青嶺酒造", "concept"),
+                alias("蔵元", "杜氏", "label"),
+            ],
+            questions: Vec::new(),
+        }],
+        0,
+        1,
+    );
+    let mut from_extraction = ClaimedNames::default();
+    from_extraction.absorb_extraction(&written);
+
+    let batch = crate::ingest::parse_batch(Cursor::new(concat!(
+        r#"{"taguru_batch":1,"context":"sake","source":"a"}"#,
+        "\n",
+        r#"{"subject":"青嶺酒造","label":"杜氏","object":"高瀬","weight":1.0}"#,
+        "\n",
+        r#"{"alias":"Aomine","canonical":"青嶺酒造","kind":"concept"}"#,
+        "\n",
+        r#"{"alias":"蔵元","canonical":"杜氏","kind":"label"}"#,
+        "\n",
+    )))
+    .expect("batch parses");
+    let mut from_batch = ClaimedNames::default();
+    from_batch.absorb_batch(&batch);
+
+    let expected_concepts: BTreeMap<String, String> = [
+        ("青嶺酒造", "青嶺酒造"),
+        ("高瀬", "高瀬"),
+        ("Aomine", "青嶺酒造"),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .collect();
+    let expected_labels: BTreeMap<String, String> = [("杜氏", "杜氏"), ("蔵元", "杜氏")]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    assert_eq!(from_extraction.concepts, expected_concepts);
+    assert_eq!(from_extraction.labels, expected_labels);
+    assert_eq!(from_batch.concepts, expected_concepts);
+    assert_eq!(from_batch.labels, expected_labels);
+
+    // --vocabulary seeds: every harvested spelling resolves to itself.
+    let seeded = ClaimedNames::seeded(
+        &["青嶺酒造".to_string()].into(),
+        &["杜氏".to_string()].into(),
+    );
+    assert_eq!(
+        seeded.concepts,
+        [("青嶺酒造".to_string(), "青嶺酒造".to_string())].into()
+    );
+    assert_eq!(
+        seeded.labels,
+        [("杜氏".to_string(), "杜氏".to_string())].into()
+    );
+
+    // Chunk coordinates label the removal; the claim set itself is
+    // never mutated by the prune.
+    let mut outputs = [
+        chunk_output(ModelOutput {
+            associations: Vec::new(),
+            aliases: Vec::new(),
+            questions: Vec::new(),
+        }),
+        ChunkOutput {
+            output: ModelOutput {
+                associations: vec![association("高瀬酒造", "所在地", "新潟", 1.0)],
+                aliases: vec![alias("高瀬", "高瀬酒造", "concept")],
+                questions: Vec::new(),
+            },
+            chunk_index: 1,
+            user: String::new(),
+            answer: String::new(),
+            removed: Vec::new(),
+        },
+    ];
+    let removed = prune_claimed_aliases(&mut outputs, 2, &seeded);
+    assert!(removed.is_empty(), "{removed:?}"); // 高瀬 is not seeded
+    let removed = prune_claimed_aliases(&mut outputs, 2, &from_batch);
+    assert_eq!(
+        removed,
+        vec![
+            "chunk 2/2 aliases[0]: alias \"高瀬\" already names a concept an earlier document \
+             or the target context settled on; an alias cannot rewire it (import would refuse \
+             the batch)"
+                .to_string()
+        ]
+    );
+    assert!(outputs[1].output.aliases.is_empty());
+    assert_eq!(from_batch.concepts, expected_concepts);
+}
+
 #[test]
 fn candidate_terms_segment_scripts_and_merge_adjacent_runs() {
     let terms = candidate_terms(
