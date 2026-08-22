@@ -358,3 +358,153 @@ pub(super) fn prune_unresolvable_aliases(
     }
     removed
 }
+
+/// Issue #758: the names earlier documents of this run — and the
+/// `--vocabulary` context — already settled on, per namespace, each
+/// spelling mapped to the record it resolves to: a subject/object or
+/// alias canonical to itself, an alias spelling to its canonical.
+/// That is exactly the lookup import's `add_alias` consults before
+/// refusing a rewire (`AliasError::Conflict`: one spelling is one
+/// referent, aliases included), replayed here so the refusal happens
+/// at extraction time with accounting instead of stopping an import
+/// stream three batches in with the earlier batches already applied.
+/// A merge (aliasing two names that both already exist) is refused
+/// on the same terms — import has no merge, the consolidation audit
+/// (ADR 0012 §4) proposes one later.
+#[derive(Default)]
+pub(super) struct ClaimedNames {
+    pub(super) concepts: BTreeMap<String, String>,
+    pub(super) labels: BTreeMap<String, String>,
+}
+
+impl ClaimedNames {
+    /// Seeds both namespaces from `--vocabulary`'s harvested name
+    /// sets. The export's own alias spellings are not harvested
+    /// (ADR 0015: only the spellings the graph settles on are offered),
+    /// so a target-context alias is known here only through its
+    /// canonical — the import refusal still stands for those; this is
+    /// the subset extract can see.
+    pub(super) fn seeded(concepts: &BTreeSet<String>, labels: &BTreeSet<String>) -> Self {
+        Self {
+            concepts: concepts
+                .iter()
+                .map(|name| (name.clone(), name.clone()))
+                .collect(),
+            labels: labels
+                .iter()
+                .map(|name| (name.clone(), name.clone()))
+                .collect(),
+        }
+    }
+
+    /// Records what a document this run just wrote will intern.
+    pub(super) fn absorb_extraction(&mut self, extraction: &Extraction) {
+        for fact in &extraction.associations {
+            claim_name(&mut self.concepts, &fact.subject);
+            claim_name(&mut self.concepts, &fact.object);
+            claim_name(&mut self.labels, &fact.label);
+        }
+        claim_aliases(&mut self.concepts, &extraction.concepts);
+        claim_aliases(&mut self.labels, &extraction.labels);
+    }
+
+    /// Records what a manifest-skipped document's already-written
+    /// batch interns — the same names `absorb_vocabulary` rereads for
+    /// the label prompt, so a skipped document claims exactly what a
+    /// freshly written one does.
+    pub(super) fn absorb_batch(&mut self, batch: &crate::ingest::Batch) {
+        for [subject, label, object] in batch.association_triples() {
+            claim_name(&mut self.concepts, subject);
+            claim_name(&mut self.concepts, object);
+            claim_name(&mut self.labels, label);
+        }
+        claim_aliases(&mut self.concepts, batch.concept_aliases());
+        claim_aliases(&mut self.labels, batch.label_aliases());
+    }
+
+    /// What `spelling` resolves to in `namespace`, or `None` when
+    /// nothing has claimed it.
+    fn resolve<'a>(namespace: &'a BTreeMap<String, String>, spelling: &'a str) -> Option<&'a str> {
+        namespace.get(spelling).map(String::as_str)
+    }
+}
+
+/// A name (subject, object, label, alias canonical) resolves to
+/// itself — unless an earlier alias already maps this spelling, in
+/// which case import's `add_alias` would keep routing through that
+/// alias, and so does this map.
+fn claim_name(namespace: &mut BTreeMap<String, String>, name: &str) {
+    namespace
+        .entry(name.to_string())
+        .or_insert_with(|| name.to_string());
+}
+
+/// An alias spelling resolves to its canonical's record: the canonical
+/// claims itself first (import interns it before any alias lands on
+/// it), then the spelling routes to whatever the canonical resolves
+/// to — aliasing to an alias lands on the true record, as `add_alias`
+/// does.
+fn claim_aliases(namespace: &mut BTreeMap<String, String>, aliases: &BTreeMap<String, String>) {
+    for (spelling, canonical) in aliases {
+        claim_name(namespace, canonical);
+        let target = namespace
+            .get(canonical)
+            .cloned()
+            .unwrap_or_else(|| canonical.clone());
+        namespace.entry(spelling.clone()).or_insert(target);
+    }
+}
+
+/// Issue #758: an alias whose spelling an EARLIER document of this run
+/// (or the `--vocabulary` context) already interned as a different
+/// record cannot import — `add_alias` refuses the rewire, and the 409
+/// stops the whole import stream — so it is removed with accounting,
+/// alongside [`prune_unresolvable_aliases`]. Mechanical, not
+/// corrective: the in-document shadowing check stays corrective
+/// because the model can re-judge its OWN associations, but it can
+/// never un-claim a name a previous document settled on. The same
+/// mapping claimed twice (spelling already resolving to this very
+/// canonical) is import's idempotent no-op and survives.
+pub(super) fn prune_claimed_aliases(
+    outputs: &mut [ChunkOutput],
+    chunk_total: usize,
+    claimed: &ClaimedNames,
+) -> Vec<String> {
+    let mut removed = Vec::new();
+    for chunk in outputs.iter_mut() {
+        let prefix = if chunk_total > 1 {
+            format!("chunk {}/{chunk_total} ", chunk.chunk_index + 1)
+        } else {
+            String::new()
+        };
+        let mut index = 0usize;
+        chunk.output.aliases.retain(|alias| {
+            let path = format!("{prefix}aliases[{index}]");
+            index += 1;
+            let (Some(spelling), Some(canonical), Some(kind)) =
+                (&alias.alias, &alias.canonical, &alias.kind)
+            else {
+                return true; // Stage 1's finding, not this one's
+            };
+            let namespace = match kind.as_str() {
+                "concept" => &claimed.concepts,
+                "label" => &claimed.labels,
+                _ => return true,
+            };
+            let Some(existing) = ClaimedNames::resolve(namespace, spelling) else {
+                return true; // nothing claimed this spelling yet
+            };
+            let target = ClaimedNames::resolve(namespace, canonical).unwrap_or(canonical);
+            if existing == target {
+                return true; // the same mapping again — import's no-op
+            }
+            removed.push(format!(
+                "{path}: alias {} already names a {kind} an earlier document or the target \
+                 context settled on; an alias cannot rewire it (import would refuse the batch)",
+                quote_for_issue(spelling)
+            ));
+            false
+        });
+    }
+    removed
+}

@@ -1581,6 +1581,129 @@ fn extract_vocabulary_steers_spellings_and_is_a_computation_input() {
     let _ = std::fs::remove_dir_all(&docs);
     let _ = std::fs::remove_dir_all(&out);
 }
+/// #758: document A settles on a concept spelling; document C offers
+/// that same spelling as an alias of a different name. Import would
+/// refuse the rewire (409, the stream stopping with A already
+/// applied), so extract removes the alias mechanically with accounting
+/// and the directory imports whole. A rerun with a new document D
+/// claims A's names from A's skipped batch the same way.
+#[test]
+fn extract_prunes_an_alias_that_would_rewire_an_earlier_documents_concept() {
+    let docs = batch_dir("extract-claimed-docs");
+    let a = docs.join("a.md");
+    let c = docs.join("c.md");
+    std::fs::write(&a, "東雲電機株式会社(架空)は新潟にある。").unwrap();
+    std::fs::write(&c, "東雲電機株式会社の製品 SN-SEN70。").unwrap();
+    let out = batch_dir("extract-claimed-out");
+
+    let reply_a = json!({"associations": [
+        {"subject": "東雲電機株式会社(架空)", "label": "所在地", "object": "新潟"}
+    ]})
+    .to_string();
+    let reply_c = json!({
+        "associations": [
+            {"subject": "東雲電機株式会社", "label": "製品", "object": "SN-SEN70"}
+        ],
+        "aliases": [
+            {"alias": "東雲電機株式会社(架空)", "canonical": "東雲電機株式会社", "kind": "concept"}
+        ]
+    })
+    .to_string();
+    let (url, requests) = stub_chat_server(vec![reply_a, reply_c.clone()]);
+    let provider = [
+        ("TAGURU_EXTRACT_URL", url.as_str()),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &provider,
+        &[
+            "--context",
+            "spec",
+            "--description",
+            "product spec sheets",
+            a.to_str().unwrap(),
+            c.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    // No corrective turn was spent: one request per document.
+    assert_eq!(requests.join().unwrap().len(), 2);
+    assert!(
+        stdout.contains("1 item(s) removed (mechanical validation)"),
+        "{stdout}"
+    );
+    let expected = format!(
+        "taguru: extract: {}: removed: aliases[0]: alias \"東雲電機株式会社(架空)\" already \
+         names a concept an earlier document or the target context settled on; an alias \
+         cannot rewire it (import would refuse the batch)",
+        c.display()
+    );
+    assert!(stderr.contains(&expected), "{stderr}");
+    let batches: Vec<String> = std::fs::read_dir(&out)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
+        .map(|path| std::fs::read_to_string(path).unwrap())
+        .collect();
+    assert_eq!(batches.len(), 2, "{batches:?}");
+    assert!(
+        batches.iter().all(|batch| !batch.contains("\"alias\"")),
+        "the rewiring alias must not be written: {batches:?}"
+    );
+
+    // The whole directory imports — the 409 that motivated this never
+    // fires.
+    let data_dir = common::scratch_dir("http-extract-claimed");
+    let (code, stdout, stderr) = run_import(&data_dir, &[out.to_str().unwrap()]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(!stderr.contains("already resolves"), "{stderr}");
+
+    // Rerun: A and C are unchanged (skipped), D is new and offers A's
+    // concept as an alias again — claimed from A's batch file, not
+    // from a fresh extraction.
+    let d = docs.join("d.md");
+    std::fs::write(&d, "東雲電機株式会社の拠点は東京。").unwrap();
+    let reply_d = json!({
+        "associations": [
+            {"subject": "東雲電機株式会社", "label": "拠点", "object": "東京"}
+        ],
+        "aliases": [
+            {"alias": "東雲電機株式会社(架空)", "canonical": "東雲電機株式会社", "kind": "concept"}
+        ]
+    })
+    .to_string();
+    let (url, requests) = stub_chat_server(vec![reply_d]);
+    let provider = [
+        ("TAGURU_EXTRACT_URL", url.as_str()),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &provider,
+        &[
+            "--context",
+            "spec",
+            "--description",
+            "product spec sheets",
+            a.to_str().unwrap(),
+            c.to_str().unwrap(),
+            d.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert_eq!(requests.join().unwrap().len(), 1);
+    assert_eq!(stdout.matches("unchanged, skipped").count(), 2, "{stdout}");
+    let expected = format!(
+        "taguru: extract: {}: removed: aliases[0]: alias \"東雲電機株式会社(架空)\" already",
+        d.display()
+    );
+    assert!(stderr.contains(&expected), "{stderr}");
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
 /// TAGURU_EXTRACT_CANDIDATES engages the block without the flag, and a
 /// bad value is a hard usage error — the --lossy env conventions.
 #[test]

@@ -110,6 +110,20 @@ impl Batch {
             .collect()
     }
 
+    /// The alias mappings this batch records, spelling → canonical,
+    /// per namespace — what `add_alias` will intern once applied.
+    /// Extract's cross-document claim set (#758) reads these from a
+    /// manifest-skipped document's batch so a LATER document's alias
+    /// that would rewire one of them is refused before import has to.
+    pub(crate) fn concept_aliases(&self) -> &BTreeMap<String, String> {
+        &self.concepts
+    }
+
+    /// [`Batch::concept_aliases`] for the label namespace.
+    pub(crate) fn label_aliases(&self) -> &BTreeMap<String, String> {
+        &self.labels
+    }
+
     /// Every association as `[subject, label, object]` — the coverage
     /// check's input (ADR 0016, #496 S4) when a manifest-skipped
     /// document is judged from its already-written batch instead of a

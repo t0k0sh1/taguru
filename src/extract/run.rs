@@ -64,6 +64,12 @@ pub(super) struct Run {
     pub(super) model_name: String,
     pub(super) manifest: Manifest,
     pub(super) vocabulary: BTreeSet<String>,
+    /// Issue #758: every concept/label spelling an earlier document of
+    /// this run (or `--vocabulary`'s context) settled on, mapped to
+    /// what it resolves to — the set a later document's alias must not
+    /// rewire. Grows exactly where `vocabulary` does: when a document
+    /// lands, and when a skipped one's batch is absorbed.
+    pub(super) claimed_names: ClaimedNames,
     pub(super) claimed: BTreeMap<String, String>,
     /// Chunk completions to run concurrently within one document (1 =
     /// today's sequential loop). Documents themselves always run
@@ -403,6 +409,16 @@ impl Run {
                 }
             }
             removed.extend(prune_unresolvable_aliases(&mut outputs, chunk_total));
+            // #758: an alias that would rewire a name an EARLIER
+            // document (or the target context) already settled on is
+            // import's Conflict refusal — mechanical, on the same
+            // terms as the dangling prune: nothing the model could
+            // correct, so nothing a corrective turn is spent on.
+            removed.extend(prune_claimed_aliases(
+                &mut outputs,
+                chunk_total,
+                &self.claimed_names,
+            ));
         }
         let extraction = merge(
             outputs.into_iter().map(|chunk| chunk.output).collect(),
@@ -446,6 +462,7 @@ impl Run {
         // per-chunk outputs already extracted are still good.
         checkpoints.clear();
         self.vocabulary.extend(extraction.label_vocabulary());
+        self.claimed_names.absorb_extraction(&extraction);
         // ADR 0013's accounting half: every mechanical removal is
         // named on stderr, path first — the report line below carries
         // only the count. Never-silent-drop survives as visibility.
@@ -925,7 +942,9 @@ impl Run {
     }
 
     /// A skipped document still contributes its labels, so later
-    /// documents keep reusing the same vocabulary. Its batch file
+    /// documents keep reusing the same vocabulary — and its names to
+    /// the claim set (#758), so a later document's alias cannot rewire
+    /// what a skipped one already wrote. Its batch file
     /// already exists and the manifest says it matches this source, but
     /// the file itself could still be unreadable or corrupt (truncated
     /// by an interrupted write from an older version, hand-edited,
@@ -947,6 +966,7 @@ impl Run {
         {
             Ok(batch) => {
                 self.vocabulary.extend(batch.label_vocabulary());
+                self.claimed_names.absorb_batch(&batch);
                 Some(batch)
             }
             Err(error) => {
