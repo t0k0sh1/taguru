@@ -467,16 +467,7 @@ pub(super) fn extract_piece(
             // piece that exhausts the ladder with nothing left to
             // demote splits.
             if let Some((from, to)) = context.ladder.demote_from(rung) {
-                let why = match &outcome {
-                    RoundOutcome::TimedOut(message) => {
-                        format!("the completion timed out ({message})")
-                    }
-                    _ if context.ladder.max_output_tokens.is_some() => {
-                        "the answer ended at the output cap even after the escalated resend"
-                            .to_string()
-                    }
-                    _ => "the answer ended at the backend's output ceiling".to_string(),
-                };
+                let why = demotion_reason(&outcome, context.ladder.max_output_tokens.is_some());
                 eprintln!(
                     "taguru: extract: {}: structured output: {} demoted to {} — {why} under \
                      the {} rung; the piece restarts at the ladder's top",
@@ -511,6 +502,20 @@ pub(super) fn extract_piece(
             }
             Ok(outputs)
         }
+    }
+}
+
+/// The "why" of an ADR 0021 demotion line: what exhausted the ladder.
+/// `budgeted` tells a `length` under `--max-output-tokens` (the
+/// escalated resend was already spent) from one at the backend's own
+/// ceiling (no budget configured, so nothing was escalated).
+pub(super) fn demotion_reason(outcome: &RoundOutcome, budgeted: bool) -> String {
+    match outcome {
+        RoundOutcome::TimedOut(message) => format!("the completion timed out ({message})"),
+        _ if budgeted => {
+            "the answer ended at the output cap even after the escalated resend".to_string()
+        }
+        _ => "the answer ended at the backend's output ceiling".to_string(),
     }
 }
 

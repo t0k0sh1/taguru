@@ -172,8 +172,8 @@ use candidates::{CANDIDATE_CAP, CANDIDATE_MAX_BYTES};
 use chat_client::build_chat_body;
 #[cfg(test)]
 use chunking::{
-    AttemptOutcome, MAX_LISTED_ISSUES, PieceContext, classify_attempt, corrective_message,
-    extract_piece,
+    AttemptOutcome, MAX_LISTED_ISSUES, PieceContext, RoundOutcome, classify_attempt,
+    corrective_message, demotion_reason, extract_piece,
 };
 #[cfg(test)]
 use coverage::GAP_QUOTE_MAX_BYTES;

@@ -4371,6 +4371,29 @@ fn rungs_order_name_format_and_demote_from_guards() {
     assert_eq!(auto.response_format(), None);
 }
 
+/// The demotion line's "why", pinned per exhausting outcome: a timeout
+/// quotes the client's message; a `length` names the escalated resend
+/// only when a budget made one happen.
+#[test]
+fn demotion_reason_names_the_timeout_or_the_cap_that_was_hit() {
+    assert_eq!(
+        demotion_reason(&RoundOutcome::TimedOut("timeout: global".into()), true),
+        "the completion timed out (timeout: global)"
+    );
+    assert_eq!(
+        demotion_reason(&RoundOutcome::TimedOut("timeout: global".into()), false),
+        "the completion timed out (timeout: global)"
+    );
+    assert_eq!(
+        demotion_reason(&RoundOutcome::LengthLimited, true),
+        "the answer ended at the output cap even after the escalated resend"
+    );
+    assert_eq!(
+        demotion_reason(&RoundOutcome::LengthLimited, false),
+        "the answer ended at the backend's output ceiling"
+    );
+}
+
 #[test]
 fn ladder_a_piece_at_the_split_floor_fails_the_source() {
     let chat = ScriptedChat::start(vec![
