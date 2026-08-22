@@ -18,6 +18,7 @@ fn base_inputs<'a>(sha256: &'a str, model: &'a str) -> ComputationInputs<'a> {
         structured_output: "",
         max_output_tokens: 0,
         escalation_factor: "",
+        chunk_bytes: "",
         lossy: false,
         schema_digest: "",
         candidates: "",
@@ -2517,6 +2518,7 @@ fn request_options_default_adds_no_keys_to_the_body() {
         &RequestOptions {
             response_format: Some(json_object_response_format()),
             max_tokens: Some(512),
+            fail_fast_on_timeout: false,
         },
     );
     assert_eq!(
@@ -3624,7 +3626,16 @@ fn runbook_flag_boundaries_hold_exactly() {
 struct ScriptedChat {
     url: String,
     requests: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    /// `Some` gives [`ScriptedChat::client`] a global timeout — the
+    /// ADR 0020 tests pair it with [`STALL`] responses.
+    timeout_secs: Option<u64>,
 }
+
+/// A scripted "response" that is never sent: the server holds the
+/// connection for longer than the client's timeout and then drops it,
+/// the way a provider grinding past `TAGURU_EXTRACT_TIMEOUT_SECS`
+/// looks from the client.
+const STALL: &str = "<stall>";
 
 fn chat_answer(content: &str, finish_reason: &str) -> String {
     serde_json::json!({
@@ -3635,57 +3646,78 @@ fn chat_answer(content: &str, finish_reason: &str) -> String {
 
 impl ScriptedChat {
     fn start(responses: Vec<String>) -> Self {
+        Self::start_with_timeout(responses, None)
+    }
+
+    fn start_with_timeout(responses: Vec<String>, timeout_secs: Option<u64>) -> Self {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("must bind");
         let url = format!("http://{}", listener.local_addr().unwrap());
         let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let seen = std::sync::Arc::clone(&requests);
+        // One thread per connection, so a STALL holds only its own
+        // connection open — the client's next request (a sub-piece
+        // after the timeout, or a retry) is still served promptly.
+        let queue = std::sync::Arc::new(std::sync::Mutex::new(responses.into_iter()));
         std::thread::spawn(move || {
-            let mut queue = responses.into_iter();
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { break };
-                let mut head = Vec::new();
-                let mut byte = [0u8; 1];
-                while !head.ends_with(b"\r\n\r\n") {
-                    match stream.read(&mut byte) {
-                        Ok(1) => head.extend_from_slice(&byte),
-                        _ => return,
+                let seen = std::sync::Arc::clone(&seen);
+                let queue = std::sync::Arc::clone(&queue);
+                std::thread::spawn(move || {
+                    let mut head = Vec::new();
+                    let mut byte = [0u8; 1];
+                    while !head.ends_with(b"\r\n\r\n") {
+                        match stream.read(&mut byte) {
+                            Ok(1) => head.extend_from_slice(&byte),
+                            _ => return,
+                        }
                     }
-                }
-                let length: usize = String::from_utf8_lossy(&head)
-                    .to_ascii_lowercase()
-                    .lines()
-                    .find_map(|line| line.strip_prefix("content-length:"))
-                    .and_then(|value| value.trim().parse().ok())
-                    .unwrap_or(0);
-                let mut body = vec![0u8; length];
-                if stream.read_exact(&mut body).is_err() {
-                    return;
-                }
-                if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) {
-                    seen.lock().unwrap().push(value);
-                }
-                let Some(answer) = queue.next() else { return };
-                let _ = write!(
-                    stream,
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
-                     Content-Length: {}\r\nConnection: close\r\n\r\n{answer}",
-                    answer.len()
-                );
+                    let length: usize = String::from_utf8_lossy(&head)
+                        .to_ascii_lowercase()
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length:"))
+                        .and_then(|value| value.trim().parse().ok())
+                        .unwrap_or(0);
+                    let mut body = vec![0u8; length];
+                    if stream.read_exact(&mut body).is_err() {
+                        return;
+                    }
+                    if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) {
+                        seen.lock().unwrap().push(value);
+                    }
+                    let answer = queue.lock().unwrap().next();
+                    let Some(answer) = answer else { return };
+                    if answer == STALL {
+                        std::thread::sleep(std::time::Duration::from_secs(3));
+                        return; // the client has given up; drop the stream
+                    }
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                        answer.len()
+                    );
+                });
             }
         });
-        Self { url, requests }
+        Self {
+            url,
+            requests,
+            timeout_secs,
+        }
     }
 
     fn client(&self) -> ChatClient {
+        let mut config = ureq::Agent::config_builder().http_status_as_error(false);
+        if let Some(secs) = self.timeout_secs {
+            config = config.timeout_global(Some(Duration::from_secs(secs)));
+        }
         ChatClient {
             url: self.url.clone(),
             model: "scripted".to_string(),
             api_key: None,
-            agent: ureq::Agent::config_builder()
-                .http_status_as_error(false)
-                .build()
-                .into(),
+            agent: config.build().into(),
         }
     }
 
@@ -3748,6 +3780,7 @@ fn drive_ladder_with_factor(
             structured_output: String::new(),
             max_output_tokens: max_output_tokens.unwrap_or(0),
             escalation_factor: String::new(),
+            chunk_bytes: String::new(),
             lossy: true,
             schema_digest: String::new(),
             candidates: String::new(),
@@ -3982,6 +4015,190 @@ fn manifests_reextract_when_the_escalation_factor_changes_under_a_budget() {
     };
     assert!(legacy.matches("b.md", &legacy_inputs("")));
     assert!(!legacy.matches("b.md", &legacy_inputs("3")));
+}
+
+/// ADR 0020 (#762): a timeout under the ladder is a too-big piece, the
+/// way `length` is — it goes straight to the split rung, with no
+/// same-size retry (the stalled ask is the only request at that size)
+/// and no escalation (a larger cap cannot make a slow piece faster).
+#[test]
+fn ladder_a_timeout_splits_the_piece_without_a_same_size_retry() {
+    let chat = ScriptedChat::start_with_timeout(
+        vec![
+            STALL.to_string(),
+            chat_answer(VALID_ANSWER, "stop"),
+            chat_answer(VALID_ANSWER, "stop"),
+        ],
+        Some(1),
+    );
+    let block_a = "あ".repeat(200);
+    let block_b = "い".repeat(200);
+    let piece = format!("{block_a}\n\n{block_b}");
+    let started = std::time::Instant::now();
+    let outputs = drive_ladder(&chat, "timeout-split", &piece, Some(64)).unwrap();
+    assert_eq!(outputs.len(), 2, "one output per split sub-piece");
+    let requests = chat.requests();
+    assert_eq!(
+        requests.len(),
+        3,
+        "the stalled ask, then one per sub-piece — never a same-size retry, never an \
+         escalation: {requests:?}"
+    );
+    let user_of = |request: &serde_json::Value| {
+        request["messages"][1]["content"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert!(user_of(&requests[0]).contains(&block_a) && user_of(&requests[0]).contains(&block_b));
+    assert!(user_of(&requests[1]).contains(&block_a) && !user_of(&requests[1]).contains(&block_b));
+    assert!(user_of(&requests[2]).contains(&block_b) && !user_of(&requests[2]).contains(&block_a));
+    // Every request still carries the configured budget: a timeout
+    // never escalates.
+    for request in &requests {
+        assert_eq!(request["max_tokens"], serde_json::json!(64), "{request:?}");
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(8),
+        "one 1 s timeout plus two instant answers — not four retried timeouts: {:?}",
+        started.elapsed()
+    );
+}
+
+/// At the split floor a timeout fails the source with the timeout
+/// named and the two knobs that would have helped — after exactly one
+/// attempt, not RETRY_ATTEMPTS of them.
+#[test]
+fn ladder_a_timeout_at_the_split_floor_fails_the_source_after_one_attempt() {
+    let chat = ScriptedChat::start_with_timeout(vec![STALL.to_string()], Some(1));
+    let started = std::time::Instant::now();
+    let error = drive_ladder(&chat, "timeout-floor", "短い文書。", Some(64)).unwrap_err();
+    assert!(
+        error.contains("timed out") && error.contains("cannot split further"),
+        "{error}"
+    );
+    assert!(
+        error.contains("TAGURU_EXTRACT_TIMEOUT_SECS") && error.contains("--chunk-bytes"),
+        "{error}"
+    );
+    assert!(!error.contains("after 4 attempts"), "{error}");
+    assert_eq!(chat.requests().len(), 1);
+    assert!(
+        started.elapsed() < Duration::from_secs(6),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+/// The client's fail-fast switch is what the ladder relies on: with it
+/// a timeout returns at once; without it (every non-ladder caller) the
+/// pre-0020 four-attempt discipline is byte-for-byte intact.
+#[test]
+fn the_chat_client_fails_fast_on_timeout_only_when_asked() {
+    let chat = ScriptedChat::start_with_timeout(vec![STALL.to_string(); 4], Some(1));
+    let client = chat.client();
+    let messages = [serde_json::json!({"role": "user", "content": "hi"})];
+    let Err(fast) = client.complete(
+        &messages,
+        &RequestOptions {
+            fail_fast_on_timeout: true,
+            ..RequestOptions::default()
+        },
+    ) else {
+        panic!("a stalled provider must not complete");
+    };
+    assert_eq!(fast.kind, ChatFailure::Timeout);
+    assert!(
+        !fast.message.contains("after 4 attempts"),
+        "{}",
+        fast.message
+    );
+    assert_eq!(chat.requests().len(), 1);
+
+    let chat = ScriptedChat::start_with_timeout(vec![STALL.to_string(); 4], Some(1));
+    let Err(slow) = chat
+        .client()
+        .complete(&messages, &RequestOptions::default())
+    else {
+        panic!("a stalled provider must not complete");
+    };
+    assert_eq!(slow.kind, ChatFailure::Timeout);
+    assert!(
+        slow.message.contains("after 4 attempts"),
+        "{}",
+        slow.message
+    );
+    assert_eq!(chat.requests().len(), 4);
+}
+
+#[test]
+fn chunk_bytes_flag_parses_validates_and_rejects_a_duplicate() {
+    fn parse(words: &[&str]) -> Result<Args, i32> {
+        Args::parse(&words.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+    let base = ["--context", "c", "--out", "o"];
+    let with = |extra: &[&str]| {
+        let mut words: Vec<&str> = base.to_vec();
+        words.extend_from_slice(extra);
+        words.push("doc.md");
+        parse(&words)
+    };
+    assert_eq!(with(&[]).unwrap().chunk_bytes, None);
+    assert_eq!(
+        with(&["--chunk-bytes", "4096"]).unwrap().chunk_bytes,
+        Some(4096)
+    );
+    assert_eq!(
+        with(&["--chunk-bytes", "512"]).unwrap().chunk_bytes,
+        Some(512)
+    );
+    assert!(matches!(with(&["--chunk-bytes", "511"]), Err(2)));
+    assert!(matches!(with(&["--chunk-bytes", "lots"]), Err(2)));
+    assert!(matches!(with(&["--chunk-bytes"]), Err(2)));
+    assert!(matches!(
+        with(&["--chunk-bytes", "4096", "--chunk-bytes", "8192"]),
+        Err(2)
+    ));
+}
+
+/// `""` at the default cap (so pre-0020 manifests keep matching), the
+/// literal otherwise — pinned on the literal default, not the constant.
+#[test]
+fn chunk_bytes_manifest_value_is_empty_only_at_the_default() {
+    assert_eq!(CHUNK_BYTES, 24 * 1024);
+    assert_eq!(chunk_bytes_manifest_value(24 * 1024), "");
+    assert_eq!(chunk_bytes_manifest_value(4096), "4096");
+    assert_eq!(chunk_bytes_manifest_value(24 * 1024 + 1), "24577");
+}
+
+#[test]
+fn manifests_reextract_when_the_chunk_cap_changes() {
+    let capped = |cap: &'static str| ComputationInputs {
+        chunk_bytes: cap,
+        ..base_inputs("hash-1", "model-1")
+    };
+    let mut manifest = Manifest::default();
+    manifest.record("a.md", &capped("4096"), "a.md.jsonl");
+    assert!(manifest.matches("a.md", &capped("4096")));
+    assert!(!manifest.matches("a.md", &capped("")));
+    assert!(!manifest.matches("a.md", &capped("8192")));
+
+    let legacy: Manifest = serde_json::from_str(&format!(
+        r#"{{"documents":{{"b.md":{{"sha256":"hash-2","model":"model-1",
+            "prompt_version":{PROMPT_VERSION},"context":"sake","questions_n":0,
+            "no_passage":false,"description":"","fact_budget":0,
+            "structured_output":"","max_output_tokens":0,"lossy":false,
+            "output":"b.md.jsonl"}}}}}}"#
+    ))
+    .expect("a manifest without the field deserializes");
+    assert!(legacy.matches("b.md", &base_inputs("hash-2", "model-1")));
+    assert!(!legacy.matches(
+        "b.md",
+        &ComputationInputs {
+            chunk_bytes: "4096",
+            ..base_inputs("hash-2", "model-1")
+        }
+    ));
 }
 
 #[test]

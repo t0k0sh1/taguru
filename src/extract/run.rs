@@ -56,6 +56,9 @@ pub(super) struct Run {
     /// TAGURU_EXTRACT_ESCALATION_FACTOR (ADR 0019) — carried here only
     /// for the manifest record; the ladder reads its own copy.
     pub(super) escalation_factor: usize,
+    /// `--chunk-bytes`/TAGURU_EXTRACT_CHUNK_BYTES, resolved
+    /// ([`CHUNK_BYTES`] by default) — ADR 0020 (#762).
+    pub(super) chunk_bytes: usize,
     /// `Some` exactly when a mechanism or an output budget is engaged
     /// on a live run: the §7 ladder replaces the legacy corrective
     /// loop. `None` under all-defaults — byte-for-byte today's
@@ -185,6 +188,7 @@ impl Run {
                 self.max_output_tokens,
                 self.escalation_factor,
             ),
+            chunk_bytes: chunk_bytes_manifest_value(self.chunk_bytes),
             lossy: self.lossy,
             schema_digest: self.schema_digest.clone(),
             candidates: candidates_manifest_value(self.candidates).to_string(),
@@ -274,6 +278,7 @@ impl Run {
         // alike, so the two can never drift field by field.
         let escalation_factor =
             escalation_manifest_value(self.max_output_tokens, self.escalation_factor);
+        let chunk_bytes = chunk_bytes_manifest_value(self.chunk_bytes);
         let inputs = ComputationInputs {
             sha256: &hash,
             model: &self.model_name,
@@ -285,6 +290,7 @@ impl Run {
             structured_output: self.structured_output.manifest_value(),
             max_output_tokens: self.max_output_tokens.unwrap_or(0),
             escalation_factor: &escalation_factor,
+            chunk_bytes: &chunk_bytes,
             lossy: self.lossy,
             schema_digest: &self.schema_digest,
             candidates: candidates_manifest_value(self.candidates),
@@ -330,7 +336,7 @@ impl Run {
         } else {
             Vec::new()
         };
-        let plan = chunk_plan(&text);
+        let plan = chunk_plan_with_cap(&text, self.chunk_bytes);
         if self.dry_run {
             // Read-only: a dry run still calls/writes nothing, but
             // reusable-count reporting is exactly what --dry-run is for
@@ -711,6 +717,9 @@ impl Run {
                 .ladder
                 .as_ref()
                 .and_then(|ladder| ladder.max_output_tokens),
+            // Stage 2 is a corrective turn, not a piece the ladder could
+            // split: a timeout here keeps the ordinary retry discipline.
+            fail_fast_on_timeout: false,
         };
         let rules = self.item_rules(paragraph_count);
         let sink = self.diagnostics.as_ref();

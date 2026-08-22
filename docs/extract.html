@@ -113,6 +113,7 @@ TAGURU_EXTRACT_MAX_OUTPUT_TOKENS  default for --max-output-tokens (default unset
 TAGURU_EXTRACT_ESCALATION_FACTOR  cap of the one escalated resend after an
                     answer ends at --max-output-tokens, as a multiple of that
                     budget; 0 = uncapped (default 2)
+TAGURU_EXTRACT_CHUNK_BYTES  default for --chunk-bytes (default 24576)
 TAGURU_EXTRACT_LOSSY  default for --lossy (default 0/false)
 TAGURU_EXTRACT_CANDIDATES  default for --candidates (default 0/false)
 TAGURU_EXTRACT_VOCABULARY  default for --vocabulary (default unset, off)
@@ -138,6 +139,10 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
                     max_tokens (default: none sent); an answer cut off at
                     the budget escalates deterministically instead of being
                     re-asked under the limit it just hit (see below)
+--chunk-bytes N     document bytes per model call (default 24576, at least
+                    512); chunks split at paragraph boundaries — lower it for
+                    a slow provider or output-dense documents (statutes,
+                    minutes); overrides TAGURU_EXTRACT_CHUNK_BYTES
 --parallel N        chunk completions to run concurrently within one
                     document (default 1, sequential); overrides
                     TAGURU_EXTRACT_PARALLEL when both are set
@@ -225,7 +230,7 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
     <ul>
       <li><b>Turn thinking mode OFF.</b> A model in reasoning mode spends the whole time budget on invisible thinking tokens before the first byte of JSON: the same 10 KB document that extracted in ~30 s with thinking off blew through a 300 s timeout with it on. The extractor speaks plain OpenAI-compatible chat and does not toggle vendor-specific thinking flags — pick a non-thinking model, or disable thinking on the serving side. The symptom: a busy GPU and <code>timed out reading response</code> — or, with no timeout set, an <i>empty</i> response after minutes of thinking (reported as exactly that). Thinking exhausted the generation budget.</li>
       <li><b>Give the server a real context window.</b> A 24 KiB chunk is roughly 6k tokens. A serving default of 4k truncates the request <b>silently</b> — no error, just quietly degraded output. On Ollama, bake the window into a derived model: <code>FROM &lt;base&gt;</code> + <code>PARAMETER num_ctx 16384</code> → <code>ollama create</code>.</li>
-      <li><b>Match the timeout to the hardware.</b> <code>TAGURU_EXTRACT_TIMEOUT_SECS</code> bounds each chat completion (default 300; <code>0</code> = unlimited). Every attempt gets the full budget, and a transient failure is retried up to 4 attempts total, so a provider that stalls instead of erroring can cost several multiples of the timeout per chunk before the retries exhaust — worth remembering before dropping the timeout to something tight.</li>
+      <li><b>Match the timeout to the hardware.</b> <code>TAGURU_EXTRACT_TIMEOUT_SECS</code> bounds each chat completion (default 300; <code>0</code> = unlimited). Every attempt gets the full budget, and a transient failure is retried up to 4 attempts total, so a provider that stalls instead of erroring can cost several multiples of the timeout per chunk before the retries exhaust — worth remembering before dropping the timeout to something tight. Under the escalation ladder (<code>--max-output-tokens</code> or <code>--structured-output</code>) a timeout is not retried at the same size at all: the chunk splits instead (ADR 0020), so the cost is one timeout per split level, and <code>--chunk-bytes</code> lets you start smaller.</li>
       <li><b>The manifest trusts the model's name.</b> Re-point a serving alias at a different base (overwrite <code>ollama create my-extractor</code> with another base) and nothing the manifest can see changes — documents stay "unchanged" under what is actually a new model. Name models honestly, or <code>--force</code> after re-pointing. The same caveat as the embedding vector cache (also keyed by model name).</li>
       <li><b>A wall of a malformed answer near the output cap can stall a chunk for minutes.</b> A small local model that runs its output budget out mid-answer produces one huge invalid response; replaying that whole response back verbatim and then asking for the same length again just reproduces the same cutoff — one chunk of a few hundred bytes measured at 4-5 minutes this way. The first-class fix is <code>--max-output-tokens</code>: with an explicit budget, a cut-off answer takes the deterministic escalation ladder (<a href="#structured-output">below</a>) instead of a shorter-please retry. Without one, <code>--fact-budget N</code> asks for fewer associations per chunk up front, the truncation-aware correction (see <a href="#prompt">below</a>) asks for a shorter answer once the provider's <code>finish_reason</code> says the prior one was cut off, and <code>TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES=0</code> is the blunter fallback: never replay the bad answer at all.</li>
     </ul>
@@ -457,6 +462,12 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       and falls through to the split. Raise the factor for a provider whose honest answers
       routinely need more than twice the budget; set it to <code>0</code> only for one that is
       known not to loop.
+      A completion that runs <code>TAGURU_EXTRACT_TIMEOUT_SECS</code> out under the ladder is
+      treated the same way as <code>length</code> (ADR 0020): the piece is too big for the
+      <i>time</i> budget, so it goes straight to the split rung — never retried at the same
+      size (the split is the retry; transport failures, 429 and 5xx keep their four attempts),
+      never escalated (a larger output cap cannot make a slow piece faster) — and at the split
+      floor it fails the source with the timeout named and the two knobs that would have helped.
       Policy refusals (<code>finish_reason: content_filter</code>) are terminal immediately —
       no corrective turn argues with a policy. Both controls are manifest compute inputs like
       <code>--questions</code>: changing them re-extracts.
@@ -466,15 +477,19 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
   <section id="chunking">
     <h2>Chunking</h2>
     <p>
-      Documents are sent in chunks of at most 24 KiB, cut at paragraph boundaries (aliases and
+      Documents are sent in chunks of at most <code>--chunk-bytes</code> (24 KiB by default;
+      <code>TAGURU_EXTRACT_CHUNK_BYTES</code> sets the default), cut at paragraph boundaries (aliases and
       duplicate folding stay coherent across chunks — an alias in chunk 1 whose canonical first
       appears in chunk 3 still lands). A fact whose evidence straddles a chunk boundary can be
       missed; that is why the cap leans large. Passages are never chunked: the batch carries the
       full document text as-is. Documents over 8 MiB are refused — the batch passage could not
       carry them. Split the document. Under the escalation ladder
-      (<a href="#structured-output">above</a>) a length-limited chunk can split further at run
+      (<a href="#structured-output">above</a>) a length-limited or timed-out chunk can split further at run
       time, so <code>--dry-run</code>'s chunk count is a lower bound on model calls, not an
-      exact one.
+      exact one. The cap is a computation input: a document extracted under a different
+      <code>--chunk-bytes</code> re-extracts (the default cap matches manifests written before the
+      flag existed). Lower it for a slow local provider or for output-dense documents — statutes,
+      minutes — whose answers outrun the time or token budget at the default cap (ADR 0020).
     </p>
     <p>
       <code>--parallel N</code> (or <code>TAGURU_EXTRACT_PARALLEL</code>; the flag wins when both

@@ -5,7 +5,9 @@
 - **Issue**: #188
 - **Related**: #178, #179, #180, #181, #182, #185, #187
 - **Supersedes**: — / **Superseded by**: ADR 0019 (§7's escalation rung only — the
-  uncapped resend becomes a capped one; everything else here stands)
+  uncapped resend becomes a capped one), ADR 0020 (§7's `TIMEOUT` row under
+  the ladder only — a timeout descends to the split rung — and the fixed
+  chunk cap becomes `--chunk-bytes`); everything else here stands
 
 Once Accepted, this document's Decision is immutable: a changed decision gets a
 new `adr/000N-*.md` that names this one in *Supersedes*, never an edit here.

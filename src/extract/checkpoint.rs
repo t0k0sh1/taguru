@@ -31,6 +31,13 @@ pub(super) struct CheckpointFingerprint {
     /// factor invalidates it.
     #[serde(default)]
     pub(super) escalation_factor: String,
+    /// `--chunk-bytes` as [`chunk_bytes_manifest_value`] encodes it
+    /// (`""` = default) — ADR 0020. A different cap re-cuts every
+    /// chunk, and each cached unit is keyed by its chunk's content
+    /// hash anyway; the field makes the mismatch explicit rather than
+    /// relying on every hash missing.
+    #[serde(default)]
+    pub(super) chunk_bytes: String,
     pub(super) lossy: bool,
     /// `--schema`'s document digest (`""` = no schema). Same default
     /// as [`ManifestEntry::schema_digest`] and the same reasoning: a
