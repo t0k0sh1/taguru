@@ -782,6 +782,17 @@ describe("isPreConnectFailure", () => {
     expect(isPreConnectFailure(midFlight)).toBe(false);
     expect(isPreConnectFailure(new Error("boom"))).toBe(false);
   });
+
+  it("terminates on a cyclic cause chain", () => {
+    // A `cause` that loops back on itself must not hang the walk: the
+    // visited set is what bounds it (without it, this test never returns).
+    const loop = new Error("loop") as Error & { cause?: unknown };
+    loop.cause = loop;
+    expect(isPreConnectFailure(loop)).toBe(false);
+
+    const outer = new TypeError("fetch failed", { cause: loop });
+    expect(isPreConnectFailure(outer)).toBe(false);
+  });
 });
 
 describe("describeError", () => {
