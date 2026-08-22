@@ -799,10 +799,19 @@ pub fn run(args: &[String]) -> i32 {
         // ADR 0015: the exported context's label spellings seed the
         // run vocabulary, so the existing "relation labels already in
         // use" block carries them from the first document — no new
-        // prompt machinery for labels.
+        // prompt machinery for labels. The export carries no per-label
+        // occurrence count (#759), so each seeded label starts at 1 —
+        // "established", not "unknown" — and grows from there as this
+        // run's own documents land.
         vocabulary: context_vocabulary
             .as_ref()
-            .map(|vocabulary| vocabulary.labels.clone())
+            .map(|vocabulary| {
+                vocabulary
+                    .labels
+                    .iter()
+                    .map(|label| (label.clone(), 1))
+                    .collect()
+            })
             .unwrap_or_default(),
         // #758: the context's settled spellings are claimed from the
         // first document, the way its labels seed the prompt above.

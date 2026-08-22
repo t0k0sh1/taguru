@@ -142,6 +142,24 @@ fn association_mechanically(
         issues.append(&mut item_issues);
         return Some(parsed);
     }
+    // A single character (a bare Japanese particle, most often) reads
+    // fine to `interpret_required_string` but functions as no relation
+    // at all: unusable for query/paths/schema, and — because labels
+    // accumulate into the run's reuse vocabulary (#759) — a survivor
+    // gets suggested back to every later chunk, snowballing into every
+    // association sharing one meaningless label. Same anchor-nothing
+    // judgment as a single-character candidate name (`candidates.rs`).
+    let label = parsed
+        .label
+        .as_deref()
+        .expect("no absence and no issue means the field parsed");
+    if label.chars().count() < 2 {
+        removed.push(format!(
+            "{path}: label {} is a single character — too generic to be a relation",
+            quote_for_issue(label)
+        ));
+        return None;
+    }
     // Both positions are checked before anything is recorded, so an
     // item fabricating subject AND object names them together — the
     // one removal record is the complete diagnosis, not whichever

@@ -19,6 +19,21 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Changed
 
+- `taguru extract`: an association whose relation label is a single
+  character (most often a bare Japanese particle picked up as the
+  whole relation, e.g. `は`) is now removed mechanically, with the
+  usual accounting — a single character functions as no relation at
+  all (unusable for query/paths/schema), and because labels
+  accumulate into the run's reuse vocabulary, a survivor got
+  suggested back to every later chunk, snowballing into unrelated
+  associations sharing one meaningless label (measured: 41/41
+  associations in one Japanese document). A two-or-more-character
+  label is unaffected — same anchor-nothing judgment `--candidates`
+  already applies to single-character names. The "relation labels
+  already in use" prompt block now also carries a reuse count
+  (`label (×N)`) and ranks the most-reused label first, so a
+  one-off label is no longer visually indistinguishable from an
+  established one (#759).
 - `taguru extract`: a cross-chunk alias issue (a spelling that shadows
   an association name, a mapping that conflicts with an earlier one)
   that the one Stage 2 corrective turn leaves standing is now removed
