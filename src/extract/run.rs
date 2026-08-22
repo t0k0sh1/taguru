@@ -709,10 +709,7 @@ impl Run {
             candidates,
         );
         let options = RequestOptions {
-            response_format: self
-                .ladder
-                .as_ref()
-                .and_then(|ladder| ladder.response_format.clone()),
+            response_format: self.ladder.as_ref().and_then(LadderConfig::response_format),
             max_tokens: self
                 .ladder
                 .as_ref()

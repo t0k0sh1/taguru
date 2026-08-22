@@ -3752,15 +3752,22 @@ fn drive_ladder_with_factor(
     max_output_tokens: Option<usize>,
     escalation_factor: usize,
 ) -> Result<Vec<ChunkOutput>, String> {
+    let ladder = LadderConfig::new(Rung::Prompted, false, max_output_tokens, escalation_factor);
+    drive_ladder_on(chat, tag, piece, &ladder)
+}
+
+/// [`drive_ladder`] on a caller-built ladder — the ADR 0021 tests
+/// share one across pieces to watch the rung demote run-wide.
+fn drive_ladder_on(
+    chat: &ScriptedChat,
+    tag: &str,
+    piece: &str,
+    ladder: &LadderConfig,
+) -> Result<Vec<ChunkOutput>, String> {
     let dir = std::env::temp_dir().join(format!("taguru-ladder-{tag}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     let client = chat.client();
-    let ladder = LadderConfig {
-        response_format: None,
-        max_output_tokens,
-        escalation_factor,
-    };
     let policy = CorrectionPolicy {
         max_attempts: 3,
         corrective_context_cap: None,
@@ -3778,7 +3785,7 @@ fn drive_ladder_with_factor(
             description: String::new(),
             fact_budget: 0,
             structured_output: String::new(),
-            max_output_tokens: max_output_tokens.unwrap_or(0),
+            max_output_tokens: ladder.max_output_tokens.unwrap_or(0),
             escalation_factor: String::new(),
             chunk_bytes: String::new(),
             lossy: true,
@@ -3793,7 +3800,7 @@ fn drive_ladder_with_factor(
         source: "doc.md",
         chunk_index: 0,
         chunk_total: 1,
-        ladder: &ladder,
+        ladder,
         policy: &policy,
         fact_budget: 0,
         rules: None,
@@ -3946,10 +3953,8 @@ fn ladder_escalation_factor_caps_the_resend_and_zero_uncaps_it() {
 /// and an absurd factor saturates instead of overflowing.
 #[test]
 fn escalated_budget_follows_the_factor_and_saturates() {
-    let ladder = |max_output_tokens, escalation_factor| LadderConfig {
-        response_format: None,
-        max_output_tokens,
-        escalation_factor,
+    let ladder = |max_output_tokens, escalation_factor| {
+        LadderConfig::new(Rung::Prompted, false, max_output_tokens, escalation_factor)
     };
     assert_eq!(DEFAULT_ESCALATION_FACTOR, 2);
     assert_eq!(
@@ -4199,6 +4204,171 @@ fn manifests_reextract_when_the_chunk_cap_changes() {
             ..base_inputs("hash-2", "model-1")
         }
     ));
+}
+
+/// ADR 0021 (#760): under an `auto`-resolved rung, a piece that exhausts
+/// the ladder (budget round + escalated resend both `length`) demotes
+/// the run one rung and restarts at the top — json_schema → json_object
+/// → prompted — and only at the bottom would it split. The demotion is
+/// run-wide: the next piece starts on the demoted rung.
+#[test]
+fn ladder_auto_demotes_one_rung_per_exhausted_piece_and_restarts_it() {
+    let chat = ScriptedChat::start(vec![
+        chat_answer("loop…", "length"),
+        chat_answer("loop…", "length"),
+        chat_answer("loop…", "length"),
+        chat_answer("loop…", "length"),
+        chat_answer(VALID_ANSWER, "stop"),
+        chat_answer(VALID_ANSWER, "stop"),
+    ]);
+    let ladder = LadderConfig::new(Rung::JsonSchema, true, Some(64), 2);
+    let outputs = drive_ladder_on(&chat, "demote", "短い文書。", &ladder).unwrap();
+    assert_eq!(outputs.len(), 1, "the piece never split");
+    let requests = chat.requests();
+    assert_eq!(requests.len(), 5, "{requests:?}");
+    let format_of = |request: &serde_json::Value| {
+        request
+            .get("response_format")
+            .map(|format| format["type"].as_str().unwrap().to_string())
+    };
+    assert_eq!(format_of(&requests[0]).as_deref(), Some("json_schema"));
+    assert_eq!(requests[0]["max_tokens"], serde_json::json!(64));
+    assert_eq!(format_of(&requests[1]).as_deref(), Some("json_schema"));
+    assert_eq!(requests[1]["max_tokens"], serde_json::json!(128));
+    // Demoted: the same piece restarts at the budget round.
+    assert_eq!(format_of(&requests[2]).as_deref(), Some("json_object"));
+    assert_eq!(requests[2]["max_tokens"], serde_json::json!(64));
+    assert_eq!(format_of(&requests[3]).as_deref(), Some("json_object"));
+    assert_eq!(requests[3]["max_tokens"], serde_json::json!(128));
+    // Demoted again: prompted JSON, no response_format at all.
+    assert_eq!(format_of(&requests[4]), None);
+    assert_eq!(requests[4]["max_tokens"], serde_json::json!(64));
+    assert_eq!(ladder.rung(), Rung::Prompted);
+
+    // Run-wide: a later piece starts where the run now is.
+    let outputs = drive_ladder_on(&chat, "demote-next", "次の文書。", &ladder).unwrap();
+    assert_eq!(outputs.len(), 1);
+    let requests = chat.requests();
+    assert_eq!(requests.len(), 6);
+    assert_eq!(format_of(&requests[5]), None);
+}
+
+/// A pinned rung is the operator's choice: exhausting the ladder under
+/// it splits, as ADR 0001 §7 says, and every sub-piece keeps the rung.
+#[test]
+fn ladder_a_pinned_rung_never_demotes() {
+    let chat = ScriptedChat::start(vec![
+        chat_answer("loop…", "length"),
+        chat_answer("loop…", "length"),
+        chat_answer(VALID_ANSWER, "stop"),
+        chat_answer(VALID_ANSWER, "stop"),
+    ]);
+    let block_a = "あ".repeat(200);
+    let block_b = "い".repeat(200);
+    let piece = format!("{block_a}\n\n{block_b}");
+    let ladder = LadderConfig::new(Rung::JsonSchema, false, Some(64), 2);
+    let outputs = drive_ladder_on(&chat, "pinned", &piece, &ladder).unwrap();
+    assert_eq!(outputs.len(), 2, "split, not demoted");
+    let requests = chat.requests();
+    assert_eq!(requests.len(), 4);
+    for request in &requests {
+        assert_eq!(
+            request["response_format"]["type"], "json_schema",
+            "{request:?}"
+        );
+    }
+    assert_eq!(ladder.rung(), Rung::JsonSchema);
+}
+
+/// A timeout exhausts the ladder too (ADR 0020), so under `auto` it
+/// demotes before it would split — and never escalates on the way.
+#[test]
+fn ladder_a_timeout_under_auto_demotes_before_splitting() {
+    let chat = ScriptedChat::start_with_timeout(
+        vec![STALL.to_string(), chat_answer(VALID_ANSWER, "stop")],
+        Some(1),
+    );
+    let ladder = LadderConfig::new(Rung::JsonSchema, true, Some(64), 2);
+    let outputs = drive_ladder_on(&chat, "timeout-demote", "短い文書。", &ladder).unwrap();
+    assert_eq!(outputs.len(), 1, "restarted whole, not split");
+    let requests = chat.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0]["response_format"]["type"], "json_schema");
+    assert_eq!(requests[1]["response_format"]["type"], "json_object");
+    assert_eq!(requests[1]["max_tokens"], serde_json::json!(64));
+    assert_eq!(ladder.rung(), Rung::JsonObject);
+}
+
+/// At the bottom rung there is nothing to demote, demotable or not:
+/// `length` splits exactly as it did before ADR 0021.
+#[test]
+fn ladder_at_the_bottom_rung_a_length_still_splits() {
+    let chat = ScriptedChat::start(vec![
+        chat_answer("loop…", "length"),
+        chat_answer("loop…", "length"),
+        chat_answer(VALID_ANSWER, "stop"),
+        chat_answer(VALID_ANSWER, "stop"),
+    ]);
+    let piece = format!("{}\n\n{}", "あ".repeat(200), "い".repeat(200));
+    let ladder = LadderConfig::new(Rung::Prompted, true, Some(64), 2);
+    let outputs = drive_ladder_on(&chat, "bottom", &piece, &ladder).unwrap();
+    assert_eq!(outputs.len(), 2);
+    assert_eq!(chat.requests().len(), 4);
+    assert_eq!(ladder.rung(), Rung::Prompted);
+}
+
+/// The rung table and the demotion step's rules, pinned directly: the
+/// order, the names stderr uses, the formats each rung sends, a pinned
+/// ladder demoting nothing, the bottom demoting nothing, and a stale
+/// observation (another worker already demoted) reporting the run's
+/// current rung without moving it again.
+#[test]
+fn rungs_order_name_format_and_demote_from_guards() {
+    assert_eq!(Rung::JsonSchema.below(), Some(Rung::JsonObject));
+    assert_eq!(Rung::JsonObject.below(), Some(Rung::Prompted));
+    assert_eq!(Rung::Prompted.below(), None);
+    assert_eq!(Rung::JsonSchema.name(), "json_schema");
+    assert_eq!(Rung::JsonObject.name(), "json_object");
+    assert_eq!(Rung::Prompted.name(), "prompted JSON");
+    assert_eq!(
+        Rung::JsonSchema.response_format().unwrap()["type"],
+        "json_schema"
+    );
+    assert_eq!(
+        Rung::JsonObject.response_format(),
+        Some(serde_json::json!({"type": "json_object"}))
+    );
+    assert_eq!(Rung::Prompted.response_format(), None);
+
+    let pinned = LadderConfig::new(Rung::JsonSchema, false, None, 2);
+    assert_eq!(pinned.demote_from(Rung::JsonSchema), None);
+    assert_eq!(pinned.rung(), Rung::JsonSchema);
+    assert_eq!(pinned.response_format().unwrap()["type"], "json_schema");
+
+    let auto = LadderConfig::new(Rung::JsonSchema, true, None, 2);
+    assert_eq!(
+        auto.demote_from(Rung::JsonSchema),
+        Some((Rung::JsonSchema, Rung::JsonObject))
+    );
+    assert_eq!(auto.rung(), Rung::JsonObject);
+    assert_eq!(
+        auto.response_format(),
+        Some(serde_json::json!({"type": "json_object"}))
+    );
+    // Stale: a piece that failed under json_schema finds the run
+    // already on json_object — restart there, demote nothing.
+    assert_eq!(
+        auto.demote_from(Rung::JsonSchema),
+        Some((Rung::JsonSchema, Rung::JsonObject))
+    );
+    assert_eq!(auto.rung(), Rung::JsonObject);
+    assert_eq!(
+        auto.demote_from(Rung::JsonObject),
+        Some((Rung::JsonObject, Rung::Prompted))
+    );
+    assert_eq!(auto.demote_from(Rung::Prompted), None);
+    assert_eq!(auto.rung(), Rung::Prompted);
+    assert_eq!(auto.response_format(), None);
 }
 
 #[test]

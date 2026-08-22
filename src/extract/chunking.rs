@@ -391,6 +391,13 @@ pub(super) struct PieceContext<'a> {
 /// running the client timeout out and being retried as a transport
 /// failure (#761: 10–25 minutes per chunk, and no split at the end).
 ///
+/// Before either splits, ADR 0021 (#760) asks whether the RUNG is the
+/// problem: under an `auto`-resolved constrained rung, a piece that
+/// exhausts the ladder demotes the run one rung (json_schema →
+/// json_object → prompted) and restarts at the top — see
+/// [`LadderConfig::demote_from`]. At most two restarts per piece, so
+/// the bound above still holds.
+///
 /// A timeout (ADR 0020, #762) takes the split rung directly, from
 /// whichever round it happens in: a piece the provider cannot finish
 /// within `TAGURU_EXTRACT_TIMEOUT_SECS` is too big for the time
@@ -420,10 +427,15 @@ pub(super) fn extract_piece(
         context.chunk_total,
         piece,
     );
+    // ADR 0021: the rung is read once per piece and carried through
+    // its rounds, so a demotion is judged against the rung this piece
+    // actually failed under.
+    let rung = context.ladder.rung();
     let mut outcome = extract_round(
         context,
         &user,
         piece.len(),
+        rung,
         context.ladder.max_output_tokens,
     );
     if matches!(outcome, RoundOutcome::LengthLimited) && context.ladder.max_output_tokens.is_some()
@@ -432,6 +444,7 @@ pub(super) fn extract_piece(
             context,
             &user,
             piece.len(),
+            rung,
             context.ladder.escalated_budget(),
         );
     }
@@ -446,6 +459,34 @@ pub(super) fn extract_piece(
              refusal is terminal; no corrective turn can change it"
         )),
         RoundOutcome::LengthLimited | RoundOutcome::TimedOut(_) => {
+            // ADR 0021 (#760): under an `auto`-resolved constrained
+            // rung, a piece that exhausts the ladder is first read as
+            // the rung looping (a probe that passed on a tiny ask says
+            // nothing about a real document) — demote the RUN one
+            // rung and restart this piece at the ladder's top. Only a
+            // piece that exhausts the ladder with nothing left to
+            // demote splits.
+            if let Some((from, to)) = context.ladder.demote_from(rung) {
+                let why = match &outcome {
+                    RoundOutcome::TimedOut(message) => {
+                        format!("the completion timed out ({message})")
+                    }
+                    _ if context.ladder.max_output_tokens.is_some() => {
+                        "the answer ended at the output cap even after the escalated resend"
+                            .to_string()
+                    }
+                    _ => "the answer ended at the backend's output ceiling".to_string(),
+                };
+                eprintln!(
+                    "taguru: extract: {}: structured output: {} demoted to {} — {why} under \
+                     the {} rung; the piece restarts at the ladder's top",
+                    context.source,
+                    from.name(),
+                    to.name(),
+                    from.name()
+                );
+                return extract_piece(context, piece);
+            }
             let cap = (piece.len() / 2).max(MIN_SPLIT_CAP);
             let sub_pieces = split_labeled_piece(piece, cap);
             if sub_pieces.len() <= 1 {
@@ -502,10 +543,11 @@ pub(super) fn extract_round(
     context: &PieceContext,
     user: &str,
     piece_bytes: usize,
+    rung: Rung,
     max_tokens: Option<usize>,
 ) -> RoundOutcome {
     let options = RequestOptions {
-        response_format: context.ladder.response_format.clone(),
+        response_format: rung.response_format(),
         max_tokens,
         // ADR 0020: under the ladder a timeout descends to the split
         // rung, so the client must not spend four same-size attempts

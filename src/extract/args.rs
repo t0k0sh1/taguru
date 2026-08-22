@@ -659,13 +659,66 @@ impl StructuredOutputMode {
     }
 }
 
+/// One rung of ADR 0001 §6's structured-output ladder: what
+/// `response_format` an extraction request carries. Ordered strongest
+/// first; [`Rung::below`] is the demotion step ADR 0021 takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Rung {
+    JsonSchema,
+    JsonObject,
+    /// Bare prompted JSON — no `response_format` at all.
+    Prompted,
+}
+
+impl Rung {
+    pub(super) fn response_format(self) -> Option<serde_json::Value> {
+        match self {
+            Self::JsonSchema => Some(json_schema_response_format()),
+            Self::JsonObject => Some(json_object_response_format()),
+            Self::Prompted => None,
+        }
+    }
+
+    /// The spelling stderr reports — the same words the startup
+    /// resolution line uses, so a demotion line reads against it.
+    pub(super) fn name(self) -> &'static str {
+        match self {
+            Self::JsonSchema => "json_schema",
+            Self::JsonObject => "json_object",
+            Self::Prompted => "prompted JSON",
+        }
+    }
+
+    /// The next rung down, `None` at the bottom.
+    pub(super) fn below(self) -> Option<Rung> {
+        match self {
+            Self::JsonSchema => Some(Self::JsonObject),
+            Self::JsonObject => Some(Self::Prompted),
+            Self::Prompted => None,
+        }
+    }
+}
+
 /// The §7 ladder's per-run inputs, settled once at startup: the
-/// verified (or pinned) `response_format` for every extraction
-/// request, and the operator's output budget. Present exactly when
-/// some new control is engaged; `None` keeps the legacy loop
-/// byte-for-byte.
+/// verified (or pinned) rung for every extraction request, and the
+/// operator's output budget. Present exactly when some new control is
+/// engaged; `None` keeps the legacy loop byte-for-byte.
+///
+/// The rung is the one thing here that can change after startup —
+/// ADR 0021 (#760): a probe-verified rung can still loop on a real
+/// document, and when a piece exhausts the ladder under a constrained
+/// rung the run demotes one rung and restarts that piece. Run-wide on
+/// purpose (the finding is about the backend, not the piece), so the
+/// rung sits behind a mutex that `--parallel` workers share; a worker
+/// mid-round keeps the rung it started under, its next round reads
+/// the demoted one.
 pub(super) struct LadderConfig {
-    pub(super) response_format: Option<serde_json::Value>,
+    rung: std::sync::Mutex<Rung>,
+    /// `true` exactly when `--structured-output auto` resolved the
+    /// rung: a pinned rung is the operator's choice and never demotes
+    /// (its `length`/timeout goes to the split rung as ADR 0001 §7
+    /// says), and a run with no mechanism has nothing to demote.
+    demotable: bool,
     pub(super) max_output_tokens: Option<usize>,
     /// ADR 0019 (#761): the escalation rung's cap, as a multiple of
     /// `max_output_tokens`; `0` restores ADR 0001 §7's uncapped resend.
@@ -683,6 +736,66 @@ pub(super) struct LadderConfig {
 pub(super) const DEFAULT_ESCALATION_FACTOR: usize = 2;
 
 impl LadderConfig {
+    pub(super) fn new(
+        rung: Rung,
+        demotable: bool,
+        max_output_tokens: Option<usize>,
+        escalation_factor: usize,
+    ) -> Self {
+        Self {
+            rung: std::sync::Mutex::new(rung),
+            demotable,
+            max_output_tokens,
+            escalation_factor,
+        }
+    }
+
+    /// The rung an extraction request sends right now. A piece reads
+    /// it once at the top of its ladder and carries it through every
+    /// round, so [`LadderConfig::demote_from`] can tell whether the
+    /// failure it is handed was observed under the current rung.
+    pub(super) fn rung(&self) -> Rung {
+        *self
+            .rung
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The `response_format` of the current rung — what the
+    /// cross-chunk corrective turn sends (it reads the rung fresh,
+    /// which is right: Stage 2 runs after every piece has landed).
+    pub(super) fn response_format(&self) -> Option<serde_json::Value> {
+        self.rung().response_format()
+    }
+
+    /// ADR 0021: demote one rung, but only if the run is still on
+    /// `observed` — the rung the failing piece actually ran under.
+    /// Two `--parallel` workers that each exhaust the ladder under
+    /// json_schema must demote the run ONCE, not twice: the first
+    /// moves it to json_object and the second, finding the run no
+    /// longer where it failed, simply restarts its piece under the
+    /// rung the first chose. `None` when nothing was demoted — the
+    /// caller then takes the split rung as before — but a stale
+    /// observation is reported as a demotion too (`Some`) so the
+    /// caller restarts rather than splitting under the old rung.
+    pub(super) fn demote_from(&self, observed: Rung) -> Option<(Rung, Rung)> {
+        if !self.demotable {
+            return None;
+        }
+        let mut current = self
+            .rung
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *current != observed {
+            // Someone else already demoted past the rung this piece
+            // failed under: restart under theirs, demote nothing.
+            return Some((observed, *current));
+        }
+        let lower = observed.below()?;
+        *current = lower;
+        Some((observed, lower))
+    }
+
     /// The `max_tokens` the escalation rung sends: `factor ×
     /// max_output_tokens`, or `None` (uncapped) under factor 0. Only
     /// meaningful when a budget is configured — the ladder escalates
