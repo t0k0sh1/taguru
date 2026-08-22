@@ -7,6 +7,23 @@ Entries that change an on-disk format or a response shape say so.
 
 ## [Unreleased]
 
+### Changed
+
+- `taguru extract`'s escalation rung is now capped (ADR 0019,
+  supersedes ADR 0001 §7's "resend with no cap"): when an answer ends
+  at `--max-output-tokens`, the one neutral resend is sent at
+  `TAGURU_EXTRACT_ESCALATION_FACTOR` × the budget (default 2) instead
+  of uncapped. A local model that loops under constrained decoding
+  never ended the uncapped resend with `length` — it ran the
+  `TAGURU_EXTRACT_TIMEOUT_SECS` timeout out, was retried as a
+  transport failure, and failed the source without ever reaching the
+  split rung (10–25 minutes per chunk measured). Capped, the loop
+  ends with `length` and falls through to the split. `0` restores the
+  uncapped resend. The factor is a manifest/checkpoint computation
+  input only when non-default under a budget, so existing manifests
+  keep matching; diagnostics' `requested_max_tokens` now shows the
+  escalated cap on the resend attempt (#761).
+
 ### Fixed
 
 - `taguru extract` no longer writes an alias whose spelling an earlier

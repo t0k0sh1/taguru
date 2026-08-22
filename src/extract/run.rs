@@ -53,6 +53,9 @@ pub(super) struct Run {
     /// TAGURU_EXTRACT_MAX_OUTPUT_TOKENS (`None` = no output-token
     /// parameter is ever sent, today's request).
     pub(super) max_output_tokens: Option<usize>,
+    /// TAGURU_EXTRACT_ESCALATION_FACTOR (ADR 0019) — carried here only
+    /// for the manifest record; the ladder reads its own copy.
+    pub(super) escalation_factor: usize,
     /// `Some` exactly when a mechanism or an output budget is engaged
     /// on a live run: the §7 ladder replaces the legacy corrective
     /// loop. `None` under all-defaults — byte-for-byte today's
@@ -178,6 +181,10 @@ impl Run {
             fact_budget: self.fact_budget,
             structured_output: self.structured_output.manifest_value().to_string(),
             max_output_tokens: self.max_output_tokens.unwrap_or(0),
+            escalation_factor: escalation_manifest_value(
+                self.max_output_tokens,
+                self.escalation_factor,
+            ),
             lossy: self.lossy,
             schema_digest: self.schema_digest.clone(),
             candidates: candidates_manifest_value(self.candidates).to_string(),
@@ -265,6 +272,8 @@ impl Run {
         let recorded_output = self.manifest.output_of(source);
         // Built ONCE for the skip check and the post-write record
         // alike, so the two can never drift field by field.
+        let escalation_factor =
+            escalation_manifest_value(self.max_output_tokens, self.escalation_factor);
         let inputs = ComputationInputs {
             sha256: &hash,
             model: &self.model_name,
@@ -275,6 +284,7 @@ impl Run {
             fact_budget: self.fact_budget,
             structured_output: self.structured_output.manifest_value(),
             max_output_tokens: self.max_output_tokens.unwrap_or(0),
+            escalation_factor: &escalation_factor,
             lossy: self.lossy,
             schema_digest: &self.schema_digest,
             candidates: candidates_manifest_value(self.candidates),

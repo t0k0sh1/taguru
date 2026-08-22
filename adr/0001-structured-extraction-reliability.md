@@ -4,7 +4,8 @@
 - **Date**: 2026-07-23
 - **Issue**: #188
 - **Related**: #178, #179, #180, #181, #182, #185, #187
-- **Supersedes**: — / **Superseded by**: —
+- **Supersedes**: — / **Superseded by**: ADR 0019 (§7's escalation rung only — the
+  uncapped resend becomes a capped one; everything else here stands)
 
 Once Accepted, this document's Decision is immutable: a changed decision gets a
 new `adr/000N-*.md` that names this one in *Supersedes*, never an edit here.

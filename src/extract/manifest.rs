@@ -61,6 +61,15 @@ pub(super) struct ManifestEntry {
     /// other and re-extracts.
     #[serde(default)]
     pub(super) max_output_tokens: usize,
+    /// TAGURU_EXTRACT_ESCALATION_FACTOR of the run that wrote this
+    /// batch, as [`escalation_manifest_value`] encodes it (`""` = the
+    /// default, or no budget for it to apply to — ADR 0019): the
+    /// escalated resend's cap changes what the model can answer on
+    /// that rung, so a non-default factor re-extracts like
+    /// `max_output_tokens`; the empty default keeps entries written
+    /// before the field existed matching an all-defaults run.
+    #[serde(default)]
+    pub(super) escalation_factor: String,
     /// --lossy of the run that wrote this batch (issue #199): whether
     /// invalid items were dropped-and-counted instead of corrected or
     /// failed changes what the batch's facts even are, so toggling it
@@ -150,6 +159,7 @@ impl Manifest {
                 && entry.fact_budget == inputs.fact_budget
                 && entry.structured_output == inputs.structured_output
                 && entry.max_output_tokens == inputs.max_output_tokens
+                && entry.escalation_factor == inputs.escalation_factor
                 && entry.lossy == inputs.lossy
                 && entry.schema_digest == inputs.schema_digest
                 && entry.candidates == inputs.candidates
@@ -185,6 +195,7 @@ impl Manifest {
                 fact_budget: inputs.fact_budget,
                 structured_output: inputs.structured_output.to_string(),
                 max_output_tokens: inputs.max_output_tokens,
+                escalation_factor: inputs.escalation_factor.to_string(),
                 lossy: inputs.lossy,
                 schema_digest: inputs.schema_digest.to_string(),
                 candidates: inputs.candidates.to_string(),
@@ -220,6 +231,7 @@ pub(super) struct ComputationInputs<'a> {
     pub(super) fact_budget: usize,
     pub(super) structured_output: &'a str,
     pub(super) max_output_tokens: usize,
+    pub(super) escalation_factor: &'a str,
     pub(super) lossy: bool,
     pub(super) schema_digest: &'a str,
     pub(super) candidates: &'a str,

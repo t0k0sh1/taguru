@@ -334,6 +334,7 @@ fn scrub_extract_env(command: &mut Command) -> &mut Command {
         .env_remove("TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES")
         .env_remove("TAGURU_EXTRACT_STRUCTURED_OUTPUT")
         .env_remove("TAGURU_EXTRACT_MAX_OUTPUT_TOKENS")
+        .env_remove("TAGURU_EXTRACT_ESCALATION_FACTOR")
         .env_remove("TAGURU_EXTRACT_LOSSY")
         .env_remove("TAGURU_EXTRACT_CANDIDATES")
         .env_remove("TAGURU_EXTRACT_VOCABULARY")
@@ -2652,10 +2653,11 @@ fn extract_rejects_a_bad_max_output_tokens_value() {
 }
 
 /// With a budget engaged, a `length`-terminated answer escalates
-/// exactly once: the next request drops `max_tokens` and resends the
-/// base ask NEUTRALLY — no corrective turn, no replay of the truncated
-/// answer, none of the legacy SHORTER wording (which asks for less
-/// than the budget could now hold).
+/// exactly once: the next request raises `max_tokens` to the factored
+/// cap (ADR 0019: 2× by default) and resends the base ask NEUTRALLY —
+/// no corrective turn, no replay of the truncated answer, none of the
+/// legacy SHORTER wording (which asks for less than the budget could
+/// now hold).
 #[test]
 fn length_limited_escalates_once_with_a_neutral_resend_when_a_budget_is_set() {
     let docs = batch_dir("extract-escalate-docs");
@@ -2691,9 +2693,9 @@ fn length_limited_escalates_once_with_a_neutral_resend_when_a_budget_is_set() {
     assert_eq!(requests.len(), 2);
     assert_eq!(json_body_of(&requests[0])["max_tokens"], 512);
     let escalated = json_body_of(&requests[1]);
-    assert!(
-        escalated.get("max_tokens").is_none(),
-        "escalation must drop the budget, never re-ask under it: {escalated}"
+    assert_eq!(
+        escalated["max_tokens"], 1024,
+        "escalation must raise the budget (2× by default), never re-ask under it: {escalated}"
     );
     assert_eq!(
         escalated["messages"].as_array().unwrap().len(),
@@ -2706,6 +2708,78 @@ fn length_limited_escalates_once_with_a_neutral_resend_when_a_budget_is_set() {
         requests[1]
     );
     assert!(!requests[1].contains("SHORTER"), "{}", requests[1]);
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// ADR 0019 (#761): TAGURU_EXTRACT_ESCALATION_FACTOR sets the escalated
+/// resend's cap as a multiple of the budget; 0 restores the uncapped
+/// resend; anything else is a usage error whether or not a budget is
+/// configured.
+#[test]
+fn escalation_factor_env_caps_the_resend_and_zero_uncaps_it() {
+    let docs = batch_dir("extract-escfactor-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let out = batch_dir("extract-escfactor-out");
+
+    for (factor, expected) in [("3", Some(1536)), ("0", None)] {
+        let (url, captured) = stub_chat_server_concurrent(|_index, attempt| {
+            if attempt == 0 {
+                chat_ok_with_finish_reason("truncated garbage", "length")
+            } else {
+                chat_ok(&json!({"associations": []}).to_string())
+            }
+        });
+        let (code, stdout, stderr) = run_extract(
+            &out,
+            &[
+                ("TAGURU_EXTRACT_URL", url.as_str()),
+                ("TAGURU_EXTRACT_MODEL", "stub-model"),
+                ("TAGURU_EXTRACT_ESCALATION_FACTOR", factor),
+            ],
+            &[
+                "--context",
+                "c",
+                "--force",
+                "--max-output-tokens",
+                "512",
+                doc.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(
+            code, 0,
+            "factor {factor}: stdout: {stdout}\nstderr: {stderr}"
+        );
+        let requests = captured.lock().unwrap();
+        assert_eq!(requests.len(), 2, "factor {factor}");
+        assert_eq!(json_body_of(&requests[0])["max_tokens"], 512);
+        let escalated = json_body_of(&requests[1]);
+        match expected {
+            Some(cap) => assert_eq!(escalated["max_tokens"], cap, "factor {factor}: {escalated}"),
+            None => assert!(
+                escalated.get("max_tokens").is_none(),
+                "factor 0 is the uncapped resend: {escalated}"
+            ),
+        }
+    }
+
+    // A bad value is a usage error even without a budget.
+    let (code, _, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", "http://127.0.0.1:9"),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+            ("TAGURU_EXTRACT_ESCALATION_FACTOR", "two"),
+        ],
+        &["--context", "c", doc.to_str().unwrap()],
+    );
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains("TAGURU_EXTRACT_ESCALATION_FACTOR needs an integer of at least 0"),
+        "{stderr}"
+    );
 
     let _ = std::fs::remove_dir_all(&docs);
     let _ = std::fs::remove_dir_all(&out);
@@ -2861,7 +2935,7 @@ fn length_limited_after_escalation_splits_the_piece_and_sub_pieces_restart_at_th
         "budgeted ask, escalated ask, then one per split half"
     );
     assert_eq!(json_body_of(&requests[0])["max_tokens"], 512);
-    assert!(json_body_of(&requests[1]).get("max_tokens").is_none());
+    assert_eq!(json_body_of(&requests[1])["max_tokens"], 1024);
     assert_eq!(json_body_of(&requests[2])["max_tokens"], 512);
     assert_eq!(json_body_of(&requests[3])["max_tokens"], 512);
 
@@ -4061,9 +4135,9 @@ fn diagnostics_distinguishes_length_limited_empty_and_refusal_states() {
         assert_eq!(records[0]["requested_max_tokens"], 512);
         assert!(!records[0]["parse_error"].is_null());
         assert_eq!(records[1]["state"], "stop_valid");
-        assert!(
-            records[1].get("requested_max_tokens").is_none(),
-            "escalation drops the budget: {:?}",
+        assert_eq!(
+            records[1]["requested_max_tokens"], 1024,
+            "escalation records the factored cap it resent at: {:?}",
             records[1]
         );
 

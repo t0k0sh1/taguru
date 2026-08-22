@@ -17,6 +17,7 @@ fn base_inputs<'a>(sha256: &'a str, model: &'a str) -> ComputationInputs<'a> {
         fact_budget: 0,
         structured_output: "",
         max_output_tokens: 0,
+        escalation_factor: "",
         lossy: false,
         schema_digest: "",
         candidates: "",
@@ -3702,6 +3703,23 @@ fn drive_ladder(
     piece: &str,
     max_output_tokens: Option<usize>,
 ) -> Result<Vec<ChunkOutput>, String> {
+    drive_ladder_with_factor(
+        chat,
+        tag,
+        piece,
+        max_output_tokens,
+        DEFAULT_ESCALATION_FACTOR,
+    )
+}
+
+/// [`drive_ladder`] at an explicit escalation factor (ADR 0019).
+fn drive_ladder_with_factor(
+    chat: &ScriptedChat,
+    tag: &str,
+    piece: &str,
+    max_output_tokens: Option<usize>,
+    escalation_factor: usize,
+) -> Result<Vec<ChunkOutput>, String> {
     let dir = std::env::temp_dir().join(format!("taguru-ladder-{tag}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -3709,6 +3727,7 @@ fn drive_ladder(
     let ladder = LadderConfig {
         response_format: None,
         max_output_tokens,
+        escalation_factor,
     };
     let policy = CorrectionPolicy {
         max_attempts: 3,
@@ -3728,6 +3747,7 @@ fn drive_ladder(
             fact_budget: 0,
             structured_output: String::new(),
             max_output_tokens: max_output_tokens.unwrap_or(0),
+            escalation_factor: String::new(),
             lossy: true,
             schema_digest: String::new(),
             candidates: String::new(),
@@ -3793,9 +3813,10 @@ fn ladder_an_empty_answer_gets_one_corrective_then_the_named_diagnosis() {
 }
 
 /// LENGTH_LIMITED's full ladder: the configured budget answers
-/// `length` → one escalation with the cap dropped (the truncated
-/// answer never replayed) → `length` again → the piece splits and each
-/// sub-piece runs its own ladder from the top.
+/// `length` → one escalation at the factored cap (ADR 0019: 2× by
+/// default; the truncated answer never replayed) → `length` again →
+/// the piece splits and each sub-piece runs its own ladder from the
+/// top.
 #[test]
 fn ladder_length_limited_escalates_once_then_splits_the_piece() {
     let chat = ScriptedChat::start(vec![
@@ -3821,9 +3842,10 @@ fn ladder_length_limited_escalates_once_then_splits_the_piece() {
         "round 1 runs at the configured budget: {:?}",
         requests[0]
     );
-    assert!(
-        requests[1].get("max_tokens").is_none(),
-        "the escalation drops the cap entirely: {:?}",
+    assert_eq!(
+        requests[1]["max_tokens"],
+        serde_json::json!(128),
+        "the escalation resends at DEFAULT_ESCALATION_FACTOR × the budget: {:?}",
         requests[1]
     );
     assert!(
@@ -3847,6 +3869,121 @@ fn ladder_length_limited_escalates_once_then_splits_the_piece() {
 /// A piece already too small to split that still overruns the
 /// escalated budget fails the source with the named diagnosis rather
 /// than importing a truncated extraction.
+/// ADR 0019 (#761): the escalated resend's cap follows the factor —
+/// an explicit one multiplies the budget, and 0 restores ADR 0001 §7's
+/// uncapped resend (no `max_tokens` at all). Neither changes the rest
+/// of the ladder: the cut-off answer is still discarded, the resend is
+/// still neutral.
+#[test]
+fn ladder_escalation_factor_caps_the_resend_and_zero_uncaps_it() {
+    let chat = ScriptedChat::start(vec![
+        chat_answer("truncated…", "length"),
+        chat_answer(VALID_ANSWER, "stop"),
+    ]);
+    let outputs = drive_ladder_with_factor(&chat, "factor3", "短い文書。", Some(64), 3).unwrap();
+    assert_eq!(outputs.len(), 1);
+    let requests = chat.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0]["max_tokens"], serde_json::json!(64));
+    assert_eq!(
+        requests[1]["max_tokens"],
+        serde_json::json!(192),
+        "factor 3 escalates to 3 × 64: {:?}",
+        requests[1]
+    );
+    assert_eq!(requests[1]["messages"].as_array().unwrap().len(), 2);
+
+    let chat = ScriptedChat::start(vec![
+        chat_answer("truncated…", "length"),
+        chat_answer(VALID_ANSWER, "stop"),
+    ]);
+    let outputs = drive_ladder_with_factor(&chat, "factor0", "短い文書。", Some(64), 0).unwrap();
+    assert_eq!(outputs.len(), 1);
+    let requests = chat.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[1].get("max_tokens").is_none(),
+        "factor 0 is the uncapped resend: {:?}",
+        requests[1]
+    );
+}
+
+/// The factored cap itself, pinned on literals: the default is exactly
+/// 2, a budget-less ladder escalates nothing, factor 0 is uncapped,
+/// and an absurd factor saturates instead of overflowing.
+#[test]
+fn escalated_budget_follows_the_factor_and_saturates() {
+    let ladder = |max_output_tokens, escalation_factor| LadderConfig {
+        response_format: None,
+        max_output_tokens,
+        escalation_factor,
+    };
+    assert_eq!(DEFAULT_ESCALATION_FACTOR, 2);
+    assert_eq!(
+        ladder(Some(512), DEFAULT_ESCALATION_FACTOR).escalated_budget(),
+        Some(1024)
+    );
+    assert_eq!(ladder(Some(512), 3).escalated_budget(), Some(1536));
+    assert_eq!(ladder(Some(512), 1).escalated_budget(), Some(512));
+    assert_eq!(ladder(Some(512), 0).escalated_budget(), None);
+    assert_eq!(ladder(None, 3).escalated_budget(), None);
+    assert_eq!(
+        ladder(Some(usize::MAX / 2 + 1), 2).escalated_budget(),
+        Some(usize::MAX)
+    );
+}
+
+/// The manifest encoding (ADR 0019): `""` whenever the factor cannot
+/// matter (no budget) or is the default — so entries written before
+/// the field existed keep matching — and the literal factor otherwise,
+/// including `0`, which is a deliberate non-default choice.
+#[test]
+fn escalation_manifest_value_is_empty_at_the_default_or_without_a_budget() {
+    assert_eq!(escalation_manifest_value(None, 7), "");
+    assert_eq!(escalation_manifest_value(None, 0), "");
+    assert_eq!(
+        escalation_manifest_value(Some(512), DEFAULT_ESCALATION_FACTOR),
+        ""
+    );
+    assert_eq!(escalation_manifest_value(Some(512), 3), "3");
+    assert_eq!(escalation_manifest_value(Some(512), 0), "0");
+}
+
+/// A non-default factor is a computation input: changing it re-extracts
+/// a budgeted document, while a legacy entry (no field) still matches a
+/// default rerun — the `candidates`/`vocabulary_digest` precedent.
+#[test]
+fn manifests_reextract_when_the_escalation_factor_changes_under_a_budget() {
+    let budgeted = |factor: &'static str| ComputationInputs {
+        max_output_tokens: 512,
+        escalation_factor: factor,
+        ..base_inputs("hash-1", "model-1")
+    };
+    let mut manifest = Manifest::default();
+    manifest.record("a.md", &budgeted("3"), "a.md.jsonl");
+    assert!(manifest.matches("a.md", &budgeted("3")));
+    assert!(!manifest.matches("a.md", &budgeted("")));
+    assert!(!manifest.matches("a.md", &budgeted("0")));
+
+    // A pre-0019 entry deserializes with the field empty and keeps
+    // matching the default factor, never a non-default one.
+    let legacy: Manifest = serde_json::from_str(&format!(
+        r#"{{"documents":{{"b.md":{{"sha256":"hash-2","model":"model-1",
+            "prompt_version":{PROMPT_VERSION},"context":"sake","questions_n":0,
+            "no_passage":false,"description":"","fact_budget":0,
+            "structured_output":"","max_output_tokens":512,"lossy":false,
+            "output":"b.md.jsonl"}}}}}}"#
+    ))
+    .expect("a manifest without the field deserializes");
+    let legacy_inputs = |factor: &'static str| ComputationInputs {
+        max_output_tokens: 512,
+        escalation_factor: factor,
+        ..base_inputs("hash-2", "model-1")
+    };
+    assert!(legacy.matches("b.md", &legacy_inputs("")));
+    assert!(!legacy.matches("b.md", &legacy_inputs("3")));
+}
+
 #[test]
 fn ladder_a_piece_at_the_split_floor_fails_the_source() {
     let chat = ScriptedChat::start(vec![

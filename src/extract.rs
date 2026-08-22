@@ -105,7 +105,10 @@ mod tests;
 #[path = "extract/vocabulary.rs"]
 mod vocabulary;
 
-use args::{Args, CorrectionPolicy, LadderConfig, Outcome};
+use args::{
+    Args, CorrectionPolicy, DEFAULT_ESCALATION_FACTOR, LadderConfig, Outcome,
+    escalation_manifest_value,
+};
 use diagnostics::DiagnosticsSink;
 use manifest::{ComputationInputs, Manifest};
 use run::Run;
@@ -209,6 +212,9 @@ chat endpoint:
                       0 omits it entirely (unset: replay it in full)
   TAGURU_EXTRACT_STRUCTURED_OUTPUT  default for --structured-output (off)
   TAGURU_EXTRACT_MAX_OUTPUT_TOKENS  default for --max-output-tokens (unset)
+  TAGURU_EXTRACT_ESCALATION_FACTOR  cap of the one escalated resend after an
+                      answer ends at --max-output-tokens, as a multiple of
+                      that budget; 0 = uncapped (2)
   TAGURU_EXTRACT_LOSSY  default for --lossy (0/false)
   TAGURU_EXTRACT_CANDIDATES  default for --candidates (0/false)
   TAGURU_EXTRACT_VOCABULARY  default for --vocabulary (unset, off)
@@ -533,6 +539,23 @@ pub fn run(args: &[String]) -> i32 {
             Err(_) => None,
         },
     };
+    // ADR 0019: the escalation rung's cap as a multiple of the budget.
+    // Read unconditionally (a bad value is a usage error whether or not
+    // a budget is set, like every other TAGURU_EXTRACT_* knob), applied
+    // only when a budget engages the ladder.
+    let escalation_factor = match std::env::var("TAGURU_EXTRACT_ESCALATION_FACTOR") {
+        Ok(value) => match value.parse::<usize>() {
+            Ok(n) => n,
+            Err(_) => {
+                return crate::config::subcommand_usage_error(
+                    "extract",
+                    "TAGURU_EXTRACT_ESCALATION_FACTOR needs an integer of at least 0 \
+                     (0 = uncapped escalation)",
+                );
+            }
+        },
+        Err(_) => DEFAULT_ESCALATION_FACTOR,
+    };
     // ADR 0001 §4/§6: the structured-output rung is resolved once per
     // run — probed when asked to, never assumed, never re-derived per
     // chunk. Any engaged control (a mechanism, or an output budget)
@@ -545,6 +568,7 @@ pub fn run(args: &[String]) -> i32 {
         (Some(client), mode, budget) => Some(LadderConfig {
             response_format: resolve_response_format(client, mode),
             max_output_tokens: budget,
+            escalation_factor,
         }),
     };
     // Same "hard usage error, not a silent warning" reasoning as
@@ -735,6 +759,7 @@ pub fn run(args: &[String]) -> i32 {
         },
         structured_output,
         max_output_tokens,
+        escalation_factor,
         ladder,
         out: args.out,
         client,

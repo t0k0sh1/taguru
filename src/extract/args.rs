@@ -646,4 +646,43 @@ impl StructuredOutputMode {
 pub(super) struct LadderConfig {
     pub(super) response_format: Option<serde_json::Value>,
     pub(super) max_output_tokens: Option<usize>,
+    /// ADR 0019 (#761): the escalation rung's cap, as a multiple of
+    /// `max_output_tokens`; `0` restores ADR 0001 §7's uncapped resend.
+    /// Bounded by default because an uncapped resend to a model that
+    /// loops under constrained decoding never ends with `length` — it
+    /// ends with the client timeout, retried, and the split rung is
+    /// never reached.
+    pub(super) escalation_factor: usize,
+}
+
+/// The default for `TAGURU_EXTRACT_ESCALATION_FACTOR`: twice the
+/// budget — enough headroom that an honestly-longer answer lands, small
+/// enough that a looping model hits `length` within a couple of the
+/// original budget's wall-clock instead of the timeout's.
+pub(super) const DEFAULT_ESCALATION_FACTOR: usize = 2;
+
+impl LadderConfig {
+    /// The `max_tokens` the escalation rung sends: `factor ×
+    /// max_output_tokens`, or `None` (uncapped) under factor 0. Only
+    /// meaningful when a budget is configured — the ladder escalates
+    /// nothing otherwise.
+    pub(super) fn escalated_budget(&self) -> Option<usize> {
+        let budget = self.max_output_tokens?;
+        (self.escalation_factor > 0).then(|| budget.saturating_mul(self.escalation_factor))
+    }
+}
+
+/// The manifest's record of the escalation factor: `""` when it cannot
+/// affect the computation (no budget configured) or when it is the
+/// default — the "new field defaults to the value that changes today's
+/// behavior least" precedent `structured_output`/`lossy` set, so a
+/// manifest written before the field existed keeps matching an
+/// all-defaults run instead of re-extracting everything; any other
+/// factor is recorded verbatim and re-extracts like any computation
+/// input.
+pub(super) fn escalation_manifest_value(budget: Option<usize>, factor: usize) -> String {
+    match budget {
+        Some(_) if factor != DEFAULT_ESCALATION_FACTOR => factor.to_string(),
+        _ => String::new(),
+    }
 }
