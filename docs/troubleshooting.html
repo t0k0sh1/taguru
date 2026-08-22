@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Troubleshooting — Taguru</title>
-  <meta name="description" content="Symptom-driven triage for a local RAG stack on Taguru: version skew and pre-1.0 response-shape changes, stale Docker images, separating Taguru request latency from LLM generation latency, embedding 404s and lexical degrade, and local model behavior (thinking, context window, output caps, streaming).">
+  <meta name="description" content="Symptom-driven triage for a local RAG stack on Taguru: version skew and pre-1.0 response-shape changes, stale Docker images, separating Taguru request latency from LLM generation latency, embedding 404s and lexical degrade, a wrong-language embedding model on non-Latin corpora, and local model behavior (thinking, context window, output caps, streaming).">
   <link rel="icon" type="image/png" href="favicon.png">
   <link rel="stylesheet" href="style.css">
   <script src="site.js"></script>
@@ -102,6 +102,7 @@
           <tr><td>everything is slow, including a bare <code>curl</code> search with no LLM involved</td><td>Taguru itself, or its embedding provider</td><td><code>"http"</code> log lines; <code>TAGURU_LOG_SEARCHES=1</code> if needed (logs raw cue text — see caveat)</td><td><a href="#latency">Whose seconds are they?</a>, <a href="#embedding">The semantic lane</a></td></tr>
           <tr><td>search still returns results, but paraphrased queries stopped matching</td><td>the semantic lane silently degraded to lexical-only</td><td><code>plan.contexts[].lanes.vector.ran</code> on the search response</td><td><a href="#embedding">The semantic lane</a></td></tr>
           <tr><td>immediate failure: <code>embedding provider answered HTTP 404</code></td><td><code>TAGURU_EMBED_URL</code> is missing the <code>/v1/embeddings</code> path</td><td><code>curl</code> the configured URL directly</td><td><a href="#embedding">The semantic lane</a></td></tr>
+          <tr><td>resolve ranks the wrong candidate, or <code>taguru calibrate</code> reports <code>OVERLAP</code>, on a Japanese (or other non-Latin) corpus</td><td>an embedding model that doesn't separate the language well, or concept-name glosses too short to anchor a separation</td><td>a probe against a paraphrase cue; compare the expected name's cosine to the top other candidate's</td><td><a href="#embedding">The semantic lane</a></td></tr>
           <tr><td>long silence and a busy GPU, then a timeout or an empty answer</td><td>a thinking model spending the whole budget on reasoning tokens</td><td>provider logs, the response's <code>finish_reason</code></td><td><a href="#local-llm">The serving layer</a></td></tr>
           <tr><td>the first request after idle is very slow; streaming "feels fast" but the total doesn't change</td><td>model load / VRAM (context window), or a streaming misconception</td><td>time a second, back-to-back request</td><td><a href="#local-llm">The serving layer</a></td></tr>
         </tbody>
@@ -418,6 +419,33 @@ curl -X POST localhost:8248/contexts/sake/compact</code></pre>
       vector lane degrades recall on paraphrase and synonym queries, it doesn't empty the result
       set. See <a href="architecture.html#search">Internal architecture — search</a> for the two
       lanes and fusion.
+    </p>
+    <p>
+      <b>A third failure mode, quieter than either above: the right-language model, ranking
+      badly.</b> No 404, no degrade — the vector lane runs and reports success, and still ranks
+      badly, because the embedding model itself doesn't separate the corpus's language well.
+      Measured on a Japanese sake-brewery corpus: Ollama's <code>nomic-embed-text</code>
+      <b>reversed</b> a resolve — cue "新潟の酒蔵" scored the correct brand (青嶺酒造) at 0.57
+      but a manufacturing-process term (洗米) at 0.65, ranking the process term above the entity
+      the cue actually names. Point <code>TAGURU_EMBED_MODEL</code> at a model built for
+      multilingual retrieval instead before assuming a floor problem — <code>embeddinggemma</code>
+      through the same Ollama endpoint, or the in-process <code>local</code> provider's
+      <code>multilingual-e5-small</code> / <code>-base</code> (see
+      <a href="local-rag-walkthrough.html#server">the local RAG walkthrough</a>).
+    </p>
+    <p>
+      <b>A <code>calibrate</code> <code>OVERLAP</code> verdict can be correct even on a healthy
+      multilingual model.</b> With the ranking order fixed, <code>taguru calibrate</code> still
+      reported <code>OVERLAP</code> for <code>embeddinggemma</code> on the same corpus: the
+      expected name's cosine band (0.40–0.62) overlapped the best <i>other</i> candidate's band
+      (0.47–0.69). The cause here differs from the gloss-cross-reference case measured on
+      <a href="gcp.html#embeddings">Google Cloud</a> — this corpus's concept-name glosses run
+      2–5 characters, too little text for the model to anchor a separation at any floor. A short
+      gloss folding in more context (the label outline <code>describe</code> already returns,
+      not just the bare name) is the lever that can help; a floor number alone cannot fix an
+      overlapping band — <code>calibrate</code> reports it rather than papering over it, by
+      design. See <a href="evaluate.html#calibrate"><code>calibrate</code></a> for what the
+      verdict means.
     </p>
   </section>
 

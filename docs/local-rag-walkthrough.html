@@ -185,6 +185,16 @@ services:
       floor, and see <a href="troubleshooting.html#embedding">Troubleshooting — the semantic
       lane</a> if a search response's <code>plan</code> says the vector lane didn't run.
     </p>
+    <p class="note warn">
+      <b><code>nomic-embed-text</code> is a poor pick for a Japanese corpus.</b> Measured on a
+      Japanese sake-brewery corpus: it ranked a manufacturing-process term above the brand name
+      a cue actually named — an order inversion, not a marginal score. Prefer a model built for
+      multilingual retrieval instead — <code>embeddinggemma</code> through the same Ollama
+      endpoint, or the in-process <code>local</code> provider's <code>multilingual-e5-small</code>
+      shown above — and see <a href="troubleshooting.html#embedding">Troubleshooting — the
+      semantic lane</a> for the measured numbers and why a healthy multilingual model can still
+      report <code>calibrate</code> <code>OVERLAP</code> on short concept names.
+    </p>
   </section>
 
   <section id="versions">
