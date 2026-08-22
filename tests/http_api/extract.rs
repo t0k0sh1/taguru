@@ -3313,6 +3313,81 @@ fn auto_probe_resolves_to_json_schema_when_the_backend_honors_it() {
     let _ = std::fs::remove_dir_all(&out);
 }
 
+/// ADR 0021 (#760): a probe-verified json_schema rung that loops on a
+/// real document (`length` at the budget and again at the escalated
+/// resend) demotes the run to json_object — reported on stderr — and
+/// the piece restarts; the next document starts on the demoted rung.
+#[test]
+fn auto_demotes_json_schema_after_a_looping_piece_and_reports_it() {
+    let docs = batch_dir("extract-demote-docs");
+    let a = docs.join("a.md");
+    let b = docs.join("b.md");
+    std::fs::write(&a, "small document").unwrap();
+    std::fs::write(&b, "another small document").unwrap();
+    let out = batch_dir("extract-demote-out");
+
+    // Every request here is "chunk 0": the probe, a's rounds, b's
+    // round — so `attempt` counts them in order.
+    let (url, captured) = stub_chat_server_concurrent(|_index, attempt| match attempt {
+        0 => chat_ok(&json!({"associations": [], "aliases": []}).to_string()),
+        1 | 2 => chat_ok_with_finish_reason("looping garbage", "length"),
+        _ => chat_ok(&json!({"associations": []}).to_string()),
+    });
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--structured-output",
+            "auto",
+            "--max-output-tokens",
+            "512",
+            a.to_str().unwrap(),
+            b.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("2 written"), "{stdout}");
+    assert!(
+        stderr.contains("structured output: json_schema (probe verified)"),
+        "{stderr}"
+    );
+    let expected = format!(
+        "taguru: extract: {}: structured output: json_schema demoted to json_object — the \
+         answer ended at the output cap even after the escalated resend under the \
+         json_schema rung; the piece restarts at the ladder's top",
+        a.display()
+    );
+    assert!(stderr.contains(&expected), "{stderr}");
+
+    let requests = captured.lock().unwrap();
+    assert_eq!(
+        requests.len(),
+        5,
+        "probe, a at 512, a at 1024, a restarted at 512 under json_object, b"
+    );
+    let body = |i: usize| json_body_of(&requests[i]);
+    assert_eq!(body(1)["response_format"]["type"], "json_schema");
+    assert_eq!(body(1)["max_tokens"], 512);
+    assert_eq!(body(2)["response_format"]["type"], "json_schema");
+    assert_eq!(body(2)["max_tokens"], 1024);
+    assert_eq!(body(3)["response_format"]["type"], "json_object");
+    assert_eq!(body(3)["max_tokens"], 512);
+    assert_eq!(
+        body(4)["response_format"]["type"],
+        "json_object",
+        "the demotion is run-wide: {}",
+        body(4)
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
 /// A prose answer to the json_schema probe fails that rung; JSON of
 /// any shape to the second probe verifies json_object, and extraction
 /// proceeds under it.

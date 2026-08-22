@@ -442,6 +442,18 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       schema variant is a possible future refinement). A schema-constrained answer still passes
       through every check in the contract above — the wire narrows shapes; validation stays the
       authority — and one that fails anyway is reported on stderr as provider non-conformance.
+      A probe that passes says nothing about a real document: some local models <b>loop under
+      constrained decoding</b> — the tiny probe answers cleanly, then a 2 KB abstract generates
+      15,000 tokens of schema-shaped output and never stops (measured on Ollama with a 30B
+      MoE). So <code>auto</code> also <b>demotes at run time</b> (ADR 0021): when a chunk
+      exhausts the ladder under a constrained rung — <code>length</code> at the budget and again
+      at the escalated resend, or a timeout — the run drops one rung (json_schema → json_object
+      → prompted JSON), reports it on stderr, and restarts that chunk at the ladder's top; only
+      a chunk that exhausts the ladder with nothing left to demote splits. The demotion is
+      run-wide and never reverses: the finding is about the backend, not the chunk. The pinned
+      modes never demote — a looping model under <code>json-schema</code> splits down to the
+      floor and fails, so pin <code>json-object</code> or <code>off</code> for a model known to
+      loop.
     </p>
     <p>
       <code>--max-output-tokens N</code> makes the output cap an explicit request parameter

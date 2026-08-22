@@ -106,19 +106,20 @@ mod tests;
 mod vocabulary;
 
 use args::{
-    Args, CorrectionPolicy, DEFAULT_ESCALATION_FACTOR, LadderConfig, Outcome,
+    Args, CorrectionPolicy, DEFAULT_ESCALATION_FACTOR, LadderConfig, Outcome, Rung,
     escalation_manifest_value,
 };
 use diagnostics::DiagnosticsSink;
 use manifest::{ComputationInputs, Manifest};
 use run::Run;
-use structured_output::resolve_response_format;
+use structured_output::resolve_rung;
 
 pub(crate) use args::StructuredOutputMode;
 pub(crate) use chat_client::{ChatClient, RequestOptions};
 pub(crate) use documents::{ChunkDescriptor, chunk_plan, expand_documents, read_document};
 use documents::{chunk_bytes_manifest_value, chunk_plan_with_cap};
 pub(crate) use signals::{StopSignal, block_stop_signals_on_this_thread};
+use structured_output::json_object_response_format;
 pub(crate) use structured_output::json_schema_response_format;
 pub(crate) use vocabulary::vocabulary_digest;
 
@@ -171,8 +172,8 @@ use candidates::{CANDIDATE_CAP, CANDIDATE_MAX_BYTES};
 use chat_client::build_chat_body;
 #[cfg(test)]
 use chunking::{
-    AttemptOutcome, MAX_LISTED_ISSUES, PieceContext, classify_attempt, corrective_message,
-    extract_piece,
+    AttemptOutcome, MAX_LISTED_ISSUES, PieceContext, RoundOutcome, classify_attempt,
+    corrective_message, demotion_reason, extract_piece,
 };
 #[cfg(test)]
 use coverage::GAP_QUOTE_MAX_BYTES;
@@ -182,8 +183,8 @@ use diagnostics::{AttemptRecord, ChunkRecord, DocumentRecord, ProviderMetadataRe
 use parse::{ModelQuestion, parse_model_output};
 #[cfg(test)]
 use structured_output::{
-    ProbeVerdict, RETRY_MAX_BACKOFF, conforms_to_model_output_shape, json_object_response_format,
-    probe_structured_output, random_duration_up_to,
+    ProbeVerdict, RETRY_MAX_BACKOFF, conforms_to_model_output_shape, probe_structured_output,
+    random_duration_up_to,
 };
 
 const USAGE: &str = "\
@@ -587,11 +588,14 @@ pub fn run(args: &[String]) -> i32 {
     let ladder = match (&client, structured_output, max_output_tokens) {
         (_, StructuredOutputMode::Off, None) => None,
         (None, _, _) => None,
-        (Some(client), mode, budget) => Some(LadderConfig {
-            response_format: resolve_response_format(client, mode),
-            max_output_tokens: budget,
+        // ADR 0021: only an `auto` resolution can be demoted later —
+        // a pinned rung is the operator's choice.
+        (Some(client), mode, budget) => Some(LadderConfig::new(
+            resolve_rung(client, mode),
+            matches!(mode, StructuredOutputMode::Auto),
+            budget,
             escalation_factor,
-        }),
+        )),
     };
     // Same "hard usage error, not a silent warning" reasoning as
     // --parallel/--fact-budget above (extract never initializes a

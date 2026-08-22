@@ -24,38 +24,35 @@ pub(super) const PROBE_MAX_TOKENS: usize = 256;
 /// surfaces its 400 on the first document); `auto` verifies against
 /// the live endpoint before relying on anything, because a backend may
 /// accept a parameter without honoring it (ADR 0001 §6).
-pub(super) fn resolve_response_format(
-    client: &ChatClient,
-    mode: StructuredOutputMode,
-) -> Option<serde_json::Value> {
+pub(super) fn resolve_rung(client: &ChatClient, mode: StructuredOutputMode) -> Rung {
     match mode {
-        StructuredOutputMode::Off => None,
+        StructuredOutputMode::Off => Rung::Prompted,
         StructuredOutputMode::JsonSchema => {
             eprintln!("taguru: extract: structured output: json_schema (pinned)");
-            Some(json_schema_response_format())
+            Rung::JsonSchema
         }
         StructuredOutputMode::JsonObject => {
             eprintln!("taguru: extract: structured output: json_object (pinned)");
-            Some(json_object_response_format())
+            Rung::JsonObject
         }
         StructuredOutputMode::Auto => match probe_structured_output(client) {
             ProbeVerdict::JsonSchema => {
                 eprintln!("taguru: extract: structured output: json_schema (probe verified)");
-                Some(json_schema_response_format())
+                Rung::JsonSchema
             }
             ProbeVerdict::JsonObject => {
                 eprintln!(
                     "taguru: extract: structured output: json_object \
                      (the json_schema probe failed)"
                 );
-                Some(json_object_response_format())
+                Rung::JsonObject
             }
             ProbeVerdict::Prompted => {
                 eprintln!(
                     "taguru: extract: structured output: prompted JSON only \
                      (both probes failed)"
                 );
-                None
+                Rung::Prompted
             }
         },
     }

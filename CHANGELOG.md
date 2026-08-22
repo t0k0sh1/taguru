@@ -19,6 +19,17 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Changed
 
+- `taguru extract --structured-output auto` now demotes its rung at
+  run time (ADR 0021, supersedes ADR 0001 §6's once-per-run
+  resolution for `auto` only): a probe-verified json_schema rung can
+  still loop on a real document (15,000 tokens of schema-shaped
+  output for a 2 KB abstract, measured), so when a chunk exhausts the
+  ladder under a constrained rung — `length` at the budget and again
+  at the escalated resend, or a timeout — the run drops one rung
+  (json_schema → json_object → prompted JSON), reports it on stderr,
+  and restarts that chunk at the ladder's top; only a chunk with
+  nothing left to demote splits. Run-wide, never reversed, and only
+  for `auto` — the pinned modes keep ADR 0001 §7's split (#760).
 - `taguru extract`: under the escalation ladder (`--max-output-tokens`
   or `--structured-output`), a completion that runs
   `TAGURU_EXTRACT_TIMEOUT_SECS` out now descends to the split rung —

@@ -7,7 +7,9 @@
 - **Supersedes**: — / **Superseded by**: ADR 0019 (§7's escalation rung only — the
   uncapped resend becomes a capped one), ADR 0020 (§7's `TIMEOUT` row under
   the ladder only — a timeout descends to the split rung — and the fixed
-  chunk cap becomes `--chunk-bytes`); everything else here stands
+  chunk cap becomes `--chunk-bytes`), ADR 0021 (§6's once-per-run rung
+  resolution for `auto` only — a verified rung can be demoted at run time);
+  everything else here stands
 
 Once Accepted, this document's Decision is immutable: a changed decision gets a
 new `adr/000N-*.md` that names this one in *Supersedes*, never an edit here.
