@@ -455,14 +455,23 @@ impl Run {
             self.date,
             &self.tags,
         );
+        // Both failures below keep the checkpoint file too (it is
+        // cleared only once the batch has landed), so they carry the
+        // same resume hint as a chunk or Stage 2 failure.
         if let Err(message) = crate::ingest::parse_batch(Cursor::new(body.as_bytes())) {
-            return Err(format!(
-                "the emitted batch failed self-validation \
-                 ({message}) — a bug in taguru, not in the document"
+            return Err(with_resume_hint(
+                &checkpoints,
+                format!(
+                    "the emitted batch failed self-validation \
+                     ({message}) — a bug in taguru, not in the document"
+                ),
             ));
         }
         if let Err(error) = crate::storage::write_atomic(&out_path, body.as_bytes()) {
-            return Err(format!("writing {}: {error}", out_path.display()));
+            return Err(with_resume_hint(
+                &checkpoints,
+                format!("writing {}: {error}", out_path.display()),
+            ));
         }
         self.manifest.record(source, &inputs, &file_name);
         // A manifest from before #730's naming change recorded the
