@@ -378,13 +378,15 @@ impl Run {
             }
         }
         let chunks: Vec<String> = plan.into_iter().map(|descriptor| descriptor.text).collect();
-        let chunk_result = self.extract_chunks(
-            source,
-            &chunks,
-            canonical_paragraphs,
-            &candidates,
-            &checkpoints,
-        )?;
+        let chunk_result = self
+            .extract_chunks(
+                source,
+                &chunks,
+                canonical_paragraphs,
+                &candidates,
+                &checkpoints,
+            )
+            .map_err(|message| with_resume_hint(&checkpoints, message))?;
         let mut outputs = match chunk_result {
             ChunkLoopResult::Complete(outputs) => outputs,
             // Whatever units already landed stay on disk — a rerun
@@ -405,14 +407,17 @@ impl Run {
         if !self.lossy {
             let cross_issues = combined_cross_output_issues(&outputs, self.schema.as_deref());
             if !cross_issues.is_empty() {
-                self.correct_cross_output_issues(
-                    source,
-                    &mut outputs,
-                    cross_issues,
-                    chunks.len(),
-                    canonical_paragraphs,
-                    &candidates,
-                )?;
+                removed.extend(
+                    self.correct_cross_output_issues(
+                        source,
+                        &mut outputs,
+                        cross_issues,
+                        chunks.len(),
+                        canonical_paragraphs,
+                        &candidates,
+                    )
+                    .map_err(|message| with_resume_hint(&checkpoints, message))?,
+                );
             }
             let chunk_total = chunks.len();
             for chunk in &outputs {
@@ -450,14 +455,23 @@ impl Run {
             self.date,
             &self.tags,
         );
+        // Both failures below keep the checkpoint file too (it is
+        // cleared only once the batch has landed), so they carry the
+        // same resume hint as a chunk or Stage 2 failure.
         if let Err(message) = crate::ingest::parse_batch(Cursor::new(body.as_bytes())) {
-            return Err(format!(
-                "the emitted batch failed self-validation \
-                 ({message}) — a bug in taguru, not in the document"
+            return Err(with_resume_hint(
+                &checkpoints,
+                format!(
+                    "the emitted batch failed self-validation \
+                     ({message}) — a bug in taguru, not in the document"
+                ),
             ));
         }
         if let Err(error) = crate::storage::write_atomic(&out_path, body.as_bytes()) {
-            return Err(format!("writing {}: {error}", out_path.display()));
+            return Err(with_resume_hint(
+                &checkpoints,
+                format!("writing {}: {error}", out_path.display()),
+            ));
         }
         self.manifest.record(source, &inputs, &file_name);
         // A manifest from before #730's naming change recorded the
@@ -683,9 +697,13 @@ impl Run {
     /// rebuild-not-accumulate discipline, at the output level. Bounded
     /// to exactly one extra call per offending output regardless of
     /// `max_attempts` (the issue's "one targeted corrective turn"): a
-    /// still-invalid, still-cross-conflicting, length-limited,
-    /// refused, or empty reply fails the source outright — Stage 2
-    /// never splits and never loops a second round.
+    /// still-invalid, length-limited, refused, or empty reply fails
+    /// the source outright — Stage 2 never splits and never loops a
+    /// second round. An alias issue that the turn leaves standing is
+    /// removed with accounting instead (ADR 0022, #763) — the records
+    /// are returned for the report line, stderr, and the sidecar; a
+    /// standing issue about anything but an alias still fails the
+    /// source.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn correct_cross_output_issues(
         &self,
@@ -695,7 +713,7 @@ impl Run {
         chunk_total: usize,
         paragraph_count: usize,
         candidates: &[String],
-    ) -> Result<(), String> {
+    ) -> Result<Vec<String>, String> {
         let client = self
             .client
             .as_ref()
@@ -938,23 +956,33 @@ impl Run {
         // Re-check rather than trust the single corrective turn blindly:
         // a correction can rename an association another output's alias
         // depended on, introducing a FRESH cross-output issue. This is
-        // the bounded re-check, not a second round — any issue here
+        // the bounded re-check, not a second round. ADR 0022: an alias
+        // issue still standing is removed with accounting (the loop
+        // re-checks after each removal pass — removing aliases can only
+        // shrink the issue set, so it ends); anything else standing
         // fails the source.
-        if let Some((output_index, issues)) =
-            combined_cross_output_issues(outputs, self.schema.as_deref())
-                .into_iter()
-                .next()
-        {
-            let chunk_index = outputs[output_index].chunk_index;
-            return Err(format!(
-                "chunk {}/{chunk_total}: still has {} cross-chunk issue(s) after \
-                 correction: {}",
-                chunk_index + 1,
-                issues.len(),
-                issues.join("; ")
-            ));
+        let mut removed = Vec::new();
+        loop {
+            let remaining = combined_cross_output_issues(outputs, self.schema.as_deref());
+            if remaining.is_empty() {
+                break;
+            }
+            match prune_uncorrected_aliases(outputs, remaining, chunk_total) {
+                Ok(records) if records.is_empty() => break,
+                Ok(records) => removed.extend(records),
+                Err((output_index, issues)) => {
+                    let chunk_index = outputs[output_index].chunk_index;
+                    return Err(format!(
+                        "chunk {}/{chunk_total}: still has {} cross-chunk issue(s) after \
+                         correction: {}",
+                        chunk_index + 1,
+                        issues.len(),
+                        issues.join("; ")
+                    ));
+                }
+            }
         }
-        Ok(())
+        Ok(removed)
     }
 
     /// A skipped document still contributes its labels, so later
@@ -1079,4 +1107,18 @@ pub(super) fn labeled_document(text: &str, cap: usize) -> String {
         }
     }
     blocks.join("\n\n")
+}
+
+/// A failing document keeps its checkpoint file, so the failure line
+/// says what a plain rerun resumes from (#763) — the operator's reflex
+/// after a late-chunk failure was `--force`, which is exactly the flag
+/// that discards those units.
+pub(super) fn with_resume_hint(checkpoints: &CheckpointStore, message: String) -> String {
+    match checkpoints.unit_count() {
+        0 => message,
+        units => format!(
+            "{message} ({units} extracted unit(s) are checkpointed — a rerun without \
+             --force resumes from them)"
+        ),
+    }
 }

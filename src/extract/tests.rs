@@ -1198,6 +1198,213 @@ fn claimed_names_absorb_extractions_batches_and_vocabulary_alike() {
     assert_eq!(from_batch.concepts, expected_concepts);
 }
 
+/// ADR 0022 (#763): after the corrective turn, an alias issue still
+/// standing is removed with accounting — highest index first within an
+/// output so every recorded path names the alias its issue did — while
+/// a standing issue about anything else hands the caller that output's
+/// non-alias issues to fail the source with.
+#[test]
+fn prune_uncorrected_aliases_removes_alias_issues_and_refuses_the_rest() {
+    assert_eq!(
+        alias_issue_index("aliases[3].alias: names something"),
+        Some(3)
+    );
+    assert_eq!(alias_issue_index("aliases[0]: conflicts with"), Some(0));
+    assert_eq!(
+        alias_issue_index("aliases[12].canonical: reserved"),
+        Some(12)
+    );
+    assert_eq!(alias_issue_index("associations[3].subject: x"), None);
+    assert_eq!(alias_issue_index("aliases[x]: y"), None);
+    assert_eq!(alias_issue_index("aliases: expected an array"), None);
+
+    let mut outputs = [
+        chunk_output(ModelOutput {
+            associations: vec![association("a", "l", "b", 1.0)],
+            aliases: vec![
+                alias("keep", "a", "concept"),
+                alias("a", "b", "concept"),    // shadows — still so
+                alias("b", "a", "concept"),    // shadows — still so
+                alias("also", "b", "concept"), // fine
+            ],
+            questions: Vec::new(),
+        }),
+        ChunkOutput {
+            output: ModelOutput {
+                associations: Vec::new(),
+                aliases: vec![alias("z", "a", "concept")],
+                questions: Vec::new(),
+            },
+            chunk_index: 2,
+            user: String::new(),
+            answer: String::new(),
+            removed: Vec::new(),
+        },
+    ];
+    let issues = vec![
+        (
+            0,
+            vec![
+                "aliases[1].alias: names something the associations already contain".to_string(),
+                "aliases[2].alias: names something the associations already contain".to_string(),
+                // The same alias flagged twice is removed once.
+                "aliases[2]: conflicts with an earlier alias mapping".to_string(),
+            ],
+        ),
+        (
+            1,
+            vec!["aliases[0]: conflicts with an earlier alias mapping \"z\" to \"b\"".to_string()],
+        ),
+    ];
+    let removed = prune_uncorrected_aliases(&mut outputs, issues, 3).unwrap();
+    assert_eq!(
+        removed,
+        vec![
+            "chunk 1/3 aliases[2].alias: names something the associations already contain — \
+             still so after the corrective turn; removed"
+                .to_string(),
+            "chunk 1/3 aliases[1].alias: names something the associations already contain — \
+             still so after the corrective turn; removed"
+                .to_string(),
+            "chunk 3/3 aliases[0]: conflicts with an earlier alias mapping \"z\" to \"b\" — \
+             still so after the corrective turn; removed"
+                .to_string(),
+        ]
+    );
+    let kept: Vec<&str> = outputs[0]
+        .output
+        .aliases
+        .iter()
+        .map(|alias| alias.alias.as_deref().unwrap())
+        .collect();
+    assert_eq!(kept, vec!["keep", "also"]);
+    assert!(outputs[1].output.aliases.is_empty());
+
+    // A single-chunk document carries no chunk prefix.
+    let mut single = [chunk_output(ModelOutput {
+        associations: vec![association("a", "l", "b", 1.0)],
+        aliases: vec![alias("a", "b", "concept")],
+        questions: Vec::new(),
+    })];
+    let removed = prune_uncorrected_aliases(
+        &mut single,
+        vec![(0, vec!["aliases[0].alias: names something".to_string()])],
+        1,
+    )
+    .unwrap();
+    assert_eq!(
+        removed,
+        vec!["aliases[0].alias: names something — still so after the corrective turn; removed"]
+    );
+    assert!(single[0].output.aliases.is_empty());
+
+    // An out-of-range index (the issue list and the outputs disagree)
+    // removes nothing and records nothing rather than panicking —
+    // including the off-by-one index exactly at the list's length.
+    let removed = prune_uncorrected_aliases(
+        &mut single,
+        vec![(0, vec!["aliases[5].alias: names something".to_string()])],
+        1,
+    )
+    .unwrap();
+    assert!(removed.is_empty());
+    let mut one = [chunk_output(ModelOutput {
+        associations: vec![association("a", "l", "b", 1.0)],
+        aliases: vec![alias("x", "a", "concept")],
+        questions: Vec::new(),
+    })];
+    let removed = prune_uncorrected_aliases(
+        &mut one,
+        vec![(0, vec!["aliases[1].alias: names something".to_string()])],
+        1,
+    )
+    .unwrap();
+    assert!(removed.is_empty());
+    assert_eq!(one[0].output.aliases.len(), 1);
+
+    // A non-alias issue anywhere in an output refuses that output —
+    // only the non-alias issues come back — and nothing is removed.
+    let mut mixed = [chunk_output(ModelOutput {
+        associations: vec![association("a", "l", "b", 1.0)],
+        aliases: vec![alias("a", "b", "concept")],
+        questions: Vec::new(),
+    })];
+    let refused = prune_uncorrected_aliases(
+        &mut mixed,
+        vec![(
+            0,
+            vec![
+                "aliases[0].alias: names something".to_string(),
+                "associations[0].subject: type Brewery is not in the relation's domain".to_string(),
+            ],
+        )],
+        1,
+    )
+    .unwrap_err();
+    assert_eq!(
+        refused,
+        (
+            0,
+            vec![
+                "associations[0].subject: type Brewery is not in the relation's domain".to_string()
+            ]
+        )
+    );
+    assert_eq!(mixed[0].output.aliases.len(), 1);
+}
+
+/// The resume hint rides only when there is something to resume from.
+#[test]
+fn with_resume_hint_names_the_checkpointed_units_only_when_there_are_any() {
+    let dir = std::env::temp_dir().join(format!("taguru-hint-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let fingerprint = CheckpointFingerprint {
+        sha256: "h".to_string(),
+        model: "m".to_string(),
+        prompt_version: PROMPT_VERSION,
+        context: "c".to_string(),
+        questions_n: 0,
+        no_passage: false,
+        description: String::new(),
+        fact_budget: 0,
+        structured_output: String::new(),
+        max_output_tokens: 0,
+        escalation_factor: String::new(),
+        chunk_bytes: String::new(),
+        lossy: false,
+        schema_digest: String::new(),
+        candidates: String::new(),
+        vocabulary_digest: String::new(),
+    };
+    let store = CheckpointStore::empty(dir.join("unit.json"), fingerprint);
+    assert_eq!(store.unit_count(), 0);
+    assert_eq!(
+        with_resume_hint(&store, "chunk 2/3: boom".to_string()),
+        "chunk 2/3: boom"
+    );
+    let unit = |text: &str| CheckpointUnit {
+        chunk_index: 0,
+        output: ModelOutput {
+            associations: Vec::new(),
+            aliases: Vec::new(),
+            questions: Vec::new(),
+        },
+        user: text.to_string(),
+        answer: String::new(),
+        removed: Vec::new(),
+    };
+    store.record("doc.md", "h1".to_string(), unit("a"));
+    store.record("doc.md", "h2".to_string(), unit("b"));
+    assert_eq!(store.unit_count(), 2);
+    assert_eq!(
+        with_resume_hint(&store, "chunk 3/3: boom".to_string()),
+        "chunk 3/3: boom (2 extracted unit(s) are checkpointed — a rerun without --force \
+         resumes from them)"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn candidate_terms_segment_scripts_and_merge_adjacent_runs() {
     let terms = candidate_terms(

@@ -278,7 +278,7 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
     <p>Model output is treated as untrusted input, and the contract is enforced on this side of the wire:</p>
     <ul>
       <li>Exact duplicate triples fold into one line (the in-document paraphrase rule, applied mechanically).</li>
-      <li>Items that could never import as answered are <b>removed mechanically</b>, before any corrective turn (ADR 0013): an association or alias with a required field missing or empty, an alias that maps a spelling to itself, an alias whose canonical names nothing the document's associations contain, an alias whose spelling an <i>earlier</i> document of the same run (or the <code>--vocabulary</code> context) already settled on as a different concept or label — import would refuse that rewire and stop the stream, so it never gets written — and a subject/object that never appears in the document text (a whitespace- and case-blind check, so a normalized compound like <code>プール最大接続数</code> for a document that says <code>プールの最大接続数</code> still passes). Every removal is named path-first on stderr, counted on the report line as <code>removed (mechanical validation)</code>, and listed in the <a href="#diagnostics">diagnostics sidecar</a> — never a silent drop.</li>
+      <li>Items that could never import as answered are <b>removed mechanically</b>, before any corrective turn (ADR 0013): an association or alias with a required field missing or empty, an alias that maps a spelling to itself, an alias whose canonical names nothing the document's associations contain, an alias whose spelling an <i>earlier</i> document of the same run (or the <code>--vocabulary</code> context) already settled on as a different concept or label — import would refuse that rewire and stop the stream, so it never gets written — and a subject/object that never appears in the document text (a whitespace- and case-blind check, so a normalized compound like <code>プール最大接続数</code> for a document that says <code>プールの最大接続数</code> still passes). Every removal is named path-first on stderr, counted on the report line as <code>removed (mechanical validation)</code>, and listed in the <a href="#diagnostics">diagnostics sidecar</a> — never a silent drop. One removal class is the exception to "before any corrective turn": an alias whose in-document shadowing or conflict the one Stage 2 corrective turn leaves standing is removed <i>after</i> that turn (ADR 0022), with the same accounting.</li>
       <li>Invalid items removal cannot judge — wrong-typed or oversized fields, zero/non-finite/over-cap weights, unknown alias kinds, shadowing or conflicting aliases, out-of-range questions — earn a <b>path-addressed corrective turn</b> by default (see below): a present-but-wrong value is content the model can actually fix.</li>
       <li>A missing or out-of-range paragraph tag loses <b>only the tag</b>, never the fact — the association keeps the model's subject/label/object/weight judgment as-is.</li>
       <li>An alias is adopted only when its canonical is a name this file's associations register, and never when the alias spelling is itself such a name (either would fail the batch at apply time).</li>
@@ -376,7 +376,12 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       rather than deleting their items, add nothing that wasn't already there, JSON only. A
       shadowing or conflicting alias can only be judged once every chunk of the document has
       answered — that check runs once per document, right before the facts are merged, and (like
-      the per-chunk check) spends at most one corrective turn before giving up; a <i>dangling</i>
+      the per-chunk check) spends at most one corrective turn; an alias issue that turn leaves standing is then
+      <b>removed with accounting</b> rather than failing the source (ADR 0022: an alias records a
+      spelling variant, never a fact, so losing one costs nothing the consolidation audit cannot
+      propose later — while failing the document cost every fact it held; a standing issue about
+      an association, such as a schema domain/range violation, still fails the source); a
+      <i>dangling</i>
       alias found at that same point is mechanically pruned instead, after any corrective turns,
       since an alias whose canonical resolves to nothing cannot import at all — and so is an alias
       that would rewire a spelling an earlier document of the run already claimed, which the
@@ -595,7 +600,11 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       than bypassing the manifest skip. A document whose batch lands successfully has its
       checkpoint file deleted; a document that ultimately fails (Stage 2 correction, merge,
       self-validation) keeps it — the chunks it did complete are still good work worth keeping for
-      the next attempt.
+      the next attempt, and the failure line says how many units are checkpointed and that a
+      rerun <i>without</i> <code>--force</code> resumes from them, re-asking only what failed.
+      There is deliberately no "write what succeeded" mode: a batch is the source's complete,
+      valid truth or nothing (ADR 0001 §8), and the checkpoints already make the retry cost only
+      the failed part.
     </p>
     <p>
       <code>--dry-run</code> reads checkpoints too (never writes or calls anything) and folds a
