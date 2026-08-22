@@ -347,6 +347,8 @@ ENVIRONMENT (every knob; unset = the shown default):
                                in full)
   TAGURU_EXTRACT_STRUCTURED_OUTPUT  default for --structured-output (off)
   TAGURU_EXTRACT_MAX_OUTPUT_TOKENS  default for --max-output-tokens (unset)
+  TAGURU_EXTRACT_ESCALATION_FACTOR  cap of the escalated resend, as a multiple
+                      of --max-output-tokens; 0 = uncapped (2)
   TAGURU_EXTRACT_LOSSY         default for --lossy (0/false)
   TAGURU_EXTRACT_CANDIDATES    default for --candidates (0/false)
   TAGURU_EXTRACT_VOCABULARY    default for --vocabulary (unset, off)

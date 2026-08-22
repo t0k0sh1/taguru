@@ -23,6 +23,14 @@ pub(super) struct CheckpointFingerprint {
     pub(super) fact_budget: usize,
     pub(super) structured_output: String,
     pub(super) max_output_tokens: usize,
+    /// TAGURU_EXTRACT_ESCALATION_FACTOR as [`escalation_manifest_value`]
+    /// encodes it (`""` = default or no budget) — ADR 0019. Same
+    /// `default` reasoning as `schema_digest` below: a checkpoint file
+    /// predating this field was written under the then-only (uncapped)
+    /// rung, and still matches a default rerun; only a non-default
+    /// factor invalidates it.
+    #[serde(default)]
+    pub(super) escalation_factor: String,
     pub(super) lossy: bool,
     /// `--schema`'s document digest (`""` = no schema). Same default
     /// as [`ManifestEntry::schema_digest`] and the same reasoning: a

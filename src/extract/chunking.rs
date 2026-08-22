@@ -377,13 +377,19 @@ pub(super) struct PieceContext<'a> {
 }
 
 /// ADR 0001 §7 for one piece: a round at the configured budget; on
-/// `length`, one budget escalation — drop `max_tokens` and resend the
-/// base ask NEUTRALLY, the truncated answer discarded, never replayed,
-/// never salvaged as a prefix; on `length` again, split the piece and
-/// run each sub-piece's ladder from the top; a piece too small to
-/// split fails the source. Escalation happens at most once per piece
-/// and each split halves the cap down to [`MIN_SPLIT_CAP`], so the
-/// call count is bounded by piece size and `max_attempts`.
+/// `length`, one budget escalation — resend the base ask NEUTRALLY at
+/// [`LadderConfig::escalated_budget`] (ADR 0019: `factor ×` the
+/// budget, uncapped only under factor 0), the truncated answer
+/// discarded, never replayed, never salvaged as a prefix; on `length`
+/// again, split the piece and run each sub-piece's ladder from the
+/// top; a piece too small to split fails the source. Escalation
+/// happens at most once per piece and each split halves the cap down
+/// to [`MIN_SPLIT_CAP`], so the call count is bounded by piece size
+/// and `max_attempts` — and, with the escalated resend capped, so is
+/// the wall-clock: a model that loops under constrained decoding ends
+/// that resend with `length` and reaches the split rung, instead of
+/// running the client timeout out and being retried as a transport
+/// failure (#761: 10–25 minutes per chunk, and no split at the end).
 ///
 /// Checked against issue #179's checkpoint store before doing any of
 /// that: a cache hit on THIS piece's own content hash returns
@@ -413,7 +419,12 @@ pub(super) fn extract_piece(
     );
     if matches!(outcome, RoundOutcome::LengthLimited) && context.ladder.max_output_tokens.is_some()
     {
-        outcome = extract_round(context, &user, piece.len(), None);
+        outcome = extract_round(
+            context,
+            &user,
+            piece.len(),
+            context.ladder.escalated_budget(),
+        );
     }
     match outcome {
         RoundOutcome::Valid(chunk_output) => {

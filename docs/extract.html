@@ -110,6 +110,9 @@ TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES  cap a corrective turn's replay of
                     0 omits it entirely (default: unset, replay in full)
 TAGURU_EXTRACT_STRUCTURED_OUTPUT  default for --structured-output (default off)
 TAGURU_EXTRACT_MAX_OUTPUT_TOKENS  default for --max-output-tokens (default unset)
+TAGURU_EXTRACT_ESCALATION_FACTOR  cap of the one escalated resend after an
+                    answer ends at --max-output-tokens, as a multiple of that
+                    budget; 0 = uncapped (default 2)
 TAGURU_EXTRACT_LOSSY  default for --lossy (default 0/false)
 TAGURU_EXTRACT_CANDIDATES  default for --candidates (default 0/false)
 TAGURU_EXTRACT_VOCABULARY  default for --vocabulary (default unset, off)
@@ -440,11 +443,20 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       instead of ambient serving configuration. When a completion still ends with
       <code>finish_reason: length</code>, the next action is deterministic, and it is never
       "re-ask under the very limit that just proved too small": first the budget escalates
-      <b>once</b> — the same ask resent neutrally with no cap, the truncated answer discarded
-      (its prefix is never salvaged, even when it happens to parse); if the uncapped ask still
-      overruns, the chunk <b>splits</b> — each half re-labeled with its paragraph numbers and
+      <b>once</b> — the same ask resent neutrally at <code>TAGURU_EXTRACT_ESCALATION_FACTOR</code>
+      times the budget (default 2×; <code>0</code> sends no cap at all), the truncated answer
+      discarded (its prefix is never salvaged, even when it happens to parse); if the escalated
+      ask still overruns, the chunk <b>splits</b> — each half re-labeled with its paragraph numbers and
       run through the ladder from the top at the configured budget; a piece too small to split
       fails the source with a named diagnosis rather than importing a truncated extraction.
+      The escalated resend is capped on purpose (ADR 0019): a model that loops under constrained
+      decoding never ends an uncapped resend with <code>length</code> — it ends with the
+      <code>TAGURU_EXTRACT_TIMEOUT_SECS</code> timeout, retried as a transport failure, and the
+      split rung is never reached (measured at 10–25 minutes per chunk on a looping local model).
+      Capped, the loop ends with <code>length</code> within a couple of the budget's wall-clock
+      and falls through to the split. Raise the factor for a provider whose honest answers
+      routinely need more than twice the budget; set it to <code>0</code> only for one that is
+      known not to loop.
       Policy refusals (<code>finish_reason: content_filter</code>) are terminal immediately —
       no corrective turn argues with a policy. Both controls are manifest compute inputs like
       <code>--questions</code>: changing them re-extracts.
