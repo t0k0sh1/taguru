@@ -1299,7 +1299,8 @@ fn prune_uncorrected_aliases_removes_alias_issues_and_refuses_the_rest() {
     assert!(single[0].output.aliases.is_empty());
 
     // An out-of-range index (the issue list and the outputs disagree)
-    // removes nothing and records nothing rather than panicking.
+    // removes nothing and records nothing rather than panicking —
+    // including the off-by-one index exactly at the list's length.
     let removed = prune_uncorrected_aliases(
         &mut single,
         vec![(0, vec!["aliases[5].alias: names something".to_string()])],
@@ -1307,6 +1308,19 @@ fn prune_uncorrected_aliases_removes_alias_issues_and_refuses_the_rest() {
     )
     .unwrap();
     assert!(removed.is_empty());
+    let mut one = [chunk_output(ModelOutput {
+        associations: vec![association("a", "l", "b", 1.0)],
+        aliases: vec![alias("x", "a", "concept")],
+        questions: Vec::new(),
+    })];
+    let removed = prune_uncorrected_aliases(
+        &mut one,
+        vec![(0, vec!["aliases[1].alias: names something".to_string()])],
+        1,
+    )
+    .unwrap();
+    assert!(removed.is_empty());
+    assert_eq!(one[0].output.aliases.len(), 1);
 
     // A non-alias issue anywhere in an output refuses that output —
     // only the non-alias issues come back — and nothing is removed.
