@@ -39,6 +39,20 @@ pub(crate) fn chunk_plan(text: &str) -> Vec<ChunkDescriptor> {
     chunk_plan_with_cap(text, CHUNK_BYTES)
 }
 
+/// The manifest's record of `--chunk-bytes` (ADR 0020, #762): `""` at
+/// the default [`CHUNK_BYTES`] — the "new field defaults to the value
+/// that changes today's behavior least" precedent, so entries written
+/// before the field existed keep matching a default run — and the
+/// literal cap otherwise, since a different cap changes every chunk
+/// the model is shown.
+pub(super) fn chunk_bytes_manifest_value(cap: usize) -> String {
+    if cap == CHUNK_BYTES {
+        String::new()
+    } else {
+        cap.to_string()
+    }
+}
+
 pub(super) fn chunk_plan_with_cap(text: &str, cap: usize) -> Vec<ChunkDescriptor> {
     chunk(&labeled_document(text, cap), cap)
         .into_iter()

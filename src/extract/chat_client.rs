@@ -122,6 +122,14 @@ pub(crate) struct ChatCompletion {
 pub(crate) struct RequestOptions {
     pub(crate) response_format: Option<serde_json::Value>,
     pub(crate) max_tokens: Option<usize>,
+    /// ADR 0020 (#762): return the first `Timeout` instead of
+    /// retrying it at the same size — the §7 ladder's own next step
+    /// (split the piece) IS the retry, and four same-size attempts at
+    /// a piece the hardware cannot finish in time only multiply the
+    /// cost. Transport failures, 429, and 5xx keep their retries
+    /// either way. `false` (the default, and every non-ladder caller)
+    /// is byte-for-byte the pre-0020 retry discipline.
+    pub(crate) fail_fast_on_timeout: bool,
 }
 
 /// The request body [`ChatClient::complete`] sends. serde_json's maps
@@ -211,6 +219,9 @@ impl ChatClient {
                     match parse_chat_completion(response.into_body()) {
                         Ok(completion) => return Ok(completion),
                         Err(error) => {
+                            if options.fail_fast_on_timeout && error.kind == ChatFailure::Timeout {
+                                return Err(error);
+                            }
                             last = Some(error);
                             None
                         }
@@ -243,10 +254,14 @@ impl ChatClient {
                     retry_after
                 }
                 Err(error) => {
-                    last = Some(ChatError::new(
+                    let error = ChatError::new(
                         classify_send_error(&error),
                         format!("chat request failed: {error}"),
-                    ));
+                    );
+                    if options.fail_fast_on_timeout && error.kind == ChatFailure::Timeout {
+                        return Err(error);
+                    }
+                    last = Some(error);
                     None
                 }
             };

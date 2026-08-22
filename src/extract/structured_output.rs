@@ -86,6 +86,7 @@ pub(super) fn probe_structured_output(client: &ChatClient) -> ProbeVerdict {
         ]
     };
     let schema_options = RequestOptions {
+        fail_fast_on_timeout: false,
         response_format: Some(json_schema_response_format()),
         max_tokens: Some(PROBE_MAX_TOKENS),
     };
@@ -97,6 +98,7 @@ pub(super) fn probe_structured_output(client: &ChatClient) -> ProbeVerdict {
         return ProbeVerdict::JsonSchema;
     }
     let object_options = RequestOptions {
+        fail_fast_on_timeout: false,
         response_format: Some(json_object_response_format()),
         max_tokens: Some(PROBE_MAX_TOKENS),
     };

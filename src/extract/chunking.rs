@@ -391,6 +391,15 @@ pub(super) struct PieceContext<'a> {
 /// running the client timeout out and being retried as a transport
 /// failure (#761: 10–25 minutes per chunk, and no split at the end).
 ///
+/// A timeout (ADR 0020, #762) takes the split rung directly, from
+/// whichever round it happens in: a piece the provider cannot finish
+/// within `TAGURU_EXTRACT_TIMEOUT_SECS` is too big for the time
+/// budget exactly as a `length` answer is too big for the token
+/// budget, so it is never retried at the same size (the client is
+/// told to fail fast on timeouts under the ladder) and never
+/// escalated — a larger output cap cannot make a slow piece faster.
+/// At the split floor it fails the source with the timeout named.
+///
 /// Checked against issue #179's checkpoint store before doing any of
 /// that: a cache hit on THIS piece's own content hash returns
 /// immediately with no model call. Since a split's sub-pieces re-enter
@@ -436,16 +445,24 @@ pub(super) fn extract_piece(
             "the provider refused this content (finish_reason {reason}) — a policy \
              refusal is terminal; no corrective turn can change it"
         )),
-        RoundOutcome::LengthLimited => {
+        RoundOutcome::LengthLimited | RoundOutcome::TimedOut(_) => {
             let cap = (piece.len() / 2).max(MIN_SPLIT_CAP);
             let sub_pieces = split_labeled_piece(piece, cap);
             if sub_pieces.len() <= 1 {
-                return Err(format!(
-                    "the answer still ended at the output cap for a {}-byte piece that \
-                     cannot split further — failing the source rather than importing a \
-                     truncated extraction",
-                    piece.len()
-                ));
+                return Err(match outcome {
+                    RoundOutcome::TimedOut(message) => format!(
+                        "the completion timed out for a {}-byte piece that cannot split \
+                         further ({message}) — failing the source; raise \
+                         TAGURU_EXTRACT_TIMEOUT_SECS or lower --chunk-bytes",
+                        piece.len()
+                    ),
+                    _ => format!(
+                        "the answer still ended at the output cap for a {}-byte piece that \
+                         cannot split further — failing the source rather than importing a \
+                         truncated extraction",
+                        piece.len()
+                    ),
+                });
             }
             let mut outputs = Vec::new();
             for sub_piece in &sub_pieces {
@@ -463,6 +480,12 @@ pub(super) enum RoundOutcome {
     /// output cap — the ladder decides what changes; the round itself
     /// never re-asks under the limit it just hit.
     LengthLimited,
+    /// The completion ran `TAGURU_EXTRACT_TIMEOUT_SECS` out (ADR 0020,
+    /// #762): the piece is too big for the time budget, so — like
+    /// `LengthLimited` — the ladder's next step is the split rung,
+    /// never another same-size attempt. Carries the client's message
+    /// for the floor diagnosis.
+    TimedOut(String),
     /// A policy refusal, carrying the provider's spelling.
     Refusal(String),
     Failed(String),
@@ -484,6 +507,10 @@ pub(super) fn extract_round(
     let options = RequestOptions {
         response_format: context.ladder.response_format.clone(),
         max_tokens,
+        // ADR 0020: under the ladder a timeout descends to the split
+        // rung, so the client must not spend four same-size attempts
+        // on it first.
+        fail_fast_on_timeout: true,
     };
     let base = [
         serde_json::json!({"role": "system", "content": context.system}),
@@ -533,6 +560,13 @@ pub(super) fn extract_round(
                         piece_bytes: Some(piece_bytes),
                         requested_max_tokens: max_tokens,
                     });
+                }
+                // ADR 0020: a timeout is the ladder's signal that this
+                // piece is too big for the time budget — the same
+                // shape as `length`, handed to the same next step.
+                // Transport failures stay terminal (already retried).
+                if error.kind == ChatFailure::Timeout {
+                    return RoundOutcome::TimedOut(error.into());
                 }
                 return RoundOutcome::Failed(error.into());
             }

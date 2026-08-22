@@ -117,6 +117,7 @@ use structured_output::resolve_response_format;
 pub(crate) use args::StructuredOutputMode;
 pub(crate) use chat_client::{ChatClient, RequestOptions};
 pub(crate) use documents::{ChunkDescriptor, chunk_plan, expand_documents, read_document};
+use documents::{chunk_bytes_manifest_value, chunk_plan_with_cap};
 pub(crate) use signals::{StopSignal, block_stop_signals_on_this_thread};
 pub(crate) use structured_output::json_schema_response_format;
 pub(crate) use vocabulary::vocabulary_digest;
@@ -132,8 +133,9 @@ use candidates::{candidate_terms, candidates_block, candidates_manifest_value};
 use chat_client::{ChatCompletion, ChatError, ChatFailure, classify_io_error};
 use checkpoint::{CheckpointFingerprint, CheckpointStore, CheckpointUnit};
 use chunking::{
-    AnswerFault, ChunkOutput, corrective_assistant_turn, corrective_validation_message,
-    evaluate_answer, extract_chunk_or_ladder, indicates_length_limit, indicates_refusal,
+    AnswerFault, ChunkOutput, MIN_SPLIT_CAP, corrective_assistant_turn,
+    corrective_validation_message, evaluate_answer, extract_chunk_or_ladder,
+    indicates_length_limit, indicates_refusal,
 };
 use coverage::coverage_gaps;
 use diagnostics::DiagnosticsAttempt;
@@ -177,8 +179,6 @@ use coverage::GAP_QUOTE_MAX_BYTES;
 #[cfg(test)]
 use diagnostics::{AttemptRecord, ChunkRecord, DocumentRecord, ProviderMetadataRecord};
 #[cfg(test)]
-use documents::chunk_plan_with_cap;
-#[cfg(test)]
 use parse::{ModelQuestion, parse_model_output};
 #[cfg(test)]
 use structured_output::{
@@ -215,6 +215,7 @@ chat endpoint:
   TAGURU_EXTRACT_ESCALATION_FACTOR  cap of the one escalated resend after an
                       answer ends at --max-output-tokens, as a multiple of
                       that budget; 0 = uncapped (2)
+  TAGURU_EXTRACT_CHUNK_BYTES  default for --chunk-bytes (24576)
   TAGURU_EXTRACT_LOSSY  default for --lossy (0/false)
   TAGURU_EXTRACT_CANDIDATES  default for --candidates (0/false)
   TAGURU_EXTRACT_VOCABULARY  default for --vocabulary (unset, off)
@@ -246,6 +247,10 @@ chat endpoint:
                       at the budget escalates once without it, then splits
                       the chunk — never re-asked under the limit it just
                       hit
+  --chunk-bytes N     document bytes per model call (default 24576, at least
+                      512); chunks split at paragraph boundaries — lower it
+                      for a slow provider or output-dense documents (statutes,
+                      minutes); overrides TAGURU_EXTRACT_CHUNK_BYTES
   --config F          read KEY=VALUE environment from F (same dialect as serve)
   --parallel N        chunk completions to run concurrently within one
                       document (1, sequential); documents themselves stay
@@ -539,6 +544,23 @@ pub fn run(args: &[String]) -> i32 {
             Err(_) => None,
         },
     };
+    // ADR 0020: the chunk cap. Same floor as the split rung's — below
+    // it a chunk could not split at all.
+    let chunk_bytes = match args.chunk_bytes {
+        Some(n) => n,
+        None => match std::env::var("TAGURU_EXTRACT_CHUNK_BYTES") {
+            Ok(value) => match value.parse::<usize>() {
+                Ok(n) if n >= MIN_SPLIT_CAP => n,
+                _ => {
+                    return crate::config::subcommand_usage_error(
+                        "extract",
+                        "TAGURU_EXTRACT_CHUNK_BYTES needs an integer of at least 512",
+                    );
+                }
+            },
+            Err(_) => CHUNK_BYTES,
+        },
+    };
     // ADR 0019: the escalation rung's cap as a multiple of the budget.
     // Read unconditionally (a bad value is a usage error whether or not
     // a budget is set, like every other TAGURU_EXTRACT_* knob), applied
@@ -760,6 +782,7 @@ pub fn run(args: &[String]) -> i32 {
         structured_output,
         max_output_tokens,
         escalation_factor,
+        chunk_bytes,
         ladder,
         out: args.out,
         client,

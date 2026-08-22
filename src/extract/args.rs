@@ -35,6 +35,10 @@ pub(super) struct Args {
     /// sending no output-token parameter at all (today's request) —
     /// resolved in [`run`].
     pub(super) max_output_tokens: Option<usize>,
+    /// `None` defers to TAGURU_EXTRACT_CHUNK_BYTES, and then to
+    /// [`CHUNK_BYTES`] — resolved in [`run`]. ADR 0020 (#762): the
+    /// caller-selectable unit policy ADR 0001 §7 D anticipated.
+    pub(super) chunk_bytes: Option<usize>,
     /// `None` defers to TAGURU_EXTRACT_LOSSY, and then to `false`
     /// (issue #199's default: an invalid item earns a corrective turn,
     /// never a silent drop) — resolved in [`run`], same pattern as
@@ -90,6 +94,7 @@ impl Args {
         let mut parallel: Option<usize> = None;
         let mut structured_output: Option<StructuredOutputMode> = None;
         let mut max_output_tokens: Option<usize> = None;
+        let mut chunk_bytes: Option<usize> = None;
         let mut lossy: Option<bool> = None;
         let mut candidates: Option<bool> = None;
         let mut vocabulary: Option<PathBuf> = None;
@@ -234,6 +239,21 @@ impl Args {
                         return Err(crate::config::subcommand_usage_error(
                             "extract",
                             "--max-output-tokens needs an integer of at least 1",
+                        ));
+                    }
+                },
+                "--chunk-bytes" => match rest.next().map(|value| value.parse::<usize>()) {
+                    Some(_) if chunk_bytes.is_some() => {
+                        return Err(crate::config::subcommand_usage_error(
+                            "extract",
+                            "--chunk-bytes given twice",
+                        ));
+                    }
+                    Some(Ok(n)) if n >= MIN_SPLIT_CAP => chunk_bytes = Some(n),
+                    _ => {
+                        return Err(crate::config::subcommand_usage_error(
+                            "extract",
+                            "--chunk-bytes needs an integer of at least 512",
                         ));
                     }
                 },
@@ -489,6 +509,7 @@ impl Args {
             parallel,
             structured_output,
             max_output_tokens,
+            chunk_bytes,
             lossy,
             candidates,
             vocabulary,

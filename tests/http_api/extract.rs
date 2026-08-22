@@ -335,6 +335,7 @@ fn scrub_extract_env(command: &mut Command) -> &mut Command {
         .env_remove("TAGURU_EXTRACT_STRUCTURED_OUTPUT")
         .env_remove("TAGURU_EXTRACT_MAX_OUTPUT_TOKENS")
         .env_remove("TAGURU_EXTRACT_ESCALATION_FACTOR")
+        .env_remove("TAGURU_EXTRACT_CHUNK_BYTES")
         .env_remove("TAGURU_EXTRACT_LOSSY")
         .env_remove("TAGURU_EXTRACT_CANDIDATES")
         .env_remove("TAGURU_EXTRACT_VOCABULARY")
@@ -2708,6 +2709,155 @@ fn length_limited_escalates_once_with_a_neutral_resend_when_a_budget_is_set() {
         requests[1]
     );
     assert!(!requests[1].contains("SHORTER"), "{}", requests[1]);
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// ADR 0020 (#762): `--chunk-bytes` / TAGURU_EXTRACT_CHUNK_BYTES set the
+/// chunk cap — visible in --dry-run's chunk count — the flag winning
+/// over the variable, and both refusing anything under the split floor.
+#[test]
+fn chunk_bytes_flag_and_env_set_the_chunk_cap() {
+    let docs = batch_dir("extract-chunkbytes-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, format!("{}\n\n{}", "a".repeat(600), "b".repeat(600))).unwrap();
+    let out = batch_dir("extract-chunkbytes-out");
+    let dry = |env: &[(&str, &str)], extra: &[&str]| {
+        let mut args = vec!["--dry-run", "--context", "c"];
+        args.extend_from_slice(extra);
+        args.push(doc.to_str().unwrap());
+        run_extract(&out, env, &args)
+    };
+
+    let (code, stdout, stderr) = dry(&[], &[]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert_eq!(chunk_count_from_dry_run(&stdout), 1, "{stdout}");
+
+    let (code, stdout, _) = dry(&[], &["--chunk-bytes", "700"]);
+    assert_eq!(code, 0, "{stdout}");
+    assert_eq!(chunk_count_from_dry_run(&stdout), 2, "{stdout}");
+
+    let (code, stdout, _) = dry(&[("TAGURU_EXTRACT_CHUNK_BYTES", "700")], &[]);
+    assert_eq!(code, 0, "{stdout}");
+    assert_eq!(chunk_count_from_dry_run(&stdout), 2, "{stdout}");
+
+    // The flag wins over the variable.
+    let (code, stdout, _) = dry(
+        &[("TAGURU_EXTRACT_CHUNK_BYTES", "700")],
+        &["--chunk-bytes", "4096"],
+    );
+    assert_eq!(code, 0, "{stdout}");
+    assert_eq!(chunk_count_from_dry_run(&stdout), 1, "{stdout}");
+
+    let (code, _, stderr) = dry(&[], &["--chunk-bytes", "511"]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains("--chunk-bytes needs an integer of at least 512"),
+        "{stderr}"
+    );
+    for bad in ["big", "511", "0"] {
+        let (code, _, stderr) = dry(&[("TAGURU_EXTRACT_CHUNK_BYTES", bad)], &[]);
+        assert_eq!(code, 2, "{bad}: {stderr}");
+        assert!(
+            stderr.contains("TAGURU_EXTRACT_CHUNK_BYTES needs an integer of at least 512"),
+            "{bad}: {stderr}"
+        );
+    }
+    // The floor itself is accepted from the variable too — and at 512
+    // each 600-byte paragraph is itself over the cap, so it splits.
+    let (code, stdout, _) = dry(&[("TAGURU_EXTRACT_CHUNK_BYTES", "512")], &[]);
+    assert_eq!(code, 0, "{stdout}");
+    assert_eq!(chunk_count_from_dry_run(&stdout), 4, "{stdout}");
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// ADR 0020 (#762): under the ladder a timeout descends to the split
+/// rung — one stalled ask, then one answer per half — instead of four
+/// same-size attempts and a failed source; at the split floor it fails
+/// after one attempt with the timeout named.
+#[test]
+fn a_timeout_under_the_ladder_splits_instead_of_retrying_at_the_same_size() {
+    let docs = batch_dir("extract-timeoutsplit-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, format!("{}\n\n{}", "a".repeat(600), "b".repeat(600))).unwrap();
+    let out = batch_dir("extract-timeoutsplit-out");
+
+    let (url, captured) = stub_chat_server_concurrent(|_index, attempt| {
+        if attempt == 0 {
+            // Outlive the client's 1 s timeout, then answer into a
+            // connection the client has already abandoned.
+            std::thread::sleep(std::time::Duration::from_secs(3));
+        }
+        chat_ok(&json!({"associations": []}).to_string())
+    });
+    let started = std::time::Instant::now();
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+            ("TAGURU_EXTRACT_TIMEOUT_SECS", "1"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--max-output-tokens",
+            "512",
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("1 written"), "{stdout}");
+    assert!(!stderr.contains("after 4 attempts"), "{stderr}");
+    assert_eq!(
+        captured.lock().unwrap().len(),
+        3,
+        "the stalled ask, then one per half"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(20),
+        "took {:?}",
+        started.elapsed()
+    );
+
+    // The floor: one paragraph that cannot split, always stalling.
+    let floor = docs.join("floor.md");
+    std::fs::write(&floor, "content").unwrap();
+    let (url, captured) = stub_chat_server_concurrent(|_index, _attempt| {
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        chat_ok(&json!({"associations": []}).to_string())
+    });
+    let started = std::time::Instant::now();
+    let (code, _, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+            ("TAGURU_EXTRACT_TIMEOUT_SECS", "1"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--max-output-tokens",
+            "512",
+            floor.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("timed out") && stderr.contains("cannot split further"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("after 4 attempts"), "{stderr}");
+    assert_eq!(captured.lock().unwrap().len(), 1, "one attempt, no retries");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "took {:?}",
+        started.elapsed()
+    );
 
     let _ = std::fs::remove_dir_all(&docs);
     let _ = std::fs::remove_dir_all(&out);

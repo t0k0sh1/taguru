@@ -7,7 +7,29 @@ Entries that change an on-disk format or a response shape say so.
 
 ## [Unreleased]
 
+### Added
+
+- `taguru extract --chunk-bytes N` / `TAGURU_EXTRACT_CHUNK_BYTES`
+  (default 24576, at least 512): the document bytes per model call,
+  previously a fixed 24 KiB. Lower it for a slow local provider or
+  output-dense documents (statutes, minutes) whose answers outrun the
+  time or token budget at the default cap. A manifest/checkpoint
+  computation input when non-default, so existing manifests keep
+  matching (ADR 0020, #762).
+
 ### Changed
+
+- `taguru extract`: under the escalation ladder (`--max-output-tokens`
+  or `--structured-output`), a completion that runs
+  `TAGURU_EXTRACT_TIMEOUT_SECS` out now descends to the split rung —
+  the same next step as `finish_reason: length` — instead of being
+  retried four times at the same size and then failing the source
+  without ever splitting. A timeout is never escalated (a larger
+  output cap cannot make a slow piece faster); at the split floor the
+  source fails after one attempt with the timeout named and the two
+  knobs that would have helped. Transport failures, 429 and 5xx keep
+  their four attempts, and the legacy path (no controls engaged) is
+  unchanged (ADR 0020, #762).
 
 - `taguru extract`'s escalation rung is now capped (ADR 0019,
   supersedes ADR 0001 §7's "resend with no cap"): when an answer ends
