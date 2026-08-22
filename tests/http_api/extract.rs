@@ -2756,12 +2756,19 @@ fn chunk_bytes_flag_and_env_set_the_chunk_cap() {
         stderr.contains("--chunk-bytes needs an integer of at least 512"),
         "{stderr}"
     );
-    let (code, _, stderr) = dry(&[("TAGURU_EXTRACT_CHUNK_BYTES", "big")], &[]);
-    assert_eq!(code, 2, "{stderr}");
-    assert!(
-        stderr.contains("TAGURU_EXTRACT_CHUNK_BYTES needs an integer of at least 512"),
-        "{stderr}"
-    );
+    for bad in ["big", "511", "0"] {
+        let (code, _, stderr) = dry(&[("TAGURU_EXTRACT_CHUNK_BYTES", bad)], &[]);
+        assert_eq!(code, 2, "{bad}: {stderr}");
+        assert!(
+            stderr.contains("TAGURU_EXTRACT_CHUNK_BYTES needs an integer of at least 512"),
+            "{bad}: {stderr}"
+        );
+    }
+    // The floor itself is accepted from the variable too — and at 512
+    // each 600-byte paragraph is itself over the cap, so it splits.
+    let (code, stdout, _) = dry(&[("TAGURU_EXTRACT_CHUNK_BYTES", "512")], &[]);
+    assert_eq!(code, 0, "{stdout}");
+    assert_eq!(chunk_count_from_dry_run(&stdout), 4, "{stdout}");
 
     let _ = std::fs::remove_dir_all(&docs);
     let _ = std::fs::remove_dir_all(&out);
