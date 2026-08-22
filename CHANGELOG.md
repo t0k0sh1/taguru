@@ -68,6 +68,14 @@ Entries that change an on-disk format or a response shape say so.
   input only when non-default under a budget, so existing manifests
   keep matching; diagnostics' `requested_max_tokens` now shows the
   escalated cap on the resend attempt (#761).
+- docs: `nomic-embed-text` is a poor pick for a Japanese corpus (a
+  measured resolve inversion); the local RAG walkthrough and
+  troubleshooting now point at a multilingual model
+  (`embeddinggemma` over Ollama, or the in-process `local`
+  provider's `multilingual-e5-small`/`-base`) instead, and explain
+  why `taguru calibrate` can still report `OVERLAP` on a healthy
+  multilingual model when concept-name glosses are only a few
+  characters long (#764).
 
 ### Fixed
 
