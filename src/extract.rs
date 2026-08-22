@@ -143,7 +143,7 @@ use diagnostics::DiagnosticsAttempt;
 use manifest::{CHECKPOINT_DIR_NAME, batch_file_name, checkpoint_file_name};
 use mechanical::{
     ClaimedNames, mechanical_interpret, name_occurs, normalize_for_occurrence,
-    prune_claimed_aliases, prune_unresolvable_aliases,
+    prune_claimed_aliases, prune_uncorrected_aliases, prune_unresolvable_aliases,
 };
 use parse::{
     ItemRules, ModelAlias, ModelAssociation, ModelOutput, candidate_json, describe_value,
@@ -180,7 +180,11 @@ use coverage::GAP_QUOTE_MAX_BYTES;
 #[cfg(test)]
 use diagnostics::{AttemptRecord, ChunkRecord, DocumentRecord, ProviderMetadataRecord};
 #[cfg(test)]
+use mechanical::alias_issue_index;
+#[cfg(test)]
 use parse::{ModelQuestion, parse_model_output};
+#[cfg(test)]
+use run::with_resume_hint;
 #[cfg(test)]
 use structured_output::{
     ProbeVerdict, RETRY_MAX_BACKOFF, conforms_to_model_output_shape, probe_structured_output,

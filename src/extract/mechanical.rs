@@ -508,3 +508,64 @@ pub(super) fn prune_claimed_aliases(
     }
     removed
 }
+
+/// The alias index an issue path names (`aliases[3].alias: …`,
+/// `aliases[3]: conflicts …`, `aliases[3].canonical: …`), or `None`
+/// for any issue about something other than an alias item.
+pub(super) fn alias_issue_index(issue: &str) -> Option<usize> {
+    let rest = issue.strip_prefix("aliases[")?;
+    let (digits, _) = rest.split_once(']')?;
+    digits.parse().ok()
+}
+
+/// ADR 0022 (#763): what the Stage 2 re-check still flags after the
+/// one corrective turn. Alias issues — a spelling that still shadows
+/// an association name, a mapping that still conflicts, a canonical
+/// that still names the reserved type label — are removed here with
+/// accounting, the ADR 0013 way: an alias records a spelling variant,
+/// never a fact, so losing it loses nothing the consolidation audit
+/// cannot propose later (the same ruling #758 made for cross-document
+/// shadowing), while failing the whole source over it lost every fact
+/// the document held. Anything that is NOT an alias item (a schema
+/// domain/range violation on an association) is content, and keeps
+/// ADR 0001 §8's ruling: `Err` with that output's issues, the caller
+/// fails the source. Indices are removed highest-first within an
+/// output so each recorded path still names the alias the issue did.
+pub(super) fn prune_uncorrected_aliases(
+    outputs: &mut [ChunkOutput],
+    issues_by_output: Vec<(usize, Vec<String>)>,
+    chunk_total: usize,
+) -> Result<Vec<String>, (usize, Vec<String>)> {
+    let mut removed = Vec::new();
+    for (output_index, issues) in issues_by_output {
+        let non_alias: Vec<String> = issues
+            .iter()
+            .filter(|issue| alias_issue_index(issue).is_none())
+            .cloned()
+            .collect();
+        if !non_alias.is_empty() {
+            return Err((output_index, non_alias));
+        }
+        let chunk = &mut outputs[output_index];
+        let prefix = if chunk_total > 1 {
+            format!("chunk {}/{chunk_total} ", chunk.chunk_index + 1)
+        } else {
+            String::new()
+        };
+        let mut doomed: Vec<(usize, &String)> = issues
+            .iter()
+            .filter_map(|issue| alias_issue_index(issue).map(|index| (index, issue)))
+            .collect();
+        doomed.sort_by_key(|(index, _)| std::cmp::Reverse(*index));
+        doomed.dedup_by_key(|(index, _)| *index);
+        for (index, issue) in doomed {
+            if index < chunk.output.aliases.len() {
+                chunk.output.aliases.remove(index);
+                removed.push(format!(
+                    "{prefix}{issue} — still so after the corrective turn; removed"
+                ));
+            }
+        }
+    }
+    Ok(removed)
+}

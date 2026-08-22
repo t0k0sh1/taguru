@@ -195,6 +195,16 @@ impl CheckpointStore {
         }
     }
 
+    /// How many extracted units the store holds — what a failure
+    /// line tells the operator a plain rerun resumes from (#763).
+    pub(super) fn unit_count(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .units
+            .len()
+    }
+
     /// Best-effort delete once a document's batch has durably landed —
     /// the checkpoint's whole purpose (resuming an INCOMPLETE document)
     /// no longer applies, and clearing it keeps `--dry-run`'s reuse

@@ -895,6 +895,70 @@ fn a_failing_chunk_fails_the_document_without_dispatching_the_tail() {
     let _ = std::fs::remove_dir_all(&out);
 }
 
+/// #763: a document that fails on a later chunk keeps the earlier
+/// chunks' checkpoints, the failure line says so, and a plain rerun
+/// resumes from them — only the failed chunk is asked again.
+#[test]
+fn a_late_chunk_failure_names_its_checkpoints_and_a_rerun_resumes_from_them() {
+    let docs = batch_dir("extract-resume-hint-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, format!("{}\n\n{}", "a".repeat(600), "b".repeat(600))).unwrap();
+    let out = batch_dir("extract-resume-hint-out");
+    let args = [
+        "--context",
+        "c",
+        "--chunk-bytes",
+        "700",
+        doc.to_str().unwrap(),
+    ];
+
+    let (url, captured) = stub_chat_server_concurrent(|index, _attempt| {
+        if index == 1 {
+            chat_error(400, "Bad Request", "", "no thanks")
+        } else {
+            chat_ok(&json!({"associations": []}).to_string())
+        }
+    });
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &args,
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stderr.contains("chunk 2/2"), "{stderr}");
+    assert!(
+        stderr.contains(
+            "(1 extracted unit(s) are checkpointed — a rerun without --force resumes from them)"
+        ),
+        "{stderr}"
+    );
+    assert_eq!(captured.lock().unwrap().len(), 2);
+
+    // The rerun asks only for the chunk that failed.
+    let (url, captured) = stub_chat_server_concurrent(|_index, _attempt| {
+        chat_ok(&json!({"associations": []}).to_string())
+    });
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &args,
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("1 written"), "{stdout}");
+    let seen = captured.lock().unwrap();
+    assert_eq!(seen.len(), 1, "only the failed chunk is re-asked: {seen:?}");
+    assert_eq!(chunk_index_of(&seen[0]), 1);
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
 /// A transient 500 recovers on retry — RETRY_ATTEMPTS now covers more
 /// than the one immediate retry the old fixed-sleep policy gave.
 #[test]
@@ -3831,6 +3895,61 @@ fn a_shadowing_alias_earns_a_cross_chunk_corrective_turn() {
         "{}",
         requests[1]
     );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// ADR 0022 (#763): a shadowing alias the corrective turn does not fix
+/// is removed with accounting — named on stderr, counted on the report
+/// line — and the document is written, instead of one uncorrectable
+/// alias costing every fact the document held.
+#[test]
+fn an_uncorrected_shadowing_alias_is_removed_and_the_document_still_lands() {
+    let docs = batch_dir("extract-uncorrected-shadow-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "a small b document").unwrap();
+    let out = batch_dir("extract-uncorrected-shadow-out");
+
+    let bad_reply = json!({
+        "associations": [
+            {"subject": "a", "label": "l", "object": "b"}
+        ],
+        "aliases": [
+            {"alias": "a", "canonical": "b", "kind": "concept"}
+        ]
+    })
+    .to_string();
+    // The model answers the corrective turn with the very same thing.
+    let (url, requests) = stub_chat_server(vec![bad_reply.clone(), bad_reply]);
+    let provider = [
+        ("TAGURU_EXTRACT_URL", url.as_str()),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+    let (code, stdout, stderr) =
+        run_extract(&out, &provider, &["--context", "c", doc.to_str().unwrap()]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("1 association(s), 0 alias(es)"), "{stdout}");
+    assert!(
+        stdout.contains("1 item(s) removed (mechanical validation)"),
+        "{stdout}"
+    );
+    let expected = format!(
+        "taguru: extract: {}: removed: aliases[0].alias: names something the associations \
+         already contain — still so after the corrective turn; removed",
+        doc.display()
+    );
+    assert!(stderr.contains(&expected), "{stderr}");
+    assert_eq!(
+        requests.join().unwrap().len(),
+        2,
+        "one ask, one corrective turn"
+    );
+    let batches = stray_batch_files(&out);
+    assert_eq!(batches.len(), 1, "{batches:?}");
+    let batch = std::fs::read_to_string(out.join(&batches[0])).unwrap();
+    assert!(batch.contains("\"subject\":\"a\""), "{batch}");
+    assert!(!batch.contains("\"alias\""), "{batch}");
 
     let _ = std::fs::remove_dir_all(&docs);
     let _ = std::fs::remove_dir_all(&out);

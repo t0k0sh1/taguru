@@ -19,6 +19,18 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Changed
 
+- `taguru extract`: a cross-chunk alias issue (a spelling that shadows
+  an association name, a mapping that conflicts with an earlier one)
+  that the one Stage 2 corrective turn leaves standing is now removed
+  with accounting — named on stderr, counted on the report line, in
+  the diagnostics sidecar — instead of failing the whole source (ADR
+  0022, supersedes ADR 0013 §3.3 for alias items only). An alias
+  records a spelling variant, never a fact; failing the document over
+  one uncorrectable alias cost every fact it held. A standing issue
+  about an association (schema domain/range) still fails the source.
+  A document that fails on a later chunk now says how many units are
+  checkpointed and that a rerun without `--force` resumes from them
+  (#763).
 - `taguru extract --structured-output auto` now demotes its rung at
   run time (ADR 0021, supersedes ADR 0001 §6's once-per-run
   resolution for `auto` only): a probe-verified json_schema rung can

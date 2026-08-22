@@ -4,6 +4,10 @@
 - **Date**: 2026-08-08
 - **Issue**: #496 (S1)
 - **Related**: #199, #178, #180, #181, #464, #465, #466
+- **Superseded by**: ADR 0022 (§3.2–3.3's "shadowing and conflicting aliases
+  stay corrective" — they still get their corrective turn, but one that
+  leaves them standing now removes them with accounting instead of failing
+  the source; everything else here stands)
 - **Supersedes**: ADR 0001 §8's corrective-turn routing for
   mechanically-judgeable items (partial — everything else in ADR 0001
   stands) / **Superseded by**: —
