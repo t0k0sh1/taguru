@@ -17,10 +17,11 @@ time when a chunk exhausts the ladder (ADR 0021, #760), and
 `--chunk-bytes` exposes the per-call document size (ADR 0020). Output
 quality fixes ride along: an alias an earlier document already settled
 on, or one the corrective turn cannot fix, is removed with accounting
-instead of breaking import or failing the source (#758, ADR 0022 /
-#763), and single-character relation labels no longer snowball through
-the reuse vocabulary (#759). Docs gain Japanese embedding-model guidance
-(#764). No on-disk format or response-shape change.
+instead of breaking import or failing the source (#758, ADR 0022 and
+#763), and single-character relation labels no longer snowball
+through the reuse vocabulary (#759). Docs gain Japanese
+embedding-model guidance (#764). No on-disk format or response-shape
+change.
 
 ### Added
 
