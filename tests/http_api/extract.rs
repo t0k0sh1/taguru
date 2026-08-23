@@ -4938,6 +4938,40 @@ fn extract_without_diagnostics_out_writes_no_sidecar() {
     let _ = std::fs::remove_dir_all(&diag_dir);
 }
 
+/// `--dry-run` calls nothing, so it opens no sidecar either (the usage
+/// text says so) — not even the `run` record ADR 0023 puts first, and
+/// not the trace directory.
+#[test]
+fn dry_run_opens_no_diagnostics_sidecar_and_no_trace() {
+    let docs = batch_dir("extract-diag-dryrun-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let out = batch_dir("extract-diag-dryrun-out");
+    let diag_dir = batch_dir("extract-diag-dryrun-diag");
+    let diag = diag_dir.join("diag.jsonl");
+
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[],
+        &[
+            "--dry-run",
+            "--context",
+            "c",
+            "--diagnostics-out",
+            diag.to_str().unwrap(),
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("would extract"), "{stdout}");
+    assert!(!diag.exists(), "--dry-run must not open the sidecar");
+    assert!(!out.join(".extract-trace").exists());
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+    let _ = std::fs::remove_dir_all(&diag_dir);
+}
+
 /// Stage 2's cross-chunk alias correction earns its own diagnostics
 /// record, `stage: "cross_chunk"` — distinct from the item-stage
 /// records the same run also emits.
