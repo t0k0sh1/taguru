@@ -1,6 +1,6 @@
 {
   "name": "taguru",
-  "version": "0.9.3",
+  "version": "0.9.4",
   "description": "TypeScript/JavaScript client SDK for the Taguru long-term semantic memory server",
   "license": "MIT",
   "repository": {
