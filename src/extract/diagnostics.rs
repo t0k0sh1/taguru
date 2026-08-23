@@ -58,7 +58,7 @@ impl DiagnosticsSink {
     /// extraction itself (requirement 4 only binds stdout/stderr when
     /// the FLAG is absent) — an I/O error here earns one stderr warning
     /// and every later record on this sink is silently dropped.
-    pub(super) fn emit(&self, attempt: DiagnosticsAttempt) {
+    pub(super) fn emit(&self, attempt: &DiagnosticsAttempt) {
         let provider_metadata = attempt.response.map(|response| ProviderMetadataRecord {
             finish_reason: response.finish_reason.clone(),
             input_tokens: response.usage.and_then(|usage| usage.input_tokens),
@@ -84,7 +84,7 @@ impl DiagnosticsSink {
             provider_metadata,
             parse_error: attempt.parse_error.map(str::to_string),
             validation_issues: attempt.validation_issues.map(<[String]>::to_vec),
-            removed_items: attempt.removed_items,
+            removed_items: attempt.removed_items.clone(),
             piece_bytes: attempt.piece_bytes,
             requested_max_tokens: attempt.requested_max_tokens,
             response_text,

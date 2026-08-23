@@ -69,6 +69,8 @@ use crate::sha256::sha256_hex;
 mod aggregate;
 #[path = "extract/args.rs"]
 mod args;
+#[path = "extract/attempts.rs"]
+mod attempts;
 #[path = "extract/candidates.rs"]
 mod candidates;
 #[path = "extract/chat_client.rs"]
@@ -132,6 +134,7 @@ pub(crate) use vocabulary::vocabulary_digest;
 // centralizes this instead of having every submodule import from
 // every sibling it needs.
 use aggregate::{Extraction, ItemKey, association_name_sets, combined_cross_output_issues, merge};
+use attempts::{AttemptLog, Observers, attempts_file_name, attempts_log_enabled};
 use candidates::{candidate_terms, candidates_block, candidates_manifest_value};
 use chat_client::{ChatCompletion, ChatError, ChatFailure, classify_io_error};
 use checkpoint::{CheckpointFingerprint, CheckpointStore, CheckpointUnit};
@@ -157,7 +160,7 @@ use prompt::{system_prompt, user_message, user_message_document};
 use render::{chunk, floor_char_boundary, render_batch, split_labeled_piece, split_oversized};
 use run::labeled_document;
 use structured_output::{jittered_backoff, parse_retry_after, read_capped_chat_body, snippet};
-use trace::{PieceOrigin, render_trace, write_trace};
+use trace::{PieceOrigin, TRACE_DIR_NAME, render_trace, write_trace};
 use vocabulary::{ContextVocabulary, context_names_block, load_vocabulary};
 
 // Test-only cross-submodule access: production code never names these
@@ -169,6 +172,8 @@ use vocabulary::{ContextVocabulary, context_names_block, load_vocabulary};
 use aggregate::{cross_output_issues, schema_output_issues};
 #[cfg(test)]
 use args::parse_date;
+#[cfg(test)]
+use attempts::attempts_log_enabled_from;
 #[cfg(test)]
 use candidates::{CANDIDATE_CAP, CANDIDATE_MAX_BYTES};
 #[cfg(test)]
@@ -235,6 +240,9 @@ chat endpoint:
   TAGURU_EXTRACT_VOCABULARY  default for --vocabulary (unset, off)
   TAGURU_EXTRACT_COVERAGE  default for --coverage (0/false)
   TAGURU_EXTRACT_DIAGNOSTICS  default for --diagnostics-out (unset, off)
+  TAGURU_EXTRACT_TRACE_ATTEMPTS  `off` disables the per-document attempts log
+                      under OUT/.extract-trace/ (every completion's full
+                      prompt and answer; on by default — ADR 0025)
   TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
                       each diagnostics record, capped to this many bytes;
                       unset or 0 = never attach it (metadata only)
@@ -864,6 +872,7 @@ pub fn run(args: &[String]) -> i32 {
         schema,
         schema_digest,
         stop: StopSignal::install("extract"),
+        attempts_log: attempts_log_enabled(),
     };
 
     let mut written = 0usize;

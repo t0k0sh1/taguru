@@ -343,6 +343,7 @@ fn scrub_extract_env(command: &mut Command) -> &mut Command {
         .env_remove("TAGURU_EXTRACT_VOCABULARY")
         .env_remove("TAGURU_EXTRACT_COVERAGE")
         .env_remove("TAGURU_EXTRACT_DIAGNOSTICS")
+        .env_remove("TAGURU_EXTRACT_TRACE_ATTEMPTS")
         .env_remove("TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES")
         .env_remove("TAGURU_EXTRACT_SCHEMA")
         .env_remove("TAGURU_CONFIG")
@@ -6294,10 +6295,14 @@ fn trace_marks_a_checkpoint_reused_piece_with_the_producing_runs_attempt() {
     assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
     assert_eq!(requests.join().unwrap().len(), 3);
     assert_eq!(checkpoint_units_count(&out, doc_src), 1);
-    assert!(
-        !out.join(".extract-trace").exists(),
-        "a failed document writes no trace"
-    );
+    // A failed document writes no trace file — only its attempts log
+    // (ADR 0025), which is the directory's one entry here.
+    let entries: Vec<String> = std::fs::read_dir(out.join(".extract-trace"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    assert!(entries[0].ends_with(".attempts.jsonl"), "{entries:?}");
 
     let reply = json!({"associations": [
         {"subject": "S", "label": "rel", "object": "value-1", "weight": 1.0}
@@ -6503,4 +6508,329 @@ fn trace_records_every_lost_item_with_its_original_text() {
     let _ = std::fs::remove_dir_all(&docs);
     let _ = std::fs::remove_dir_all(&out);
     let _ = std::fs::remove_dir_all(&diag_dir);
+}
+
+// =====================================================================
+// ADR 0025 (#788): the per-document attempts log — every completion's
+// full prompt and full answer, on by default.
+// =====================================================================
+
+/// Reads `--out/.extract-trace/<batch stem>.attempts.jsonl` for the one
+/// document whose attempts log exists there.
+fn read_attempts_log(out: &std::path::Path) -> Vec<Value> {
+    let dir = out.join(".extract-trace");
+    let mut logs: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.to_string_lossy().ends_with(".attempts.jsonl"))
+        .collect();
+    assert_eq!(logs.len(), 1, "{logs:?}");
+    let text = std::fs::read_to_string(logs.remove(0)).unwrap();
+    text.lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+/// A corrective retry: the log holds the document record, the system
+/// prompt once (by hash), and every completion's full conversation and
+/// full answer — the retry's replayed bad answer and corrective ask
+/// included — joinable to the sidecar by `(run_id, attempt_seq)`, with
+/// no environment variable set.
+#[test]
+fn attempts_log_keeps_every_completions_full_prompt_and_answer() {
+    let docs = batch_dir("extract-attempts-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "alpha relates to beta").unwrap();
+    let out = batch_dir("extract-attempts-out");
+    let diag_dir = batch_dir("extract-attempts-diag");
+    let diag = diag_dir.join("diag.jsonl");
+
+    let good = json!({"associations": [
+        {"subject": "alpha", "label": "relates to", "object": "beta", "weight": 1.0}
+    ]})
+    .to_string();
+    let (url, requests) = stub_chat_server(vec!["not json at all".to_string(), good.clone()]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--diagnostics-out",
+            diag.to_str().unwrap(),
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let sent = requests.join().unwrap();
+    assert_eq!(sent.len(), 2);
+
+    let (batch_name, _) = read_trace(&out);
+    let log_path = out.join(".extract-trace").join(format!(
+        "{}.attempts.jsonl",
+        batch_name.trim_end_matches(".jsonl")
+    ));
+    assert!(log_path.is_file(), "{}", log_path.display());
+    let records = read_attempts_log(&out);
+    let kinds: Vec<&str> = records
+        .iter()
+        .map(|r| r["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        ["document", "system", "attempt", "attempt"],
+        "{records:?}"
+    );
+
+    let sidecar = read_diagnostics(&diag);
+    let run_id = sidecar[0]["run_id"].as_str().unwrap();
+    assert_eq!(records[0]["run_id"], run_id);
+    assert_eq!(records[0]["source"], doc.to_str().unwrap());
+    assert_eq!(records[0]["resumed"], false);
+    assert_eq!(records[0]["document_sha256"].as_str().unwrap().len(), 64);
+
+    let system = &records[1];
+    let system_text = system["content"].as_str().unwrap();
+    assert!(system_text.contains("associations"), "{system_text:.80}");
+    assert_eq!(system["bytes"], system_text.len());
+    let sha = system["sha256"].as_str().unwrap();
+    assert_eq!(sha.len(), 64);
+
+    // The first attempt: base conversation, malformed answer in full.
+    let first = &records[2];
+    assert_eq!(first["attempt_seq"], 1);
+    assert_eq!(first["run_id"], run_id);
+    assert_eq!(first["stage"], "item");
+    assert_eq!(first["attempt"], 1);
+    assert_eq!(first["state"], "stop_malformed");
+    assert_eq!(first["answer"], "not json at all");
+    let turns = first["messages"].as_array().unwrap();
+    assert_eq!(turns.len(), 2, "{turns:?}");
+    assert_eq!(turns[0]["role"], "system");
+    assert_eq!(turns[0]["system_sha256"], sha);
+    assert!(turns[0].get("content").is_none(), "system rides by hash");
+    assert_eq!(turns[1]["role"], "user");
+    let user = turns[1]["content"].as_str().unwrap();
+    assert!(user.ends_with("[0] alpha relates to beta"), "{user:?}");
+    assert!(!first["parse_error"].is_null());
+    // What the log says was sent IS what the stub received.
+    // `stub_chat_server` captures "{headers}\n{body}" — the body is the
+    // last line.
+    let sent_first: Value = serde_json::from_str(sent[0].lines().last().unwrap()).unwrap();
+    assert_eq!(sent_first["messages"][1]["content"], user);
+    assert_eq!(
+        sha256_hex_of(sent_first["messages"][0]["content"].as_str().unwrap()),
+        sha
+    );
+
+    // The corrective attempt: the replayed bad answer and the ask, in
+    // full; the accepted answer in full; joinable to the sidecar.
+    let second = &records[3];
+    assert_eq!(second["attempt_seq"], 2);
+    assert_eq!(second["attempt"], 2);
+    assert_eq!(second["state"], "stop_valid");
+    assert_eq!(second["answer"], good);
+    let turns = second["messages"].as_array().unwrap();
+    assert_eq!(turns.len(), 4, "{turns:?}");
+    assert_eq!(turns[2]["role"], "assistant");
+    assert_eq!(turns[2]["content"], "not json at all");
+    assert_eq!(turns[3]["role"], "user");
+    assert!(
+        turns[3]["content"].as_str().unwrap().contains("JSON"),
+        "{}",
+        turns[3]
+    );
+    assert_eq!(second["piece_id"], first["piece_id"]);
+    let sidecar_second = sidecar
+        .iter()
+        .find(|r| r["kind"] == "attempt" && r["attempt_seq"] == 2)
+        .unwrap();
+    assert_eq!(sidecar_second["piece_id"], second["piece_id"]);
+    assert_eq!(sidecar_second["state"], "stop_valid");
+    // The sidecar itself still carries no raw text without the opt-in.
+    assert!(sidecar_second.get("response_text").is_none());
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+    let _ = std::fs::remove_dir_all(&diag_dir);
+}
+
+fn sha256_hex_of(text: &str) -> String {
+    use std::process::Command;
+    // No sha2 crate in the test harness: shell out, which every CI
+    // runner and dev box has.
+    let output = Command::new("shasum")
+        .args(["-a", "256"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child.stdin.take().unwrap().write_all(text.as_bytes())?;
+            child.wait_with_output()
+        })
+        .expect("shasum runs");
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_string()
+}
+
+/// A document that fails keeps its attempts log (that is what the log
+/// is for); the resumed run appends to it — `resumed: true` — rather
+/// than truncating the earlier run's attempts, so the file spans the
+/// runs that built the batch, exactly as the checkpoint does.
+#[test]
+fn attempts_log_survives_a_failure_and_is_appended_to_on_resume() {
+    let docs = batch_dir("extract-attempts-resume-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, multi_chunk_document(9)).unwrap();
+    let doc_src = doc.to_str().unwrap();
+    let out = batch_dir("extract-attempts-resume-out");
+
+    let chunk0 = json!({"associations": [
+        {"subject": "S", "label": "rel", "object": "value-0", "weight": 1.0}
+    ]})
+    .to_string();
+    let (url, _) = stub_chat_server(vec![chunk0, "not json".to_string(), "not json".to_string()]);
+    let (code, _, _) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &["--context", "c", doc_src],
+    );
+    assert_eq!(code, 1);
+    let after_failure = read_attempts_log(&out);
+    let kinds: Vec<&str> = after_failure
+        .iter()
+        .map(|r| r["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        ["document", "system", "attempt", "attempt", "attempt"],
+        "{after_failure:?}"
+    );
+    let first_run = after_failure[0]["run_id"].as_str().unwrap().to_string();
+    assert!(
+        after_failure[3..]
+            .iter()
+            .all(|r| r["state"] == "stop_malformed"),
+        "{after_failure:?}"
+    );
+
+    let chunk1 = json!({"associations": [
+        {"subject": "S", "label": "rel", "object": "value-1", "weight": 1.0}
+    ]})
+    .to_string();
+    let (url, _) = stub_chat_server(vec![chunk1]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &["--context", "c", doc_src],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let after_resume = read_attempts_log(&out);
+    let kinds: Vec<&str> = after_resume
+        .iter()
+        .map(|r| r["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "document", "system", "attempt", "attempt", "attempt", "document", "system", "attempt"
+        ],
+        "{after_resume:?}"
+    );
+    assert_eq!(after_resume[5]["resumed"], true);
+    assert_ne!(after_resume[5]["run_id"], first_run.as_str());
+    assert_eq!(after_resume[7]["run_id"], after_resume[5]["run_id"]);
+    assert_eq!(after_resume[7]["attempt_seq"], 1);
+    assert_eq!(after_resume[7]["chunk_index"], 1);
+    // The trace's reused piece names the first run's attempt 1 — which
+    // the log still holds in full.
+    let (_, trace) = read_trace(&out);
+    let reused = trace
+        .iter()
+        .find(|r| r["kind"] == "piece" && r["reused"] == true)
+        .unwrap();
+    assert_eq!(reused["attempt"]["run_id"], first_run.as_str());
+    assert_eq!(reused["attempt"]["attempt_seq"], 1);
+    assert_eq!(after_resume[2]["run_id"], first_run.as_str());
+    assert_eq!(after_resume[2]["attempt_seq"], 1);
+    assert_eq!(after_resume[2]["piece_id"], reused["piece_id"]);
+
+    // A re-extraction from scratch (--force, no checkpoint) truncates.
+    let chunk_any = json!({"associations": []}).to_string();
+    let (url, _) = stub_chat_server_concurrent(move |_, _| chat_ok(&chunk_any));
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &["--context", "c", "--force", doc_src],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let after_force = read_attempts_log(&out);
+    assert_eq!(after_force[0]["resumed"], false);
+    assert_ne!(after_force[0]["run_id"], first_run.as_str());
+    assert_eq!(
+        after_force
+            .iter()
+            .filter(|r| r["kind"] == "document")
+            .count(),
+        1,
+        "{after_force:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// `TAGURU_EXTRACT_TRACE_ATTEMPTS=off` is the opt-out: no attempts log,
+/// the trace file and the batch unchanged.
+#[test]
+fn attempts_log_can_be_switched_off() {
+    let docs = batch_dir("extract-attempts-off-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "alpha relates to beta").unwrap();
+    let out = batch_dir("extract-attempts-off-out");
+    let (url, _) = stub_chat_server(vec![json!({"associations": []}).to_string()]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+            ("TAGURU_EXTRACT_TRACE_ATTEMPTS", "off"),
+        ],
+        &["--context", "c", doc.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let (_, trace) = read_trace(&out);
+    assert_eq!(trace[0]["kind"], "document");
+    let logs = std::fs::read_dir(out.join(".extract-trace"))
+        .unwrap()
+        .filter(|entry| {
+            entry
+                .as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".attempts.jsonl")
+        })
+        .count();
+    assert_eq!(logs, 0);
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
 }

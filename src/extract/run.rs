@@ -130,6 +130,10 @@ pub(super) struct Run {
     /// Issue #179's cooperative stop flag, checked between chunks and
     /// between documents.
     pub(super) stop: StopSignal,
+    /// ADR 0025 (#788): whether each document's attempts log (full
+    /// prompts and answers) is written — `true` unless
+    /// `TAGURU_EXTRACT_TRACE_ATTEMPTS` is `off`.
+    pub(super) attempts_log: bool,
 }
 
 impl Run {
@@ -141,6 +145,38 @@ impl Run {
             .as_ref()
             .map(|client| client.run_id.clone())
             .unwrap_or_default()
+    }
+
+    /// ADR 0025: the per-document attempts log, unless
+    /// `TAGURU_EXTRACT_TRACE_ATTEMPTS` turned it off (resolved once
+    /// into `attempts_log`). Failure to open is reported, not fatal.
+    pub(super) fn open_attempt_log(
+        &self,
+        batch_file_name: &str,
+        resuming: bool,
+        run_id: &str,
+        source: &str,
+        document_sha256: &str,
+    ) -> Option<AttemptLog> {
+        if !self.attempts_log {
+            return None;
+        }
+        let dir = self.out.join(TRACE_DIR_NAME);
+        let path = dir.join(attempts_file_name(batch_file_name));
+        let opened = fs::create_dir_all(&dir).and_then(|()| {
+            AttemptLog::open(path.clone(), resuming, run_id, source, document_sha256)
+        });
+        match opened {
+            Ok(log) => Some(log),
+            Err(error) => {
+                eprintln!(
+                    "taguru: extract: attempts log: opening {}: {error} — this document's \
+                     attempts are not recorded",
+                    path.display()
+                );
+                None
+            }
+        }
     }
 
     /// The Stage 1 item rules for one document, or `None` under
@@ -393,6 +429,23 @@ impl Run {
                 sink.emit_chunk(source, index, plan.len(), descriptor);
             }
         }
+        // ADR 0025 (#788): the attempts log — every completion's full
+        // prompt and answer — opens here, appending when the checkpoint
+        // says this document is being resumed, truncating otherwise,
+        // so the file spans exactly the runs that built the batch. A
+        // log that cannot open is one stderr line, never a failure.
+        let run_id = self.run_id();
+        let attempt_log = self.open_attempt_log(
+            &file_name,
+            checkpoints.unit_count() > 0,
+            &run_id,
+            source,
+            &hash,
+        );
+        let observers = Observers {
+            sink: self.diagnostics.as_ref(),
+            log: attempt_log.as_ref(),
+        };
         let chunks: Vec<String> = plan
             .iter()
             .map(|descriptor| descriptor.text.clone())
@@ -404,6 +457,7 @@ impl Run {
                 canonical_paragraphs,
                 &candidates,
                 &checkpoints,
+                &observers,
             )
             .map_err(|message| with_resume_hint(&checkpoints, message))?;
         let mut outputs = match chunk_result {
@@ -432,6 +486,7 @@ impl Run {
                     chunks.len(),
                     canonical_paragraphs,
                     &candidates,
+                    &observers,
                 )
                 .map_err(|message| with_resume_hint(&checkpoints, message))?;
             }
@@ -461,7 +516,6 @@ impl Run {
             .collect();
         // ADR 0023: what the trace needs of each output, read off
         // before merge() consumes them, in merge()'s input order.
-        let run_id = self.run_id();
         let pieces: Vec<PieceOrigin> = outputs
             .iter()
             .map(|output| PieceOrigin::of(output, &run_id))
@@ -609,6 +663,7 @@ impl Run {
         paragraph_count: usize,
         candidates: &[String],
         checkpoints: &CheckpointStore,
+        observers: &Observers,
     ) -> Result<ChunkLoopResult, String> {
         if self.parallel > 1 {
             return self.extract_chunks_concurrently(
@@ -617,6 +672,7 @@ impl Run {
                 paragraph_count,
                 candidates,
                 checkpoints,
+                observers,
             );
         }
         let client = self
@@ -649,7 +705,7 @@ impl Run {
                 self.ladder.as_ref(),
                 rules.as_ref(),
                 &self.vocabulary_allowlist,
-                self.diagnostics.as_ref(),
+                observers,
                 checkpoints,
             ) {
                 Ok(piece_outputs) => outputs.extend(piece_outputs),
@@ -687,6 +743,7 @@ impl Run {
         paragraph_count: usize,
         candidates: &[String],
         checkpoints: &CheckpointStore,
+        observers: &Observers,
     ) -> Result<ChunkLoopResult, String> {
         let client = self
             .client
@@ -718,7 +775,7 @@ impl Run {
                     self.ladder.as_ref(),
                     rules.as_ref(),
                     &self.vocabulary_allowlist,
-                    self.diagnostics.as_ref(),
+                    observers,
                     checkpoints,
                 )
             },
@@ -760,6 +817,7 @@ impl Run {
         chunk_total: usize,
         paragraph_count: usize,
         candidates: &[String],
+        observers: &Observers,
     ) -> Result<(), String> {
         let client = self
             .client
@@ -784,7 +842,6 @@ impl Run {
             fail_fast_on_timeout: false,
         };
         let rules = self.item_rules(paragraph_count);
-        let sink = self.diagnostics.as_ref();
         for (output_index, issues) in cross_issues {
             let (chunk_index, piece_id, user, answer) = {
                 let chunk = &outputs[output_index];
@@ -811,9 +868,43 @@ impl Run {
             let response = match client.complete(&messages, &options) {
                 Ok(response) => response,
                 Err(error) => {
-                    if let Some(sink) = sink {
+                    {
                         let message = error.to_string();
-                        sink.emit(DiagnosticsAttempt {
+                        observers.emit(
+                            &DiagnosticsAttempt {
+                                source,
+                                stage: "cross_chunk",
+                                chunk_index,
+                                attempt: 1,
+                                attempt_ref: &attempt_ref,
+                                piece_id,
+                                max_attempts: 1,
+                                state: match error.kind {
+                                    ChatFailure::Timeout => "timeout",
+                                    ChatFailure::Transport => "transport",
+                                },
+                                length_limited: false,
+                                elapsed: started.elapsed(),
+                                response: None,
+                                parse_error: Some(&message),
+                                validation_issues: None,
+                                removed_items: None,
+                                piece_bytes: None,
+                                requested_max_tokens: options.max_tokens,
+                            },
+                            &messages,
+                        );
+                    }
+                    return Err(format!("{label}: {error}"));
+                }
+            };
+            let elapsed = started.elapsed();
+            if indicates_length_limit(response.finish_reason.as_deref()) {
+                {
+                    let message =
+                        "the cross-chunk correction was cut off at the output limit".to_string();
+                    observers.emit(
+                        &DiagnosticsAttempt {
                             source,
                             stage: "cross_chunk",
                             chunk_index,
@@ -821,46 +912,18 @@ impl Run {
                             attempt_ref: &attempt_ref,
                             piece_id,
                             max_attempts: 1,
-                            state: match error.kind {
-                                ChatFailure::Timeout => "timeout",
-                                ChatFailure::Transport => "transport",
-                            },
-                            length_limited: false,
-                            elapsed: started.elapsed(),
-                            response: None,
+                            state: "length_limited",
+                            length_limited: true,
+                            elapsed,
+                            response: Some(&response),
                             parse_error: Some(&message),
                             validation_issues: None,
                             removed_items: None,
                             piece_bytes: None,
                             requested_max_tokens: options.max_tokens,
-                        });
-                    }
-                    return Err(format!("{label}: {error}"));
-                }
-            };
-            let elapsed = started.elapsed();
-            if indicates_length_limit(response.finish_reason.as_deref()) {
-                if let Some(sink) = sink {
-                    let message =
-                        "the cross-chunk correction was cut off at the output limit".to_string();
-                    sink.emit(DiagnosticsAttempt {
-                        source,
-                        stage: "cross_chunk",
-                        chunk_index,
-                        attempt: 1,
-                        attempt_ref: &attempt_ref,
-                        piece_id,
-                        max_attempts: 1,
-                        state: "length_limited",
-                        length_limited: true,
-                        elapsed,
-                        response: Some(&response),
-                        parse_error: Some(&message),
-                        validation_issues: None,
-                        removed_items: None,
-                        piece_bytes: None,
-                        requested_max_tokens: options.max_tokens,
-                    });
+                        },
+                        &messages,
+                    );
                 }
                 return Err(format!(
                     "{label}: the cross-chunk correction was cut off at the output \
@@ -870,29 +933,32 @@ impl Run {
             if let Some(reason) = response.finish_reason.as_deref()
                 && indicates_refusal(reason)
             {
-                if let Some(sink) = sink {
+                {
                     let message = format!(
                         "the provider refused the cross-chunk correction \
                          (finish_reason {reason})"
                     );
-                    sink.emit(DiagnosticsAttempt {
-                        source,
-                        stage: "cross_chunk",
-                        chunk_index,
-                        attempt: 1,
-                        attempt_ref: &attempt_ref,
-                        piece_id,
-                        max_attempts: 1,
-                        state: "refusal",
-                        length_limited: false,
-                        elapsed,
-                        response: Some(&response),
-                        parse_error: Some(&message),
-                        validation_issues: None,
-                        removed_items: None,
-                        piece_bytes: None,
-                        requested_max_tokens: options.max_tokens,
-                    });
+                    observers.emit(
+                        &DiagnosticsAttempt {
+                            source,
+                            stage: "cross_chunk",
+                            chunk_index,
+                            attempt: 1,
+                            attempt_ref: &attempt_ref,
+                            piece_id,
+                            max_attempts: 1,
+                            state: "refusal",
+                            length_limited: false,
+                            elapsed,
+                            response: Some(&response),
+                            parse_error: Some(&message),
+                            validation_issues: None,
+                            removed_items: None,
+                            piece_bytes: None,
+                            requested_max_tokens: options.max_tokens,
+                        },
+                        &messages,
+                    );
                 }
                 return Err(format!(
                     "{label}: the provider refused the cross-chunk correction \
@@ -900,26 +966,29 @@ impl Run {
                 ));
             }
             if is_empty_answer(&response.content) {
-                if let Some(sink) = sink {
+                {
                     let message = empty_answer_diagnosis();
-                    sink.emit(DiagnosticsAttempt {
-                        source,
-                        stage: "cross_chunk",
-                        chunk_index,
-                        attempt: 1,
-                        attempt_ref: &attempt_ref,
-                        piece_id,
-                        max_attempts: 1,
-                        state: "empty",
-                        length_limited: false,
-                        elapsed,
-                        response: Some(&response),
-                        parse_error: Some(&message),
-                        validation_issues: None,
-                        removed_items: None,
-                        piece_bytes: None,
-                        requested_max_tokens: options.max_tokens,
-                    });
+                    observers.emit(
+                        &DiagnosticsAttempt {
+                            source,
+                            stage: "cross_chunk",
+                            chunk_index,
+                            attempt: 1,
+                            attempt_ref: &attempt_ref,
+                            piece_id,
+                            max_attempts: 1,
+                            state: "empty",
+                            length_limited: false,
+                            elapsed,
+                            response: Some(&response),
+                            parse_error: Some(&message),
+                            validation_issues: None,
+                            removed_items: None,
+                            piece_bytes: None,
+                            requested_max_tokens: options.max_tokens,
+                        },
+                        &messages,
+                    );
                 }
                 return Err(format!("{label}: {}", empty_answer_diagnosis()));
             }
@@ -930,25 +999,28 @@ impl Run {
                 &self.vocabulary_allowlist,
             ) {
                 Ok(evaluated) => {
-                    if let Some(sink) = sink {
-                        sink.emit(DiagnosticsAttempt {
-                            source,
-                            stage: "cross_chunk",
-                            chunk_index,
-                            attempt: 1,
-                            attempt_ref: &attempt_ref,
-                            piece_id,
-                            max_attempts: 1,
-                            state: "stop_valid",
-                            length_limited: false,
-                            elapsed,
-                            response: Some(&response),
-                            parse_error: None,
-                            validation_issues: None,
-                            removed_items: removed_item_texts(&evaluated.removed),
-                            piece_bytes: None,
-                            requested_max_tokens: options.max_tokens,
-                        });
+                    {
+                        observers.emit(
+                            &DiagnosticsAttempt {
+                                source,
+                                stage: "cross_chunk",
+                                chunk_index,
+                                attempt: 1,
+                                attempt_ref: &attempt_ref,
+                                piece_id,
+                                max_attempts: 1,
+                                state: "stop_valid",
+                                length_limited: false,
+                                elapsed,
+                                response: Some(&response),
+                                parse_error: None,
+                                validation_issues: None,
+                                removed_items: removed_item_texts(&evaluated.removed),
+                                piece_bytes: None,
+                                requested_max_tokens: options.max_tokens,
+                            },
+                            &messages,
+                        );
                     }
                     outputs[output_index] = ChunkOutput {
                         output: evaluated.output,
@@ -962,25 +1034,28 @@ impl Run {
                     };
                 }
                 Err(AnswerFault::Syntax(error)) => {
-                    if let Some(sink) = sink {
-                        sink.emit(DiagnosticsAttempt {
-                            source,
-                            stage: "cross_chunk",
-                            chunk_index,
-                            attempt: 1,
-                            attempt_ref: &attempt_ref,
-                            piece_id,
-                            max_attempts: 1,
-                            state: "stop_malformed",
-                            length_limited: false,
-                            elapsed,
-                            response: Some(&response),
-                            parse_error: Some(&error),
-                            validation_issues: None,
-                            removed_items: None,
-                            piece_bytes: None,
-                            requested_max_tokens: options.max_tokens,
-                        });
+                    {
+                        observers.emit(
+                            &DiagnosticsAttempt {
+                                source,
+                                stage: "cross_chunk",
+                                chunk_index,
+                                attempt: 1,
+                                attempt_ref: &attempt_ref,
+                                piece_id,
+                                max_attempts: 1,
+                                state: "stop_malformed",
+                                length_limited: false,
+                                elapsed,
+                                response: Some(&response),
+                                parse_error: Some(&error),
+                                validation_issues: None,
+                                removed_items: None,
+                                piece_bytes: None,
+                                requested_max_tokens: options.max_tokens,
+                            },
+                            &messages,
+                        );
                     }
                     return Err(format!(
                         "{label}: the cross-chunk correction was not the JSON object \
@@ -988,31 +1063,34 @@ impl Run {
                     ));
                 }
                 Err(AnswerFault::Invalid(issues)) => {
-                    if let Some(sink) = sink {
+                    {
                         let message = format!(
                             "the cross-chunk correction still left {} invalid item(s) \
                              uncorrected: {}",
                             issues.len(),
                             issues.join("; ")
                         );
-                        sink.emit(DiagnosticsAttempt {
-                            source,
-                            stage: "cross_chunk",
-                            chunk_index,
-                            attempt: 1,
-                            attempt_ref: &attempt_ref,
-                            piece_id,
-                            max_attempts: 1,
-                            state: "stop_malformed",
-                            length_limited: false,
-                            elapsed,
-                            response: Some(&response),
-                            parse_error: Some(&message),
-                            validation_issues: Some(&issues),
-                            removed_items: None,
-                            piece_bytes: None,
-                            requested_max_tokens: options.max_tokens,
-                        });
+                        observers.emit(
+                            &DiagnosticsAttempt {
+                                source,
+                                stage: "cross_chunk",
+                                chunk_index,
+                                attempt: 1,
+                                attempt_ref: &attempt_ref,
+                                piece_id,
+                                max_attempts: 1,
+                                state: "stop_malformed",
+                                length_limited: false,
+                                elapsed,
+                                response: Some(&response),
+                                parse_error: Some(&message),
+                                validation_issues: Some(&issues),
+                                removed_items: None,
+                                piece_bytes: None,
+                                requested_max_tokens: options.max_tokens,
+                            },
+                            &messages,
+                        );
                     }
                     return Err(format!(
                         "{label}: the cross-chunk correction still left {} invalid \
