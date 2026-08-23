@@ -5,7 +5,23 @@ Notable changes to taguru. The format follows
 follow [SemVer](https://semver.org/) (pre-1.0: minor bumps may break).
 Entries that change an on-disk format or a response shape say so.
 
-## [Unreleased]
+## [0.9.4] - 2026-08-23
+
+An `extract` hardening release, driven by running the pipeline over
+real Japanese corpora against a local model. The escalation ladder is
+now finite and always reaches the split rung: the resend is capped at
+`TAGURU_EXTRACT_ESCALATION_FACTOR` × the budget (ADR 0019, #761), a
+timeout descends to the split rung instead of four same-size retries
+(ADR 0020, #762), `--structured-output auto` demotes its rung at run
+time when a chunk exhausts the ladder (ADR 0021, #760), and
+`--chunk-bytes` exposes the per-call document size (ADR 0020). Output
+quality fixes ride along: an alias an earlier document already settled
+on, or one the corrective turn cannot fix, is removed with accounting
+instead of breaking import or failing the source (#758; ADR 0022
+/ #763), and single-character relation labels no longer snowball
+through the reuse vocabulary (#759). Docs gain Japanese
+embedding-model guidance (#764). No on-disk format or response-shape
+change.
 
 ### Added
 
@@ -3444,7 +3460,8 @@ OTLP tracing, OAuth for remote MCP), the MCP stdio bridge, and the
 offline tooling (`import`, `extract`, `inspect`, `estimate`).
 Published to crates.io and GHCR.
 
-[Unreleased]: https://github.com/t0k0sh1/taguru/compare/v0.9.3...HEAD
+[Unreleased]: https://github.com/t0k0sh1/taguru/compare/v0.9.4...HEAD
+[0.9.4]: https://github.com/t0k0sh1/taguru/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/t0k0sh1/taguru/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/t0k0sh1/taguru/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/t0k0sh1/taguru/compare/v0.9.0...v0.9.1
