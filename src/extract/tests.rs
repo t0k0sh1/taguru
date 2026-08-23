@@ -68,6 +68,9 @@ fn every_extract_known_key_is_documented() {
 fn attempt_record_serializes_the_shared_key_set() {
     let full = AttemptRecord {
         kind: "attempt",
+        run_id: "0000deadbeef0000".to_string(),
+        attempt_seq: 1,
+        piece_id: "p".repeat(64),
         source: "doc.md".to_string(),
         stage: "item",
         chunk_index: 0,
@@ -102,6 +105,7 @@ fn attempt_record_serializes_the_shared_key_set() {
         keys,
         vec![
             "attempt",
+            "attempt_seq",
             "chunk_index",
             "elapsed_seconds",
             "kind",
@@ -109,9 +113,11 @@ fn attempt_record_serializes_the_shared_key_set() {
             "max_attempts",
             "parse_error",
             "piece_bytes",
+            "piece_id",
             "provider_metadata",
             "requested_max_tokens",
             "response_text",
+            "run_id",
             "source",
             "stage",
             "state",
@@ -142,6 +148,9 @@ fn attempt_record_serializes_the_shared_key_set() {
     // counterpart for at all.
     let minimal = AttemptRecord {
         kind: "attempt",
+        run_id: "0000deadbeef0000".to_string(),
+        attempt_seq: 1,
+        piece_id: "p".repeat(64),
         source: "doc.md".to_string(),
         stage: "item",
         chunk_index: 0,
@@ -176,6 +185,9 @@ fn attempt_record_serializes_the_shared_key_set() {
     }
     for present in [
         "kind",
+        "run_id",
+        "attempt_seq",
+        "piece_id",
         "source",
         "stage",
         "chunk_index",
@@ -326,7 +338,7 @@ fn explicit_nulls_cost_the_item_never_the_document() {
     assert_eq!(merged.associations.len(), 1);
     // An omitted weight is a plain assertion.
     assert_eq!(merged.associations[0].weight, 1.0);
-    assert_eq!(merged.associations[0].chunk_index, 0);
+    assert_eq!(merged.associations[0].origin, 0);
     assert!(merged.concepts.is_empty());
     assert_eq!(merged.dropped, 3);
 }
@@ -1025,6 +1037,8 @@ fn prune_resolves_canonicals_across_outputs_and_labels_chunks() {
                 questions: Vec::new(),
             },
             chunk_index: 1,
+            piece_id: String::new(),
+            attempt: None,
             user: String::new(),
             answer: String::new(),
             removed: Vec::new(),
@@ -1234,6 +1248,8 @@ fn claimed_names_absorb_extractions_batches_and_vocabulary_alike() {
                 questions: Vec::new(),
             },
             chunk_index: 1,
+            piece_id: String::new(),
+            attempt: None,
             user: String::new(),
             answer: String::new(),
             removed: Vec::new(),
@@ -1293,6 +1309,8 @@ fn prune_uncorrected_aliases_removes_alias_issues_and_refuses_the_rest() {
                 questions: Vec::new(),
             },
             chunk_index: 2,
+            piece_id: String::new(),
+            attempt: None,
             user: String::new(),
             answer: String::new(),
             removed: Vec::new(),
@@ -1442,6 +1460,7 @@ fn with_resume_hint_names_the_checkpointed_units_only_when_there_are_any() {
     );
     let unit = |text: &str| CheckpointUnit {
         chunk_index: 0,
+        attempt: None,
         output: ModelOutput {
             associations: Vec::new(),
             aliases: Vec::new(),
@@ -1910,6 +1929,8 @@ fn chunk_output(output: ModelOutput) -> ChunkOutput {
     ChunkOutput {
         output,
         chunk_index: 0,
+        piece_id: String::new(),
+        attempt: None,
         user: String::new(),
         answer: String::new(),
         removed: Vec::new(),
@@ -1958,9 +1979,9 @@ fn merge_folds_duplicates_and_drops_what_the_contract_refuses() {
     );
     assert_eq!(merged.associations.len(), 2);
     assert_eq!(merged.associations[0].weight, 1.0);
-    assert_eq!(merged.associations[0].chunk_index, 0); // the surviving copy is chunk 0's, not chunk 1's duplicate
+    assert_eq!(merged.associations[0].origin, 0); // the surviving copy is chunk 0's, not chunk 1's duplicate
     assert_eq!(merged.associations[0].paragraph, Some(0));
-    assert_eq!(merged.associations[1].chunk_index, 1);
+    assert_eq!(merged.associations[1].origin, 1);
     // Out-of-range self-reports cost only the tag: the fact survives.
     assert_eq!(merged.associations[1].paragraph, None);
     assert_eq!(merged.concepts.len(), 1);
@@ -4082,6 +4103,8 @@ impl ScriptedChat {
             model: "scripted".to_string(),
             api_key: None,
             agent: config.build().into(),
+            run_id: "0000deadbeef0000".to_string(),
+            attempts: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -4846,4 +4869,247 @@ fn batch_file_names_truncate_only_past_the_threshold() {
         !name.starts_with(&"x".repeat(97)),
         "past the threshold, the prefix is 96 bytes: {name}"
     );
+}
+
+// ===================== ADR 0023 (#785): trace ids =====================
+
+/// Every kept item kind records which of merge()'s inputs it came from,
+/// and a cross-output duplicate is attributed to the kept (first) copy —
+/// the key `render_trace` joins items to pieces on.
+#[test]
+fn merge_records_the_origin_output_of_every_kept_item() {
+    let first = ModelOutput {
+        associations: vec![association("A", "rel", "B", 1.0)],
+        aliases: vec![alias("a", "A", "concept")],
+        questions: vec![ModelQuestion {
+            paragraph: Some(0),
+            question: Some("why?".into()),
+        }],
+    };
+    let second = ModelOutput {
+        associations: vec![
+            association("A", "rel", "B", 1.0), // duplicate of the first's
+            association("B", "rel", "C", 1.0),
+        ],
+        aliases: vec![
+            alias("a", "A", "concept"), // duplicate alias
+            alias("r", "rel", "label"),
+        ],
+        questions: vec![ModelQuestion {
+            paragraph: Some(1),
+            question: Some("how?".into()),
+        }],
+    };
+    let merged = merge(vec![first, second], 1, 2);
+    let origin = |key: ItemKey| merged.origins.get(&key).copied();
+    let triple = |s: &str, l: &str, o: &str| ItemKey::Association {
+        subject: s.into(),
+        label: l.into(),
+        object: o.into(),
+    };
+    assert_eq!(origin(triple("A", "rel", "B")), Some(0));
+    assert_eq!(origin(triple("B", "rel", "C")), Some(1));
+    assert_eq!(origin(ItemKey::Concept("a".into())), Some(0));
+    assert_eq!(origin(ItemKey::Label("r".into())), Some(1));
+    assert_eq!(origin(ItemKey::Question(0, "why?".into())), Some(0));
+    assert_eq!(origin(ItemKey::Question(1, "how?".into())), Some(1));
+    assert_eq!(merged.origins.len(), 6, "{:?}", merged.origins);
+    assert_eq!(merged.duplicates, 2);
+    // `Fact::origin` agrees with the map.
+    for fact in &merged.associations {
+        assert_eq!(
+            Some(fact.origin),
+            origin(triple(&fact.subject, &fact.label, &fact.object))
+        );
+    }
+}
+
+/// `render_trace` after a split: two outputs share `chunk_index` 0 with
+/// distinct `piece_id`s, each item names its own piece (not the
+/// position-in-list the old `chunk_index` misnomer conflated), a
+/// checkpoint-reused output is marked by its foreign run id, and the
+/// file is one JSON object per line in the documented order.
+#[test]
+fn render_trace_joins_items_to_pieces_across_a_split_and_a_reuse() {
+    let piece_a = "[0] alpha text\n\n[1] beta text";
+    let piece_b = "[2] gamma text";
+    let piece_c = "[3] delta text";
+    let mut outputs = vec![
+        chunk_output(ModelOutput {
+            associations: vec![association("alpha", "rel", "beta", 1.0)],
+            aliases: Vec::new(),
+            questions: Vec::new(),
+        }),
+        chunk_output(ModelOutput {
+            associations: vec![association("gamma", "rel", "alpha", 1.0)],
+            aliases: vec![alias("g", "gamma", "concept")],
+            questions: Vec::new(),
+        }),
+        chunk_output(ModelOutput {
+            associations: vec![association("delta", "rel", "alpha", 1.0)],
+            aliases: Vec::new(),
+            questions: Vec::new(),
+        }),
+    ];
+    // Chunk 0 split into A and B; chunk 1 is C, reused from a
+    // checkpoint another run wrote.
+    for (output, (piece, chunk_index, run)) in outputs.iter_mut().zip([
+        (piece_a, 0, "0000000000000001"),
+        (piece_b, 0, "0000000000000001"),
+        (piece_c, 1, "ffffffffffffffff"),
+    ]) {
+        output.user = user_message("doc.md", chunk_index, 2, piece);
+        output.chunk_index = chunk_index;
+        output.piece_id = sha256_hex(piece.as_bytes());
+        output.attempt = Some(AttemptRef {
+            run_id: run.into(),
+            attempt_seq: 7,
+        });
+    }
+    let run_id = "0000000000000001";
+    let pieces: Vec<PieceOrigin> = outputs
+        .iter()
+        .map(|output| PieceOrigin::of(output, run_id))
+        .collect();
+    assert_eq!(pieces[0].paragraph_range, Some((0, 1)));
+    assert_eq!(pieces[1].paragraph_range, Some((2, 2)));
+    assert_eq!(pieces[0].piece_bytes, piece_a.len());
+    assert!(!pieces[0].reused && !pieces[1].reused && pieces[2].reused);
+
+    let chunks = vec![
+        ChunkDescriptor {
+            text: format!("{piece_a}\n\n{piece_b}"),
+            sha256: "c0".repeat(32),
+            paragraph_first: 0,
+            paragraph_last: 2,
+        },
+        ChunkDescriptor {
+            text: piece_c.to_string(),
+            sha256: sha256_hex(piece_c.as_bytes()),
+            paragraph_first: 3,
+            paragraph_last: 3,
+        },
+    ];
+    let extraction = merge(
+        outputs.into_iter().map(|output| output.output).collect(),
+        0,
+        4,
+    );
+    let text = render_trace(
+        run_id,
+        "doc.md",
+        "d".repeat(64).as_str(),
+        Path::new("out/doc.jsonl"),
+        &chunks,
+        &pieces,
+        &extraction,
+    );
+    let records: Vec<serde_json::Value> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let kinds: Vec<&str> = records
+        .iter()
+        .map(|record| record["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "document", "chunk", "chunk", "piece", "piece", "piece", "item", "item", "item", "item"
+        ]
+    );
+    assert_eq!(records[0]["run_id"], run_id);
+    assert_eq!(records[0]["chunk_total"], 2);
+    assert_eq!(records[0]["batch_path"], "out/doc.jsonl");
+    assert_eq!(records[1]["chunk_sha256"], "c0".repeat(32));
+    // Pieces: the split pair both point at chunk 0's sha; the reused
+    // one keeps its foreign attempt.
+    assert_eq!(records[3]["chunk_index"], 0);
+    assert_eq!(records[4]["chunk_index"], 0);
+    assert_eq!(records[3]["chunk_sha256"], "c0".repeat(32));
+    assert_eq!(records[4]["chunk_sha256"], "c0".repeat(32));
+    assert_ne!(records[3]["piece_id"], records[4]["piece_id"]);
+    assert_eq!(records[3]["paragraph_first"], 0);
+    assert_eq!(records[3]["paragraph_last"], 1);
+    assert_eq!(records[4]["paragraph_first"], 2);
+    assert_eq!(records[3]["reused"], false);
+    assert_eq!(records[5]["reused"], true);
+    assert_eq!(records[5]["attempt"]["run_id"], "ffffffffffffffff");
+    assert_eq!(records[5]["attempt"]["attempt_seq"], 7);
+    assert_eq!(records[5]["piece_id"], sha256_hex(piece_c.as_bytes()));
+    // Items, in batch order (associations then concepts), each naming
+    // the piece that answered it — B's item names B, not chunk 0.
+    let item = |object: &str| {
+        records
+            .iter()
+            .find(|record| record["kind"] == "item" && record["object"] == object)
+            .unwrap()
+    };
+    assert_eq!(item("beta")["piece_id"], sha256_hex(piece_a.as_bytes()));
+    assert_eq!(item("alpha")["item"], "association");
+    let gamma_items: Vec<&serde_json::Value> = records
+        .iter()
+        .filter(|record| record["kind"] == "item" && record["subject"] == "gamma")
+        .collect();
+    assert_eq!(gamma_items.len(), 1);
+    assert_eq!(gamma_items[0]["piece_id"], sha256_hex(piece_b.as_bytes()));
+    let delta = records
+        .iter()
+        .find(|record| record["kind"] == "item" && record["subject"] == "delta")
+        .unwrap();
+    assert_eq!(delta["piece_id"], sha256_hex(piece_c.as_bytes()));
+    let concept = records
+        .iter()
+        .find(|record| record["kind"] == "item" && record["item"] == "concept")
+        .unwrap();
+    assert_eq!(concept["alias"], "g");
+    assert_eq!(concept["canonical"], "gamma");
+    assert_eq!(concept["piece_id"], sha256_hex(piece_b.as_bytes()));
+    // An item record carries only its own key's fields.
+    assert!(concept.get("subject").is_none(), "{concept}");
+    assert!(delta.get("alias").is_none(), "{delta}");
+}
+
+/// The lenient paragraph-range reader: labeled pieces give their
+/// range; anything else gives `None` rather than panicking like
+/// `leading_paragraph_number` (whose contract is the real run's).
+#[test]
+fn paragraph_range_reads_labels_and_declines_unlabeled_text() {
+    assert_eq!(paragraph_range("[4] one\n\n[6] two"), Some((4, 6)));
+    assert_eq!(paragraph_range("[4] only"), Some((4, 4)));
+    assert_eq!(paragraph_range("plain text"), None);
+    assert_eq!(paragraph_range("[4] one\n\nunlabeled"), None);
+    assert_eq!(paragraph_range(""), None);
+}
+
+/// `ChatClient::next_attempt` numbers completions 1, 2, 3… under one
+/// run id; a pre-0023 checkpoint unit (no `attempt` key) still loads
+/// with `attempt: None`, and a unit written today round-trips it.
+#[test]
+fn attempt_refs_are_dense_per_client_and_survive_the_checkpoint() {
+    let client = ScriptedChat::start(Vec::new()).client();
+    let first = client.next_attempt();
+    let second = client.next_attempt();
+    assert_eq!(first.attempt_seq, 1);
+    assert_eq!(second.attempt_seq, 2);
+    assert_eq!(first.run_id, second.run_id);
+    assert_eq!(first.run_id.len(), 16);
+
+    let legacy: CheckpointUnit = serde_json::from_str(
+        r#"{"chunk_index": 0, "output": {"associations": [], "aliases": [], "questions": []},
+            "user": "u", "answer": "a"}"#,
+    )
+    .unwrap();
+    assert_eq!(legacy.attempt, None);
+    let unit = CheckpointUnit {
+        chunk_index: 0,
+        attempt: Some(first.clone()),
+        output: legacy.output.clone(),
+        user: "u".into(),
+        answer: "a".into(),
+        removed: Vec::new(),
+    };
+    let reloaded: CheckpointUnit =
+        serde_json::from_str(&serde_json::to_string(&unit).unwrap()).unwrap();
+    assert_eq!(reloaded.attempt, Some(first));
 }

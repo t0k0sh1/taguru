@@ -285,9 +285,11 @@ fn stray_batch_files(dir: &std::path::Path) -> Vec<std::ffi::OsString> {
             // (skip-index of successes) and, since issue #179, the
             // chunk checkpoint directory (one file per document,
             // cleared but never removed itself once a document's
-            // batch lands).
+            // batch lands) — and, since ADR 0023, the trace directory
+            // (one file per written document, the batch's sibling).
             name.to_str() != Some(".extract-manifest.json")
                 && name.to_str() != Some(".extract-checkpoints")
+                && name.to_str() != Some(".extract-trace")
         })
         .collect()
 }
@@ -4884,8 +4886,11 @@ fn diagnostics_is_written_incrementally_and_survives_a_kill() {
         .filter_map(|line| serde_json::from_str(line).ok())
         .collect();
     assert!(!records.is_empty(), "no complete diagnostics line survived");
+    // ADR 0023 §3.3: the sidecar's first line names the run; the
+    // chunk record still lands before that chunk's first attempt.
+    assert_eq!(records[0]["kind"], "run", "{records:?}");
     assert_eq!(
-        records[0]["kind"], "chunk",
+        records[1]["kind"], "chunk",
         "the chunk record lands before that chunk's first attempt: {records:?}"
     );
     let record = records
@@ -4927,6 +4932,40 @@ fn extract_without_diagnostics_out_writes_no_sidecar() {
         "extract must never write a diagnostics sidecar without \
          --diagnostics-out/TAGURU_EXTRACT_DIAGNOSTICS"
     );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+    let _ = std::fs::remove_dir_all(&diag_dir);
+}
+
+/// `--dry-run` calls nothing, so it opens no sidecar either (the usage
+/// text says so) — not even the `run` record ADR 0023 puts first, and
+/// not the trace directory.
+#[test]
+fn dry_run_opens_no_diagnostics_sidecar_and_no_trace() {
+    let docs = batch_dir("extract-diag-dryrun-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let out = batch_dir("extract-diag-dryrun-out");
+    let diag_dir = batch_dir("extract-diag-dryrun-diag");
+    let diag = diag_dir.join("diag.jsonl");
+
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[],
+        &[
+            "--dry-run",
+            "--context",
+            "c",
+            "--diagnostics-out",
+            diag.to_str().unwrap(),
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("would extract"), "{stdout}");
+    assert!(!diag.exists(), "--dry-run must not open the sidecar");
+    assert!(!out.join(".extract-trace").exists());
 
     let _ = std::fs::remove_dir_all(&docs);
     let _ = std::fs::remove_dir_all(&out);
@@ -4991,6 +5030,24 @@ fn diagnostics_records_the_stage_two_cross_chunk_correction() {
     assert_eq!(records[1]["state"], "stop_valid");
     assert_eq!(records[1]["attempt"], 1);
     assert_eq!(records[1]["max_attempts"], 1);
+    // ADR 0023: both completions are numbered in issue order and name
+    // the same piece; the trace's piece record names the CORRECTIVE
+    // completion — the answer the batch actually came from — and the
+    // alias the correction introduced is traced to that piece.
+    assert_eq!(records[0]["attempt_seq"], 1);
+    assert_eq!(records[1]["attempt_seq"], 2);
+    assert_eq!(records[1]["piece_id"], records[0]["piece_id"]);
+    let (_, trace) = read_trace(&out);
+    let piece = trace.iter().find(|r| r["kind"] == "piece").unwrap();
+    assert_eq!(piece["piece_id"], records[0]["piece_id"]);
+    assert_eq!(piece["attempt"]["run_id"], records[1]["run_id"]);
+    assert_eq!(piece["attempt"]["attempt_seq"], 2, "{piece:?}");
+    let alias = trace
+        .iter()
+        .find(|r| r["kind"] == "item" && r["item"] == "concept")
+        .unwrap();
+    assert_eq!(alias["alias"], "x");
+    assert_eq!(alias["piece_id"], piece["piece_id"]);
 
     let _ = std::fs::remove_dir_all(&docs);
     let _ = std::fs::remove_dir_all(&out);
@@ -5994,4 +6051,320 @@ fn a_second_sigint_forces_an_immediate_exit_even_while_permanently_blocked() {
 
     let _ = std::fs::remove_dir_all(&docs);
     let _ = std::fs::remove_dir_all(&out);
+}
+
+// =====================================================================
+// ADR 0023 (#785): the per-document trace file under
+// `--out/.extract-trace/`, joining every batch item to its piece and
+// completion.
+// =====================================================================
+
+/// Reads `--out/.extract-trace/<batch name>` for the one batch in
+/// `out`, as records in file order.
+fn read_trace(out: &std::path::Path) -> (String, Vec<Value>) {
+    let batches = stray_batch_files(out);
+    assert_eq!(batches.len(), 1, "{batches:?}");
+    let name = batches[0].to_str().unwrap().to_string();
+    let path = out.join(".extract-trace").join(&name);
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("reading trace {}: {error}", path.display()));
+    let records = text
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    (name, records)
+}
+
+/// A two-chunk document: every batch item has an `item` record naming
+/// the `piece_id` of the chunk whose answer carried it; every `piece`
+/// names the `(run_id, attempt_seq)` the diagnostics sidecar recorded
+/// for the same completion; an unsplit chunk's `piece_id` is its
+/// `chunk_sha256`; and a triple both chunks answered is attributed to
+/// the first (the copy `merge` kept).
+#[test]
+fn trace_joins_every_batch_item_to_its_piece_and_the_sidecar_attempt() {
+    let docs = batch_dir("extract-trace-join-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, multi_chunk_document(9)).unwrap();
+    let out = batch_dir("extract-trace-join-out");
+    let diag_dir = batch_dir("extract-trace-join-diag");
+    let diag = diag_dir.join("diag.jsonl");
+
+    let (url, _captured) = stub_chat_server_concurrent(|index, _attempt| {
+        let object = format!("value-{index}");
+        chat_ok(
+            &json!({
+                "associations": [
+                    {"subject": "S", "label": "rel", "object": object, "weight": 1.0, "paragraph": 0},
+                    {"subject": "S", "label": "rel", "object": "value-9", "weight": 1.0}
+                ],
+                "aliases": [{"alias": "s", "canonical": "S", "kind": "concept"}],
+                "questions": [{"paragraph": 0, "question": format!("what is value-{index}?")}]
+            })
+            .to_string(),
+        )
+    });
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--questions",
+            "2",
+            "--diagnostics-out",
+            diag.to_str().unwrap(),
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+
+    let sidecar = read_diagnostics(&diag);
+    assert_eq!(sidecar[0]["kind"], "run", "{sidecar:?}");
+    let run_id = sidecar[0]["run_id"].as_str().unwrap().to_string();
+    assert_eq!(run_id.len(), 16, "{run_id:?}");
+    assert!(run_id.chars().all(|c| c.is_ascii_hexdigit()), "{run_id:?}");
+
+    let (batch_name, trace) = read_trace(&out);
+    assert_eq!(trace[0]["kind"], "document", "{trace:?}");
+    assert_eq!(trace[0]["run_id"], run_id.as_str());
+    assert_eq!(trace[0]["source"], doc.to_str().unwrap());
+    assert_eq!(trace[0]["chunk_total"], 2);
+    assert_eq!(trace[0]["document_sha256"].as_str().unwrap().len(), 64);
+    assert!(
+        trace[0]["batch_path"]
+            .as_str()
+            .unwrap()
+            .ends_with(&batch_name),
+        "{:?}",
+        trace[0]
+    );
+
+    let chunks: Vec<&Value> = trace.iter().filter(|r| r["kind"] == "chunk").collect();
+    let pieces: Vec<&Value> = trace.iter().filter(|r| r["kind"] == "piece").collect();
+    let items: Vec<&Value> = trace.iter().filter(|r| r["kind"] == "item").collect();
+    assert_eq!(chunks.len(), 2, "{trace:?}");
+    assert_eq!(pieces.len(), 2, "{trace:?}");
+    // The diagnostics chunk records and the trace chunk records agree
+    // field for field (ADR 0003 §7's provenance, in both places).
+    for (index, chunk) in chunks.iter().enumerate() {
+        let twin = sidecar
+            .iter()
+            .find(|r| r["kind"] == "chunk" && r["chunk_index"] == index)
+            .unwrap();
+        for field in [
+            "chunk_sha256",
+            "chunk_bytes",
+            "paragraph_first",
+            "paragraph_last",
+            "chunk_total",
+        ] {
+            assert_eq!(chunk[field], twin[field], "{field}: {chunk:?} vs {twin:?}");
+        }
+    }
+    // Unsplit: piece == chunk, fresh (not reused), and its attempt is
+    // exactly the sidecar's stop_valid attempt for that piece.
+    for (index, piece) in pieces.iter().enumerate() {
+        assert_eq!(piece["chunk_index"], index);
+        assert_eq!(piece["piece_id"], chunks[index]["chunk_sha256"]);
+        assert_eq!(piece["chunk_sha256"], chunks[index]["chunk_sha256"]);
+        assert_eq!(piece["piece_bytes"], chunks[index]["chunk_bytes"]);
+        assert_eq!(piece["paragraph_first"], chunks[index]["paragraph_first"]);
+        assert_eq!(piece["paragraph_last"], chunks[index]["paragraph_last"]);
+        assert_eq!(piece["reused"], false);
+        assert_eq!(piece["attempt"]["run_id"], run_id.as_str());
+        let seq = piece["attempt"]["attempt_seq"].as_u64().unwrap();
+        let attempt = sidecar
+            .iter()
+            .find(|r| r["kind"] == "attempt" && r["attempt_seq"] == seq)
+            .unwrap_or_else(|| panic!("no sidecar attempt {seq}: {sidecar:?}"));
+        assert_eq!(attempt["run_id"], run_id.as_str());
+        assert_eq!(attempt["piece_id"], piece["piece_id"]);
+        assert_eq!(attempt["chunk_index"], index);
+        assert_eq!(attempt["state"], "stop_valid");
+    }
+    // attempt_seq is 1-based and dense over the run's completions.
+    let mut seqs: Vec<u64> = sidecar
+        .iter()
+        .filter(|r| r["kind"] == "attempt")
+        .map(|r| r["attempt_seq"].as_u64().unwrap())
+        .collect();
+    seqs.sort_unstable();
+    assert_eq!(seqs, vec![1, 2]);
+
+    // Every batch item has exactly one item record, keyed by content.
+    let batch = std::fs::read_to_string(out.join(&batch_name)).unwrap();
+    let batch_lines: Vec<Value> = batch
+        .lines()
+        .skip(1) // header
+        .map(|line| serde_json::from_str(line).unwrap())
+        .filter(|line: &Value| line.get("passage").is_none())
+        .collect();
+    assert_eq!(items.len(), batch_lines.len(), "{items:?}\n{batch_lines:?}");
+    let piece_of = |item: &Value| -> usize {
+        let id = item["piece_id"].as_str().expect("every item names a piece");
+        pieces
+            .iter()
+            .position(|p| p["piece_id"] == id)
+            .expect("an item's piece_id names a piece record")
+    };
+    for line in &batch_lines {
+        let item = items
+            .iter()
+            .find(|item| {
+                if line.get("subject").is_some() {
+                    item["item"] == "association"
+                        && item["subject"] == line["subject"]
+                        && item["label"] == line["label"]
+                        && item["object"] == line["object"]
+                } else if line.get("alias").is_some() {
+                    item["item"] == line["kind"] && item["alias"] == line["alias"]
+                } else {
+                    item["item"] == "question"
+                        && item["paragraph"] == line["paragraph"]
+                        && item["question"] == line["question"]
+                }
+            })
+            .unwrap_or_else(|| panic!("no item record for {line}: {items:?}"));
+        // Each chunk's own object came from that chunk.
+        if line["object"] == "value-0" {
+            assert_eq!(piece_of(item), 0, "{item:?}");
+        }
+        if line["object"] == "value-1" {
+            assert_eq!(piece_of(item), 1, "{item:?}");
+        }
+        if line["question"] == "what is value-1?" {
+            assert_eq!(piece_of(item), 1, "{item:?}");
+        }
+    }
+    // The triple both chunks answered is attributed to the kept copy —
+    // the first output's — and the alias likewise.
+    let shared = items
+        .iter()
+        .find(|item| item["object"] == "value-9")
+        .unwrap();
+    assert_eq!(piece_of(shared), 0, "{shared:?}");
+    let alias = items.iter().find(|item| item["item"] == "concept").unwrap();
+    assert_eq!(piece_of(alias), 0, "{alias:?}");
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+    let _ = std::fs::remove_dir_all(&diag_dir);
+}
+
+/// ADR 0023 §3.5: a unit reused from a checkpoint keeps the attempt
+/// of the run that produced it — the resumed run's trace marks it
+/// `reused: true` with the EARLIER run's id, while the freshly
+/// extracted chunk carries the resumed run's own id.
+#[test]
+fn trace_marks_a_checkpoint_reused_piece_with_the_producing_runs_attempt() {
+    // The same shape as `setup_one_checkpointed_chunk_and_one_failure`,
+    // with objects the occurrence check (ADR 0013) attests in
+    // `multi_chunk_document` ("value-N"), so both items reach the
+    // batch and the trace.
+    let docs = batch_dir("extract-trace-reuse-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, multi_chunk_document(9)).unwrap();
+    let doc_src = doc.to_str().unwrap();
+    let out = batch_dir("extract-trace-reuse-out");
+    let diag_dir = batch_dir("extract-trace-reuse-diag");
+    let diag = diag_dir.join("diag.jsonl");
+
+    let chunk0_reply = json!({"associations": [
+        {"subject": "S", "label": "rel", "object": "value-0", "weight": 1.0}
+    ]})
+    .to_string();
+    let (url, requests) = stub_chat_server(vec![
+        chunk0_reply,
+        "not json".to_string(),
+        "not json".to_string(),
+    ]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &["--context", "c", doc_src],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert_eq!(requests.join().unwrap().len(), 3);
+    assert_eq!(checkpoint_units_count(&out, doc_src), 1);
+    assert!(
+        !out.join(".extract-trace").exists(),
+        "a failed document writes no trace"
+    );
+
+    let reply = json!({"associations": [
+        {"subject": "S", "label": "rel", "object": "value-1", "weight": 1.0}
+    ]})
+    .to_string();
+    let (url, requests) = stub_chat_server(vec![reply]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--diagnostics-out",
+            diag.to_str().unwrap(),
+            doc_src,
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert_eq!(requests.join().unwrap().len(), 1);
+
+    let sidecar = read_diagnostics(&diag);
+    let run_id = sidecar[0]["run_id"].as_str().unwrap();
+    let (_, trace) = read_trace(&out);
+    let pieces: Vec<&Value> = trace.iter().filter(|r| r["kind"] == "piece").collect();
+    assert_eq!(pieces.len(), 2, "{trace:?}");
+    let reused = pieces.iter().find(|p| p["chunk_index"] == 0).unwrap();
+    let fresh = pieces.iter().find(|p| p["chunk_index"] == 1).unwrap();
+    assert_eq!(reused["reused"], true, "{reused:?}");
+    assert_ne!(reused["attempt"]["run_id"], run_id, "{reused:?}");
+    assert_eq!(reused["attempt"]["attempt_seq"], 1, "{reused:?}");
+    assert_eq!(fresh["reused"], false, "{fresh:?}");
+    assert_eq!(fresh["attempt"]["run_id"], run_id, "{fresh:?}");
+    assert_eq!(fresh["attempt"]["attempt_seq"], 1, "{fresh:?}");
+    let items: Vec<&Value> = trace.iter().filter(|r| r["kind"] == "item").collect();
+    let chunk0 = items.iter().find(|i| i["object"] == "value-0").unwrap();
+    let chunk1 = items.iter().find(|i| i["object"] == "value-1").unwrap();
+    assert_eq!(chunk0["piece_id"], reused["piece_id"]);
+    assert_eq!(chunk1["piece_id"], fresh["piece_id"]);
+
+    // An unchanged rerun skips the document and leaves its trace as
+    // written (the batch's lifecycle, not the run's).
+    let before = std::fs::read_to_string(
+        out.join(".extract-trace")
+            .join(stray_batch_files(&out)[0].to_str().unwrap()),
+    )
+    .unwrap();
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", "http://127.0.0.1:9"),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &["--context", "c", doc_src],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("unchanged, skipped"), "{stdout}");
+    let after = std::fs::read_to_string(
+        out.join(".extract-trace")
+            .join(stray_batch_files(&out)[0].to_str().unwrap()),
+    )
+    .unwrap();
+    assert_eq!(before, after);
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+    let _ = std::fs::remove_dir_all(&diag_dir);
 }

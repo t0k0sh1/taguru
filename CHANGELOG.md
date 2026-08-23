@@ -5,6 +5,22 @@ Notable changes to taguru. The format follows
 follow [SemVer](https://semver.org/) (pre-1.0: minor bumps may break).
 Entries that change an on-disk format or a response shape say so.
 
+## [Unreleased]
+
+### Added
+
+- `extract` writes a per-document **trace** beside every batch —
+  `<out>/.extract-trace/<batch name>`, always on — joining every batch
+  item (by its content key; the batch format is unchanged) to the piece
+  of text and the completion that produced it: `document`, `chunk`,
+  `piece` (`piece_id` = the checkpoint unit's sha256; `attempt` =
+  `{run_id, attempt_seq}`, the Stage 2 corrective completion when one
+  replaced the answer; `reused` for a checkpointed unit), and `item`
+  records (ADR 0023, #785). The diagnostics sidecar now opens with a
+  `kind: "run"` record and every `attempt` record carries `run_id`,
+  `attempt_seq`, and `piece_id` (additive). Checkpoint units record the
+  completion that produced them (`attempt`, defaulted on older files).
+
 ## [0.9.4] - 2026-08-23
 
 An `extract` hardening release, driven by running the pipeline over

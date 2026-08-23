@@ -171,7 +171,9 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
                     chunk, attempt, terminal state, finish_reason, token
                     usage, latency, parse/validation issues), one per
                     document written (association/alias/duplicate/dropped/
-                    uncovered counts); off by default, ignored under --dry-run
+                    uncovered counts), a "run" record first; off by default,
+                    ignored under --dry-run. Joins the per-document trace
+                    OUT/.extract-trace/ always writes (see below)
 --source-id ID      write ID as the batch header's source instead of the
                     document path — the promotion runbook's
                     session:{agent}:{id} convention; several documents each
@@ -592,7 +594,11 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       recursive re-attempt — a resumed run's split points are not guaranteed to line up with a
       prior run's. Keying on content hash instead of position means a completed sub-piece is
       recognized as done regardless of how either run divided the chunk around it, and a
-      not-yet-completed sub-piece is correctly treated as new work.
+      not-yet-completed sub-piece is correctly treated as new work. That same hash is the
+      unit's <code>piece_id</code> in the <a href="#trace">trace</a>, and since 0.9.5 each
+      unit also records the completion that produced it (<code>attempt</code>:
+      <code>{run_id, attempt_seq}</code>), so a resumed document's trace still names the
+      original run for every reused unit.
     </p>
     <p>
       A checkpoint file also carries the same compute-input fingerprint the manifest checks
@@ -653,14 +659,22 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
     </p>
     <p>
       The sidecar is a tagged stream: a <code>kind</code> field discriminates
-      <code>"chunk"</code>, <code>"attempt"</code>, and <code>"document"</code> records, described
-      below. A consumer written before <code>"chunk"</code>/<code>"document"</code> existed keeps
-      working unmodified as long as it filters on <code>kind == "attempt"</code> — the same
-      discriminator it already needed to read the sidecar at all — since an <code>attempt</code>
-      record's own shape has not changed.
+      <code>"run"</code> (the first line — <code>run_id</code>, the identity of this invocation;
+      ADR 0023), <code>"chunk"</code>, <code>"attempt"</code>, and <code>"document"</code>
+      records, described below. A consumer written before <code>"chunk"</code>/
+      <code>"document"</code>/<code>"run"</code> existed keeps working unmodified as long as it
+      filters on <code>kind == "attempt"</code> — the same discriminator it already needed to
+      read the sidecar at all — since an <code>attempt</code> record's own shape has only ever
+      gained fields.
     </p>
     <p>
-      Every <code>attempt</code> record carries: <code>source</code>, <code>chunk_index</code>,
+      Every <code>attempt</code> record carries: <code>run_id</code>, <code>attempt_seq</code>
+      (one-based, in issue order over every extraction completion of the run — the corrective
+      budget's own <code>attempt</code> below restarts per round, this never does) and
+      <code>piece_id</code> (the sha256 of the text this completion asked about — the chunk, or
+      the split sub-piece; for <code>cross_chunk</code>, the piece whose answer is being
+      corrected), the three keys the <a href="#trace">trace file</a> joins on;
+      <code>source</code>, <code>chunk_index</code>,
       <code>attempt</code> (one-based), <code>max_attempts</code>, <code>stage</code>
       (<code>item</code> for the per-chunk loop, <code>cross_chunk</code> for the Stage 2 alias
       correction above), <code>state</code> — the
@@ -735,6 +749,57 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       stays exactly what it has always been, a skip-index of successes, with no diagnostics
       mixed in. For watching this sidecar (or the SDK's equivalent event stream) live against a
       multi-hour run, see <a href="long-running.html#progress">long-running ingestion</a>.
+    </p>
+  </section>
+
+  <section id="trace">
+    <h2>Trace: from any batch item back to the text and the completion that produced it</h2>
+    <p>
+      Every written batch gets a sibling under <code>&lt;out&gt;/.extract-trace/</code>, named like
+      the batch file, always on, no flag (<a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0023-extraction-trace-ids.md">ADR
+      0023</a>). Where the diagnostics sidecar describes <i>a run</i>, the trace describes
+      <i>a batch</i>: it is written atomically in the same step as the batch, replaced when the
+      document is re-extracted, left alone when the manifest skips it, never written for a
+      document that fails (its checkpoint keeps what matters for the resume), and never a
+      manifest input — a batch from before this file existed simply has none. It is hidden and
+      in a subdirectory so <code>taguru import DIR</code> never reads it as a batch. The batch
+      format itself is unchanged: import refuses unknown fields, so an item is identified by
+      its content, exactly as the batch makes it unique — the association triple, the alias
+      spelling within <code>concept</code>/<code>label</code>, the question's
+      (<code>paragraph</code>, text).
+    </p>
+    <p>
+      The file is a tagged JSONL stream like the sidecar (<code>kind</code>; skip kinds you do
+      not know), in this order: one <code>document</code> (<code>run_id</code>,
+      <code>source</code>, <code>document_sha256</code> — the manifest's hash of the text,
+      <code>batch_path</code>, <code>chunk_total</code>); one <code>chunk</code> per chunk of
+      the plan (the same <code>chunk_index</code>/<code>chunk_sha256</code>/
+      <code>chunk_bytes</code>/<code>paragraph_first</code>/<code>paragraph_last</code> the
+      sidecar's chunk record carries); one <code>piece</code> per answer the chunk loop kept —
+      a chunk, or each sub-piece the split rung made of one, so several pieces can share a
+      <code>chunk_index</code> — with <code>piece_id</code> (sha256 of the piece text as sent;
+      the checkpoint unit's key, so an unsplit chunk's <code>piece_id</code> equals its
+      <code>chunk_sha256</code>), <code>chunk_sha256</code>, <code>piece_bytes</code>, its own
+      paragraph range, <code>reused</code> (the answer came from a checkpoint rather than a
+      completion of this run), and <code>attempt</code> — <code>{run_id, attempt_seq}</code> of
+      the completion whose answer this piece's output <i>is</i>: the accepted Stage 1 answer,
+      or the Stage 2 corrective answer when one replaced it; for a reused unit, the completion
+      of the run that produced it, which the checkpoint now records (<code>null</code> only for
+      a checkpoint written before 0.9.5); then one <code>item</code> per batch line in batch
+      order (<code>item</code>: <code>association</code> | <code>concept</code> |
+      <code>label</code> | <code>question</code>, the content key, and <code>piece_id</code>).
+    </p>
+    <p>
+      Joins: item → piece by <code>piece_id</code>; piece → chunk by <code>chunk_index</code> or
+      <code>chunk_sha256</code>; piece → the sidecar's <code>attempt</code> record by
+      <code>(run_id, attempt_seq)</code> when that run's sidecar was kept; any record → the
+      document by the file itself. A duplicate triple two chunks both answered is attributed
+      to the copy <code>merge</code> kept, the first — the batch holds one line, so the trace
+      holds one item. Given a piece's paragraph range and the document's own bytes, the text
+      the model was shown follows from the server's paragraph splitter exactly as for the
+      sidecar's chunk record (ADR 0003 §7). A trace that cannot be written earns one stderr
+      line and never fails the document: the batch and the manifest are the truth, the trace
+      is advisory.
     </p>
   </section>
 

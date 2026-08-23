@@ -102,6 +102,8 @@ mod structured_output;
 #[path = "extract/tests.rs"]
 #[cfg(test)]
 mod tests;
+#[path = "extract/trace.rs"]
+mod trace;
 #[path = "extract/vocabulary.rs"]
 mod vocabulary;
 
@@ -115,7 +117,7 @@ use run::Run;
 use structured_output::resolve_rung;
 
 pub(crate) use args::StructuredOutputMode;
-pub(crate) use chat_client::{ChatClient, RequestOptions};
+pub(crate) use chat_client::{AttemptRef, ChatClient, RequestOptions};
 pub(crate) use documents::{ChunkDescriptor, chunk_plan, expand_documents, read_document};
 use documents::{chunk_bytes_manifest_value, chunk_plan_with_cap};
 pub(crate) use signals::{StopSignal, block_stop_signals_on_this_thread};
@@ -129,7 +131,7 @@ pub(crate) use vocabulary::vocabulary_digest;
 // hub itself brings into scope) — the same reason ingest.rs's hub
 // centralizes this instead of having every submodule import from
 // every sibling it needs.
-use aggregate::{Extraction, association_name_sets, combined_cross_output_issues, merge};
+use aggregate::{Extraction, ItemKey, association_name_sets, combined_cross_output_issues, merge};
 use candidates::{candidate_terms, candidates_block, candidates_manifest_value};
 use chat_client::{ChatCompletion, ChatError, ChatFailure, classify_io_error};
 use checkpoint::{CheckpointFingerprint, CheckpointStore, CheckpointUnit};
@@ -155,6 +157,7 @@ use prompt::{system_prompt, user_message, user_message_document};
 use render::{chunk, floor_char_boundary, render_batch, split_labeled_piece, split_oversized};
 use run::labeled_document;
 use structured_output::{jittered_backoff, parse_retry_after, read_capped_chat_body, snippet};
+use trace::{PieceOrigin, render_trace, write_trace};
 use vocabulary::{ContextVocabulary, context_names_block, load_vocabulary};
 
 // Test-only cross-submodule access: production code never names these
@@ -192,6 +195,8 @@ use structured_output::{
     ProbeVerdict, RETRY_MAX_BACKOFF, conforms_to_model_output_shape, probe_structured_output,
     random_duration_up_to,
 };
+#[cfg(test)]
+use trace::paragraph_range;
 
 const USAGE: &str = "\
 usage: taguru extract [--dry-run] [--force] [--no-passage] [--questions N]
@@ -300,10 +305,13 @@ chat endpoint:
                       \"document\" record per document written (association/
                       alias/duplicate/dropped/uncovered counts) — metadata only;
                       TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES opts an \"attempt\"
-                      record into a byte-capped raw answer. Truncated fresh
-                      at open: FILE describes this run, not a log appended
-                      across runs. Default (unset): no sidecar, stdout/
-                      stderr unchanged. Ignored under --dry-run, which
+                      record into a byte-capped raw answer. The first record
+                      is \"run\" (run_id), and every \"attempt\" carries run_id/
+                      attempt_seq/piece_id — the keys the per-document trace
+                      under OUT/.extract-trace/ joins on (ADR 0023). Truncated
+                      fresh at open: FILE describes this run, not a log
+                      appended across runs. Default (unset): no sidecar,
+                      stdout/stderr unchanged. Ignored under --dry-run, which
                       calls nothing to record.
   --source-id ID      write ID as the batch header's source instead of the
                       document path — the promotion runbook's
@@ -705,7 +713,14 @@ pub fn run(args: &[String]) -> i32 {
     // client-construction skip above.
     let diagnostics = match &diagnostics_path {
         Some(path) if !args.dry_run => {
-            match DiagnosticsSink::open(path.clone(), diagnostics_raw_bytes) {
+            // ADR 0023: the sidecar's first record names the run — the
+            // client minted the id (one client per invocation), and
+            // under `!dry_run` the client exists.
+            let run_id = client
+                .as_ref()
+                .map(|client| client.run_id.as_str())
+                .unwrap_or_default();
+            match DiagnosticsSink::open(path.clone(), diagnostics_raw_bytes, run_id) {
                 Ok(sink) => Some(sink),
                 Err(error) => {
                     eprintln!(

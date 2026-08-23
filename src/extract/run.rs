@@ -133,6 +133,16 @@ pub(super) struct Run {
 }
 
 impl Run {
+    /// ADR 0023: the run's id, minted by the client (one per
+    /// invocation). Empty under `--dry-run`, which has no client and
+    /// writes no trace.
+    pub(super) fn run_id(&self) -> String {
+        self.client
+            .as_ref()
+            .map(|client| client.run_id.clone())
+            .unwrap_or_default()
+    }
+
     /// The Stage 1 item rules for one document, or `None` under
     /// `--lossy` — see [`evaluate_answer`]/[`ItemRules`].
     pub(super) fn item_rules(&self, paragraph_count: usize) -> Option<ItemRules> {
@@ -382,7 +392,10 @@ impl Run {
                 sink.emit_chunk(source, index, plan.len(), descriptor);
             }
         }
-        let chunks: Vec<String> = plan.into_iter().map(|descriptor| descriptor.text).collect();
+        let chunks: Vec<String> = plan
+            .iter()
+            .map(|descriptor| descriptor.text.clone())
+            .collect();
         let chunk_result = self
             .extract_chunks(
                 source,
@@ -446,6 +459,13 @@ impl Run {
                 &self.claimed_names,
             ));
         }
+        // ADR 0023: what the trace needs of each output, read off
+        // before merge() consumes them, in merge()'s input order.
+        let run_id = self.run_id();
+        let pieces: Vec<PieceOrigin> = outputs
+            .iter()
+            .map(|output| PieceOrigin::of(output, &run_id))
+            .collect();
         let extraction = merge(
             outputs.into_iter().map(|chunk| chunk.output).collect(),
             self.questions,
@@ -478,6 +498,22 @@ impl Run {
                 format!("writing {}: {error}", out_path.display()),
             ));
         }
+        // ADR 0023 §3.3: the trace lands right after the batch and
+        // before the manifest records it — a batch the manifest knows
+        // has its trace beside it (or a stderr line saying why not).
+        write_trace(
+            &self.out,
+            &file_name,
+            &render_trace(
+                &run_id,
+                source,
+                &hash,
+                &out_path,
+                &plan,
+                &pieces,
+                &extraction,
+            ),
+        );
         self.manifest.record(source, &inputs, &file_name);
         // A manifest from before #730's naming change recorded the
         // un-hashed output name; the replacement just landed durably
@@ -746,10 +782,16 @@ impl Run {
         let rules = self.item_rules(paragraph_count);
         let sink = self.diagnostics.as_ref();
         for (output_index, issues) in cross_issues {
-            let (chunk_index, user, answer) = {
+            let (chunk_index, piece_id, user, answer) = {
                 let chunk = &outputs[output_index];
-                (chunk.chunk_index, chunk.user.clone(), chunk.answer.clone())
+                (
+                    chunk.chunk_index,
+                    chunk.piece_id.clone(),
+                    chunk.user.clone(),
+                    chunk.answer.clone(),
+                )
             };
+            let piece_id = piece_id.as_str();
             let label = format!("chunk {}/{chunk_total}", chunk_index + 1);
             let messages = [
                 serde_json::json!({"role": "system", "content": &system}),
@@ -761,6 +803,7 @@ impl Run {
                 }),
             ];
             let started = std::time::Instant::now();
+            let attempt_ref = client.next_attempt();
             let response = match client.complete(&messages, &options) {
                 Ok(response) => response,
                 Err(error) => {
@@ -771,6 +814,8 @@ impl Run {
                             stage: "cross_chunk",
                             chunk_index,
                             attempt: 1,
+                            attempt_ref: &attempt_ref,
+                            piece_id,
                             max_attempts: 1,
                             state: match error.kind {
                                 ChatFailure::Timeout => "timeout",
@@ -799,6 +844,8 @@ impl Run {
                         stage: "cross_chunk",
                         chunk_index,
                         attempt: 1,
+                        attempt_ref: &attempt_ref,
+                        piece_id,
                         max_attempts: 1,
                         state: "length_limited",
                         length_limited: true,
@@ -829,6 +876,8 @@ impl Run {
                         stage: "cross_chunk",
                         chunk_index,
                         attempt: 1,
+                        attempt_ref: &attempt_ref,
+                        piece_id,
                         max_attempts: 1,
                         state: "refusal",
                         length_limited: false,
@@ -854,6 +903,8 @@ impl Run {
                         stage: "cross_chunk",
                         chunk_index,
                         attempt: 1,
+                        attempt_ref: &attempt_ref,
+                        piece_id,
                         max_attempts: 1,
                         state: "empty",
                         length_limited: false,
@@ -881,6 +932,8 @@ impl Run {
                             stage: "cross_chunk",
                             chunk_index,
                             attempt: 1,
+                            attempt_ref: &attempt_ref,
+                            piece_id,
                             max_attempts: 1,
                             state: "stop_valid",
                             length_limited: false,
@@ -897,6 +950,8 @@ impl Run {
                     outputs[output_index] = ChunkOutput {
                         output: evaluated.output,
                         chunk_index,
+                        piece_id: piece_id.to_string(),
+                        attempt: Some(attempt_ref),
                         user,
                         answer: response.content,
                         removed: evaluated.removed,
@@ -909,6 +964,8 @@ impl Run {
                             stage: "cross_chunk",
                             chunk_index,
                             attempt: 1,
+                            attempt_ref: &attempt_ref,
+                            piece_id,
                             max_attempts: 1,
                             state: "stop_malformed",
                             length_limited: false,
@@ -939,6 +996,8 @@ impl Run {
                             stage: "cross_chunk",
                             chunk_index,
                             attempt: 1,
+                            attempt_ref: &attempt_ref,
+                            piece_id,
                             max_attempts: 1,
                             state: "stop_malformed",
                             length_limited: false,

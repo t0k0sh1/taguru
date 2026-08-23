@@ -70,6 +70,12 @@ pub(super) struct CheckpointUnit {
     /// The ORIGINAL chunk's coordinates, kept only for the same "chunk
     /// i/n" reporting `ChunkOutput::chunk_index` already carries.
     pub(super) chunk_index: usize,
+    /// ADR 0023 §3.5: the completion that produced this unit, so a
+    /// reused unit still names its origin. `default` because a
+    /// pre-0023 checkpoint has none to name — the trace then says
+    /// `null`, never a guess.
+    #[serde(default)]
+    pub(super) attempt: Option<AttemptRef>,
     pub(super) output: ModelOutput,
     /// The exact user turn and the model's own final answer text for
     /// this unit — needed so a reused unit can still participate in
