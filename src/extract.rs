@@ -184,6 +184,8 @@ use mechanical::alias_issue_index;
 #[cfg(test)]
 use parse::{ModelQuestion, parse_model_output};
 #[cfg(test)]
+use prompt::schema_block;
+#[cfg(test)]
 use run::with_resume_hint;
 #[cfg(test)]
 use structured_output::{

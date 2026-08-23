@@ -1968,8 +1968,14 @@ fn merge_folds_duplicates_and_drops_what_the_contract_refuses() {
     assert_eq!(merged.labels["設立年"], "創業年");
     assert_eq!(merged.duplicates, 2); // one triple, one alias pair
     assert_eq!(merged.dropped, 7);
-    assert!(merged.label_usage_counts().contains_key("杜氏"));
-    assert!(merged.label_usage_counts().contains_key("創業年"));
+    // "杜氏" is used by one surviving association only; "創業年" is used
+    // by one association PLUS carries the "設立年" alias's canonical —
+    // exact counts, not mere presence, since a broken accumulator
+    // (e.g. `*=` in place of `+=`) would still report both as present
+    // while collapsing every count to zero.
+    let counts = merged.label_usage_counts();
+    assert_eq!(counts.get("杜氏"), Some(&1), "{counts:?}");
+    assert_eq!(counts.get("創業年"), Some(&2), "{counts:?}");
 }
 
 #[test]
@@ -2499,6 +2505,12 @@ fn rendered_batches_pass_the_import_parser() {
     assert_eq!(batch.context, "sake");
     assert_eq!(batch.source, "docs/aomine.md");
     assert!(batch.label_vocabulary().contains("杜氏"));
+    assert_eq!(
+        batch.label_usage_counts().get("杜氏"),
+        Some(&1),
+        "{:?}",
+        batch.label_usage_counts()
+    );
 }
 
 #[test]
@@ -3069,6 +3081,32 @@ fn the_system_prompt_omits_the_schema_block_when_mode_is_off() {
     assert!(
         !prompt.contains(crate::schema::SCHEMA_TYPE_LABEL),
         "{prompt}"
+    );
+}
+
+/// A constrained relation already in the run's own label vocabulary
+/// sorts before one that isn't (so it survives an oversized schema's
+/// `VOCABULARY_CAP` cut first) — deliberately picked so the vocabulary
+/// member is alphabetically LAST, ruling out a coincidental pass from
+/// plain alphabetical order.
+#[test]
+fn schema_block_sorts_a_vocabulary_known_relation_before_an_unknown_one() {
+    let schema = test_schema(
+        &[("Brewery", &[])],
+        &[
+            ("aaa_new", &["Brewery"], &[]),
+            ("zzz_reused", &["Brewery"], &[]),
+        ],
+        crate::schema::SchemaMode::Warn,
+        false,
+    );
+    let vocabulary: BTreeMap<String, usize> = [("zzz_reused".to_string(), 1)].into();
+    let block = schema_block(schema.document(), &vocabulary);
+    let reused_pos = block.find("zzz_reused").expect("present");
+    let new_pos = block.find("aaa_new").expect("present");
+    assert!(
+        reused_pos < new_pos,
+        "a relation already in the run's vocabulary sorts first: {block}"
     );
 }
 
