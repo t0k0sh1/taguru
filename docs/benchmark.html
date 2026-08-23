@@ -229,6 +229,7 @@ CORPUS_DIR           exactly one directory (.md/.txt, sorted by name) — every
   cells/&lt;model_id&gt;/run&lt;NN&gt;/              # passed verbatim as `taguru extract --out`
       .extract-manifest.json             #   written by extract, untouched by the harness
       .extract-checkpoints/              #   written by extract
+      .extract-trace/                    #   written by extract (ADR 0023)
       &lt;batch files&gt;                      #   raw extraction output
       diagnostics.jsonl                  #   passed as --diagnostics-out
       stdout.log  stderr.log  exit_code  #   the cell's own record

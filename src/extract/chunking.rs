@@ -27,6 +27,12 @@ pub(super) struct ChunkOutput {
     /// fixed) — used only for "chunk i/n" error text; several
     /// `ChunkOutput`s can share one `chunk_index` after a split.
     pub(super) chunk_index: usize,
+    /// ADR 0023: sha256 of the piece text this output answers — the
+    /// checkpoint unit's key, and the id the trace file joins items to.
+    pub(super) piece_id: String,
+    /// ADR 0023: the completion whose answer `answer` is. `None` only
+    /// for a unit reused from a checkpoint written before ADR 0023.
+    pub(super) attempt: Option<AttemptRef>,
     pub(super) user: String,
     pub(super) answer: String,
     /// ADR 0013: the path-addressed record of every item the
@@ -89,6 +95,7 @@ pub(super) fn extract_chunk(
     user: &str,
     source: &str,
     chunk_index: usize,
+    piece_id: &str,
     policy: &CorrectionPolicy,
     fact_budget: usize,
     rules: Option<&ItemRules>,
@@ -118,6 +125,7 @@ pub(super) fn extract_chunk(
             }));
         }
         let started = std::time::Instant::now();
+        let attempt_ref = client.next_attempt();
         let response = match client.complete(&messages, &RequestOptions::default()) {
             Ok(response) => response,
             Err(error) => {
@@ -128,6 +136,8 @@ pub(super) fn extract_chunk(
                         stage: "item",
                         chunk_index,
                         attempt,
+                        attempt_ref: &attempt_ref,
+                        piece_id,
                         max_attempts: policy.max_attempts,
                         state: match error.kind {
                             ChatFailure::Timeout => "timeout",
@@ -160,6 +170,8 @@ pub(super) fn extract_chunk(
                         stage: "item",
                         chunk_index,
                         attempt,
+                        attempt_ref: &attempt_ref,
+                        piece_id,
                         max_attempts: policy.max_attempts,
                         state: "stop_valid",
                         // Legacy accepts a length-terminated answer that
@@ -181,6 +193,8 @@ pub(super) fn extract_chunk(
                 return Ok(ChunkOutput {
                     output: evaluated.output,
                     chunk_index,
+                    piece_id: piece_id.to_string(),
+                    attempt: Some(attempt_ref),
                     user: user.to_string(),
                     answer: response.content,
                     removed: evaluated.removed,
@@ -202,6 +216,8 @@ pub(super) fn extract_chunk(
                         stage: "item",
                         chunk_index,
                         attempt,
+                        attempt_ref: &attempt_ref,
+                        piece_id,
                         max_attempts: policy.max_attempts,
                         state,
                         length_limited,
@@ -233,6 +249,8 @@ pub(super) fn extract_chunk(
                         stage: "item",
                         chunk_index,
                         attempt,
+                        attempt_ref: &attempt_ref,
+                        piece_id,
                         max_attempts: policy.max_attempts,
                         state: "stop_malformed",
                         length_limited: false,
@@ -266,6 +284,8 @@ pub(super) fn checkpointed_unit(checkpoints: &CheckpointStore, piece: &str) -> O
     checkpoints.lookup(&unit_hash).map(|unit| ChunkOutput {
         output: unit.output,
         chunk_index: unit.chunk_index,
+        piece_id: unit_hash,
+        attempt: unit.attempt,
         user: unit.user,
         answer: unit.answer,
         removed: unit.removed,
@@ -286,6 +306,7 @@ pub(super) fn record_checkpoint(
         unit_hash,
         CheckpointUnit {
             chunk_index: output.chunk_index,
+            attempt: output.attempt.clone(),
             output: output.output.clone(),
             user: output.user.clone(),
             answer: output.answer.clone(),
@@ -327,6 +348,7 @@ pub(super) fn extract_chunk_or_ladder(
                 &user,
                 source,
                 chunk_index,
+                &sha256_hex(piece.as_bytes()),
                 policy,
                 fact_budget,
                 rules,
@@ -431,9 +453,11 @@ pub(super) fn extract_piece(
     // its rounds, so a demotion is judged against the rung this piece
     // actually failed under.
     let rung = context.ladder.rung();
+    let piece_id = sha256_hex(piece.as_bytes());
     let mut outcome = extract_round(
         context,
         &user,
+        &piece_id,
         piece.len(),
         rung,
         context.ladder.max_output_tokens,
@@ -443,6 +467,7 @@ pub(super) fn extract_piece(
         outcome = extract_round(
             context,
             &user,
+            &piece_id,
             piece.len(),
             rung,
             context.ladder.escalated_budget(),
@@ -547,6 +572,7 @@ pub(super) enum RoundOutcome {
 pub(super) fn extract_round(
     context: &PieceContext,
     user: &str,
+    piece_id: &str,
     piece_bytes: usize,
     rung: Rung,
     max_tokens: Option<usize>,
@@ -583,6 +609,7 @@ pub(super) fn extract_round(
             }));
         }
         let started = std::time::Instant::now();
+        let attempt_ref = context.client.next_attempt();
         let response = match context.client.complete(&messages, &options) {
             Ok(response) => response,
             Err(error) => {
@@ -593,6 +620,8 @@ pub(super) fn extract_round(
                         stage: "item",
                         chunk_index: context.chunk_index,
                         attempt,
+                        attempt_ref: &attempt_ref,
+                        piece_id,
                         max_attempts: context.policy.max_attempts,
                         state: match error.kind {
                             ChatFailure::Timeout => "timeout",
@@ -632,6 +661,8 @@ pub(super) fn extract_round(
                         stage: "item",
                         chunk_index: context.chunk_index,
                         attempt,
+                        attempt_ref: &attempt_ref,
+                        piece_id,
                         max_attempts: context.policy.max_attempts,
                         state: "stop_valid",
                         length_limited: false,
@@ -648,6 +679,8 @@ pub(super) fn extract_round(
                 return RoundOutcome::Valid(ChunkOutput {
                     output: evaluated.output,
                     chunk_index: context.chunk_index,
+                    piece_id: piece_id.to_string(),
+                    attempt: Some(attempt_ref.clone()),
                     user: user.to_string(),
                     answer: response.content,
                     removed: evaluated.removed,
@@ -664,6 +697,8 @@ pub(super) fn extract_round(
                         stage: "item",
                         chunk_index: context.chunk_index,
                         attempt,
+                        attempt_ref: &attempt_ref,
+                        piece_id,
                         max_attempts: context.policy.max_attempts,
                         state: "length_limited",
                         length_limited: true,
@@ -687,6 +722,8 @@ pub(super) fn extract_round(
                         stage: "item",
                         chunk_index: context.chunk_index,
                         attempt,
+                        attempt_ref: &attempt_ref,
+                        piece_id,
                         max_attempts: context.policy.max_attempts,
                         state: "refusal",
                         length_limited: false,
@@ -709,6 +746,8 @@ pub(super) fn extract_round(
                         stage: "item",
                         chunk_index: context.chunk_index,
                         attempt,
+                        attempt_ref: &attempt_ref,
+                        piece_id,
                         max_attempts: context.policy.max_attempts,
                         state: "empty",
                         length_limited: false,
@@ -750,6 +789,8 @@ pub(super) fn extract_round(
                         stage: "item",
                         chunk_index: context.chunk_index,
                         attempt,
+                        attempt_ref: &attempt_ref,
+                        piece_id,
                         max_attempts: context.policy.max_attempts,
                         state: "stop_malformed",
                         length_limited: false,
@@ -787,6 +828,8 @@ pub(super) fn extract_round(
                         stage: "item",
                         chunk_index: context.chunk_index,
                         attempt,
+                        attempt_ref: &attempt_ref,
+                        piece_id,
                         max_attempts: context.policy.max_attempts,
                         state: "stop_malformed",
                         length_limited: false,

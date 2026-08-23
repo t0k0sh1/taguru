@@ -32,14 +32,26 @@ pub(super) struct DiagnosticsSink {
 }
 
 impl DiagnosticsSink {
-    pub(super) fn open(path: PathBuf, raw_cap: Option<usize>) -> std::io::Result<Self> {
+    /// Opens (truncating) and writes the `kind: "run"` record first
+    /// (ADR 0023 §3.3): `run_id` is what joins this run's `attempt`
+    /// records to the per-document trace files it wrote.
+    pub(super) fn open(
+        path: PathBuf,
+        raw_cap: Option<usize>,
+        run_id: &str,
+    ) -> std::io::Result<Self> {
         let file = fs::File::create(&path)?;
-        Ok(Self {
+        let sink = Self {
             writer: Mutex::new(std::io::BufWriter::new(file)),
             raw_cap: raw_cap.filter(|&n| n > 0),
             path,
             warned: AtomicBool::new(false),
-        })
+        };
+        sink.write_record(&RunRecord {
+            kind: "run",
+            run_id: run_id.to_string(),
+        });
+        Ok(sink)
     }
 
     /// Assembles and writes one record. A diagnostics write never fails
@@ -58,6 +70,9 @@ impl DiagnosticsSink {
             .and_then(|response| self.capture_raw(&response.content));
         let record = AttemptRecord {
             kind: "attempt",
+            run_id: attempt.attempt_ref.run_id.clone(),
+            attempt_seq: attempt.attempt_ref.attempt_seq,
+            piece_id: attempt.piece_id.to_string(),
             source: attempt.source.to_string(),
             stage: attempt.stage,
             chunk_index: attempt.chunk_index,
@@ -190,6 +205,12 @@ impl DiagnosticsSink {
 /// shape.
 pub(super) struct DiagnosticsAttempt<'a> {
     pub(super) source: &'a str,
+    /// ADR 0023: this completion's identity, taken from
+    /// [`ChatClient::next_attempt`] right before the call it names.
+    pub(super) attempt_ref: &'a AttemptRef,
+    /// ADR 0023: the piece this completion asked about (for Stage 2,
+    /// the piece whose output is being corrected).
+    pub(super) piece_id: &'a str,
     pub(super) stage: &'static str,
     pub(super) chunk_index: usize,
     pub(super) attempt: usize,
@@ -229,6 +250,12 @@ pub(super) struct DiagnosticsAttempt<'a> {
 #[derive(serde::Serialize)]
 pub(super) struct AttemptRecord {
     pub(super) kind: &'static str,
+    /// ADR 0023: always present — `(run_id, attempt_seq)` is the key a
+    /// trace file's `piece.attempt` joins on, `piece_id` the key its
+    /// items join on.
+    pub(super) run_id: String,
+    pub(super) attempt_seq: u64,
+    pub(super) piece_id: String,
     pub(super) source: String,
     pub(super) stage: &'static str,
     pub(super) chunk_index: usize,
@@ -250,6 +277,15 @@ pub(super) struct AttemptRecord {
     pub(super) requested_max_tokens: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) response_text: Option<String>,
+}
+
+/// The sidecar's first line (ADR 0023 §3.3): which run the `attempt`
+/// records below belong to. Written by [`DiagnosticsSink::open`]
+/// itself, so no sidecar of this version lacks it.
+#[derive(serde::Serialize)]
+pub(super) struct RunRecord {
+    pub(super) kind: &'static str,
+    pub(super) run_id: String,
 }
 
 /// [`ChatCompletion`]'s `finish_reason` and [`TokenUsage`], nested to

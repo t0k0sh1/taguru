@@ -15,6 +15,28 @@ pub(super) struct Extraction {
     pub(super) questions: Vec<(u32, String)>,
     pub(super) duplicates: usize,
     pub(super) dropped: usize,
+    /// ADR 0023 §3.4: which of `merge`'s input outputs each kept item
+    /// came from — the output's position in the input list (the same
+    /// number [`Fact::origin`] carries), keyed by the item's content
+    /// key. A duplicate folded across outputs is attributed to the
+    /// output that was kept, i.e. the first.
+    pub(super) origins: BTreeMap<ItemKey, usize>,
+}
+
+/// ADR 0023 §3.1: a batch item's identity is its content, exactly as
+/// the batch makes it unique — `merge` folds associations on the
+/// triple, aliases on their spelling within a namespace, and questions
+/// on (paragraph, text).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum ItemKey {
+    Association {
+        subject: String,
+        label: String,
+        object: String,
+    },
+    Concept(String),
+    Label(String),
+    Question(u32, String),
 }
 
 pub(super) struct Fact {
@@ -22,8 +44,12 @@ pub(super) struct Fact {
     pub(super) label: String,
     pub(super) object: String,
     pub(super) weight: f64,
-    #[allow(dead_code)] // read by tests only — a follow-up issue surfaces it beyond merge()
-    pub(super) chunk_index: usize,
+    /// The position, in `merge`'s input list, of the output this fact
+    /// came from — NOT a chunk index: after the split rung one chunk
+    /// yields several outputs (ADR 0023 §2 names the old field's
+    /// misnomer). The trace file maps it back to `chunk_index` and
+    /// `piece_id`.
+    pub(super) origin: usize,
     pub(super) paragraph: Option<u32>,
 }
 
@@ -410,12 +436,13 @@ pub(super) fn merge(
         questions: Vec::new(),
         duplicates: 0,
         dropped: 0,
+        origins: BTreeMap::new(),
     };
     let mut seen: HashSet<(String, String, String)> = HashSet::new();
     let mut seen_questions: HashSet<(u32, String)> = HashSet::new();
     let mut per_paragraph: BTreeMap<u32, usize> = BTreeMap::new();
-    let mut aliases: Vec<ModelAlias> = Vec::new();
-    for (chunk_index, output) in outputs.into_iter().enumerate() {
+    let mut aliases: Vec<(usize, ModelAlias)> = Vec::new();
+    for (origin, output) in outputs.into_iter().enumerate() {
         for item in output.questions {
             let paragraph = item.paragraph;
             let question = item.question.unwrap_or_default();
@@ -447,6 +474,10 @@ pub(super) fn merge(
             // deduplication instead of the cap that caused it.
             *count += 1;
             seen_questions.insert(question_key.clone());
+            extraction.origins.insert(
+                ItemKey::Question(question_key.0, question_key.1.clone()),
+                origin,
+            );
             extraction.questions.push(question_key);
         }
         for item in output.associations {
@@ -487,16 +518,24 @@ pub(super) fn merge(
             let paragraph = item
                 .paragraph
                 .filter(|&paragraph| (paragraph as usize) < paragraph_count);
+            extraction.origins.insert(
+                ItemKey::Association {
+                    subject: subject.to_string(),
+                    label: label.to_string(),
+                    object: object.to_string(),
+                },
+                origin,
+            );
             extraction.associations.push(Fact {
                 subject: subject.to_string(),
                 label: label.to_string(),
                 object: object.to_string(),
                 weight,
-                chunk_index,
+                origin,
                 paragraph,
             });
         }
-        aliases.extend(output.aliases);
+        aliases.extend(output.aliases.into_iter().map(|alias| (origin, alias)));
     }
 
     // Aliases check against the MERGED associations, so a chunk-1
@@ -508,7 +547,7 @@ pub(super) fn merge(
         concept_names.insert(&fact.object);
         label_names.insert(&fact.label);
     }
-    for alias in aliases {
+    for (origin, alias) in aliases {
         // Trim to match the association names in `concept_names` /
         // `label_names`, which are the trimmed subject/label/object
         // above; an untrimmed spelling or canonical would miss the
@@ -517,9 +556,17 @@ pub(super) fn merge(
         let spelling = spelling.trim();
         let canonical = alias.canonical.unwrap_or_default();
         let canonical = canonical.trim();
-        let (namespace, names) = match alias.kind.as_deref() {
-            Some("concept") => (&mut extraction.concepts, &concept_names),
-            Some("label") => (&mut extraction.labels, &label_names),
+        let (namespace, names, key) = match alias.kind.as_deref() {
+            Some("concept") => (
+                &mut extraction.concepts,
+                &concept_names,
+                ItemKey::Concept(spelling.to_string()),
+            ),
+            Some("label") => (
+                &mut extraction.labels,
+                &label_names,
+                ItemKey::Label(spelling.to_string()),
+            ),
             _ => {
                 extraction.dropped += 1;
                 continue;
@@ -539,6 +586,7 @@ pub(super) fn merge(
         match namespace.entry(spelling.to_string()) {
             Entry::Vacant(vacant) => {
                 vacant.insert(canonical.to_string());
+                extraction.origins.insert(key, origin);
             }
             Entry::Occupied(existing) => {
                 if existing.get().as_str() == canonical {

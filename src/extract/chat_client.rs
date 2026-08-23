@@ -18,6 +18,36 @@ pub(crate) struct ChatClient {
     pub(super) model: String,
     pub(super) api_key: Option<String>,
     pub(super) agent: ureq::Agent,
+    /// ADR 0023: the identity of the run this client serves — 16 hex
+    /// characters from the OS random source, minted once per client
+    /// (one client per `taguru extract` invocation), never derived
+    /// from any input. Carried here, not on `Run`, because every
+    /// extraction call site already holds the client and none holds
+    /// the run.
+    pub(super) run_id: String,
+    /// ADR 0023: how many extraction completions this client has
+    /// numbered so far — [`ChatClient::next_attempt`]'s counter.
+    /// Shared across `--parallel` workers through the `&ChatClient`
+    /// they already share.
+    pub(super) attempts: std::sync::atomic::AtomicU64,
+}
+
+/// ADR 0023 §3.2: one extraction completion's identity — the run it
+/// belongs to and its 1-based position among the completions that
+/// run issued. Equality of two `AttemptRef`s means the same HTTP
+/// conversation, wherever the two records live (trace file,
+/// diagnostics sidecar, checkpoint).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, Deserialize)]
+pub(crate) struct AttemptRef {
+    pub(crate) run_id: String,
+    pub(crate) attempt_seq: u64,
+}
+
+/// 16 hex characters from the OS random source — a run id (ADR 0023).
+pub(super) fn mint_run_id() -> String {
+    let mut bytes = [0u8; 8];
+    getrandom::fill(&mut bytes).expect("the OS random source must work");
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// Whether [`ChatClient::complete`] gave up before the provider ever
@@ -176,7 +206,26 @@ impl ChatClient {
             model,
             api_key: std::env::var("TAGURU_EXTRACT_API_KEY").ok(),
             agent: config.build().into(),
+            run_id: mint_run_id(),
+            attempts: std::sync::atomic::AtomicU64::new(0),
         })
+    }
+
+    /// The next extraction completion's identity (ADR 0023 §3.2):
+    /// taken by the three extraction call sites immediately before
+    /// their [`ChatClient::complete`], so the number names that call
+    /// whether it succeeds or fails. Deliberately not taken inside
+    /// `complete` itself: the ADR 0021 probe and `taguru communities`
+    /// complete through the same method and are not extraction
+    /// attempts.
+    pub(crate) fn next_attempt(&self) -> AttemptRef {
+        AttemptRef {
+            run_id: self.run_id.clone(),
+            attempt_seq: self
+                .attempts
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                + 1,
+        }
     }
 
     /// One chat completion, returning the assistant text alongside the
