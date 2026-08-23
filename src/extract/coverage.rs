@@ -41,6 +41,11 @@ pub(super) struct CoverageGap {
     /// The canonical paragraph index (the server's own split — the
     /// same numbering the model cites), so the gap is addressable.
     pub(super) paragraph: u32,
+    /// The sentence in full — the trace's `uncovered` record (ADR
+    /// 0026, #787) carries this, uncapped.
+    pub(super) sentence: String,
+    /// The sentence for one report line, capped at
+    /// [`GAP_QUOTE_MAX_BYTES`] — stderr's payload, as ever.
     pub(super) quote: String,
 }
 
@@ -77,6 +82,7 @@ pub(super) fn coverage_gaps(text: &str, triples: &[[&str; 3]]) -> Vec<CoverageGa
             if !covered {
                 gaps.push(CoverageGap {
                     paragraph: span.index,
+                    sentence: sentence.to_string(),
                     quote: quote_sentence(sentence),
                 });
             }

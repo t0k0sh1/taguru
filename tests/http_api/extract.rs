@@ -1161,6 +1161,45 @@ fn extract_coverage_reports_uncovered_candidate_pair_sentences() {
     assert_eq!(document["uncovered"], 1);
     requests.join().unwrap();
 
+    // ADR 0026 (#787): the trace carries the same gap with the FULL
+    // sentence and the paragraph's text, plus one `paragraph` record
+    // per canonical paragraph — text attached exactly when no kept
+    // item cites it — so coverage rate (count- or byte-weighted) is a
+    // fold over the records.
+    // (`read_trace` expects the batch to be --out's only stray file;
+    // this test also parks diag.jsonl there, so address the trace by
+    // the batch name directly.)
+    let batch_name = stray_batch_files(&out)
+        .into_iter()
+        .map(|name| name.to_string_lossy().into_owned())
+        .find(|name| name != "diag.jsonl")
+        .unwrap();
+    let trace: Vec<Value> = std::fs::read_to_string(out.join(".extract-trace").join(&batch_name))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let coverage: Vec<&Value> = trace.iter().filter(|r| r["kind"] == "paragraph").collect();
+    assert_eq!(coverage.len(), 2, "{coverage:?}");
+    assert_eq!(coverage[0]["paragraph"], 0);
+    assert_eq!(coverage[0]["covered"], true);
+    assert_eq!(coverage[0]["items"], 1);
+    assert!(coverage[0].get("text").is_none());
+    assert_eq!(coverage[0]["bytes"], "バックアップはS3へ保存する。".len());
+    assert_eq!(coverage[1]["covered"], true, "paragraph 1 is cited too");
+    let gaps: Vec<&Value> = trace.iter().filter(|r| r["kind"] == "uncovered").collect();
+    assert_eq!(gaps.len(), 1, "{gaps:?}");
+    assert_eq!(gaps[0]["paragraph"], 1);
+    assert_eq!(gaps[0]["sentence"], "- 頻度: 日次");
+    assert_eq!(
+        gaps[0]["text"],
+        "- 頻度: 日次
+- 保持期間: 30日"
+    );
+    let chunk = trace.iter().find(|r| r["kind"] == "chunk").unwrap();
+    assert_eq!(gaps[0]["chunk_index"], chunk["chunk_index"]);
+    assert_eq!(gaps[0]["chunk_sha256"], chunk["chunk_sha256"]);
+
     // Report-only: the flag is not a computation input, so a rerun
     // skips — and still judges the gap from the batch it already
     // wrote. It must call nothing: the stub above accepted exactly

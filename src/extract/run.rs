@@ -552,6 +552,27 @@ impl Run {
                 format!("writing {}: {error}", out_path.display()),
             ));
         }
+        // ADR 0016 (#496 S4), the recall-side half — computed here,
+        // before the trace, so the trace's `uncovered` records (ADR
+        // 0026, #787) are the same gaps stderr names below: every
+        // sentence whose candidate pair no accepted association
+        // covers. Pure over (document text, accepted associations).
+        let uncovered = if self.coverage {
+            let triples: Vec<[&str; 3]> = extraction
+                .associations
+                .iter()
+                .map(|fact| {
+                    [
+                        fact.subject.as_str(),
+                        fact.label.as_str(),
+                        fact.object.as_str(),
+                    ]
+                })
+                .collect();
+            coverage_gaps(&text, &triples)
+        } else {
+            Vec::new()
+        };
         // ADR 0023 §3.3: the trace lands right after the batch and
         // before the manifest records it — a batch the manifest knows
         // has its trace beside it (or a stderr line saying why not).
@@ -570,6 +591,7 @@ impl Run {
                     .map(|span| &text[span.start as usize..span.end as usize])
                     .collect::<Vec<&str>>(),
                 &extraction,
+                &uncovered,
             ),
         );
         self.manifest.record(source, &inputs, &file_name);
@@ -600,25 +622,7 @@ impl Run {
         for reason in &removed {
             eprintln!("taguru: extract: {source}: removed: {reason}");
         }
-        // ADR 0016 (#496 S4), the recall-side half: every sentence
-        // whose candidate pair no accepted association covers, named
-        // on stderr the same way — the report line carries the count.
-        let uncovered = if self.coverage {
-            let triples: Vec<[&str; 3]> = extraction
-                .associations
-                .iter()
-                .map(|fact| {
-                    [
-                        fact.subject.as_str(),
-                        fact.label.as_str(),
-                        fact.object.as_str(),
-                    ]
-                })
-                .collect();
-            coverage_gaps(&text, &triples)
-        } else {
-            Vec::new()
-        };
+        // ADR 0016's stderr half, from the gaps computed above.
         for gap in &uncovered {
             eprintln!("taguru: extract: {source}: uncovered: {}", gap.describe());
         }

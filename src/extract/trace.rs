@@ -126,6 +126,43 @@ pub(super) struct TraceLoss<'a> {
     pub(super) kept_piece_id: Option<&'a str>,
 }
 
+/// ADR 0026 (#787): one canonical paragraph's coverage — `covered`
+/// when at least one kept item cites it — with the paragraph's own
+/// text exactly when it is NOT covered, so the unreflected side of
+/// the document is listable in the original without re-splitting the
+/// batch passage. `bytes` weights the coverage rate.
+#[derive(serde::Serialize)]
+pub(super) struct TraceParagraph<'a> {
+    pub(super) kind: &'static str,
+    pub(super) paragraph: u32,
+    pub(super) bytes: usize,
+    /// How many kept items (associations and questions) cite it.
+    pub(super) items: usize,
+    pub(super) covered: bool,
+    /// The paragraph's text, present exactly when `covered` is false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) text: Option<&'a str>,
+}
+
+/// ADR 0026 (#787): one ADR 0016 coverage gap — a sentence holding a
+/// candidate pair that no accepted association covers — with the FULL
+/// sentence (stderr's quote is byte-capped; this is not) and the
+/// paragraph's text. Written only under `--coverage`, exactly when
+/// stderr names the gap.
+#[derive(serde::Serialize)]
+pub(super) struct TraceUncovered<'a> {
+    pub(super) kind: &'static str,
+    pub(super) paragraph: u32,
+    pub(super) sentence: &'a str,
+    pub(super) text: &'a str,
+    /// The chunk whose range holds the paragraph (the first, for an
+    /// oversized paragraph straddling several — ADR 0003 §7 repeats
+    /// its number across them). `null` if no chunk range holds it —
+    /// a taguru bug, never invented.
+    pub(super) chunk_index: Option<usize>,
+    pub(super) chunk_sha256: Option<&'a str>,
+}
+
 /// What the chunk loop knew about one output, kept past `merge` (which
 /// consumes the `ChunkOutput`s) so the trace can name it.
 pub(super) struct PieceOrigin {
@@ -173,7 +210,10 @@ impl PieceOrigin {
 /// Renders one document's trace (ADR 0023 §3.4), in file order:
 /// `document`, every `chunk`, every `piece`, every `item` in batch
 /// order, then (ADR 0024) every `loss` — removals piece by piece, then
-/// merge's drops and duplicates. `chunks` is the plan's descriptors;
+/// merge's drops and duplicates — then (ADR 0026) one `paragraph`
+/// record per canonical paragraph (text attached exactly when no kept
+/// item cites it) and one `uncovered` record per `--coverage` gap,
+/// with the full sentence. `chunks` is the plan's descriptors;
 /// `pieces` the chunk loop's outputs in `merge`'s input order, so
 /// [`Extraction::origins`] and [`Loss::origin`] index straight into
 /// it; `paragraphs` the document's canonical paragraphs' text, the
@@ -188,6 +228,7 @@ pub(super) fn render_trace(
     pieces: &[PieceOrigin],
     paragraphs: &[&str],
     extraction: &Extraction,
+    uncovered: &[CoverageGap],
 ) -> String {
     let mut lines = Vec::new();
     let mut push = |record: &dyn erased_serialize::Serialize| {
@@ -336,6 +377,49 @@ pub(super) fn render_trace(
                 .kept_origin
                 .and_then(|origin| pieces.get(origin))
                 .map(|piece| piece.piece_id.as_str()),
+        });
+    }
+    // ADR 0026: paragraph coverage — cited-by-kept-items, byte-
+    // weighted by `bytes`; the text of exactly the paragraphs nothing
+    // cites, so the unreflected side is readable in the original.
+    let mut citations = vec![0usize; paragraphs.len()];
+    for fact in &extraction.associations {
+        if let Some(paragraph) = fact.paragraph
+            && let Some(count) = citations.get_mut(paragraph as usize)
+        {
+            *count += 1;
+        }
+    }
+    for (paragraph, _) in &extraction.questions {
+        if let Some(count) = citations.get_mut(*paragraph as usize) {
+            *count += 1;
+        }
+    }
+    for (paragraph, (text, items)) in paragraphs.iter().zip(&citations).enumerate() {
+        let covered = *items > 0;
+        push(&TraceParagraph {
+            kind: "paragraph",
+            paragraph: paragraph as u32,
+            bytes: text.len(),
+            items: *items,
+            covered,
+            text: (!covered).then_some(*text),
+        });
+    }
+    for gap in uncovered {
+        let chunk = chunks.iter().enumerate().find(|(_, descriptor)| {
+            (descriptor.paragraph_first..=descriptor.paragraph_last).contains(&gap.paragraph)
+        });
+        push(&TraceUncovered {
+            kind: "uncovered",
+            paragraph: gap.paragraph,
+            sentence: &gap.sentence,
+            text: paragraphs
+                .get(gap.paragraph as usize)
+                .copied()
+                .unwrap_or_default(),
+            chunk_index: chunk.map(|(index, _)| index),
+            chunk_sha256: chunk.map(|(_, descriptor)| descriptor.sha256.as_str()),
         });
     }
     lines.join("\n") + "\n"

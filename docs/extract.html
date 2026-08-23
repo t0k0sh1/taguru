@@ -807,7 +807,17 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       duplicates; the document record's <code>removed</code>/<code>dropped</code>/
       <code>duplicates</code> counts are these records' lengths by reason. The loss <i>rate</i>
       — lost ÷ (kept + lost) per piece, rolled up — follows from the <code>item</code> and
-      <code>loss</code> records alone.
+      <code>loss</code> records alone. After the losses come the document's own side
+      (<a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0026-paragraph-coverage-records.md">ADR
+      0026</a>): one <code>paragraph</code> record per canonical paragraph —
+      <code>paragraph</code>, <code>bytes</code>, <code>items</code> (kept associations and
+      questions citing it), <code>covered</code>, and <code>text</code> present exactly when
+      nothing cites it, so the unreflected paragraphs are listable in the original and the
+      paragraph coverage rate (count- or byte-weighted) is one fold over the records — and,
+      under <code>--coverage</code>, one <code>uncovered</code> record per
+      <a href="#quality">coverage gap</a>, line for line with stderr but carrying the
+      <b>full</b> sentence (stderr's quote stays byte-capped), the paragraph's text, and the
+      owning chunk (<code>chunk_index</code>/<code>chunk_sha256</code>).
     </p>
     <p>
       Joins: item → piece by <code>piece_id</code>; piece → chunk by <code>chunk_index</code> or
