@@ -156,11 +156,19 @@ use parse::{
     interpret_model_output, interpret_questions, is_empty_answer, model_output_json_schema,
     quote_for_issue, strip_fences,
 };
-use prompt::{system_prompt, user_message, user_message_document};
+#[cfg(test)]
+use prompt::VOCABULARY_CAP;
+use prompt::{
+    ranked_vocabulary, schema_constrained_relations, schema_type_names, system_prompt,
+    user_message, user_message_document,
+};
 use render::{chunk, floor_char_boundary, render_batch, split_labeled_piece, split_oversized};
 use run::labeled_document;
 use structured_output::{jittered_backoff, parse_retry_after, read_capped_chat_body, snippet};
-use trace::{PieceOrigin, TRACE_DIR_NAME, render_trace, write_trace};
+use trace::{
+    PieceOrigin, SteeringSchema, TRACE_DIR_NAME, TraceSteering, VocabularyEntry, render_trace,
+    write_trace,
+};
 use vocabulary::{ContextVocabulary, context_names_block, load_vocabulary};
 
 // Test-only cross-submodule access: production code never names these

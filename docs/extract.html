@@ -790,7 +790,17 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       a checkpoint written before 0.9.5); then one <code>item</code> per batch line in batch
       order (<code>item</code>: <code>association</code> | <code>concept</code> |
       <code>label</code> | <code>question</code>, the content key, and <code>piece_id</code>);
-      then one <code>loss</code> per item the model's accepted answer held that the batch does
+      then one <code>steering</code> record (after <code>document</code> — listed here in
+      reading order) with what taguru itself put into the prompt, as data
+      (<a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0027-steering-records.md">ADR
+      0027</a>): <code>candidates</code> (ADR 0014's list as offered), <code>vocabulary</code>
+      (<code>[{label, count}]</code> in prompt order — the reuse list's own ranking and cap,
+      computed by the same code that renders the block), <code>context_names</code>
+      (<code>--vocabulary</code>'s capped list), and <code>schema</code>
+      (<code>{types, constrained_relations}</code>; <code>null</code> when no schema block was
+      prompted); <code>chunk_index</code> is <code>null</code> — document scope, every chunk
+      sees the same lists today; per-chunk context (a future control) adds records with the
+      index set. Then one <code>loss</code> per item the model's accepted answer held that the batch does
       not (<a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0024-loss-records.md">ADR
       0024</a>): <code>item</code> (<code>association</code> | <code>alias</code> |
       <code>question</code>), <code>reason</code> — <code>removed</code> (mechanical validation,

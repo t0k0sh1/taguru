@@ -6865,3 +6865,92 @@ fn attempts_log_can_be_switched_off() {
     let _ = std::fs::remove_dir_all(&docs);
     let _ = std::fs::remove_dir_all(&out);
 }
+
+/// #789 / ADR 0027: the trace's `steering` record shows exactly what
+/// taguru put in the prompt — the second document of a run carries the
+/// first document's labels with their counts (the #759 amplification
+/// path, now auditable), and `--candidates` lists the offered names.
+#[test]
+fn trace_steering_record_carries_candidates_and_reuse_vocabulary() {
+    let docs = batch_dir("extract-steering-docs");
+    let first = docs.join("a.md");
+    let second = docs.join("b.md");
+    std::fs::write(&first, "alpha relates to beta").unwrap();
+    std::fs::write(&second, "gamma relates to delta").unwrap();
+    let out = batch_dir("extract-steering-out");
+
+    let (url, _captured) = stub_chat_server_concurrent(|_, _| {
+        chat_ok(
+            &json!({"associations": [
+                {"subject": "alpha", "label": "relates to", "object": "beta", "weight": 1.0},
+                {"subject": "gamma", "label": "relates to", "object": "delta", "weight": 1.0}
+            ]})
+            .to_string(),
+        )
+    });
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--candidates",
+            first.to_str().unwrap(),
+            second.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+
+    let steering_of = |name: &str| -> Value {
+        let batch = stray_batch_files(&out)
+            .into_iter()
+            .map(|entry| entry.to_string_lossy().into_owned())
+            .find(|file| file.contains(name))
+            .unwrap();
+        std::fs::read_to_string(out.join(".extract-trace").join(&batch))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .find(|record| record["kind"] == "steering")
+            .unwrap()
+    };
+    // Documents run in sorted order: a.md first, with an empty
+    // vocabulary; b.md second, offered a.md's labels with counts.
+    let first_steering = steering_of("a.md");
+    assert_eq!(first_steering["chunk_index"], Value::Null);
+    assert_eq!(first_steering["vocabulary"], json!([]));
+    assert_eq!(first_steering["context_names"], json!([]));
+    assert_eq!(first_steering["schema"], Value::Null);
+    let candidates: Vec<&str> = first_steering["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect();
+    assert!(candidates.contains(&"alpha"), "{candidates:?}");
+    assert!(candidates.contains(&"beta"), "{candidates:?}");
+    assert!(!candidates.contains(&"gamma"), "a.md's own names only");
+
+    let second_steering = steering_of("b.md");
+    // a.md kept one association (the gamma one was mechanically
+    // removed — its names never occur in a.md) — the reuse list b.md
+    // saw says so, count and all.
+    assert_eq!(
+        second_steering["vocabulary"],
+        json!([{"label": "relates to", "count": 1}])
+    );
+    let candidates: Vec<&str> = second_steering["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect();
+    assert!(candidates.contains(&"gamma"), "{candidates:?}");
+    assert!(!candidates.contains(&"alpha"), "b.md's own names only");
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}

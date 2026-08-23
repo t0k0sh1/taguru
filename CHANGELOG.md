@@ -48,6 +48,13 @@ Entries that change an on-disk format or a response shape say so.
   full sentence — stderr's byte-capped quote is unchanged — the
   paragraph's text, and the owning chunk (ADR 0026, #787).
 
+- The trace records the prompt's steering lists as data: one
+  `steering` record per document with the candidate names (ADR 0014),
+  the reuse-label list with its prompted counts and ranking (#759's
+  list, computed by the same code that renders the prompt block),
+  `--vocabulary` context names, and the schema block's lists (ADR
+  0027, #789).
+
 ### Changed
 
 - `extract`'s stderr lists a document's mechanical removals per chunk

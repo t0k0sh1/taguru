@@ -1941,6 +1941,19 @@ fn alias(alias: &str, canonical: &str, kind: &str) -> ModelAlias {
     }
 }
 
+/// A `steering` record with nothing prompted — the shape most trace
+/// tests need.
+fn empty_steering() -> TraceSteering<'static> {
+    TraceSteering {
+        kind: "steering",
+        chunk_index: None,
+        candidates: &[],
+        vocabulary: Vec::new(),
+        context_names: &[],
+        schema: None,
+    }
+}
+
 /// The pre-#786 shape of a prune's accounting: every removal the
 /// outputs now carry (drained), chunk-prefixed exactly as
 /// `extract_document` reports them — so the prune tests keep pinning
@@ -5050,6 +5063,7 @@ fn render_trace_joins_items_to_pieces_across_a_split_and_a_reuse() {
         &[],
         &extraction,
         &[],
+        &empty_steering(),
     );
     let records: Vec<serde_json::Value> = text
         .lines()
@@ -5062,28 +5076,29 @@ fn render_trace_joins_items_to_pieces_across_a_split_and_a_reuse() {
     assert_eq!(
         kinds,
         [
-            "document", "chunk", "chunk", "piece", "piece", "piece", "item", "item", "item", "item"
+            "document", "steering", "chunk", "chunk", "piece", "piece", "piece", "item", "item",
+            "item", "item"
         ]
     );
     assert_eq!(records[0]["run_id"], run_id);
     assert_eq!(records[0]["chunk_total"], 2);
     assert_eq!(records[0]["batch_path"], "out/doc.jsonl");
-    assert_eq!(records[1]["chunk_sha256"], "c0".repeat(32));
+    assert_eq!(records[2]["chunk_sha256"], "c0".repeat(32));
     // Pieces: the split pair both point at chunk 0's sha; the reused
     // one keeps its foreign attempt.
-    assert_eq!(records[3]["chunk_index"], 0);
     assert_eq!(records[4]["chunk_index"], 0);
-    assert_eq!(records[3]["chunk_sha256"], "c0".repeat(32));
+    assert_eq!(records[5]["chunk_index"], 0);
     assert_eq!(records[4]["chunk_sha256"], "c0".repeat(32));
-    assert_ne!(records[3]["piece_id"], records[4]["piece_id"]);
-    assert_eq!(records[3]["paragraph_first"], 0);
-    assert_eq!(records[3]["paragraph_last"], 1);
-    assert_eq!(records[4]["paragraph_first"], 2);
-    assert_eq!(records[3]["reused"], false);
-    assert_eq!(records[5]["reused"], true);
-    assert_eq!(records[5]["attempt"]["run_id"], "ffffffffffffffff");
-    assert_eq!(records[5]["attempt"]["attempt_seq"], 7);
-    assert_eq!(records[5]["piece_id"], sha256_hex(piece_c.as_bytes()));
+    assert_eq!(records[5]["chunk_sha256"], "c0".repeat(32));
+    assert_ne!(records[4]["piece_id"], records[5]["piece_id"]);
+    assert_eq!(records[4]["paragraph_first"], 0);
+    assert_eq!(records[4]["paragraph_last"], 1);
+    assert_eq!(records[5]["paragraph_first"], 2);
+    assert_eq!(records[4]["reused"], false);
+    assert_eq!(records[6]["reused"], true);
+    assert_eq!(records[6]["attempt"]["run_id"], "ffffffffffffffff");
+    assert_eq!(records[6]["attempt"]["attempt_seq"], 7);
+    assert_eq!(records[6]["piece_id"], sha256_hex(piece_c.as_bytes()));
     // Items, in batch order (associations then concepts), each naming
     // the piece that answered it — B's item names B, not chunk 0.
     let item = |object: &str| {
@@ -5404,6 +5419,7 @@ fn render_trace_shows_every_loss_in_the_original_text() {
         &["alpha text", "beta text", "gamma text"],
         &extraction,
         &[],
+        &empty_steering(),
     );
     let losses: Vec<serde_json::Value> = text
         .lines()
@@ -5615,6 +5631,7 @@ fn lossy_parse_drops_are_recorded_as_unparsed_losses() {
         &["a b"],
         &extraction,
         &[],
+        &empty_steering(),
     );
     let losses: Vec<serde_json::Value> = text
         .lines()
@@ -5768,6 +5785,7 @@ fn render_trace_reports_paragraph_coverage_and_gap_sentences() {
         &paragraphs,
         &extraction,
         &gaps,
+        &empty_steering(),
     );
     let records: Vec<serde_json::Value> = rendered
         .lines()
@@ -5812,4 +5830,51 @@ fn render_trace_reports_paragraph_coverage_and_gap_sentences() {
             .all(|kind| *kind != "uncovered")
     );
     assert_eq!(kinds.last(), Some(&"uncovered"));
+}
+
+// ================ #789 / ADR 0027: the steering record ================
+
+/// The record is the prompt's own lists: the reuse vocabulary ranked
+/// and capped exactly as `system_prompt` renders it, the schema lists
+/// exactly as `schema_block` prompts them (gated on `mode != off`),
+/// and `chunk_index: null` — document scope.
+#[test]
+fn steering_record_mirrors_the_prompted_lists() {
+    let vocabulary: BTreeMap<String, usize> = [("rel", 3), ("uses", 1), ("above", 3)] // ties break by label
+        .into_iter()
+        .map(|(label, count)| (label.to_string(), count))
+        .collect();
+    let ranked = ranked_vocabulary(&vocabulary);
+    assert_eq!(
+        ranked,
+        [
+            ("above".to_string(), 3),
+            ("rel".to_string(), 3),
+            ("uses".to_string(), 1)
+        ]
+    );
+    // The cap is the prompt's: entry 201 by rank never appears.
+    let big: BTreeMap<String, usize> = (0..VOCABULARY_CAP + 5)
+        .map(|index| (format!("label-{index:04}"), VOCABULARY_CAP + 5 - index))
+        .collect();
+    let ranked = ranked_vocabulary(&big);
+    assert_eq!(ranked.len(), VOCABULARY_CAP);
+    assert_eq!(ranked[0].0, "label-0000");
+
+    // The prompt renders the same order and counts.
+    let prompt = system_prompt(&vocabulary, 0, 0, None, &[], &[]);
+    assert!(
+        prompt.contains("above (×3), rel (×3), uses"),
+        "{prompt:.900}"
+    );
+
+    // Serialized shape: nothing prompted → empty lists and null schema.
+    let value: serde_json::Value =
+        serde_json::from_str(&serde_json::to_string(&empty_steering()).unwrap()).unwrap();
+    assert_eq!(value["kind"], "steering");
+    assert_eq!(value["chunk_index"], serde_json::Value::Null);
+    assert_eq!(value["candidates"], serde_json::json!([]));
+    assert_eq!(value["vocabulary"], serde_json::json!([]));
+    assert_eq!(value["context_names"], serde_json::json!([]));
+    assert_eq!(value["schema"], serde_json::Value::Null);
 }

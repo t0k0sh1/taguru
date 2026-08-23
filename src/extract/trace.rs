@@ -126,6 +126,44 @@ pub(super) struct TraceLoss<'a> {
     pub(super) kept_piece_id: Option<&'a str>,
 }
 
+/// ADR 0027 (#789): what taguru itself put into the prompt to steer
+/// the answer, exactly as prompted (each list carries the prompt's own
+/// ranking and caps — computed by the same functions that render the
+/// blocks, so record and prompt cannot drift). One record per
+/// document today, `chunk_index: null`: every chunk of a document sees
+/// the same steering (ADR 0014: candidates come from the whole
+/// document, once; the vocabulary grows only between documents). When
+/// #782 adds per-chunk context, its records set `chunk_index` — a
+/// chunk's steering is the document-wide record plus its own.
+#[derive(serde::Serialize)]
+pub(super) struct TraceSteering<'a> {
+    pub(super) kind: &'static str,
+    pub(super) chunk_index: Option<usize>,
+    /// ADR 0014's candidate names, as offered (empty: `--candidates`
+    /// off, or a document with none).
+    pub(super) candidates: &'a [String],
+    /// #759's reuse list, in prompt order with the prompted counts
+    /// (empty: first document of a run with no `--vocabulary`).
+    pub(super) vocabulary: Vec<VocabularyEntry<'a>>,
+    /// ADR 0015's target-context concept names, as prompted.
+    pub(super) context_names: &'a [String],
+    /// ADR 0009 §11.1's schema block lists; `null` when no schema
+    /// block was prompted.
+    pub(super) schema: Option<SteeringSchema<'a>>,
+}
+
+#[derive(serde::Serialize)]
+pub(super) struct VocabularyEntry<'a> {
+    pub(super) label: &'a str,
+    pub(super) count: usize,
+}
+
+#[derive(serde::Serialize)]
+pub(super) struct SteeringSchema<'a> {
+    pub(super) types: Vec<&'a str>,
+    pub(super) constrained_relations: Vec<&'a str>,
+}
+
 /// ADR 0026 (#787): one canonical paragraph's coverage — `covered`
 /// when at least one kept item cites it — with the paragraph's own
 /// text exactly when it is NOT covered, so the unreflected side of
@@ -229,6 +267,7 @@ pub(super) fn render_trace(
     paragraphs: &[&str],
     extraction: &Extraction,
     uncovered: &[CoverageGap],
+    steering: &TraceSteering,
 ) -> String {
     let mut lines = Vec::new();
     let mut push = |record: &dyn erased_serialize::Serialize| {
@@ -248,6 +287,9 @@ pub(super) fn render_trace(
         batch_path: batch_path.display().to_string(),
         chunk_total: chunks.len(),
     });
+    // ADR 0027: the prompt's steering lists, right after the document
+    // record — they hold for every chunk below.
+    push(steering);
     for (chunk_index, descriptor) in chunks.iter().enumerate() {
         push(&TraceChunk {
             kind: "chunk",
