@@ -61,11 +61,14 @@ impl Removal {
         }
     }
 
-    /// Which batch-item kind the path names — `associations[..]` or
-    /// `aliases[..]`; the mechanical pass removes nothing else.
+    /// Which batch-item kind the path names — `associations[..]`,
+    /// `aliases[..]`, or `questions[..]` (the last only from lossy
+    /// parse drops; the mechanical pass never removes a question).
     pub(super) fn item_kind(&self) -> &'static str {
-        if self.path.contains("associations[") {
+        if self.path.starts_with("associations[") {
             "association"
+        } else if self.path.starts_with("questions[") {
+            "question"
         } else {
             "alias"
         }

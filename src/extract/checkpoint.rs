@@ -90,6 +90,10 @@ pub(super) struct CheckpointUnit {
     /// had no removals to record — its units validated fully.
     #[serde(default)]
     pub(super) removed: Vec<Removal>,
+    /// ADR 0024 §3.6: lossy mode's parse-time drops; `default` for
+    /// checkpoints written before the field existed.
+    #[serde(default)]
+    pub(super) unparsed: Vec<Removal>,
 }
 
 /// One document's durable checkpoint state: the settings it was

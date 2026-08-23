@@ -29,8 +29,14 @@ Entries that change an on-disk format or a response shape say so.
   the point of removal (`path`/`reason`/`item`; the report line,
   stderr, and the sidecar's `removed_items` strings are unchanged);
   checkpoint units store them so, and pre-0.9.5 checkpoints still
-  load. Stderr lists a document's removals per chunk in removal order
-  rather than Stage 2's first.
+  load. Under `--lossy`, array elements that are not objects — dropped
+  at parse — are recorded the same way.
+
+### Changed
+
+- `extract`'s stderr lists a document's mechanical removals per chunk
+  in removal order, rather than the Stage 2 alias removals first
+  (#786).
 
 ## [0.9.4] - 2026-08-23
 

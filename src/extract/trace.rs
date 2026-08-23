@@ -140,6 +140,8 @@ pub(super) struct PieceOrigin {
     pub(super) text: String,
     /// ADR 0013's removals from this output, as #786 records them.
     pub(super) removed: Vec<Removal>,
+    /// Lossy mode's parse-time drops (ADR 0024 §3.6).
+    pub(super) unparsed: Vec<Removal>,
 }
 
 impl PieceOrigin {
@@ -163,6 +165,7 @@ impl PieceOrigin {
             attempt: output.attempt.clone(),
             text: piece.to_string(),
             removed: output.removed.clone(),
+            unparsed: output.unparsed.clone(),
         }
     }
 }
@@ -288,7 +291,9 @@ pub(super) fn render_trace(
             .map(|text| (paragraph, *text))
     };
     for piece in pieces {
-        for removal in &piece.removed {
+        let removed = piece.removed.iter().map(|removal| ("removed", removal));
+        let unparsed = piece.unparsed.iter().map(|removal| ("dropped", removal));
+        for (reason, removal) in removed.chain(unparsed) {
             let paragraph = cited(
                 removal
                     .item
@@ -299,7 +304,7 @@ pub(super) fn render_trace(
             push(&TraceLoss {
                 kind: "loss",
                 item: removal.item_kind(),
-                reason: "removed",
+                reason,
                 rule: &removal.reason,
                 path: Some(&removal.path),
                 raw: &removal.item,

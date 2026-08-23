@@ -85,6 +85,17 @@ count(item records for the piece)`, `parsed = kept + lost`; loss rate
 and run. No field is added for the denominator: the trace already
 holds every kept and every lost item.
 
+### 3.6 Lossy mode's parse-time drops
+
+Under `--lossy`, an array element that is not an object never reaches
+`merge`: lossy parsing returns `None` for it and discards the issue.
+`evaluate_answer` records each such element (`unparsed`, a `Removal`
+with the element verbatim and the path), the output and the
+checkpoint carry it (defaulted on older files), and the trace writes
+it as a `dropped` loss after the piece's removals. Strict mode never
+fills it — the mechanical pass removes those elements with accounting.
+Lossy's report line and stderr are unchanged: the record is trace-only.
+
 ## 4. Consequences
 
 - Every loss can be read in the original by anyone holding the
@@ -94,6 +105,5 @@ holds every kept and every lost item.
   the document's own size times its loss count. #788's size policy
   covers the per-piece text separately; this record keeps the
   paragraph where it can.
-- Under `--lossy`, an array element that is not an object is dropped
-  at parse time and never reaches `merge`; it leaves no record. Every
-  other lossy drop reaches `merge` and is recorded.
+- Every item an accepted answer held that the batch does not is
+  recorded — under `--lossy` too (§3.6).

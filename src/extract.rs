@@ -174,6 +174,8 @@ use candidates::{CANDIDATE_CAP, CANDIDATE_MAX_BYTES};
 #[cfg(test)]
 use chat_client::build_chat_body;
 #[cfg(test)]
+use chunking::non_object_elements;
+#[cfg(test)]
 use chunking::{
     AttemptOutcome, MAX_LISTED_ISSUES, PieceContext, RoundOutcome, classify_attempt,
     corrective_message, demotion_reason, extract_piece,

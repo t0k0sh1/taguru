@@ -794,7 +794,8 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       <code>question</code>), <code>reason</code> — <code>removed</code> (mechanical validation,
       ADR 0013, including the Stage 2 alias prunes), <code>dropped</code> (the contract refused
       it as written: an empty name, a zero weight, a dangling alias, a question over the
-      <code>--questions</code> cap…), or <code>duplicate</code> (an identical item was already
+      <code>--questions</code> cap… and, under <code>--lossy</code>, an array element that was
+      not an object, dropped at parse), or <code>duplicate</code> (an identical item was already
       kept) — <code>rule</code> in the report's own words, <code>path</code> (removals only: the
       item's address in the answer), <code>raw</code> (the item exactly as the model wrote it),
       <code>piece_id</code>, <code>attempt</code>, <code>paragraph</code>, and <code>text</code>:

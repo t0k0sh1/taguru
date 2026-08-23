@@ -1052,6 +1052,7 @@ fn prune_resolves_canonicals_across_outputs_and_labels_chunks() {
             user: String::new(),
             answer: String::new(),
             removed: Vec::new(),
+            unparsed: Vec::new(),
         },
     ];
     prune_unresolvable_aliases(&mut outputs);
@@ -1266,6 +1267,7 @@ fn claimed_names_absorb_extractions_batches_and_vocabulary_alike() {
             user: String::new(),
             answer: String::new(),
             removed: Vec::new(),
+            unparsed: Vec::new(),
         },
     ];
     prune_claimed_aliases(&mut outputs, &seeded);
@@ -1329,6 +1331,7 @@ fn prune_uncorrected_aliases_removes_alias_issues_and_refuses_the_rest() {
             user: String::new(),
             answer: String::new(),
             removed: Vec::new(),
+            unparsed: Vec::new(),
         },
     ];
     let issues = vec![
@@ -1484,6 +1487,7 @@ fn with_resume_hint_names_the_checkpointed_units_only_when_there_are_any() {
         user: text.to_string(),
         answer: String::new(),
         removed: Vec::new(),
+        unparsed: Vec::new(),
     };
     store.record("doc.md", "h1".to_string(), unit("a"));
     store.record("doc.md", "h2".to_string(), unit("b"));
@@ -1971,6 +1975,7 @@ fn chunk_output(output: ModelOutput) -> ChunkOutput {
         user: String::new(),
         answer: String::new(),
         removed: Vec::new(),
+        unparsed: Vec::new(),
     }
 }
 
@@ -5146,6 +5151,7 @@ fn attempt_refs_are_dense_per_client_and_survive_the_checkpoint() {
         user: "u".into(),
         answer: "a".into(),
         removed: Vec::new(),
+        unparsed: Vec::new(),
     };
     let reloaded: CheckpointUnit =
         serde_json::from_str(&serde_json::to_string(&unit).unwrap()).unwrap();
@@ -5513,4 +5519,153 @@ fn prune_claimed_counts_every_removal() {
     assert_eq!(prune_claimed_aliases(&mut outputs, &claimed), 2);
     assert_eq!(outputs[0].output.aliases.len(), 1);
     assert_eq!(outputs[0].removed.len(), 2);
+}
+
+/// ADR 0024 §3.6: under `--lossy`, an array element that is not an
+/// object is dropped at parse — `evaluate_answer` records it as
+/// `unparsed`, with the element verbatim, so the trace shows it as a
+/// `dropped` loss; strict mode never fills the field (the mechanical
+/// pass removes those with accounting instead).
+#[test]
+fn lossy_parse_drops_are_recorded_as_unparsed_losses() {
+    let answer = serde_json::json!({
+        "associations": [
+            {"subject": "a", "label": "l", "object": "b"},
+            "just a string",
+            7
+        ],
+        "aliases": [["not", "an", "object"]],
+        "questions": [null, {"paragraph": 0, "question": "q?"}]
+    })
+    .to_string();
+    let lossy = evaluate_answer(&answer, None, "a b", &HashSet::new()).unwrap();
+    assert_eq!(lossy.output.associations.len(), 1);
+    assert!(lossy.removed.is_empty());
+    let summary: Vec<(String, &'static str, String)> = lossy
+        .unparsed
+        .iter()
+        .map(|removal| {
+            (
+                removal.path.clone(),
+                removal.item_kind(),
+                removal.to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            (
+                "associations[1]".to_string(),
+                "association",
+                "associations[1]: expected an object, got string \"just a string\" — dropped \
+                 at parse under --lossy"
+                    .to_string()
+            ),
+            (
+                "associations[2]".to_string(),
+                "association",
+                "associations[2]: expected an object, got number 7 — dropped at parse under \
+                 --lossy"
+                    .to_string()
+            ),
+            (
+                "aliases[0]".to_string(),
+                "alias",
+                "aliases[0]: expected an object, got an array — dropped at parse under --lossy"
+                    .to_string()
+            ),
+            (
+                "questions[0]".to_string(),
+                "question",
+                "questions[0]: expected an object, got null — dropped at parse under --lossy"
+                    .to_string()
+            ),
+        ]
+    );
+    assert_eq!(lossy.unparsed[0].item, "just a string");
+    assert_eq!(
+        lossy.unparsed[2].item,
+        serde_json::json!(["not", "an", "object"])
+    );
+    // A bare non-object answer has no arrays to walk.
+    assert!(non_object_elements(&serde_json::json!([1, 2])).is_empty());
+
+    // The trace renders them as `dropped` losses after the piece's
+    // removals, against the piece text.
+    let mut output = chunk_output(lossy.output);
+    output.user = user_message("doc.md", 0, 1, "[0] a b");
+    output.piece_id = "p".repeat(64);
+    output.unparsed = lossy.unparsed;
+    output.removed = vec![Removal::new("aliases[3]", "r", &serde_json::json!({}))];
+    let pieces = vec![PieceOrigin::of(&output, "0000000000000001")];
+    let extraction = merge(vec![output.output], 0, 1);
+    let text = render_trace(
+        "0000000000000001",
+        "doc.md",
+        "d".repeat(64).as_str(),
+        Path::new("out/doc.jsonl"),
+        &[],
+        &pieces,
+        &["a b"],
+        &extraction,
+    );
+    let losses: Vec<serde_json::Value> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .filter(|record: &serde_json::Value| record["kind"] == "loss")
+        .collect();
+    let reasons: Vec<(&str, &str)> = losses
+        .iter()
+        .map(|loss| {
+            (
+                loss["reason"].as_str().unwrap(),
+                loss["item"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        reasons,
+        [
+            ("removed", "alias"),
+            ("dropped", "association"),
+            ("dropped", "association"),
+            ("dropped", "alias"),
+            ("dropped", "question"),
+            // merge's own drop of the parsed question (questions cap 0)
+            ("dropped", "question"),
+        ]
+    );
+    assert!(
+        losses[5]["rule"]
+            .as_str()
+            .unwrap()
+            .contains("--questions 0")
+    );
+    assert_eq!(losses[1]["path"], "associations[1]");
+    assert_eq!(losses[1]["raw"], "just a string");
+    assert_eq!(losses[1]["text"], "[0] a b");
+
+    // Strict mode leaves the field empty.
+    let rules = ItemRules {
+        paragraph_count: 1,
+        questions_requested: true,
+    };
+    let strict = evaluate_answer(
+        r#"{"associations": [{"subject": "a", "label": "rel", "object": "b"}, 7]}"#,
+        Some(&rules),
+        "a b",
+        &HashSet::new(),
+    )
+    .unwrap();
+    assert!(strict.unparsed.is_empty());
+    assert_eq!(strict.removed.len(), 1);
+
+    // And a pre-field checkpoint loads with it empty.
+    let legacy: CheckpointUnit = serde_json::from_str(
+        r#"{"chunk_index": 0, "output": {"associations": [], "aliases": [], "questions": []},
+            "user": "u", "answer": "a"}"#,
+    )
+    .unwrap();
+    assert!(legacy.unparsed.is_empty());
 }

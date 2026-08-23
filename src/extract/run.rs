@@ -958,6 +958,7 @@ impl Run {
                         user,
                         answer: response.content,
                         removed: evaluated.removed,
+                        unparsed: evaluated.unparsed,
                     };
                 }
                 Err(AnswerFault::Syntax(error)) => {
