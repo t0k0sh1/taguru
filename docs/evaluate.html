@@ -225,7 +225,11 @@
       independent of any one corpus's content. It writes nothing to disk; the report is stdout
       only (or <code>--json</code>), and even an overlapping band — "this model cannot separate
       these two names at this dimension" — is exit <code>0</code>, because an honest overlap
-      finding is calibrate's success, not its failure. <code>evaluate</code> reads whatever floor
+      finding is calibrate's success, not its failure. An overlap can show up on an otherwise
+      healthy corpus and a correctly-ranking model too — short concept-name glosses (a few
+      characters, common for entity names in Japanese) leave little text for a model to anchor a
+      separation on; see <a href="troubleshooting.html#embedding">Troubleshooting — the semantic
+      lane</a> for a measured case. <code>evaluate</code> reads whatever floor
       calibrate suggested (via <code>eval.jsonl</code>'s <code>options.floor</code>, or the
       server's own configured default) and measures what that floor, applied to a labeled
       question set, actually retrieves.
