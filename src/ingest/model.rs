@@ -96,6 +96,30 @@ impl Batch {
             .collect()
     }
 
+    /// [`Self::label_vocabulary`], but counting how many associations
+    /// (plus alias canonicals) used each spelling — extract's
+    /// `absorb_vocabulary` (issue #759) folds these into the run's
+    /// reuse-frequency signal when a skipped document's batch is
+    /// reread, the same way live extraction output counts its own.
+    /// `schema:type` is excluded, matching
+    /// `Extraction::label_usage_counts`'s ADR 0009 §6.3 exclusion 2 —
+    /// without it, a document skipped under `--schema` would leak the
+    /// reserved label into later prompts that a freshly extracted one
+    /// never would.
+    pub(crate) fn label_usage_counts(&self) -> BTreeMap<String, usize> {
+        let mut counts = BTreeMap::new();
+        for label in self
+            .associations
+            .iter()
+            .map(|op| &op.label)
+            .chain(self.labels.values())
+            .filter(|label| label.as_str() != crate::schema::SCHEMA_TYPE_LABEL)
+        {
+            *counts.entry(label.clone()).or_insert(0) += 1;
+        }
+        counts
+    }
+
     /// The concept spellings this batch settles on: every association
     /// subject/object, plus alias CANONICALS — never alias spellings,
     /// which are exactly the variants a canonical exists to fold.

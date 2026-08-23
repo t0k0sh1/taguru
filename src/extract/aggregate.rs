@@ -28,23 +28,33 @@ pub(super) struct Fact {
 }
 
 impl Extraction {
-    /// The relation spellings this document settled on. ADR 0009 §6.3
-    /// exclusion 2: `schema:type` never enters this vocabulary — `extract`
-    /// has no notion of whether the target context even has a schema, so
-    /// unlike the server-side exclusions (gated on "a schema document
-    /// exists") this one is unconditional, the same way a producer never
-    /// needs to know a server-side reserved id exists to simply never
-    /// coin one. Filtering here, rather than where `system_prompt` emits
-    /// its vocabulary block, covers both places this set accumulates —
-    /// live extraction output and `absorb_vocabulary`'s reread of past
-    /// batch files — with one line instead of two.
-    pub(super) fn label_vocabulary(&self) -> BTreeSet<String> {
-        self.associations
+    /// The relation spellings this document settled on, with how many
+    /// associations (plus alias canonicals) used each one — issue
+    /// #759's reuse signal: a label many associations already share is
+    /// a safe bet to reuse, one that shows up once might be noise
+    /// (a bare particle, a one-off paraphrase) not worth reinforcing.
+    /// ADR 0009 §6.3 exclusion 2: `schema:type` never enters this
+    /// vocabulary — `extract` has no notion of whether the target
+    /// context even has a schema, so unlike the server-side exclusions
+    /// (gated on "a schema document exists") this one is unconditional,
+    /// the same way a producer never needs to know a server-side
+    /// reserved id exists to simply never coin one. Filtering here,
+    /// rather than where `system_prompt` emits its vocabulary block,
+    /// covers both places this set accumulates — live extraction
+    /// output and `absorb_vocabulary`'s reread of past batch files —
+    /// with one line instead of two.
+    pub(super) fn label_usage_counts(&self) -> BTreeMap<String, usize> {
+        let mut counts = BTreeMap::new();
+        for label in self
+            .associations
             .iter()
-            .map(|fact| fact.label.clone())
-            .chain(self.labels.values().cloned())
-            .filter(|label| label != crate::schema::SCHEMA_TYPE_LABEL)
-            .collect()
+            .map(|fact| &fact.label)
+            .chain(self.labels.values())
+            .filter(|label| label.as_str() != crate::schema::SCHEMA_TYPE_LABEL)
+        {
+            *counts.entry(label.clone()).or_insert(0) += 1;
+        }
+        counts
     }
 }
 

@@ -1219,7 +1219,7 @@ fn extract_suffixed_source_ids_respect_the_name_cap() {
     let at_cap = "s".repeat(1021);
     let reply = |name: &str, text: &str| {
         json!({"associations": [
-            {"subject": name, "label": "l", "object": text, "weight": 1.0, "paragraph": 0}
+            {"subject": name, "label": "rel", "object": text, "weight": 1.0, "paragraph": 0}
         ]})
         .to_string()
     };
@@ -1413,7 +1413,7 @@ fn extract_bakes_the_runbook_conventions_into_the_batch() {
     std::fs::write(nested_b.join("x.md"), "弐。").unwrap();
     let (url, requests) = stub_chat_server(vec![
         json!({"associations": [
-            {"subject": "壱", "label": "l", "object": "壱。", "weight": 1.0, "paragraph": 0}
+            {"subject": "壱", "label": "rel", "object": "壱。", "weight": 1.0, "paragraph": 0}
         ]})
         .to_string(),
     ]);
@@ -3014,9 +3014,9 @@ fn a_length_terminated_answer_that_happens_to_parse_is_never_treated_as_success(
     let out = batch_dir("extract-validprefix-out");
 
     let prefix = json!({"associations":
-        [{"subject": "half_answer", "label": "l", "object": "x", "weight": 1.0}]});
+        [{"subject": "half_answer", "label": "rel", "object": "x", "weight": 1.0}]});
     let complete = json!({"associations":
-        [{"subject": "whole_answer", "label": "l", "object": "x", "weight": 1.0}]});
+        [{"subject": "whole_answer", "label": "rel", "object": "x", "weight": 1.0}]});
     let (url, captured) = stub_chat_server_concurrent(move |_index, attempt| {
         if attempt == 0 {
             chat_ok_with_finish_reason(&prefix.to_string(), "length")
@@ -3709,14 +3709,14 @@ fn strict_default_corrects_an_invalid_weight_and_keeps_every_item() {
 
     let bad_reply = json!({
         "associations": [
-            {"subject": "a", "label": "l", "object": "b", "weight": "strong"}
+            {"subject": "a", "label": "rel", "object": "b", "weight": "strong"}
         ],
         "aliases": []
     })
     .to_string();
     let good_reply = json!({
         "associations": [
-            {"subject": "a", "label": "l", "object": "b", "weight": 0.9}
+            {"subject": "a", "label": "rel", "object": "b", "weight": 0.9}
         ],
         "aliases": []
     })
@@ -3762,7 +3762,7 @@ fn strict_default_fails_the_source_when_the_corrected_answer_is_still_invalid() 
 
     let bad_reply = json!({
         "associations": [
-            {"subject": "a", "label": "l", "object": "b", "weight": "strong"}
+            {"subject": "a", "label": "rel", "object": "b", "weight": "strong"}
         ],
         "aliases": []
     })
@@ -3804,7 +3804,7 @@ fn a_failed_reextraction_leaves_the_existing_batch_untouched() {
 
     let good_reply = json!({
         "associations": [
-            {"subject": "a", "label": "l", "object": "b", "weight": 1.0}
+            {"subject": "a", "label": "rel", "object": "b", "weight": 1.0}
         ],
         "aliases": []
     })
@@ -3824,7 +3824,7 @@ fn a_failed_reextraction_leaves_the_existing_batch_untouched() {
 
     let bad_reply = json!({
         "associations": [
-            {"subject": "a", "label": "l", "object": "b", "weight": "strong"}
+            {"subject": "a", "label": "rel", "object": "b", "weight": "strong"}
         ],
         "aliases": []
     })
@@ -3861,7 +3861,7 @@ fn a_shadowing_alias_earns_a_cross_chunk_corrective_turn() {
 
     let bad_reply = json!({
         "associations": [
-            {"subject": "a", "label": "l", "object": "b"}
+            {"subject": "a", "label": "rel", "object": "b"}
         ],
         "aliases": [
             {"alias": "a", "canonical": "b", "kind": "concept"}
@@ -3870,7 +3870,7 @@ fn a_shadowing_alias_earns_a_cross_chunk_corrective_turn() {
     .to_string();
     let good_reply = json!({
         "associations": [
-            {"subject": "a", "label": "l", "object": "b"}
+            {"subject": "a", "label": "rel", "object": "b"}
         ],
         "aliases": [
             {"alias": "x", "canonical": "a", "kind": "concept"}
@@ -3913,7 +3913,7 @@ fn an_uncorrected_shadowing_alias_is_removed_and_the_document_still_lands() {
 
     let bad_reply = json!({
         "associations": [
-            {"subject": "a", "label": "l", "object": "b"}
+            {"subject": "a", "label": "rel", "object": "b"}
         ],
         "aliases": [
             {"alias": "a", "canonical": "b", "kind": "concept"}
@@ -3968,7 +3968,7 @@ fn a_dangling_alias_is_pruned_mechanically_with_zero_corrective_turns() {
 
     let reply = json!({
         "associations": [
-            {"subject": "a", "label": "l", "object": "b"}
+            {"subject": "a", "label": "rel", "object": "b"}
         ],
         "aliases": [
             {"alias": "x", "canonical": "存在しない", "kind": "concept"}
@@ -4126,7 +4126,7 @@ fn lossy_flag_skips_correction_and_marks_the_drop_explicitly() {
     // actually gets dropped, so this is a faithful pre-#199 drop case.
     let bad_reply = json!({
         "associations": [
-            {"subject": "a", "label": "l", "object": "b", "weight": 0}
+            {"subject": "a", "label": "rel", "object": "b", "weight": 0}
         ],
         "aliases": []
     })
@@ -4165,7 +4165,7 @@ fn strict_default_with_max_attempts_of_one_skips_the_validity_corrective_turn() 
 
     let bad_reply = json!({
         "associations": [
-            {"subject": "a", "label": "l", "object": "b", "weight": 0}
+            {"subject": "a", "label": "rel", "object": "b", "weight": 0}
         ],
         "aliases": []
     })
@@ -4231,7 +4231,7 @@ fn extract_lossy_env_var_enables_lossy_mode_without_the_flag() {
 
     let bad_reply = json!({
         "associations": [
-            {"subject": "a", "label": "l", "object": "b", "weight": 0}
+            {"subject": "a", "label": "rel", "object": "b", "weight": 0}
         ],
         "aliases": []
     })
@@ -4950,7 +4950,7 @@ fn diagnostics_records_the_stage_two_cross_chunk_correction() {
     // exercises the cross_chunk corrective record.
     let bad_reply = json!({
         "associations": [
-            {"subject": "a", "label": "l", "object": "b"}
+            {"subject": "a", "label": "rel", "object": "b"}
         ],
         "aliases": [
             {"alias": "a", "canonical": "b", "kind": "concept"}
@@ -4959,7 +4959,7 @@ fn diagnostics_records_the_stage_two_cross_chunk_correction() {
     .to_string();
     let good_reply = json!({
         "associations": [
-            {"subject": "a", "label": "l", "object": "b"}
+            {"subject": "a", "label": "rel", "object": "b"}
         ],
         "aliases": [
             {"alias": "x", "canonical": "a", "kind": "concept"}
@@ -5151,8 +5151,8 @@ fn diagnostics_writes_a_document_record_whose_counts_match_the_written_batch() {
     // duplicates=1, dropped=0.
     let reply = json!({
         "associations": [
-            {"subject": "a", "label": "l", "object": "b", "weight": 1.0},
-            {"subject": "a", "label": "l", "object": "b", "weight": 1.0}
+            {"subject": "a", "label": "rel", "object": "b", "weight": 1.0},
+            {"subject": "a", "label": "rel", "object": "b", "weight": 1.0}
         ],
         "aliases": [
             {"alias": "X", "canonical": "a", "kind": "concept"}
@@ -5227,7 +5227,7 @@ fn extract_lossy_flag_overrides_the_environment_variable() {
 
     let bad_reply = json!({
         "associations": [
-            {"subject": "a", "label": "l", "object": "b", "weight": 0}
+            {"subject": "a", "label": "rel", "object": "b", "weight": 0}
         ],
         "aliases": []
     })
@@ -5318,7 +5318,7 @@ fn setup_one_checkpointed_chunk_and_one_failure(
     // text, not the original part tag, so the latter can't tell chunk
     // 1's retries apart from chunk 0.
     let chunk0_reply = json!({"associations": [
-        {"subject": "S", "label": "l", "object": "chunk0", "weight": 1.0}
+        {"subject": "S", "label": "rel", "object": "chunk0", "weight": 1.0}
     ]})
     .to_string();
     let (url, requests) = stub_chat_server(vec![
@@ -5366,7 +5366,7 @@ fn checkpoint_reuses_a_completed_chunk_after_a_failed_document_without_recalling
     // checkpoint. One reply, so the server thread's join (implicitly,
     // via requests.join() below) proves exactly one connection arrived.
     let reply = json!({"associations": [
-        {"subject": "S", "label": "l", "object": "chunk1", "weight": 1.0}
+        {"subject": "S", "label": "rel", "object": "chunk1", "weight": 1.0}
     ]})
     .to_string();
     let (url, requests) = stub_chat_server(vec![reply]);
@@ -5434,11 +5434,11 @@ fn force_ignores_existing_checkpoints_and_recalls_every_chunk() {
     // chunk 0's checkpoint too.
     let (url, requests) = stub_chat_server(vec![
         json!({"associations": [
-            {"subject": "S", "label": "l", "object": "chunk0", "weight": 1.0}
+            {"subject": "S", "label": "rel", "object": "chunk0", "weight": 1.0}
         ]})
         .to_string(),
         json!({"associations": [
-            {"subject": "S", "label": "l", "object": "chunk1", "weight": 1.0}
+            {"subject": "S", "label": "rel", "object": "chunk1", "weight": 1.0}
         ]})
         .to_string(),
     ]);
@@ -5474,11 +5474,11 @@ fn a_changed_fact_budget_invalidates_checkpoints_even_though_content_is_unchange
     // --fact-budget invalidates chunk 0's checkpoint too.
     let (url, requests) = stub_chat_server(vec![
         json!({"associations": [
-            {"subject": "S", "label": "l", "object": "chunk0", "weight": 1.0}
+            {"subject": "S", "label": "rel", "object": "chunk0", "weight": 1.0}
         ]})
         .to_string(),
         json!({"associations": [
-            {"subject": "S", "label": "l", "object": "chunk1", "weight": 1.0}
+            {"subject": "S", "label": "rel", "object": "chunk1", "weight": 1.0}
         ]})
         .to_string(),
     ]);
@@ -5515,7 +5515,7 @@ fn checkpoint_resumes_a_killed_multi_chunk_document_without_recalling_completed_
 
     let response0 = chat_ok(
         &json!({"associations": [
-            {"subject": "S", "label": "l", "object": "chunk0", "weight": 1.0}
+            {"subject": "S", "label": "rel", "object": "chunk0", "weight": 1.0}
         ]})
         .to_string(),
     );
@@ -5562,7 +5562,7 @@ fn checkpoint_resumes_a_killed_multi_chunk_document_without_recalling_completed_
     let (url, captured) = stub_chat_server_concurrent(|index, _attempt| {
         chat_ok(
             &json!({"associations": [
-                {"subject": "S", "label": "l", "object": format!("chunk{index}"), "weight": 1.0}
+                {"subject": "S", "label": "rel", "object": format!("chunk{index}"), "weight": 1.0}
             ]})
             .to_string(),
         )
@@ -5791,7 +5791,7 @@ fn cooperative_sigint_stops_between_chunks_and_a_rerun_resumes() {
 
     let response0 = chat_ok(
         &json!({"associations": [
-            {"subject": "S", "label": "l", "object": "chunk0", "weight": 1.0}
+            {"subject": "S", "label": "rel", "object": "chunk0", "weight": 1.0}
         ]})
         .to_string(),
     );
@@ -5863,7 +5863,7 @@ fn cooperative_sigint_stops_between_chunks_and_a_rerun_resumes() {
     let (url, captured) = stub_chat_server_concurrent(|index, _attempt| {
         chat_ok(
             &json!({"associations": [
-                {"subject": "S", "label": "l", "object": format!("chunk{index}"), "weight": 1.0}
+                {"subject": "S", "label": "rel", "object": format!("chunk{index}"), "weight": 1.0}
             ]})
             .to_string(),
         )

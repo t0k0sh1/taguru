@@ -69,7 +69,12 @@ pub(super) struct Run {
     pub(super) client: Option<ChatClient>,
     pub(super) model_name: String,
     pub(super) manifest: Manifest,
-    pub(super) vocabulary: BTreeSet<String>,
+    /// Relation labels this run has settled on, mapped to how many
+    /// associations (plus alias canonicals) used each one so far —
+    /// issue #759's reuse-frequency signal, offered back to
+    /// `system_prompt` so a one-off label isn't indistinguishable from
+    /// an established one.
+    pub(super) vocabulary: BTreeMap<String, usize>,
     /// Issue #758: every concept/label spelling an earlier document of
     /// this run (or `--vocabulary`'s context) settled on, mapped to
     /// what it resolves to — the set a later document's alias must not
@@ -491,7 +496,9 @@ impl Run {
         // self-validation above instead keeps its checkpoint file: the
         // per-chunk outputs already extracted are still good.
         checkpoints.clear();
-        self.vocabulary.extend(extraction.label_vocabulary());
+        for (label, count) in extraction.label_usage_counts() {
+            *self.vocabulary.entry(label).or_insert(0) += count;
+        }
         self.claimed_names.absorb_extraction(&extraction);
         // ADR 0013's accounting half: every mechanical removal is
         // named on stderr, path first — the report line below carries
@@ -1009,7 +1016,9 @@ impl Run {
             .and_then(|file| crate::ingest::parse_batch(std::io::BufReader::new(file)))
         {
             Ok(batch) => {
-                self.vocabulary.extend(batch.label_vocabulary());
+                for (label, count) in batch.label_usage_counts() {
+                    *self.vocabulary.entry(label).or_insert(0) += count;
+                }
                 self.claimed_names.absorb_batch(&batch);
                 Some(batch)
             }

@@ -921,6 +921,63 @@ fn mechanical_pass_never_occurrence_checks_labels() {
     assert_eq!(evaluation.output.associations.len(), 1);
 }
 
+/// #759: a single-character label (most often a bare Japanese
+/// particle picked up as the whole relation) anchors nothing and is
+/// removed mechanically, with accounting — no corrective turn, since
+/// there is no "correct" spelling to recover, only a two-or-more
+/// character judgment the item already fails.
+#[test]
+fn mechanical_pass_removes_a_single_character_label() {
+    let rules = ItemRules {
+        paragraph_count: 1,
+        questions_requested: false,
+    };
+    let answer = serde_json::json!({
+        "associations": [
+            {"subject": "所有権", "label": "は", "object": "Rustの最もユニークな機能"},
+            {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬"},
+        ],
+        "aliases": []
+    });
+    let document = "所有権はRustの最もユニークな機能。青嶺酒造には高瀬がいる。";
+    let evaluation = mechanical_interpret(&answer, &rules, document, &HashSet::new());
+    assert!(evaluation.issues.is_empty());
+    assert_eq!(evaluation.output.associations.len(), 1);
+    assert_eq!(
+        evaluation.output.associations[0].label.as_deref(),
+        Some("杜氏")
+    );
+    assert_eq!(evaluation.removed.len(), 1);
+    assert!(
+        evaluation.removed[0].contains("associations[0]")
+            && evaluation.removed[0].contains("single character"),
+        "{:?}",
+        evaluation.removed
+    );
+}
+
+/// A two-character label survives even when it reads as terse — the
+/// cut is "single character", not "short": `chars().count() < 2`
+/// matches the candidate-name precedent (`candidates.rs`) exactly, so
+/// a genuinely minimal but real relation label is never mistaken for
+/// the particle-collapse case above.
+#[test]
+fn mechanical_pass_keeps_a_two_character_label() {
+    let rules = ItemRules {
+        paragraph_count: 1,
+        questions_requested: false,
+    };
+    let answer = serde_json::json!({
+        "associations": [{"subject": "青嶺酒造", "label": "住所", "object": "新潟県"}],
+        "aliases": []
+    });
+    let evaluation =
+        mechanical_interpret(&answer, &rules, "青嶺酒造の住所は新潟県。", &HashSet::new());
+    assert!(evaluation.issues.is_empty());
+    assert!(evaluation.removed.is_empty());
+    assert_eq!(evaluation.output.associations.len(), 1);
+}
+
 /// Shadowing keeps its corrective turn: the prune removes ONLY what
 /// cannot import (a dangling canonical); an alias whose spelling IS
 /// an association name carries real, judgeable content.
@@ -1483,11 +1540,11 @@ fn candidate_terms_cap_count_and_drop_oversized_or_single_char_tokens() {
 
 #[test]
 fn system_prompt_offers_candidates_only_when_given_and_stays_nonrestrictive() {
-    let without = system_prompt(&BTreeSet::new(), 0, 0, None, &[], &[]);
+    let without = system_prompt(&BTreeMap::new(), 0, 0, None, &[], &[]);
     assert!(!without.contains("Names appearing in this document"));
 
     let terms = vec!["署名鍵".to_string(), "cargo-nextest".to_string()];
-    let with = system_prompt(&BTreeSet::new(), 0, 0, None, &[], &terms);
+    let with = system_prompt(&BTreeMap::new(), 0, 0, None, &[], &terms);
     assert!(with.contains("Names appearing in this document"));
     // The measured prose rendering (re-encoding the list regressed the
     // bench — see candidates_block's comment), framed as data in so
@@ -1911,8 +1968,14 @@ fn merge_folds_duplicates_and_drops_what_the_contract_refuses() {
     assert_eq!(merged.labels["設立年"], "創業年");
     assert_eq!(merged.duplicates, 2); // one triple, one alias pair
     assert_eq!(merged.dropped, 7);
-    assert!(merged.label_vocabulary().contains("杜氏"));
-    assert!(merged.label_vocabulary().contains("創業年"));
+    // "杜氏" is used by one surviving association only; "創業年" is used
+    // by one association PLUS carries the "設立年" alias's canonical —
+    // exact counts, not mere presence, since a broken accumulator
+    // (e.g. `*=` in place of `+=`) would still report both as present
+    // while collapsing every count to zero.
+    let counts = merged.label_usage_counts();
+    assert_eq!(counts.get("杜氏"), Some(&1), "{counts:?}");
+    assert_eq!(counts.get("創業年"), Some(&2), "{counts:?}");
 }
 
 #[test]
@@ -2442,6 +2505,50 @@ fn rendered_batches_pass_the_import_parser() {
     assert_eq!(batch.context, "sake");
     assert_eq!(batch.source, "docs/aomine.md");
     assert!(batch.label_vocabulary().contains("杜氏"));
+    assert_eq!(
+        batch.label_usage_counts().get("杜氏"),
+        Some(&1),
+        "{:?}",
+        batch.label_usage_counts()
+    );
+}
+
+/// #759 review: a document skipped under `--schema` (`absorb_vocabulary`
+/// rereads its already-written batch instead of extracting fresh) must
+/// not leak the reserved `schema:type` label into later prompts — the
+/// same exclusion a freshly extracted document's `Extraction::label_
+/// usage_counts` already applies.
+#[test]
+fn batch_label_usage_counts_excludes_the_reserved_schema_type_label() {
+    let extraction = merge(
+        vec![ModelOutput {
+            associations: vec![
+                association("青嶺酒造", "杜氏", "高瀬", 1.0),
+                association("青嶺酒造", crate::schema::SCHEMA_TYPE_LABEL, "Brewery", 1.0),
+            ],
+            aliases: vec![],
+            questions: Vec::new(),
+        }],
+        2,
+        2,
+    );
+    let body = render_batch(
+        "sake",
+        "docs/aomine.md",
+        None,
+        &extraction,
+        Some("一段落目。\n\n二段落目。"),
+        None,
+        &[],
+    );
+    let batch = crate::ingest::parse_batch(Cursor::new(body.as_bytes()))
+        .expect("extract must never emit what import refuses");
+    let counts = batch.label_usage_counts();
+    assert_eq!(counts.get("杜氏"), Some(&1), "{counts:?}");
+    assert!(
+        !counts.contains_key(crate::schema::SCHEMA_TYPE_LABEL),
+        "{counts:?}"
+    );
 }
 
 #[test]
@@ -2909,8 +3016,9 @@ fn split_labeled_piece_halves_blocks_with_their_labels_repeated() {
 
 #[test]
 fn the_system_prompt_offers_the_accumulated_vocabulary() {
-    assert!(!system_prompt(&BTreeSet::new(), 0, 0, None, &[], &[]).contains("already in use"));
-    let vocabulary: BTreeSet<String> = ["杜氏".to_string(), "創業年".to_string()].into();
+    assert!(!system_prompt(&BTreeMap::new(), 0, 0, None, &[], &[]).contains("already in use"));
+    let vocabulary: BTreeMap<String, usize> =
+        [("杜氏".to_string(), 1), ("創業年".to_string(), 1)].into();
     let prompt = system_prompt(&vocabulary, 0, 0, None, &[], &[]);
     assert!(
         prompt.contains("杜氏") && prompt.contains("創業年"),
@@ -2927,15 +3035,38 @@ fn the_system_prompt_offers_the_accumulated_vocabulary() {
 }
 
 #[test]
+fn the_system_prompt_ranks_labels_by_reuse_count_and_names_a_count_over_one() {
+    // #759: a label many associations already used sorts first and
+    // shows its count; a label used once so far renders bare — the
+    // model gets a signal for which spelling is established without
+    // a redundant "(×1)" on every entry.
+    let vocabulary: BTreeMap<String, usize> = [
+        ("対応フィラメント".to_string(), 3),
+        ("設立年".to_string(), 1),
+    ]
+    .into();
+    let prompt = system_prompt(&vocabulary, 0, 0, None, &[], &[]);
+    assert!(prompt.contains("対応フィラメント (×3)"), "{prompt}");
+    assert!(prompt.contains("設立年"), "{prompt}");
+    assert!(!prompt.contains("設立年 (×1)"), "{prompt}");
+    let block_start = prompt
+        .find("already in use")
+        .expect("vocabulary block present");
+    let higher = prompt[block_start..].find("対応フィラメント").unwrap();
+    let lower = prompt[block_start..].find("設立年").unwrap();
+    assert!(higher < lower, "the higher count sorts first: {prompt}");
+}
+
+#[test]
 fn the_system_prompt_omits_the_fact_budget_clause_by_default() {
     assert!(
-        !system_prompt(&BTreeSet::new(), 0, 0, None, &[], &[]).contains("association(s) total")
+        !system_prompt(&BTreeMap::new(), 0, 0, None, &[], &[]).contains("association(s) total")
     );
 }
 
 #[test]
 fn the_system_prompt_states_the_fact_budget_when_set() {
-    let prompt = system_prompt(&BTreeSet::new(), 0, 5, None, &[], &[]);
+    let prompt = system_prompt(&BTreeMap::new(), 0, 5, None, &[], &[]);
     assert!(
         prompt.contains("at most 5 association(s) total"),
         "{prompt}"
@@ -2950,7 +3081,7 @@ fn the_system_prompt_offers_the_schema_types_and_a_relation_line_when_mode_is_no
         crate::schema::SchemaMode::Warn,
         false,
     );
-    let prompt = system_prompt(&BTreeSet::new(), 0, 0, Some(&schema), &[], &[]);
+    let prompt = system_prompt(&BTreeMap::new(), 0, 0, Some(&schema), &[], &[]);
     assert!(
         prompt.contains("Brewery") && prompt.contains("Person"),
         "{prompt}"
@@ -2970,7 +3101,7 @@ fn the_system_prompt_omits_the_arrow_for_a_relation_constrained_on_one_side_only
         crate::schema::SchemaMode::Warn,
         false,
     );
-    let prompt = system_prompt(&BTreeSet::new(), 0, 0, Some(&schema), &[], &[]);
+    let prompt = system_prompt(&BTreeMap::new(), 0, 0, Some(&schema), &[], &[]);
     assert!(prompt.contains("代表銘柄 domain: Brewery"), "{prompt}");
     assert!(!prompt.contains("any"), "{prompt}");
 }
@@ -2983,11 +3114,37 @@ fn the_system_prompt_omits_the_schema_block_when_mode_is_off() {
         crate::schema::SchemaMode::Off,
         false,
     );
-    let prompt = system_prompt(&BTreeSet::new(), 0, 0, Some(&schema), &[], &[]);
+    let prompt = system_prompt(&BTreeMap::new(), 0, 0, Some(&schema), &[], &[]);
     assert!(!prompt.contains("Brewery"), "{prompt}");
     assert!(
         !prompt.contains(crate::schema::SCHEMA_TYPE_LABEL),
         "{prompt}"
+    );
+}
+
+/// A constrained relation already in the run's own label vocabulary
+/// sorts before one that isn't (so it survives an oversized schema's
+/// `VOCABULARY_CAP` cut first) — deliberately picked so the vocabulary
+/// member is alphabetically LAST, ruling out a coincidental pass from
+/// plain alphabetical order.
+#[test]
+fn schema_block_sorts_a_vocabulary_known_relation_before_an_unknown_one() {
+    let schema = test_schema(
+        &[("Brewery", &[])],
+        &[
+            ("aaa_new", &["Brewery"], &[]),
+            ("zzz_reused", &["Brewery"], &[]),
+        ],
+        crate::schema::SchemaMode::Warn,
+        false,
+    );
+    let vocabulary: BTreeMap<String, usize> = [("zzz_reused".to_string(), 1)].into();
+    let block = schema_block(schema.document(), &vocabulary);
+    let reused_pos = block.find("zzz_reused").expect("present");
+    let new_pos = block.find("aaa_new").expect("present");
+    assert!(
+        reused_pos < new_pos,
+        "a relation already in the run's vocabulary sorts first: {block}"
     );
 }
 

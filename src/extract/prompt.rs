@@ -12,7 +12,7 @@ pub(super) const VOCABULARY_CAP: usize = 200;
 /// everything else is what agents follow live. `schema` folds in ADR
 /// 0009 §11.1's block when one is installed via `--schema`.
 pub(super) fn system_prompt(
-    vocabulary: &BTreeSet<String>,
+    vocabulary: &BTreeMap<String, usize>,
     questions: usize,
     fact_budget: usize,
     schema: Option<&crate::schema::InstalledSchema>,
@@ -65,12 +65,28 @@ pub(super) fn system_prompt(
     if !vocabulary.is_empty() {
         prompt.push_str(
             "\nRelation labels already in use — reuse these exact spellings when one \
-             fits instead of coining a synonym: ",
+             fits instead of coining a synonym. A parenthesized count is how many \
+             associations already used that label (plus any alias that settled on it \
+             as canonical); prefer a higher count over a synonym, and treat an \
+             uncounted one as used only once so far: ",
         );
-        let labels: Vec<&str> = vocabulary
+        let mut ranked: Vec<(&str, usize)> = vocabulary
             .iter()
+            .map(|(label, count)| (label.as_str(), *count))
+            .collect();
+        ranked.sort_by(|(a_label, a_count), (b_label, b_count)| {
+            b_count.cmp(a_count).then_with(|| a_label.cmp(b_label))
+        });
+        let labels: Vec<String> = ranked
+            .into_iter()
             .take(VOCABULARY_CAP)
-            .map(String::as_str)
+            .map(|(label, count)| {
+                if count > 1 {
+                    format!("{label} (×{count})")
+                } else {
+                    label.to_string()
+                }
+            })
             .collect();
         prompt.push_str(&labels.join(", "));
         prompt.push('\n');
@@ -105,7 +121,7 @@ pub(super) fn system_prompt(
 /// THIS document survive the cut on an oversized schema.
 pub(super) fn schema_block(
     document: &crate::schema::SchemaDocument,
-    vocabulary: &BTreeSet<String>,
+    vocabulary: &BTreeMap<String, usize>,
 ) -> String {
     let mut block = String::new();
     if !document.types.is_empty() {
@@ -130,7 +146,7 @@ pub(super) fn schema_block(
         .map(|(label, relation)| (label.as_str(), relation))
         .filter(|(_, relation)| !relation.domain.is_empty() || !relation.range.is_empty())
         .collect();
-    relations.sort_by_key(|(label, _)| (!vocabulary.contains(*label), *label));
+    relations.sort_by_key(|(label, _)| (!vocabulary.contains_key(*label), *label));
     let lines: Vec<String> = relations
         .into_iter()
         .take(VOCABULARY_CAP)
