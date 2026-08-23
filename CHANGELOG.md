@@ -20,6 +20,17 @@ Entries that change an on-disk format or a response shape say so.
   `kind: "run"` record and every `attempt` record carries `run_id`,
   `attempt_seq`, and `piece_id` (additive). Checkpoint units record the
   completion that produced them (`attempt`, defaulted on older files).
+- The trace records every item the model's accepted answer held that
+  the batch does not — mechanically removed (ADR 0013, Stage 1 and the
+  Stage 2 alias prunes), dropped by `merge`'s contract, or folded as a
+  duplicate — as a `loss` record with the item exactly as written, the
+  rule, and **the original text** it was about (the cited paragraph,
+  else the whole piece) (ADR 0024, #786). Removals are structured at
+  the point of removal (`path`/`reason`/`item`; the report line,
+  stderr, and the sidecar's `removed_items` strings are unchanged);
+  checkpoint units store them so, and pre-0.9.5 checkpoints still
+  load. Stderr lists a document's removals per chunk in removal order
+  rather than Stage 2's first.
 
 ## [0.9.4] - 2026-08-23
 

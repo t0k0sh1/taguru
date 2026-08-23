@@ -25,8 +25,88 @@ use super::*;
 /// model calls spent on repair.
 pub(super) struct MechanicalEvaluation {
     pub(super) output: ModelOutput,
-    pub(super) removed: Vec<String>,
+    pub(super) removed: Vec<Removal>,
     pub(super) issues: Vec<String>,
+}
+
+/// One mechanically removed item (ADR 0013), as #786 / ADR 0024
+/// record it: the path-addressed `reason` every report line and
+/// diagnostics record has always carried, plus the item the model
+/// actually wrote (`item`, verbatim JSON — the raw array element for
+/// a Stage 1 removal, the parsed alias for a Stage 2 prune), so the
+/// loss can be read in the original instead of reconstructed from a
+/// message. `Display` is the pre-#786 string, byte for byte, so
+/// stderr, the report line, and `removed_items` are unchanged.
+#[derive(Clone, serde::Serialize, PartialEq)]
+#[cfg_attr(test, derive(Debug))]
+pub(super) struct Removal {
+    pub(super) path: String,
+    pub(super) reason: String,
+    pub(super) item: serde_json::Value,
+}
+
+impl Removal {
+    pub(super) fn new(
+        path: impl Into<String>,
+        reason: impl Into<String>,
+        item: &impl serde::Serialize,
+    ) -> Self {
+        Self {
+            path: path.into(),
+            reason: reason.into(),
+            // Every item here is a serde_json::Value or a derive-
+            // Serialize model struct — never fails; Null rather than
+            // a panic on the impossible path.
+            item: serde_json::to_value(item).unwrap_or(serde_json::Value::Null),
+        }
+    }
+
+    /// Which batch-item kind the path names — `associations[..]` or
+    /// `aliases[..]`; the mechanical pass removes nothing else.
+    pub(super) fn item_kind(&self) -> &'static str {
+        if self.path.contains("associations[") {
+            "association"
+        } else {
+            "alias"
+        }
+    }
+}
+
+impl std::fmt::Display for Removal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.path, self.reason)
+    }
+}
+
+/// A checkpoint written before #786 recorded each removal as its
+/// display string only; it still loads — as a `Removal` with the
+/// string split back into path/reason and no item (`Null`) — so a
+/// resumed document keeps its accounting.
+impl<'de> Deserialize<'de> for Removal {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Either {
+            Structured {
+                path: String,
+                reason: String,
+                #[serde(default)]
+                item: serde_json::Value,
+            },
+            Legacy(String),
+        }
+        Ok(match Either::deserialize(deserializer)? {
+            Either::Structured { path, reason, item } => Self { path, reason, item },
+            Either::Legacy(text) => {
+                let (path, reason) = text.split_once(": ").unwrap_or(("", text.as_str()));
+                Self {
+                    path: path.to_string(),
+                    reason: reason.to_string(),
+                    item: serde_json::Value::Null,
+                }
+            }
+        })
+    }
 }
 
 /// The strict-mode replacement for [`interpret_model_output`]: the
@@ -46,7 +126,7 @@ pub(super) fn mechanical_interpret(
 ) -> MechanicalEvaluation {
     let haystack = normalize_for_occurrence(document);
     let mut issues = Vec::new();
-    let mut removed = Vec::new();
+    let mut removed: Vec<Removal> = Vec::new();
     let empty_map = serde_json::Map::new();
     let obj = value.as_object().unwrap_or(&empty_map);
 
@@ -118,13 +198,14 @@ fn association_mechanically(
     haystack: &str,
     vocabulary: &HashSet<String>,
     issues: &mut Vec<String>,
-    removed: &mut Vec<String>,
+    removed: &mut Vec<Removal>,
 ) -> Option<ModelAssociation> {
     let path = format!("associations[{index}]");
     let Some(obj) = item.as_object() else {
-        removed.push(format!(
-            "{path}: expected an object, got {}",
-            describe_value(item)
+        removed.push(Removal::new(
+            &path,
+            format!("expected an object, got {}", describe_value(item)),
+            item,
         ));
         return None;
     };
@@ -133,7 +214,7 @@ fn association_mechanically(
         .filter_map(|key| field_absence(obj, key).map(|kind| format!("{key} {kind}")))
         .collect();
     if !absent.is_empty() {
-        removed.push(format!("{path}: {}", absent.join(", ")));
+        removed.push(Removal::new(&path, absent.join(", "), item));
         return None;
     }
     let mut item_issues = Vec::new();
@@ -154,9 +235,13 @@ fn association_mechanically(
         .as_deref()
         .expect("no absence and no issue means the field parsed");
     if label.chars().count() < 2 {
-        removed.push(format!(
-            "{path}: label {} is a single character — too generic to be a relation",
-            quote_for_issue(label)
+        removed.push(Removal::new(
+            &path,
+            format!(
+                "label {} is a single character — too generic to be a relation",
+                quote_for_issue(label)
+            ),
+            item,
         ));
         return None;
     }
@@ -183,7 +268,7 @@ fn association_mechanically(
         })
         .collect();
     if !fabricated.is_empty() {
-        removed.push(format!("{path}: {}", fabricated.join(", ")));
+        removed.push(Removal::new(&path, fabricated.join(", "), item));
         return None;
     }
     Some(parsed)
@@ -199,13 +284,14 @@ fn alias_mechanically(
     index: usize,
     item: &serde_json::Value,
     issues: &mut Vec<String>,
-    removed: &mut Vec<String>,
+    removed: &mut Vec<Removal>,
 ) -> Option<ModelAlias> {
     let path = format!("aliases[{index}]");
     let Some(obj) = item.as_object() else {
-        removed.push(format!(
-            "{path}: expected an object, got {}",
-            describe_value(item)
+        removed.push(Removal::new(
+            &path,
+            format!("expected an object, got {}", describe_value(item)),
+            item,
         ));
         return None;
     };
@@ -214,7 +300,7 @@ fn alias_mechanically(
         .filter_map(|key| field_absence(obj, key).map(|kind| format!("{key} {kind}")))
         .collect();
     if !absent.is_empty() {
-        removed.push(format!("{path}: {}", absent.join(", ")));
+        removed.push(Removal::new(&path, absent.join(", "), item));
         return None;
     }
     let mut item_issues = Vec::new();
@@ -224,7 +310,7 @@ fn alias_mechanically(
     {
         // interpret_alias_item's own self-alias issue is in item_issues;
         // it dies with the item rather than becoming a corrective ask.
-        removed.push(format!("{path}: alias equals its canonical"));
+        removed.push(Removal::new(&path, "alias equals its canonical", item));
         return None;
     }
     if !item_issues.is_empty() {
@@ -335,21 +421,14 @@ pub(super) fn name_occurs(haystack: &str, name: &str) -> bool {
 /// corrective message's item indices still match the answer text the
 /// model sees replayed; a dangling alias a correction itself
 /// introduces lands here too, on the same terms.
-pub(super) fn prune_unresolvable_aliases(
-    outputs: &mut [ChunkOutput],
-    chunk_total: usize,
-) -> Vec<String> {
+pub(super) fn prune_unresolvable_aliases(outputs: &mut [ChunkOutput]) -> usize {
     let (concept_names, label_names) = association_name_sets(outputs);
-    let mut removed = Vec::new();
+    let mut count = 0;
     for chunk in outputs.iter_mut() {
-        let prefix = if chunk_total > 1 {
-            format!("chunk {}/{chunk_total} ", chunk.chunk_index + 1)
-        } else {
-            String::new()
-        };
+        let removed = &mut chunk.removed;
         let mut index = 0usize;
         chunk.output.aliases.retain(|alias| {
-            let path = format!("{prefix}aliases[{index}]");
+            let path = format!("aliases[{index}]");
             index += 1;
             let (Some(spelling), Some(canonical), Some(kind)) =
                 (&alias.alias, &alias.canonical, &alias.kind)
@@ -367,14 +446,19 @@ pub(super) fn prune_unresolvable_aliases(
             if names.contains(spelling) || names.contains(canonical) {
                 return true; // resolvable, or shadowing (corrective)
             }
-            removed.push(format!(
-                "{path}: canonical {} names nothing the associations contain",
-                quote_for_issue(canonical)
+            removed.push(Removal::new(
+                path,
+                format!(
+                    "canonical {} names nothing the associations contain",
+                    quote_for_issue(canonical)
+                ),
+                alias,
             ));
+            count += 1;
             false
         });
     }
-    removed
+    count
 }
 
 /// Issue #758: the names earlier documents of this run — and the
@@ -483,21 +567,13 @@ fn claim_aliases(namespace: &mut BTreeMap<String, String>, aliases: &BTreeMap<St
 /// never un-claim a name a previous document settled on. The same
 /// mapping claimed twice (spelling already resolving to this very
 /// canonical) is import's idempotent no-op and survives.
-pub(super) fn prune_claimed_aliases(
-    outputs: &mut [ChunkOutput],
-    chunk_total: usize,
-    claimed: &ClaimedNames,
-) -> Vec<String> {
-    let mut removed = Vec::new();
+pub(super) fn prune_claimed_aliases(outputs: &mut [ChunkOutput], claimed: &ClaimedNames) -> usize {
+    let mut count = 0;
     for chunk in outputs.iter_mut() {
-        let prefix = if chunk_total > 1 {
-            format!("chunk {}/{chunk_total} ", chunk.chunk_index + 1)
-        } else {
-            String::new()
-        };
+        let removed = &mut chunk.removed;
         let mut index = 0usize;
         chunk.output.aliases.retain(|alias| {
-            let path = format!("{prefix}aliases[{index}]");
+            let path = format!("aliases[{index}]");
             index += 1;
             let (Some(spelling), Some(canonical), Some(kind)) =
                 (&alias.alias, &alias.canonical, &alias.kind)
@@ -516,15 +592,21 @@ pub(super) fn prune_claimed_aliases(
             if existing == target {
                 return true; // the same mapping again — import's no-op
             }
-            removed.push(format!(
-                "{path}: alias {} already names a {kind} an earlier document or the target \
-                 context settled on; an alias cannot rewire it (import would refuse the batch)",
-                quote_for_issue(spelling)
+            removed.push(Removal::new(
+                path,
+                format!(
+                    "alias {} already names a {kind} an earlier document or the target \
+                     context settled on; an alias cannot rewire it (import would refuse the \
+                     batch)",
+                    quote_for_issue(spelling)
+                ),
+                alias,
             ));
+            count += 1;
             false
         });
     }
-    removed
+    count
 }
 
 /// The alias index an issue path names (`aliases[3].alias: …`,
@@ -552,9 +634,8 @@ pub(super) fn alias_issue_index(issue: &str) -> Option<usize> {
 pub(super) fn prune_uncorrected_aliases(
     outputs: &mut [ChunkOutput],
     issues_by_output: Vec<(usize, Vec<String>)>,
-    chunk_total: usize,
-) -> Result<Vec<String>, (usize, Vec<String>)> {
-    let mut removed = Vec::new();
+) -> Result<usize, (usize, Vec<String>)> {
+    let mut count = 0;
     for (output_index, issues) in issues_by_output {
         let non_alias: Vec<String> = issues
             .iter()
@@ -565,11 +646,6 @@ pub(super) fn prune_uncorrected_aliases(
             return Err((output_index, non_alias));
         }
         let chunk = &mut outputs[output_index];
-        let prefix = if chunk_total > 1 {
-            format!("chunk {}/{chunk_total} ", chunk.chunk_index + 1)
-        } else {
-            String::new()
-        };
         let mut doomed: Vec<(usize, &String)> = issues
             .iter()
             .filter_map(|issue| alias_issue_index(issue).map(|index| (index, issue)))
@@ -578,12 +654,19 @@ pub(super) fn prune_uncorrected_aliases(
         doomed.dedup_by_key(|(index, _)| *index);
         for (index, issue) in doomed {
             if index < chunk.output.aliases.len() {
-                chunk.output.aliases.remove(index);
-                removed.push(format!(
-                    "{prefix}{issue} — still so after the corrective turn; removed"
+                let alias = chunk.output.aliases.remove(index);
+                // The issue text is `aliases[N]<.field>: <finding>`;
+                // the path half is the item's address, the rest the
+                // finding, as every other Removal splits them.
+                let (path, finding) = issue.split_once(": ").unwrap_or((issue.as_str(), ""));
+                chunk.removed.push(Removal::new(
+                    path,
+                    format!("{finding} — still so after the corrective turn; removed"),
+                    &alias,
                 ));
+                count += 1;
             }
         }
     }
-    Ok(removed)
+    Ok(count)
 }

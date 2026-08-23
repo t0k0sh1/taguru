@@ -98,6 +98,34 @@ impl<'a> TraceItem<'a> {
     }
 }
 
+/// ADR 0024 (#786): one item the model wrote that the batch does
+/// not hold, with the original text it was about. `text` is the cited
+/// paragraph when the item cited a valid one, else the whole piece the
+/// model was shown — the loss is always readable in the original.
+#[derive(serde::Serialize)]
+pub(super) struct TraceLoss<'a> {
+    pub(super) kind: &'static str,
+    /// `association` | `alias` | `question`.
+    pub(super) item: &'static str,
+    /// `removed` (mechanical, ADR 0013 — Stage 1 or a Stage 2 prune)
+    /// | `dropped` (merge's contract) | `duplicate` (merge folded it).
+    pub(super) reason: &'static str,
+    /// The rule or finding, in the report's own words.
+    pub(super) rule: &'a str,
+    /// `removed` only: the item's path in the accepted answer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) path: Option<&'a str>,
+    /// The item as the model wrote it.
+    pub(super) raw: &'a serde_json::Value,
+    pub(super) piece_id: &'a str,
+    pub(super) attempt: Option<&'a AttemptRef>,
+    pub(super) paragraph: Option<u32>,
+    pub(super) text: &'a str,
+    /// `duplicate` only: the piece whose copy the batch holds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) kept_piece_id: Option<&'a str>,
+}
+
 /// What the chunk loop knew about one output, kept past `merge` (which
 /// consumes the `ChunkOutput`s) so the trace can name it.
 pub(super) struct PieceOrigin {
@@ -107,6 +135,11 @@ pub(super) struct PieceOrigin {
     pub(super) paragraph_range: Option<(u32, u32)>,
     pub(super) reused: bool,
     pub(super) attempt: Option<AttemptRef>,
+    /// The piece text the model was shown — a loss without a valid
+    /// paragraph citation is shown against this.
+    pub(super) text: String,
+    /// ADR 0013's removals from this output, as #786 records them.
+    pub(super) removed: Vec<Removal>,
 }
 
 impl PieceOrigin {
@@ -128,15 +161,21 @@ impl PieceOrigin {
                 .as_ref()
                 .is_none_or(|attempt| attempt.run_id != run_id),
             attempt: output.attempt.clone(),
+            text: piece.to_string(),
+            removed: output.removed.clone(),
         }
     }
 }
 
 /// Renders one document's trace (ADR 0023 §3.4), in file order:
 /// `document`, every `chunk`, every `piece`, every `item` in batch
-/// order. `chunks` is the plan's descriptors; `pieces` the chunk
-/// loop's outputs in `merge`'s input order, so [`Extraction::origins`]
-/// indexes straight into it.
+/// order, then (ADR 0024) every `loss` — removals piece by piece, then
+/// merge's drops and duplicates. `chunks` is the plan's descriptors;
+/// `pieces` the chunk loop's outputs in `merge`'s input order, so
+/// [`Extraction::origins`] and [`Loss::origin`] index straight into
+/// it; `paragraphs` the document's canonical paragraphs' text, the
+/// coordinate every `paragraph` field cites.
+#[allow(clippy::too_many_arguments)] // one call site; a struct would only rename the eight
 pub(super) fn render_trace(
     run_id: &str,
     source: &str,
@@ -144,6 +183,7 @@ pub(super) fn render_trace(
     batch_path: &Path,
     chunks: &[ChunkDescriptor],
     pieces: &[PieceOrigin],
+    paragraphs: &[&str],
     extraction: &Extraction,
 ) -> String {
     let mut lines = Vec::new();
@@ -238,6 +278,60 @@ pub(super) fn render_trace(
             item.canonical = Some(canonical);
             push(&item);
         }
+    }
+    // Losses (ADR 0024): each readable in the original — the cited
+    // paragraph, else the piece.
+    let cited = |paragraph: Option<u32>| -> Option<(u32, &str)> {
+        let paragraph = paragraph?;
+        paragraphs
+            .get(paragraph as usize)
+            .map(|text| (paragraph, *text))
+    };
+    for piece in pieces {
+        for removal in &piece.removed {
+            let paragraph = cited(
+                removal
+                    .item
+                    .get("paragraph")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|n| u32::try_from(n).ok()),
+            );
+            push(&TraceLoss {
+                kind: "loss",
+                item: removal.item_kind(),
+                reason: "removed",
+                rule: &removal.reason,
+                path: Some(&removal.path),
+                raw: &removal.item,
+                piece_id: &piece.piece_id,
+                attempt: piece.attempt.as_ref(),
+                paragraph: paragraph.map(|(index, _)| index),
+                text: paragraph.map_or(piece.text.as_str(), |(_, text)| text),
+                kept_piece_id: None,
+            });
+        }
+    }
+    for loss in &extraction.losses {
+        let Some(piece) = pieces.get(loss.origin) else {
+            continue; // a taguru bug; the line is skipped, not invented
+        };
+        let paragraph = cited(loss.paragraph);
+        push(&TraceLoss {
+            kind: "loss",
+            item: loss.kind,
+            reason: loss.reason,
+            rule: &loss.rule,
+            path: None,
+            raw: &loss.item,
+            piece_id: &piece.piece_id,
+            attempt: piece.attempt.as_ref(),
+            paragraph: paragraph.map(|(index, _)| index),
+            text: paragraph.map_or(piece.text.as_str(), |(_, text)| text),
+            kept_piece_id: loss
+                .kept_origin
+                .and_then(|origin| pieces.get(origin))
+                .map(|piece| piece.piece_id.as_str()),
+        });
     }
     lines.join("\n") + "\n"
 }

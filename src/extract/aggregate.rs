@@ -21,6 +21,32 @@ pub(super) struct Extraction {
     /// key. A duplicate folded across outputs is attributed to the
     /// output that was kept, i.e. the first.
     pub(super) origins: BTreeMap<ItemKey, usize>,
+    /// #786 / ADR 0024: every item `merge` counted in `dropped`
+    /// or `duplicates`, with the item as the model wrote it — the
+    /// `duplicates`/`dropped` counters are these records' lengths by
+    /// reason.
+    pub(super) losses: Vec<Loss>,
+}
+
+/// One item `merge` did not keep (#786): what it was, why, which
+/// output it came from, and — for a duplicate — which output's copy
+/// was kept instead. `item` is the model's item verbatim (the parsed
+/// struct re-serialized: absent fields are `null`).
+#[cfg_attr(test, derive(Debug))]
+pub(super) struct Loss {
+    /// `association` | `alias` | `question`.
+    pub(super) kind: &'static str,
+    /// `dropped` (the contract refuses it as written) | `duplicate`
+    /// (an identical item was already kept).
+    pub(super) reason: &'static str,
+    /// The rule, in the report's vocabulary.
+    pub(super) rule: String,
+    pub(super) item: serde_json::Value,
+    pub(super) origin: usize,
+    pub(super) kept_origin: Option<usize>,
+    /// The paragraph the item cited, when it cited a valid one — the
+    /// trace's key to the original text.
+    pub(super) paragraph: Option<u32>,
 }
 
 /// ADR 0023 §3.1: a batch item's identity is its content, exactly as
@@ -437,7 +463,9 @@ pub(super) fn merge(
         duplicates: 0,
         dropped: 0,
         origins: BTreeMap::new(),
+        losses: Vec::new(),
     };
+    let to_value = |item: &dyn erased::Serialize| item.to_value();
     let mut seen: HashSet<(String, String, String)> = HashSet::new();
     let mut seen_questions: HashSet<(u32, String)> = HashSet::new();
     let mut per_paragraph: BTreeMap<u32, usize> = BTreeMap::new();
@@ -445,7 +473,7 @@ pub(super) fn merge(
     for (origin, output) in outputs.into_iter().enumerate() {
         for item in output.questions {
             let paragraph = item.paragraph;
-            let question = item.question.unwrap_or_default();
+            let question = item.question.clone().unwrap_or_default();
             let question = question.trim();
             let shape_ok = paragraph
                 .is_some_and(|paragraph| (paragraph as usize) < paragraph_count)
@@ -454,16 +482,54 @@ pub(super) fn merge(
                 && questions_cap > 0;
             let Some(paragraph) = paragraph.filter(|_| shape_ok) else {
                 extraction.dropped += 1;
+                extraction.losses.push(Loss {
+                    kind: "question",
+                    reason: "dropped",
+                    rule: if questions_cap == 0 {
+                        "questions were not requested (--questions 0)".to_string()
+                    } else {
+                        "paragraph missing or out of range, or question empty or over \
+                         the size cap"
+                            .to_string()
+                    },
+                    item: to_value(&item),
+                    origin,
+                    kept_origin: None,
+                    paragraph: item
+                        .paragraph
+                        .filter(|&paragraph| (paragraph as usize) < paragraph_count),
+                });
                 continue;
             };
             let question_key = (paragraph, question.to_string());
             if seen_questions.contains(&question_key) {
                 extraction.duplicates += 1;
+                extraction.losses.push(Loss {
+                    kind: "question",
+                    reason: "duplicate",
+                    rule: "the same question for the same paragraph was already kept".to_string(),
+                    item: to_value(&item),
+                    origin,
+                    kept_origin: extraction
+                        .origins
+                        .get(&ItemKey::Question(paragraph, question.to_string()))
+                        .copied(),
+                    paragraph: Some(paragraph),
+                });
                 continue;
             }
             let count = per_paragraph.entry(paragraph).or_insert(0);
             if *count >= questions_cap {
                 extraction.dropped += 1;
+                extraction.losses.push(Loss {
+                    kind: "question",
+                    reason: "dropped",
+                    rule: format!("over the --questions cap of {questions_cap} for the paragraph"),
+                    item: to_value(&item),
+                    origin,
+                    kept_origin: None,
+                    paragraph: Some(paragraph),
+                });
                 continue;
             }
             // Only register with seen_questions once the item is actually
@@ -487,11 +553,11 @@ pub(super) fn merge(
             // fold whitespace, so " apple" and "apple" would split into
             // two concept nodes, and the dedup key below would miss the
             // duplicate. The question path above trims the same way.
-            let subject = item.subject.unwrap_or_default();
+            let subject = item.subject.clone().unwrap_or_default();
             let subject = subject.trim();
-            let label = item.label.unwrap_or_default();
+            let label = item.label.clone().unwrap_or_default();
             let label = label.trim();
-            let object = item.object.unwrap_or_default();
+            let object = item.object.clone().unwrap_or_default();
             let object = object.trim();
             let weight = item.weight.unwrap_or(1.0);
             let names_ok = [subject, label, object]
@@ -499,25 +565,61 @@ pub(super) fn merge(
                 .all(|text| !text.is_empty() && text.len() <= MAX_NAME_BYTES);
             // A zero weight asserts nothing; refusing it here beats
             // shipping a fact the graph treats as absent.
+            let cited = item
+                .paragraph
+                .filter(|&paragraph| (paragraph as usize) < paragraph_count);
             if !names_ok
                 || !weight.is_finite()
                 || weight == 0.0
                 || weight.abs() > MAX_ASSOCIATION_WEIGHT
             {
                 extraction.dropped += 1;
+                extraction.losses.push(Loss {
+                    kind: "association",
+                    reason: "dropped",
+                    rule: if names_ok {
+                        format!(
+                            "weight must be finite, non-zero, and at most \
+                             {MAX_ASSOCIATION_WEIGHT} in magnitude"
+                        )
+                    } else {
+                        format!(
+                            "subject, label, and object must each be non-empty and at most \
+                             {MAX_NAME_BYTES} bytes"
+                        )
+                    },
+                    item: to_value(&item),
+                    origin,
+                    kept_origin: None,
+                    paragraph: cited,
+                });
                 continue;
             }
             let key = (subject.to_string(), label.to_string(), object.to_string());
             if !seen.insert(key) {
                 extraction.duplicates += 1;
+                extraction.losses.push(Loss {
+                    kind: "association",
+                    reason: "duplicate",
+                    rule: "the same subject/label/object triple was already kept".to_string(),
+                    item: to_value(&item),
+                    origin,
+                    kept_origin: extraction
+                        .origins
+                        .get(&ItemKey::Association {
+                            subject: subject.to_string(),
+                            label: label.to_string(),
+                            object: object.to_string(),
+                        })
+                        .copied(),
+                    paragraph: cited,
+                });
                 continue;
             }
             // A missing or out-of-range self-report costs only the
             // paragraph tag, never the fact — the item still carries
             // the model's judgment about subject/label/object/weight.
-            let paragraph = item
-                .paragraph
-                .filter(|&paragraph| (paragraph as usize) < paragraph_count);
+            let paragraph = cited;
             extraction.origins.insert(
                 ItemKey::Association {
                     subject: subject.to_string(),
@@ -552,10 +654,19 @@ pub(super) fn merge(
         // `label_names`, which are the trimmed subject/label/object
         // above; an untrimmed spelling or canonical would miss the
         // `names.contains` checks and split the stored alias.
-        let spelling = alias.alias.unwrap_or_default();
+        let spelling = alias.alias.clone().unwrap_or_default();
         let spelling = spelling.trim();
-        let canonical = alias.canonical.unwrap_or_default();
+        let canonical = alias.canonical.clone().unwrap_or_default();
         let canonical = canonical.trim();
+        let lost = |reason: &'static str, rule: String, kept_origin: Option<usize>| Loss {
+            kind: "alias",
+            reason,
+            rule,
+            item: to_value(&alias),
+            origin,
+            kept_origin,
+            paragraph: None,
+        };
         let (namespace, names, key) = match alias.kind.as_deref() {
             Some("concept") => (
                 &mut extraction.concepts,
@@ -569,6 +680,11 @@ pub(super) fn merge(
             ),
             _ => {
                 extraction.dropped += 1;
+                extraction.losses.push(lost(
+                    "dropped",
+                    "kind must be \"concept\" or \"label\"".to_string(),
+                    None,
+                ));
                 continue;
             }
         };
@@ -581,6 +697,17 @@ pub(super) fn merge(
         // never leaves here.
         if !shape_ok || !names.contains(canonical) || names.contains(spelling) {
             extraction.dropped += 1;
+            let rule = if !shape_ok {
+                format!(
+                    "alias must be non-empty, differ from its canonical, and both at most \
+                     {MAX_NAME_BYTES} bytes"
+                )
+            } else if !names.contains(canonical) {
+                "canonical names nothing the associations contain".to_string()
+            } else {
+                "alias is itself a name the associations contain".to_string()
+            };
+            extraction.losses.push(lost("dropped", rule, None));
             continue;
         }
         match namespace.entry(spelling.to_string()) {
@@ -589,13 +716,37 @@ pub(super) fn merge(
                 extraction.origins.insert(key, origin);
             }
             Entry::Occupied(existing) => {
+                let kept_origin = extraction.origins.get(&key).copied();
                 if existing.get().as_str() == canonical {
                     extraction.duplicates += 1;
+                    extraction.losses.push(lost(
+                        "duplicate",
+                        "the same alias mapping was already kept".to_string(),
+                        kept_origin,
+                    ));
                 } else {
                     extraction.dropped += 1;
+                    extraction.losses.push(lost(
+                        "dropped",
+                        "alias already maps to a different canonical in this document".to_string(),
+                        kept_origin,
+                    ));
                 }
             }
         }
     }
     extraction
+}
+
+/// An object-safe serialize seam so one closure in `merge` turns any
+/// of the three model item structs into its JSON value.
+mod erased {
+    pub(super) trait Serialize {
+        fn to_value(&self) -> serde_json::Value;
+    }
+    impl<T: serde::Serialize> Serialize for T {
+        fn to_value(&self) -> serde_json::Value {
+            serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
+        }
+    }
 }

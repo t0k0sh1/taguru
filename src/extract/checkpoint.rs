@@ -89,7 +89,7 @@ pub(super) struct CheckpointUnit {
     /// carried. `default` because a pre-0013 checkpoint file simply
     /// had no removals to record — its units validated fully.
     #[serde(default)]
-    pub(super) removed: Vec<String>,
+    pub(super) removed: Vec<Removal>,
 }
 
 /// One document's durable checkpoint state: the settings it was
