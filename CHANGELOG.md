@@ -41,6 +41,13 @@ Entries that change an on-disk format or a response shape say so.
   The diagnostics sidecar and `TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES`
   are unchanged.
 
+- The trace records the document's own side of coverage: one
+  `paragraph` record per canonical paragraph (`bytes`, `items`,
+  `covered`, and the paragraph's text exactly when no kept item cites
+  it) and, under `--coverage`, one `uncovered` record per gap with the
+  full sentence — stderr's byte-capped quote is unchanged — the
+  paragraph's text, and the owning chunk (ADR 0026, #787).
+
 ### Changed
 
 - `extract`'s stderr lists a document's mechanical removals per chunk

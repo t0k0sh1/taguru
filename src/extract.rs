@@ -143,7 +143,7 @@ use chunking::{
     corrective_validation_message, evaluate_answer, extract_chunk_or_ladder,
     indicates_length_limit, indicates_refusal,
 };
-use coverage::coverage_gaps;
+use coverage::{CoverageGap, coverage_gaps};
 use diagnostics::{DiagnosticsAttempt, removed_item_texts};
 use manifest::{CHECKPOINT_DIR_NAME, batch_file_name, checkpoint_file_name};
 use mechanical::{

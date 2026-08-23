@@ -5049,6 +5049,7 @@ fn render_trace_joins_items_to_pieces_across_a_split_and_a_reuse() {
         &pieces,
         &[],
         &extraction,
+        &[],
     );
     let records: Vec<serde_json::Value> = text
         .lines()
@@ -5402,6 +5403,7 @@ fn render_trace_shows_every_loss_in_the_original_text() {
         &pieces,
         &["alpha text", "beta text", "gamma text"],
         &extraction,
+        &[],
     );
     let losses: Vec<serde_json::Value> = text
         .lines()
@@ -5612,6 +5614,7 @@ fn lossy_parse_drops_are_recorded_as_unparsed_losses() {
         &pieces,
         &["a b"],
         &extraction,
+        &[],
     );
     let losses: Vec<serde_json::Value> = text
         .lines()
@@ -5706,4 +5709,107 @@ fn attempts_log_switch_and_file_name() {
     assert!(first_failure(&warned));
     assert!(!first_failure(&warned));
     assert!(!first_failure(&warned));
+}
+
+// ============== #787 / ADR 0026: paragraph coverage records ==============
+
+/// One `paragraph` record per canonical paragraph — `covered` from the
+/// kept items' citations (associations and questions), the text
+/// attached exactly when nothing cites it — and one `uncovered` record
+/// per coverage gap, with the FULL sentence (stderr's quote is capped)
+/// and the owning chunk.
+#[test]
+fn render_trace_reports_paragraph_coverage_and_gap_sentences() {
+    let long_tail = "の".repeat(GAP_QUOTE_MAX_BYTES);
+    let text = format!("alpha は beta を含む\n\ngamma と delta の関係 {long_tail}\n\nepsilon");
+    let triples = [["alpha", "含む", "beta"]];
+    let gaps = coverage_gaps(&text, &triples);
+    assert_eq!(
+        gaps.len(),
+        1,
+        "paragraph 1's sentence holds an uncovered pair"
+    );
+    assert_eq!(gaps[0].paragraph, 1);
+    assert!(gaps[0].quote.ends_with('…'), "{:?}", gaps[0].quote);
+    assert!(
+        gaps[0].sentence.len() > gaps[0].quote.len(),
+        "the record carries the full sentence"
+    );
+
+    let mut fact = association("alpha", "含む", "beta", 1.0);
+    fact.paragraph = Some(0);
+    let output = chunk_output(ModelOutput {
+        associations: vec![fact],
+        aliases: Vec::new(),
+        questions: vec![ModelQuestion {
+            paragraph: Some(0),
+            question: Some("why?".into()),
+        }],
+    });
+    let paragraphs: Vec<&str> = crate::paragraph::split(&text)
+        .iter()
+        .map(|span| &text[span.start as usize..span.end as usize])
+        .collect();
+    let chunks = vec![ChunkDescriptor {
+        text: text.clone(),
+        sha256: "c0".repeat(32),
+        paragraph_first: 0,
+        paragraph_last: 2,
+    }];
+    let pieces = vec![PieceOrigin::of(&output, "0000000000000001")];
+    let extraction = merge(vec![output.output], 1, paragraphs.len());
+    let rendered = render_trace(
+        "0000000000000001",
+        "doc.md",
+        "d".repeat(64).as_str(),
+        Path::new("out/doc.jsonl"),
+        &chunks,
+        &pieces,
+        &paragraphs,
+        &extraction,
+        &gaps,
+    );
+    let records: Vec<serde_json::Value> = rendered
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let coverage: Vec<&serde_json::Value> = records
+        .iter()
+        .filter(|record| record["kind"] == "paragraph")
+        .collect();
+    assert_eq!(coverage.len(), 3, "{coverage:?}");
+    // Paragraph 0: cited by the association AND the question.
+    assert_eq!(coverage[0]["paragraph"], 0);
+    assert_eq!(coverage[0]["covered"], true);
+    assert_eq!(coverage[0]["items"], 2);
+    assert!(coverage[0].get("text").is_none(), "covered → no text");
+    assert_eq!(coverage[0]["bytes"], paragraphs[0].len());
+    // Paragraphs 1 and 2: uncited, text attached.
+    for (record, paragraph) in coverage[1..].iter().zip(&paragraphs[1..]) {
+        assert_eq!(record["covered"], false);
+        assert_eq!(record["items"], 0);
+        assert_eq!(record["text"], *paragraph);
+    }
+    let uncovered: Vec<&serde_json::Value> = records
+        .iter()
+        .filter(|record| record["kind"] == "uncovered")
+        .collect();
+    assert_eq!(uncovered.len(), 1, "{uncovered:?}");
+    assert_eq!(uncovered[0]["paragraph"], 1);
+    assert_eq!(uncovered[0]["sentence"], gaps[0].sentence);
+    assert_eq!(uncovered[0]["text"], paragraphs[1]);
+    assert_eq!(uncovered[0]["chunk_index"], 0);
+    assert_eq!(uncovered[0]["chunk_sha256"], "c0".repeat(32));
+    // Records land after every loss record, paragraphs before gaps.
+    let kinds: Vec<&str> = records
+        .iter()
+        .map(|record| record["kind"].as_str().unwrap())
+        .collect();
+    let first_paragraph = kinds.iter().position(|kind| *kind == "paragraph").unwrap();
+    assert!(
+        kinds[..first_paragraph]
+            .iter()
+            .all(|kind| *kind != "uncovered")
+    );
+    assert_eq!(kinds.last(), Some(&"uncovered"));
 }
