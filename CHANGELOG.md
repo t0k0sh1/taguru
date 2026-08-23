@@ -32,6 +32,15 @@ Entries that change an on-disk format or a response shape say so.
   load. Under `--lossy`, array elements that are not objects — dropped
   at parse — are recorded the same way.
 
+- `extract` keeps every completion's **full prompt and full answer**
+  beside the batch — `<out>/.extract-trace/<batch stem>.attempts.jsonl`,
+  on by default (`TAGURU_EXTRACT_TRACE_ATTEMPTS=off` to disable): the
+  system prompt once by hash, every other turn and the answer in full,
+  the sidecar's ids and classification on each record; kept when a
+  document fails, appended to on a checkpoint resume (ADR 0025, #788).
+  The diagnostics sidecar and `TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES`
+  are unchanged.
+
 ### Changed
 
 - `extract`'s stderr lists a document's mechanical removals per chunk

@@ -4234,7 +4234,10 @@ fn drive_ladder_on(
         fact_budget: 0,
         rules: None,
         vocabulary: &vocabulary,
-        sink: None,
+        observers: &Observers {
+            sink: None,
+            log: None,
+        },
         checkpoints: &checkpoints,
     };
     let outcome = extract_piece(&context, piece);
@@ -5668,4 +5671,39 @@ fn lossy_parse_drops_are_recorded_as_unparsed_losses() {
     )
     .unwrap();
     assert!(legacy.unparsed.is_empty());
+}
+
+// ================== #788 / ADR 0025: the attempts log ==================
+
+#[test]
+fn attempts_log_switch_and_file_name() {
+    for on in [
+        None,
+        Some(""),
+        Some("on"),
+        Some("1"),
+        Some("full"),
+        Some("yes"),
+    ] {
+        assert!(attempts_log_enabled_from(on), "{on:?}");
+    }
+    for off in [
+        Some("off"),
+        Some("OFF"),
+        Some(" 0 "),
+        Some("false"),
+        Some("no"),
+    ] {
+        assert!(!attempts_log_enabled_from(off), "{off:?}");
+    }
+    assert_eq!(
+        attempts_file_name("docs__a.md-1aa4e2eba4299c6b.jsonl"),
+        "docs__a.md-1aa4e2eba4299c6b.attempts.jsonl"
+    );
+    assert_eq!(attempts_file_name("odd"), "odd.attempts.jsonl");
+    // The warn-once gate fires exactly once.
+    let warned = AtomicBool::new(false);
+    assert!(first_failure(&warned));
+    assert!(!first_failure(&warned));
+    assert!(!first_failure(&warned));
 }

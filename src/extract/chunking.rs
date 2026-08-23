@@ -108,7 +108,7 @@ pub(super) fn extract_chunk(
     fact_budget: usize,
     rules: Option<&ItemRules>,
     vocabulary: &HashSet<String>,
-    sink: Option<&DiagnosticsSink>,
+    observers: &Observers,
 ) -> Result<ChunkOutput, String> {
     let base = [
         serde_json::json!({"role": "system", "content": system}),
@@ -137,29 +137,32 @@ pub(super) fn extract_chunk(
         let response = match client.complete(&messages, &RequestOptions::default()) {
             Ok(response) => response,
             Err(error) => {
-                if let Some(sink) = sink {
+                {
                     let message = error.to_string();
-                    sink.emit(DiagnosticsAttempt {
-                        source,
-                        stage: "item",
-                        chunk_index,
-                        attempt,
-                        attempt_ref: &attempt_ref,
-                        piece_id,
-                        max_attempts: policy.max_attempts,
-                        state: match error.kind {
-                            ChatFailure::Timeout => "timeout",
-                            ChatFailure::Transport => "transport",
+                    observers.emit(
+                        &DiagnosticsAttempt {
+                            source,
+                            stage: "item",
+                            chunk_index,
+                            attempt,
+                            attempt_ref: &attempt_ref,
+                            piece_id,
+                            max_attempts: policy.max_attempts,
+                            state: match error.kind {
+                                ChatFailure::Timeout => "timeout",
+                                ChatFailure::Transport => "transport",
+                            },
+                            length_limited: false,
+                            elapsed: started.elapsed(),
+                            response: None,
+                            parse_error: Some(&message),
+                            validation_issues: None,
+                            removed_items: None,
+                            piece_bytes: None,
+                            requested_max_tokens: None,
                         },
-                        length_limited: false,
-                        elapsed: started.elapsed(),
-                        response: None,
-                        parse_error: Some(&message),
-                        validation_issues: None,
-                        removed_items: None,
-                        piece_bytes: None,
-                        requested_max_tokens: None,
-                    });
+                        &messages,
+                    );
                 }
                 return Err(error.into());
             }
@@ -172,30 +175,35 @@ pub(super) fn extract_chunk(
             vocabulary,
         ) {
             Ok(evaluated) => {
-                if let Some(sink) = sink {
-                    sink.emit(DiagnosticsAttempt {
-                        source,
-                        stage: "item",
-                        chunk_index,
-                        attempt,
-                        attempt_ref: &attempt_ref,
-                        piece_id,
-                        max_attempts: policy.max_attempts,
-                        state: "stop_valid",
-                        // Legacy accepts a length-terminated answer that
-                        // still parses (today's behavior, unchanged) —
-                        // this flag alone keeps that truncation visible
-                        // in diagnostics without turning it into a
-                        // failure the run never treated as one.
-                        length_limited: indicates_length_limit(response.finish_reason.as_deref()),
-                        elapsed,
-                        response: Some(&response),
-                        parse_error: None,
-                        validation_issues: None,
-                        removed_items: removed_item_texts(&evaluated.removed),
-                        piece_bytes: None,
-                        requested_max_tokens: None,
-                    });
+                {
+                    observers.emit(
+                        &DiagnosticsAttempt {
+                            source,
+                            stage: "item",
+                            chunk_index,
+                            attempt,
+                            attempt_ref: &attempt_ref,
+                            piece_id,
+                            max_attempts: policy.max_attempts,
+                            state: "stop_valid",
+                            // Legacy accepts a length-terminated answer that
+                            // still parses (today's behavior, unchanged) —
+                            // this flag alone keeps that truncation visible
+                            // in diagnostics without turning it into a
+                            // failure the run never treated as one.
+                            length_limited: indicates_length_limit(
+                                response.finish_reason.as_deref(),
+                            ),
+                            elapsed,
+                            response: Some(&response),
+                            parse_error: None,
+                            validation_issues: None,
+                            removed_items: removed_item_texts(&evaluated.removed),
+                            piece_bytes: None,
+                            requested_max_tokens: None,
+                        },
+                        &messages,
+                    );
                 }
                 return Ok(ChunkOutput {
                     output: evaluated.output,
@@ -210,7 +218,7 @@ pub(super) fn extract_chunk(
             }
             Err(AnswerFault::Syntax(error)) => {
                 let length_limited = indicates_length_limit(response.finish_reason.as_deref());
-                if let Some(sink) = sink {
+                {
                     // Diagnostics-only classification — is_empty_answer
                     // has no bearing on the corrective text below, which
                     // stays the ordinary Syntax path exactly as before.
@@ -219,24 +227,27 @@ pub(super) fn extract_chunk(
                     } else {
                         "stop_malformed"
                     };
-                    sink.emit(DiagnosticsAttempt {
-                        source,
-                        stage: "item",
-                        chunk_index,
-                        attempt,
-                        attempt_ref: &attempt_ref,
-                        piece_id,
-                        max_attempts: policy.max_attempts,
-                        state,
-                        length_limited,
-                        elapsed,
-                        response: Some(&response),
-                        parse_error: Some(&error),
-                        validation_issues: None,
-                        removed_items: None,
-                        piece_bytes: None,
-                        requested_max_tokens: None,
-                    });
+                    observers.emit(
+                        &DiagnosticsAttempt {
+                            source,
+                            stage: "item",
+                            chunk_index,
+                            attempt,
+                            attempt_ref: &attempt_ref,
+                            piece_id,
+                            max_attempts: policy.max_attempts,
+                            state,
+                            length_limited,
+                            elapsed,
+                            response: Some(&response),
+                            parse_error: Some(&error),
+                            validation_issues: None,
+                            removed_items: None,
+                            piece_bytes: None,
+                            requested_max_tokens: None,
+                        },
+                        &messages,
+                    );
                 }
                 last_diagnosis = format!("the model would not produce the JSON object: {error}");
                 pending = Some(CorrectiveAsk::Syntax {
@@ -251,25 +262,28 @@ pub(super) fn extract_chunk(
                     issues.len(),
                     issues.join("; ")
                 );
-                if let Some(sink) = sink {
-                    sink.emit(DiagnosticsAttempt {
-                        source,
-                        stage: "item",
-                        chunk_index,
-                        attempt,
-                        attempt_ref: &attempt_ref,
-                        piece_id,
-                        max_attempts: policy.max_attempts,
-                        state: "stop_malformed",
-                        length_limited: false,
-                        elapsed,
-                        response: Some(&response),
-                        parse_error: Some(&diagnosis),
-                        validation_issues: Some(&issues),
-                        removed_items: None,
-                        piece_bytes: None,
-                        requested_max_tokens: None,
-                    });
+                {
+                    observers.emit(
+                        &DiagnosticsAttempt {
+                            source,
+                            stage: "item",
+                            chunk_index,
+                            attempt,
+                            attempt_ref: &attempt_ref,
+                            piece_id,
+                            max_attempts: policy.max_attempts,
+                            state: "stop_malformed",
+                            length_limited: false,
+                            elapsed,
+                            response: Some(&response),
+                            parse_error: Some(&diagnosis),
+                            validation_issues: Some(&issues),
+                            removed_items: None,
+                            piece_bytes: None,
+                            requested_max_tokens: None,
+                        },
+                        &messages,
+                    );
                 }
                 last_diagnosis = diagnosis;
                 pending = Some(CorrectiveAsk::Invalid { issues });
@@ -343,7 +357,7 @@ pub(super) fn extract_chunk_or_ladder(
     ladder: Option<&LadderConfig>,
     rules: Option<&ItemRules>,
     vocabulary: &HashSet<String>,
-    sink: Option<&DiagnosticsSink>,
+    observers: &Observers,
     checkpoints: &CheckpointStore,
 ) -> Result<Vec<ChunkOutput>, String> {
     match ladder {
@@ -363,7 +377,7 @@ pub(super) fn extract_chunk_or_ladder(
                 fact_budget,
                 rules,
                 vocabulary,
-                sink,
+                observers,
             )?;
             record_checkpoint(checkpoints, source, piece, &output);
             Ok(vec![output])
@@ -380,7 +394,7 @@ pub(super) fn extract_chunk_or_ladder(
                 fact_budget,
                 rules,
                 vocabulary,
-                sink,
+                observers,
                 checkpoints,
             };
             extract_piece(&context, piece)
@@ -404,7 +418,7 @@ pub(super) struct PieceContext<'a> {
     pub(super) fact_budget: usize,
     pub(super) rules: Option<&'a ItemRules>,
     pub(super) vocabulary: &'a HashSet<String>,
-    pub(super) sink: Option<&'a DiagnosticsSink>,
+    pub(super) observers: &'a Observers<'a>,
     pub(super) checkpoints: &'a CheckpointStore,
 }
 
@@ -601,6 +615,7 @@ pub(super) fn extract_round(
         serde_json::json!({"role": "system", "content": context.system}),
         serde_json::json!({"role": "user", "content": user}),
     ];
+    let observers = context.observers;
     let mut last_diagnosis = String::new();
     let mut prior_bad_answer: Option<String> = None;
     let mut pending: Option<CorrectiveAsk> = None;
@@ -625,29 +640,32 @@ pub(super) fn extract_round(
         let response = match context.client.complete(&messages, &options) {
             Ok(response) => response,
             Err(error) => {
-                if let Some(sink) = context.sink {
+                {
                     let message = error.to_string();
-                    sink.emit(DiagnosticsAttempt {
-                        source: context.source,
-                        stage: "item",
-                        chunk_index: context.chunk_index,
-                        attempt,
-                        attempt_ref: &attempt_ref,
-                        piece_id,
-                        max_attempts: context.policy.max_attempts,
-                        state: match error.kind {
-                            ChatFailure::Timeout => "timeout",
-                            ChatFailure::Transport => "transport",
+                    observers.emit(
+                        &DiagnosticsAttempt {
+                            source: context.source,
+                            stage: "item",
+                            chunk_index: context.chunk_index,
+                            attempt,
+                            attempt_ref: &attempt_ref,
+                            piece_id,
+                            max_attempts: context.policy.max_attempts,
+                            state: match error.kind {
+                                ChatFailure::Timeout => "timeout",
+                                ChatFailure::Transport => "transport",
+                            },
+                            length_limited: false,
+                            elapsed: started.elapsed(),
+                            response: None,
+                            parse_error: Some(&message),
+                            validation_issues: None,
+                            removed_items: None,
+                            piece_bytes: Some(piece_bytes),
+                            requested_max_tokens: max_tokens,
                         },
-                        length_limited: false,
-                        elapsed: started.elapsed(),
-                        response: None,
-                        parse_error: Some(&message),
-                        validation_issues: None,
-                        removed_items: None,
-                        piece_bytes: Some(piece_bytes),
-                        requested_max_tokens: max_tokens,
-                    });
+                        &messages,
+                    );
                 }
                 // ADR 0020: a timeout is the ladder's signal that this
                 // piece is too big for the time budget — the same
@@ -667,25 +685,28 @@ pub(super) fn extract_round(
             context.vocabulary,
         ) {
             AttemptOutcome::Valid(evaluated) => {
-                if let Some(sink) = context.sink {
-                    sink.emit(DiagnosticsAttempt {
-                        source: context.source,
-                        stage: "item",
-                        chunk_index: context.chunk_index,
-                        attempt,
-                        attempt_ref: &attempt_ref,
-                        piece_id,
-                        max_attempts: context.policy.max_attempts,
-                        state: "stop_valid",
-                        length_limited: false,
-                        elapsed,
-                        response: Some(&response),
-                        parse_error: None,
-                        validation_issues: None,
-                        removed_items: removed_item_texts(&evaluated.removed),
-                        piece_bytes: Some(piece_bytes),
-                        requested_max_tokens: max_tokens,
-                    });
+                {
+                    observers.emit(
+                        &DiagnosticsAttempt {
+                            source: context.source,
+                            stage: "item",
+                            chunk_index: context.chunk_index,
+                            attempt,
+                            attempt_ref: &attempt_ref,
+                            piece_id,
+                            max_attempts: context.policy.max_attempts,
+                            state: "stop_valid",
+                            length_limited: false,
+                            elapsed,
+                            response: Some(&response),
+                            parse_error: None,
+                            validation_issues: None,
+                            removed_items: removed_item_texts(&evaluated.removed),
+                            piece_bytes: Some(piece_bytes),
+                            requested_max_tokens: max_tokens,
+                        },
+                        &messages,
+                    );
                 }
                 return RoundOutcome::Valid(Box::new(ChunkOutput {
                     output: evaluated.output,
@@ -699,78 +720,87 @@ pub(super) fn extract_round(
                 }));
             }
             AttemptOutcome::LengthLimited => {
-                if let Some(sink) = context.sink {
+                {
                     let reason = response.finish_reason.as_deref().unwrap_or("length");
                     let message = format!(
                         "the answer was cut off at the output limit (finish_reason {reason})"
                     );
-                    sink.emit(DiagnosticsAttempt {
-                        source: context.source,
-                        stage: "item",
-                        chunk_index: context.chunk_index,
-                        attempt,
-                        attempt_ref: &attempt_ref,
-                        piece_id,
-                        max_attempts: context.policy.max_attempts,
-                        state: "length_limited",
-                        length_limited: true,
-                        elapsed,
-                        response: Some(&response),
-                        parse_error: Some(&message),
-                        validation_issues: None,
-                        removed_items: None,
-                        piece_bytes: Some(piece_bytes),
-                        requested_max_tokens: max_tokens,
-                    });
+                    observers.emit(
+                        &DiagnosticsAttempt {
+                            source: context.source,
+                            stage: "item",
+                            chunk_index: context.chunk_index,
+                            attempt,
+                            attempt_ref: &attempt_ref,
+                            piece_id,
+                            max_attempts: context.policy.max_attempts,
+                            state: "length_limited",
+                            length_limited: true,
+                            elapsed,
+                            response: Some(&response),
+                            parse_error: Some(&message),
+                            validation_issues: None,
+                            removed_items: None,
+                            piece_bytes: Some(piece_bytes),
+                            requested_max_tokens: max_tokens,
+                        },
+                        &messages,
+                    );
                 }
                 return RoundOutcome::LengthLimited;
             }
             AttemptOutcome::Refusal(reason) => {
-                if let Some(sink) = context.sink {
+                {
                     let message =
                         format!("the provider refused this content (finish_reason {reason})");
-                    sink.emit(DiagnosticsAttempt {
-                        source: context.source,
-                        stage: "item",
-                        chunk_index: context.chunk_index,
-                        attempt,
-                        attempt_ref: &attempt_ref,
-                        piece_id,
-                        max_attempts: context.policy.max_attempts,
-                        state: "refusal",
-                        length_limited: false,
-                        elapsed,
-                        response: Some(&response),
-                        parse_error: Some(&message),
-                        validation_issues: None,
-                        removed_items: None,
-                        piece_bytes: Some(piece_bytes),
-                        requested_max_tokens: max_tokens,
-                    });
+                    observers.emit(
+                        &DiagnosticsAttempt {
+                            source: context.source,
+                            stage: "item",
+                            chunk_index: context.chunk_index,
+                            attempt,
+                            attempt_ref: &attempt_ref,
+                            piece_id,
+                            max_attempts: context.policy.max_attempts,
+                            state: "refusal",
+                            length_limited: false,
+                            elapsed,
+                            response: Some(&response),
+                            parse_error: Some(&message),
+                            validation_issues: None,
+                            removed_items: None,
+                            piece_bytes: Some(piece_bytes),
+                            requested_max_tokens: max_tokens,
+                        },
+                        &messages,
+                    );
                 }
                 return RoundOutcome::Refusal(reason);
             }
             AttemptOutcome::Empty => {
                 let diagnosis = empty_answer_diagnosis();
-                if let Some(sink) = context.sink {
-                    sink.emit(DiagnosticsAttempt {
-                        source: context.source,
-                        stage: "item",
-                        chunk_index: context.chunk_index,
-                        attempt,
-                        attempt_ref: &attempt_ref,
-                        piece_id,
-                        max_attempts: context.policy.max_attempts,
-                        state: "empty",
-                        length_limited: false,
-                        elapsed,
-                        response: Some(&response),
-                        parse_error: Some(&diagnosis),
-                        validation_issues: None,
-                        removed_items: None,
-                        piece_bytes: Some(piece_bytes),
-                        requested_max_tokens: max_tokens,
-                    });
+                {
+                    observers.emit(
+                        &DiagnosticsAttempt {
+                            source: context.source,
+                            stage: "item",
+                            chunk_index: context.chunk_index,
+                            attempt,
+                            attempt_ref: &attempt_ref,
+                            piece_id,
+                            max_attempts: context.policy.max_attempts,
+                            state: "empty",
+                            length_limited: false,
+                            elapsed,
+                            response: Some(&response),
+                            parse_error: Some(&diagnosis),
+                            validation_issues: None,
+                            removed_items: None,
+                            piece_bytes: Some(piece_bytes),
+                            requested_max_tokens: max_tokens,
+                        },
+                        &messages,
+                    );
                 }
                 if empty_corrected {
                     return RoundOutcome::Failed(diagnosis);
@@ -795,25 +825,28 @@ pub(super) fn extract_round(
                         context.source
                     );
                 }
-                if let Some(sink) = context.sink {
-                    sink.emit(DiagnosticsAttempt {
-                        source: context.source,
-                        stage: "item",
-                        chunk_index: context.chunk_index,
-                        attempt,
-                        attempt_ref: &attempt_ref,
-                        piece_id,
-                        max_attempts: context.policy.max_attempts,
-                        state: "stop_malformed",
-                        length_limited: false,
-                        elapsed,
-                        response: Some(&response),
-                        parse_error: Some(&error),
-                        validation_issues: None,
-                        removed_items: None,
-                        piece_bytes: Some(piece_bytes),
-                        requested_max_tokens: max_tokens,
-                    });
+                {
+                    observers.emit(
+                        &DiagnosticsAttempt {
+                            source: context.source,
+                            stage: "item",
+                            chunk_index: context.chunk_index,
+                            attempt,
+                            attempt_ref: &attempt_ref,
+                            piece_id,
+                            max_attempts: context.policy.max_attempts,
+                            state: "stop_malformed",
+                            length_limited: false,
+                            elapsed,
+                            response: Some(&response),
+                            parse_error: Some(&error),
+                            validation_issues: None,
+                            removed_items: None,
+                            piece_bytes: Some(piece_bytes),
+                            requested_max_tokens: max_tokens,
+                        },
+                        &messages,
+                    );
                 }
                 last_diagnosis = format!("the model would not produce the JSON object: {error}");
                 pending = Some(CorrectiveAsk::Syntax {
@@ -834,25 +867,28 @@ pub(super) fn extract_round(
                     issues.len(),
                     issues.join("; ")
                 );
-                if let Some(sink) = context.sink {
-                    sink.emit(DiagnosticsAttempt {
-                        source: context.source,
-                        stage: "item",
-                        chunk_index: context.chunk_index,
-                        attempt,
-                        attempt_ref: &attempt_ref,
-                        piece_id,
-                        max_attempts: context.policy.max_attempts,
-                        state: "stop_malformed",
-                        length_limited: false,
-                        elapsed,
-                        response: Some(&response),
-                        parse_error: Some(&diagnosis),
-                        validation_issues: Some(&issues),
-                        removed_items: None,
-                        piece_bytes: Some(piece_bytes),
-                        requested_max_tokens: max_tokens,
-                    });
+                {
+                    observers.emit(
+                        &DiagnosticsAttempt {
+                            source: context.source,
+                            stage: "item",
+                            chunk_index: context.chunk_index,
+                            attempt,
+                            attempt_ref: &attempt_ref,
+                            piece_id,
+                            max_attempts: context.policy.max_attempts,
+                            state: "stop_malformed",
+                            length_limited: false,
+                            elapsed,
+                            response: Some(&response),
+                            parse_error: Some(&diagnosis),
+                            validation_issues: Some(&issues),
+                            removed_items: None,
+                            piece_bytes: Some(piece_bytes),
+                            requested_max_tokens: max_tokens,
+                        },
+                        &messages,
+                    );
                 }
                 last_diagnosis = diagnosis;
                 pending = Some(CorrectiveAsk::Invalid { issues });
