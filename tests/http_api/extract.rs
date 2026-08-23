@@ -6659,26 +6659,18 @@ fn attempts_log_keeps_every_completions_full_prompt_and_answer() {
     let _ = std::fs::remove_dir_all(&diag_dir);
 }
 
+/// Mirrors `crate::extract::sha256_hex` without depending on the
+/// library crate from an integration test — same pattern as
+/// evaluate.rs's thresholds digest.
 fn sha256_hex_of(text: &str) -> String {
-    use std::process::Command;
-    // No sha2 crate in the test harness: shell out, which every CI
-    // runner and dev box has.
-    let output = Command::new("shasum")
-        .args(["-a", "256"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .and_then(|mut child| {
-            use std::io::Write;
-            child.stdin.take().unwrap().write_all(text.as_bytes())?;
-            child.wait_with_output()
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write;
+    Sha256::digest(text.as_bytes())
+        .iter()
+        .fold(String::with_capacity(64), |mut hex, byte| {
+            let _ = write!(hex, "{byte:02x}");
+            hex
         })
-        .expect("shasum runs");
-    String::from_utf8_lossy(&output.stdout)
-        .split_whitespace()
-        .next()
-        .unwrap()
-        .to_string()
 }
 
 /// A document that fails keeps its attempts log (that is what the log

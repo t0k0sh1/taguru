@@ -821,6 +821,34 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       line and never fails the document: the batch and the manifest are the truth, the trace
       is advisory.
     </p>
+    <h3 id="attempts">The attempts log: every prompt and every answer, in full</h3>
+    <p>
+      Beside the trace, <code>&lt;out&gt;/.extract-trace/&lt;batch stem&gt;.attempts.jsonl</code>
+      keeps the text of every conversation the document had with the model, by default
+      (<a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0025-attempts-log.md">ADR
+      0025</a>): one <code>document</code> record per run over the document (<code>run_id</code>,
+      <code>source</code>, <code>document_sha256</code>, <code>resumed</code>); the system prompt
+      once, in full, as a <code>system</code> record (<code>sha256</code>, <code>bytes</code>,
+      <code>content</code>) — it is fixed for the document, so attempts name it by hash; and one
+      <code>attempt</code> per completion, in issue order, carrying the sidecar's own fields
+      (<code>run_id</code>, <code>attempt_seq</code>, <code>piece_id</code>, <code>stage</code>,
+      <code>attempt</code>, <code>state</code>, <code>finish_reason</code>, token counts, …) plus
+      <code>messages</code> — every turn as sent, the system turn as
+      <code>{role, system_sha256}</code> and the rest as <code>{role, content}</code> in full, the
+      replayed prior answer and corrective ask of a retry included — and <code>answer</code>, the
+      model's final text in full (<code>null</code> for <code>timeout</code>/<code>transport</code>).
+      Nothing is capped. It is written incrementally (a killed run keeps every completion made),
+      <b>kept when the document fails</b> — that is what it is for — and, on a checkpoint resume,
+      appended to rather than truncated, so it spans exactly the runs that built the batch; a
+      fresh start (<code>--force</code>, a changed document) truncates it. Joins: the sidecar by
+      <code>(run_id, attempt_seq)</code>, the trace's <code>piece</code> by <code>piece_id</code>
+      and <code>attempt</code>, a <code>loss</code>'s <code>path</code> into <code>answer</code>.
+      Measured on the 0.9.3 field corpus it is 5–70 KiB per document.
+      <code>TAGURU_EXTRACT_TRACE_ATTEMPTS=off</code> switches it off. The diagnostics sidecar is
+      unchanged: metadata only, <code>TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES</code> still the capped
+      opt-in — the sidecar is the file to hand to someone else; the attempts log stays with the
+      data, exposing no more of the document than the batch and checkpoint beside it already do.
+    </p>
   </section>
 
   <section id="trust">
