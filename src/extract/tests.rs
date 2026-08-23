@@ -2513,6 +2513,44 @@ fn rendered_batches_pass_the_import_parser() {
     );
 }
 
+/// #759 review: a document skipped under `--schema` (`absorb_vocabulary`
+/// rereads its already-written batch instead of extracting fresh) must
+/// not leak the reserved `schema:type` label into later prompts — the
+/// same exclusion a freshly extracted document's `Extraction::label_
+/// usage_counts` already applies.
+#[test]
+fn batch_label_usage_counts_excludes_the_reserved_schema_type_label() {
+    let extraction = merge(
+        vec![ModelOutput {
+            associations: vec![
+                association("青嶺酒造", "杜氏", "高瀬", 1.0),
+                association("青嶺酒造", crate::schema::SCHEMA_TYPE_LABEL, "Brewery", 1.0),
+            ],
+            aliases: vec![],
+            questions: Vec::new(),
+        }],
+        2,
+        2,
+    );
+    let body = render_batch(
+        "sake",
+        "docs/aomine.md",
+        None,
+        &extraction,
+        Some("一段落目。\n\n二段落目。"),
+        None,
+        &[],
+    );
+    let batch = crate::ingest::parse_batch(Cursor::new(body.as_bytes()))
+        .expect("extract must never emit what import refuses");
+    let counts = batch.label_usage_counts();
+    assert_eq!(counts.get("杜氏"), Some(&1), "{counts:?}");
+    assert!(
+        !counts.contains_key(crate::schema::SCHEMA_TYPE_LABEL),
+        "{counts:?}"
+    );
+}
+
 #[test]
 fn a_stripped_passage_strips_the_paragraph_locators_too() {
     // The model tags facts with paragraph numbers unconditionally —

@@ -101,6 +101,11 @@ impl Batch {
     /// `absorb_vocabulary` (issue #759) folds these into the run's
     /// reuse-frequency signal when a skipped document's batch is
     /// reread, the same way live extraction output counts its own.
+    /// `schema:type` is excluded, matching
+    /// `Extraction::label_usage_counts`'s ADR 0009 §6.3 exclusion 2 —
+    /// without it, a document skipped under `--schema` would leak the
+    /// reserved label into later prompts that a freshly extracted one
+    /// never would.
     pub(crate) fn label_usage_counts(&self) -> BTreeMap<String, usize> {
         let mut counts = BTreeMap::new();
         for label in self
@@ -108,6 +113,7 @@ impl Batch {
             .iter()
             .map(|op| &op.label)
             .chain(self.labels.values())
+            .filter(|label| label.as_str() != crate::schema::SCHEMA_TYPE_LABEL)
         {
             *counts.entry(label.clone()).or_insert(0) += 1;
         }

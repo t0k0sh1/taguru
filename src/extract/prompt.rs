@@ -66,8 +66,9 @@ pub(super) fn system_prompt(
         prompt.push_str(
             "\nRelation labels already in use — reuse these exact spellings when one \
              fits instead of coining a synonym. A parenthesized count is how many \
-             associations already used that label; prefer a higher count over a \
-             synonym, and treat an uncounted one as used only once so far: ",
+             associations already used that label (plus any alias that settled on it \
+             as canonical); prefer a higher count over a synonym, and treat an \
+             uncounted one as used only once so far: ",
         );
         let mut ranked: Vec<(&str, usize)> = vocabulary
             .iter()

@@ -258,10 +258,10 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       Relation labels converge <b>across the run</b>: each document's labels are offered to every
       later document's prompt (the offline stand-in for check-before-mint), so one run doesn't
       mint synonyms per file but converges on one vocabulary — ranked by how many associations
-      have used each one so far, most-reused first, with a <code>(×N)</code> count on anything
-      used more than once (issue #759): a label many associations already share is a safer reuse
-      than one that showed up once, and the count is the signal that tells them apart. Temperature
-      is 0.
+      (plus any alias that settled on it as canonical) have used each one so far, most-reused
+      first, with a <code>(×N)</code> count on anything used more than once (issue #759): a label
+      many associations already share is a safer reuse than one that showed up once, and the
+      count is the signal that tells them apart. Temperature is 0.
     </p>
     <p>
       When <code>--schema</code> names a document whose <code>mode</code> is not
