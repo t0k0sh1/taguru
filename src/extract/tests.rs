@@ -5878,3 +5878,47 @@ fn steering_record_mirrors_the_prompted_lists() {
     assert_eq!(value["context_names"], serde_json::json!([]));
     assert_eq!(value["schema"], serde_json::Value::Null);
 }
+
+/// The schema helpers the prompt block and the steering record share
+/// (ADR 0027): exact lists, the constrained-only filter on either
+/// side, and no constraints header for a schema with none.
+#[test]
+fn schema_prompt_lists_are_exact_and_filter_unconstrained_relations() {
+    let schema = test_schema(
+        &[("Brewery", &[]), ("Person", &[])],
+        &[
+            ("domain_only", &["Brewery"], &[]),
+            ("range_only", &[], &["Person"]),
+            ("unconstrained", &[], &[]),
+        ],
+        crate::schema::SchemaMode::Warn,
+        false,
+    );
+    assert_eq!(
+        schema_type_names(schema.document()),
+        ["Brewery", "Person"],
+        "the type list is the schema's keys, exactly"
+    );
+    let constrained: Vec<&str> = schema_constrained_relations(schema.document(), &BTreeMap::new())
+        .into_iter()
+        .map(|(label, _)| label)
+        .collect();
+    assert_eq!(
+        constrained,
+        ["domain_only", "range_only"],
+        "a domain-only and a range-only relation both count; an unconstrained one never"
+    );
+    // A types-only schema prompts no constraints header at all.
+    let types_only = test_schema(
+        &[("Brewery", &[])],
+        &[("unconstrained", &[], &[])],
+        crate::schema::SchemaMode::Warn,
+        false,
+    );
+    let block = schema_block(types_only.document(), &BTreeMap::new());
+    assert!(block.contains("Brewery"), "{block}");
+    assert!(
+        !block.contains("Relation constraints"),
+        "no constrained relation → no constraints header: {block}"
+    );
+}
