@@ -168,7 +168,7 @@ impl AttemptLog {
             .write_all(line.as_bytes())
             .and_then(|()| writer.flush());
         if let Err(error) = wrote
-            && !self.warned.swap(true, Ordering::Relaxed)
+            && first_failure(&self.warned)
         {
             eprintln!(
                 "taguru: extract: attempts log: writing {}: {error} — further records are \
@@ -177,6 +177,13 @@ impl AttemptLog {
             );
         }
     }
+}
+
+/// The warn-once gate: `true` exactly for the first call on a given
+/// flag, so one write failure earns one stderr line and every later
+/// dropped record is silent.
+pub(super) fn first_failure(warned: &AtomicBool) -> bool {
+    !warned.swap(true, Ordering::Relaxed)
 }
 
 /// The log's first line per run over this document.

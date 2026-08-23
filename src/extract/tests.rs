@@ -5701,4 +5701,9 @@ fn attempts_log_switch_and_file_name() {
         "docs__a.md-1aa4e2eba4299c6b.attempts.jsonl"
     );
     assert_eq!(attempts_file_name("odd"), "odd.attempts.jsonl");
+    // The warn-once gate fires exactly once.
+    let warned = AtomicBool::new(false);
+    assert!(first_failure(&warned));
+    assert!(!first_failure(&warned));
+    assert!(!first_failure(&warned));
 }

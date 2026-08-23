@@ -173,7 +173,7 @@ use aggregate::{cross_output_issues, schema_output_issues};
 #[cfg(test)]
 use args::parse_date;
 #[cfg(test)]
-use attempts::attempts_log_enabled_from;
+use attempts::{attempts_log_enabled_from, first_failure};
 #[cfg(test)]
 use candidates::{CANDIDATE_CAP, CANDIDATE_MAX_BYTES};
 #[cfg(test)]
