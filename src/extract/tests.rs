@@ -5423,3 +5423,94 @@ fn render_trace_shows_every_loss_in_the_original_text() {
     assert_eq!(losses[3]["raw"]["weight"], 0.0);
     assert_eq!(losses[3]["attempt"]["attempt_seq"], 2);
 }
+
+/// The loss record's `paragraph` keeps a citation exactly when it is in
+/// range: `paragraph_count - 1` stays, `paragraph_count` does not — on
+/// both the dropped-association and the dropped-question paths.
+#[test]
+fn loss_paragraph_is_kept_exactly_when_in_range() {
+    let count = 3;
+    let mut last = association("A", "rel", "B", 0.0);
+    last.paragraph = Some(2);
+    let mut past = association("A", "rel", "C", 0.0);
+    past.paragraph = Some(3);
+    let mut first = association("A", "rel", "D", 0.0);
+    first.paragraph = Some(0);
+    let merged = merge(
+        vec![ModelOutput {
+            associations: vec![last, past, first],
+            aliases: Vec::new(),
+            questions: vec![
+                ModelQuestion {
+                    paragraph: Some(2),
+                    question: Some("".into()), // empty → dropped, citation valid
+                },
+                ModelQuestion {
+                    paragraph: Some(3),
+                    question: Some("q".into()), // out of range → dropped
+                },
+            ],
+        }],
+        1,
+        count,
+    );
+    let paragraphs: Vec<(&str, Option<u32>)> = merged
+        .losses
+        .iter()
+        .map(|loss| (loss.kind, loss.paragraph))
+        .collect();
+    assert_eq!(
+        paragraphs,
+        [
+            ("question", Some(2)),
+            ("question", None),
+            ("association", Some(2)),
+            ("association", None),
+            ("association", Some(0)),
+        ],
+        "{:?}",
+        merged.losses
+    );
+}
+
+/// `removed_items` is absent for a clean answer and lists every
+/// removal's display string otherwise — never `Some(empty)`.
+#[test]
+fn removed_item_texts_is_some_exactly_when_anything_was_removed() {
+    assert_eq!(removed_item_texts(&[]), None);
+    let removals = [
+        Removal::new("associations[0]", "object empty", &serde_json::json!({})),
+        Removal::new(
+            "aliases[2]",
+            "alias equals its canonical",
+            &serde_json::json!({}),
+        ),
+    ];
+    assert_eq!(
+        removed_item_texts(&removals),
+        Some(vec![
+            "associations[0]: object empty".to_string(),
+            "aliases[2]: alias equals its canonical".to_string(),
+        ])
+    );
+}
+
+/// `prune_claimed_aliases` returns how many it removed — two claimed
+/// spellings in one output count two.
+#[test]
+fn prune_claimed_counts_every_removal() {
+    let concepts: BTreeSet<String> = ["X", "Y"].iter().map(|s| s.to_string()).collect();
+    let claimed = ClaimedNames::seeded(&concepts, &BTreeSet::new());
+    let mut outputs = [chunk_output(ModelOutput {
+        associations: vec![association("a", "l", "b", 1.0)],
+        aliases: vec![
+            alias("X", "a", "concept"),
+            alias("ok", "a", "concept"),
+            alias("Y", "b", "concept"),
+        ],
+        questions: Vec::new(),
+    })];
+    assert_eq!(prune_claimed_aliases(&mut outputs, &claimed), 2);
+    assert_eq!(outputs[0].output.aliases.len(), 1);
+    assert_eq!(outputs[0].removed.len(), 2);
+}
