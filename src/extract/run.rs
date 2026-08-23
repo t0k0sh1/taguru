@@ -341,7 +341,8 @@ impl Run {
         // input only — the passage stays verbatim) so every returned
         // association and question can cite an index the server
         // itself validates against.
-        let canonical_paragraphs = crate::paragraph::split(&text).len();
+        let paragraph_spans = crate::paragraph::split(&text);
+        let canonical_paragraphs = paragraph_spans.len();
         // ADR 0014: candidate names come from the WHOLE document, once
         // — every chunk is offered the same list (the vocabulary
         // discipline's reasoning, one level down), and the corrective
@@ -421,44 +422,43 @@ impl Run {
         // message's item indices still match the replayed answers.
         // `--lossy` skips both, matching Stage 1's skip: merge() alone
         // decides what survives.
-        let mut removed = Vec::new();
         if !self.lossy {
             let cross_issues = combined_cross_output_issues(&outputs, self.schema.as_deref());
             if !cross_issues.is_empty() {
-                removed.extend(
-                    self.correct_cross_output_issues(
-                        source,
-                        &mut outputs,
-                        cross_issues,
-                        chunks.len(),
-                        canonical_paragraphs,
-                        &candidates,
-                    )
-                    .map_err(|message| with_resume_hint(&checkpoints, message))?,
-                );
+                self.correct_cross_output_issues(
+                    source,
+                    &mut outputs,
+                    cross_issues,
+                    chunks.len(),
+                    canonical_paragraphs,
+                    &candidates,
+                )
+                .map_err(|message| with_resume_hint(&checkpoints, message))?;
             }
-            let chunk_total = chunks.len();
-            for chunk in &outputs {
-                for reason in &chunk.removed {
-                    removed.push(if chunk_total > 1 {
-                        format!("chunk {}/{chunk_total} {reason}", chunk.chunk_index + 1)
-                    } else {
-                        reason.clone()
-                    });
-                }
-            }
-            removed.extend(prune_unresolvable_aliases(&mut outputs, chunk_total));
+            prune_unresolvable_aliases(&mut outputs);
             // #758: an alias that would rewire a name an EARLIER
             // document (or the target context) already settled on is
             // import's Conflict refusal — mechanical, on the same
             // terms as the dangling prune: nothing the model could
             // correct, so nothing a corrective turn is spent on.
-            removed.extend(prune_claimed_aliases(
-                &mut outputs,
-                chunk_total,
-                &self.claimed_names,
-            ));
+            prune_claimed_aliases(&mut outputs, &self.claimed_names);
         }
+        // Every removal — Stage 1's and Stage 2's — now sits on the
+        // output it came from (#786); the report names each one
+        // chunk-first, exactly as before.
+        let chunk_total = chunks.len();
+        let removed: Vec<String> = outputs
+            .iter()
+            .flat_map(|chunk| {
+                chunk.removed.iter().map(move |removal| {
+                    if chunk_total > 1 {
+                        format!("chunk {}/{chunk_total} {removal}", chunk.chunk_index + 1)
+                    } else {
+                        removal.to_string()
+                    }
+                })
+            })
+            .collect();
         // ADR 0023: what the trace needs of each output, read off
         // before merge() consumes them, in merge()'s input order.
         let run_id = self.run_id();
@@ -511,6 +511,10 @@ impl Run {
                 &out_path,
                 &plan,
                 &pieces,
+                &paragraph_spans
+                    .iter()
+                    .map(|span| &text[span.start as usize..span.end as usize])
+                    .collect::<Vec<&str>>(),
                 &extraction,
             ),
         );
@@ -756,7 +760,7 @@ impl Run {
         chunk_total: usize,
         paragraph_count: usize,
         candidates: &[String],
-    ) -> Result<Vec<String>, String> {
+    ) -> Result<(), String> {
         let client = self
             .client
             .as_ref()
@@ -941,8 +945,7 @@ impl Run {
                             response: Some(&response),
                             parse_error: None,
                             validation_issues: None,
-                            removed_items: (!evaluated.removed.is_empty())
-                                .then_some(evaluated.removed.as_slice()),
+                            removed_items: removed_item_texts(&evaluated.removed),
                             piece_bytes: None,
                             requested_max_tokens: options.max_tokens,
                         });
@@ -955,6 +958,7 @@ impl Run {
                         user,
                         answer: response.content,
                         removed: evaluated.removed,
+                        unparsed: evaluated.unparsed,
                     };
                 }
                 Err(AnswerFault::Syntax(error)) => {
@@ -1027,15 +1031,14 @@ impl Run {
         // re-checks after each removal pass — removing aliases can only
         // shrink the issue set, so it ends); anything else standing
         // fails the source.
-        let mut removed = Vec::new();
         loop {
             let remaining = combined_cross_output_issues(outputs, self.schema.as_deref());
             if remaining.is_empty() {
                 break;
             }
-            match prune_uncorrected_aliases(outputs, remaining, chunk_total) {
-                Ok(records) if records.is_empty() => break,
-                Ok(records) => removed.extend(records),
+            match prune_uncorrected_aliases(outputs, remaining) {
+                Ok(0) => break,
+                Ok(_) => {}
                 Err((output_index, issues)) => {
                     let chunk_index = outputs[output_index].chunk_index;
                     return Err(format!(
@@ -1048,7 +1051,7 @@ impl Run {
                 }
             }
         }
-        Ok(removed)
+        Ok(())
     }
 
     /// A skipped document still contributes its labels, so later

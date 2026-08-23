@@ -141,10 +141,10 @@ use chunking::{
     indicates_length_limit, indicates_refusal,
 };
 use coverage::coverage_gaps;
-use diagnostics::DiagnosticsAttempt;
+use diagnostics::{DiagnosticsAttempt, removed_item_texts};
 use manifest::{CHECKPOINT_DIR_NAME, batch_file_name, checkpoint_file_name};
 use mechanical::{
-    ClaimedNames, mechanical_interpret, name_occurs, normalize_for_occurrence,
+    ClaimedNames, Removal, mechanical_interpret, name_occurs, normalize_for_occurrence,
     prune_claimed_aliases, prune_uncorrected_aliases, prune_unresolvable_aliases,
 };
 use parse::{
@@ -173,6 +173,8 @@ use args::parse_date;
 use candidates::{CANDIDATE_CAP, CANDIDATE_MAX_BYTES};
 #[cfg(test)]
 use chat_client::build_chat_body;
+#[cfg(test)]
+use chunking::non_object_elements;
 #[cfg(test)]
 use chunking::{
     AttemptOutcome, MAX_LISTED_ISSUES, PieceContext, RoundOutcome, classify_attempt,

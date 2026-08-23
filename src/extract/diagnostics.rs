@@ -84,7 +84,7 @@ impl DiagnosticsSink {
             provider_metadata,
             parse_error: attempt.parse_error.map(str::to_string),
             validation_issues: attempt.validation_issues.map(<[String]>::to_vec),
-            removed_items: attempt.removed_items.map(<[String]>::to_vec),
+            removed_items: attempt.removed_items,
             piece_bytes: attempt.piece_bytes,
             requested_max_tokens: attempt.requested_max_tokens,
             response_text,
@@ -227,7 +227,7 @@ pub(super) struct DiagnosticsAttempt<'a> {
     /// ADR 0013: the mechanical pass's removals on a `stop_valid`
     /// attempt — `Some` exactly when the accepted answer had items
     /// removed; every other state is `None`.
-    pub(super) removed_items: Option<&'a [String]>,
+    pub(super) removed_items: Option<Vec<String>>,
     /// Ladder-only: the byte length of the piece this round asked
     /// about, distinguishing split sub-pieces that share one
     /// `chunk_index`.
@@ -277,6 +277,13 @@ pub(super) struct AttemptRecord {
     pub(super) requested_max_tokens: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) response_text: Option<String>,
+}
+
+/// `removed_items`'s value for an accepted answer: each removal's
+/// display string, `Some` exactly when anything was removed (ADR
+/// 0013's record, unchanged by #786's structured `Removal`).
+pub(super) fn removed_item_texts(removed: &[Removal]) -> Option<Vec<String>> {
+    (!removed.is_empty()).then(|| removed.iter().map(ToString::to_string).collect())
 }
 
 /// The sidecar's first line (ADR 0023 §3.3): which run the `attempt`

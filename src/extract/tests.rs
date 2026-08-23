@@ -815,9 +815,10 @@ fn removed_fixtures_are_removed_mechanically_with_zero_corrective_issues() {
             Vec::<String>::new(),
             "{label}: the mechanical pass must leave nothing for a corrective turn"
         );
-        let mut removed = evaluation.removed;
+        let mut removed: Vec<String> = evaluation.removed.iter().map(ToString::to_string).collect();
         let mut outputs = [chunk_output(evaluation.output)];
-        removed.extend(prune_unresolvable_aliases(&mut outputs, 1));
+        prune_unresolvable_aliases(&mut outputs);
+        removed.extend(drain_removals(&mut outputs, 1));
         assert_eq!(removed, expected_removed, "{label}: removals didn't match");
         assert_eq!(
             outputs[0].output.associations.len() as u64,
@@ -881,7 +882,11 @@ fn evaluate_answer_accepts_after_mechanical_removal_and_records_it() {
     let evaluated = evaluate_answer(content, Some(&rules), document, &HashSet::new())
         .expect("only removable departures");
     assert_eq!(
-        evaluated.removed,
+        evaluated
+            .removed
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
         vec![
             "associations[1]: object empty".to_string(),
             "aliases[0]: alias equals its canonical".to_string(),
@@ -961,8 +966,12 @@ fn mechanical_pass_removes_a_single_character_label() {
     );
     assert_eq!(evaluation.removed.len(), 1);
     assert!(
-        evaluation.removed[0].contains("associations[0]")
-            && evaluation.removed[0].contains("single character"),
+        evaluation.removed[0]
+            .to_string()
+            .contains("associations[0]")
+            && evaluation.removed[0]
+                .to_string()
+                .contains("single character"),
         "{:?}",
         evaluation.removed
     );
@@ -1003,7 +1012,8 @@ fn prune_keeps_shadowing_and_conflicting_aliases_for_correction() {
         ],
         questions: Vec::new(),
     })];
-    let removed = prune_unresolvable_aliases(&mut outputs, 1);
+    prune_unresolvable_aliases(&mut outputs);
+    let removed = drain_removals(&mut outputs, 1);
     assert_eq!(
         removed,
         vec![
@@ -1042,9 +1052,11 @@ fn prune_resolves_canonicals_across_outputs_and_labels_chunks() {
             user: String::new(),
             answer: String::new(),
             removed: Vec::new(),
+            unparsed: Vec::new(),
         },
     ];
-    let removed = prune_unresolvable_aliases(&mut outputs, 2);
+    prune_unresolvable_aliases(&mut outputs);
+    let removed = drain_removals(&mut outputs, 2);
     assert_eq!(
         removed,
         vec![
@@ -1084,7 +1096,8 @@ fn prune_claimed_removes_an_alias_that_would_rewire_an_earlier_documents_name() 
         ],
         questions: Vec::new(),
     })];
-    let removed = prune_claimed_aliases(&mut outputs, 1, &claimed);
+    prune_claimed_aliases(&mut outputs, &claimed);
+    let removed = drain_removals(&mut outputs, 1);
     assert_eq!(
         removed,
         vec![
@@ -1139,7 +1152,8 @@ fn prune_claimed_keeps_idempotent_routed_and_foreign_namespace_aliases() {
         ],
         questions: Vec::new(),
     })];
-    let removed = prune_claimed_aliases(&mut outputs, 1, &claimed);
+    prune_claimed_aliases(&mut outputs, &claimed);
+    let removed = drain_removals(&mut outputs, 1);
     assert_eq!(
         removed,
         vec![
@@ -1253,11 +1267,14 @@ fn claimed_names_absorb_extractions_batches_and_vocabulary_alike() {
             user: String::new(),
             answer: String::new(),
             removed: Vec::new(),
+            unparsed: Vec::new(),
         },
     ];
-    let removed = prune_claimed_aliases(&mut outputs, 2, &seeded);
+    prune_claimed_aliases(&mut outputs, &seeded);
+    let removed = drain_removals(&mut outputs, 2);
     assert!(removed.is_empty(), "{removed:?}"); // 高瀬 is not seeded
-    let removed = prune_claimed_aliases(&mut outputs, 2, &from_batch);
+    prune_claimed_aliases(&mut outputs, &from_batch);
+    let removed = drain_removals(&mut outputs, 2);
     assert_eq!(
         removed,
         vec![
@@ -1314,6 +1331,7 @@ fn prune_uncorrected_aliases_removes_alias_issues_and_refuses_the_rest() {
             user: String::new(),
             answer: String::new(),
             removed: Vec::new(),
+            unparsed: Vec::new(),
         },
     ];
     let issues = vec![
@@ -1331,7 +1349,8 @@ fn prune_uncorrected_aliases_removes_alias_issues_and_refuses_the_rest() {
             vec!["aliases[0]: conflicts with an earlier alias mapping \"z\" to \"b\"".to_string()],
         ),
     ];
-    let removed = prune_uncorrected_aliases(&mut outputs, issues, 3).unwrap();
+    prune_uncorrected_aliases(&mut outputs, issues).unwrap();
+    let removed = drain_removals(&mut outputs, 3);
     assert_eq!(
         removed,
         vec![
@@ -1361,12 +1380,12 @@ fn prune_uncorrected_aliases_removes_alias_issues_and_refuses_the_rest() {
         aliases: vec![alias("a", "b", "concept")],
         questions: Vec::new(),
     })];
-    let removed = prune_uncorrected_aliases(
+    prune_uncorrected_aliases(
         &mut single,
         vec![(0, vec!["aliases[0].alias: names something".to_string()])],
-        1,
     )
     .unwrap();
+    let removed = drain_removals(&mut single, 1);
     assert_eq!(
         removed,
         vec!["aliases[0].alias: names something — still so after the corrective turn; removed"]
@@ -1376,24 +1395,24 @@ fn prune_uncorrected_aliases_removes_alias_issues_and_refuses_the_rest() {
     // An out-of-range index (the issue list and the outputs disagree)
     // removes nothing and records nothing rather than panicking —
     // including the off-by-one index exactly at the list's length.
-    let removed = prune_uncorrected_aliases(
+    prune_uncorrected_aliases(
         &mut single,
         vec![(0, vec!["aliases[5].alias: names something".to_string()])],
-        1,
     )
     .unwrap();
+    let removed = drain_removals(&mut single, 1);
     assert!(removed.is_empty());
     let mut one = [chunk_output(ModelOutput {
         associations: vec![association("a", "l", "b", 1.0)],
         aliases: vec![alias("x", "a", "concept")],
         questions: Vec::new(),
     })];
-    let removed = prune_uncorrected_aliases(
+    prune_uncorrected_aliases(
         &mut one,
         vec![(0, vec!["aliases[1].alias: names something".to_string()])],
-        1,
     )
     .unwrap();
+    let removed = drain_removals(&mut one, 1);
     assert!(removed.is_empty());
     assert_eq!(one[0].output.aliases.len(), 1);
 
@@ -1413,7 +1432,6 @@ fn prune_uncorrected_aliases_removes_alias_issues_and_refuses_the_rest() {
                 "associations[0].subject: type Brewery is not in the relation's domain".to_string(),
             ],
         )],
-        1,
     )
     .unwrap_err();
     assert_eq!(
@@ -1469,6 +1487,7 @@ fn with_resume_hint_names_the_checkpointed_units_only_when_there_are_any() {
         user: text.to_string(),
         answer: String::new(),
         removed: Vec::new(),
+        unparsed: Vec::new(),
     };
     store.record("doc.md", "h1".to_string(), unit("a"));
     store.record("doc.md", "h2".to_string(), unit("b"));
@@ -1922,6 +1941,28 @@ fn alias(alias: &str, canonical: &str, kind: &str) -> ModelAlias {
     }
 }
 
+/// The pre-#786 shape of a prune's accounting: every removal the
+/// outputs now carry (drained), chunk-prefixed exactly as
+/// `extract_document` reports them — so the prune tests keep pinning
+/// the strings the report line and stderr actually print.
+fn drain_removals(outputs: &mut [ChunkOutput], chunk_total: usize) -> Vec<String> {
+    outputs
+        .iter_mut()
+        .flat_map(|chunk| {
+            let chunk_index = chunk.chunk_index;
+            std::mem::take(&mut chunk.removed)
+                .into_iter()
+                .map(move |removal| {
+                    if chunk_total > 1 {
+                        format!("chunk {}/{chunk_total} {removal}", chunk_index + 1)
+                    } else {
+                        removal.to_string()
+                    }
+                })
+        })
+        .collect()
+}
+
 /// Test-only shorthand for a `ChunkOutput` whose conversation base
 /// doesn't matter to the test at hand (only `cross_output_issues`'s
 /// own output-array position does).
@@ -1934,6 +1975,7 @@ fn chunk_output(output: ModelOutput) -> ChunkOutput {
         user: String::new(),
         answer: String::new(),
         removed: Vec::new(),
+        unparsed: Vec::new(),
     }
 }
 
@@ -5002,6 +5044,7 @@ fn render_trace_joins_items_to_pieces_across_a_split_and_a_reuse() {
         Path::new("out/doc.jsonl"),
         &chunks,
         &pieces,
+        &[],
         &extraction,
     );
     let records: Vec<serde_json::Value> = text
@@ -5108,8 +5151,521 @@ fn attempt_refs_are_dense_per_client_and_survive_the_checkpoint() {
         user: "u".into(),
         answer: "a".into(),
         removed: Vec::new(),
+        unparsed: Vec::new(),
     };
     let reloaded: CheckpointUnit =
         serde_json::from_str(&serde_json::to_string(&unit).unwrap()).unwrap();
     assert_eq!(reloaded.attempt, Some(first));
+}
+
+// ================== #786 / ADR 0024: loss records ==================
+
+/// Every `dropped`/`duplicates` increment in `merge` leaves a `Loss`
+/// with the item verbatim, the reason, the rule, the origin, and —
+/// for a duplicate — the origin whose copy was kept.
+#[test]
+fn merge_records_a_loss_for_every_dropped_or_folded_item() {
+    let first = ModelOutput {
+        associations: vec![association("A", "rel", "B", 1.0)],
+        aliases: vec![alias("a", "A", "concept")],
+        questions: vec![ModelQuestion {
+            paragraph: Some(0),
+            question: Some("why?".into()),
+        }],
+    };
+    let mut zero_weight = association("A", "rel", "C", 0.0);
+    zero_weight.paragraph = Some(1);
+    let second = ModelOutput {
+        associations: vec![
+            association("A", "rel", "B", 1.0), // duplicate → kept from 0
+            zero_weight,                       // dropped: weight
+            association("", "rel", "C", 1.0),  // dropped: empty subject
+        ],
+        aliases: vec![
+            alias("a", "A", "concept"),  // duplicate mapping
+            alias("a", "B", "concept"),  // conflicting mapping → dropped
+            alias("zz", "Q", "concept"), // dangling canonical → dropped
+            alias("b", "B", "thing"),    // bad kind → dropped
+        ],
+        questions: vec![
+            ModelQuestion {
+                paragraph: Some(0),
+                question: Some("why?".into()),
+            }, // duplicate
+            ModelQuestion {
+                paragraph: Some(0),
+                question: Some("how?".into()),
+            }, // over the cap of 1
+            ModelQuestion {
+                paragraph: Some(9),
+                question: Some("where?".into()),
+            }, // out of range → dropped
+        ],
+    };
+    let merged = merge(vec![first, second], 1, 2);
+    assert_eq!(merged.associations.len(), 1);
+    assert_eq!(merged.dropped, 7, "{:?}", merged.losses);
+    assert_eq!(merged.duplicates, 3, "{:?}", merged.losses);
+    assert_eq!(merged.losses.len(), 10);
+    assert!(merged.losses.iter().all(|loss| loss.origin == 1));
+    let find = |kind: &str, reason: &str, needle: &str| {
+        merged
+            .losses
+            .iter()
+            .find(|loss| loss.kind == kind && loss.reason == reason && loss.rule.contains(needle))
+            .unwrap_or_else(|| panic!("{kind}/{reason}/{needle}: {:?}", merged.losses))
+    };
+    let dup = find("association", "duplicate", "already kept");
+    assert_eq!(dup.kept_origin, Some(0));
+    assert_eq!(dup.item["object"], "B");
+    let weight = find("association", "dropped", "weight");
+    assert_eq!(weight.item["weight"], 0.0);
+    assert_eq!(weight.paragraph, Some(1), "a valid citation is kept");
+    let names = find("association", "dropped", "non-empty");
+    assert_eq!(names.item["subject"], "");
+    assert_eq!(
+        find("alias", "duplicate", "same alias").kept_origin,
+        Some(0)
+    );
+    assert_eq!(
+        find("alias", "dropped", "different canonical").item["canonical"],
+        "B"
+    );
+    find("alias", "dropped", "names nothing");
+    find("alias", "dropped", "kind must be");
+    assert_eq!(
+        find("question", "duplicate", "same question").kept_origin,
+        Some(0)
+    );
+    assert_eq!(
+        find("question", "dropped", "--questions cap of 1").paragraph,
+        Some(0)
+    );
+    let range = find("question", "dropped", "out of range");
+    assert_eq!(range.paragraph, None, "an invalid citation is not kept");
+    assert_eq!(range.item["paragraph"], 9);
+}
+
+/// The mechanical pass and every Stage 2 prune record the item they
+/// removed, not only the message — and the message is byte for byte
+/// the pre-#786 one. A checkpoint from before #786 (string removals)
+/// still loads, as item-less removals.
+#[test]
+fn removals_carry_the_model_item_and_load_from_legacy_checkpoints() {
+    let rules = ItemRules {
+        paragraph_count: 3,
+        questions_requested: false,
+    };
+    let answer = serde_json::json!({
+        "associations": [
+            {"subject": "ghost", "label": "rel", "object": "beta", "weight": 1.0, "paragraph": 1},
+            "not an object"
+        ],
+        "aliases": [{"alias": "x", "canonical": "x", "kind": "concept"}]
+    });
+    let evaluation =
+        mechanical_interpret(&answer, &rules, "[0] alpha\n\n[1] beta", &HashSet::new());
+    assert!(evaluation.issues.is_empty(), "{:?}", evaluation.issues);
+    let texts: Vec<String> = evaluation.removed.iter().map(ToString::to_string).collect();
+    assert_eq!(
+        texts,
+        [
+            "associations[0]: subject \"ghost\" does not appear in the document text",
+            "associations[1]: expected an object, got string \"not an object\"",
+            "aliases[0]: alias equals its canonical",
+        ]
+    );
+    assert_eq!(evaluation.removed[0].item["subject"], "ghost");
+    assert_eq!(evaluation.removed[0].item["paragraph"], 1);
+    assert_eq!(evaluation.removed[0].item_kind(), "association");
+    assert_eq!(evaluation.removed[1].item, "not an object");
+    assert_eq!(evaluation.removed[2].item["alias"], "x");
+    assert_eq!(evaluation.removed[2].item_kind(), "alias");
+
+    // Stage 2 prunes: the parsed alias is the item.
+    let mut outputs = [chunk_output(ModelOutput {
+        associations: vec![association("a", "l", "b", 1.0)],
+        aliases: vec![alias("zz", "nowhere", "concept")],
+        questions: Vec::new(),
+    })];
+    assert_eq!(prune_unresolvable_aliases(&mut outputs), 1);
+    assert_eq!(outputs[0].removed[0].item["alias"], "zz");
+    assert_eq!(outputs[0].removed[0].path, "aliases[0]");
+    let mut outputs = [chunk_output(ModelOutput {
+        associations: vec![association("a", "l", "b", 1.0)],
+        aliases: vec![alias("a", "b", "concept")],
+        questions: Vec::new(),
+    })];
+    assert_eq!(
+        prune_uncorrected_aliases(
+            &mut outputs,
+            vec![(0, vec!["aliases[0].alias: names something".to_string()])],
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(outputs[0].removed[0].path, "aliases[0].alias");
+    assert_eq!(outputs[0].removed[0].item["canonical"], "b");
+    assert_eq!(
+        outputs[0].removed[0].to_string(),
+        "aliases[0].alias: names something — still so after the corrective turn; removed"
+    );
+
+    // Legacy and structured both load; structured round-trips.
+    let legacy: Vec<Removal> =
+        serde_json::from_str(r#"["associations[2]: object empty", "bare"]"#).unwrap();
+    assert_eq!(legacy[0].path, "associations[2]");
+    assert_eq!(legacy[0].reason, "object empty");
+    assert_eq!(legacy[0].item, serde_json::Value::Null);
+    assert_eq!(legacy[0].to_string(), "associations[2]: object empty");
+    assert_eq!(legacy[1].path, "");
+    assert_eq!(legacy[1].reason, "bare");
+    let structured: Removal =
+        serde_json::from_str(&serde_json::to_string(&evaluation.removed[0]).unwrap()).unwrap();
+    assert_eq!(structured, evaluation.removed[0]);
+}
+
+/// `render_trace` writes one `loss` per removal and per merge loss,
+/// each against the original text: the cited paragraph when the item
+/// cited a valid one, else the whole piece; a duplicate names the
+/// piece whose copy was kept.
+#[test]
+fn render_trace_shows_every_loss_in_the_original_text() {
+    let piece_a = "[0] alpha text\n\n[1] beta text";
+    let piece_b = "[2] gamma text";
+    let mut outputs = vec![
+        chunk_output(ModelOutput {
+            associations: vec![association("alpha", "rel", "beta", 1.0)],
+            aliases: Vec::new(),
+            questions: Vec::new(),
+        }),
+        chunk_output(ModelOutput {
+            associations: vec![
+                association("alpha", "rel", "beta", 1.0),
+                association("gamma", "rel", "alpha", 0.0),
+            ],
+            aliases: Vec::new(),
+            questions: Vec::new(),
+        }),
+    ];
+    for (output, (piece, chunk_index)) in outputs.iter_mut().zip([(piece_a, 0), (piece_b, 1)]) {
+        output.user = user_message("doc.md", chunk_index, 2, piece);
+        output.chunk_index = chunk_index;
+        output.piece_id = sha256_hex(piece.as_bytes());
+        output.attempt = Some(AttemptRef {
+            run_id: "0000000000000001".into(),
+            attempt_seq: chunk_index as u64 + 1,
+        });
+    }
+    let mut cited = association("ghost", "rel", "beta", 1.0);
+    cited.paragraph = Some(1);
+    outputs[0].removed = vec![
+        Removal::new(
+            "associations[1]",
+            "subject \"ghost\" does not appear in the document text",
+            &cited,
+        ),
+        Removal::new(
+            "aliases[0]",
+            "alias equals its canonical",
+            &alias("x", "x", "concept"),
+        ),
+    ];
+    let pieces: Vec<PieceOrigin> = outputs
+        .iter()
+        .map(|output| PieceOrigin::of(output, "0000000000000001"))
+        .collect();
+    let chunks: Vec<ChunkDescriptor> = [piece_a, piece_b]
+        .iter()
+        .enumerate()
+        .map(|(index, piece)| ChunkDescriptor {
+            text: piece.to_string(),
+            sha256: sha256_hex(piece.as_bytes()),
+            paragraph_first: if index == 0 { 0 } else { 2 },
+            paragraph_last: if index == 0 { 1 } else { 2 },
+        })
+        .collect();
+    let extraction = merge(
+        outputs.into_iter().map(|output| output.output).collect(),
+        0,
+        3,
+    );
+    let text = render_trace(
+        "0000000000000001",
+        "doc.md",
+        "d".repeat(64).as_str(),
+        Path::new("out/doc.jsonl"),
+        &chunks,
+        &pieces,
+        &["alpha text", "beta text", "gamma text"],
+        &extraction,
+    );
+    let losses: Vec<serde_json::Value> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .filter(|record: &serde_json::Value| record["kind"] == "loss")
+        .collect();
+    assert_eq!(losses.len(), 4, "{losses:?}");
+    // Removals first, piece by piece; then merge's losses.
+    assert_eq!(losses[0]["reason"], "removed");
+    assert_eq!(losses[0]["item"], "association");
+    assert_eq!(losses[0]["path"], "associations[1]");
+    assert_eq!(losses[0]["raw"]["subject"], "ghost");
+    assert_eq!(losses[0]["paragraph"], 1);
+    assert_eq!(losses[0]["text"], "beta text");
+    assert_eq!(losses[0]["piece_id"], sha256_hex(piece_a.as_bytes()));
+    assert_eq!(losses[0]["attempt"]["attempt_seq"], 1);
+    assert!(losses[0].get("kept_piece_id").is_none());
+    assert_eq!(losses[1]["item"], "alias");
+    assert_eq!(losses[1]["paragraph"], serde_json::Value::Null);
+    assert_eq!(losses[1]["text"], piece_a, "no citation → the piece");
+    assert_eq!(losses[2]["reason"], "duplicate");
+    assert_eq!(losses[2]["piece_id"], sha256_hex(piece_b.as_bytes()));
+    assert_eq!(losses[2]["kept_piece_id"], sha256_hex(piece_a.as_bytes()));
+    assert_eq!(losses[2]["text"], piece_b);
+    assert!(losses[2].get("path").is_none());
+    assert_eq!(losses[3]["reason"], "dropped");
+    assert!(losses[3]["rule"].as_str().unwrap().contains("weight"));
+    assert_eq!(losses[3]["raw"]["weight"], 0.0);
+    assert_eq!(losses[3]["attempt"]["attempt_seq"], 2);
+}
+
+/// The loss record's `paragraph` keeps a citation exactly when it is in
+/// range: `paragraph_count - 1` stays, `paragraph_count` does not — on
+/// both the dropped-association and the dropped-question paths.
+#[test]
+fn loss_paragraph_is_kept_exactly_when_in_range() {
+    let count = 3;
+    let mut last = association("A", "rel", "B", 0.0);
+    last.paragraph = Some(2);
+    let mut past = association("A", "rel", "C", 0.0);
+    past.paragraph = Some(3);
+    let mut first = association("A", "rel", "D", 0.0);
+    first.paragraph = Some(0);
+    let merged = merge(
+        vec![ModelOutput {
+            associations: vec![last, past, first],
+            aliases: Vec::new(),
+            questions: vec![
+                ModelQuestion {
+                    paragraph: Some(2),
+                    question: Some("".into()), // empty → dropped, citation valid
+                },
+                ModelQuestion {
+                    paragraph: Some(3),
+                    question: Some("q".into()), // out of range → dropped
+                },
+            ],
+        }],
+        1,
+        count,
+    );
+    let paragraphs: Vec<(&str, Option<u32>)> = merged
+        .losses
+        .iter()
+        .map(|loss| (loss.kind, loss.paragraph))
+        .collect();
+    assert_eq!(
+        paragraphs,
+        [
+            ("question", Some(2)),
+            ("question", None),
+            ("association", Some(2)),
+            ("association", None),
+            ("association", Some(0)),
+        ],
+        "{:?}",
+        merged.losses
+    );
+}
+
+/// `removed_items` is absent for a clean answer and lists every
+/// removal's display string otherwise — never `Some(empty)`.
+#[test]
+fn removed_item_texts_is_some_exactly_when_anything_was_removed() {
+    assert_eq!(removed_item_texts(&[]), None);
+    let removals = [
+        Removal::new("associations[0]", "object empty", &serde_json::json!({})),
+        Removal::new(
+            "aliases[2]",
+            "alias equals its canonical",
+            &serde_json::json!({}),
+        ),
+    ];
+    assert_eq!(
+        removed_item_texts(&removals),
+        Some(vec![
+            "associations[0]: object empty".to_string(),
+            "aliases[2]: alias equals its canonical".to_string(),
+        ])
+    );
+}
+
+/// `prune_claimed_aliases` returns how many it removed — two claimed
+/// spellings in one output count two.
+#[test]
+fn prune_claimed_counts_every_removal() {
+    let concepts: BTreeSet<String> = ["X", "Y"].iter().map(|s| s.to_string()).collect();
+    let claimed = ClaimedNames::seeded(&concepts, &BTreeSet::new());
+    let mut outputs = [chunk_output(ModelOutput {
+        associations: vec![association("a", "l", "b", 1.0)],
+        aliases: vec![
+            alias("X", "a", "concept"),
+            alias("ok", "a", "concept"),
+            alias("Y", "b", "concept"),
+        ],
+        questions: Vec::new(),
+    })];
+    assert_eq!(prune_claimed_aliases(&mut outputs, &claimed), 2);
+    assert_eq!(outputs[0].output.aliases.len(), 1);
+    assert_eq!(outputs[0].removed.len(), 2);
+}
+
+/// ADR 0024 §3.6: under `--lossy`, an array element that is not an
+/// object is dropped at parse — `evaluate_answer` records it as
+/// `unparsed`, with the element verbatim, so the trace shows it as a
+/// `dropped` loss; strict mode never fills the field (the mechanical
+/// pass removes those with accounting instead).
+#[test]
+fn lossy_parse_drops_are_recorded_as_unparsed_losses() {
+    let answer = serde_json::json!({
+        "associations": [
+            {"subject": "a", "label": "l", "object": "b"},
+            "just a string",
+            7
+        ],
+        "aliases": [["not", "an", "object"]],
+        "questions": [null, {"paragraph": 0, "question": "q?"}]
+    })
+    .to_string();
+    let lossy = evaluate_answer(&answer, None, "a b", &HashSet::new()).unwrap();
+    assert_eq!(lossy.output.associations.len(), 1);
+    assert!(lossy.removed.is_empty());
+    let summary: Vec<(String, &'static str, String)> = lossy
+        .unparsed
+        .iter()
+        .map(|removal| {
+            (
+                removal.path.clone(),
+                removal.item_kind(),
+                removal.to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            (
+                "associations[1]".to_string(),
+                "association",
+                "associations[1]: expected an object, got string \"just a string\" — dropped \
+                 at parse under --lossy"
+                    .to_string()
+            ),
+            (
+                "associations[2]".to_string(),
+                "association",
+                "associations[2]: expected an object, got number 7 — dropped at parse under \
+                 --lossy"
+                    .to_string()
+            ),
+            (
+                "aliases[0]".to_string(),
+                "alias",
+                "aliases[0]: expected an object, got an array — dropped at parse under --lossy"
+                    .to_string()
+            ),
+            (
+                "questions[0]".to_string(),
+                "question",
+                "questions[0]: expected an object, got null — dropped at parse under --lossy"
+                    .to_string()
+            ),
+        ]
+    );
+    assert_eq!(lossy.unparsed[0].item, "just a string");
+    assert_eq!(
+        lossy.unparsed[2].item,
+        serde_json::json!(["not", "an", "object"])
+    );
+    // A bare non-object answer has no arrays to walk.
+    assert!(non_object_elements(&serde_json::json!([1, 2])).is_empty());
+
+    // The trace renders them as `dropped` losses after the piece's
+    // removals, against the piece text.
+    let mut output = chunk_output(lossy.output);
+    output.user = user_message("doc.md", 0, 1, "[0] a b");
+    output.piece_id = "p".repeat(64);
+    output.unparsed = lossy.unparsed;
+    output.removed = vec![Removal::new("aliases[3]", "r", &serde_json::json!({}))];
+    let pieces = vec![PieceOrigin::of(&output, "0000000000000001")];
+    let extraction = merge(vec![output.output], 0, 1);
+    let text = render_trace(
+        "0000000000000001",
+        "doc.md",
+        "d".repeat(64).as_str(),
+        Path::new("out/doc.jsonl"),
+        &[],
+        &pieces,
+        &["a b"],
+        &extraction,
+    );
+    let losses: Vec<serde_json::Value> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .filter(|record: &serde_json::Value| record["kind"] == "loss")
+        .collect();
+    let reasons: Vec<(&str, &str)> = losses
+        .iter()
+        .map(|loss| {
+            (
+                loss["reason"].as_str().unwrap(),
+                loss["item"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        reasons,
+        [
+            ("removed", "alias"),
+            ("dropped", "association"),
+            ("dropped", "association"),
+            ("dropped", "alias"),
+            ("dropped", "question"),
+            // merge's own drop of the parsed question (questions cap 0)
+            ("dropped", "question"),
+        ]
+    );
+    assert!(
+        losses[5]["rule"]
+            .as_str()
+            .unwrap()
+            .contains("--questions 0")
+    );
+    assert_eq!(losses[1]["path"], "associations[1]");
+    assert_eq!(losses[1]["raw"], "just a string");
+    assert_eq!(losses[1]["text"], "[0] a b");
+
+    // Strict mode leaves the field empty.
+    let rules = ItemRules {
+        paragraph_count: 1,
+        questions_requested: true,
+    };
+    let strict = evaluate_answer(
+        r#"{"associations": [{"subject": "a", "label": "rel", "object": "b"}, 7]}"#,
+        Some(&rules),
+        "a b",
+        &HashSet::new(),
+    )
+    .unwrap();
+    assert!(strict.unparsed.is_empty());
+    assert_eq!(strict.removed.len(), 1);
+
+    // And a pre-field checkpoint loads with it empty.
+    let legacy: CheckpointUnit = serde_json::from_str(
+        r#"{"chunk_index": 0, "output": {"associations": [], "aliases": [], "questions": []},
+            "user": "u", "answer": "a"}"#,
+    )
+    .unwrap();
+    assert!(legacy.unparsed.is_empty());
 }

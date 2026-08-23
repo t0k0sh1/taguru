@@ -6368,3 +6368,139 @@ fn trace_marks_a_checkpoint_reused_piece_with_the_producing_runs_attempt() {
     let _ = std::fs::remove_dir_all(&out);
     let _ = std::fs::remove_dir_all(&diag_dir);
 }
+
+/// #786 / ADR 0023 §3.7: every item the model wrote that the batch
+/// does not hold lands in the trace as a `loss` with the original text
+/// — a mechanically removed fabrication (against its cited paragraph),
+/// a triple both chunks answered (the kept piece named), and a
+/// question over the `--questions` cap — and the document record's
+/// `removed`/`duplicates`/`dropped` counts are those records' lengths.
+#[test]
+fn trace_records_every_lost_item_with_its_original_text() {
+    let docs = batch_dir("extract-trace-loss-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, multi_chunk_document(9)).unwrap();
+    let out = batch_dir("extract-trace-loss-out");
+    let diag_dir = batch_dir("extract-trace-loss-diag");
+    let diag = diag_dir.join("diag.jsonl");
+
+    let (url, _captured) = stub_chat_server_concurrent(|index, _attempt| {
+        chat_ok(
+            &json!({
+                "associations": [
+                    {"subject": "S", "label": "rel", "object": "value-9", "weight": 1.0},
+                    {"subject": "ghost", "label": "rel", "object": "value-9", "weight": 1.0,
+                     "paragraph": 0}
+                ],
+                "questions": [
+                    {"paragraph": 0, "question": "one?"},
+                    {"paragraph": 0, "question": format!("two-{index}?")}
+                ]
+            })
+            .to_string(),
+        )
+    });
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--questions",
+            "1",
+            "--diagnostics-out",
+            diag.to_str().unwrap(),
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("removed: chunk 1/2 associations[1]: subject \"ghost\" does not appear"),
+        "{stderr}"
+    );
+
+    let (_, trace) = read_trace(&out);
+    let pieces: Vec<&Value> = trace.iter().filter(|r| r["kind"] == "piece").collect();
+    let losses: Vec<&Value> = trace.iter().filter(|r| r["kind"] == "loss").collect();
+    let document = read_diagnostics(&diag)
+        .into_iter()
+        .find(|r| r["kind"] == "document")
+        .unwrap();
+    let count = |reason: &str| losses.iter().filter(|l| l["reason"] == reason).count();
+    assert_eq!(document["removed"], count("removed"), "{losses:?}");
+    assert_eq!(document["duplicates"], count("duplicate"), "{losses:?}");
+    assert_eq!(document["dropped"], count("dropped"), "{losses:?}");
+    assert_eq!(count("removed"), 2, "one fabrication per chunk: {losses:?}");
+
+    // The fabrication cited paragraph 0, so its text is that paragraph
+    // — the original, not the `[0] `-labeled rendering.
+    let removed: Vec<&&Value> = losses.iter().filter(|l| l["reason"] == "removed").collect();
+    for (index, loss) in removed.iter().enumerate() {
+        assert_eq!(loss["item"], "association");
+        assert_eq!(loss["path"], "associations[1]");
+        assert!(
+            loss["rule"].as_str().unwrap().contains("\"ghost\""),
+            "{loss}"
+        );
+        assert_eq!(loss["raw"]["subject"], "ghost");
+        assert_eq!(loss["paragraph"], 0);
+        assert!(
+            loss["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("Paragraph 0: s value-"),
+            "{loss}"
+        );
+        assert_eq!(loss["piece_id"], pieces[index]["piece_id"]);
+        assert_eq!(loss["attempt"], pieces[index]["attempt"]);
+    }
+    // The shared triple: chunk 1's copy is the duplicate, chunk 0's
+    // is kept; no citation → the piece text.
+    let duplicates: Vec<&&Value> = losses
+        .iter()
+        .filter(|l| l["reason"] == "duplicate" && l["item"] == "association")
+        .collect();
+    assert_eq!(duplicates.len(), 1, "{losses:?}");
+    assert_eq!(duplicates[0]["raw"]["object"], "value-9");
+    assert_eq!(duplicates[0]["piece_id"], pieces[1]["piece_id"]);
+    assert_eq!(duplicates[0]["kept_piece_id"], pieces[0]["piece_id"]);
+    assert_eq!(duplicates[0]["paragraph"], Value::Null);
+    let piece_text = duplicates[0]["text"].as_str().unwrap();
+    assert_eq!(
+        piece_text.len() as u64,
+        pieces[1]["piece_bytes"].as_u64().unwrap(),
+        "no citation → the whole piece, as sent"
+    );
+    assert!(piece_text.starts_with('['), "{piece_text:.40}");
+    // Questions: "one?" twice (chunk 1's is a duplicate), "two-0?" over
+    // the cap of 1, "two-1?" over the cap too.
+    let questions: Vec<&&Value> = losses.iter().filter(|l| l["item"] == "question").collect();
+    assert_eq!(questions.len(), 3, "{questions:?}");
+    assert_eq!(
+        questions
+            .iter()
+            .filter(|l| l["reason"] == "duplicate")
+            .count(),
+        1
+    );
+    assert!(
+        questions
+            .iter()
+            .filter(|l| l["reason"] == "dropped")
+            .all(|l| l["rule"].as_str().unwrap().contains("--questions cap of 1")),
+        "{questions:?}"
+    );
+    // Every loss is readable: text is never empty.
+    assert!(
+        losses
+            .iter()
+            .all(|l| !l["text"].as_str().unwrap().is_empty())
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+    let _ = std::fs::remove_dir_all(&diag_dir);
+}

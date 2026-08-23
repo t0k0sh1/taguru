@@ -787,7 +787,25 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       of the run that produced it, which the checkpoint now records (<code>null</code> only for
       a checkpoint written before 0.9.5); then one <code>item</code> per batch line in batch
       order (<code>item</code>: <code>association</code> | <code>concept</code> |
-      <code>label</code> | <code>question</code>, the content key, and <code>piece_id</code>).
+      <code>label</code> | <code>question</code>, the content key, and <code>piece_id</code>);
+      then one <code>loss</code> per item the model's accepted answer held that the batch does
+      not (<a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0024-loss-records.md">ADR
+      0024</a>): <code>item</code> (<code>association</code> | <code>alias</code> |
+      <code>question</code>), <code>reason</code> — <code>removed</code> (mechanical validation,
+      ADR 0013, including the Stage 2 alias prunes), <code>dropped</code> (the contract refused
+      it as written: an empty name, a zero weight, a dangling alias, a question over the
+      <code>--questions</code> cap… and, under <code>--lossy</code>, an array element that was
+      not an object, dropped at parse), or <code>duplicate</code> (an identical item was already
+      kept) — <code>rule</code> in the report's own words, <code>path</code> (removals only: the
+      item's address in the answer), <code>raw</code> (the item exactly as the model wrote it),
+      <code>piece_id</code>, <code>attempt</code>, <code>paragraph</code>, and <code>text</code>:
+      <b>the original text the item was about</b> — the cited paragraph when the item cited a
+      valid one, else the whole piece the model was shown. A duplicate adds
+      <code>kept_piece_id</code>. Removals come first, piece by piece, then merge's drops and
+      duplicates; the document record's <code>removed</code>/<code>dropped</code>/
+      <code>duplicates</code> counts are these records' lengths by reason. The loss <i>rate</i>
+      — lost ÷ (kept + lost) per piece, rolled up — follows from the <code>item</code> and
+      <code>loss</code> records alone.
     </p>
     <p>
       Joins: item → piece by <code>piece_id</code>; piece → chunk by <code>chunk_index</code> or

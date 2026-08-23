@@ -35,11 +35,19 @@ pub(super) struct ChunkOutput {
     pub(super) attempt: Option<AttemptRef>,
     pub(super) user: String,
     pub(super) answer: String,
-    /// ADR 0013: the path-addressed record of every item the
-    /// mechanical pass removed from `output` — carried here (and
-    /// through the checkpoint) so the document-level report can
-    /// account for the removals of reused units too.
-    pub(super) removed: Vec<String>,
+    /// ADR 0013: every item removed from `output` — the Stage 1
+    /// mechanical pass's, and (#786) the Stage 2 prunes', each with the
+    /// item the model wrote — carried here (and through the checkpoint)
+    /// so the document-level report can account for the removals of
+    /// reused units too, and the trace can show each loss in the
+    /// original.
+    pub(super) removed: Vec<Removal>,
+    /// ADR 0024 §3.6: under `--lossy`, the array elements that were not
+    /// objects — dropped at parse, before `merge` ever saw them — so
+    /// the trace's loss records are complete in lossy mode too. Always
+    /// empty in strict mode (the mechanical pass removes those with
+    /// accounting instead).
+    pub(super) unparsed: Vec<Removal>,
 }
 
 /// How a Stage 1 corrective turn (issue #199) asks the model to try
@@ -184,8 +192,7 @@ pub(super) fn extract_chunk(
                         response: Some(&response),
                         parse_error: None,
                         validation_issues: None,
-                        removed_items: (!evaluated.removed.is_empty())
-                            .then_some(evaluated.removed.as_slice()),
+                        removed_items: removed_item_texts(&evaluated.removed),
                         piece_bytes: None,
                         requested_max_tokens: None,
                     });
@@ -198,6 +205,7 @@ pub(super) fn extract_chunk(
                     user: user.to_string(),
                     answer: response.content,
                     removed: evaluated.removed,
+                    unparsed: evaluated.unparsed,
                 });
             }
             Err(AnswerFault::Syntax(error)) => {
@@ -289,6 +297,7 @@ pub(super) fn checkpointed_unit(checkpoints: &CheckpointStore, piece: &str) -> O
         user: unit.user,
         answer: unit.answer,
         removed: unit.removed,
+        unparsed: unit.unparsed,
     })
 }
 
@@ -311,6 +320,7 @@ pub(super) fn record_checkpoint(
             user: output.user.clone(),
             answer: output.answer.clone(),
             removed: output.removed.clone(),
+            unparsed: output.unparsed.clone(),
         },
     );
 }
@@ -476,7 +486,7 @@ pub(super) fn extract_piece(
     match outcome {
         RoundOutcome::Valid(chunk_output) => {
             record_checkpoint(context.checkpoints, context.source, piece, &chunk_output);
-            Ok(vec![chunk_output])
+            Ok(vec![*chunk_output])
         }
         RoundOutcome::Failed(message) => Err(message),
         RoundOutcome::Refusal(reason) => Err(format!(
@@ -546,7 +556,9 @@ pub(super) fn demotion_reason(outcome: &RoundOutcome, budgeted: bool) -> String 
 
 /// How one [`extract_round`] ended, seen from the ladder.
 pub(super) enum RoundOutcome {
-    Valid(ChunkOutput),
+    /// Boxed: a `ChunkOutput` carries the user turn, the answer, and
+    /// both removal lists — far larger than the other arms.
+    Valid(Box<ChunkOutput>),
     /// The provider's metadata says this round's answer ended at the
     /// output cap — the ladder decides what changes; the round itself
     /// never re-asks under the limit it just hit.
@@ -670,13 +682,12 @@ pub(super) fn extract_round(
                         response: Some(&response),
                         parse_error: None,
                         validation_issues: None,
-                        removed_items: (!evaluated.removed.is_empty())
-                            .then_some(evaluated.removed.as_slice()),
+                        removed_items: removed_item_texts(&evaluated.removed),
                         piece_bytes: Some(piece_bytes),
                         requested_max_tokens: max_tokens,
                     });
                 }
-                return RoundOutcome::Valid(ChunkOutput {
+                return RoundOutcome::Valid(Box::new(ChunkOutput {
                     output: evaluated.output,
                     chunk_index: context.chunk_index,
                     piece_id: piece_id.to_string(),
@@ -684,7 +695,8 @@ pub(super) fn extract_round(
                     user: user.to_string(),
                     answer: response.content,
                     removed: evaluated.removed,
-                });
+                    unparsed: evaluated.unparsed,
+                }));
             }
             AttemptOutcome::LengthLimited => {
                 if let Some(sink) = context.sink {
@@ -1003,7 +1015,39 @@ pub(super) enum AnswerFault {
 /// its contract is that nothing is validated at all.
 pub(super) struct EvaluatedAnswer {
     pub(super) output: ModelOutput,
-    pub(super) removed: Vec<String>,
+    pub(super) removed: Vec<Removal>,
+    /// Lossy mode's parse-time drops (ADR 0024 §3.6); empty in strict
+    /// mode.
+    pub(super) unparsed: Vec<Removal>,
+}
+
+/// The elements of the answer's `associations`/`aliases`/`questions`
+/// arrays that are not objects — what lossy parsing drops without a
+/// word (`interpret_*_item` returns `None` and lossy discards the
+/// issue). Recorded so a `--lossy` run's trace still names every item
+/// the answer held (ADR 0024 §3.6).
+pub(super) fn non_object_elements(value: &serde_json::Value) -> Vec<Removal> {
+    let Some(obj) = value.as_object() else {
+        return Vec::new();
+    };
+    let mut unparsed = Vec::new();
+    for key in ["associations", "aliases", "questions"] {
+        if let Some(serde_json::Value::Array(items)) = get_present(obj, key) {
+            for (index, item) in items.iter().enumerate() {
+                if !item.is_object() {
+                    unparsed.push(Removal::new(
+                        format!("{key}[{index}]"),
+                        format!(
+                            "expected an object, got {} — dropped at parse under --lossy",
+                            describe_value(item)
+                        ),
+                        item,
+                    ));
+                }
+            }
+        }
+    }
+    unparsed
 }
 
 /// The Stage 1 gate every corrective-loop entry point calls instead of
@@ -1035,6 +1079,7 @@ pub(super) fn evaluate_answer(
             Ok(EvaluatedAnswer {
                 output,
                 removed: Vec::new(),
+                unparsed: non_object_elements(&value),
             })
         }
         Some(rules) => {
@@ -1043,6 +1088,7 @@ pub(super) fn evaluate_answer(
                 Ok(EvaluatedAnswer {
                     output: evaluation.output,
                     removed: evaluation.removed,
+                    unparsed: Vec::new(),
                 })
             } else {
                 // The whole answer goes back for correction; this
