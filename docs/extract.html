@@ -929,8 +929,10 @@ l=out/.extract-trace/a.attempts.jsonl      # the attempts log</code></pre>
   and .label=="作る" and .object=="アルコール")' "$t"
 # → {"kind":"item","item":"association",…,"piece_id":"3f2a…"}</code></pre>
     <p>
-      (An alias selects on <code>.item=="alias" and .alias==… and .canonical==…</code>;
-      a question on <code>.question</code> and <code>.paragraph</code>.)
+      (An alias selects on <code>(.item=="concept" or .item=="label") and .alias==…
+      and .canonical==…</code> — a concept alias and a label alias are separate
+      namespaces, each its own <code>item</code> value; a question on
+      <code>.question</code> and <code>.paragraph</code>.)
     </p>
     <p>
       <b>2. The piece.</b> <code>piece_id</code> names the text the item came from:
@@ -946,11 +948,13 @@ jq -c --arg p "$p" 'select(.kind=="piece" and .piece_id==$p)' "$t"
     </p>
     <p>
       <b>3. The conversation, in full.</b> The attempts log has every completion that asked about
-      this piece, in issue order — the accepted one from step 2 and every failed or corrected
-      try before it:
+      this piece, in issue order — the accepted one and every failed or corrected try before
+      it. The accepted one is the record matching step 2's <code>attempt</code> on <b>both</b>
+      <code>run_id</code> and <code>attempt_seq</code>: a resumed document's log spans several
+      runs, and <code>attempt_seq</code> restarts per run, so alone it is ambiguous:
     </p>
     <pre><code>jq -c --arg p "$p" 'select(.kind=="attempt" and .piece_id==$p)
-  | {attempt_seq, state, messages, answer}' "$l"
+  | {run_id, attempt_seq, state, messages, answer}' "$l"
 jq -r 'select(.kind=="system") | .content' "$l"   # the system turn, by hash</code></pre>
     <p>
       The user turn inside <code>messages</code> is the exact text the model was shown — the
@@ -968,7 +972,7 @@ jq -r 'select(.kind=="system") | .content' "$l"   # the system turn, by hash</co
       record from step 2 naming (or not naming) it:
     </p>
     <pre><code>jq -c 'select(.kind=="attempt")
-  | {attempt_seq, stage, state, corrects,
+  | {run_id, attempt_seq, stage, state, corrects,
      issues: .validation_issues}' "$l"</code></pre>
     <p>
       <b>5. The losses.</b> What the accepted answer held that the batch does not, each with the
