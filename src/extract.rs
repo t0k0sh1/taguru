@@ -134,7 +134,7 @@ pub(crate) use vocabulary::vocabulary_digest;
 // centralizes this instead of having every submodule import from
 // every sibling it needs.
 use aggregate::{Extraction, ItemKey, association_name_sets, combined_cross_output_issues, merge};
-use attempts::{AttemptLog, Observers, attempts_file_name, attempts_log_enabled};
+use attempts::{AttemptLog, MoveRecord, Observers, attempts_file_name, attempts_log_enabled};
 use candidates::{candidate_terms, candidates_block, candidates_manifest_value};
 use chat_client::{ChatCompletion, ChatError, ChatFailure, classify_io_error};
 use checkpoint::{CheckpointFingerprint, CheckpointStore, CheckpointUnit};

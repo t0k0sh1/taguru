@@ -3195,8 +3195,110 @@ fn length_limited_after_escalation_splits_the_piece_and_sub_pieces_restart_at_th
     assert_eq!(json_body_of(&requests[2])["max_tokens"], 512);
     assert_eq!(json_body_of(&requests[3])["max_tokens"], 512);
 
+    // ADR 0029 (#791): the two ladder moves land in the attempts log
+    // as records — the escalation with both budgets, then the split
+    // with size, cap, and sub-piece count — id-joined to the piece.
+    drop(requests);
+    let records = read_attempts_log(&out);
+    let moves: Vec<&Value> = records.iter().filter(|r| r["kind"] == "move").collect();
+    assert_eq!(moves.len(), 2, "{moves:?}");
+    let run_id = records[0]["run_id"].as_str().unwrap();
+    assert_eq!(moves[0]["move"], "escalate");
+    assert_eq!(moves[0]["run_id"], run_id);
+    assert_eq!(moves[0]["chunk_index"], 0);
+    assert_eq!(moves[0]["from_max_tokens"], 512);
+    assert_eq!(moves[0]["to_max_tokens"], 1024);
+    assert!(moves[0].get("from_rung").is_none());
+    assert_eq!(moves[1]["move"], "split");
+    assert_eq!(moves[1]["piece_id"], moves[0]["piece_id"]);
+    assert!(
+        moves[1]["reason"].as_str().unwrap().contains("output cap"),
+        "{}",
+        moves[1]
+    );
+    assert!(moves[1]["piece_bytes"].as_u64().unwrap() > 1000);
+    assert!(moves[1]["split_cap"].as_u64().unwrap() >= 512);
+    assert_eq!(moves[1]["sub_pieces"], 2);
+    // The two length-limited attempts both name the same piece the
+    // moves do; the sub-pieces' attempts name their own.
+    let attempts: Vec<&Value> = records.iter().filter(|r| r["kind"] == "attempt").collect();
+    assert_eq!(attempts.len(), 4);
+    assert_eq!(attempts[0]["piece_id"], moves[0]["piece_id"]);
+    assert_eq!(attempts[1]["state"], "length_limited");
+    assert_ne!(attempts[2]["piece_id"], moves[0]["piece_id"]);
+    // A clean HTTP conversation: zero transport retries everywhere.
+    assert!(attempts.iter().all(|a| a["transport_retries"] == 0));
+
     let _ = std::fs::remove_dir_all(&docs);
     let _ = std::fs::remove_dir_all(&out);
+}
+
+/// ADR 0029 (#791): the transport-layer retries ADR 0001 §10 folds
+/// into one attempt are now counted on it — a 500 answered twice
+/// before success is one `attempt` record with `transport_retries: 2`,
+/// in the sidecar and the attempts log alike.
+#[test]
+fn transport_retries_are_counted_on_the_one_attempt_record() {
+    let docs = batch_dir("extract-retrycount-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "alpha relates to beta").unwrap();
+    let out = batch_dir("extract-retrycount-out");
+    let diag_dir = batch_dir("extract-retrycount-diag");
+    let diag = diag_dir.join("diag.jsonl");
+
+    let good = chat_ok(
+        &json!({"associations": [
+            {"subject": "alpha", "label": "relates to", "object": "beta", "weight": 1.0}
+        ]})
+        .to_string(),
+    );
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls_in = std::sync::Arc::clone(&calls);
+    let (url, _captured) = stub_chat_server_concurrent(move |_index, _attempt| {
+        // Connection-order fault injection: the first two tries get a
+        // 500, the third the real answer.
+        let call = calls_in.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if call < 2 {
+            "HTTP/1.1 500 Internal Server Error
+content-length: 0
+
+"
+            .to_string()
+        } else {
+            good.clone()
+        }
+    });
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--diagnostics-out",
+            diag.to_str().unwrap(),
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "stdout: {stdout}
+stderr: {stderr}"
+    );
+    let records = read_attempt_records(&diag);
+    assert_eq!(records.len(), 1, "one attempt, retries folded in");
+    assert_eq!(records[0]["state"], "stop_valid");
+    assert_eq!(records[0]["transport_retries"], 2, "{:?}", records[0]);
+    let log = read_attempts_log(&out);
+    let attempt = log.iter().find(|r| r["kind"] == "attempt").unwrap();
+    assert_eq!(attempt["transport_retries"], 2);
+    assert!(!log.iter().any(|r| r["kind"] == "move"), "no ladder move");
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+    let _ = std::fs::remove_dir_all(&diag_dir);
 }
 
 /// A piece too small to split that still overruns the escalated
@@ -3489,6 +3591,38 @@ fn auto_demotes_json_schema_after_a_looping_piece_and_reports_it() {
         "the demotion is run-wide: {}",
         body(4)
     );
+
+    // ADR 0029 (#791): the escalation and the demotion are records in
+    // a.md's attempts log, with the stderr line's reason and both
+    // rungs — the restart under json_object then succeeds, so no
+    // split record follows.
+    let a_batch = stray_batch_files(&out)
+        .into_iter()
+        .map(|entry| entry.to_string_lossy().into_owned())
+        .find(|name| name.contains("a.md"))
+        .unwrap();
+    let moves: Vec<Value> = std::fs::read_to_string(out.join(".extract-trace").join(format!(
+        "{}.attempts.jsonl",
+        a_batch.trim_end_matches(".jsonl")
+    )))
+    .unwrap()
+    .lines()
+    .map(|line| serde_json::from_str::<Value>(line).unwrap())
+    .filter(|record| record["kind"] == "move")
+    .collect();
+    let kinds: Vec<&str> = moves.iter().map(|m| m["move"].as_str().unwrap()).collect();
+    assert_eq!(kinds, ["escalate", "demote"], "{moves:?}");
+    assert_eq!(moves[1]["from_rung"], "json_schema");
+    assert_eq!(moves[1]["to_rung"], "json_object");
+    assert!(
+        moves[1]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("even after the escalated resend"),
+        "{}",
+        moves[1]
+    );
+    assert_eq!(moves[1]["piece_id"], moves[0]["piece_id"]);
 
     let _ = std::fs::remove_dir_all(&docs);
     let _ = std::fs::remove_dir_all(&out);

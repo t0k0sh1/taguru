@@ -72,11 +72,19 @@ pub(crate) enum ChatFailure {
 pub(crate) struct ChatError {
     pub(crate) kind: ChatFailure,
     pub(super) message: String,
+    /// ADR 0029 (#791): failed tries before this error was returned
+    /// (the first try counts as 0) — [`ChatClient::complete`] stamps
+    /// it at every return; [`ChatError::new`] starts it at 0.
+    pub(crate) transport_retries: usize,
 }
 
 impl ChatError {
     pub(super) fn new(kind: ChatFailure, message: String) -> Self {
-        Self { kind, message }
+        Self {
+            kind,
+            message,
+            transport_retries: 0,
+        }
     }
 }
 
@@ -139,6 +147,11 @@ pub(crate) struct ChatCompletion {
     pub(crate) content: String,
     pub(crate) finish_reason: Option<String>,
     pub(crate) usage: Option<TokenUsage>,
+    /// ADR 0029 (#791): how many transport-layer tries failed before
+    /// this completion arrived — 0 for a clean first try; the
+    /// `transport`/429/5xx retries ADR 0001 §10 folds into one
+    /// attempt, now counted on it.
+    pub(crate) transport_retries: usize,
 }
 
 /// The optional OpenAI-compatible parameters one completion carries
@@ -266,9 +279,13 @@ impl ChatClient {
                 // `Transport` to say so.
                 Ok(response) if response.status().as_u16() < 400 => {
                     match parse_chat_completion(response.into_body()) {
-                        Ok(completion) => return Ok(completion),
-                        Err(error) => {
+                        Ok(mut completion) => {
+                            completion.transport_retries = attempt;
+                            return Ok(completion);
+                        }
+                        Err(mut error) => {
                             if options.fail_fast_on_timeout && error.kind == ChatFailure::Timeout {
+                                error.transport_retries = attempt;
                                 return Err(error);
                             }
                             last = Some(error);
@@ -297,17 +314,20 @@ impl ChatClient {
                         ),
                     );
                     if code != 429 && code < 500 {
+                        let mut error = error;
+                        error.transport_retries = attempt;
                         return Err(error);
                     }
                     last = Some(error);
                     retry_after
                 }
                 Err(error) => {
-                    let error = ChatError::new(
+                    let mut error = ChatError::new(
                         classify_send_error(&error),
                         format!("chat request failed: {error}"),
                     );
                     if options.fail_fast_on_timeout && error.kind == ChatFailure::Timeout {
+                        error.transport_retries = attempt;
                         return Err(error);
                     }
                     last = Some(error);
@@ -321,10 +341,12 @@ impl ChatClient {
             }
         }
         let last = last.expect("RETRY_ATTEMPTS >= 1, so the loop set this at least once");
-        Err(ChatError::new(
+        let mut error = ChatError::new(
             last.kind,
             format!("after {RETRY_ATTEMPTS} attempts: {}", last.message),
-        ))
+        );
+        error.transport_retries = RETRY_ATTEMPTS - 1;
+        Err(error)
     }
 }
 
@@ -368,5 +390,6 @@ pub(super) fn parse_chat_completion(body: ureq::Body) -> Result<ChatCompletion, 
         content,
         finish_reason,
         usage,
+        transport_retries: 0,
     })
 }
