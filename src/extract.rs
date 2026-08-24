@@ -136,6 +136,8 @@ pub(crate) use vocabulary::vocabulary_digest;
 use aggregate::{Extraction, ItemKey, association_name_sets, combined_cross_output_issues, merge};
 use attempts::{AttemptLog, MoveRecord, Observers, attempts_file_name, attempts_log_enabled};
 use candidates::{candidate_terms, candidates_block, candidates_manifest_value};
+#[cfg(test)]
+use chat_client::RETRY_ATTEMPTS;
 use chat_client::{ChatCompletion, ChatError, ChatFailure, classify_io_error};
 use checkpoint::{CheckpointFingerprint, CheckpointStore, CheckpointUnit};
 use chunking::{

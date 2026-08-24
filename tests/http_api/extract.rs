@@ -2928,6 +2928,25 @@ fn a_timeout_under_the_ladder_splits_instead_of_retrying_at_the_same_size() {
         "took {:?}",
         started.elapsed()
     );
+    // ADR 0029: a timeout split's move record says it was a timeout,
+    // not an output cap.
+    let records = read_attempts_log(&out);
+    let split = records
+        .iter()
+        .find(|r| r["kind"] == "move" && r["move"] == "split")
+        .unwrap_or_else(|| panic!("{records:?}"));
+    assert!(
+        split["reason"].as_str().unwrap().contains("timed out"),
+        "{split}"
+    );
+    assert_eq!(split["sub_pieces"], 2);
+    // The timed-out attempt is on record with zero transport retries —
+    // fail-fast under the ladder returned the first timeout.
+    let timeout = records
+        .iter()
+        .find(|r| r["kind"] == "attempt" && r["state"] == "timeout")
+        .unwrap_or_else(|| panic!("{records:?}"));
+    assert_eq!(timeout["transport_retries"], 0);
 
     // The floor: one paragraph that cannot split, always stalling.
     let floor = docs.join("floor.md");

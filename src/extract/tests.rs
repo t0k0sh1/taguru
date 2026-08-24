@@ -4091,6 +4091,11 @@ struct ScriptedChat {
 /// looks from the client.
 const STALL: &str = "<stall>";
 
+/// A scripted 429 with `Retry-After: 0`, so the client's retry loop
+/// spins without sleeping — the ADR 0029 transport-retry tests count
+/// tries, not seconds.
+const RATE_LIMIT: &str = "<rate-limit>";
+
 fn chat_answer(content: &str, finish_reason: &str) -> String {
     serde_json::json!({
         "choices": [{"message": {"content": content}, "finish_reason": finish_reason}]
@@ -4145,6 +4150,14 @@ impl ScriptedChat {
                     if answer == STALL {
                         std::thread::sleep(std::time::Duration::from_secs(3));
                         return; // the client has given up; drop the stream
+                    }
+                    if answer == RATE_LIMIT {
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 0\r\n\
+                             Content-Length: 0\r\nConnection: close\r\n\r\n"
+                        );
+                        return;
                     }
                     let _ = write!(
                         stream,
@@ -5947,5 +5960,43 @@ fn schema_prompt_lists_are_exact_and_filter_unconstrained_relations() {
     assert!(
         !block.contains("Relation constraints"),
         "no constrained relation → no constraints header: {block}"
+    );
+}
+
+/// ADR 0029 (#791): `transport_retries` counts the tries folded into
+/// one attempt — 0 on a clean first try, the failed-try count on a
+/// success after retries, and `RETRY_ATTEMPTS - 1` when every try was
+/// spent (the "after 4 attempts" error).
+#[test]
+fn transport_retries_count_folded_tries_and_the_exhausted_total() {
+    let ask = [serde_json::json!({"role": "user", "content": "hi"})];
+    let chat = ScriptedChat::start(vec![chat_answer("clean", "stop")]);
+    let clean = chat
+        .client()
+        .complete(&ask, &RequestOptions::default())
+        .unwrap();
+    assert_eq!(clean.transport_retries, 0);
+
+    let chat = ScriptedChat::start(vec![
+        RATE_LIMIT.to_string(),
+        RATE_LIMIT.to_string(),
+        chat_answer("eventually", "stop"),
+    ]);
+    let eventually = chat
+        .client()
+        .complete(&ask, &RequestOptions::default())
+        .unwrap();
+    assert_eq!(eventually.content, "eventually");
+    assert_eq!(eventually.transport_retries, 2);
+
+    let chat = ScriptedChat::start(vec![RATE_LIMIT.to_string(); RETRY_ATTEMPTS]);
+    let Err(exhausted) = chat.client().complete(&ask, &RequestOptions::default()) else {
+        panic!("four 429s must exhaust the retries");
+    };
+    assert_eq!(exhausted.transport_retries, RETRY_ATTEMPTS - 1);
+    assert!(
+        exhausted.message.contains("after 4 attempts"),
+        "{}",
+        exhausted.message
     );
 }
