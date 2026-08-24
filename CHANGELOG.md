@@ -9,6 +9,12 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Added
 
+- `docs/extract.html` gains a reading guide for the records above
+  (#794): a `jq` walkthrough from one batch line back to the piece,
+  the full conversation, the correction chain, and the losses; an
+  observation → knob tuning table (thresholds land after the #780
+  baseline); and the four #784 questions each metric answers.
+
 - `extract` writes a per-document **trace** beside every batch —
   `<out>/.extract-trace/<batch name>`, always on — joining every batch
   item (by its content key; the batch format is unchanged) to the piece

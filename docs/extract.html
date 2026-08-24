@@ -907,6 +907,191 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
     </p>
   </section>
 
+  <section id="reading">
+    <h2>Reading the records: tracing one item, and what to adjust</h2>
+    <p>
+      Everything above says what is written. This section is the reader's path through it
+      (#784): start from one line of a finished batch and end with the original text, the exact
+      prompt, and the model's full answer side by side — then, when a number looks wrong,
+      which knob answers it. <code>jq</code> is enough; no taguru command is involved. Throughout,
+      for a batch <code>out/a.jsonl</code>:
+    </p>
+    <pre><code>t=out/.extract-trace/a.jsonl               # the trace
+l=out/.extract-trace/a.attempts.jsonl      # the attempts log</code></pre>
+
+    <h3 id="walkthrough">From one batch line back to everything that produced it</h3>
+    <p>
+      <b>1. The item.</b> A batch line is identified by its content, so select the trace
+      <code>item</code> record with the same key — the association triple, the alias
+      spelling, or the question's (<code>paragraph</code>, text):
+    </p>
+    <pre><code>jq -c 'select(.kind=="item" and .subject=="酵母"
+  and .label=="作る" and .object=="アルコール")' "$t"
+# → {"kind":"item","item":"association",…,"piece_id":"3f2a…"}</code></pre>
+    <p>
+      (An alias selects on <code>.item=="alias" and .alias==… and .canonical==…</code>;
+      a question on <code>.question</code> and <code>.paragraph</code>.)
+    </p>
+    <p>
+      <b>2. The piece.</b> <code>piece_id</code> names the text the item came from:
+    </p>
+    <pre><code>p=3f2a…   # from step 1
+jq -c --arg p "$p" 'select(.kind=="piece" and .piece_id==$p)' "$t"
+# → chunk_index, piece_bytes, paragraph_first/last, reused,
+#   attempt: {run_id, attempt_seq}</code></pre>
+    <p>
+      <code>attempt</code> is the completion whose answer this piece's output <i>is</i>;
+      <code>paragraph_first</code>/<code>paragraph_last</code> locate the text in the original
+      document by the server's canonical paragraph numbering.
+    </p>
+    <p>
+      <b>3. The conversation, in full.</b> The attempts log has every completion that asked about
+      this piece, in issue order — the accepted one from step 2 and every failed or corrected
+      try before it:
+    </p>
+    <pre><code>jq -c --arg p "$p" 'select(.kind=="attempt" and .piece_id==$p)
+  | {attempt_seq, state, messages, answer}' "$l"
+jq -r 'select(.kind=="system") | .content' "$l"   # the system turn, by hash</code></pre>
+    <p>
+      The user turn inside <code>messages</code> is the exact text the model was shown — the
+      original passage needs no separate lookup — and <code>answer</code> is the reply in
+      full. <code>state</code>, <code>finish_reason</code>, token counts, and
+      <code>transport_retries</code> ride on the same record.
+    </p>
+    <p>
+      <b>4. The correction chain.</b> A record carrying <code>corrects</code> is a corrective
+      attempt; its target is the record with that <code>{run_id, attempt_seq}</code>. The whole
+      tuple — what was flagged, what was asked, what came back, what was adopted — reads
+      off records already in hand: the flagged issues are the corrected attempt's
+      <code>validation_issues</code>, the ask is the corrective attempt's last
+      <code>messages</code> turn, the reply is its <code>answer</code>, and adoption is the piece
+      record from step 2 naming (or not naming) it:
+    </p>
+    <pre><code>jq -c 'select(.kind=="attempt")
+  | {attempt_seq, stage, state, corrects,
+     issues: .validation_issues}' "$l"</code></pre>
+    <p>
+      <b>5. The losses.</b> What the accepted answer held that the batch does not, each with the
+      item exactly as the model wrote it (<code>raw</code>) beside the original text it was about
+      (<code>text</code>) — read the pair before concluding anything about why:
+    </p>
+    <pre><code>jq -c --arg p "$p" 'select(.kind=="loss" and .piece_id==$p)
+  | {reason, rule, raw, paragraph, text}' "$t"</code></pre>
+    <p>
+      <b>6. The document's side.</b> The reverse direction — what the output does
+      <i>not</i> reflect — is the <code>paragraph</code> records (uncited paragraphs carry
+      their text) and, under <code>--coverage</code>, the <code>uncovered</code> sentences:
+    </p>
+    <pre><code>jq -c 'select(.kind=="paragraph" and .covered==false)
+  | {paragraph, bytes, text}' "$t"
+jq -c 'select(.kind=="uncovered") | {paragraph, sentence}' "$t"</code></pre>
+    <p>
+      What taguru itself contributed to the prompt is the trace's single
+      <code>steering</code> record (candidates, reuse vocabulary with counts, context names,
+      schema block); what the retry machinery did on its own is the attempts log's
+      <code>move</code> records. For the aggregate view of all of this — loss rates,
+      coverage, correction success, attempt states, moves, label concentration, cost — run
+      <code>scripts/extract_metrics.py</code> over the same <code>--out</code>; anchoring rate and
+      locator validity come from <code>taguru anchoring</code>.
+    </p>
+
+    <h3 id="tuning">When a number looks wrong: observation → knob</h3>
+    <p>
+      Each row pairs an observation — as the metric tables or the records spell it —
+      with the control that answers it. The knobs are all described earlier on this page.
+    </p>
+    <table>
+      <thead>
+        <tr><th>Observation</th><th>What to adjust</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>length_limited</code> share high; frequent <code>escalate</code> moves, or
+            <code>split</code> moves whose reason is the output cap</td>
+          <td>Raise <code>--max-output-tokens</code> (the escalated resend's ceiling is
+            <code>TAGURU_EXTRACT_ESCALATION_FACTOR</code> × it), or lower
+            <code>--chunk-bytes</code> — less text per call means shorter answers.</td>
+        </tr>
+        <tr>
+          <td><code>timeout</code> share high; <code>split</code> moves whose reason is the
+            timeout</td>
+          <td>Raise <code>TAGURU_EXTRACT_TIMEOUT_SECS</code> (local models often need it), or
+            lower <code>--chunk-bytes</code>.</td>
+        </tr>
+        <tr>
+          <td>Runaway under schema-constrained decoding: pieces exhausting the ladder
+            (<code>length_limited</code> at the escalated resend, or <code>timeout</code>) under
+            an <code>auto</code>-resolved rung, and a <code>demote</code> move appearing run
+            after run</td>
+          <td><code>--structured-output json-object</code> (or <code>off</code>) — pin the
+            rung <code>auto</code> keeps demoting to, instead of paying the failed ladder
+            again at the start of every run.</td>
+        </tr>
+        <tr>
+          <td>Corrections don't take: correction success low, <code>removed_instead</code>
+            high</td>
+          <td>Raise <code>TAGURU_EXTRACT_MAX_ATTEMPTS</code>; read the corrective ask beside its
+            answer (walkthrough step 4). <code>TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES</code>
+            changes how much of the bad answer is replayed. An ask the model consistently
+            misreads is a product bug — file it with those two records attached; the wording
+            is taguru's, not yours.</td>
+        </tr>
+        <tr>
+          <td>One label over-reused: top-1 share high, label entropy low, and the
+            <code>steering</code> record's vocabulary shows that label's count
+            snowballing</td>
+          <td>The reuse list itself steers this (it accumulates over the run in document order;
+            since #759 it is ranked by count and drops single-character labels). Re-extract the
+            affected document alone with <code>--force</code> — a fresh run has an empty
+            reuse list — and compare: if the label vanishes, the offer drove it, not the
+            document.</td>
+        </tr>
+        <tr>
+          <td>Referent in another chunk: items citing a paragraph outside their piece's
+            range, or a subject that only occurs in some other chunk's range</td>
+          <td>Raise <code>--chunk-bytes</code> so mention and referent share a chunk. Supplying
+            per-chunk context is the planned control
+            (<a href="https://github.com/t0k0sh1/taguru/issues/782">#782</a>) — the steering
+            record's <code>chunk_index</code> is already reserved for it.</td>
+        </tr>
+      </tbody>
+    </table>
+    <p class="note">
+      What counts as "high" is deliberately absent: the thresholds come from the
+      baseline measurement against the field corpus
+      (<a href="https://github.com/t0k0sh1/taguru/issues/780">#780</a>) and land here once
+      measured. Until then, compare against your own previous run —
+      <code>extract_metrics.py --compare</code> exists for exactly this — rather than
+      against an absolute.
+    </p>
+
+    <h3 id="axes">Four questions, one record set</h3>
+    <p>
+      The same records answer four different questions — keep straight which one you are
+      asking (#784):
+    </p>
+    <ol>
+      <li><b>Is the model good enough?</b> — attempt-state shares (does it keep the
+        format), <code>length_limited</code>/<code>timeout</code> counts (does it fit the
+        budget), correction success (does it understand the ask), and the loss records'
+        <code>raw</code>/<code>text</code> pairs read by a person (is the interpretation right).
+        If these fail, a stronger model beats any knob — see
+        <a href="#quality">Quality</a>.</li>
+      <li><b>Is the RAG itself capable?</b> — the loss <i>rate</i> (answers the model gave
+        that taguru did not keep — the headline number), the correction tuples (did recovery
+        keep the meaning), paragraph coverage and the uncited paragraphs' text (what the
+        output never reflects), steering versus the labels actually kept (did what taguru offered
+        distort the answer), and piece paragraph ranges versus item citations (did chunking
+        starve the model of the referent). <code>taguru evaluate</code>'s retrieval metrics
+        sit on this axis too.</li>
+      <li><b>Which parameter?</b> — the table above.</li>
+      <li><b>Is the whole system's answer right?</b> — end-to-end answer quality is
+        out of scope for these records; axis 2's retrieval metrics and its gold data are the
+        substrate an end-to-end evaluation builds on (see
+        <a href="evaluate.html">evaluate</a> and <a href="benchmark.html">benchmark</a>).</li>
+    </ol>
+  </section>
+
   <section id="trust">
     <h2>Trust: extraction is a channel for claims</h2>
     <p>
