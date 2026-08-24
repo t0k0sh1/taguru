@@ -9,6 +9,7 @@ the granularities: document -> context -> group -> run.
     python3 scripts/extract_metrics.py OUT_DIR [OUT_DIR ...]
         [--ledger ledger.json]        # source -> context/groups mapping
         [--price-in N] [--price-out N]  # cost per 1M tokens (default 0)
+        [--anchoring report.json]     # `taguru anchoring --json` output (#793)
         [--json out.json] [--markdown out.md]  # default: markdown to stdout
         [--compare baseline.json]     # per-document deltas vs an earlier run
 
@@ -365,11 +366,69 @@ def aggregate(documents: list[dict], ledger: dict, prices: tuple[float, float]) 
     }
 
 
+# ---------------------------------------------------------------- anchoring
+
+ANCHOR_COUNT_KEYS = (
+    "associations",
+    "anchored_strict",
+    "anchored_with_aliases",
+    "cited",
+    "locator_valid",
+)
+
+
+def anchoring_rates(counts: dict) -> dict:
+    rates = dict(counts)
+    rates["rate_strict"] = ratio(counts["anchored_strict"], counts["associations"])
+    rates["rate_with_aliases"] = ratio(
+        counts["anchored_with_aliases"], counts["associations"]
+    )
+    rates["alias_dependent_rate"] = ratio(
+        counts["anchored_with_aliases"] - counts["anchored_strict"], counts["associations"]
+    )
+    rates["locator_validity"] = ratio(counts["locator_valid"], counts["cited"])
+    return rates
+
+
+def attach_anchoring(report: dict, anchoring: dict) -> None:
+    """Folds a `taguru anchoring --json` report into the tables, using
+    the context/group assignments the trace aggregation already made
+    (so both metric families roll up identically)."""
+    run = Counter()
+    contexts: dict[str, Counter] = defaultdict(Counter)
+    groups: dict[str, Counter] = defaultdict(Counter)
+    for source, row in anchoring.get("documents", {}).items():
+        counts = {key: row.get(key, 0) for key in ANCHOR_COUNT_KEYS}
+        entry = report["documents"].get(source)
+        if entry is None:
+            print(
+                f"warning: anchoring report covers {source!r}, which the trace "
+                "aggregation does not; skipped",
+                file=sys.stderr,
+            )
+            continue
+        entry["metrics"]["anchoring"] = anchoring_rates(counts)
+        run.update(counts)
+        contexts[entry["context"]].update(counts)
+        for group in entry["groups"]:
+            groups[group].update(counts)
+    if not run:
+        return
+    report["run"]["anchoring"] = anchoring_rates(dict(run))
+    for name, counter in contexts.items():
+        report["contexts"][name]["anchoring"] = anchoring_rates(dict(counter))
+    for name, counter in groups.items():
+        report["groups"][name]["anchoring"] = anchoring_rates(dict(counter))
+
+
 # ----------------------------------------------------------------- compare
 
 # metric path -> direction ("down" = lower is better)
 COMPARE_KEYS = [
     (("loss", "association", "rate"), "down", "assoc loss"),
+    (("anchoring", "rate_strict"), "up", "anchoring (strict)"),
+    (("anchoring", "rate_with_aliases"), "up", "anchoring (aliases)"),
+    (("anchoring", "locator_validity"), "up", "locator validity"),
     (("coverage", "covered_byte_rate"), "up", "coverage (bytes)"),
     (("corrections", "success_rate"), "up", "correction success"),
     (("attempts", "stop_valid_rate"), "up", "stop_valid"),
@@ -463,6 +522,24 @@ def markdown(report: dict) -> str:
     lines += [
         metric_row(source, entry["metrics"]) for source, entry in report["documents"].items()
     ]
+    anchored = [("run", report["run"])] + [
+        (name, m) for section in ("contexts", "groups") for name, m in report[section].items()
+    ] + [(source, entry["metrics"]) for source, entry in report["documents"].items()]
+    anchored = [(name, m["anchoring"]) for name, m in anchored if "anchoring" in m]
+    if anchored:
+        lines += [
+            "",
+            "## Anchoring",
+            "",
+            "| scope | assocs | strict | with aliases | alias-dependent | locator validity |",
+            "|---|---|---|---|---|---|",
+        ]
+        lines += [
+            f"| {name} | {a['associations']} | {fmt(a['rate_strict'])} "
+            f"| {fmt(a['rate_with_aliases'])} | {fmt(a['alias_dependent_rate'])} "
+            f"| {fmt(a['locator_validity'])} |"
+            for name, a in anchored
+        ]
     if "compare" in report:
         cmp = report["compare"]
         lines += [
@@ -618,6 +695,31 @@ def self_test() -> int:
             if got != want:
                 print(f"self-test check {index} failed: got {got!r}, want {want!r}")
                 return 1
+        # anchoring attachment: counts roll up with the same assignments.
+        attach_anchoring(
+            report,
+            {"documents": {"a.md": {"context": "ch1", "associations": 4,
+                                    "anchored_strict": 2, "anchored_with_aliases": 3,
+                                    "cited": 3, "locator_valid": 3},
+                           "ghost.md": {"context": "x", "associations": 1,
+                                        "anchored_strict": 0,
+                                        "anchored_with_aliases": 0,
+                                        "cited": 0, "locator_valid": 0}}},
+        )
+        anchor = report["run"]["anchoring"]
+        anchor_checks = [
+            (anchor["rate_strict"], 0.5),
+            (anchor["rate_with_aliases"], 0.75),
+            (anchor["alias_dependent_rate"], 0.25),
+            (anchor["locator_validity"], 1.0),
+            (report["contexts"]["ch1"]["anchoring"]["associations"], 4),
+            (report["groups"]["book"]["anchoring"]["associations"], 4),
+            ("anchoring" in report["documents"]["a.md"]["metrics"], True),
+        ]
+        for index, (got, want) in enumerate(anchor_checks):
+            if got != want:
+                print(f"self-test anchoring check {index} failed: got {got!r}, want {want!r}")
+                return 1
         # compare: a baseline where the loss rate was worse and seconds lower
         baseline = json.loads(json.dumps(report))
         baseline["documents"]["a.md"]["metrics"]["loss"]["association"]["rate"] = 0.5
@@ -642,6 +744,7 @@ def main() -> int:
     parser.add_argument("--ledger", type=Path, help="source -> context/groups JSON")
     parser.add_argument("--price-in", type=float, default=0.0, help="per 1M input tokens")
     parser.add_argument("--price-out", type=float, default=0.0, help="per 1M output tokens")
+    parser.add_argument("--anchoring", type=Path, help="a `taguru anchoring --json` report")
     parser.add_argument("--json", type=Path, help="write the full report as JSON here")
     parser.add_argument("--markdown", type=Path, help="write the tables here (default stdout)")
     parser.add_argument("--compare", type=Path, help="a --json report to diff against")
@@ -659,6 +762,10 @@ def main() -> int:
         print("no traced documents found", file=sys.stderr)
         return 1
     report = aggregate(documents, ledger, (args.price_in, args.price_out))
+    if args.anchoring:
+        attach_anchoring(
+            report, json.loads(args.anchoring.read_text(encoding="utf-8"))
+        )
     if args.compare:
         baseline = json.loads(args.compare.read_text(encoding="utf-8"))
         report["compare"] = compare(report, baseline)

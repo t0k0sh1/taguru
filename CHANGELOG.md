@@ -93,6 +93,18 @@ Entries that change an on-disk format or a response shape say so.
   `--compare` diffs two runs per document with improved/worsened
   counts. python3 standard library only.
 
+- `taguru anchoring` (#793): judges extraction batches against their
+  own passage text, offline — the anchoring rate (subject and object
+  present in the cited paragraph, else the passage, as a
+  `normalize_entry` substring match) in a **strict** (own spelling)
+  and a **with-aliases** (alias group: the batch's own concept
+  aliases plus `--vocabulary`'s context aliases) variant, the gap
+  being the alias-dependent share, and **locator validity** (cited
+  paragraphs that actually hold the subject or object). Needs only
+  batch files, so it applies to pre-0.9.5 output unchanged; `--json`
+  writes the report `scripts/extract_metrics.py --anchoring` folds
+  into its tables.
+
 ### Changed
 
 - `extract`'s stderr lists a document's mechanical removals per chunk

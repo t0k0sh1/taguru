@@ -7340,3 +7340,214 @@ fn extract_metrics_script_aggregates_a_real_run() {
     let _ = std::fs::remove_dir_all(&docs);
     let _ = std::fs::remove_dir_all(&out);
 }
+
+/// #793: `taguru anchoring` judges a real extract run's batches — the
+/// strict and alias-group anchoring rates and locator validity — and
+/// `scripts/extract_metrics.py --anchoring` rolls the JSON into its
+/// tables. The alias-dependent case is exercised end to end: the model
+/// asserts a fact under a spelling the passage never uses, anchored
+/// only through the alias it also emitted.
+#[test]
+fn anchoring_command_rates_a_real_run_and_the_script_folds_it_in() {
+    let docs = batch_dir("extract-anchoring-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "青嶺酒造の杜氏は高瀬。\n\n蔵は山にある。").unwrap();
+    let out = batch_dir("extract-anchoring-out");
+    let reply = json!({
+        "associations": [
+            {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬", "weight": 1.0,
+             "paragraph": 0}
+        ]
+    })
+    .to_string();
+    let (url, _requests) = stub_chat_server(vec![reply]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &["--context", "c", doc.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+
+    // A second, hand-written batch (anchoring parses, never imports):
+    // its subject appears in the passage only under the alias's
+    // canonical spelling — anchored with aliases, not strictly. This
+    // is 0.9.3-shaped input too: no trace beside it.
+    std::fs::write(
+        out.join("b.jsonl"),
+        "{\"taguru_batch\":1,\"context\":\"c\",\"source\":\"b.md\"}\n\
+         {\"passage\":\"青嶺酒造の杜氏は高瀬。\\n\\n蔵は山にある。\"}\n\
+         {\"subject\":\"あおみね\",\"label\":\"所在\",\"object\":\"山\",\"weight\":1.0}\n\
+         {\"alias\":\"あおみね\",\"canonical\":\"青嶺酒造\",\"kind\":\"concept\"}\n",
+    )
+    .unwrap();
+
+    let report_path = docs.join("anchoring.json");
+    let output = Command::new(env!("CARGO_BIN_EXE_taguru"))
+        .args(["anchoring", out.to_str().unwrap()])
+        .args(["--json", report_path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let table = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !table.contains("skipped"),
+        "nothing was skipped, so no skipped line: {table}"
+    );
+    let report: Value =
+        serde_json::from_str(&std::fs::read_to_string(&report_path).unwrap()).unwrap();
+    let totals = &report["totals"];
+    assert_eq!(totals["associations"], 2, "{report}");
+    assert_eq!(totals["anchored_strict"], 1, "あおみね is not in the text");
+    assert_eq!(
+        totals["anchored_with_aliases"], 2,
+        "…but its alias's canonical is"
+    );
+    assert_eq!(totals["rate_strict"], 0.5);
+    assert_eq!(totals["rate_with_aliases"], 1.0);
+    assert_eq!(totals["cited"], 1, "only a.md's association cites");
+    assert_eq!(totals["locator_valid"], 1);
+    assert_eq!(
+        report["documents"]["b.md"]["anchored_strict"], 0,
+        "{report}"
+    );
+    assert_eq!(report["documents"]["b.md"]["anchored_with_aliases"], 1);
+    let a_key = doc.to_str().unwrap();
+    assert_eq!(report["documents"][a_key]["context"], "c");
+
+    // The aggregation script folds the matched document in and warns
+    // about the trace-less one instead of inventing a row.
+    let script =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/extract_metrics.py");
+    let folded = Command::new("python3")
+        .arg(&script)
+        .arg(&out)
+        .args(["--anchoring", report_path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&folded.stdout);
+    let warnings = String::from_utf8_lossy(&folded.stderr);
+    assert!(folded.status.success(), "{text}{warnings}");
+    assert!(text.contains("## Anchoring"), "{text}");
+    assert!(
+        text.contains("| run | 1 | 1.000 | 1.000 | 0.000 | 1.000 |"),
+        "{text}"
+    );
+    assert!(warnings.contains("'b.md'"), "{warnings}");
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// The anchoring CLI's edges: a usage error exits 2 with the unknown
+/// argument named; `--vocabulary` context aliases actually widen the
+/// alias groups (without the flag the same association is unanchored);
+/// a `--no-passage`-shaped batch is skipped and counted; the table
+/// prints its TOTAL row.
+#[test]
+fn anchoring_cli_usage_vocabulary_and_skip_edges() {
+    let dir = batch_dir("extract-anchoring-cli-docs");
+    // Usage error: exit 2, the argument named, usage shown.
+    let bogus = Command::new(env!("CARGO_BIN_EXE_taguru"))
+        .args(["anchoring", "--bogus"])
+        .output()
+        .unwrap();
+    assert_eq!(bogus.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&bogus.stderr);
+    assert!(stderr.contains("unknown argument '--bogus'"), "{stderr}");
+    assert!(stderr.contains("usage: taguru anchoring"), "{stderr}");
+
+    // One judgeable batch whose subject anchors only through a
+    // CONTEXT alias, one passage-less batch (skipped, counted).
+    std::fs::write(
+        dir.join("c.jsonl"),
+        "{\"taguru_batch\":1,\"context\":\"c\",\"source\":\"c.md\"}\n\
+         {\"passage\":\"青嶺酒造の杜氏は高瀬。\"}\n\
+         {\"subject\":\"あおみね\",\"label\":\"杜氏\",\"object\":\"高瀬\",\"weight\":1.0}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("nopassage.jsonl"),
+        "{\"taguru_batch\":1,\"context\":\"c\",\"source\":\"n.md\"}\n\
+         {\"subject\":\"a\",\"label\":\"l\",\"object\":\"b\",\"weight\":1.0}\n",
+    )
+    .unwrap();
+    let vocabulary = dir.join("vocabulary.jsonl");
+    std::fs::write(
+        &vocabulary,
+        "{\"taguru_batch\":1,\"context\":\"c\",\"source\":\"prior.md\"}\n\
+         {\"subject\":\"青嶺酒造\",\"label\":\"杜氏\",\"object\":\"高瀬\",\"weight\":1.0}\n\
+         {\"alias\":\"あおみね\",\"canonical\":\"青嶺酒造\",\"kind\":\"concept\"}\n",
+    )
+    .unwrap();
+
+    let run = |vocab: bool| -> (String, String) {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_taguru"));
+        command
+            .arg("anchoring")
+            .arg(dir.join("c.jsonl"))
+            .arg(dir.join("nopassage.jsonl"));
+        if vocab {
+            command.args(["--vocabulary", vocabulary.to_str().unwrap()]);
+        }
+        let output = command.output().unwrap();
+        assert!(output.status.success());
+        (
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+    let (with, with_err) = run(true);
+    assert!(with.contains("TOTAL\t1\t0.000\t1.000\t-"), "{with}");
+    assert!(
+        with.contains("(1 batch(es) without a passage skipped)"),
+        "{with}"
+    );
+    assert!(with_err.contains("no passage"), "{with_err}");
+    let (without, _) = run(false);
+    assert!(
+        without.contains("TOTAL\t1\t0.000\t0.000\t-"),
+        "without --vocabulary nothing supplies the alias: {without}"
+    );
+
+    // Every batch skipped: nothing to report, exit 1 (the module
+    // doc's contract).
+    let empty = Command::new(env!("CARGO_BIN_EXE_taguru"))
+        .arg("anchoring")
+        .arg(dir.join("nopassage.jsonl"))
+        .output()
+        .unwrap();
+    assert_eq!(empty.status.code(), Some(1));
+    let empty_err = String::from_utf8_lossy(&empty.stderr);
+    assert!(
+        empty_err.contains("no batch with a passage to judge"),
+        "{empty_err}"
+    );
+
+    // The same source judged twice (two inputs): both rows survive,
+    // the second under a disambiguated key, with a warning.
+    let twin = dir.join("twin");
+    std::fs::create_dir(&twin).unwrap();
+    std::fs::copy(dir.join("c.jsonl"), twin.join("c.jsonl")).unwrap();
+    let doubled = Command::new(env!("CARGO_BIN_EXE_taguru"))
+        .arg("anchoring")
+        .arg(dir.join("c.jsonl"))
+        .arg(twin.join("c.jsonl"))
+        .output()
+        .unwrap();
+    assert!(doubled.status.success());
+    let stdout = String::from_utf8_lossy(&doubled.stdout);
+    let stderr = String::from_utf8_lossy(&doubled.stderr);
+    assert!(stdout.contains("TOTAL\t2\t"), "both counted: {stdout}");
+    assert!(stdout.contains("c.md (twin)"), "{stdout}");
+    assert!(stderr.contains("source 'c.md' already judged"), "{stderr}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

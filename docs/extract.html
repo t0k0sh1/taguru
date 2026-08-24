@@ -830,6 +830,10 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       owning chunk (<code>chunk_index</code>/<code>chunk_sha256</code>).
     </p>
     <p>
+      <code>taguru anchoring OUT_DIR --json report.json</code> judges the written batches
+      against their own passage text — the anchoring rate (strict and alias-group) and locator
+      validity, hallucination's mechanical floor; batch files are all it needs, so pre-0.9.5
+      output qualifies (<code>taguru anchoring --help</code>).
       <code>scripts/extract_metrics.py</code> (python3, standard library only) folds these
       records — and the attempts log below — into the #784 metric tables per document, context,
       group, and run (loss rates by reason, paragraph coverage, correction success, attempt-state

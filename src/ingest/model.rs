@@ -152,6 +152,20 @@ impl Batch {
     /// check's input (ADR 0016, #496 S4) when a manifest-skipped
     /// document is judged from its already-written batch instead of a
     /// fresh extraction.
+    /// The batch's passage, if it carries one — `taguru anchoring`'s
+    /// original text (#793).
+    pub(crate) fn passage(&self) -> Option<&str> {
+        self.passage.as_deref()
+    }
+
+    /// The association operations verbatim, paragraph citations
+    /// included — `taguru anchoring` judges these (#793);
+    /// [`Batch::association_triples`] stays the coverage check's
+    /// paragraph-less view.
+    pub(crate) fn associations(&self) -> &[crate::registry::AssocOp] {
+        &self.associations
+    }
+
     pub(crate) fn association_triples(&self) -> Vec<[&str; 3]> {
         self.associations
             .iter()

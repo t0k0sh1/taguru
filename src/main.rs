@@ -1,3 +1,4 @@
+mod anchoring;
 mod api;
 mod auth;
 mod benchmark;
