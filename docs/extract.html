@@ -857,6 +857,16 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       <code>{role, system_sha256}</code> and the rest as <code>{role, content}</code> in full, the
       replayed prior answer and corrective ask of a retry included — and <code>answer</code>, the
       model's final text in full (<code>null</code> for <code>timeout</code>/<code>transport</code>).
+      A corrective attempt also carries <code>corrects</code> — the
+      <code>{run_id, attempt_seq}</code> of the attempt whose answer it replays and asks to fix
+      (Stage 1: the same piece's previous attempt; Stage 2: the accepted attempt whose output is
+      being corrected) — so the correction tuple "what was flagged → what was asked → what came
+      back → what was adopted" is a join over records already on disk
+      (<a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0028-correction-tuples.md">ADR
+      0028</a>): the flagged issues sit on the corrected attempt, the ask is the corrective
+      attempt's own last turn, adoption is the trace <code>piece</code> record naming this
+      attempt, and what was flagged-then-removed instead lands in the trace's <code>loss</code>
+      records.
       Nothing is capped. It is written incrementally (a killed run keeps every completion made),
       <b>kept when the document fails</b> — that is what it is for — and, on a checkpoint resume,
       appended to rather than truncated, so it spans exactly the runs that built the batch; a

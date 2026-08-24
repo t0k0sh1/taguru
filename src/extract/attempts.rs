@@ -133,6 +133,7 @@ impl AttemptLog {
             kind: "attempt",
             run_id: &attempt.attempt_ref.run_id,
             attempt_seq: attempt.attempt_ref.attempt_seq,
+            corrects: attempt.corrects,
             piece_id: attempt.piece_id,
             source: attempt.source,
             chunk_index: attempt.chunk_index,
@@ -227,6 +228,10 @@ struct AttemptFullRecord<'a> {
     kind: &'static str,
     run_id: &'a str,
     attempt_seq: u64,
+    /// ADR 0028: the attempt this corrective attempt replays and asks
+    /// to fix; absent on base attempts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    corrects: Option<&'a AttemptRef>,
     piece_id: &'a str,
     source: &'a str,
     chunk_index: usize,

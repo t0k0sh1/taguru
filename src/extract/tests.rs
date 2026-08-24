@@ -70,6 +70,7 @@ fn attempt_record_serializes_the_shared_key_set() {
         kind: "attempt",
         run_id: "0000deadbeef0000".to_string(),
         attempt_seq: 1,
+        corrects: None,
         piece_id: "p".repeat(64),
         source: "doc.md".to_string(),
         stage: "item",
@@ -150,6 +151,7 @@ fn attempt_record_serializes_the_shared_key_set() {
         kind: "attempt",
         run_id: "0000deadbeef0000".to_string(),
         attempt_seq: 1,
+        corrects: None,
         piece_id: "p".repeat(64),
         source: "doc.md".to_string(),
         stage: "item",
@@ -176,6 +178,7 @@ fn attempt_record_serializes_the_shared_key_set() {
         .map(String::as_str)
         .collect();
     for absent in [
+        "corrects",
         "piece_bytes",
         "requested_max_tokens",
         "response_text",

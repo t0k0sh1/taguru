@@ -72,6 +72,7 @@ impl DiagnosticsSink {
             kind: "attempt",
             run_id: attempt.attempt_ref.run_id.clone(),
             attempt_seq: attempt.attempt_ref.attempt_seq,
+            corrects: attempt.corrects.cloned(),
             piece_id: attempt.piece_id.to_string(),
             source: attempt.source.to_string(),
             stage: attempt.stage,
@@ -208,6 +209,13 @@ pub(super) struct DiagnosticsAttempt<'a> {
     /// ADR 0023: this completion's identity, taken from
     /// [`ChatClient::next_attempt`] right before the call it names.
     pub(super) attempt_ref: &'a AttemptRef,
+    /// ADR 0028 (#790): for a corrective attempt, the attempt whose
+    /// answer it replays and asks to fix — Stage 1: the previous
+    /// attempt of the same piece; Stage 2: the accepted attempt whose
+    /// output is being corrected. `None` for a base attempt (and for a
+    /// Stage 2 correction of a pre-0023 checkpointed unit, which has
+    /// no recorded attempt to name).
+    pub(super) corrects: Option<&'a AttemptRef>,
     /// ADR 0023: the piece this completion asked about (for Stage 2,
     /// the piece whose output is being corrected).
     pub(super) piece_id: &'a str,
@@ -255,6 +263,10 @@ pub(super) struct AttemptRecord {
     /// items join on.
     pub(super) run_id: String,
     pub(super) attempt_seq: u64,
+    /// ADR 0028: present exactly on corrective attempts — the
+    /// `(run_id, attempt_seq)` of the attempt being corrected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) corrects: Option<AttemptRef>,
     pub(super) piece_id: String,
     pub(super) source: String,
     pub(super) stage: &'static str,
