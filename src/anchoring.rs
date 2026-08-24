@@ -133,8 +133,28 @@ pub(crate) fn run(args: &[String]) -> i32 {
             batch.concept_aliases(),
             &context_aliases,
         );
+        // Two inputs can hold the same source (the same document
+        // extracted into two out-dirs); totals count both, so the
+        // table must list both — disambiguate by the batch file's
+        // directory, with a warning, exactly as
+        // scripts/extract_metrics.py does for its trace aggregation.
+        let mut key = batch.source.clone();
+        if documents.contains_key(&key) {
+            let parent = file
+                .parent()
+                .and_then(Path::file_name)
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| file.display().to_string());
+            key = format!("{} ({parent})", batch.source);
+            eprintln!(
+                "taguru: anchoring: {}: source '{}' already judged — listed again as \
+                 '{key}'",
+                file.display(),
+                batch.source
+            );
+        }
         documents.insert(
-            batch.source.clone(),
+            key,
             DocumentReport {
                 context: batch.context.clone(),
                 counts: report,

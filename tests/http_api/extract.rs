@@ -7512,5 +7512,37 @@ fn anchoring_cli_usage_vocabulary_and_skip_edges() {
         "without --vocabulary nothing supplies the alias: {without}"
     );
 
+    // Every batch skipped: nothing to report, exit 1 (the module
+    // doc's contract).
+    let empty = Command::new(env!("CARGO_BIN_EXE_taguru"))
+        .arg("anchoring")
+        .arg(dir.join("nopassage.jsonl"))
+        .output()
+        .unwrap();
+    assert_eq!(empty.status.code(), Some(1));
+    let empty_err = String::from_utf8_lossy(&empty.stderr);
+    assert!(
+        empty_err.contains("no batch with a passage to judge"),
+        "{empty_err}"
+    );
+
+    // The same source judged twice (two inputs): both rows survive,
+    // the second under a disambiguated key, with a warning.
+    let twin = dir.join("twin");
+    std::fs::create_dir(&twin).unwrap();
+    std::fs::copy(dir.join("c.jsonl"), twin.join("c.jsonl")).unwrap();
+    let doubled = Command::new(env!("CARGO_BIN_EXE_taguru"))
+        .arg("anchoring")
+        .arg(dir.join("c.jsonl"))
+        .arg(twin.join("c.jsonl"))
+        .output()
+        .unwrap();
+    assert!(doubled.status.success());
+    let stdout = String::from_utf8_lossy(&doubled.stdout);
+    let stderr = String::from_utf8_lossy(&doubled.stderr);
+    assert!(stdout.contains("TOTAL\t2\t"), "both counted: {stdout}");
+    assert!(stdout.contains("c.md (twin)"), "{stdout}");
+    assert!(stderr.contains("source 'c.md' already judged"), "{stderr}");
+
     let _ = std::fs::remove_dir_all(&dir);
 }
