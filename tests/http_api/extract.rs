@@ -7250,15 +7250,19 @@ fn extract_metrics_script_aggregates_a_real_run() {
     let out = batch_dir("extract-metrics-out");
     let (url, _captured) = stub_chat_server_concurrent(|index, attempt| {
         if index == 0 && attempt == 0 {
-            chat_ok("not json") // one corrective round
+            // One corrective round, with usage: this attempt fails, so
+            // its tokens land in the lost-cost buckets.
+            chat_ok_with_usage("not json", 40, 7)
         } else {
-            chat_ok(
+            chat_ok_with_usage(
                 &json!({"associations": [
                     {"subject": "S", "label": "rel", "object": format!("value-{index}"),
                      "weight": 1.0, "paragraph": 0},
                     {"subject": "ghost", "label": "rel", "object": "value-9", "weight": 1.0}
                 ]})
                 .to_string(),
+                100,
+                50,
             )
         }
     });
@@ -7311,7 +7315,13 @@ fn extract_metrics_script_aggregates_a_real_run() {
     assert_eq!(metrics["corrections"]["success_rate"], 1.0);
     assert_eq!(metrics["attempts"]["total"], 3, "base+corrective+chunk2");
     assert!(metrics["coverage"]["covered_rate"].as_f64().unwrap() > 0.0);
-    assert!(metrics["cost"]["input_tokens"].is_number());
+    // The stub's usage sums: 40+100+100 in, 7+50+50 out; the malformed
+    // attempt's 40/7 are the lost share; money at 100/200 per 1M.
+    assert_eq!(metrics["cost"]["input_tokens"], 240, "{metrics}");
+    assert_eq!(metrics["cost"]["output_tokens"], 107, "{metrics}");
+    assert_eq!(metrics["cost"]["lost_input_tokens"], 40, "{metrics}");
+    assert_eq!(metrics["cost"]["lost_output_tokens"], 7, "{metrics}");
+    assert_eq!(metrics["cost"]["money"], 0.0454, "{metrics}");
     assert_eq!(report["contexts"]["ch1"]["documents"], 1);
     assert_eq!(report["groups"]["book"]["documents"], 1);
 

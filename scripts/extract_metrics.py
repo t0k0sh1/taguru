@@ -336,7 +336,20 @@ def aggregate(documents: list[dict], ledger: dict, prices: tuple[float, float]) 
         entry = ledger.get(source, {})
         context = entry.get("context", "(unassigned)")
         memberships = entry.get("groups") or [document["out_dir"].name]
-        per_document[source] = {
+        # Two out-dirs can hold the same source (the same document
+        # extracted twice); the run/context/group sums count both, so
+        # the document table must too — disambiguate by directory
+        # rather than silently overwriting. The rule is deterministic,
+        # so --compare keys still match when both runs collide alike.
+        key = source
+        if key in per_document:
+            key = f"{source} ({document['out_dir'].name})"
+            print(
+                f"warning: {source} appears in more than one OUT_DIR; "
+                f"listed again as {key!r}",
+                file=sys.stderr,
+            )
+        per_document[key] = {
             "context": context,
             "groups": memberships,
             "metrics": summarize(bucket, prices),
@@ -539,6 +552,26 @@ def self_test() -> int:
         (trace_dir / "a.attempts.jsonl").write_text(
             "".join(json.dumps(r) + "\n" for r in attempts), encoding="utf-8"
         )
+        # The same source in a second out-dir must not overwrite the
+        # first document-table row.
+        twin = Path(tmp) / "twin"
+        twin_trace = twin / TRACE_DIR
+        twin_trace.mkdir(parents=True)
+        for name in ("a.jsonl", "a.attempts.jsonl"):
+            twin_trace.joinpath(name).write_text(
+                trace_dir.joinpath(name).read_text(encoding="utf-8"), encoding="utf-8"
+            )
+        report = aggregate(
+            load_documents([out, twin]),
+            {"sources": {"a.md": {"context": "ch1", "groups": ["book"]}}}["sources"],
+            (100.0, 200.0),
+        )
+        if sorted(report["documents"]) != ["a.md", "a.md (twin)"]:
+            print(f"self-test collision keys failed: {sorted(report['documents'])}")
+            return 1
+        if report["run"]["documents"] != 2:
+            print("self-test collision run count failed")
+            return 1
         report = aggregate(
             load_documents([out]),
             {"sources": {"a.md": {"context": "ch1", "groups": ["book"]}}}["sources"],
