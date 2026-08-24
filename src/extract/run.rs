@@ -930,6 +930,7 @@ impl Run {
                 Err(error) => {
                     {
                         let message = error.to_string();
+                        let error_retries = error.transport_retries;
                         observers.emit(
                             &DiagnosticsAttempt {
                                 source,
@@ -947,6 +948,7 @@ impl Run {
                                 length_limited: false,
                                 elapsed: started.elapsed(),
                                 response: None,
+                                transport_retries: error_retries,
                                 parse_error: Some(&message),
                                 validation_issues: None,
                                 removed_items: None,
@@ -978,6 +980,7 @@ impl Run {
                             length_limited: true,
                             elapsed,
                             response: Some(&response),
+                            transport_retries: response.transport_retries,
                             parse_error: Some(&message),
                             validation_issues: None,
                             removed_items: None,
@@ -1014,6 +1017,7 @@ impl Run {
                             length_limited: false,
                             elapsed,
                             response: Some(&response),
+                            transport_retries: response.transport_retries,
                             parse_error: Some(&message),
                             validation_issues: None,
                             removed_items: None,
@@ -1045,6 +1049,7 @@ impl Run {
                             length_limited: false,
                             elapsed,
                             response: Some(&response),
+                            transport_retries: response.transport_retries,
                             parse_error: Some(&message),
                             validation_issues: None,
                             removed_items: None,
@@ -1078,6 +1083,7 @@ impl Run {
                                 length_limited: false,
                                 elapsed,
                                 response: Some(&response),
+                                transport_retries: response.transport_retries,
                                 parse_error: None,
                                 validation_issues: None,
                                 removed_items: removed_item_texts(&evaluated.removed),
@@ -1114,6 +1120,7 @@ impl Run {
                                 length_limited: false,
                                 elapsed,
                                 response: Some(&response),
+                                transport_retries: response.transport_retries,
                                 parse_error: Some(&error),
                                 validation_issues: None,
                                 removed_items: None,
@@ -1150,6 +1157,7 @@ impl Run {
                                 length_limited: false,
                                 elapsed,
                                 response: Some(&response),
+                                transport_retries: response.transport_retries,
                                 parse_error: Some(&message),
                                 validation_issues: Some(&issues),
                                 removed_items: None,

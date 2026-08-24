@@ -79,6 +79,7 @@ fn attempt_record_serializes_the_shared_key_set() {
         max_attempts: 2,
         state: "stop_malformed",
         length_limited: false,
+        transport_retries: 1,
         elapsed_seconds: 0.5,
         provider_metadata: Some(ProviderMetadataRecord {
             finish_reason: Some("stop".to_string()),
@@ -122,6 +123,7 @@ fn attempt_record_serializes_the_shared_key_set() {
             "source",
             "stage",
             "state",
+            "transport_retries",
             "validation_issues",
         ]
     );
@@ -160,6 +162,7 @@ fn attempt_record_serializes_the_shared_key_set() {
         max_attempts: 2,
         state: "stop_valid",
         length_limited: false,
+        transport_retries: 0,
         elapsed_seconds: 0.1,
         provider_metadata: None,
         parse_error: None,
@@ -196,6 +199,7 @@ fn attempt_record_serializes_the_shared_key_set() {
         "chunk_index",
         "attempt",
         "max_attempts",
+        "transport_retries",
         "state",
         "length_limited",
         "elapsed_seconds",
@@ -2930,6 +2934,7 @@ fn classify_attempt_reads_provider_metadata_before_the_parse() {
         content: valid.to_string(),
         finish_reason: Some("length".to_string()),
         usage: None,
+        transport_retries: 0,
     };
     assert!(matches!(
         classify_attempt(&completion, None, "", &HashSet::new()),
@@ -2942,6 +2947,7 @@ fn classify_attempt_reads_provider_metadata_before_the_parse() {
         content: String::new(),
         finish_reason: Some("max_tokens".to_string()),
         usage: None,
+        transport_retries: 0,
     };
     assert!(matches!(
         classify_attempt(&empty_at_cap, None, "", &HashSet::new()),
@@ -2951,6 +2957,7 @@ fn classify_attempt_reads_provider_metadata_before_the_parse() {
         content: valid.to_string(),
         finish_reason: Some("content_filter".to_string()),
         usage: None,
+        transport_retries: 0,
     };
     assert!(matches!(
         classify_attempt(&refused, None, "", &HashSet::new()),
@@ -2960,6 +2967,7 @@ fn classify_attempt_reads_provider_metadata_before_the_parse() {
         content: "```json\n```".to_string(),
         finish_reason: Some("stop".to_string()),
         usage: None,
+        transport_retries: 0,
     };
     assert!(matches!(
         classify_attempt(&empty, None, "", &HashSet::new()),
@@ -2969,6 +2977,7 @@ fn classify_attempt_reads_provider_metadata_before_the_parse() {
         content: valid.to_string(),
         finish_reason: Some("stop".to_string()),
         usage: None,
+        transport_retries: 0,
     };
     assert!(matches!(
         classify_attempt(&ok, None, "", &HashSet::new()),
@@ -2978,6 +2987,7 @@ fn classify_attempt_reads_provider_metadata_before_the_parse() {
         content: "not json".to_string(),
         finish_reason: None,
         usage: None,
+        transport_retries: 0,
     };
     assert!(matches!(
         classify_attempt(&malformed, None, "", &HashSet::new()),
@@ -2997,6 +3007,7 @@ fn classify_attempt_reads_provider_metadata_before_the_parse() {
                 .to_string(),
         finish_reason: Some("stop".to_string()),
         usage: None,
+        transport_retries: 0,
     };
     assert!(matches!(
         classify_attempt(&invalid, Some(&strict_rules), "a l b", &HashSet::new()),
@@ -4080,6 +4091,11 @@ struct ScriptedChat {
 /// looks from the client.
 const STALL: &str = "<stall>";
 
+/// A scripted 429 with `Retry-After: 0`, so the client's retry loop
+/// spins without sleeping — the ADR 0029 transport-retry tests count
+/// tries, not seconds.
+const RATE_LIMIT: &str = "<rate-limit>";
+
 fn chat_answer(content: &str, finish_reason: &str) -> String {
     serde_json::json!({
         "choices": [{"message": {"content": content}, "finish_reason": finish_reason}]
@@ -4134,6 +4150,14 @@ impl ScriptedChat {
                     if answer == STALL {
                         std::thread::sleep(std::time::Duration::from_secs(3));
                         return; // the client has given up; drop the stream
+                    }
+                    if answer == RATE_LIMIT {
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 0\r\n\
+                             Content-Length: 0\r\nConnection: close\r\n\r\n"
+                        );
+                        return;
                     }
                     let _ = write!(
                         stream,
@@ -5936,5 +5960,43 @@ fn schema_prompt_lists_are_exact_and_filter_unconstrained_relations() {
     assert!(
         !block.contains("Relation constraints"),
         "no constrained relation → no constraints header: {block}"
+    );
+}
+
+/// ADR 0029 (#791): `transport_retries` counts the tries folded into
+/// one attempt — 0 on a clean first try, the failed-try count on a
+/// success after retries, and `RETRY_ATTEMPTS - 1` when every try was
+/// spent (the "after 4 attempts" error).
+#[test]
+fn transport_retries_count_folded_tries_and_the_exhausted_total() {
+    let ask = [serde_json::json!({"role": "user", "content": "hi"})];
+    let chat = ScriptedChat::start(vec![chat_answer("clean", "stop")]);
+    let clean = chat
+        .client()
+        .complete(&ask, &RequestOptions::default())
+        .unwrap();
+    assert_eq!(clean.transport_retries, 0);
+
+    let chat = ScriptedChat::start(vec![
+        RATE_LIMIT.to_string(),
+        RATE_LIMIT.to_string(),
+        chat_answer("eventually", "stop"),
+    ]);
+    let eventually = chat
+        .client()
+        .complete(&ask, &RequestOptions::default())
+        .unwrap();
+    assert_eq!(eventually.content, "eventually");
+    assert_eq!(eventually.transport_retries, 2);
+
+    let chat = ScriptedChat::start(vec![RATE_LIMIT.to_string(); RETRY_ATTEMPTS]);
+    let Err(exhausted) = chat.client().complete(&ask, &RequestOptions::default()) else {
+        panic!("four 429s must exhaust the retries");
+    };
+    assert_eq!(exhausted.transport_retries, RETRY_ATTEMPTS - 1);
+    assert!(
+        exhausted.message.contains("after 4 attempts"),
+        "{}",
+        exhausted.message
     );
 }

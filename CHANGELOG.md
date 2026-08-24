@@ -74,6 +74,16 @@ Entries that change an on-disk format or a response shape say so.
   the correction success rate are joins over existing records (ADR
   0028, #790).
 
+- The ladder's moves are records (ADR 0029, #791): the attempts log
+  gains `kind: "move"` — `escalate` (`from_max_tokens`/`to_max_tokens`),
+  `demote` (`from_rung`/`to_rung`), `split`
+  (`piece_bytes`/`split_cap`/`sub_pieces`, the reason telling the
+  output cap from a timeout) — each with `run_id`/`piece_id`/
+  `chunk_index` and the stderr line's reason. Attempt records in the
+  sidecar and the attempts log gain `transport_retries` (always
+  present; the 429/5xx/transport tries folded into one attempt, now
+  counted). stderr is unchanged.
+
 ### Changed
 
 - `extract`'s stderr lists a document's mechanical removals per chunk

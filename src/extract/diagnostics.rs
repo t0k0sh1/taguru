@@ -70,6 +70,7 @@ impl DiagnosticsSink {
             .and_then(|response| self.capture_raw(&response.content));
         let record = AttemptRecord {
             kind: "attempt",
+            transport_retries: attempt.transport_retries,
             run_id: attempt.attempt_ref.run_id.clone(),
             attempt_seq: attempt.attempt_ref.attempt_seq,
             corrects: attempt.corrects.cloned(),
@@ -230,6 +231,10 @@ pub(super) struct DiagnosticsAttempt<'a> {
     pub(super) elapsed: Duration,
     /// `None` exactly for `timeout`/`transport` — no response exists.
     pub(super) response: Option<&'a ChatCompletion>,
+    /// ADR 0029 (#791): failed transport-layer tries (429/5xx/
+    /// transport) folded into this one attempt — from the completion
+    /// on success, from the [`ChatError`] on failure.
+    pub(super) transport_retries: usize,
     pub(super) parse_error: Option<&'a str>,
     pub(super) validation_issues: Option<&'a [String]>,
     /// ADR 0013: the mechanical pass's removals on a `stop_valid`
@@ -279,6 +284,8 @@ pub(super) struct AttemptRecord {
     pub(super) max_attempts: usize,
     pub(super) state: &'static str,
     pub(super) length_limited: bool,
+    /// ADR 0029: always present — 0 for a clean first try.
+    pub(super) transport_retries: usize,
     pub(super) elapsed_seconds: f64,
     pub(super) provider_metadata: Option<ProviderMetadataRecord>,
     pub(super) parse_error: Option<String>,

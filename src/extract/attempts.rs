@@ -142,6 +142,7 @@ impl AttemptLog {
             max_attempts: attempt.max_attempts,
             state: attempt.state,
             length_limited: attempt.length_limited,
+            transport_retries: attempt.transport_retries,
             elapsed_seconds: attempt.elapsed.as_secs_f64(),
             requested_max_tokens: attempt.requested_max_tokens,
             finish_reason: response.and_then(|response| response.finish_reason.as_deref()),
@@ -155,7 +156,7 @@ impl AttemptLog {
         });
     }
 
-    fn write_record(&self, record: &impl serde::Serialize) {
+    pub(super) fn write_record(&self, record: &impl serde::Serialize) {
         let mut line = match serde_json::to_string(record) {
             Ok(line) => line,
             Err(_) => return,
@@ -242,6 +243,7 @@ struct AttemptFullRecord<'a> {
     max_attempts: usize,
     state: &'static str,
     length_limited: bool,
+    transport_retries: usize,
     elapsed_seconds: f64,
     requested_max_tokens: Option<usize>,
     finish_reason: Option<&'a str>,
@@ -254,6 +256,72 @@ struct AttemptFullRecord<'a> {
     parse_error: Option<&'a str>,
     validation_issues: Option<&'a [String]>,
     removed_items: Option<&'a [String]>,
+}
+
+/// ADR 0029 (#791): one ladder move (ADR 0001 §7 / 0019 / 0020 /
+/// 0021), as a record instead of a stderr sentence — `escalate` (the
+/// budget raised for one neutral resend), `demote` (the run's
+/// structured-output rung lowered; the piece restarts), `split` (the
+/// piece divided and each part rerun from the ladder's top). The
+/// per-attempt facts (states, timeouts, token costs) stay on the
+/// `attempt` records; a move record says what the ladder DID next and
+/// why, joinable by `piece_id` and, run-wide, by `run_id`.
+#[derive(serde::Serialize)]
+pub(super) struct MoveRecord<'a> {
+    pub(super) kind: &'static str,
+    #[serde(rename = "move")]
+    pub(super) action: &'static str,
+    pub(super) run_id: &'a str,
+    pub(super) piece_id: &'a str,
+    pub(super) chunk_index: usize,
+    /// Why the ladder moved, in the stderr line's own words.
+    pub(super) reason: &'a str,
+    /// `escalate` only: the budget of the round that ended `length`,
+    /// and the escalated resend's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) from_max_tokens: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) to_max_tokens: Option<usize>,
+    /// `demote` only: the rung observed failing, and the one the run
+    /// continues on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) from_rung: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) to_rung: Option<&'static str>,
+    /// `split` only: the piece's size, the sub-piece cap, and how many
+    /// sub-pieces it divided into.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) piece_bytes: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) split_cap: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) sub_pieces: Option<usize>,
+}
+
+impl<'a> MoveRecord<'a> {
+    pub(super) fn blank(
+        action: &'static str,
+        run_id: &'a str,
+        piece_id: &'a str,
+        chunk_index: usize,
+        reason: &'a str,
+    ) -> Self {
+        Self {
+            kind: "move",
+            action,
+            run_id,
+            piece_id,
+            chunk_index,
+            reason,
+            from_max_tokens: None,
+            to_max_tokens: None,
+            from_rung: None,
+            to_rung: None,
+            piece_bytes: None,
+            split_cap: None,
+            sub_pieces: None,
+        }
+    }
 }
 
 /// Everything an attempt is reported to, bundled so the call sites
@@ -274,6 +342,15 @@ impl Observers<'_> {
         }
         if let Some(log) = self.log {
             log.record(attempt, messages);
+        }
+    }
+
+    /// One ladder move (ADR 0029) into the attempts log; the sidecar
+    /// is unchanged — moves are per-document facts and live with the
+    /// document's own record.
+    pub(super) fn move_event(&self, record: &MoveRecord) {
+        if let Some(log) = self.log {
+            log.write_record(record);
         }
     }
 }

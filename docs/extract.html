@@ -857,6 +857,10 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       <code>{role, system_sha256}</code> and the rest as <code>{role, content}</code> in full, the
       replayed prior answer and corrective ask of a retry included — and <code>answer</code>, the
       model's final text in full (<code>null</code> for <code>timeout</code>/<code>transport</code>).
+      Every attempt record also carries <code>transport_retries</code> — how many
+      transport-layer tries (429, 5xx, transport errors) failed inside this one attempt before
+      its outcome (<code>0</code> = a clean first try; the four-retries-are-one-record ruling is
+      unchanged, the count makes it visible).
       A corrective attempt also carries <code>corrects</code> — the
       <code>{run_id, attempt_seq}</code> of the attempt whose answer it replays and asks to fix
       (Stage 1: the same piece's previous attempt; Stage 2: the accepted attempt whose output is
@@ -869,7 +873,17 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       attempt's own last turn, adoption is the trace <code>piece</code> record naming this
       attempt, and what was flagged-then-removed instead lands in the trace's <code>loss</code>
       records.
-      Nothing is capped. It is written incrementally (a killed run keeps every completion made),
+      Nothing is capped. The ladder's own actions land beside the attempts as
+      <code>kind: "move"</code> records
+      (<a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0029-ladder-move-records.md">ADR
+      0029</a>): <code>move</code> is <code>escalate</code> (ADR 0019;
+      <code>from_max_tokens</code>/<code>to_max_tokens</code>), <code>demote</code> (ADR 0021;
+      <code>from_rung</code>/<code>to_rung</code>), or <code>split</code> (ADR 0001 §7 / ADR
+      0020; <code>piece_bytes</code>/<code>split_cap</code>/<code>sub_pieces</code>, the reason
+      telling the output cap from a timeout), each with <code>run_id</code>,
+      <code>piece_id</code>, <code>chunk_index</code>, and <code>reason</code> in the stderr
+      line's own words — so per-document-kind frequency and cost of every retry-machinery action
+      is a fold over this file. It is written incrementally (a killed run keeps every completion made),
       <b>kept when the document fails</b> — that is what it is for — and, on a checkpoint resume,
       appended to rather than truncated, so it spans exactly the runs that built the batch; a
       fresh start (<code>--force</code>, a changed document) truncates it. Joins: the sidecar by

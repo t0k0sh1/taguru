@@ -146,6 +146,7 @@ pub(super) fn extract_chunk(
             Err(error) => {
                 {
                     let message = error.to_string();
+                    let error_retries = error.transport_retries;
                     observers.emit(
                         &DiagnosticsAttempt {
                             source,
@@ -163,6 +164,7 @@ pub(super) fn extract_chunk(
                             length_limited: false,
                             elapsed: started.elapsed(),
                             response: None,
+                            transport_retries: error_retries,
                             parse_error: Some(&message),
                             validation_issues: None,
                             removed_items: None,
@@ -205,6 +207,7 @@ pub(super) fn extract_chunk(
                             ),
                             elapsed,
                             response: Some(&response),
+                            transport_retries: response.transport_retries,
                             parse_error: None,
                             validation_issues: None,
                             removed_items: removed_item_texts(&evaluated.removed),
@@ -250,6 +253,7 @@ pub(super) fn extract_chunk(
                             length_limited,
                             elapsed,
                             response: Some(&response),
+                            transport_retries: response.transport_retries,
                             parse_error: Some(&error),
                             validation_issues: None,
                             removed_items: None,
@@ -288,6 +292,7 @@ pub(super) fn extract_chunk(
                             length_limited: false,
                             elapsed,
                             response: Some(&response),
+                            transport_retries: response.transport_retries,
                             parse_error: Some(&diagnosis),
                             validation_issues: Some(&issues),
                             removed_items: None,
@@ -501,6 +506,18 @@ pub(super) fn extract_piece(
     );
     if matches!(outcome, RoundOutcome::LengthLimited) && context.ladder.max_output_tokens.is_some()
     {
+        // ADR 0029: the escalation, as a record — the budget the
+        // answer overran and the one the neutral resend gets.
+        let mut record = MoveRecord::blank(
+            "escalate",
+            &context.client.run_id,
+            &piece_id,
+            context.chunk_index,
+            "the answer ended at the output cap; resending once at the escalated budget",
+        );
+        record.from_max_tokens = context.ladder.max_output_tokens;
+        record.to_max_tokens = context.ladder.escalated_budget();
+        context.observers.move_event(&record);
         outcome = extract_round(
             context,
             &user,
@@ -530,6 +547,16 @@ pub(super) fn extract_piece(
             // demote splits.
             if let Some((from, to)) = context.ladder.demote_from(rung) {
                 let why = demotion_reason(&outcome, context.ladder.max_output_tokens.is_some());
+                let mut record = MoveRecord::blank(
+                    "demote",
+                    &context.client.run_id,
+                    &piece_id,
+                    context.chunk_index,
+                    &why,
+                );
+                record.from_rung = Some(from.name());
+                record.to_rung = Some(to.name());
+                context.observers.move_event(&record);
                 eprintln!(
                     "taguru: extract: {}: structured output: {} demoted to {} — {why} under \
                      the {} rung; the piece restarts at the ladder's top",
@@ -558,6 +585,22 @@ pub(super) fn extract_piece(
                     ),
                 });
             }
+            // ADR 0029: the split, as a record — reason in the same
+            // vocabulary the attempt states use.
+            let mut record = MoveRecord::blank(
+                "split",
+                &context.client.run_id,
+                &piece_id,
+                context.chunk_index,
+                match outcome {
+                    RoundOutcome::TimedOut(_) => "the completion timed out (ADR 0020)",
+                    _ => "the answer still ended at the output cap",
+                },
+            );
+            record.piece_bytes = Some(piece.len());
+            record.split_cap = Some(cap);
+            record.sub_pieces = Some(sub_pieces.len());
+            context.observers.move_event(&record);
             let mut outputs = Vec::new();
             for sub_piece in &sub_pieces {
                 outputs.extend(extract_piece(context, sub_piece)?);
@@ -661,6 +704,7 @@ pub(super) fn extract_round(
             Err(error) => {
                 {
                     let message = error.to_string();
+                    let error_retries = error.transport_retries;
                     observers.emit(
                         &DiagnosticsAttempt {
                             source: context.source,
@@ -678,6 +722,7 @@ pub(super) fn extract_round(
                             length_limited: false,
                             elapsed: started.elapsed(),
                             response: None,
+                            transport_retries: error_retries,
                             parse_error: Some(&message),
                             validation_issues: None,
                             removed_items: None,
@@ -720,6 +765,7 @@ pub(super) fn extract_round(
                             length_limited: false,
                             elapsed,
                             response: Some(&response),
+                            transport_retries: response.transport_retries,
                             parse_error: None,
                             validation_issues: None,
                             removed_items: removed_item_texts(&evaluated.removed),
@@ -760,6 +806,7 @@ pub(super) fn extract_round(
                             length_limited: true,
                             elapsed,
                             response: Some(&response),
+                            transport_retries: response.transport_retries,
                             parse_error: Some(&message),
                             validation_issues: None,
                             removed_items: None,
@@ -789,6 +836,7 @@ pub(super) fn extract_round(
                             length_limited: false,
                             elapsed,
                             response: Some(&response),
+                            transport_retries: response.transport_retries,
                             parse_error: Some(&message),
                             validation_issues: None,
                             removed_items: None,
@@ -817,6 +865,7 @@ pub(super) fn extract_round(
                             length_limited: false,
                             elapsed,
                             response: Some(&response),
+                            transport_retries: response.transport_retries,
                             parse_error: Some(&diagnosis),
                             validation_issues: None,
                             removed_items: None,
@@ -865,6 +914,7 @@ pub(super) fn extract_round(
                             length_limited: false,
                             elapsed,
                             response: Some(&response),
+                            transport_retries: response.transport_retries,
                             parse_error: Some(&error),
                             validation_issues: None,
                             removed_items: None,
@@ -909,6 +959,7 @@ pub(super) fn extract_round(
                             length_limited: false,
                             elapsed,
                             response: Some(&response),
+                            transport_retries: response.transport_retries,
                             parse_error: Some(&diagnosis),
                             validation_issues: Some(&issues),
                             removed_items: None,
