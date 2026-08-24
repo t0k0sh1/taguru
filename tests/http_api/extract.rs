@@ -7221,3 +7221,112 @@ fn trace_steering_schema_is_null_exactly_when_no_schema_block_was_prompted() {
     let _ = std::fs::remove_dir_all(&docs);
     let _ = std::fs::remove_dir_all(&out);
 }
+
+/// #792: `scripts/extract_metrics.py` aggregates the trace and
+/// attempts-log records this crate writes — running it against a REAL
+/// extract run pins the two sides together, so a record-shape change
+/// that breaks the aggregation fails here, not in the field. (The
+/// script's own arithmetic is covered by its `--self-test`, also run
+/// here.)
+#[test]
+fn extract_metrics_script_aggregates_a_real_run() {
+    let script =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/extract_metrics.py");
+    let self_test = std::process::Command::new("python3")
+        .arg(&script)
+        .arg("--self-test")
+        .output()
+        .expect("python3 must be available");
+    assert!(
+        self_test.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&self_test.stdout),
+        String::from_utf8_lossy(&self_test.stderr)
+    );
+
+    let docs = batch_dir("extract-metrics-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, multi_chunk_document(9)).unwrap();
+    let out = batch_dir("extract-metrics-out");
+    let (url, _captured) = stub_chat_server_concurrent(|index, attempt| {
+        if index == 0 && attempt == 0 {
+            chat_ok("not json") // one corrective round
+        } else {
+            chat_ok(
+                &json!({"associations": [
+                    {"subject": "S", "label": "rel", "object": format!("value-{index}"),
+                     "weight": 1.0, "paragraph": 0},
+                    {"subject": "ghost", "label": "rel", "object": "value-9", "weight": 1.0}
+                ]})
+                .to_string(),
+            )
+        }
+    });
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &["--context", "c", doc.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+
+    let ledger = docs.join("ledger.json");
+    std::fs::write(
+        &ledger,
+        json!({"sources": {doc.to_str().unwrap(): {"context": "ch1", "groups": ["book"]}}})
+            .to_string(),
+    )
+    .unwrap();
+    let report_path = docs.join("report.json");
+    let run = std::process::Command::new("python3")
+        .arg(&script)
+        .arg(&out)
+        .args(["--ledger", ledger.to_str().unwrap()])
+        .args(["--json", report_path.to_str().unwrap()])
+        .args(["--price-in", "100", "--price-out", "200"])
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let report: Value =
+        serde_json::from_str(&std::fs::read_to_string(&report_path).unwrap()).unwrap();
+    let metrics = &report["run"];
+    assert_eq!(metrics["documents"], 1);
+    // 2 chunks kept one "S rel value-N" each; the shared "ghost"
+    // association was removed per chunk (fabricated subject) and the
+    // duplicate of chunk 1's copy... ghost is removed mechanically in
+    // both chunks (2 removed losses), the two value-N facts survive.
+    assert_eq!(metrics["loss"]["association"]["kept"], 2, "{metrics}");
+    assert_eq!(
+        metrics["loss"]["association"]["by_reason"]["removed"], 2,
+        "{metrics}"
+    );
+    assert_eq!(metrics["corrections"]["attempted"], 1);
+    assert_eq!(metrics["corrections"]["success_rate"], 1.0);
+    assert_eq!(metrics["attempts"]["total"], 3, "base+corrective+chunk2");
+    assert!(metrics["coverage"]["covered_rate"].as_f64().unwrap() > 0.0);
+    assert!(metrics["cost"]["input_tokens"].is_number());
+    assert_eq!(report["contexts"]["ch1"]["documents"], 1);
+    assert_eq!(report["groups"]["book"]["documents"], 1);
+
+    // Compare mode against itself: everything unchanged.
+    let compared = std::process::Command::new("python3")
+        .arg(&script)
+        .arg(&out)
+        .args(["--compare", report_path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&compared.stdout);
+    assert!(compared.status.success(), "{text}");
+    assert!(text.contains("Compared to baseline"), "{text}");
+    assert!(text.contains("| assoc loss | 0 | 0 | 1 |"), "{text}");
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
