@@ -143,6 +143,14 @@ USAGE:
                                         regressed/added/removed cases (ADR
                                         0004 §9.2; see: taguru evaluate
                                         compare --help)
+  taguru anchoring BATCH_OR_DIR... [--vocabulary PATH] [--json FILE]
+                                        judge extraction batches against their
+                                        own passage text: the anchoring rate
+                                        (subject and object present in the
+                                        cited paragraph, else the passage;
+                                        strict and alias-group variants) and
+                                        locator validity — offline, no server
+                                        (see: taguru anchoring --help)
   taguru calibrate --context NAME --probes FILE [--json] [--url URL] [URL]
                                         measure the semantic-floor bands of a
                                         running server's embedding model with
@@ -457,6 +465,7 @@ pub fn dispatch() -> Command {
         Some("restore") => exit(crate::ship::run(&args[1..])),
         Some("extract") => exit(crate::extract::run(&args[1..])),
         Some("calibrate") => exit(crate::calibrate::run(&args[1..])),
+        Some("anchoring") => exit(crate::anchoring::run(&args[1..])),
         Some("communities") => exit(crate::communities::run(&args[1..])),
         Some("consolidation") => exit(crate::consolidation::run(&args[1..])),
         Some(other) => {
