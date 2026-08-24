@@ -7396,6 +7396,11 @@ fn anchoring_command_rates_a_real_run_and_the_script_folds_it_in() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    let table = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !table.contains("skipped"),
+        "nothing was skipped, so no skipped line: {table}"
+    );
     let report: Value =
         serde_json::from_str(&std::fs::read_to_string(&report_path).unwrap()).unwrap();
     let totals = &report["totals"];
