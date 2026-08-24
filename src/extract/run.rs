@@ -210,12 +210,25 @@ impl Run {
                 .as_deref()
                 .map(crate::schema::InstalledSchema::document)
                 .filter(|document| document.mode != crate::schema::SchemaMode::Off)
-                .map(|document| SteeringSchema {
-                    types: schema_type_names(document),
-                    constrained_relations: schema_constrained_relations(document, &self.vocabulary)
-                        .into_iter()
-                        .map(|(label, _)| label)
-                        .collect(),
+                .and_then(|document| {
+                    let types = schema_type_names(document);
+                    let constrained_relations: Vec<&str> =
+                        schema_constrained_relations(document, &self.vocabulary)
+                            .into_iter()
+                            .map(|(label, _)| label)
+                            .collect();
+                    // `schema_block` renders nothing for a schema with
+                    // no types and no constrained relations — no block
+                    // prompted means `null` here, exactly as for
+                    // `mode: off` (ADR 0027's "null exactly when no
+                    // schema block was prompted").
+                    if types.is_empty() && constrained_relations.is_empty() {
+                        return None;
+                    }
+                    Some(SteeringSchema {
+                        types,
+                        constrained_relations,
+                    })
                 }),
         }
     }

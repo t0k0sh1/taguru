@@ -57,7 +57,8 @@ the `document` record. Fields:
 - `schema`: `{types, constrained_relations}` — the schema block's two
   capped lists, by the same factoring (`schema_type_names`,
   `schema_constrained_relations`); `null` exactly when no schema
-  block was prompted (`mode: off` included).
+  block was prompted: no `--schema`, `mode: off`, or a schema whose
+  two lists are both empty (`schema_block` renders nothing then).
 
 ## 4. Consequences
 

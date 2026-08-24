@@ -6954,3 +6954,97 @@ fn trace_steering_record_carries_candidates_and_reuse_vocabulary() {
     let _ = std::fs::remove_dir_all(&docs);
     let _ = std::fs::remove_dir_all(&out);
 }
+
+/// ADR 0027's `null` contract, regression for the empty-schema edge: a
+/// valid installed schema with no types and no constrained relations
+/// prompts no schema block at all, so the steering record says
+/// `schema: null` — not `{"types":[],"constrained_relations":[]}` —
+/// while a schema that does prompt a block is recorded with its lists.
+#[test]
+fn trace_steering_schema_is_null_exactly_when_no_schema_block_was_prompted() {
+    let docs = batch_dir("extract-steering-schema-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "small document").unwrap();
+    let empty_schema = docs.join("empty.schema.json");
+    std::fs::write(
+        &empty_schema,
+        json!({
+            "schema": 1,
+            "mode": "warn",
+            "closed_labels": false,
+            "types": {},
+            "relations": {"述べる": {"domain": [], "range": []}}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let out = batch_dir("extract-steering-schema-out");
+
+    let (url, _requests) = stub_chat_server(vec![json!({"associations": []}).to_string()]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--schema",
+            empty_schema.to_str().unwrap(),
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let (_, trace) = read_trace(&out);
+    let steering = trace.iter().find(|r| r["kind"] == "steering").unwrap();
+    assert_eq!(steering["schema"], Value::Null, "{steering}");
+
+    // The populated-schema control: the block IS prompted, the record
+    // carries its lists.
+    let full_schema = docs.join("full.schema.json");
+    std::fs::write(
+        &full_schema,
+        json!({
+            "schema": 1,
+            "mode": "warn",
+            "closed_labels": false,
+            "types": {"Brewery": {"is_a": []}},
+            "relations": {"杜氏": {"domain": ["Brewery"], "range": []}}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let (url, _requests) = stub_chat_server(vec![json!({"associations": []}).to_string()]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--schema",
+            full_schema.to_str().unwrap(),
+            "--force",
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let (_, trace) = read_trace(&out);
+    let steering = trace.iter().find(|r| r["kind"] == "steering").unwrap();
+    assert_eq!(
+        steering["schema"]["types"],
+        json!(["Brewery"]),
+        "{steering}"
+    );
+    assert_eq!(
+        steering["schema"]["constrained_relations"],
+        json!(["杜氏"]),
+        "{steering}"
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}

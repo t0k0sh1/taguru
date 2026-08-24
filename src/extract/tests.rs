@@ -5908,6 +5908,19 @@ fn schema_prompt_lists_are_exact_and_filter_unconstrained_relations() {
         ["domain_only", "range_only"],
         "a domain-only and a range-only relation both count; an unconstrained one never"
     );
+    // A schema with no types and no constrained relations prompts NO
+    // block at all — `schema_block` renders the empty string — so the
+    // steering record must say `null`, not empty lists (ADR 0027).
+    let empty_schema = test_schema(
+        &[],
+        &[("unconstrained", &[], &[])],
+        crate::schema::SchemaMode::Warn,
+        false,
+    );
+    assert_eq!(schema_block(empty_schema.document(), &BTreeMap::new()), "");
+    assert!(schema_type_names(empty_schema.document()).is_empty());
+    assert!(schema_constrained_relations(empty_schema.document(), &BTreeMap::new()).is_empty());
+
     // A types-only schema prompts no constraints header at all.
     let types_only = test_schema(
         &[("Brewery", &[])],
