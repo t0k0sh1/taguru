@@ -6707,6 +6707,7 @@ fn attempts_log_keeps_every_completions_full_prompt_and_answer() {
     assert_eq!(sidecar_second["piece_id"], second["piece_id"]);
     assert_eq!(sidecar_second["state"], "stop_valid");
     assert_eq!(sidecar_second["corrects"]["attempt_seq"], 1);
+    assert_eq!(sidecar_second["corrects"]["run_id"], run_id);
     // The sidecar itself still carries no raw text without the opt-in.
     assert!(sidecar_second.get("response_text").is_none());
 

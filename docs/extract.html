@@ -860,7 +860,9 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       A corrective attempt also carries <code>corrects</code> — the
       <code>{run_id, attempt_seq}</code> of the attempt whose answer it replays and asks to fix
       (Stage 1: the same piece's previous attempt; Stage 2: the accepted attempt whose output is
-      being corrected) — so the correction tuple "what was flagged → what was asked → what came
+      being corrected; absent exactly when that attempt has no recorded identity — a Stage 2
+      correction of a unit reused from a pre-0.9.5 checkpoint, written before attempts had ids)
+      — so the correction tuple "what was flagged → what was asked → what came
       back → what was adopted" is a join over records already on disk
       (<a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0028-correction-tuples.md">ADR
       0028</a>): the flagged issues sit on the corrected attempt, the ask is the corrective

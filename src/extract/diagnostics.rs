@@ -263,8 +263,12 @@ pub(super) struct AttemptRecord {
     /// items join on.
     pub(super) run_id: String,
     pub(super) attempt_seq: u64,
-    /// ADR 0028: present exactly on corrective attempts — the
-    /// `(run_id, attempt_seq)` of the attempt being corrected.
+    /// ADR 0028: present on corrective attempts — the
+    /// `(run_id, attempt_seq)` of the attempt being corrected — when
+    /// that attempt has a recorded identity. The one exception: a
+    /// Stage 2 correction of a unit reused from a pre-0.9.5 (pre-ADR
+    /// 0023) checkpoint, which recorded no attempt to name, is a
+    /// corrective attempt with no `corrects`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) corrects: Option<AttemptRef>,
     pub(super) piece_id: String,

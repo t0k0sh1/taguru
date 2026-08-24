@@ -229,7 +229,9 @@ struct AttemptFullRecord<'a> {
     run_id: &'a str,
     attempt_seq: u64,
     /// ADR 0028: the attempt this corrective attempt replays and asks
-    /// to fix; absent on base attempts.
+    /// to fix; absent on base attempts — and on a Stage 2 correction
+    /// of a unit reused from a pre-0.9.5 (pre-ADR 0023) checkpoint,
+    /// which recorded no attempt to name.
     #[serde(skip_serializing_if = "Option::is_none")]
     corrects: Option<&'a AttemptRef>,
     piece_id: &'a str,
