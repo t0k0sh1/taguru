@@ -84,6 +84,15 @@ Entries that change an on-disk format or a response shape say so.
   present; the 429/5xx/transport tries folded into one attempt, now
   counted). stderr is unchanged.
 
+- `scripts/extract_metrics.py` (#792): folds the trace and attempts-log
+  records into metric tables — loss rates by item kind and reason,
+  paragraph coverage (count- and byte-weighted), correction success,
+  attempt-state and ladder-move counts, label concentration, graph
+  shape, and time/token/money cost — per document, context (via a
+  `--ledger` mapping), group, and run, as JSON and Markdown;
+  `--compare` diffs two runs per document with improved/worsened
+  counts. python3 standard library only.
+
 ### Changed
 
 - `extract`'s stderr lists a document's mechanical removals per chunk
