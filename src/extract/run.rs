@@ -179,6 +179,60 @@ impl Run {
         }
     }
 
+    /// ADR 0027 (#789): the trace's `steering` record for one document
+    /// — every list computed by the same function that renders its
+    /// prompt block, so the record is what the model was actually
+    /// shown. Document-scoped (`chunk_index: null`): all of a
+    /// document's chunks share one prompt.
+    pub(super) fn steering_record<'a>(&'a self, candidates: &'a [String]) -> TraceSteering<'a> {
+        TraceSteering {
+            kind: "steering",
+            chunk_index: None,
+            candidates,
+            vocabulary: ranked_vocabulary(&self.vocabulary)
+                .into_iter()
+                .map(|(label, count)| {
+                    // The prompt renders these by reference into one
+                    // string; the record needs the label text itself.
+                    VocabularyEntry {
+                        label: self
+                            .vocabulary
+                            .get_key_value(&label)
+                            .map(|(key, _)| key.as_str())
+                            .unwrap_or_default(),
+                        count,
+                    }
+                })
+                .collect(),
+            context_names: &self.vocabulary_names,
+            schema: self
+                .schema
+                .as_deref()
+                .map(crate::schema::InstalledSchema::document)
+                .filter(|document| document.mode != crate::schema::SchemaMode::Off)
+                .and_then(|document| {
+                    let types = schema_type_names(document);
+                    let constrained_relations: Vec<&str> =
+                        schema_constrained_relations(document, &self.vocabulary)
+                            .into_iter()
+                            .map(|(label, _)| label)
+                            .collect();
+                    // `schema_block` renders nothing for a schema with
+                    // no types and no constrained relations — no block
+                    // prompted means `null` here, exactly as for
+                    // `mode: off` (ADR 0027's "null exactly when no
+                    // schema block was prompted").
+                    if types.is_empty() && constrained_relations.is_empty() {
+                        return None;
+                    }
+                    Some(SteeringSchema {
+                        types,
+                        constrained_relations,
+                    })
+                }),
+        }
+    }
+
     /// The Stage 1 item rules for one document, or `None` under
     /// `--lossy` — see [`evaluate_answer`]/[`ItemRules`].
     pub(super) fn item_rules(&self, paragraph_count: usize) -> Option<ItemRules> {
@@ -592,6 +646,7 @@ impl Run {
                     .collect::<Vec<&str>>(),
                 &extraction,
                 &uncovered,
+                &self.steering_record(&candidates),
             ),
         );
         self.manifest.record(source, &inputs, &file_name);

@@ -11,6 +11,34 @@ pub(super) const VOCABULARY_CAP: usize = 200;
 /// consistent spellings inside the run replace check-before-mint,
 /// everything else is what agents follow live. `schema` folds in ADR
 /// 0009 §11.1's block when one is installed via `--schema`.
+/// The schema block's entity-type list, exactly as prompted (capped)
+/// — shared with the trace's `steering` record (ADR 0027, #789).
+pub(super) fn schema_type_names(document: &crate::schema::SchemaDocument) -> Vec<&str> {
+    document
+        .types
+        .keys()
+        .take(VOCABULARY_CAP)
+        .map(String::as_str)
+        .collect()
+}
+
+/// The schema block's constrained relations, in prompt order (this
+/// run's own vocabulary first, capped) — shared with the trace's
+/// `steering` record (ADR 0027, #789).
+pub(super) fn schema_constrained_relations<'a>(
+    document: &'a crate::schema::SchemaDocument,
+    vocabulary: &BTreeMap<String, usize>,
+) -> Vec<(&'a str, &'a crate::schema::RelationDef)> {
+    let mut relations: Vec<(&str, &crate::schema::RelationDef)> = document
+        .relations
+        .iter()
+        .map(|(label, relation)| (label.as_str(), relation))
+        .filter(|(_, relation)| !relation.domain.is_empty() || !relation.range.is_empty())
+        .collect();
+    relations.sort_by_key(|(label, _)| (!vocabulary.contains_key(*label), *label));
+    relations.into_iter().take(VOCABULARY_CAP).collect()
+}
+
 pub(super) fn system_prompt(
     vocabulary: &BTreeMap<String, usize>,
     questions: usize,
@@ -70,16 +98,8 @@ pub(super) fn system_prompt(
              as canonical); prefer a higher count over a synonym, and treat an \
              uncounted one as used only once so far: ",
         );
-        let mut ranked: Vec<(&str, usize)> = vocabulary
-            .iter()
-            .map(|(label, count)| (label.as_str(), *count))
-            .collect();
-        ranked.sort_by(|(a_label, a_count), (b_label, b_count)| {
-            b_count.cmp(a_count).then_with(|| a_label.cmp(b_label))
-        });
-        let labels: Vec<String> = ranked
+        let labels: Vec<String> = ranked_vocabulary(vocabulary)
             .into_iter()
-            .take(VOCABULARY_CAP)
             .map(|(label, count)| {
                 if count > 1 {
                     format!("{label} (×{count})")
@@ -110,6 +130,25 @@ pub(super) fn system_prompt(
     prompt
 }
 
+/// The reuse-vocabulary list exactly as the prompt offers it (#759's
+/// ranking: count desc, then label asc, capped at [`VOCABULARY_CAP`])
+/// — factored out so the trace's `steering` record (ADR 0027, #789)
+/// is this one computation and can never drift from the prompt.
+pub(super) fn ranked_vocabulary(vocabulary: &BTreeMap<String, usize>) -> Vec<(String, usize)> {
+    let mut ranked: Vec<(&str, usize)> = vocabulary
+        .iter()
+        .map(|(label, count)| (label.as_str(), *count))
+        .collect();
+    ranked.sort_by(|(a_label, a_count), (b_label, b_count)| {
+        b_count.cmp(a_count).then_with(|| a_label.cmp(b_label))
+    });
+    ranked
+        .into_iter()
+        .take(VOCABULARY_CAP)
+        .map(|(label, count)| (label.to_string(), count))
+        .collect()
+}
+
 /// ADR 0009 §11.1: the block [`system_prompt`] appends after the
 /// vocabulary block, only when a schema is installed and its `mode !=
 /// off`. Same "reuse these exact spellings" framing as the vocabulary
@@ -125,12 +164,7 @@ pub(super) fn schema_block(
 ) -> String {
     let mut block = String::new();
     if !document.types.is_empty() {
-        let names: Vec<&str> = document
-            .types
-            .keys()
-            .take(VOCABULARY_CAP)
-            .map(String::as_str)
-            .collect();
+        let names = schema_type_names(document);
         block.push_str(&format!(
             "\nThis context has a schema. A concept may be given an entity type via one \
              association per type on the reserved relation label \"{label}\" (e.g. \
@@ -140,16 +174,8 @@ pub(super) fn schema_block(
             label = crate::schema::SCHEMA_TYPE_LABEL,
         ));
     }
-    let mut relations: Vec<(&str, &crate::schema::RelationDef)> = document
-        .relations
-        .iter()
-        .map(|(label, relation)| (label.as_str(), relation))
-        .filter(|(_, relation)| !relation.domain.is_empty() || !relation.range.is_empty())
-        .collect();
-    relations.sort_by_key(|(label, _)| (!vocabulary.contains_key(*label), *label));
-    let lines: Vec<String> = relations
+    let lines: Vec<String> = schema_constrained_relations(document, vocabulary)
         .into_iter()
-        .take(VOCABULARY_CAP)
         .filter_map(|(label, relation)| relation_line(label, &relation.domain, &relation.range))
         .collect();
     if !lines.is_empty() {

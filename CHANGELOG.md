@@ -48,6 +48,22 @@ Entries that change an on-disk format or a response shape say so.
   full sentence — stderr's byte-capped quote is unchanged — the
   paragraph's text, and the owning chunk (ADR 0026, #787).
 
+- The trace records the prompt's steering lists as data (ADR 0027,
+  #789): one `steering` record per document, placed right after the
+  `document` record, with `chunk_index: null` (document scope — every
+  chunk sees the same lists; per-chunk context, when it arrives, adds
+  records with the index set). Fields: `candidates` (ADR 0014's list
+  as offered, capped at 100; `[]` when `--candidates` is off or the
+  document yields none), `vocabulary` (`[{label, count}]` in prompt
+  order — count desc then label asc, capped at 200, computed by the
+  same code that renders the prompt block; `[]` when nothing has
+  accumulated), `context_names` (`--vocabulary`'s prompted list,
+  capped at 200; `[]` without the flag), and `schema`
+  (`{types, constrained_relations}`, each capped at 200; `null`
+  exactly when no schema block was prompted — no `--schema`,
+  `mode: off`, or a schema with no types and no constrained
+  relations).
+
 ### Changed
 
 - `extract`'s stderr lists a document's mechanical removals per chunk
