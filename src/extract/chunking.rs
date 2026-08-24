@@ -116,6 +116,7 @@ pub(super) fn extract_chunk(
     ];
     let mut last_diagnosis = String::new();
     let mut prior_bad_answer: Option<String> = None;
+    let mut prior_ref: Option<AttemptRef> = None;
     let mut pending: Option<CorrectiveAsk> = None;
     for attempt in 1..=policy.max_attempts {
         let mut messages = base.to_vec();
@@ -134,6 +135,12 @@ pub(super) fn extract_chunk(
         }
         let started = std::time::Instant::now();
         let attempt_ref = client.next_attempt();
+        // ADR 0028 (#790): a corrective attempt names the attempt whose
+        // answer it replays — the tuple's link.
+        let corrects = prior_bad_answer
+            .is_some()
+            .then(|| prior_ref.clone())
+            .flatten();
         let response = match client.complete(&messages, &RequestOptions::default()) {
             Ok(response) => response,
             Err(error) => {
@@ -146,6 +153,7 @@ pub(super) fn extract_chunk(
                             chunk_index,
                             attempt,
                             attempt_ref: &attempt_ref,
+                            corrects: corrects.as_ref(),
                             piece_id,
                             max_attempts: policy.max_attempts,
                             state: match error.kind {
@@ -183,6 +191,7 @@ pub(super) fn extract_chunk(
                             chunk_index,
                             attempt,
                             attempt_ref: &attempt_ref,
+                            corrects: corrects.as_ref(),
                             piece_id,
                             max_attempts: policy.max_attempts,
                             state: "stop_valid",
@@ -234,6 +243,7 @@ pub(super) fn extract_chunk(
                             chunk_index,
                             attempt,
                             attempt_ref: &attempt_ref,
+                            corrects: corrects.as_ref(),
                             piece_id,
                             max_attempts: policy.max_attempts,
                             state,
@@ -254,6 +264,7 @@ pub(super) fn extract_chunk(
                     parse_error: error,
                     length_limited,
                 });
+                prior_ref = Some(attempt_ref);
                 prior_bad_answer = Some(response.content);
             }
             Err(AnswerFault::Invalid(issues)) => {
@@ -270,6 +281,7 @@ pub(super) fn extract_chunk(
                             chunk_index,
                             attempt,
                             attempt_ref: &attempt_ref,
+                            corrects: corrects.as_ref(),
                             piece_id,
                             max_attempts: policy.max_attempts,
                             state: "stop_malformed",
@@ -287,6 +299,7 @@ pub(super) fn extract_chunk(
                 }
                 last_diagnosis = diagnosis;
                 pending = Some(CorrectiveAsk::Invalid { issues });
+                prior_ref = Some(attempt_ref);
                 prior_bad_answer = Some(response.content);
             }
         }
@@ -618,6 +631,7 @@ pub(super) fn extract_round(
     let observers = context.observers;
     let mut last_diagnosis = String::new();
     let mut prior_bad_answer: Option<String> = None;
+    let mut prior_ref: Option<AttemptRef> = None;
     let mut pending: Option<CorrectiveAsk> = None;
     let mut empty_corrected = false;
     for attempt in 1..=context.policy.max_attempts {
@@ -637,6 +651,11 @@ pub(super) fn extract_round(
         }
         let started = std::time::Instant::now();
         let attempt_ref = context.client.next_attempt();
+        // ADR 0028 (#790): the corrective tuple's link.
+        let corrects = prior_bad_answer
+            .is_some()
+            .then(|| prior_ref.clone())
+            .flatten();
         let response = match context.client.complete(&messages, &options) {
             Ok(response) => response,
             Err(error) => {
@@ -649,6 +668,7 @@ pub(super) fn extract_round(
                             chunk_index: context.chunk_index,
                             attempt,
                             attempt_ref: &attempt_ref,
+                            corrects: corrects.as_ref(),
                             piece_id,
                             max_attempts: context.policy.max_attempts,
                             state: match error.kind {
@@ -693,6 +713,7 @@ pub(super) fn extract_round(
                             chunk_index: context.chunk_index,
                             attempt,
                             attempt_ref: &attempt_ref,
+                            corrects: corrects.as_ref(),
                             piece_id,
                             max_attempts: context.policy.max_attempts,
                             state: "stop_valid",
@@ -732,6 +753,7 @@ pub(super) fn extract_round(
                             chunk_index: context.chunk_index,
                             attempt,
                             attempt_ref: &attempt_ref,
+                            corrects: corrects.as_ref(),
                             piece_id,
                             max_attempts: context.policy.max_attempts,
                             state: "length_limited",
@@ -760,6 +782,7 @@ pub(super) fn extract_round(
                             chunk_index: context.chunk_index,
                             attempt,
                             attempt_ref: &attempt_ref,
+                            corrects: corrects.as_ref(),
                             piece_id,
                             max_attempts: context.policy.max_attempts,
                             state: "refusal",
@@ -787,6 +810,7 @@ pub(super) fn extract_round(
                             chunk_index: context.chunk_index,
                             attempt,
                             attempt_ref: &attempt_ref,
+                            corrects: corrects.as_ref(),
                             piece_id,
                             max_attempts: context.policy.max_attempts,
                             state: "empty",
@@ -811,6 +835,7 @@ pub(super) fn extract_round(
                     parse_error: diagnosis,
                     length_limited: false,
                 });
+                prior_ref = Some(attempt_ref);
                 prior_bad_answer = Some(response.content);
             }
             AttemptOutcome::Malformed(error) => {
@@ -833,6 +858,7 @@ pub(super) fn extract_round(
                             chunk_index: context.chunk_index,
                             attempt,
                             attempt_ref: &attempt_ref,
+                            corrects: corrects.as_ref(),
                             piece_id,
                             max_attempts: context.policy.max_attempts,
                             state: "stop_malformed",
@@ -853,6 +879,7 @@ pub(super) fn extract_round(
                     parse_error: error,
                     length_limited: false,
                 });
+                prior_ref = Some(attempt_ref);
                 prior_bad_answer = Some(response.content);
             }
             AttemptOutcome::Invalid(issues) => {
@@ -875,6 +902,7 @@ pub(super) fn extract_round(
                             chunk_index: context.chunk_index,
                             attempt,
                             attempt_ref: &attempt_ref,
+                            corrects: corrects.as_ref(),
                             piece_id,
                             max_attempts: context.policy.max_attempts,
                             state: "stop_malformed",
@@ -892,6 +920,7 @@ pub(super) fn extract_round(
                 }
                 last_diagnosis = diagnosis;
                 pending = Some(CorrectiveAsk::Invalid { issues });
+                prior_ref = Some(attempt_ref);
                 prior_bad_answer = Some(response.content);
             }
         }

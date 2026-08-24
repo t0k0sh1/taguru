@@ -902,11 +902,12 @@ impl Run {
         };
         let rules = self.item_rules(paragraph_count);
         for (output_index, issues) in cross_issues {
-            let (chunk_index, piece_id, user, answer) = {
+            let (chunk_index, piece_id, corrected_attempt, user, answer) = {
                 let chunk = &outputs[output_index];
                 (
                     chunk.chunk_index,
                     chunk.piece_id.clone(),
+                    chunk.attempt.clone(),
                     chunk.user.clone(),
                     chunk.answer.clone(),
                 )
@@ -936,6 +937,7 @@ impl Run {
                                 chunk_index,
                                 attempt: 1,
                                 attempt_ref: &attempt_ref,
+                                corrects: corrected_attempt.as_ref(),
                                 piece_id,
                                 max_attempts: 1,
                                 state: match error.kind {
@@ -969,6 +971,7 @@ impl Run {
                             chunk_index,
                             attempt: 1,
                             attempt_ref: &attempt_ref,
+                            corrects: corrected_attempt.as_ref(),
                             piece_id,
                             max_attempts: 1,
                             state: "length_limited",
@@ -1004,6 +1007,7 @@ impl Run {
                             chunk_index,
                             attempt: 1,
                             attempt_ref: &attempt_ref,
+                            corrects: corrected_attempt.as_ref(),
                             piece_id,
                             max_attempts: 1,
                             state: "refusal",
@@ -1034,6 +1038,7 @@ impl Run {
                             chunk_index,
                             attempt: 1,
                             attempt_ref: &attempt_ref,
+                            corrects: corrected_attempt.as_ref(),
                             piece_id,
                             max_attempts: 1,
                             state: "empty",
@@ -1066,6 +1071,7 @@ impl Run {
                                 chunk_index,
                                 attempt: 1,
                                 attempt_ref: &attempt_ref,
+                                corrects: corrected_attempt.as_ref(),
                                 piece_id,
                                 max_attempts: 1,
                                 state: "stop_valid",
@@ -1101,6 +1107,7 @@ impl Run {
                                 chunk_index,
                                 attempt: 1,
                                 attempt_ref: &attempt_ref,
+                                corrects: corrected_attempt.as_ref(),
                                 piece_id,
                                 max_attempts: 1,
                                 state: "stop_malformed",
@@ -1136,6 +1143,7 @@ impl Run {
                                 chunk_index,
                                 attempt: 1,
                                 attempt_ref: &attempt_ref,
+                                corrects: corrected_attempt.as_ref(),
                                 piece_id,
                                 max_attempts: 1,
                                 state: "stop_malformed",

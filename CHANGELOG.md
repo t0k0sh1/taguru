@@ -64,6 +64,16 @@ Entries that change an on-disk format or a response shape say so.
   `mode: off`, or a schema with no types and no constrained
   relations).
 
+- Corrective attempts name the attempt they correct: `attempt` records
+  in the attempts log and the diagnostics sidecar gain `corrects`
+  (`{run_id, attempt_seq}`, present exactly on corrective attempts —
+  Stage 1: the same piece's previous attempt; Stage 2: the accepted
+  attempt whose output is corrected; absent for a Stage 2 correction
+  of a pre-0.9.5 checkpointed unit). The correction tuple — flagged
+  issues → ask → answer → adoption, against the original text — and
+  the correction success rate are joins over existing records (ADR
+  0028, #790).
+
 ### Changed
 
 - `extract`'s stderr lists a document's mechanical removals per chunk

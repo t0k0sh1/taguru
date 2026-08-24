@@ -5077,6 +5077,14 @@ fn diagnostics_records_the_stage_two_cross_chunk_correction() {
     assert_eq!(records[0]["attempt_seq"], 1);
     assert_eq!(records[1]["attempt_seq"], 2);
     assert_eq!(records[1]["piece_id"], records[0]["piece_id"]);
+    // ADR 0028: Stage 2 corrects the ACCEPTED Stage 1 attempt whose
+    // output it replays.
+    assert!(records[0].get("corrects").is_none());
+    assert_eq!(records[1]["corrects"]["run_id"], records[0]["run_id"]);
+    assert_eq!(
+        records[1]["corrects"]["attempt_seq"],
+        records[0]["attempt_seq"]
+    );
     let (_, trace) = read_trace(&out);
     let piece = trace.iter().find(|r| r["kind"] == "piece").unwrap();
     assert_eq!(piece["piece_id"], records[0]["piece_id"]);
@@ -6647,6 +6655,10 @@ fn attempts_log_keeps_every_completions_full_prompt_and_answer() {
     assert_eq!(first["attempt"], 1);
     assert_eq!(first["state"], "stop_malformed");
     assert_eq!(first["answer"], "not json at all");
+    assert!(
+        first.get("corrects").is_none(),
+        "a base attempt corrects nothing"
+    );
     let turns = first["messages"].as_array().unwrap();
     assert_eq!(turns.len(), 2, "{turns:?}");
     assert_eq!(turns[0]["role"], "system");
@@ -6673,6 +6685,10 @@ fn attempts_log_keeps_every_completions_full_prompt_and_answer() {
     assert_eq!(second["attempt"], 2);
     assert_eq!(second["state"], "stop_valid");
     assert_eq!(second["answer"], good);
+    // ADR 0028: the corrective attempt names the attempt it corrects —
+    // the tuple (issue → ask → answer → adoption) joins on this.
+    assert_eq!(second["corrects"]["run_id"], run_id);
+    assert_eq!(second["corrects"]["attempt_seq"], 1);
     let turns = second["messages"].as_array().unwrap();
     assert_eq!(turns.len(), 4, "{turns:?}");
     assert_eq!(turns[2]["role"], "assistant");
@@ -6690,6 +6706,8 @@ fn attempts_log_keeps_every_completions_full_prompt_and_answer() {
         .unwrap();
     assert_eq!(sidecar_second["piece_id"], second["piece_id"]);
     assert_eq!(sidecar_second["state"], "stop_valid");
+    assert_eq!(sidecar_second["corrects"]["attempt_seq"], 1);
+    assert_eq!(sidecar_second["corrects"]["run_id"], run_id);
     // The sidecar itself still carries no raw text without the opt-in.
     assert!(sidecar_second.get("response_text").is_none());
 
