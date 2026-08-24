@@ -7000,8 +7000,10 @@ fn trace_steering_schema_is_null_exactly_when_no_schema_block_was_prompted() {
     let steering = trace.iter().find(|r| r["kind"] == "steering").unwrap();
     assert_eq!(steering["schema"], Value::Null, "{steering}");
 
-    // The populated-schema control: the block IS prompted, the record
-    // carries its lists.
+    // The types-only control: one list empty, the other not — the
+    // block IS prompted (its type half), so the record carries the
+    // lists; this is the case that separates "both empty" from
+    // "either empty".
     let full_schema = docs.join("full.schema.json");
     std::fs::write(
         &full_schema,
@@ -7010,7 +7012,7 @@ fn trace_steering_schema_is_null_exactly_when_no_schema_block_was_prompted() {
             "mode": "warn",
             "closed_labels": false,
             "types": {"Brewery": {"is_a": []}},
-            "relations": {"杜氏": {"domain": ["Brewery"], "range": []}}
+            "relations": {"述べる": {"domain": [], "range": []}}
         })
         .to_string(),
     )
@@ -7041,7 +7043,7 @@ fn trace_steering_schema_is_null_exactly_when_no_schema_block_was_prompted() {
     );
     assert_eq!(
         steering["schema"]["constrained_relations"],
-        json!(["杜氏"]),
+        json!([]),
         "{steering}"
     );
 
