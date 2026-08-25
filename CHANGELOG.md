@@ -5,7 +5,24 @@ Notable changes to taguru. The format follows
 follow [SemVer](https://semver.org/) (pre-1.0: minor bumps may break).
 Entries that change an on-disk format or a response shape say so.
 
-## [Unreleased]
+## [0.9.5] - 2026-08-25
+
+An `extract` observability release (#784): a run now records enough to
+find product problems after the fact — always on, beside the batches,
+with the batch wire format untouched. Every written batch gets a trace
+joining each item back to the text and the completion that produced it
+(ADR 0023), every loss paired with the original text it was about (ADR
+0024), the document's own paragraph coverage (ADR 0026), and what
+taguru itself put into the prompt (ADR 0027); an attempts log keeps
+every prompt and every answer in full, correction links, and the retry
+machinery's own moves (ADR 0025 / 0028 / 0029). `taguru anchoring`
+judges written batches against their own passage text, and
+`scripts/extract_metrics.py` folds the records into per-document /
+context / group / run metric tables; `docs/extract.html` gains the
+reading guide — trace walkthrough, observation → knob table, and the
+four axes (#794). No response-shape change; the new records are
+additive sibling files and additive sidecar/checkpoint fields (older
+checkpoints still load).
 
 ### Added
 
@@ -3572,7 +3589,8 @@ OTLP tracing, OAuth for remote MCP), the MCP stdio bridge, and the
 offline tooling (`import`, `extract`, `inspect`, `estimate`).
 Published to crates.io and GHCR.
 
-[Unreleased]: https://github.com/t0k0sh1/taguru/compare/v0.9.4...HEAD
+[Unreleased]: https://github.com/t0k0sh1/taguru/compare/v0.9.5...HEAD
+[0.9.5]: https://github.com/t0k0sh1/taguru/compare/v0.9.4...v0.9.5
 [0.9.4]: https://github.com/t0k0sh1/taguru/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/t0k0sh1/taguru/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/t0k0sh1/taguru/compare/v0.9.1...v0.9.2

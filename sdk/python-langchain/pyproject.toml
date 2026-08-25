@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "langchain-taguru"
-version = "0.9.4"
+version = "0.9.5"
 description = "LangChain integration for the Taguru long-term semantic memory server"
 readme = "README.md"
 license = "MIT"
@@ -18,7 +18,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "taguru>=0.9.4,<0.10.0",
+    "taguru>=0.9.5,<0.10.0",
     "langchain-core>=1.0.0,<2.0.0",
     # Already in the tree transitively via `taguru` (its only runtime
     # dependency); made direct because `HtmlConnector` (issue #349) imports
