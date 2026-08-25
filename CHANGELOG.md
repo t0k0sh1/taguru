@@ -5,6 +5,8 @@ Notable changes to taguru. The format follows
 follow [SemVer](https://semver.org/) (pre-1.0: minor bumps may break).
 Entries that change an on-disk format or a response shape say so.
 
+## [Unreleased]
+
 ## [0.9.5] - 2026-08-25
 
 An `extract` observability release (#784): a run now records enough to
