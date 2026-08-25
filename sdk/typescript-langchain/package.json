@@ -1,6 +1,6 @@
 {
   "name": "langchain-taguru",
-  "version": "0.9.4",
+  "version": "0.9.5",
   "description": "LangChain.js integration for the Taguru long-term semantic memory server",
   "license": "MIT",
   "repository": {
@@ -33,7 +33,7 @@
     "test:unit": "vitest run tests/unit"
   },
   "peerDependencies": {
-    "taguru": "^0.9.4",
+    "taguru": "^0.9.5",
     "@langchain/core": ">=1.0.0 <2.0.0",
     "pdfjs-dist": ">=6.2.108 <7.0.0",
     "fflate": "^0.8.0",
@@ -51,7 +51,7 @@
     "@azure/storage-blob": { "optional": true }
   },
   "devDependencies": {
-    "taguru": "^0.9.4",
+    "taguru": "^0.9.5",
     "@langchain/core": "^1.2.8",
     "pdfjs-dist": "^6.2.108",
     "fflate": "^0.8.2",
