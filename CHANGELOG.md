@@ -26,6 +26,7 @@ Entries that change an on-disk format or a response shape say so.
   `settings` record lands once per document right after `document` — a
   diagnostic snapshot of the run's compute inputs, mirroring what the
   manifest/checkpoint fingerprint checks, never a computation input itself
+  or a replay matching key; `settings.rung` is also absent off the ladder
   — ADR 0031 §3.2/§3.9 (#817). **On-disk format change**: additive fields
   and a new record kind in `--out/.extract-trace/*.attempts.jsonl`; a
   reader filtering on known `kind` values is unaffected.
