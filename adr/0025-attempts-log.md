@@ -115,3 +115,7 @@ its complexity at that size; the opt-out covers the rest.
   attempt is recorded exactly once wherever it is classified.
 - `--out/.extract-trace/` now exists for a document that fails (its
   attempts log), where before it appeared only with a written batch.
+- ADR 0031 (#817) adds a `rung` field to the `attempt` record and a
+  `settings` record right after `document` — both additive; this
+  ADR's own format (record kinds, lifecycle, the size measurement in
+  §3.4) is otherwise unchanged.

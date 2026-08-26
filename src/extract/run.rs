@@ -496,6 +496,26 @@ impl Run {
             source,
             &hash,
         );
+        // ADR 0031 §3.2/§3.9: right after the `document` record, once
+        // per document — a diagnostic snapshot of this run's settings,
+        // never a manifest/checkpoint computation input.
+        if let Some(log) = attempt_log.as_ref() {
+            log.write_record(&SettingsRecord {
+                kind: "settings",
+                prompt_version: PROMPT_VERSION,
+                model: &self.model_name,
+                questions_n: self.questions,
+                fact_budget: self.fact_budget,
+                structured_output: self.structured_output.manifest_value(),
+                max_output_tokens: self.max_output_tokens.unwrap_or(0),
+                chunk_bytes: &chunk_bytes,
+                lossy: self.lossy,
+                schema_digest: &self.schema_digest,
+                candidates: candidates_manifest_value(self.candidates),
+                vocabulary_digest: &self.vocabulary_digest,
+                rung: self.ladder.as_ref().map(|ladder| ladder.rung().name()),
+            });
+        }
         let observers = Observers {
             sink: self.diagnostics.as_ref(),
             log: attempt_log.as_ref(),
@@ -900,6 +920,9 @@ impl Run {
             // split: a timeout here keeps the ordinary retry discipline.
             fail_fast_on_timeout: false,
         };
+        // ADR 0031 §3.2: read fresh per Stage 2 call — a demote (ADR
+        // 0021) can move the run-wide rung between Stage 1 and here.
+        let rung_name = self.ladder.as_ref().map(|ladder| ladder.rung().name());
         let rules = self.item_rules(paragraph_count);
         for (output_index, issues) in cross_issues {
             let (chunk_index, piece_id, corrected_attempt, user, answer) = {
@@ -954,6 +977,7 @@ impl Run {
                                 removed_items: None,
                                 piece_bytes: None,
                                 requested_max_tokens: options.max_tokens,
+                                rung: rung_name,
                             },
                             &messages,
                         );
@@ -986,6 +1010,7 @@ impl Run {
                             removed_items: None,
                             piece_bytes: None,
                             requested_max_tokens: options.max_tokens,
+                            rung: rung_name,
                         },
                         &messages,
                     );
@@ -1023,6 +1048,7 @@ impl Run {
                             removed_items: None,
                             piece_bytes: None,
                             requested_max_tokens: options.max_tokens,
+                            rung: rung_name,
                         },
                         &messages,
                     );
@@ -1055,6 +1081,7 @@ impl Run {
                             removed_items: None,
                             piece_bytes: None,
                             requested_max_tokens: options.max_tokens,
+                            rung: rung_name,
                         },
                         &messages,
                     );
@@ -1089,6 +1116,7 @@ impl Run {
                                 removed_items: removed_item_texts(&evaluated.removed),
                                 piece_bytes: None,
                                 requested_max_tokens: options.max_tokens,
+                                rung: rung_name,
                             },
                             &messages,
                         );
@@ -1126,6 +1154,7 @@ impl Run {
                                 removed_items: None,
                                 piece_bytes: None,
                                 requested_max_tokens: options.max_tokens,
+                                rung: rung_name,
                             },
                             &messages,
                         );
@@ -1163,6 +1192,7 @@ impl Run {
                                 removed_items: None,
                                 piece_bytes: None,
                                 requested_max_tokens: options.max_tokens,
+                                rung: rung_name,
                             },
                             &messages,
                         );

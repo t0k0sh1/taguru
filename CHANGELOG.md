@@ -21,6 +21,15 @@ Entries that change an on-disk format or a response shape say so.
   the model call on one machine and replay on another — ADR 0031 (#815).
   Documents a contract only; the flags land in #781's later children. No
   behavior change; no on-disk format or response shape change.
+- The attempts log's `attempt` record gains `rung` (the structured-output
+  rung a completion was asked under; absent off the ladder), and a new
+  `settings` record lands once per document right after `document` — a
+  diagnostic snapshot of the run's compute inputs, mirroring what the
+  manifest/checkpoint fingerprint checks, never a computation input itself
+  or a replay matching key; `settings.rung` is also absent off the ladder
+  — ADR 0031 §3.2/§3.9 (#817). **On-disk format change**: additive fields
+  and a new record kind in `--out/.extract-trace/*.attempts.jsonl`; a
+  reader filtering on known `kind` values is unaffected.
 
 ## [0.9.5] - 2026-08-25
 
