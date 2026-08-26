@@ -6325,3 +6325,104 @@ fn replay_index_miss_diagnostic_names_the_first_differing_turn() {
         Some("different text")
     );
 }
+
+#[test]
+fn replay_index_reconstructs_usage_when_only_one_token_count_is_present() {
+    let path = replay_fixture_path("partial-usage");
+    let turns = [("user", "a piece with partial usage")];
+    let record = serde_json::json!({
+        "kind": "attempt",
+        "run_id": "run-1",
+        "attempt_seq": 1,
+        "piece_id": "piece-1",
+        "source": "doc.md",
+        "chunk_index": 0,
+        "stage": "base",
+        "attempt": 1,
+        "max_attempts": 4,
+        "state": "stop_valid",
+        "length_limited": false,
+        "transport_retries": 0,
+        "elapsed_seconds": 1.0,
+        "requested_max_tokens": serde_json::Value::Null,
+        "finish_reason": "stop",
+        "input_tokens": 42,
+        "output_tokens": serde_json::Value::Null,
+        "messages": turns
+            .iter()
+            .map(|(role, content)| replay_turn_json(role, content))
+            .collect::<Vec<_>>(),
+        "answer": "partial usage answer",
+        "parse_error": serde_json::Value::Null,
+        "validation_issues": serde_json::Value::Null,
+        "removed_items": serde_json::Value::Null,
+    });
+    write_replay_log(&path, &[record]);
+
+    let index = ReplayIndex::load(&path);
+    let messages = replay_request_messages(&turns);
+    match index.lookup("piece-1", &messages, None) {
+        ReplayLookup::Hit(Ok(completion)) => {
+            let usage = completion
+                .usage
+                .expect("input_tokens alone must still produce a usage record");
+            assert_eq!(usage.input_tokens, Some(42));
+            assert_eq!(usage.output_tokens, None);
+        }
+        _ => panic!("expected a hit with a reconstructed completion"),
+    }
+}
+
+#[test]
+fn replay_index_miss_diagnostic_picks_the_record_with_the_longest_matching_prefix() {
+    let path = replay_fixture_path("closest-record");
+    let query = [("user", "alpha"), ("assistant", "beta"), ("user", "gamma")];
+    write_replay_log(
+        &path,
+        &[
+            // Shares the first two turns with the query, diverges on
+            // the third — the closer of the two recordings.
+            replay_attempt_record(
+                "piece-1",
+                1,
+                "stop_valid",
+                None,
+                &[
+                    ("user", "alpha"),
+                    ("assistant", "beta"),
+                    ("user", "not-gamma"),
+                ],
+                Some("answer a"),
+            ),
+            // Diverges on the very first turn — the farther of the two.
+            replay_attempt_record(
+                "piece-1",
+                2,
+                "stop_valid",
+                None,
+                &[
+                    ("user", "not-alpha"),
+                    ("assistant", "beta"),
+                    ("user", "gamma"),
+                ],
+                Some("answer b"),
+            ),
+        ],
+    );
+    let index = ReplayIndex::load(&path);
+    let messages = replay_request_messages(&query);
+
+    let ReplayLookup::Miss(diagnostic) = index.lookup("piece-1", &messages, None) else {
+        panic!("neither recording matches the query's key");
+    };
+    assert_eq!(diagnostic.recorded, 2);
+    let difference = diagnostic
+        .first_difference
+        .expect("two recorded attempts make a comparison possible");
+    // Real prefix lengths are 2 (first recording) and 0 (second) —
+    // the first recording is the closer match.
+    assert_eq!(difference.turn_index, 2);
+    assert_eq!(difference.recorded_role.as_deref(), Some("user"));
+    assert_eq!(difference.recorded_prefix.as_deref(), Some("not-gamma"));
+    assert_eq!(difference.requested_prefix.as_deref(), Some("gamma"));
+}
