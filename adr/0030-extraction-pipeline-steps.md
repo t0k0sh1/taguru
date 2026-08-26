@@ -17,9 +17,9 @@
   ladder's moves are not steps), ADR 0028/ADR 0029 (`corrects`/`move`
   — why corrective rounds and ladder moves are not steps either), #179
   (checkpoints — today's unnamed partial step store, §4), ADR
-  0024–0027 (the records this ADR indexes by step, §6 in the
-  accompanying docs change), #784 (the umbrella those records came
-  from), #782 (the steps it is expected to add, §3.6), #781 (the
+  0024–0027 (the records this ADR indexes by step in the accompanying
+  docs change's "by step" table), #784 (the umbrella those records
+  came from), #782 (the steps it is expected to add, §3.6), #781 (the
   parent issue; ADR 0031 continues where this ADR's Scope stops)
 - **Supersedes**: — / **Superseded by**: —
 
@@ -175,10 +175,14 @@ kinds of work. None of them is a step:
    — never reassigned.
 3. **The table carries exactly one version number**, `pipeline_version`
    (starting at `1`), bumped when a row is added, removed, or its
-   scope/artifact changes. A stored record carries `step` (the name)
-   and `pipeline_version` (which edition of the table it was produced
-   under) — not a per-step version; order is a property of the table,
-   not of any one row, so two rows cannot disagree about it.
+   scope/artifact changes. This governs future step-scoped storage
+   only (#781's later children, ADR 0031 onward) — today's trace,
+   attempts log, and diagnostics sidecar keep their shape unchanged
+   (§4) and carry no such field. Where a step-scoped record does
+   exist, it carries `step` (the name) and `pipeline_version` (which
+   edition of the table it was produced under) — not a per-step
+   version; order is a property of the table, not of any one row, so
+   two rows cannot disagree about it.
 4. **`pipeline_version` is never a manifest computation input.** A
    table edition changing the *description* of the pipeline does not
    change a batch's *content*; a document extracted under table
@@ -188,7 +192,8 @@ kinds of work. None of them is a step:
 
 Adding a step means: a new ADR names the row (position, scope,
 artifact, and its answer to both §3.1 tests), the same change updates
-the docs table (§5), and `pipeline_version` bumps. Only the storage
+`docs/extract.html`'s "The pipeline" table, and `pipeline_version`
+bumps. Only the storage
 for steps at or after the insertion point is invalidated — everything
 before it is still good, which is the entire point of naming steps in
 the first place.
@@ -236,22 +241,27 @@ the binary's known step names.
   table can be indexed by step.
 - #782 adds rows without a format change — see §3.6.
 - #781's body's eight-step list is superseded by the table in §3.2.
-- **`parse`'s artifact is the one step with nothing on disk today** —
-  the `ModelOutput` before mechanical validation is not recorded
-  anywhere; this is the first gap #781's storage design (ADR 0031)
-  should close.
+- **`parse`'s artifact has no record of its own today** — no trace or
+  attempts-log line carries the `ModelOutput` independently of
+  `validate`'s outcome; a rejected answer's parse is never recorded at
+  all. An *accepted* piece's parsed-and-validated output is not
+  entirely absent, though: it is held in a checkpoint unit until the
+  batch lands (next bullet) — just not as a first-class, addressable
+  step record. Closing that gap is #781's storage design (ADR 0031)
+  to do.
 - **The checkpoint file is already an unnamed partial step store.**
   `CheckpointUnit` (`src/extract/checkpoint.rs:69-97`) holds one
   piece's `prompt` (`user`), `call` (`answer`), and `parse`+`validate`
-  (`output`/`removed`/`unparsed`) keyed by `piece_id`. ADR 0031's
-  storage design will either generalize this or subsume it.
+  (`output`/`removed`/`unparsed`) keyed by `piece_id`, and is reused on
+  resume. ADR 0031's storage design will either generalize this or
+  subsume it.
 - No existing record (`trace`, attempts log, diagnostics sidecar)
-  changes shape. The step↔record correspondence is given by docs
-  alone (§5) — no `step` field is added to any of them (rationale in
-  the accompanying docs change: most record kinds already map 1:1 to a
-  step by name; the ones that do not, like `loss`, are already
-  disambiguated by an existing field (`reason`) that a `step` field
-  would only risk contradicting).
+  changes shape. The step↔record correspondence is given by
+  `docs/extract.html`'s "by step" table alone — no `step` field is
+  added to any of them (rationale in the accompanying docs change:
+  most record kinds already map 1:1 to a step by name; the ones that
+  do not, like `loss`, are already disambiguated by an existing field
+  (`reason`) that a `step` field would only risk contradicting).
 - One known inaccuracy is left in place rather than fixed here: the
   `loss` record's `reason: "removed"` covers both `validate`'s Stage 1
   mechanical pass and `reconcile`'s Stage 2 alias prunes; docs already

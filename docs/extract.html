@@ -1037,8 +1037,8 @@ l=out/.extract-trace/a.attempts.jsonl      # the attempts log</code></pre>
     <h3 id="by-step">By step: which record shows which step's output</h3>
     <p>
       <a href="#pipeline">The pipeline</a> names the steps; this is where each one's output
-      actually lands today. Two steps have no record on disk at all — they are pure functions,
-      recomputed every time, never worth freezing.
+      actually lands today. <code>parse</code> and <code>render</code> have no record
+      independent of the steps around them — see their rows below for what does capture them.
     </p>
     <table>
       <thead>
@@ -1064,10 +1064,13 @@ l=out/.extract-trace/a.attempts.jsonl      # the attempts log</code></pre>
             diagnostics sidecar's <code>attempt</code> (metadata only); the <code>move</code>
             record right after it when the ladder acted.</td></tr>
         <tr><td><code>parse</code></td>
-          <td><em>nothing on disk</em> — parse issues surface inside the corrective ask an
-            <code>attempt</code> record carries, and <code>--lossy</code>'s parse-time drops
-            appear as trace <code>loss</code> (<code>reason: "dropped"</code>), but the parsed
-            value itself is never written; a pure function of <code>call</code>'s answer.</td></tr>
+          <td>no independent trace/attempts record — parse issues surface inside the
+            corrective ask an <code>attempt</code> record carries, and <code>--lossy</code>'s
+            parse-time drops appear as trace <code>loss</code> (<code>reason: "dropped"</code>).
+            An <em>accepted</em> piece's parsed output is, however, held in its
+            <a href="#checkpoints">checkpoint unit</a> until the batch lands and reused on
+            resume — not a first-class step record of its own, but not entirely absent
+            either.</td></tr>
         <tr><td><code>validate</code></td>
           <td>trace <code>loss</code> (<code>reason: "removed"</code>, with <code>path</code>/
             <code>rule</code>/<code>raw</code>/<code>text</code>); the corrective ask inside the
@@ -1083,9 +1086,10 @@ l=out/.extract-trace/a.attempts.jsonl      # the attempts log</code></pre>
             (<code>reason: "dropped"</code>/<code>"duplicate"</code>, with
             <code>kept_piece_id</code>); the document record's counts.</td></tr>
         <tr><td><code>render</code></td>
-          <td><em>nothing beyond the artifact itself</em> — the batch file; trace
-            <code>document.batch_path</code>; the manifest entry. A pure function of
-            <code>merge</code>'s output plus the header fields.</td></tr>
+          <td>the batch file itself is the persisted artifact — trace
+            <code>document.batch_path</code> and the manifest entry point at it. Nothing
+            computes it independently of <code>merge</code>'s output plus the header fields,
+            so there is no separate render-only record beyond the file.</td></tr>
         <tr><td><code>verify</code></td>
           <td>trace <code>paragraph</code> (<code>covered</code>/<code>items</code>/
             <code>bytes</code>, plus <code>text</code> when uncovered); trace
