@@ -1022,6 +1022,75 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
     </p>
   </section>
 
+  <section id="replay">
+    <h2>Replaying a recorded run</h2>
+    <p class="note">
+      This section describes a contract (<a
+      href="https://github.com/t0k0sh1/taguru/blob/main/adr/0031-replay-recorded-completions.md">ADR
+      0031</a>) — the flags and behavior below land across
+      <a href="https://github.com/t0k0sh1/taguru/issues/781">#781</a>'s later children and are not
+      in this build yet. It is written now so the records above (the attempts log especially) are
+      understood as the input this depends on.
+    </p>
+    <p>
+      Every completion the attempts log holds can stand in for a live model call on a later run
+      instead of being paid for again — <code>--replay auto</code> (a request with no matching
+      record falls through to a live call) or <code>--replay strict</code> (it fails the document
+      instead — for a run with no model endpoint at all, see below), reading from
+      <code>--replay-from DIR</code> (default the same <code>--out/.extract-trace</code> a run
+      already writes). A request is matched by the exact conversation it would send — every
+      turn's role and content (the system turn by its recorded hash) plus the requested output-token
+      cap — never by <code>piece_id</code> or attempt number alone: a request whose actual content
+      changed (a different validation rule, a different vocabulary offer, a different
+      <code>--candidates</code> setting) is a different question, and falls through to a live call
+      on its own rather than silently reusing a stale answer. This is what makes "change one rule,
+      replay the rest" work without an explicit invalidation step.
+    </p>
+    <p>
+      A replay run's own attempts log is <b>appended to, never truncated</b> — including under
+      <code>--force</code> — so a run replaying from the very log it is about to add to never
+      destroys its own input mid-read; the file already tolerates spanning several runs (ADR 0025),
+      and a new <code>run_id</code> is simply added alongside the ones already there. Two new
+      record kinds mark what happened: <code>replay</code> (the mode and source directory, once) and
+      <code>replay_summary</code> (replayed/live/missed counts, once) — echoed as a
+      <code>replayed N/M completions (K live)</code> stderr line per document.
+    </p>
+    <p>
+      Replay bypasses <a href="#manifest">the manifest skip</a> (a replayed completion is free
+      either way, so the skip's reason to exist is gone) and reads neither the manifest nor
+      <a href="#checkpoints">the checkpoint store</a> — a checkpoint's cached unit was parsed and
+      mechanically validated under whichever code ran the original extraction, which for "replay
+      after changing the validation rule" is exactly the answer replay must not silently reuse.
+      Replaying is never a manifest or checkpoint computation input either: a replayed completion
+      is byte-identical to its recorded original, so the batch it produces is the same function of
+      the same inputs a live run would have produced.
+    </p>
+    <p>
+      The system prompt is <b>pinned</b> from the recorded run when the log names exactly one —
+      this is what lets replaying document two of a multi-document run work even though the label
+      vocabulary <a href="#prompt">every later document's prompt offers</a> depends on what earlier
+      documents in the <em>original</em> run happened to settle on, not on this run's own (possibly
+      empty, possibly different) history. A mismatch between the pinned prompt and what this run's
+      own settings would have produced is reported once, on stderr, and on the trace's
+      <code>steering</code> record. What is <em>not</em> pinned: the document text driving each
+      chunk's user turn (changing it should fall through to a live call), and a corrective round's
+      own ask (it is a genuinely new question when the rule that triggered it changed) — so a
+      document whose original extraction needed a corrective turn can fail <code>--replay
+      strict</code> after a validation-rule change, a known limit, not an oversight.
+    </p>
+    <p>
+      <b>Running the expensive step on one machine, the rest on another</b> is what
+      <code>--replay strict</code> without a model endpoint is for: extract with model access,
+      carry the document files themselves, <code>--out/.extract-trace/*.attempts.jsonl</code>, and
+      the <code>--schema</code> document if one was used, to a machine with none, and replay there.
+      The batch, the manifest, and the checkpoint directory do not need to travel. Because matching
+      is by exact conversation content, a setting left out of sync between the two machines is
+      self-diagnosing: it changes what would be sent, which either falls through to a live call
+      (impossible without a URL — <code>--replay strict</code> fails loudly) or is reported as a
+      pinned-system mismatch — never a silent "used the wrong prompt".
+    </p>
+  </section>
+
   <section id="reading">
     <h2>Reading the records: tracing one item, and what to adjust</h2>
     <p>

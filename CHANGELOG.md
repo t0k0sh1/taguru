@@ -14,6 +14,13 @@ Entries that change an on-disk format or a response shape say so.
   `reconcile`/`merge`/`render`/`verify`) as a public, extensible contract —
   ADR 0030 (#814) — plus a "by step" index into the existing trace/attempts
   records. No behavior change; no on-disk format or response shape change.
+- `docs/extract.html` gains "Replaying a recorded run", the contract for
+  satisfying a completion from the attempts log instead of a live model
+  call — matching key, `--replay {auto|strict|off}`/`--replay-from`, file
+  safety, manifest/checkpoint bypass, system-prompt pinning, and running
+  the model call on one machine and replay on another — ADR 0031 (#815).
+  Documents a contract only; the flags land in #781's later children. No
+  behavior change; no on-disk format or response shape change.
 
 ## [0.9.5] - 2026-08-25
 
