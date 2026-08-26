@@ -4185,8 +4185,6 @@ impl ScriptedChat {
             model: "scripted".to_string(),
             api_key: None,
             agent: config.build().into(),
-            run_id: "0000deadbeef0000".to_string(),
-            attempts: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -4236,7 +4234,7 @@ fn drive_ladder_on(
     let dir = std::env::temp_dir().join(format!("taguru-ladder-{tag}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    let client = chat.client();
+    let completions = Completions::new(chat.client());
     let policy = CorrectionPolicy {
         max_attempts: 3,
         corrective_context_cap: None,
@@ -4264,7 +4262,7 @@ fn drive_ladder_on(
         },
     );
     let context = PieceContext {
-        client: &client,
+        completions: &completions,
         system: "You extract associations.",
         source: "doc.md",
         chunk_index: 0,
@@ -5171,14 +5169,14 @@ fn paragraph_range_reads_labels_and_declines_unlabeled_text() {
     assert_eq!(paragraph_range(""), None);
 }
 
-/// `ChatClient::next_attempt` numbers completions 1, 2, 3… under one
+/// `Completions::next_attempt` numbers completions 1, 2, 3… under one
 /// run id; a pre-0023 checkpoint unit (no `attempt` key) still loads
 /// with `attempt: None`, and a unit written today round-trips it.
 #[test]
 fn attempt_refs_are_dense_per_client_and_survive_the_checkpoint() {
-    let client = ScriptedChat::start(Vec::new()).client();
-    let first = client.next_attempt();
-    let second = client.next_attempt();
+    let completions = Completions::new(ScriptedChat::start(Vec::new()).client());
+    let first = completions.next_attempt();
+    let second = completions.next_attempt();
     assert_eq!(first.attempt_seq, 1);
     assert_eq!(second.attempt_seq, 2);
     assert_eq!(first.run_id, second.run_id);
