@@ -247,9 +247,110 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
     </p>
   </section>
 
+  <section id="pipeline">
+    <h2>The pipeline: the named steps every document goes through</h2>
+    <p>
+      Extract takes each document through a fixed, ordered sequence of named steps. The names
+      are a public contract (<a
+      href="https://github.com/t0k0sh1/taguru/blob/main/adr/0030-extraction-pipeline-steps.md">ADR
+      0030</a>): the same name is used in the records below, in <code>--resume-from</code>
+      (once it ships — see <a href="https://github.com/t0k0sh1/taguru/issues/781">#781</a>), and
+      in this table. <strong>The list is not closed</strong> — a later version can add a step (a
+      document-structure pass and a context-generation pass are expected from <a
+      href="https://github.com/t0k0sh1/taguru/issues/782">#782</a>), and the order to read them
+      in always comes from this table, never from a number: positions shift, names do not.
+    </p>
+    <table>
+      <thead>
+        <tr><th>Step</th><th>Scope</th><th>Model call</th><th>Produces</th><th>Described in</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>read</code></td><td>per document</td><td>—</td>
+          <td>the document text as sent, its hash, the canonical paragraph numbering</td>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td><code>plan</code></td><td>per document</td><td>—</td>
+          <td>the chunk plan (index, hash, byte length, paragraph range per chunk)</td>
+          <td><a href="#chunking">Chunking</a></td>
+        </tr>
+        <tr>
+          <td><code>steer</code></td><td>per document</td><td>—</td>
+          <td>what taguru puts into the prompt on its own: candidates, the label vocabulary,
+            context names, the schema block</td>
+          <td><a href="#prompt">What the model is asked</a>, <a href="#trace">Trace</a>
+            (<code>steering</code>)</td>
+        </tr>
+        <tr>
+          <td><code>prompt</code></td><td>per piece</td><td>—</td>
+          <td>the messages actually sent, every turn, corrective replays included</td>
+          <td><a href="#attempts">The attempts log</a></td>
+        </tr>
+        <tr>
+          <td><code>call</code></td><td>per completion</td><td>yes</td>
+          <td>the raw answer, finish reason, usage, transport retries, the classified state</td>
+          <td><a href="#structured-output">Structured output</a>, <a href="#attempts">The
+            attempts log</a></td>
+        </tr>
+        <tr>
+          <td><code>parse</code></td><td>per completion</td><td>—</td>
+          <td>the parsed answer and any parse issue</td>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td><code>validate</code></td><td>per completion</td><td>—</td>
+          <td>the items kept after mechanical validation, and what it removed</td>
+          <td><a href="#quality">Quality</a>, <a href="#trace">Trace</a> (<code>loss</code>)</td>
+        </tr>
+        <tr>
+          <td><code>reconcile</code></td><td>per document</td><td>yes</td>
+          <td>the piece outputs after cross-chunk correction, and what it pruned</td>
+          <td><a href="#trace">Trace</a> (<code>loss</code>)</td>
+        </tr>
+        <tr>
+          <td><code>merge</code></td><td>per document</td><td>—</td>
+          <td>the folded, contract-enforced extraction — one document's worth</td>
+          <td><a href="#trace">Trace</a> (<code>item</code>)</td>
+        </tr>
+        <tr>
+          <td><code>render</code></td><td>per document</td><td>—</td>
+          <td>the batch file, self-validated and atomically written</td>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td><code>verify</code></td><td>per document</td><td>—</td>
+          <td>paragraph coverage, and — with <code>--coverage</code> — uncovered candidate
+            pairs</td>
+          <td><a href="#quality">Quality</a>, <a href="#trace">Trace</a>
+            (<code>paragraph</code>/<code>uncovered</code>)</td>
+        </tr>
+      </tbody>
+    </table>
+    <p>
+      The "Model call" column is why resuming is worth having: <code>call</code> and
+      <code>reconcile</code> are the only steps that spend money, so a change that only affects a
+      later step (a validation rule, a rendering detail) should not have to pay for them again —
+      this is what <a href="https://github.com/t0k0sh1/taguru/issues/781">#781</a> is building.
+    </p>
+    <p class="note">
+      What is <em>not</em> a step: the manifest's skip decision is the gate above this pipeline,
+      not a step in it (<a href="#manifest">The manifest</a>). A corrective round, an ADR 0019
+      escalated resend, and an ADR 0021/ADR 0001 §7 demote-or-split are all another lap through
+      <code>prompt</code>→<code>call</code>→<code>parse</code>→<code>validate</code>, not steps
+      of their own — which attempt corrected which, and why the ladder moved, are already
+      answered by the <code>attempt</code> record's <code>corrects</code> and the <code>move</code>
+      record (<a href="#attempts">The attempts log</a>). Writing the trace, the attempts log, and
+      the manifest entry, and clearing the checkpoint, are bookkeeping <em>about</em> a step, not
+      steps themselves.
+    </p>
+  </section>
+
   <section id="prompt">
     <h2>What the model is asked, and what is enforced on this side</h2>
     <p>
+      This is <a href="#pipeline"><code>steer</code></a> (what goes into the prompt) and
+      <a href="#pipeline"><code>prompt</code></a> (the messages actually sent) together.
       The system prompt is the <code>/protocol</code> ingest loop distilled for a producer that
       cannot <code>resolve</code> live: one fact per association, short names in the document's
       language, one spelling per referent, negation as negative weight, no paraphrase
@@ -420,6 +521,10 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
 
   <section id="structured-output">
     <h2>Structured output and the output budget</h2>
+    <p>
+      This is the <a href="#pipeline"><code>call</code></a> step's request shape — everything
+      here governs a completion, never what precedes or follows it.
+    </p>
     <p class="note warn">
       <b>Not to be confused with <code>--schema</code> above.</b> Everything in this section is
       about <code>response_format</code> on the OpenAI-compatible wire — how the <i>model's
@@ -501,6 +606,7 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
   <section id="chunking">
     <h2>Chunking</h2>
     <p>
+      This is the <a href="#pipeline"><code>plan</code></a> step.
       Documents are sent in chunks of at most <code>--chunk-bytes</code> (24 KiB by default;
       <code>TAGURU_EXTRACT_CHUNK_BYTES</code> sets the default), cut at paragraph boundaries (aliases and
       duplicate folding stay coherent across chunks — an alias in chunk 1 whose canonical first
@@ -549,6 +655,8 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
   <section id="manifest">
     <h2>The manifest: skipping what's already extracted</h2>
     <p>
+      The manifest sits above <a href="#pipeline">the pipeline</a> — it is the gate that decides
+      whether a document runs at all, not a step within it.
       Extraction being the expensive stage, <code>--out</code> carries an
       <code>.extract-manifest.json</code>: per document, the "content hash × model × prompt
       version × target context" its batch file was computed from. Documents whose compute inputs
@@ -585,7 +693,12 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       document's panic) threw away every chunk already extracted for it. <code>--out</code> also
       carries a <code>.extract-checkpoints/</code> directory, one JSON file per document, holding
       every chunk unit successfully extracted so far. A rerun over the same <code>--out</code>
-      picks up mid-document: chunks already checkpointed are never re-sent to the model.
+      picks up mid-document: chunks already checkpointed are never re-sent to the model. Each
+      checkpointed unit is already, in effect, one piece's <a href="#pipeline"><code>prompt</code></a>,
+      <a href="#pipeline"><code>call</code></a>, <a href="#pipeline"><code>parse</code></a>, and
+      <a href="#pipeline"><code>validate</code></a> output, keyed by the piece's own text hash —
+      an unnamed precedent for the per-step storage <a
+      href="https://github.com/t0k0sh1/taguru/issues/781">#781</a> is building on.
     </p>
     <p>
       Each checkpointed unit is keyed by the <b>hash of its own text</b>, not by chunk index. This
@@ -757,6 +870,8 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
   <section id="trace">
     <h2>Trace: from any batch item back to the text and the completion that produced it</h2>
     <p>
+      See <a href="#by-step">by step</a> for which of <a href="#pipeline">the pipeline</a>'s
+      steps each record kind below reports on.
       Every written batch gets a sibling under <code>&lt;out&gt;/.extract-trace/</code>, named like
       the batch file, always on, no flag (<a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0023-extraction-trace-ids.md">ADR
       0023</a>). Where the diagnostics sidecar describes <i>a run</i>, the trace describes
@@ -918,6 +1033,73 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
     </p>
     <pre><code>t=out/.extract-trace/a.jsonl               # the trace
 l=out/.extract-trace/a.attempts.jsonl      # the attempts log</code></pre>
+
+    <h3 id="by-step">By step: which record shows which step's output</h3>
+    <p>
+      <a href="#pipeline">The pipeline</a> names the steps; this is where each one's output
+      actually lands today. Two steps have no record on disk at all — they are pure functions,
+      recomputed every time, never worth freezing.
+    </p>
+    <table>
+      <thead>
+        <tr><th>Step</th><th>Where its output is today</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>read</code></td>
+          <td>trace <code>document</code> (<code>source</code>/<code>document_sha256</code>/
+            <code>batch_path</code>/<code>chunk_total</code>); attempts log <code>document</code>;
+            the manifest entry's <code>sha256</code>. Paragraph numbering only shows up
+            indirectly, through <code>paragraph</code> records (also <code>verify</code>'s).</td></tr>
+        <tr><td><code>plan</code></td>
+          <td>trace <code>chunk</code>, one per chunk; the diagnostics sidecar's own
+            <code>chunk</code> record; the <code>--dry-run</code> per-document line.</td></tr>
+        <tr><td><code>steer</code></td>
+          <td>trace <code>steering</code> — one record, one to one with the step.</td></tr>
+        <tr><td><code>prompt</code></td>
+          <td>attempts log <code>system</code> (once, by hash) and each <code>attempt</code>'s
+            <code>messages</code> (every turn sent, replays included).</td></tr>
+        <tr><td><code>call</code></td>
+          <td>attempts log <code>attempt</code> (<code>answer</code>/<code>finish_reason</code>/
+            token counts/elapsed/<code>transport_retries</code>/<code>state</code>); the
+            diagnostics sidecar's <code>attempt</code> (metadata only); the <code>move</code>
+            record right after it when the ladder acted.</td></tr>
+        <tr><td><code>parse</code></td>
+          <td><em>nothing on disk</em> — parse issues surface inside the corrective ask an
+            <code>attempt</code> record carries, and <code>--lossy</code>'s parse-time drops
+            appear as trace <code>loss</code> (<code>reason: "dropped"</code>), but the parsed
+            value itself is never written; a pure function of <code>call</code>'s answer.</td></tr>
+        <tr><td><code>validate</code></td>
+          <td>trace <code>loss</code> (<code>reason: "removed"</code>, with <code>path</code>/
+            <code>rule</code>/<code>raw</code>/<code>text</code>); the corrective ask inside the
+            next <code>attempt</code>; ADR 0028's <code>corrects</code> link.</td></tr>
+        <tr><td><code>reconcile</code></td>
+          <td>the Stage 2 <code>attempt</code> (<code>stage: "cross_chunk"</code>,
+            <code>corrects</code>); the trace <code>piece.attempt</code> it replaces; its own
+            prunes as trace <code>loss</code> (<code>reason: "removed"</code> — the one place
+            this record kind is shared with <code>validate</code>, disambiguated only by
+            <code>rule</code>'s prose today).</td></tr>
+        <tr><td><code>merge</code></td>
+          <td>trace <code>item</code>, one per batch line, in batch order; trace <code>loss</code>
+            (<code>reason: "dropped"</code>/<code>"duplicate"</code>, with
+            <code>kept_piece_id</code>); the document record's counts.</td></tr>
+        <tr><td><code>render</code></td>
+          <td><em>nothing beyond the artifact itself</em> — the batch file; trace
+            <code>document.batch_path</code>; the manifest entry. A pure function of
+            <code>merge</code>'s output plus the header fields.</td></tr>
+        <tr><td><code>verify</code></td>
+          <td>trace <code>paragraph</code> (<code>covered</code>/<code>items</code>/
+            <code>bytes</code>, plus <code>text</code> when uncovered); trace
+            <code>uncovered</code> under <code>--coverage</code>; the matching stderr lines.</td></tr>
+      </tbody>
+    </table>
+    <p class="note">
+      No record kind gained a <code>step</code> field for this table — most already map to one
+      step by name (<code>chunk</code>→<code>plan</code>, <code>steering</code>→<code>steer</code>,
+      <code>item</code>→<code>merge</code>); the ones that serve more than one step, like
+      <code>loss</code>, are already told apart by an existing field (<code>reason</code>) that a
+      second identifier would only risk contradicting. This table is the correspondence; the
+      records on disk are unchanged.
+    </p>
 
     <h3 id="walkthrough">From one batch line back to everything that produced it</h3>
     <p>
@@ -1113,6 +1295,8 @@ jq -c 'select(.kind=="uncovered") | {paragraph, sentence}' "$t"</code></pre>
   <section id="quality">
     <h2>Quality</h2>
     <p>
+      <code>--coverage</code> below is the <a href="#pipeline"><code>verify</code></a> step; the
+      mechanical removals it reads about earlier are <a href="#pipeline"><code>validate</code></a>'s.
       Extraction quality is model quality. The contract above guarantees well-formed files, not
       good facts. Probe before committing a corpus: extract a few representative documents into a
       scratch directory, <code>taguru import</code> into a scratch <code>TAGURU_DATA_DIR</code>,

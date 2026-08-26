@@ -7,6 +7,14 @@ Entries that change an on-disk format or a response shape say so.
 
 ## [Unreleased]
 
+### Added
+
+- `docs/extract.html` gains "The pipeline" section naming `taguru extract`'s
+  steps (`read`/`plan`/`steer`/`prompt`/`call`/`parse`/`validate`/
+  `reconcile`/`merge`/`render`/`verify`) as a public, extensible contract —
+  ADR 0030 (#814) — plus a "by step" index into the existing trace/attempts
+  records. No behavior change; no on-disk format or response shape change.
+
 ## [0.9.5] - 2026-08-25
 
 An `extract` observability release (#784): a run now records enough to
