@@ -1034,11 +1034,13 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
     </p>
     <p>
       Every completion the attempts log holds can stand in for a live model call on a later run
-      instead of being paid for again — <code>--replay auto</code> (a request with no matching
-      record falls through to a live call) or <code>--replay strict</code> (it fails the document
-      instead — for a run with no model endpoint at all, see below), reading from
-      <code>--replay-from DIR</code> (default the same <code>--out/.extract-trace</code> a run
-      already writes). A request is matched by the exact conversation it would send — every
+      instead of being paid for again, once <code>--replay</code> engages it —
+      <code>off</code> (the default: every completion is a live call, today's behavior byte for
+      byte), <code>auto</code> (a request with no matching record falls through to a live call),
+      or <code>strict</code> (it fails the document instead — for a run with no model endpoint at
+      all, see below) — reading from <code>--replay-from DIR</code> (default the same
+      <code>--out/.extract-trace</code> a run already writes). A request is matched by the exact
+      conversation it would send — every
       turn's role and content (the system turn by its recorded hash) plus the requested output-token
       cap — never by <code>piece_id</code> or attempt number alone: a request whose actual content
       changed (a different validation rule, a different vocabulary offer, a different

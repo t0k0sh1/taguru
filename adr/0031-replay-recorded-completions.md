@@ -103,11 +103,17 @@ implementation happens to run second instead of keeping it in one
 
 ### 3.2 The matching key: a normalized conversation digest, not an identifier
 
-The key a request is looked up by:
+The key a request is looked up by — each field length-prefixed (a
+fixed-width byte count ahead of its bytes) rather than delimited, so
+no content, including a stray NUL byte, can ever be mistaken for a
+boundary between fields or between messages:
 
-```
-sha256( for each message in order: role \0 (role=="system" ? system_sha256 : content) \0 )
+```text
+sha256( for each message in order:
+          len(role) || role || len(field) || field )
   ++ requested_max_tokens
+
+where field = system_sha256 when role == "system", else content
 ```
 
 The system turn is hashed by reference to ADR 0025's own `system_sha256`
