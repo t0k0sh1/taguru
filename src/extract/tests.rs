@@ -5998,3 +5998,330 @@ fn transport_retries_count_folded_tries_and_the_exhausted_total() {
         exhausted.message
     );
 }
+
+// ADR 0031 §3.2/§3.4 (#818): `ReplayIndex` — parsing, snapshot
+// safety, key sensitivity, FIFO consumption, failure reconstruction,
+// the two-level piece index, and the miss diagnostic.
+
+fn replay_turn_json(role: &str, content: &str) -> serde_json::Value {
+    if role == "system" {
+        serde_json::json!({"role": role, "system_sha256": sha256_hex(content.as_bytes())})
+    } else {
+        serde_json::json!({"role": role, "content": content})
+    }
+}
+
+fn replay_attempt_record(
+    piece_id: &str,
+    attempt: usize,
+    state: &str,
+    requested_max_tokens: Option<usize>,
+    turns: &[(&str, &str)],
+    answer: Option<&str>,
+) -> serde_json::Value {
+    let messages: Vec<serde_json::Value> = turns
+        .iter()
+        .map(|(role, content)| replay_turn_json(role, content))
+        .collect();
+    serde_json::json!({
+        "kind": "attempt",
+        "run_id": "run-1",
+        "attempt_seq": attempt as u64,
+        "piece_id": piece_id,
+        "source": "doc.md",
+        "chunk_index": 0,
+        "stage": "base",
+        "attempt": attempt,
+        "max_attempts": 4,
+        "state": state,
+        "length_limited": false,
+        "transport_retries": 0,
+        "elapsed_seconds": 1.0,
+        "requested_max_tokens": requested_max_tokens,
+        "finish_reason": answer.map(|_| "stop"),
+        "input_tokens": 10,
+        "output_tokens": 20,
+        "messages": messages,
+        "answer": answer,
+        "parse_error": serde_json::Value::Null,
+        "validation_issues": serde_json::Value::Null,
+        "removed_items": serde_json::Value::Null,
+    })
+}
+
+fn replay_request_messages(turns: &[(&str, &str)]) -> Vec<serde_json::Value> {
+    turns
+        .iter()
+        .map(|(role, content)| serde_json::json!({"role": role, "content": content}))
+        .collect()
+}
+
+fn replay_fixture_path(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("taguru-replay-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    dir.join(format!("{name}.attempts.jsonl"))
+}
+
+fn write_replay_log(path: &Path, records: &[serde_json::Value]) {
+    let mut text = String::new();
+    for record in records {
+        text.push_str(&record.to_string());
+        text.push('\n');
+    }
+    fs::write(path, text).unwrap();
+}
+
+#[test]
+fn replay_index_parses_normal_records_and_ignores_corrupt_lines() {
+    let path = replay_fixture_path("parse");
+    let system_sha = sha256_hex(b"you are a helpful extractor");
+    let mut text = String::new();
+    text.push_str(
+        &serde_json::json!({
+            "kind": "system",
+            "sha256": system_sha,
+            "bytes": 27,
+            "content": "you are a helpful extractor",
+        })
+        .to_string(),
+    );
+    text.push('\n');
+    text.push_str(
+        &replay_attempt_record(
+            "piece-1",
+            1,
+            "stop_valid",
+            Some(512),
+            &[
+                ("system", "you are a helpful extractor"),
+                ("user", "extract from this paragraph"),
+            ],
+            Some("here is the extraction"),
+        )
+        .to_string(),
+    );
+    text.push('\n');
+    text.push_str("{not valid json at all\n");
+    text.push_str(r#"{"kind":"attempt","piece_id":"piece-broken","state":"stop_valid"}"#);
+    text.push('\n');
+    fs::write(&path, text).unwrap();
+
+    let index = ReplayIndex::load(&path);
+    assert_eq!(
+        index.system(&system_sha),
+        Some("you are a helpful extractor")
+    );
+
+    let messages = replay_request_messages(&[
+        ("system", "you are a helpful extractor"),
+        ("user", "extract from this paragraph"),
+    ]);
+    match index.lookup("piece-1", &messages, Some(512)) {
+        ReplayLookup::Hit(Ok(completion)) => {
+            assert_eq!(completion.content, "here is the extraction");
+        }
+        _ => panic!("the well-formed record must hit"),
+    }
+
+    // The corrupt line and the malformed record (missing `attempt`,
+    // `messages`) never got indexed — `piece-broken` is unknown.
+    match index.lookup("piece-broken", &messages, None) {
+        ReplayLookup::Miss(diagnostic) => {
+            assert_eq!(diagnostic.piece_id, "piece-broken");
+            assert_eq!(diagnostic.recorded, 0);
+        }
+        ReplayLookup::Hit(_) => panic!("a malformed record must never be offered for replay"),
+    }
+}
+
+#[test]
+fn replay_index_load_snapshots_the_file_before_it_can_be_truncated() {
+    let path = replay_fixture_path("snapshot");
+    let turns = [("user", "snapshot me")];
+    write_replay_log(
+        &path,
+        &[replay_attempt_record(
+            "piece-1",
+            1,
+            "stop_valid",
+            None,
+            &turns,
+            Some("snapshot answer"),
+        )],
+    );
+
+    let index = ReplayIndex::load(&path);
+    // The very thing `AttemptLog::open` does next to a document whose
+    // batch already landed (ADR 0025 §3.2) — truncate.
+    fs::write(&path, "").unwrap();
+
+    let messages = replay_request_messages(&turns);
+    match index.lookup("piece-1", &messages, None) {
+        ReplayLookup::Hit(Ok(completion)) => assert_eq!(completion.content, "snapshot answer"),
+        _ => panic!("load must have snapshotted the file before it was truncated"),
+    }
+}
+
+#[test]
+fn replay_index_key_is_sensitive_to_user_text_max_tokens_and_system() {
+    let path = replay_fixture_path("key-sensitivity");
+    let base_turns = [("system", "steering text"), ("user", "the original piece")];
+    write_replay_log(
+        &path,
+        &[replay_attempt_record(
+            "piece-1",
+            1,
+            "stop_valid",
+            Some(256),
+            &base_turns,
+            Some("the answer"),
+        )],
+    );
+    let index = ReplayIndex::load(&path);
+
+    // A changed user turn misses.
+    let changed_user = replay_request_messages(&[
+        ("system", "steering text"),
+        ("user", "a different piece entirely"),
+    ]);
+    assert!(matches!(
+        index.lookup("piece-1", &changed_user, Some(256)),
+        ReplayLookup::Miss(_)
+    ));
+
+    // The exact same conversation at a different `requested_max_tokens`
+    // (an escalated resend, ADR 0031 §3.2) misses too.
+    let same_messages = replay_request_messages(&base_turns);
+    assert!(matches!(
+        index.lookup("piece-1", &same_messages, Some(1024)),
+        ReplayLookup::Miss(_)
+    ));
+
+    // A changed system prompt misses, even though the user turn and
+    // cap are unchanged.
+    let changed_system = replay_request_messages(&[
+        ("system", "a different steering text"),
+        ("user", "the original piece"),
+    ]);
+    assert!(matches!(
+        index.lookup("piece-1", &changed_system, Some(256)),
+        ReplayLookup::Miss(_)
+    ));
+
+    // The exact original conversation still hits.
+    match index.lookup("piece-1", &same_messages, Some(256)) {
+        ReplayLookup::Hit(Ok(completion)) => assert_eq!(completion.content, "the answer"),
+        _ => panic!("the unchanged conversation must hit"),
+    }
+}
+
+#[test]
+fn replay_index_consumes_same_key_records_fifo_in_file_order() {
+    let path = replay_fixture_path("fifo");
+    let turns = [("user", "demoted and restarted piece")];
+    write_replay_log(
+        &path,
+        &[
+            replay_attempt_record("piece-1", 1, "stop_valid", None, &turns, Some("first")),
+            replay_attempt_record("piece-1", 2, "stop_valid", None, &turns, Some("second")),
+        ],
+    );
+    let index = ReplayIndex::load(&path);
+    let messages = replay_request_messages(&turns);
+
+    match index.lookup("piece-1", &messages, None) {
+        ReplayLookup::Hit(Ok(completion)) => assert_eq!(completion.content, "first"),
+        _ => panic!("the first queued record must come back first"),
+    }
+    match index.lookup("piece-1", &messages, None) {
+        ReplayLookup::Hit(Ok(completion)) => assert_eq!(completion.content, "second"),
+        _ => panic!("the second queued record must come back second"),
+    }
+    match index.lookup("piece-1", &messages, None) {
+        ReplayLookup::Miss(diagnostic) => {
+            assert_eq!(diagnostic.piece_id, "piece-1");
+            assert_eq!(diagnostic.recorded, 2);
+        }
+        ReplayLookup::Hit(_) => panic!("a third request has nothing left to consume"),
+    }
+}
+
+#[test]
+fn replay_index_reconstructs_a_timeout_as_a_chat_error() {
+    let path = replay_fixture_path("timeout");
+    let turns = [("user", "a piece that timed out")];
+    write_replay_log(
+        &path,
+        &[replay_attempt_record(
+            "piece-1", 1, "timeout", None, &turns, None,
+        )],
+    );
+    let index = ReplayIndex::load(&path);
+    let messages = replay_request_messages(&turns);
+
+    match index.lookup("piece-1", &messages, None) {
+        ReplayLookup::Hit(Err(error)) => assert_eq!(error.kind, ChatFailure::Timeout),
+        _ => panic!("expected a replayed timeout, got a different outcome"),
+    }
+}
+
+#[test]
+fn replay_index_keeps_two_pieces_with_identical_text_separate() {
+    let path = replay_fixture_path("two-level");
+    // A repeated paragraph: both pieces sent the exact same
+    // conversation, but each must only ever offer its own recording.
+    let turns = [("user", "a repeated paragraph")];
+    write_replay_log(
+        &path,
+        &[
+            replay_attempt_record("piece-a", 1, "stop_valid", None, &turns, Some("answer a")),
+            replay_attempt_record("piece-b", 1, "stop_valid", None, &turns, Some("answer b")),
+        ],
+    );
+    let index = ReplayIndex::load(&path);
+    let messages = replay_request_messages(&turns);
+
+    match index.lookup("piece-a", &messages, None) {
+        ReplayLookup::Hit(Ok(completion)) => assert_eq!(completion.content, "answer a"),
+        _ => panic!("piece-a must get its own recording"),
+    }
+    match index.lookup("piece-b", &messages, None) {
+        ReplayLookup::Hit(Ok(completion)) => assert_eq!(completion.content, "answer b"),
+        _ => panic!("piece-b must get its own recording"),
+    }
+}
+
+#[test]
+fn replay_index_miss_diagnostic_names_the_first_differing_turn() {
+    let path = replay_fixture_path("miss-diagnostic");
+    write_replay_log(
+        &path,
+        &[replay_attempt_record(
+            "piece-1",
+            1,
+            "stop_valid",
+            None,
+            &[("system", "steering"), ("user", "original text")],
+            Some("original answer"),
+        )],
+    );
+    let index = ReplayIndex::load(&path);
+
+    let messages = replay_request_messages(&[("system", "steering"), ("user", "different text")]);
+    let ReplayLookup::Miss(diagnostic) = index.lookup("piece-1", &messages, None) else {
+        panic!("a changed user turn must miss");
+    };
+    assert_eq!(diagnostic.piece_id, "piece-1");
+    assert_eq!(diagnostic.recorded, 1);
+    let difference = diagnostic
+        .first_difference
+        .expect("one recorded attempt makes a comparison possible");
+    assert_eq!(difference.turn_index, 1);
+    assert_eq!(difference.recorded_role.as_deref(), Some("user"));
+    assert_eq!(difference.recorded_prefix.as_deref(), Some("original text"));
+    assert_eq!(difference.requested_role.as_deref(), Some("user"));
+    assert_eq!(
+        difference.requested_prefix.as_deref(),
+        Some("different text")
+    );
+}
