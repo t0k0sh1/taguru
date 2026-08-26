@@ -145,6 +145,7 @@ impl AttemptLog {
             transport_retries: attempt.transport_retries,
             elapsed_seconds: attempt.elapsed.as_secs_f64(),
             requested_max_tokens: attempt.requested_max_tokens,
+            rung: attempt.rung,
             finish_reason: response.and_then(|response| response.finish_reason.as_deref()),
             input_tokens: response.and_then(|r| r.usage.and_then(|u| u.input_tokens)),
             output_tokens: response.and_then(|r| r.usage.and_then(|u| u.output_tokens)),
@@ -200,6 +201,34 @@ struct AttemptsDocumentRecord<'a> {
     resumed: bool,
 }
 
+/// ADR 0031 §3.2/§3.9: the run's compute-input settings, as a
+/// diagnostic — never a gate. Written once per document, right after
+/// the `document` record. The same field set `CheckpointFingerprint`
+/// checks (minus `sha256`/`context`/`no_passage`/`description`/
+/// `escalation_factor`, which name the document or a value that never
+/// reaches the model), plus `rung`. A later replay run compares its
+/// own settings against this record and names any field that differs
+/// — matching itself is still decided by the conversation (ADR 0031
+/// §3.2), never by this record; a mismatch here is a hint, not a
+/// verdict.
+#[derive(serde::Serialize)]
+pub(super) struct SettingsRecord<'a> {
+    pub(super) kind: &'static str,
+    pub(super) prompt_version: u32,
+    pub(super) model: &'a str,
+    pub(super) questions_n: usize,
+    pub(super) fact_budget: usize,
+    pub(super) structured_output: &'a str,
+    pub(super) max_output_tokens: usize,
+    pub(super) chunk_bytes: &'a str,
+    pub(super) lossy: bool,
+    pub(super) schema_digest: &'a str,
+    pub(super) candidates: &'a str,
+    pub(super) vocabulary_digest: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) rung: Option<&'static str>,
+}
+
 /// One distinct system prompt, in full, written the first time an
 /// attempt of this document sends it.
 #[derive(serde::Serialize)]
@@ -246,6 +275,10 @@ struct AttemptFullRecord<'a> {
     transport_retries: usize,
     elapsed_seconds: f64,
     requested_max_tokens: Option<usize>,
+    /// ADR 0031 §3.2: the structured-output rung this completion was
+    /// asked under; `null` off the ladder (the legacy path).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rung: Option<&'static str>,
     finish_reason: Option<&'a str>,
     input_tokens: Option<u64>,
     output_tokens: Option<u64>,

@@ -170,6 +170,7 @@ pub(super) fn extract_chunk(
                             removed_items: None,
                             piece_bytes: None,
                             requested_max_tokens: None,
+                            rung: None,
                         },
                         &messages,
                     );
@@ -213,6 +214,7 @@ pub(super) fn extract_chunk(
                             removed_items: removed_item_texts(&evaluated.removed),
                             piece_bytes: None,
                             requested_max_tokens: None,
+                            rung: None,
                         },
                         &messages,
                     );
@@ -259,6 +261,7 @@ pub(super) fn extract_chunk(
                             removed_items: None,
                             piece_bytes: None,
                             requested_max_tokens: None,
+                            rung: None,
                         },
                         &messages,
                     );
@@ -298,6 +301,7 @@ pub(super) fn extract_chunk(
                             removed_items: None,
                             piece_bytes: None,
                             requested_max_tokens: None,
+                            rung: None,
                         },
                         &messages,
                     );
@@ -728,6 +732,7 @@ pub(super) fn extract_round(
                             removed_items: None,
                             piece_bytes: Some(piece_bytes),
                             requested_max_tokens: max_tokens,
+                            rung: Some(rung.name()),
                         },
                         &messages,
                     );
@@ -771,6 +776,7 @@ pub(super) fn extract_round(
                             removed_items: removed_item_texts(&evaluated.removed),
                             piece_bytes: Some(piece_bytes),
                             requested_max_tokens: max_tokens,
+                            rung: Some(rung.name()),
                         },
                         &messages,
                     );
@@ -812,6 +818,7 @@ pub(super) fn extract_round(
                             removed_items: None,
                             piece_bytes: Some(piece_bytes),
                             requested_max_tokens: max_tokens,
+                            rung: Some(rung.name()),
                         },
                         &messages,
                     );
@@ -842,6 +849,7 @@ pub(super) fn extract_round(
                             removed_items: None,
                             piece_bytes: Some(piece_bytes),
                             requested_max_tokens: max_tokens,
+                            rung: Some(rung.name()),
                         },
                         &messages,
                     );
@@ -871,6 +879,7 @@ pub(super) fn extract_round(
                             removed_items: None,
                             piece_bytes: Some(piece_bytes),
                             requested_max_tokens: max_tokens,
+                            rung: Some(rung.name()),
                         },
                         &messages,
                     );
@@ -920,6 +929,7 @@ pub(super) fn extract_round(
                             removed_items: None,
                             piece_bytes: Some(piece_bytes),
                             requested_max_tokens: max_tokens,
+                            rung: Some(rung.name()),
                         },
                         &messages,
                     );
@@ -965,6 +975,7 @@ pub(super) fn extract_round(
                             removed_items: None,
                             piece_bytes: Some(piece_bytes),
                             requested_max_tokens: max_tokens,
+                            rung: Some(rung.name()),
                         },
                         &messages,
                     );

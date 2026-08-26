@@ -247,6 +247,14 @@ pub(super) struct DiagnosticsAttempt<'a> {
     pub(super) piece_bytes: Option<usize>,
     /// Ladder-only: this round's `max_tokens`, when one was sent.
     pub(super) requested_max_tokens: Option<usize>,
+    /// ADR 0031 §3.2: the structured-output rung this completion was
+    /// asked under (`None` off the ladder, the legacy path) — read by
+    /// the attempts log only (`AttemptFullRecord`); the sidecar stays
+    /// unchanged. Never part of a replay matching key (the same ADR
+    /// section explains why), but named here so an operator pinning
+    /// `--structured-output` for a replay run can see what a
+    /// recording was taken under.
+    pub(super) rung: Option<&'static str>,
 }
 
 /// One JSONL line of the `--diagnostics-out` sidecar. Field names

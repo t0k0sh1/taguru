@@ -3620,15 +3620,18 @@ fn auto_demotes_json_schema_after_a_looping_piece_and_reports_it() {
         .map(|entry| entry.to_string_lossy().into_owned())
         .find(|name| name.contains("a.md"))
         .unwrap();
-    let moves: Vec<Value> = std::fs::read_to_string(out.join(".extract-trace").join(format!(
+    let a_records: Vec<Value> = std::fs::read_to_string(out.join(".extract-trace").join(format!(
         "{}.attempts.jsonl",
         a_batch.trim_end_matches(".jsonl")
     )))
     .unwrap()
     .lines()
     .map(|line| serde_json::from_str::<Value>(line).unwrap())
-    .filter(|record| record["kind"] == "move")
     .collect();
+    let moves: Vec<&Value> = a_records
+        .iter()
+        .filter(|record| record["kind"] == "move")
+        .collect();
     let kinds: Vec<&str> = moves.iter().map(|m| m["move"].as_str().unwrap()).collect();
     assert_eq!(kinds, ["escalate", "demote"], "{moves:?}");
     assert_eq!(moves[1]["from_rung"], "json_schema");
@@ -3642,6 +3645,27 @@ fn auto_demotes_json_schema_after_a_looping_piece_and_reports_it() {
         moves[1]
     );
     assert_eq!(moves[1]["piece_id"], moves[0]["piece_id"]);
+
+    // ADR 0031 §3.2: every attempt names the rung it was asked under —
+    // the two under json_schema (base + escalated resend), the restart
+    // under json_object.
+    let attempts: Vec<&Value> = a_records
+        .iter()
+        .filter(|record| record["kind"] == "attempt")
+        .collect();
+    assert_eq!(attempts.len(), 3, "{attempts:?}");
+    assert_eq!(attempts[0]["rung"], "json_schema", "{}", attempts[0]);
+    assert_eq!(attempts[1]["rung"], "json_schema", "{}", attempts[1]);
+    assert_eq!(attempts[2]["rung"], "json_object", "{}", attempts[2]);
+    // The settings record names the rung `--structured-output auto`
+    // resolved at startup — the probe's own verdict, before any demote.
+    let settings = a_records
+        .iter()
+        .find(|record| record["kind"] == "settings")
+        .unwrap();
+    assert_eq!(settings["rung"], "json_schema", "{settings:?}");
+    assert_eq!(settings["structured_output"], "auto");
+    assert_eq!(settings["max_output_tokens"], 512);
 
     let _ = std::fs::remove_dir_all(&docs);
     let _ = std::fs::remove_dir_all(&out);
@@ -6782,7 +6806,7 @@ fn attempts_log_keeps_every_completions_full_prompt_and_answer() {
         .collect();
     assert_eq!(
         kinds,
-        ["document", "system", "attempt", "attempt"],
+        ["document", "settings", "system", "attempt", "attempt"],
         "{records:?}"
     );
 
@@ -6793,7 +6817,24 @@ fn attempts_log_keeps_every_completions_full_prompt_and_answer() {
     assert_eq!(records[0]["resumed"], false);
     assert_eq!(records[0]["document_sha256"].as_str().unwrap().len(), 64);
 
-    let system = &records[1];
+    // ADR 0031 §3.2/§3.9: one settings record right after `document`,
+    // a diagnostic snapshot of this run's compute inputs.
+    let settings = &records[1];
+    assert_eq!(settings["model"], "stub-model");
+    assert_eq!(settings["prompt_version"], 3);
+    assert_eq!(settings["questions_n"], 0);
+    assert_eq!(settings["fact_budget"], 0);
+    assert_eq!(settings["structured_output"], "");
+    assert_eq!(settings["max_output_tokens"], 0);
+    assert_eq!(settings["chunk_bytes"], "");
+    assert_eq!(settings["lossy"], false);
+    assert_eq!(settings["schema_digest"], "");
+    assert_eq!(settings["candidates"], "");
+    assert_eq!(settings["vocabulary_digest"], "");
+    // No `--structured-output` engaged: no ladder, so no rung to name.
+    assert!(settings.get("rung").is_none(), "{settings:?}");
+
+    let system = &records[2];
     let system_text = system["content"].as_str().unwrap();
     assert!(system_text.contains("associations"), "{system_text:.80}");
     assert_eq!(system["bytes"], system_text.len());
@@ -6801,7 +6842,7 @@ fn attempts_log_keeps_every_completions_full_prompt_and_answer() {
     assert_eq!(sha.len(), 64);
 
     // The first attempt: base conversation, malformed answer in full.
-    let first = &records[2];
+    let first = &records[3];
     assert_eq!(first["attempt_seq"], 1);
     assert_eq!(first["run_id"], run_id);
     assert_eq!(first["stage"], "item");
@@ -6833,7 +6874,7 @@ fn attempts_log_keeps_every_completions_full_prompt_and_answer() {
 
     // The corrective attempt: the replayed bad answer and the ask, in
     // full; the accepted answer in full; joinable to the sidecar.
-    let second = &records[3];
+    let second = &records[4];
     assert_eq!(second["attempt_seq"], 2);
     assert_eq!(second["attempt"], 2);
     assert_eq!(second["state"], "stop_valid");
@@ -6916,12 +6957,14 @@ fn attempts_log_survives_a_failure_and_is_appended_to_on_resume() {
         .collect();
     assert_eq!(
         kinds,
-        ["document", "system", "attempt", "attempt", "attempt"],
+        [
+            "document", "settings", "system", "attempt", "attempt", "attempt"
+        ],
         "{after_failure:?}"
     );
     let first_run = after_failure[0]["run_id"].as_str().unwrap().to_string();
     assert!(
-        after_failure[3..]
+        after_failure[4..]
             .iter()
             .all(|r| r["state"] == "stop_malformed"),
         "{after_failure:?}"
@@ -6949,15 +6992,16 @@ fn attempts_log_survives_a_failure_and_is_appended_to_on_resume() {
     assert_eq!(
         kinds,
         [
-            "document", "system", "attempt", "attempt", "attempt", "document", "system", "attempt"
+            "document", "settings", "system", "attempt", "attempt", "attempt", "document",
+            "settings", "system", "attempt"
         ],
         "{after_resume:?}"
     );
-    assert_eq!(after_resume[5]["resumed"], true);
-    assert_ne!(after_resume[5]["run_id"], first_run.as_str());
-    assert_eq!(after_resume[7]["run_id"], after_resume[5]["run_id"]);
-    assert_eq!(after_resume[7]["attempt_seq"], 1);
-    assert_eq!(after_resume[7]["chunk_index"], 1);
+    assert_eq!(after_resume[6]["resumed"], true);
+    assert_ne!(after_resume[6]["run_id"], first_run.as_str());
+    assert_eq!(after_resume[9]["run_id"], after_resume[6]["run_id"]);
+    assert_eq!(after_resume[9]["attempt_seq"], 1);
+    assert_eq!(after_resume[9]["chunk_index"], 1);
     // The trace's reused piece names the first run's attempt 1 — which
     // the log still holds in full.
     let (_, trace) = read_trace(&out);
@@ -6967,9 +7011,9 @@ fn attempts_log_survives_a_failure_and_is_appended_to_on_resume() {
         .unwrap();
     assert_eq!(reused["attempt"]["run_id"], first_run.as_str());
     assert_eq!(reused["attempt"]["attempt_seq"], 1);
-    assert_eq!(after_resume[2]["run_id"], first_run.as_str());
-    assert_eq!(after_resume[2]["attempt_seq"], 1);
-    assert_eq!(after_resume[2]["piece_id"], reused["piece_id"]);
+    assert_eq!(after_resume[3]["run_id"], first_run.as_str());
+    assert_eq!(after_resume[3]["attempt_seq"], 1);
+    assert_eq!(after_resume[3]["piece_id"], reused["piece_id"]);
 
     // A re-extraction from scratch (--force, no checkpoint) truncates.
     let chunk_any = json!({"associations": []}).to_string();
