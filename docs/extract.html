@@ -972,7 +972,19 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       keeps the text of every conversation the document had with the model, by default
       (<a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0025-attempts-log.md">ADR
       0025</a>): one <code>document</code> record per run over the document (<code>run_id</code>,
-      <code>source</code>, <code>document_sha256</code>, <code>resumed</code>); the system prompt
+      <code>source</code>, <code>document_sha256</code>, <code>resumed</code>); right after it, one
+      <code>settings</code> record (<a
+      href="https://github.com/t0k0sh1/taguru/blob/main/adr/0031-replay-recorded-completions.md">ADR
+      0031</a>) — a diagnostic snapshot of this run's compute inputs (<code>model</code>,
+      <code>prompt_version</code>, <code>questions_n</code>, <code>fact_budget</code>,
+      <code>structured_output</code>, <code>max_output_tokens</code>, <code>chunk_bytes</code>,
+      <code>lossy</code>, <code>schema_digest</code>, <code>candidates</code>,
+      <code>vocabulary_digest</code>, and the current <code>rung</code>), the same field set the
+      manifest and checkpoint fingerprint check, minus what only names the document or never
+      reaches the model (<code>sha256</code>, <code>context</code>, <code>no_passage</code>,
+      <code>description</code>, <code>escalation_factor</code>). Never a manifest/checkpoint
+      input itself — a hint for spotting why a later run's completions stop matching this one's,
+      not a gate; the system prompt
       once, in full, as a <code>system</code> record (<code>sha256</code>, <code>bytes</code>,
       <code>content</code>) — it is fixed for the document, so attempts name it by hash; and one
       <code>attempt</code> per completion, in issue order, carrying the sidecar's own fields
@@ -985,7 +997,15 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       Every attempt record also carries <code>transport_retries</code> — how many
       transport-layer tries (429, 5xx, transport errors) failed inside this one attempt before
       its outcome (<code>0</code> = a clean first try; the four-retries-are-one-record ruling is
-      unchanged, the count makes it visible).
+      unchanged, the count makes it visible). Every attempt record also carries <code>rung</code>
+      — the structured-output rung it was asked under (<code>json_schema</code>/
+      <code>json_object</code>/<code>prompted JSON</code>), absent off the ladder (the legacy
+      path). It is never part of how a later run matches this one's completions — under
+      <code>--structured-output auto</code> with <code>--parallel</code>, which rung a piece
+      demotes to can interleave differently run to run — but it is here to read: an operator
+      pinning <code>--structured-output</code> can see what rung a recording was actually taken
+      under, Stage 2's cross-chunk correction included (read fresh, so a demote between the
+      chunk loop and the correction still shows up).
       A corrective attempt also carries <code>corrects</code> — the
       <code>{run_id, attempt_seq}</code> of the attempt whose answer it replays and asks to fix
       (Stage 1: the same piece's previous attempt; Stage 2: the accepted attempt whose output is
