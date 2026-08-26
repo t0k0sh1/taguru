@@ -66,7 +66,7 @@ pub(super) struct Run {
     pub(super) ladder: Option<LadderConfig>,
     pub(super) out: PathBuf,
     /// `None` exactly under `--dry-run`, which must call nothing.
-    pub(super) client: Option<ChatClient>,
+    pub(super) completions: Option<Completions>,
     pub(super) model_name: String,
     pub(super) manifest: Manifest,
     /// Relation labels this run has settled on, mapped to how many
@@ -137,13 +137,13 @@ pub(super) struct Run {
 }
 
 impl Run {
-    /// ADR 0023: the run's id, minted by the client (one per
-    /// invocation). Empty under `--dry-run`, which has no client and
-    /// writes no trace.
+    /// ADR 0023: the run's id, minted by `Completions` (one per
+    /// invocation). Empty under `--dry-run`, which builds no
+    /// `Completions` and writes no trace.
     pub(super) fn run_id(&self) -> String {
-        self.client
+        self.completions
             .as_ref()
-            .map(|client| client.run_id.clone())
+            .map(|completions| completions.run_id().to_string())
             .unwrap_or_default()
     }
 
@@ -734,10 +734,10 @@ impl Run {
                 observers,
             );
         }
-        let client = self
-            .client
+        let completions = self
+            .completions
             .as_ref()
-            .expect("a non-dry run built the client");
+            .expect("a non-dry run built the completions");
         let system = system_prompt(
             &self.vocabulary,
             self.questions,
@@ -753,7 +753,7 @@ impl Run {
                 return Ok(ChunkLoopResult::Interrupted);
             }
             match extract_chunk_or_ladder(
-                client,
+                completions,
                 &system,
                 source,
                 index,
@@ -804,10 +804,10 @@ impl Run {
         checkpoints: &CheckpointStore,
         observers: &Observers,
     ) -> Result<ChunkLoopResult, String> {
-        let client = self
-            .client
+        let completions = self
+            .completions
             .as_ref()
-            .expect("a non-dry run built the client");
+            .expect("a non-dry run built the completions");
         let system = system_prompt(
             &self.vocabulary,
             self.questions,
@@ -823,7 +823,7 @@ impl Run {
             self.parallel,
             |&(index, piece)| {
                 extract_chunk_or_ladder(
-                    client,
+                    completions,
                     &system,
                     source,
                     index,
@@ -878,10 +878,10 @@ impl Run {
         candidates: &[String],
         observers: &Observers,
     ) -> Result<(), String> {
-        let client = self
-            .client
+        let completions = self
+            .completions
             .as_ref()
-            .expect("a non-dry run built the client");
+            .expect("a non-dry run built the completions");
         let system = system_prompt(
             &self.vocabulary,
             self.questions,
@@ -924,8 +924,8 @@ impl Run {
                 }),
             ];
             let started = std::time::Instant::now();
-            let attempt_ref = client.next_attempt();
-            let response = match client.complete(&messages, &options) {
+            let attempt_ref = completions.next_attempt();
+            let response = match completions.complete(&messages, &options) {
                 Ok(response) => response,
                 Err(error) => {
                     {

@@ -98,7 +98,7 @@ impl CorrectiveAsk {
 /// 1st answer + the same corrective text as before.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn extract_chunk(
-    client: &ChatClient,
+    completions: &Completions,
     system: &str,
     user: &str,
     source: &str,
@@ -134,14 +134,14 @@ pub(super) fn extract_chunk(
             }));
         }
         let started = std::time::Instant::now();
-        let attempt_ref = client.next_attempt();
+        let attempt_ref = completions.next_attempt();
         // ADR 0028 (#790): a corrective attempt names the attempt whose
         // answer it replays — the tuple's link.
         let corrects = prior_bad_answer
             .is_some()
             .then(|| prior_ref.clone())
             .flatten();
-        let response = match client.complete(&messages, &RequestOptions::default()) {
+        let response = match completions.complete(&messages, &RequestOptions::default()) {
             Ok(response) => response,
             Err(error) => {
                 {
@@ -364,7 +364,7 @@ pub(super) fn record_checkpoint(
 /// into several outputs through the split rung.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn extract_chunk_or_ladder(
-    client: &ChatClient,
+    completions: &Completions,
     system: &str,
     source: &str,
     chunk_index: usize,
@@ -385,7 +385,7 @@ pub(super) fn extract_chunk_or_ladder(
             }
             let user = user_message(source, chunk_index, chunk_total, piece);
             let output = extract_chunk(
-                client,
+                completions,
                 system,
                 &user,
                 source,
@@ -402,7 +402,7 @@ pub(super) fn extract_chunk_or_ladder(
         }
         Some(ladder) => {
             let context = PieceContext {
-                client,
+                completions,
                 system,
                 source,
                 chunk_index,
@@ -426,7 +426,7 @@ pub(super) fn extract_chunk_or_ladder(
 /// all the way down: a split sub-piece is still "part K of N" of the
 /// same document as far as the model is told.
 pub(super) struct PieceContext<'a> {
-    pub(super) client: &'a ChatClient,
+    pub(super) completions: &'a Completions,
     pub(super) system: &'a str,
     pub(super) source: &'a str,
     pub(super) chunk_index: usize,
@@ -510,7 +510,7 @@ pub(super) fn extract_piece(
         // answer overran and the one the neutral resend gets.
         let mut record = MoveRecord::blank(
             "escalate",
-            &context.client.run_id,
+            context.completions.run_id(),
             &piece_id,
             context.chunk_index,
             "the answer ended at the output cap; resending once at the escalated budget",
@@ -549,7 +549,7 @@ pub(super) fn extract_piece(
                 let why = demotion_reason(&outcome, context.ladder.max_output_tokens.is_some());
                 let mut record = MoveRecord::blank(
                     "demote",
-                    &context.client.run_id,
+                    context.completions.run_id(),
                     &piece_id,
                     context.chunk_index,
                     &why,
@@ -589,7 +589,7 @@ pub(super) fn extract_piece(
             // vocabulary the attempt states use.
             let mut record = MoveRecord::blank(
                 "split",
-                &context.client.run_id,
+                context.completions.run_id(),
                 &piece_id,
                 context.chunk_index,
                 match outcome {
@@ -693,13 +693,13 @@ pub(super) fn extract_round(
             }));
         }
         let started = std::time::Instant::now();
-        let attempt_ref = context.client.next_attempt();
+        let attempt_ref = context.completions.next_attempt();
         // ADR 0028 (#790): the corrective tuple's link.
         let corrects = prior_bad_answer
             .is_some()
             .then(|| prior_ref.clone())
             .flatten();
-        let response = match context.client.complete(&messages, &options) {
+        let response = match context.completions.complete(&messages, &options) {
             Ok(response) => response,
             Err(error) => {
                 {

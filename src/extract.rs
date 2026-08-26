@@ -79,6 +79,8 @@ mod chat_client;
 mod checkpoint;
 #[path = "extract/chunking.rs"]
 mod chunking;
+#[path = "extract/completions.rs"]
+mod completions;
 #[path = "extract/coverage.rs"]
 mod coverage;
 #[path = "extract/diagnostics.rs"]
@@ -138,13 +140,14 @@ use attempts::{AttemptLog, MoveRecord, Observers, attempts_file_name, attempts_l
 use candidates::{candidate_terms, candidates_block, candidates_manifest_value};
 #[cfg(test)]
 use chat_client::RETRY_ATTEMPTS;
-use chat_client::{ChatCompletion, ChatError, ChatFailure, classify_io_error};
+use chat_client::{ChatCompletion, ChatError, ChatFailure, classify_io_error, mint_run_id};
 use checkpoint::{CheckpointFingerprint, CheckpointStore, CheckpointUnit};
 use chunking::{
     AnswerFault, ChunkOutput, MIN_SPLIT_CAP, corrective_assistant_turn,
     corrective_validation_message, evaluate_answer, extract_chunk_or_ladder,
     indicates_length_limit, indicates_refusal,
 };
+use completions::Completions;
 use coverage::{CoverageGap, coverage_gaps};
 use diagnostics::{DiagnosticsAttempt, removed_item_texts};
 use manifest::{CHECKPOINT_DIR_NAME, batch_file_name, checkpoint_file_name};
@@ -631,6 +634,7 @@ pub fn run(args: &[String]) -> i32 {
             escalation_factor,
         )),
     };
+    let completions = client.map(Completions::new);
     // Same "hard usage error, not a silent warning" reasoning as
     // --parallel/--fact-budget above (extract never initializes a
     // tracing subscriber, so env::env_bool's warn! would go nowhere).
@@ -733,12 +737,12 @@ pub fn run(args: &[String]) -> i32 {
     // client-construction skip above.
     let diagnostics = match &diagnostics_path {
         Some(path) if !args.dry_run => {
-            // ADR 0023: the sidecar's first record names the run — the
-            // client minted the id (one client per invocation), and
-            // under `!dry_run` the client exists.
-            let run_id = client
+            // ADR 0023: the sidecar's first record names the run —
+            // `Completions` minted the id (one per invocation), and
+            // under `!dry_run` it exists.
+            let run_id = completions
                 .as_ref()
-                .map(|client| client.run_id.as_str())
+                .map(Completions::run_id)
                 .unwrap_or_default();
             match DiagnosticsSink::open(path.clone(), diagnostics_raw_bytes, run_id) {
                 Ok(sink) => Some(sink),
@@ -830,7 +834,7 @@ pub fn run(args: &[String]) -> i32 {
         chunk_bytes,
         ladder,
         out: args.out,
-        client,
+        completions,
         model_name,
         manifest: Manifest::load(&manifest_path),
         // ADR 0015: the exported context's label spellings seed the
