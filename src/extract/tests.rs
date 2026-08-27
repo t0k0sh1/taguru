@@ -6318,11 +6318,14 @@ fn replay_index_miss_diagnostic_names_the_first_differing_turn() {
         .expect("one recorded attempt makes a comparison possible");
     assert_eq!(difference.turn_index, 1);
     assert_eq!(difference.recorded_role.as_deref(), Some("user"));
-    assert_eq!(difference.recorded_prefix.as_deref(), Some("original text"));
+    assert_eq!(
+        difference.recorded_digest,
+        Some(sha256_hex(b"original text"))
+    );
     assert_eq!(difference.requested_role.as_deref(), Some("user"));
     assert_eq!(
-        difference.requested_prefix.as_deref(),
-        Some("different text")
+        difference.requested_digest,
+        Some(sha256_hex(b"different text"))
     );
 }
 
@@ -6423,8 +6426,8 @@ fn replay_index_miss_diagnostic_picks_the_record_with_the_longest_matching_prefi
     // the first recording is the closer match.
     assert_eq!(difference.turn_index, 2);
     assert_eq!(difference.recorded_role.as_deref(), Some("user"));
-    assert_eq!(difference.recorded_prefix.as_deref(), Some("not-gamma"));
-    assert_eq!(difference.requested_prefix.as_deref(), Some("gamma"));
+    assert_eq!(difference.recorded_digest, Some(sha256_hex(b"not-gamma")));
+    assert_eq!(difference.requested_digest, Some(sha256_hex(b"gamma")));
 }
 
 #[test]

@@ -141,7 +141,12 @@ impl Completions {
 /// `MissDiagnostic`'s stderr/error wording — "this piece has N
 /// recorded attempts, none match" plus the first turn that differs,
 /// when a comparison was possible (ADR 0031 §3.2's diagnosability
-/// point).
+/// point). Names each side's turn by role and `sha256` only, never by
+/// content: this message reaches stderr, a failed document's
+/// `ChatError`, and from there the diagnostics sidecar's
+/// `parse_error` — all metadata by design (ADR 0001 §10). The
+/// document text stays exclusively in the attempts log's own
+/// `messages`.
 fn describe_miss(diagnostic: &MissDiagnostic) -> String {
     let piece_id = &diagnostic.piece_id;
     let mut message = if diagnostic.recorded == 0 {
@@ -154,20 +159,20 @@ fn describe_miss(diagnostic: &MissDiagnostic) -> String {
     };
     if let Some(difference) = &diagnostic.first_difference {
         message.push_str(&format!(
-            " — first differs at turn {}: recorded {}{:?}, requested {}{:?}",
+            " — first differs at turn {}: recorded {}sha256:{}, requested {}sha256:{}",
             difference.turn_index,
             difference
                 .recorded_role
                 .as_deref()
-                .map(|role| format!("{role}: "))
+                .map(|role| format!("{role} "))
                 .unwrap_or_default(),
-            difference.recorded_prefix.as_deref().unwrap_or(""),
+            difference.recorded_digest.as_deref().unwrap_or("<none>"),
             difference
                 .requested_role
                 .as_deref()
-                .map(|role| format!("{role}: "))
+                .map(|role| format!("{role} "))
                 .unwrap_or_default(),
-            difference.requested_prefix.as_deref().unwrap_or("<none>"),
+            difference.requested_digest.as_deref().unwrap_or("<none>"),
         ));
     }
     message

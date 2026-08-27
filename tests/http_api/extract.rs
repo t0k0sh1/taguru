@@ -7728,6 +7728,14 @@ fn replay_auto_falls_through_on_a_settings_change_and_reports_the_mismatch() {
         ],
     );
     assert_eq!(code2, 0, "stderr: {stderr2}");
+    // Checked before `requests2.join()`: if a regression made the
+    // changed prompt wrongly hit, the stub thread would still be
+    // blocked in `accept()` waiting for the live call that never
+    // comes, and `join()` would hang the test instead of failing it.
+    assert!(
+        stderr2.contains("replayed 0/1 completions (1 live)"),
+        "{stderr2}"
+    );
     assert_eq!(
         requests2.join().unwrap().len(),
         1,

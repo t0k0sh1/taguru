@@ -107,13 +107,20 @@ impl StoredAttempt {
 /// The first turn a recorded conversation and a requested one
 /// disagree on — the diagnostic [`ReplayIndex::lookup`] returns on a
 /// miss, so an operator sees *why* nothing matched instead of a bare
-/// "not found" (ADR 0031 §3.2).
+/// "not found" (ADR 0031 §3.2). Carries a `sha256` of each side's
+/// turn, never the text itself: this diagnostic reaches stderr and a
+/// failed document's `ChatError` message (and, from there, the
+/// diagnostics sidecar's `parse_error`), which are metadata by design
+/// (ADR 0001 §10) — the document text belongs to the attempts log's
+/// own `messages` alone. A digest still lets an operator confirm
+/// *which* recorded turn a candidate string matches without this
+/// diagnostic ever carrying document content itself.
 pub(super) struct TurnDifference {
     pub(super) turn_index: usize,
     pub(super) recorded_role: Option<String>,
-    pub(super) recorded_prefix: Option<String>,
+    pub(super) recorded_digest: Option<String>,
     pub(super) requested_role: Option<String>,
-    pub(super) requested_prefix: Option<String>,
+    pub(super) requested_digest: Option<String>,
 }
 
 /// [`ReplayIndex::lookup`]'s miss report: how many attempts this
@@ -269,10 +276,14 @@ impl ReplayIndex {
     }
 }
 
-/// [`SettingsRecord`]'s replay-relevant fields, parsed back from JSON
-/// — the same field set `CheckpointFingerprint`/`Manifest` compute,
-/// minus `rung` (never part of a settings comparison; ADR 0031 §3.2
-/// keeps it off the matching key for the same reason).
+/// [`SettingsRecord`]'s eleven fields, parsed back from JSON, minus
+/// `rung` (never part of a settings comparison; ADR 0031 §3.2 keeps
+/// it off the matching key for the same reason). `SettingsRecord`
+/// already excludes `CheckpointFingerprint`'s `sha256`/`context`/
+/// `no_passage`/`description`/`escalation_factor` — values that name
+/// the document or never reach the model — so `settings_differences`
+/// never reports on those either; that is inherited from
+/// `SettingsRecord`'s own contract, not a gap here.
 pub(super) struct RecordedSettings {
     pub(super) prompt_version: u64,
     pub(super) model: String,
@@ -432,9 +443,9 @@ fn closest_difference(
     Some(TurnDifference {
         turn_index: prefix_len,
         recorded_role: recorded_turn.map(|(role, _)| role.clone()),
-        recorded_prefix: recorded_turn.map(|(_, field)| snippet(field)),
+        recorded_digest: recorded_turn.map(|(_, field)| sha256_hex(field.as_bytes())),
         requested_role: requested_turn.map(|(role, _)| role.clone()),
-        requested_prefix: requested_turn.map(|(_, field)| snippet(field)),
+        requested_digest: requested_turn.map(|(_, field)| sha256_hex(field.as_bytes())),
     })
 }
 
