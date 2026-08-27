@@ -43,16 +43,20 @@ Entries that change an on-disk format or a response shape say so.
   hint, never a gate — ADR 0031 (#818, #819). **On-disk format change**:
   two new record kinds (`replay`, `replay_summary`) in
   `--out/.extract-trace/*.attempts.jsonl`, written only under `--replay`.
-- `docs/extract.html` gains "Recording here, replaying there": the two-machine
-  procedure `--replay strict` with no `TAGURU_EXTRACT_URL` is for (extract
-  where the model is, carry the documents/`.extract-trace`/`--schema`,
-  replay where it isn't) — ADR 0031 §3.8 (#820). `--structured-output auto`
-  combined with no endpoint now names the recorded `attempt.rung` field as
-  the way to pin a rung explicitly instead. No behavior change beyond the
-  usage-error wording.
   The system-prompt pin described in `docs/extract.html` is not yet
   implemented (#821): a multi-document replay's system turn is recomputed
   from this run's own settings until then.
+- `docs/extract.html` gains "Recording here, replaying there": the two-machine
+  procedure `--replay strict` with no `TAGURU_EXTRACT_URL` is for (extract
+  where the model is, carry the documents/`.extract-trace`/`--schema`,
+  replay where it isn't) — ADR 0031 §3.8 (#820).
+
+### Changed
+
+- The `--structured-output auto` + no-endpoint usage error (#819) now names
+  the recorded attempt's own `rung` field as the way to pin a rung
+  explicitly instead of probing (#820). Wording only; still a usage error
+  under the same conditions.
 
 ## [0.9.5] - 2026-08-25
 
