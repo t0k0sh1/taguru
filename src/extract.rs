@@ -114,7 +114,7 @@ mod trace;
 mod vocabulary;
 
 use args::{
-    Args, CorrectionPolicy, DEFAULT_ESCALATION_FACTOR, LadderConfig, Outcome, Rung,
+    Args, CorrectionPolicy, DEFAULT_ESCALATION_FACTOR, LadderConfig, Outcome, ReplayMode, Rung,
     escalation_manifest_value,
 };
 use diagnostics::DiagnosticsSink;
@@ -139,7 +139,8 @@ pub(crate) use vocabulary::vocabulary_digest;
 // every sibling it needs.
 use aggregate::{Extraction, ItemKey, association_name_sets, combined_cross_output_issues, merge};
 use attempts::{
-    AttemptLog, MoveRecord, Observers, SettingsRecord, attempts_file_name, attempts_log_enabled,
+    AttemptLog, MoveRecord, Observers, ReplayRecord, ReplaySummaryRecord, SettingsRecord,
+    attempts_file_name, attempts_log_enabled,
 };
 use candidates::{candidate_terms, candidates_block, candidates_manifest_value};
 #[cfg(test)]
@@ -174,6 +175,7 @@ use prompt::{
     user_message, user_message_document,
 };
 use render::{chunk, floor_char_boundary, render_batch, split_labeled_piece, split_oversized};
+use replay::{MissDiagnostic, RecordedSettings, ReplayIndex, ReplayLookup, settings_differences};
 use run::labeled_document;
 use structured_output::{jittered_backoff, parse_retry_after, read_capped_chat_body, snippet};
 use trace::{
@@ -215,8 +217,6 @@ use parse::{ModelQuestion, parse_model_output};
 #[cfg(test)]
 use prompt::schema_block;
 #[cfg(test)]
-use replay::{ReplayIndex, ReplayLookup};
-#[cfg(test)]
 use run::with_resume_hint;
 #[cfg(test)]
 use structured_output::{
@@ -232,6 +232,7 @@ usage: taguru extract [--dry-run] [--force] [--no-passage] [--questions N]
                       [--structured-output MODE] [--max-output-tokens N]
                       [--lossy] [--candidates] [--vocabulary PATH] [--coverage]
                       [--diagnostics-out FILE] [--schema FILE]
+                      [--replay MODE] [--replay-from DIR]
                       [--source-id ID] [--date WHEN] [--tag TAG]...
                       --context NAME [--description TEXT] --out DIR FILE|DIR...
 
@@ -268,6 +269,8 @@ chat endpoint:
                       each diagnostics record, capped to this many bytes;
                       unset or 0 = never attach it (metadata only)
   TAGURU_EXTRACT_SCHEMA  default for --schema (unset, off)
+  TAGURU_EXTRACT_REPLAY  default for --replay (off)
+  TAGURU_EXTRACT_REPLAY_FROM  default for --replay-from (OUT/.extract-trace)
 
   --dry-run           list what would extract or skip; call nothing
   --force             re-extract documents the manifest says are unchanged
@@ -370,6 +373,20 @@ chat endpoint:
                       from, so it must be handed the document explicitly. A
                       file that fails to parse or validate is a startup
                       error, not a silent skip.
+  --replay MODE       satisfy completions from a prior run's attempts log
+                      instead of a live call (ADR 0031): 'auto' falls
+                      through to a live call when nothing matches; 'strict'
+                      fails the document instead, for a run with no model
+                      endpoint at all (TAGURU_EXTRACT_URL becomes optional,
+                      TAGURU_EXTRACT_MODEL stays required). 'off' (default)
+                      never consults the log. A request is matched by its
+                      exact conversation content, never by piece or attempt
+                      number, so a genuinely changed request always falls
+                      through on its own. Bypasses the manifest skip and the
+                      checkpoint store; never itself a computation input
+  --replay-from DIR   where --replay reads attempts logs from (default:
+                      --out/.extract-trace, the directory a run already
+                      writes its own to)
 
 Contract and discipline: docs/extract.html.
 ";
@@ -453,18 +470,53 @@ pub fn run(args: &[String]) -> i32 {
         Err(message) => return crate::config::subcommand_usage_error("extract", &message),
     };
 
+    // Flag-over-env, same validation strength as --structured-output
+    // below (ADR 0031 §3.3's vocabulary is closed too — an unknown
+    // value is a hard usage error, never a silent "off").
+    let replay_mode = match args.replay {
+        Some(mode) => mode,
+        None => match std::env::var("TAGURU_EXTRACT_REPLAY") {
+            Ok(value) => match ReplayMode::parse(&value) {
+                Some(mode) => mode,
+                None => {
+                    return crate::config::subcommand_usage_error(
+                        "extract",
+                        "TAGURU_EXTRACT_REPLAY takes auto, strict, or off",
+                    );
+                }
+            },
+            Err(_) => ReplayMode::Off,
+        },
+    };
+    let replaying = !matches!(replay_mode, ReplayMode::Off);
+
     // The provider is demanded up front even when every document ends
     // up skipped: a run whose environment cannot extract should say so
     // before it reports success. --dry-run alone calls nothing and
-    // needs nothing.
+    // needs nothing. `--replay strict` (ADR 0031 §3.7/§3.8) is the one
+    // other case that can run with no endpoint at all — the model name
+    // is still required (it is a manifest computation input, ADR 0031
+    // §3.7), only the URL is optional.
     let client = if args.dry_run {
         None
     } else {
+        if std::env::var("TAGURU_EXTRACT_MODEL").is_err() {
+            eprintln!("taguru: extract: TAGURU_EXTRACT_MODEL is not set");
+            return 2;
+        }
         match ChatClient::from_env() {
             Ok(client) => Some(client),
             Err(message) => {
-                eprintln!("taguru: extract: {message}");
-                return 2;
+                // TAGURU_EXTRACT_MODEL is already confirmed present
+                // above, so a failure here can only be a missing
+                // TAGURU_EXTRACT_URL — the one gap --replay strict
+                // tolerates, running on replay alone.
+                if replay_mode == ReplayMode::Strict {
+                    None
+                } else {
+                    eprintln!("taguru: extract: {message}");
+                    return 2;
+                }
             }
         }
     };
@@ -575,6 +627,19 @@ pub fn run(args: &[String]) -> i32 {
             Err(_) => StructuredOutputMode::Off,
         },
     };
+    // ADR 0031 §3.7: the ADR 0021 probe requires a live call by
+    // construction, and replay is never something that can stand in
+    // for it — the one usage error `--replay strict` with no
+    // TAGURU_EXTRACT_URL can reach that `--dry-run` (client is also
+    // `None` there) does not, since a dry run probes nothing at all.
+    if client.is_none() && !args.dry_run && matches!(structured_output, StructuredOutputMode::Auto)
+    {
+        return crate::config::subcommand_usage_error(
+            "extract",
+            "--structured-output auto needs a live model endpoint to probe \
+             (TAGURU_EXTRACT_URL) — --replay strict alone cannot resolve it",
+        );
+    }
     let max_output_tokens = match args.max_output_tokens {
         Some(n) => Some(n),
         None => match std::env::var("TAGURU_EXTRACT_MAX_OUTPUT_TOKENS") {
@@ -642,7 +707,12 @@ pub fn run(args: &[String]) -> i32 {
             escalation_factor,
         )),
     };
-    let completions = client.map(Completions::new);
+    // Unlike the old `client.map(...)`, dry-run is the only reason
+    // `completions` is ever `None` — under `--replay strict` with no
+    // `TAGURU_EXTRACT_URL` (ADR 0031 §3.7/§3.8), `client` itself is
+    // `None` but a non-dry run still needs a `Completions` to replay
+    // through.
+    let completions = (!args.dry_run).then(|| Completions::new(client));
     // Same "hard usage error, not a silent warning" reasoning as
     // --parallel/--fact-budget above (extract never initializes a
     // tracing subscriber, so env::env_bool's warn! would go nowhere).
@@ -824,6 +894,20 @@ pub fn run(args: &[String]) -> i32 {
         }
         None => (None, String::new()),
     };
+    // Flag-over-env, same pattern as --vocabulary above; unlike a
+    // parsed knob, any nonempty path is a valid value. Computed
+    // unconditionally (Run reads it only under `replaying`, but a
+    // typo'd env value should not silently do nothing just because
+    // --replay was left off too).
+    let replay_from = args
+        .replay_from
+        .or_else(|| {
+            std::env::var("TAGURU_EXTRACT_REPLAY_FROM")
+                .ok()
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        })
+        .unwrap_or_else(|| args.out.join(TRACE_DIR_NAME));
     let mut run = Run {
         context: args.context,
         description: args.description,
@@ -895,6 +979,9 @@ pub fn run(args: &[String]) -> i32 {
         schema_digest,
         stop: StopSignal::install("extract"),
         attempts_log: attempts_log_enabled(),
+        replay_mode,
+        replaying,
+        replay_from,
     };
 
     let mut written = 0usize;

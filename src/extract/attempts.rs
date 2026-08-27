@@ -229,6 +229,32 @@ pub(super) struct SettingsRecord<'a> {
     pub(super) rung: Option<&'static str>,
 }
 
+/// ADR 0031 §3.4: this document's replay mode and source directory,
+/// once per document — right after `settings`, and written only when
+/// `--replay` is `auto` or `strict`.
+#[derive(serde::Serialize)]
+pub(super) struct ReplayRecord<'a> {
+    pub(super) kind: &'static str,
+    pub(super) mode: &'static str,
+    pub(super) replay_from: &'a str,
+}
+
+/// ADR 0031 §3.4: this document's replayed/live completion counts —
+/// the last record of a replaying document's own attempts, echoing
+/// the `replayed N/M completions (K live)` stderr line. `replayed +
+/// live` is always the document's total completion count: a
+/// completion is exactly one or the other, never both, so a separate
+/// "missed" count would only restate `live` (`--replay auto`'s every
+/// miss becomes a live call) or never be written at all (`--replay
+/// strict`'s first miss fails the document before this record is
+/// reached).
+#[derive(serde::Serialize)]
+pub(super) struct ReplaySummaryRecord {
+    pub(super) kind: &'static str,
+    pub(super) replayed: u64,
+    pub(super) live: u64,
+}
+
 /// One distinct system prompt, in full, written the first time an
 /// attempt of this document sends it.
 #[derive(serde::Serialize)]

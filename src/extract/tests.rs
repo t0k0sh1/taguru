@@ -4234,7 +4234,7 @@ fn drive_ladder_on(
     let dir = std::env::temp_dir().join(format!("taguru-ladder-{tag}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    let completions = Completions::new(chat.client());
+    let completions = Completions::new(Some(chat.client()));
     let policy = CorrectionPolicy {
         max_attempts: 3,
         corrective_context_cap: None,
@@ -5174,7 +5174,7 @@ fn paragraph_range_reads_labels_and_declines_unlabeled_text() {
 /// with `attempt: None`, and a unit written today round-trips it.
 #[test]
 fn attempt_refs_are_dense_per_client_and_survive_the_checkpoint() {
-    let completions = Completions::new(ScriptedChat::start(Vec::new()).client());
+    let completions = Completions::new(Some(ScriptedChat::start(Vec::new()).client()));
     let first = completions.next_attempt();
     let second = completions.next_attempt();
     assert_eq!(first.attempt_seq, 1);

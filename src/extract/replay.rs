@@ -1,13 +1,8 @@
 //! `ReplayIndex` (ADR 0031 §3.2/§3.4): an in-memory index over one
 //! document's attempts log, built once at load time so a later run can
 //! satisfy a completion from a recorded conversation instead of a live
-//! model call. Internal only — no `--replay` flag reads this yet
-//! (that's #819); this module exists to be unit-testable on its own.
-
-// Nothing in production calls this module yet by design (#818's own
-// scope: an internal API, verified by its unit tests) — the call
-// sites that wire it into `Completions` land in #819.
-#![allow(dead_code)]
+//! model call — read by `Completions::complete` and diffed against a
+//! document's own settings in `Run::extract_document` (#819).
 
 use super::*;
 use std::collections::{HashMap, VecDeque};
@@ -159,7 +154,14 @@ pub(super) struct ReplayIndex {
     pieces: Mutex<HashMap<String, PieceRecords>>,
     /// `system` records by `sha256`, for the pin decision (#821) —
     /// stored here because both need the same read of the log.
+    #[allow(dead_code)] // read by ReplayIndex::system, wired up in #821
     systems: HashMap<String, String>,
+    /// The last `kind: "settings"` record seen in file order (ADR
+    /// 0031 §3.9): a checkpoint-resumed document's log can hold one
+    /// per run it spans, and the most recent is the closest baseline
+    /// to diff a replay run's own settings against. Diagnostic only —
+    /// never consulted by matching itself.
+    settings: Option<RecordedSettings>,
 }
 
 impl ReplayIndex {
@@ -172,6 +174,7 @@ impl ReplayIndex {
     pub(super) fn load(path: &Path) -> Self {
         let mut pieces: HashMap<String, PieceRecords> = HashMap::new();
         let mut systems: HashMap<String, String> = HashMap::new();
+        let mut settings: Option<RecordedSettings> = None;
         if let Ok(text) = fs::read_to_string(path) {
             for line in text.lines() {
                 let line = line.trim();
@@ -200,6 +203,11 @@ impl ReplayIndex {
                             piece.records.push(stored);
                         }
                     }
+                    Some("settings") => {
+                        if let Some(parsed) = parse_settings_record(&value) {
+                            settings = Some(parsed);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -207,6 +215,7 @@ impl ReplayIndex {
         Self {
             pieces: Mutex::new(pieces),
             systems,
+            settings,
         }
     }
 
@@ -247,9 +256,86 @@ impl ReplayIndex {
     /// A `system` record's full text by `sha256` — the pin decision
     /// (#821) reads this once it has decided, from the set of
     /// distinct hashes seen, that exactly one applies.
+    #[allow(dead_code)] // wired up in #821
     pub(super) fn system(&self, sha256: &str) -> Option<&str> {
         self.systems.get(sha256).map(String::as_str)
     }
+
+    /// The log's most recent `settings` record, for a replay run to
+    /// diff its own settings against (ADR 0031 §3.2/§3.9) — a hint,
+    /// never a gate: matching itself is decided by the conversation.
+    pub(super) fn settings(&self) -> Option<&RecordedSettings> {
+        self.settings.as_ref()
+    }
+}
+
+/// [`SettingsRecord`]'s replay-relevant fields, parsed back from JSON
+/// — the same field set `CheckpointFingerprint`/`Manifest` compute,
+/// minus `rung` (never part of a settings comparison; ADR 0031 §3.2
+/// keeps it off the matching key for the same reason).
+pub(super) struct RecordedSettings {
+    pub(super) prompt_version: u64,
+    pub(super) model: String,
+    pub(super) questions_n: u64,
+    pub(super) fact_budget: u64,
+    pub(super) structured_output: String,
+    pub(super) max_output_tokens: u64,
+    pub(super) chunk_bytes: String,
+    pub(super) lossy: bool,
+    pub(super) schema_digest: String,
+    pub(super) candidates: String,
+    pub(super) vocabulary_digest: String,
+}
+
+fn parse_settings_record(value: &serde_json::Value) -> Option<RecordedSettings> {
+    Some(RecordedSettings {
+        prompt_version: value["prompt_version"].as_u64()?,
+        model: value["model"].as_str()?.to_string(),
+        questions_n: value["questions_n"].as_u64()?,
+        fact_budget: value["fact_budget"].as_u64()?,
+        structured_output: value["structured_output"].as_str()?.to_string(),
+        max_output_tokens: value["max_output_tokens"].as_u64()?,
+        chunk_bytes: value["chunk_bytes"].as_str()?.to_string(),
+        lossy: value["lossy"].as_bool()?,
+        schema_digest: value["schema_digest"].as_str()?.to_string(),
+        candidates: value["candidates"].as_str()?.to_string(),
+        vocabulary_digest: value["vocabulary_digest"].as_str()?.to_string(),
+    })
+}
+
+/// Names every field where `recorded` (the log's last `settings`
+/// record) and `current` (this run's own settings) disagree, each as
+/// `"field old → new"` — the stderr line's own words (ADR 0031 §3.2's
+/// diagnostic point). Empty when nothing differs; `prompt_version`'s
+/// difference is worded as itself, not decoded, since it names a
+/// build, not a setting an operator chose.
+pub(super) fn settings_differences(
+    recorded: &RecordedSettings,
+    current: &RecordedSettings,
+) -> Vec<String> {
+    let mut differences = Vec::new();
+    macro_rules! diff {
+        ($field:ident, $label:literal) => {
+            if recorded.$field != current.$field {
+                differences.push(format!(
+                    "{} {:?} \u{2192} {:?}",
+                    $label, recorded.$field, current.$field
+                ));
+            }
+        };
+    }
+    diff!(prompt_version, "prompt_version");
+    diff!(model, "model");
+    diff!(questions_n, "questions");
+    diff!(fact_budget, "fact_budget");
+    diff!(structured_output, "structured_output");
+    diff!(max_output_tokens, "max_output_tokens");
+    diff!(chunk_bytes, "chunk_bytes");
+    diff!(lossy, "lossy");
+    diff!(schema_digest, "schema_digest");
+    diff!(candidates, "candidates");
+    diff!(vocabulary_digest, "vocabulary_digest");
+    differences
 }
 
 /// ADR 0001 §7's attempt-state vocabulary (also documented on

@@ -66,6 +66,15 @@ pub(super) struct Args {
     /// all (today's behavior) — resolved in [`run`], same pattern as
     /// `config`.
     pub(super) schema: Option<PathBuf>,
+    /// `None` defers to TAGURU_EXTRACT_REPLAY, and then to `Off`
+    /// (today's always-live behavior) — resolved in [`run`], same
+    /// pattern as `structured_output`. ADR 0031.
+    pub(super) replay: Option<ReplayMode>,
+    /// `None` defers to TAGURU_EXTRACT_REPLAY_FROM, and then to
+    /// `OUT/.extract-trace` (the same directory a run already writes
+    /// its own attempts logs to) — resolved in [`run`], same pattern
+    /// as `vocabulary`. ADR 0031 §3.7.
+    pub(super) replay_from: Option<PathBuf>,
     pub(super) context: String,
     pub(super) description: Option<String>,
     /// #466 S1 (ADR 0017): the promotion runbook's `session:{agent}:{id}`
@@ -101,6 +110,8 @@ impl Args {
         let mut coverage: Option<bool> = None;
         let mut diagnostics_out: Option<PathBuf> = None;
         let mut schema: Option<PathBuf> = None;
+        let mut replay: Option<ReplayMode> = None;
+        let mut replay_from: Option<PathBuf> = None;
         let mut context: Option<String> = None;
         let mut description: Option<String> = None;
         let mut source_id: Option<String> = None;
@@ -286,6 +297,38 @@ impl Args {
                         return Err(crate::config::subcommand_usage_error(
                             "extract",
                             "--schema needs a file path",
+                        ));
+                    }
+                },
+                "--replay" => {
+                    if replay.is_some() {
+                        return Err(crate::config::subcommand_usage_error(
+                            "extract",
+                            "--replay given twice",
+                        ));
+                    }
+                    match rest.next().and_then(|mode| ReplayMode::parse(mode)) {
+                        Some(mode) => replay = Some(mode),
+                        None => {
+                            return Err(crate::config::subcommand_usage_error(
+                                "extract",
+                                "--replay takes auto, strict, or off",
+                            ));
+                        }
+                    }
+                }
+                "--replay-from" => match rest.next() {
+                    Some(dir) if replay_from.is_none() => replay_from = Some(PathBuf::from(dir)),
+                    Some(_) => {
+                        return Err(crate::config::subcommand_usage_error(
+                            "extract",
+                            "--replay-from given twice",
+                        ));
+                    }
+                    None => {
+                        return Err(crate::config::subcommand_usage_error(
+                            "extract",
+                            "--replay-from needs a directory",
                         ));
                     }
                 },
@@ -516,6 +559,8 @@ impl Args {
             coverage,
             diagnostics_out,
             schema,
+            replay,
+            replay_from,
             context,
             description,
             source_id,
@@ -655,6 +700,41 @@ impl StructuredOutputMode {
             Self::JsonSchema => "json-schema",
             Self::JsonObject => "json-object",
             Self::Off => "",
+        }
+    }
+}
+
+/// `--replay`'s closed vocabulary (ADR 0031 §3.3): whether and how a
+/// recorded completion may stand in for a live model call. `Off` —
+/// the default — never consults the attempts log; every completion is
+/// a live call, today's behavior byte for byte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReplayMode {
+    /// A request with no matching record falls through to a live call.
+    Auto,
+    /// A request with no matching record fails the document instead —
+    /// for a run with no model endpoint at all (ADR 0031 §3.8).
+    Strict,
+    Off,
+}
+
+impl ReplayMode {
+    pub(super) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "auto" => Some(Self::Auto),
+            "strict" => Some(Self::Strict),
+            "off" => Some(Self::Off),
+            _ => None,
+        }
+    }
+
+    /// The spelling the `replay` record and the settings-mismatch
+    /// stderr line use — the same word `--replay` itself takes.
+    pub(super) fn name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Strict => "strict",
+            Self::Off => "off",
         }
     }
 }
