@@ -204,7 +204,14 @@ impl Run {
     /// — every list computed by the same function that renders its
     /// prompt block, so the record is what the model was actually
     /// shown. Document-scoped (`chunk_index: null`): all of a
-    /// document's chunks share one prompt.
+    /// document's chunks share one prompt. Exception: when
+    /// `resolved_system.pinned_from` is `Some` (ADR 0031 §3.6), the
+    /// system prompt actually sent is the pinned, verbatim recorded
+    /// text — only `system_sha256` describes it exactly.
+    /// `candidates`/`vocabulary`/`context_names`/`schema` still reflect
+    /// this run's own current computation, which a pin may have
+    /// bypassed; a trace record is advisory (ADR 0023 §3.6), never
+    /// authoritative over what the batch itself holds.
     pub(super) fn steering_record<'a>(
         &'a self,
         candidates: &'a [String],

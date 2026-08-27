@@ -147,8 +147,8 @@ pub(super) struct TraceSteering<'a> {
     pub(super) system_sha256: &'a str,
     /// ADR 0031 §3.6: the run_id the system prompt was pinned from,
     /// when `--replay` pinned it (its `ReplayIndex` named exactly one
-    /// distinct recorded system) — `null` when this run computed its
-    /// own, pin or no `--replay` at all.
+    /// distinct recorded system) — the field is absent when this run
+    /// computed its own, pin declined, or no `--replay` at all.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) pinned_from: Option<&'a str>,
     /// #759's reuse list, in prompt order with the prompted counts

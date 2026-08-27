@@ -206,8 +206,11 @@ impl ReplayIndex {
         // `system`'s own record carries no run_id (ADR 0025 §3.3: it
         // is written once per document, not once per run), so this is
         // how a system record's ORIGINATING run is recovered for
-        // `pinned_from` (ADR 0031 §3.6).
-        let mut current_run_id = String::new();
+        // `pinned_from` (ADR 0031 §3.6). `None` until a valid
+        // `document` record is seen — a `system` record with no
+        // preceding one (a truncated or malformed log) names no real
+        // origin and must never be registered as pinnable.
+        let mut current_run_id: Option<String> = None;
         if let Ok(text) = fs::read_to_string(path) {
             for line in text.lines() {
                 let line = line.trim();
@@ -219,14 +222,14 @@ impl ReplayIndex {
                 };
                 match value["kind"].as_str() {
                     Some("document") => {
-                        if let Some(run_id) = value["run_id"].as_str() {
-                            current_run_id = run_id.to_string();
-                        }
+                        current_run_id = value["run_id"].as_str().map(str::to_string);
                     }
                     Some("system") => {
-                        if let (Some(sha256), Some(content)) =
-                            (value["sha256"].as_str(), value["content"].as_str())
-                            && sha256_hex(content.as_bytes()) == sha256
+                        if let (Some(sha256), Some(content), Some(run_id)) = (
+                            value["sha256"].as_str(),
+                            value["content"].as_str(),
+                            current_run_id.as_deref(),
+                        ) && sha256_hex(content.as_bytes()) == sha256
                         {
                             // The first run to record this hash owns
                             // it — a later run's identical `system`
@@ -236,7 +239,7 @@ impl ReplayIndex {
                                 .entry(sha256.to_string())
                                 .or_insert_with(|| RecordedSystem {
                                     content: content.to_string(),
-                                    run_id: current_run_id.clone(),
+                                    run_id: run_id.to_string(),
                                 });
                         }
                     }

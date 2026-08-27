@@ -6080,6 +6080,14 @@ fn replay_index_parses_normal_records_and_ignores_corrupt_lines() {
     let mut text = String::new();
     text.push_str(
         &serde_json::json!({
+            "kind": "document",
+            "run_id": "run-parse-fixture",
+        })
+        .to_string(),
+    );
+    text.push('\n');
+    text.push_str(
+        &serde_json::json!({
             "kind": "system",
             "sha256": system_sha,
             "bytes": 27,
@@ -6110,8 +6118,9 @@ fn replay_index_parses_normal_records_and_ignores_corrupt_lines() {
 
     let index = ReplayIndex::load(&path);
     match index.pinned_system() {
-        SystemPinDecision::Pin { content, .. } => {
+        SystemPinDecision::Pin { content, run_id } => {
             assert_eq!(content, "you are a helpful extractor");
+            assert_eq!(run_id, "run-parse-fixture");
         }
         _ => panic!("the one well-formed system record must be the pin candidate"),
     }
@@ -6502,6 +6511,28 @@ fn replay_index_rejects_a_system_record_whose_hash_does_not_match_its_content() 
             "sha256": claimed_sha256,
             "bytes": real_content.len(),
             "content": real_content,
+        })],
+    );
+
+    let index = ReplayIndex::load(&path);
+    assert!(matches!(index.pinned_system(), SystemPinDecision::NoRecord));
+}
+
+/// A `system` record with no preceding `document` record (a truncated
+/// or malformed attempts log) names no real originating run and must
+/// never become pinnable — pinning it would report a nonexistent
+/// `pinned_from` run_id in the trace.
+#[test]
+fn replay_index_never_pins_a_system_record_with_no_preceding_document_record() {
+    let path = replay_fixture_path("system-before-document");
+    let content = "you are a helpful extractor";
+    write_replay_log(
+        &path,
+        &[serde_json::json!({
+            "kind": "system",
+            "sha256": sha256_hex(content.as_bytes()),
+            "bytes": content.len(),
+            "content": content,
         })],
     );
 

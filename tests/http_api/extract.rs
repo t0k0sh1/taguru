@@ -7667,16 +7667,23 @@ fn replay_strict_reuses_a_recorded_run_with_no_model_endpoint_at_all() {
     );
 
     // The trace's `steering` record names the system prompt actually
-    // sent and, since it was pinned, the run_id it was pinned from.
+    // sent and, since it was pinned, the run_id it was pinned from —
+    // its hash must be the recorded run's own, the pinned text.
+    let recorded_system_sha256 = records_before
+        .iter()
+        .find(|r| r["kind"] == "system")
+        .expect("the live run must record its system prompt")["sha256"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let (_, trace_records) = read_trace(&out);
     let steering = trace_records
         .iter()
         .find(|record| record["kind"] == "steering")
         .expect("a steering record must exist");
     assert_eq!(
-        steering["system_sha256"].as_str().unwrap().len(),
-        64,
-        "{steering}"
+        steering["system_sha256"], recorded_system_sha256,
+        "the pinned prompt's hash must be the recorded one: {steering}"
     );
     assert_eq!(steering["pinned_from"], first_run_id, "{steering}");
 

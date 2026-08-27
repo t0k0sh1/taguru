@@ -915,8 +915,8 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       (<code>{types, constrained_relations}</code>; <code>null</code> when no schema block was
       prompted), <code>system_sha256</code> (the system prompt actually sent, by hash — pinned or
       recomputed alike), and <code>pinned_from</code> (the run_id the system prompt was pinned
-      from under <a href="#replay"><code>--replay</code></a>; <code>null</code> whenever this run
-      computed its own); <code>chunk_index</code> is <code>null</code> — document scope, every chunk
+      from under <a href="#replay"><code>--replay</code></a>; absent from the record whenever
+      this run computed its own); <code>chunk_index</code> is <code>null</code> — document scope, every chunk
       sees the same lists today; per-chunk context (a future control) adds records with the
       index set. Then one <code>loss</code> per item the model's accepted answer held that the batch does
       not (<a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0024-loss-records.md">ADR
