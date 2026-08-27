@@ -369,6 +369,9 @@ ENVIRONMENT (every knob; unset = the shown default):
                                many bytes; unset or 0 = never attach it
                                (metadata only)
   TAGURU_EXTRACT_SCHEMA        default for extract's --schema (unset, off)
+  TAGURU_EXTRACT_REPLAY        default for extract's --replay (off)
+  TAGURU_EXTRACT_REPLAY_FROM   default for extract's --replay-from
+                               (OUT/.extract-trace)
   RUST_LOG                     log filter, EnvFilter syntax (info)
   TAGURU_LOG_FORMAT            json for JSON log lines (pretty)
   TAGURU_LOG_SEARCHES          1 = per-search event log; cues are memory

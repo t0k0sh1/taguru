@@ -134,6 +134,17 @@ pub(super) struct Run {
     /// prompts and answers) is written — `true` unless
     /// `TAGURU_EXTRACT_TRACE_ATTEMPTS` is `off`.
     pub(super) attempts_log: bool,
+    /// Resolved from `--replay`/TAGURU_EXTRACT_REPLAY (`Off`, the
+    /// default) — ADR 0031 §3.3.
+    pub(super) replay_mode: ReplayMode,
+    /// `true` exactly for `Auto`/`Strict` — the manifest skip and the
+    /// checkpoint store both go inert under this (ADR 0031 §3.5), and
+    /// [`Run::extract_document`] loads a [`ReplayIndex`] for every
+    /// document instead of none.
+    pub(super) replaying: bool,
+    /// `--replay-from`/TAGURU_EXTRACT_REPLAY_FROM, resolved even when
+    /// `!replaying` (`out/.extract-trace` by default) — ADR 0031 §3.7.
+    pub(super) replay_from: PathBuf,
 }
 
 impl Run {
@@ -313,7 +324,12 @@ impl Run {
             .out
             .join(CHECKPOINT_DIR_NAME)
             .join(checkpoint_file_name(source));
-        if self.force {
+        // ADR 0031 §3.5: a replay run never reads the checkpoint store
+        // — a cached unit was parsed and mechanically validated under
+        // whichever code ran the ORIGINAL extraction, which for "change
+        // the validation rule, replay the rest" is exactly the answer
+        // replay must not silently reuse.
+        if self.force || self.replaying {
             CheckpointStore::empty(path, fingerprint)
         } else {
             CheckpointStore::load(path, &fingerprint)
@@ -404,7 +420,12 @@ impl Run {
             date: self.date.unwrap_or(0),
             tags: &self.tags,
         };
+        // ADR 0031 §3.5: the skip exists to avoid paying for model
+        // calls on an unchanged document — under replay a completion is
+        // free whether or not it hits, so the skip's reason to exist is
+        // gone.
         if !self.force
+            && !self.replaying
             && self.manifest.matches(source, &inputs)
             && let Some(recorded) = recorded_output
                 .as_deref()
@@ -483,15 +504,26 @@ impl Run {
                 sink.emit_chunk(source, index, plan.len(), descriptor);
             }
         }
+        // ADR 0031 §3.4: the whole attempts log is read into memory
+        // BEFORE this run opens its own log for writing — a later
+        // append (or, pre-replay, a truncate) can then never disturb
+        // what was already loaded.
+        let replay_index = self
+            .replaying
+            .then(|| ReplayIndex::load(&self.replay_from.join(attempts_file_name(&file_name))));
         // ADR 0025 (#788): the attempts log — every completion's full
         // prompt and answer — opens here, appending when the checkpoint
         // says this document is being resumed, truncating otherwise,
         // so the file spans exactly the runs that built the batch. A
         // log that cannot open is one stderr line, never a failure.
+        // ADR 0031 §3.4: a replay run always appends, even on an
+        // otherwise-fresh document (whose checkpoint holds nothing) —
+        // truncating the very file replay is about to read from would
+        // destroy its own input.
         let run_id = self.run_id();
         let attempt_log = self.open_attempt_log(
             &file_name,
-            checkpoints.unit_count() > 0,
+            checkpoints.unit_count() > 0 || self.replaying,
             &run_id,
             source,
             &hash,
@@ -515,6 +547,45 @@ impl Run {
                 vocabulary_digest: &self.vocabulary_digest,
                 rung: self.ladder.as_ref().map(|ladder| ladder.rung().name()),
             });
+            // ADR 0031 §3.4: names the mode and the source directory,
+            // right after `settings`.
+            if self.replaying {
+                log.write_record(&ReplayRecord {
+                    kind: "replay",
+                    mode: self.replay_mode.name(),
+                    replay_from: &self.replay_from.display().to_string(),
+                });
+            }
+        }
+        // ADR 0031 §3.2/§3.9: a settings mismatch is a hint, never a
+        // gate — matching is still decided completion by completion,
+        // by conversation content. Reported once per document, before
+        // any completion of it is attempted.
+        if let Some(recorded) = replay_index.as_ref().and_then(ReplayIndex::settings) {
+            let current = RecordedSettings {
+                prompt_version: u64::from(PROMPT_VERSION),
+                model: self.model_name.clone(),
+                questions_n: self.questions as u64,
+                fact_budget: self.fact_budget as u64,
+                structured_output: self.structured_output.manifest_value().to_string(),
+                max_output_tokens: self.max_output_tokens.unwrap_or(0) as u64,
+                chunk_bytes: chunk_bytes.clone(),
+                lossy: self.lossy,
+                schema_digest: self.schema_digest.clone(),
+                candidates: candidates_manifest_value(self.candidates).to_string(),
+                vocabulary_digest: self.vocabulary_digest.clone(),
+            };
+            let differences = settings_differences(recorded, &current);
+            if !differences.is_empty() {
+                eprintln!(
+                    "taguru: extract: {source}: the records were taken under different \
+                     settings ({}) — completions will not match",
+                    differences.join(", ")
+                );
+            }
+        }
+        if let Some(completions) = self.completions.as_mut() {
+            completions.begin_document(replay_index, self.replay_mode);
         }
         let observers = Observers {
             sink: self.diagnostics.as_ref(),
@@ -700,6 +771,24 @@ impl Run {
         // ADR 0016's stderr half, from the gaps computed above.
         for gap in &uncovered {
             eprintln!("taguru: extract: {source}: uncovered: {}", gap.describe());
+        }
+        // ADR 0031 §3.4: the `replay_summary` record and its stderr
+        // echo — a replaying document's own account of what it did.
+        if self.replaying
+            && let Some((replayed, live)) =
+                self.completions.as_ref().map(Completions::document_counts)
+        {
+            eprintln!(
+                "taguru: extract: {source}: replayed {replayed}/{} completions ({live} live)",
+                replayed + live
+            );
+            if let Some(log) = attempt_log.as_ref() {
+                log.write_record(&ReplaySummaryRecord {
+                    kind: "replay_summary",
+                    replayed,
+                    live,
+                });
+            }
         }
         self.report(
             source,
@@ -948,7 +1037,7 @@ impl Run {
             ];
             let started = std::time::Instant::now();
             let attempt_ref = completions.next_attempt();
-            let response = match completions.complete(&messages, &options) {
+            let response = match completions.complete(piece_id, &messages, &options) {
                 Ok(response) => response,
                 Err(error) => {
                     {

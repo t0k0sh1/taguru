@@ -141,7 +141,7 @@ pub(super) fn extract_chunk(
             .is_some()
             .then(|| prior_ref.clone())
             .flatten();
-        let response = match completions.complete(&messages, &RequestOptions::default()) {
+        let response = match completions.complete(piece_id, &messages, &RequestOptions::default()) {
             Ok(response) => response,
             Err(error) => {
                 {
@@ -703,7 +703,7 @@ pub(super) fn extract_round(
             .is_some()
             .then(|| prior_ref.clone())
             .flatten();
-        let response = match context.completions.complete(&messages, &options) {
+        let response = match context.completions.complete(piece_id, &messages, &options) {
             Ok(response) => response,
             Err(error) => {
                 {

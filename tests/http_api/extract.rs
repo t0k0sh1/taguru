@@ -346,6 +346,8 @@ fn scrub_extract_env(command: &mut Command) -> &mut Command {
         .env_remove("TAGURU_EXTRACT_TRACE_ATTEMPTS")
         .env_remove("TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES")
         .env_remove("TAGURU_EXTRACT_SCHEMA")
+        .env_remove("TAGURU_EXTRACT_REPLAY")
+        .env_remove("TAGURU_EXTRACT_REPLAY_FROM")
         .env_remove("TAGURU_CONFIG")
 }
 
@@ -7594,4 +7596,341 @@ fn anchoring_cli_usage_vocabulary_and_skip_edges() {
     assert!(stderr.contains("source 'c.md' already judged"), "{stderr}");
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ADR 0031: the two-machine scenario (§3.8) end to end — record with
+/// a live endpoint, then replay with none configured at all. `--replay
+/// strict` with no `TAGURU_EXTRACT_URL` makes a live call physically
+/// impossible, so "the stub server saw zero requests" cannot be a
+/// counting mistake the way it could be for `--replay auto`.
+#[test]
+fn replay_strict_reuses_a_recorded_run_with_no_model_endpoint_at_all() {
+    let docs = batch_dir("extract-replay-strict-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "alpha relates to beta").unwrap();
+    let doc_src = doc.to_str().unwrap();
+    let out = batch_dir("extract-replay-strict-out");
+
+    let good = json!({"associations": [
+        {"subject": "alpha", "label": "relates to", "object": "beta", "weight": 1.0}
+    ]})
+    .to_string();
+    let (url, requests) = stub_chat_server(vec![good.clone()]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &["--context", "c", doc_src],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert_eq!(requests.join().unwrap().len(), 1);
+
+    let (batch_name, _) = read_trace(&out);
+    let batch_path = out.join(&batch_name);
+    let original_batch = std::fs::read(&batch_path).unwrap();
+    let records_before = read_attempts_log(&out);
+
+    let (code2, _stdout2, stderr2) = run_extract(
+        &out,
+        &[("TAGURU_EXTRACT_MODEL", "stub-model")],
+        &["--context", "c", "--replay", "strict", doc_src],
+    );
+    assert_eq!(code2, 0, "stderr: {stderr2}");
+    assert!(
+        stderr2.contains("replayed 1/1 completions (0 live)"),
+        "{stderr2}"
+    );
+    assert!(
+        !stderr2.contains("different settings"),
+        "nothing changed between the two runs: {stderr2}"
+    );
+
+    let replayed_batch = std::fs::read(&batch_path).unwrap();
+    assert_eq!(
+        original_batch, replayed_batch,
+        "a replayed batch must be byte-identical to the one the live run wrote"
+    );
+
+    let records_after = read_attempts_log(&out);
+    assert!(records_after.len() > records_before.len());
+    assert_eq!(
+        &records_after[..records_before.len()],
+        records_before.as_slice(),
+        "the first run's records must survive, never be truncated"
+    );
+    let second_run = &records_after[records_before.len()..];
+    let kinds: Vec<&str> = second_run
+        .iter()
+        .map(|r| r["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds[0], "document");
+    assert_eq!(second_run[0]["resumed"], true);
+    assert!(kinds.contains(&"replay"), "{kinds:?}");
+    assert!(kinds.contains(&"replay_summary"), "{kinds:?}");
+    let replay_record = second_run.iter().find(|r| r["kind"] == "replay").unwrap();
+    assert_eq!(replay_record["mode"], "strict");
+    let summary = second_run
+        .iter()
+        .find(|r| r["kind"] == "replay_summary")
+        .unwrap();
+    assert_eq!(summary["replayed"], 1);
+    assert_eq!(summary["live"], 0);
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// `--replay auto`: a request whose conversation genuinely changed
+/// (here, `--fact-budget` folds into the system prompt) falls through
+/// to a live call on its own — no explicit invalidation step — and the
+/// settings mismatch this implies is named on stderr, field by field.
+#[test]
+fn replay_auto_falls_through_on_a_settings_change_and_reports_the_mismatch() {
+    let docs = batch_dir("extract-replay-auto-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "alpha relates to beta").unwrap();
+    let doc_src = doc.to_str().unwrap();
+    let out = batch_dir("extract-replay-auto-out");
+
+    let good = json!({"associations": [
+        {"subject": "alpha", "label": "relates to", "object": "beta", "weight": 1.0}
+    ]})
+    .to_string();
+    let (url, _requests) = stub_chat_server(vec![good.clone()]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &["--context", "c", doc_src],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+
+    // A fresh stub for the fallback live call --replay auto must make.
+    let (url2, requests2) = stub_chat_server(vec![good]);
+    let (code2, _stdout2, stderr2) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url2.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--replay",
+            "auto",
+            "--fact-budget",
+            "3",
+            doc_src,
+        ],
+    );
+    assert_eq!(code2, 0, "stderr: {stderr2}");
+    // Checked before `requests2.join()`: if a regression made the
+    // changed prompt wrongly hit, the stub thread would still be
+    // blocked in `accept()` waiting for the live call that never
+    // comes, and `join()` would hang the test instead of failing it.
+    assert!(
+        stderr2.contains("replayed 0/1 completions (1 live)"),
+        "{stderr2}"
+    );
+    assert_eq!(
+        requests2.join().unwrap().len(),
+        1,
+        "the changed system prompt must miss and fall through to exactly one live call"
+    );
+    assert!(
+        stderr2.contains("different settings") && stderr2.contains("fact_budget"),
+        "{stderr2}"
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// The same settings change under `--replay strict` instead fails the
+/// document — no model endpoint to fall through to — with the miss
+/// diagnostic (piece id, recorded count) on stderr.
+#[test]
+fn replay_strict_fails_on_a_settings_change_with_the_miss_reason_on_stderr() {
+    let docs = batch_dir("extract-replay-strict-miss-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "alpha relates to beta").unwrap();
+    let doc_src = doc.to_str().unwrap();
+    let recorded_out = batch_dir("extract-replay-strict-miss-recorded");
+
+    let good = json!({"associations": [
+        {"subject": "alpha", "label": "relates to", "object": "beta", "weight": 1.0}
+    ]})
+    .to_string();
+    let (url, _requests) = stub_chat_server(vec![good]);
+    let (code, stdout, stderr) = run_extract(
+        &recorded_out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &["--context", "c", doc_src],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+
+    let replay_from = recorded_out.join(".extract-trace");
+    let strict_out = batch_dir("extract-replay-strict-miss-out");
+    let (code2, _stdout2, stderr2) = run_extract(
+        &strict_out,
+        &[("TAGURU_EXTRACT_MODEL", "stub-model")],
+        &[
+            "--context",
+            "c",
+            "--replay",
+            "strict",
+            "--replay-from",
+            replay_from.to_str().unwrap(),
+            "--fact-budget",
+            "3",
+            doc_src,
+        ],
+    );
+    assert_ne!(code2, 0, "stderr: {stderr2}");
+    assert!(stderr2.contains("--replay strict"), "{stderr2}");
+    assert!(stderr2.contains("recorded attempt"), "{stderr2}");
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&recorded_out);
+    let _ = std::fs::remove_dir_all(&strict_out);
+}
+
+/// ADR 0031 §3.2's `--parallel` determinism claim: two independent
+/// `--replay strict` runs against the same recorded log, each under
+/// `--parallel 4`, land on the identical batch — whatever race order
+/// either the original recording or either replay's own workers
+/// happened to run in. FIFO consumption only ever collides within one
+/// piece's own ladder, and different pieces always key differently.
+#[test]
+fn replay_is_deterministic_under_parallel() {
+    let docs = batch_dir("extract-replay-parallel-docs");
+    let doc = docs.join("big.md");
+    std::fs::write(&doc, multi_chunk_document(50)).unwrap();
+    let doc_src = doc.to_str().unwrap();
+
+    let probe = batch_dir("extract-replay-parallel-probe");
+    let (code, dry_stdout, stderr) =
+        run_extract(&probe, &[], &["--dry-run", "--context", "c", doc_src]);
+    assert_eq!(code, 0, "stdout: {dry_stdout}\nstderr: {stderr}");
+    let total_chunks = chunk_count_from_dry_run(&dry_stdout);
+    assert!(
+        total_chunks >= 4,
+        "fixture must span several chunks: {dry_stdout}"
+    );
+
+    fn reply_for(index: usize) -> String {
+        json!({"associations": [
+            {"subject": "S", "label": "chunk", "object": format!("value-{index}"), "weight": 1.0}
+        ]})
+        .to_string()
+    }
+
+    let recorded_out = batch_dir("extract-replay-parallel-recorded");
+    let (url, _captured) =
+        stub_chat_server_concurrent(|index, _attempt| chat_ok(&reply_for(index)));
+    let (code, stdout, stderr) = run_extract(
+        &recorded_out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &["--context", "c", "--parallel", "4", doc_src],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let (recorded_batch_name, _) = read_trace(&recorded_out);
+    let recorded_batch = std::fs::read(recorded_out.join(&recorded_batch_name)).unwrap();
+
+    let replay_from = recorded_out.join(".extract-trace");
+    let mut replayed_batches = Vec::new();
+    for tag in ["a", "b"] {
+        let out = batch_dir(&format!("extract-replay-parallel-out-{tag}"));
+        let (code, stdout, stderr) = run_extract(
+            &out,
+            &[("TAGURU_EXTRACT_MODEL", "stub-model")],
+            &[
+                "--context",
+                "c",
+                "--replay",
+                "strict",
+                "--replay-from",
+                replay_from.to_str().unwrap(),
+                "--parallel",
+                "4",
+                doc_src,
+            ],
+        );
+        assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+        let (batch_name, _) = read_trace(&out);
+        let batch = std::fs::read(out.join(&batch_name)).unwrap();
+        replayed_batches.push((out, batch));
+    }
+    assert_eq!(
+        replayed_batches[0].1, recorded_batch,
+        "replay a vs. recorded"
+    );
+    assert_eq!(
+        replayed_batches[0].1, replayed_batches[1].1,
+        "replay a vs. replay b"
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&probe);
+    let _ = std::fs::remove_dir_all(&recorded_out);
+    for (out, _) in &replayed_batches {
+        let _ = std::fs::remove_dir_all(out);
+    }
+}
+
+/// `TAGURU_EXTRACT_REPLAY_FROM` (the env fallback, no `--replay-from`
+/// flag at all) must be honored exactly like the flag — a run pointed
+/// at a recorded log purely through the environment still replays.
+#[test]
+fn replay_from_env_var_is_honored_with_no_flag() {
+    let docs = batch_dir("extract-replay-from-env-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "alpha relates to beta").unwrap();
+    let doc_src = doc.to_str().unwrap();
+    let recorded_out = batch_dir("extract-replay-from-env-recorded");
+
+    let good = json!({"associations": [
+        {"subject": "alpha", "label": "relates to", "object": "beta", "weight": 1.0}
+    ]})
+    .to_string();
+    let (url, _requests) = stub_chat_server(vec![good]);
+    let (code, stdout, stderr) = run_extract(
+        &recorded_out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &["--context", "c", doc_src],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+
+    let replay_from = recorded_out.join(".extract-trace");
+    let strict_out = batch_dir("extract-replay-from-env-out");
+    let (code2, _stdout2, stderr2) = run_extract(
+        &strict_out,
+        &[
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+            ("TAGURU_EXTRACT_REPLAY_FROM", replay_from.to_str().unwrap()),
+        ],
+        &["--context", "c", "--replay", "strict", doc_src],
+    );
+    assert_eq!(code2, 0, "stderr: {stderr2}");
+    assert!(
+        stderr2.contains("replayed 1/1 completions (0 live)"),
+        "{stderr2}"
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&recorded_out);
+    let _ = std::fs::remove_dir_all(&strict_out);
 }

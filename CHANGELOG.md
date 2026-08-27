@@ -30,6 +30,22 @@ Entries that change an on-disk format or a response shape say so.
   — ADR 0031 §3.2/§3.9 (#817). **On-disk format change**: additive fields
   and a new record kind in `--out/.extract-trace/*.attempts.jsonl`; a
   reader filtering on known `kind` values is unaffected.
+- `taguru extract --replay {auto|strict|off}` (default `off`) /
+  `--replay-from DIR` (default `--out/.extract-trace`) satisfy completions
+  from a prior run's attempts log instead of a live call — `auto` falls
+  through to a live call when nothing matches; `strict` fails the document
+  instead, running with no `TAGURU_EXTRACT_URL` at all (`TAGURU_EXTRACT_MODEL`
+  stays required). Bypasses the manifest skip and the checkpoint store while
+  replaying; matching is by exact conversation content, never by piece or
+  attempt number, so a genuinely changed request always falls through to a
+  live call on its own. A `settings` record recorded under different
+  settings than the current run is named field by field on stderr — a
+  hint, never a gate — ADR 0031 (#818, #819). **On-disk format change**:
+  two new record kinds (`replay`, `replay_summary`) in
+  `--out/.extract-trace/*.attempts.jsonl`, written only under `--replay`.
+  The system-prompt pin described in `docs/extract.html` is not yet
+  implemented (#821): a multi-document replay's system turn is recomputed
+  from this run's own settings until then.
 
 ## [0.9.5] - 2026-08-25
 

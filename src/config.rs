@@ -48,7 +48,7 @@ pub(crate) fn fmt_bytes(bytes: u64) -> String {
 /// Every variable the server reads, for typo detection: a config file
 /// is where a misspelled knob silently becomes a no-op, and unlike the
 /// shell it is worth linting.
-pub(crate) const KNOWN_KEYS: [&str; 67] = [
+pub(crate) const KNOWN_KEYS: [&str; 69] = [
     "TAGURU_ADDR",
     "TAGURU_DATA_DIR",
     "TAGURU_CACHE_BYTES",
@@ -112,6 +112,8 @@ pub(crate) const KNOWN_KEYS: [&str; 67] = [
     "TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES",
     "TAGURU_EXTRACT_TRACE_ATTEMPTS",
     "TAGURU_EXTRACT_SCHEMA",
+    "TAGURU_EXTRACT_REPLAY",
+    "TAGURU_EXTRACT_REPLAY_FROM",
     "TAGURU_LOG_FORMAT",
     "TAGURU_LOG_SEARCHES",
     "TAGURU_METRICS_PER_CONTEXT",
