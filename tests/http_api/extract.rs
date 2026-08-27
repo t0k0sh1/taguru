@@ -7631,6 +7631,13 @@ fn replay_strict_reuses_a_recorded_run_with_no_model_endpoint_at_all() {
     let batch_path = out.join(&batch_name);
     let original_batch = std::fs::read(&batch_path).unwrap();
     let records_before = read_attempts_log(&out);
+    let first_run_id = records_before
+        .iter()
+        .find(|r| r["kind"] == "document")
+        .unwrap()["run_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let (code2, _stdout2, stderr2) = run_extract(
         &out,
@@ -7646,12 +7653,32 @@ fn replay_strict_reuses_a_recorded_run_with_no_model_endpoint_at_all() {
         !stderr2.contains("different settings"),
         "nothing changed between the two runs: {stderr2}"
     );
+    // ADR 0031 §3.6: nothing changed, so the pinned system prompt must
+    // match this run's own recomputation exactly — no mismatch line.
+    assert!(
+        !stderr2.contains("the recorded system prompt differs from this run's"),
+        "{stderr2}"
+    );
 
     let replayed_batch = std::fs::read(&batch_path).unwrap();
     assert_eq!(
         original_batch, replayed_batch,
         "a replayed batch must be byte-identical to the one the live run wrote"
     );
+
+    // The trace's `steering` record names the system prompt actually
+    // sent and, since it was pinned, the run_id it was pinned from.
+    let (_, trace_records) = read_trace(&out);
+    let steering = trace_records
+        .iter()
+        .find(|record| record["kind"] == "steering")
+        .expect("a steering record must exist");
+    assert_eq!(
+        steering["system_sha256"].as_str().unwrap().len(),
+        64,
+        "{steering}"
+    );
+    assert_eq!(steering["pinned_from"], first_run_id, "{steering}");
 
     let records_after = read_attempts_log(&out);
     assert!(records_after.len() > records_before.len());
@@ -7682,12 +7709,15 @@ fn replay_strict_reuses_a_recorded_run_with_no_model_endpoint_at_all() {
     let _ = std::fs::remove_dir_all(&out);
 }
 
-/// `--replay auto`: a request whose conversation genuinely changed
-/// (here, `--fact-budget` folds into the system prompt) falls through
-/// to a live call on its own — no explicit invalidation step — and the
-/// settings mismatch this implies is named on stderr, field by field.
+/// `--replay auto`: a settings change that only touches the system
+/// prompt (`--fact-budget`) is reported on stderr field by field, same
+/// as before ADR 0031 §3.6's pin — but the pin now absorbs it: this
+/// document's one recorded `system` record is reused verbatim, so the
+/// conversation still matches and the completion still replays, with
+/// zero live calls. The recorded-vs-recomputed mismatch itself is also
+/// named on stderr (ADR 0031 §3.6).
 #[test]
-fn replay_auto_falls_through_on_a_settings_change_and_reports_the_mismatch() {
+fn replay_auto_pins_the_system_prompt_across_a_settings_change_and_reports_both_mismatches() {
     let docs = batch_dir("extract-replay-auto-docs");
     let doc = docs.join("a.md");
     std::fs::write(&doc, "alpha relates to beta").unwrap();
@@ -7698,7 +7728,7 @@ fn replay_auto_falls_through_on_a_settings_change_and_reports_the_mismatch() {
         {"subject": "alpha", "label": "relates to", "object": "beta", "weight": 1.0}
     ]})
     .to_string();
-    let (url, _requests) = stub_chat_server(vec![good.clone()]);
+    let (url, _requests) = stub_chat_server(vec![good]);
     let (code, stdout, stderr) = run_extract(
         &out,
         &[
@@ -7709,8 +7739,11 @@ fn replay_auto_falls_through_on_a_settings_change_and_reports_the_mismatch() {
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
 
-    // A fresh stub for the fallback live call --replay auto must make.
-    let (url2, requests2) = stub_chat_server(vec![good]);
+    // No replies at all: if the pin failed to absorb the settings
+    // change, the stub thread would be blocked in `accept()` waiting
+    // for a live call that never comes, and `join()` would hang the
+    // test instead of failing it.
+    let (url2, requests2) = stub_chat_server(vec![]);
     let (code2, _stdout2, stderr2) = run_extract(
         &out,
         &[
@@ -7728,21 +7761,21 @@ fn replay_auto_falls_through_on_a_settings_change_and_reports_the_mismatch() {
         ],
     );
     assert_eq!(code2, 0, "stderr: {stderr2}");
-    // Checked before `requests2.join()`: if a regression made the
-    // changed prompt wrongly hit, the stub thread would still be
-    // blocked in `accept()` waiting for the live call that never
-    // comes, and `join()` would hang the test instead of failing it.
-    assert!(
-        stderr2.contains("replayed 0/1 completions (1 live)"),
-        "{stderr2}"
-    );
     assert_eq!(
         requests2.join().unwrap().len(),
-        1,
-        "the changed system prompt must miss and fall through to exactly one live call"
+        0,
+        "the pinned system prompt must still match, no live call needed"
+    );
+    assert!(
+        stderr2.contains("replayed 1/1 completions (0 live)"),
+        "{stderr2}"
     );
     assert!(
         stderr2.contains("different settings") && stderr2.contains("fact_budget"),
+        "{stderr2}"
+    );
+    assert!(
+        stderr2.contains("the recorded system prompt differs from this run's"),
         "{stderr2}"
     );
 
@@ -7750,11 +7783,13 @@ fn replay_auto_falls_through_on_a_settings_change_and_reports_the_mismatch() {
     let _ = std::fs::remove_dir_all(&out);
 }
 
-/// The same settings change under `--replay strict` instead fails the
-/// document — no model endpoint to fall through to — with the miss
-/// diagnostic (piece id, recorded count) on stderr.
+/// A genuine conversation change — the document text itself, which
+/// drives the user turn the pin never touches (ADR 0031 §3.6) — still
+/// falls through to a live call under `--replay auto`, and still fails
+/// the document under `--replay strict`, with the miss diagnostic
+/// (piece id, recorded count) on stderr.
 #[test]
-fn replay_strict_fails_on_a_settings_change_with_the_miss_reason_on_stderr() {
+fn replay_strict_fails_on_a_changed_document_with_the_miss_reason_on_stderr() {
     let docs = batch_dir("extract-replay-strict-miss-docs");
     let doc = docs.join("a.md");
     std::fs::write(&doc, "alpha relates to beta").unwrap();
@@ -7776,6 +7811,10 @@ fn replay_strict_fails_on_a_settings_change_with_the_miss_reason_on_stderr() {
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
 
+    // The document itself changed — the pin never touches the user
+    // turn, so this must still miss regardless of the system prompt.
+    std::fs::write(&doc, "alpha relates to gamma").unwrap();
+
     let replay_from = recorded_out.join(".extract-trace");
     let strict_out = batch_dir("extract-replay-strict-miss-out");
     let (code2, _stdout2, stderr2) = run_extract(
@@ -7788,8 +7827,6 @@ fn replay_strict_fails_on_a_settings_change_with_the_miss_reason_on_stderr() {
             "strict",
             "--replay-from",
             replay_from.to_str().unwrap(),
-            "--fact-budget",
-            "3",
             doc_src,
         ],
     );
@@ -7800,6 +7837,172 @@ fn replay_strict_fails_on_a_settings_change_with_the_miss_reason_on_stderr() {
     let _ = std::fs::remove_dir_all(&docs);
     let _ = std::fs::remove_dir_all(&recorded_out);
     let _ = std::fs::remove_dir_all(&strict_out);
+}
+
+/// ADR 0031 §3.6's core motivation: a multi-document run where only
+/// document 1 changes text between record and replay still lets
+/// document 2 — whose own recorded system prompt reflects the
+/// vocabulary document 1's *original* extraction accumulated — replay
+/// with zero live calls, because document 2's pin is scoped to its own
+/// `ReplayIndex` and never depends on what document 1 replays to.
+/// Without the pin, document 2's recomputed system prompt would follow
+/// whatever vocabulary this run's own document 1 accumulates and could
+/// drift from what was recorded.
+#[test]
+fn replay_auto_pins_each_documents_own_system_prompt_independently() {
+    let docs = batch_dir("extract-replay-multi-doc-docs");
+    let doc_a = docs.join("a.md");
+    let doc_b = docs.join("b.md");
+    std::fs::write(&doc_a, "alpha relates to beta").unwrap();
+    std::fs::write(&doc_b, "gamma relates to delta").unwrap();
+    let doc_a_src = doc_a.to_str().unwrap();
+    let doc_b_src = doc_b.to_str().unwrap();
+    let out = batch_dir("extract-replay-multi-doc-out");
+
+    let good_a = json!({"associations": [
+        {"subject": "alpha", "label": "relates to", "object": "beta", "weight": 1.0}
+    ]})
+    .to_string();
+    let good_b = json!({"associations": [
+        {"subject": "gamma", "label": "relates to", "object": "delta", "weight": 1.0}
+    ]})
+    .to_string();
+    let (url, _requests) = stub_chat_server(vec![good_a, good_b]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &["--context", "c", doc_a_src, doc_b_src],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+
+    // A settings change touching every document's system prompt: were
+    // either document's pin to fail (or to leak from the other), a
+    // live call would be needed and this empty-reply stub would hang.
+    let (url2, requests2) = stub_chat_server(vec![]);
+    let (code2, _stdout2, stderr2) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url2.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--replay",
+            "auto",
+            "--fact-budget",
+            "3",
+            doc_a_src,
+            doc_b_src,
+        ],
+    );
+    assert_eq!(code2, 0, "stderr: {stderr2}");
+    assert_eq!(
+        requests2.join().unwrap().len(),
+        0,
+        "both documents' own system prompts must be pinned, no live calls"
+    );
+    assert_eq!(
+        stderr2.matches("replayed 1/1 completions (0 live)").count(),
+        2,
+        "one report line per document: {stderr2}"
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// When a document's log names two distinct `system` records (here, by
+/// hand-editing a second one in after a normal recorded run — the real
+/// cause is a checkpoint-resumed document spanning a run whose
+/// vocabulary differed), the pin declines rather than guessing: it is
+/// reported once on stderr, and the run falls back to computing its
+/// own system prompt for that document, hitting or missing on the
+/// conversation content exactly as an unpinned replay would.
+#[test]
+fn replay_does_not_pin_when_the_log_names_two_distinct_system_prompts() {
+    let docs = batch_dir("extract-replay-ambiguous-system-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "alpha relates to beta").unwrap();
+    let doc_src = doc.to_str().unwrap();
+    let out = batch_dir("extract-replay-ambiguous-system-out");
+
+    let good = json!({"associations": [
+        {"subject": "alpha", "label": "relates to", "object": "beta", "weight": 1.0}
+    ]})
+    .to_string();
+    let (url, _requests) = stub_chat_server(vec![good.clone()]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &["--context", "c", doc_src],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+
+    // Splice a second, distinct `system` record into the recorded
+    // document's attempts log — the log now names two.
+    let trace_dir = out.join(".extract-trace");
+    let attempts_path = std::fs::read_dir(&trace_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.to_string_lossy().ends_with(".attempts.jsonl"))
+        .expect("the recorded run must leave exactly one attempts log");
+    let mut text = std::fs::read_to_string(&attempts_path).unwrap();
+    let other = "a completely different system prompt";
+    let other_sha256 = sha256_hex_of(other);
+    text.push_str(&format!(
+        "{}\n",
+        json!({
+            "kind": "system",
+            "sha256": other_sha256,
+            "bytes": other.len(),
+            "content": other,
+        })
+    ));
+    std::fs::write(&attempts_path, text).unwrap();
+
+    // The same settings, unchanged: without the pin, the recomputed
+    // system prompt matches the original recording exactly, so this
+    // must still hit — proving the ambiguity fell back to a plain
+    // recompute rather than failing the completion outright.
+    let (url2, requests2) = stub_chat_server(vec![]);
+    let (code2, _stdout2, stderr2) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url2.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &["--context", "c", "--replay", "auto", doc_src],
+    );
+    assert_eq!(code2, 0, "stderr: {stderr2}");
+    assert_eq!(requests2.join().unwrap().len(), 0, "{stderr2}");
+    assert!(
+        stderr2.contains("2 distinct system prompts recorded") && stderr2.contains("not pinning"),
+        "{stderr2}"
+    );
+
+    // Not pinned: the trace's `steering` record still names the system
+    // prompt actually sent, but `pinned_from` is absent.
+    let (_, trace_records) = read_trace(&out);
+    let steering = trace_records
+        .iter()
+        .find(|record| record["kind"] == "steering")
+        .expect("a steering record must exist");
+    assert_eq!(
+        steering["system_sha256"].as_str().unwrap().len(),
+        64,
+        "{steering}"
+    );
+    assert!(steering.get("pinned_from").is_none(), "{steering}");
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
 }
 
 /// ADR 0031 §3.2's `--parallel` determinism claim: two independent

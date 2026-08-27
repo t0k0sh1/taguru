@@ -152,6 +152,27 @@ struct PieceRecords {
     by_key: HashMap<ReplayKey, VecDeque<usize>>,
 }
 
+/// One `system` record: its text, and the run_id in effect (the
+/// nearest preceding `document` record) when it was first seen —
+/// [`ReplayIndex::pinned_system`]'s `pinned_from`.
+struct RecordedSystem {
+    content: String,
+    run_id: String,
+}
+
+/// [`ReplayIndex::pinned_system`]'s decision (ADR 0031 §3.6).
+pub(super) enum SystemPinDecision<'a> {
+    /// Exactly one distinct `system` record — pin it verbatim, and the
+    /// run_id it was originally recorded under.
+    Pin { content: &'a str, run_id: &'a str },
+    /// More than one distinct text recorded (a checkpoint-resumed
+    /// document whose log spans a run where the vocabulary differed)
+    /// — ambiguity is never resolved by guessing.
+    Ambiguous { distinct: usize },
+    /// No `system` record at all — nothing to pin.
+    NoRecord,
+}
+
 /// The recorded conversations of one document's attempts log, indexed
 /// for replay (ADR 0031 §3.1–§3.4). Built once, read-only except for
 /// the FIFO queues a hit consumes from — those are the only mutation,
@@ -159,10 +180,9 @@ struct PieceRecords {
 /// distinct `piece_id`, per ADR 0031 §3.2) can share one index safely.
 pub(super) struct ReplayIndex {
     pieces: Mutex<HashMap<String, PieceRecords>>,
-    /// `system` records by `sha256`, for the pin decision (#821) —
-    /// stored here because both need the same read of the log.
-    #[allow(dead_code)] // read by ReplayIndex::system, wired up in #821
-    systems: HashMap<String, String>,
+    /// `system` records by `sha256` — [`ReplayIndex::pinned_system`]
+    /// reads this for the pin decision (ADR 0031 §3.6).
+    systems: HashMap<String, RecordedSystem>,
     /// The last `kind: "settings"` record seen in file order (ADR
     /// 0031 §3.9): a checkpoint-resumed document's log can hold one
     /// per run it spans, and the most recent is the closest baseline
@@ -180,8 +200,14 @@ impl ReplayIndex {
     /// never an error.
     pub(super) fn load(path: &Path) -> Self {
         let mut pieces: HashMap<String, PieceRecords> = HashMap::new();
-        let mut systems: HashMap<String, String> = HashMap::new();
+        let mut systems: HashMap<String, RecordedSystem> = HashMap::new();
         let mut settings: Option<RecordedSettings> = None;
+        // The `document` record most recently seen in file order —
+        // `system`'s own record carries no run_id (ADR 0025 §3.3: it
+        // is written once per document, not once per run), so this is
+        // how a system record's ORIGINATING run is recovered for
+        // `pinned_from` (ADR 0031 §3.6).
+        let mut current_run_id = String::new();
         if let Ok(text) = fs::read_to_string(path) {
             for line in text.lines() {
                 let line = line.trim();
@@ -192,12 +218,26 @@ impl ReplayIndex {
                     continue;
                 };
                 match value["kind"].as_str() {
+                    Some("document") => {
+                        if let Some(run_id) = value["run_id"].as_str() {
+                            current_run_id = run_id.to_string();
+                        }
+                    }
                     Some("system") => {
                         if let (Some(sha256), Some(content)) =
                             (value["sha256"].as_str(), value["content"].as_str())
                             && sha256_hex(content.as_bytes()) == sha256
                         {
-                            systems.insert(sha256.to_string(), content.to_string());
+                            // The first run to record this hash owns
+                            // it — a later run's identical `system`
+                            // line (the same prompt sent again) is not
+                            // a different origin.
+                            systems
+                                .entry(sha256.to_string())
+                                .or_insert_with(|| RecordedSystem {
+                                    content: content.to_string(),
+                                    run_id: current_run_id.clone(),
+                                });
                         }
                     }
                     Some("attempt") => {
@@ -260,12 +300,23 @@ impl ReplayIndex {
         })
     }
 
-    /// A `system` record's full text by `sha256` — the pin decision
-    /// (#821) reads this once it has decided, from the set of
-    /// distinct hashes seen, that exactly one applies.
-    #[allow(dead_code)] // wired up in #821
-    pub(super) fn system(&self, sha256: &str) -> Option<&str> {
-        self.systems.get(sha256).map(String::as_str)
+    /// Whether to pin this document's system prompt verbatim from the
+    /// log, and why not when it declines (ADR 0031 §3.6).
+    pub(super) fn pinned_system(&self) -> SystemPinDecision<'_> {
+        let mut systems = self.systems.values();
+        let Some(only) = systems.next() else {
+            return SystemPinDecision::NoRecord;
+        };
+        let remaining = systems.count();
+        if remaining > 0 {
+            return SystemPinDecision::Ambiguous {
+                distinct: remaining + 1,
+            };
+        }
+        SystemPinDecision::Pin {
+            content: &only.content,
+            run_id: &only.run_id,
+        }
     }
 
     /// The log's most recent `settings` record, for a replay run to

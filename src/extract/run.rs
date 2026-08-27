@@ -4,6 +4,16 @@
 
 use super::*;
 
+/// [`Run::resolve_system`]'s result: the system text actually used,
+/// its `sha256` (always — the trace's `steering` record wants what
+/// was actually sent, pinned or not), and the run_id it was pinned
+/// from, when it was pinned (ADR 0031 §3.6).
+pub(super) struct ResolvedSystem {
+    pub(super) text: String,
+    pub(super) sha256: String,
+    pub(super) pinned_from: Option<String>,
+}
+
 /// One extract run: the settled flags, the provider, and everything
 /// that accumulates across documents — the manifest, the label
 /// vocabulary offered to later prompts, and the output names already
@@ -195,11 +205,17 @@ impl Run {
     /// prompt block, so the record is what the model was actually
     /// shown. Document-scoped (`chunk_index: null`): all of a
     /// document's chunks share one prompt.
-    pub(super) fn steering_record<'a>(&'a self, candidates: &'a [String]) -> TraceSteering<'a> {
+    pub(super) fn steering_record<'a>(
+        &'a self,
+        candidates: &'a [String],
+        resolved_system: &'a ResolvedSystem,
+    ) -> TraceSteering<'a> {
         TraceSteering {
             kind: "steering",
             chunk_index: None,
             candidates,
+            system_sha256: &resolved_system.sha256,
+            pinned_from: resolved_system.pinned_from.as_deref(),
             vocabulary: ranked_vocabulary(&self.vocabulary)
                 .into_iter()
                 .map(|(label, count)| {
@@ -241,6 +257,58 @@ impl Run {
                         constrained_relations,
                     })
                 }),
+        }
+    }
+
+    /// ADR 0031 §3.6: this document's system prompt — pinned verbatim
+    /// from the attempts log when [`Completions::pinned_system`] names
+    /// exactly one distinct recorded system, recomputed from this
+    /// run's own settings otherwise. Always recomputes when not
+    /// pinning outright and, when pinning, always recomputes anyway
+    /// (cheap: no model call) to check the pin against — reporting a
+    /// mismatch once on stderr, a hint never a gate; matching itself
+    /// is still decided completion by completion, by conversation
+    /// content (ADR 0031 §3.2).
+    pub(super) fn resolve_system(&self, source: &str, candidates: &[String]) -> ResolvedSystem {
+        let recompute = || {
+            system_prompt(
+                &self.vocabulary,
+                self.questions,
+                self.fact_budget,
+                self.schema.as_deref(),
+                &self.vocabulary_names,
+                candidates,
+            )
+        };
+        let decision = self
+            .completions
+            .as_ref()
+            .map(Completions::pinned_system)
+            .unwrap_or(SystemPinDecision::NoRecord);
+        let (content, pinned_from): (String, Option<String>) = match decision {
+            SystemPinDecision::Pin { content, run_id } => {
+                (content.to_string(), Some(run_id.to_string()))
+            }
+            SystemPinDecision::Ambiguous { distinct } => {
+                eprintln!(
+                    "taguru: extract: {source}: {distinct} distinct system prompts recorded \
+                     — not pinning, computing this run's own"
+                );
+                (recompute(), None)
+            }
+            SystemPinDecision::NoRecord => (recompute(), None),
+        };
+        let sha256 = sha256_hex(content.as_bytes());
+        if pinned_from.is_some() && sha256_hex(recompute().as_bytes()) != sha256 {
+            eprintln!(
+                "taguru: extract: {source}: the recorded system prompt differs from this \
+                 run's — replaying with the recorded one"
+            );
+        }
+        ResolvedSystem {
+            text: content,
+            sha256,
+            pinned_from,
         }
     }
 
@@ -587,6 +655,10 @@ impl Run {
         if let Some(completions) = self.completions.as_mut() {
             completions.begin_document(replay_index, self.replay_mode);
         }
+        // ADR 0031 §3.6: resolved once per document, after the replay
+        // index is installed — every chunk (and Stage 2) of a document
+        // shares one prompt, pin or not (ADR 0014's same reasoning).
+        let resolved_system = self.resolve_system(source, &candidates);
         let observers = Observers {
             sink: self.diagnostics.as_ref(),
             log: attempt_log.as_ref(),
@@ -600,7 +672,7 @@ impl Run {
                 source,
                 &chunks,
                 canonical_paragraphs,
-                &candidates,
+                &resolved_system.text,
                 &checkpoints,
                 &observers,
             )
@@ -630,7 +702,7 @@ impl Run {
                     cross_issues,
                     chunks.len(),
                     canonical_paragraphs,
-                    &candidates,
+                    &resolved_system.text,
                     &observers,
                 )
                 .map_err(|message| with_resume_hint(&checkpoints, message))?;
@@ -737,7 +809,7 @@ impl Run {
                     .collect::<Vec<&str>>(),
                 &extraction,
                 &uncovered,
-                &self.steering_record(&candidates),
+                &self.steering_record(&candidates, &resolved_system),
             ),
         );
         self.manifest.record(source, &inputs, &file_name);
@@ -829,7 +901,7 @@ impl Run {
         source: &str,
         chunks: &[String],
         paragraph_count: usize,
-        candidates: &[String],
+        system: &str,
         checkpoints: &CheckpointStore,
         observers: &Observers,
     ) -> Result<ChunkLoopResult, String> {
@@ -838,7 +910,7 @@ impl Run {
                 source,
                 chunks,
                 paragraph_count,
-                candidates,
+                system,
                 checkpoints,
                 observers,
             );
@@ -847,14 +919,6 @@ impl Run {
             .completions
             .as_ref()
             .expect("a non-dry run built the completions");
-        let system = system_prompt(
-            &self.vocabulary,
-            self.questions,
-            self.fact_budget,
-            self.schema.as_deref(),
-            &self.vocabulary_names,
-            candidates,
-        );
         let rules = self.item_rules(paragraph_count);
         let mut outputs = Vec::new();
         for (index, piece) in chunks.iter().enumerate() {
@@ -863,7 +927,7 @@ impl Run {
             }
             match extract_chunk_or_ladder(
                 completions,
-                &system,
+                system,
                 source,
                 index,
                 chunks.len(),
@@ -909,7 +973,7 @@ impl Run {
         source: &str,
         chunks: &[String],
         paragraph_count: usize,
-        candidates: &[String],
+        system: &str,
         checkpoints: &CheckpointStore,
         observers: &Observers,
     ) -> Result<ChunkLoopResult, String> {
@@ -917,14 +981,6 @@ impl Run {
             .completions
             .as_ref()
             .expect("a non-dry run built the completions");
-        let system = system_prompt(
-            &self.vocabulary,
-            self.questions,
-            self.fact_budget,
-            self.schema.as_deref(),
-            &self.vocabulary_names,
-            candidates,
-        );
         let rules = self.item_rules(paragraph_count);
         let indexed: Vec<(usize, &String)> = chunks.iter().enumerate().collect();
         let outcomes = crate::registry::dispatch_chunks_concurrently(
@@ -933,7 +989,7 @@ impl Run {
             |&(index, piece)| {
                 extract_chunk_or_ladder(
                     completions,
-                    &system,
+                    system,
                     source,
                     index,
                     chunks.len(),
@@ -984,21 +1040,13 @@ impl Run {
         cross_issues: Vec<(usize, Vec<String>)>,
         chunk_total: usize,
         paragraph_count: usize,
-        candidates: &[String],
+        system: &str,
         observers: &Observers,
     ) -> Result<(), String> {
         let completions = self
             .completions
             .as_ref()
             .expect("a non-dry run built the completions");
-        let system = system_prompt(
-            &self.vocabulary,
-            self.questions,
-            self.fact_budget,
-            self.schema.as_deref(),
-            &self.vocabulary_names,
-            candidates,
-        );
         let options = RequestOptions {
             response_format: self.ladder.as_ref().and_then(LadderConfig::response_format),
             max_tokens: self
@@ -1027,7 +1075,7 @@ impl Run {
             let piece_id = piece_id.as_str();
             let label = format!("chunk {}/{chunk_total}", chunk_index + 1);
             let messages = [
-                serde_json::json!({"role": "system", "content": &system}),
+                serde_json::json!({"role": "system", "content": system}),
                 serde_json::json!({"role": "user", "content": &user}),
                 corrective_assistant_turn(&answer, self.correction.corrective_context_cap),
                 serde_json::json!({

@@ -175,7 +175,10 @@ use prompt::{
     user_message, user_message_document,
 };
 use render::{chunk, floor_char_boundary, render_batch, split_labeled_piece, split_oversized};
-use replay::{MissDiagnostic, RecordedSettings, ReplayIndex, ReplayLookup, settings_differences};
+use replay::{
+    MissDiagnostic, RecordedSettings, ReplayIndex, ReplayLookup, SystemPinDecision,
+    settings_differences,
+};
 use run::labeled_document;
 use structured_output::{jittered_backoff, parse_retry_after, read_capped_chat_body, snippet};
 use trace::{

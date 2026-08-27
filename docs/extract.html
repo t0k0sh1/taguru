@@ -911,9 +911,12 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       0027</a>): <code>candidates</code> (ADR 0014's list as offered), <code>vocabulary</code>
       (<code>[{label, count}]</code> in prompt order — the reuse list's own ranking and cap,
       computed by the same code that renders the block), <code>context_names</code>
-      (<code>--vocabulary</code>'s capped list), and <code>schema</code>
+      (<code>--vocabulary</code>'s capped list), <code>schema</code>
       (<code>{types, constrained_relations}</code>; <code>null</code> when no schema block was
-      prompted); <code>chunk_index</code> is <code>null</code> — document scope, every chunk
+      prompted), <code>system_sha256</code> (the system prompt actually sent, by hash — pinned or
+      recomputed alike), and <code>pinned_from</code> (the run_id the system prompt was pinned
+      from under <a href="#replay"><code>--replay</code></a>; <code>null</code> whenever this run
+      computed its own); <code>chunk_index</code> is <code>null</code> — document scope, every chunk
       sees the same lists today; per-chunk context (a future control) adds records with the
       index set. Then one <code>loss</code> per item the model's accepted answer held that the batch does
       not (<a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0024-loss-records.md">ADR
@@ -1048,10 +1051,8 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       The mechanism below (<a
       href="https://github.com/t0k0sh1/taguru/blob/main/adr/0031-replay-recorded-completions.md">ADR
       0031</a>) is live in this build — <code>--replay</code>/<code>--replay-from</code>, the
-      manifest/checkpoint bypass, and the <code>replay</code>/<code>replay_summary</code> records.
-      One piece named in the system-prompt paragraph below, the <b>pin</b>, is not: it lands in
-      <a href="https://github.com/t0k0sh1/taguru/issues/821">#821</a>, a later child of
-      <a href="https://github.com/t0k0sh1/taguru/issues/781">#781</a>.
+      manifest/checkpoint bypass, the <code>replay</code>/<code>replay_summary</code> records, and
+      the system-prompt pin described below.
     </p>
     <table>
       <thead>
@@ -1108,19 +1109,29 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       the same inputs a live run would have produced.
     </p>
     <p>
-      <b>Not yet landed (#821):</b> the system prompt is meant to be <b>pinned</b> from the
-      recorded run when the log names exactly one — this is what will let replaying document two
-      of a multi-document run work even though the label vocabulary
-      <a href="#prompt">every later document's prompt offers</a> depends on what earlier documents
-      in the <em>original</em> run happened to settle on, not on this run's own (possibly empty,
-      possibly different) history. Until then, a multi-document replay's system turn is recomputed
-      from this run's own settings and vocabulary, so only the first document of such a run (or a
-      single document replayed alone) is guaranteed to match. What will not be pinned even once
-      #821 lands: the document text driving each chunk's user turn (changing it should fall
-      through to a live call), and a corrective round's own ask (it is a genuinely new question
-      when the rule that triggered it changed) — so a document whose original extraction needed a
-      corrective turn can fail <code>--replay strict</code> after a validation-rule change, a
-      known limit, not an oversight.
+      The system prompt is <b>pinned</b> verbatim from the recorded run
+      (<a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0031-replay-recorded-completions.md">ADR
+      0031</a>) whenever a document's attempts log names exactly one distinct
+      <code>system</code> record — <code>system_prompt(...)</code> is never called for the actual
+      value used. This is what lets replaying document two of a multi-document run succeed even
+      though the label vocabulary <a href="#prompt">every later document's prompt offers</a>
+      depends on what earlier documents in the <em>original</em> run happened to settle on, not on
+      this run's own (possibly empty, possibly different) history: pinning is decided per document,
+      from that document's own recorded system text, never from this run's live accumulation. When
+      the pinned text's hash differs from what this run would have recomputed, that is reported
+      once on stderr (<code>the recorded system prompt differs from this run's — replaying with the
+      recorded one</code>) — a hint, never a gate, alongside the trace's <code>steering</code>
+      record carrying <code>system_sha256</code> (the hash actually sent) and, when pinned,
+      <code>pinned_from</code> (the run_id the pin was recorded under). When a document's log names
+      <em>more</em> than one distinct <code>system</code> record — a checkpoint-resumed document
+      whose log spans a run where the vocabulary differed — pinning is skipped rather than guessing
+      which one applies, reported once on stderr, and the system prompt is recomputed as an
+      unreplayed run's would be. What is never pinned: the document text driving each chunk's user
+      turn (changing it should fall through to a live call), and a corrective round's own ask (it
+      is a genuinely new question when the rule that triggered it changed) — so a document whose
+      original extraction needed a corrective turn can still fail <code>--replay strict</code>
+      after a validation-rule change, a permanent limit of content-addressed matching, not an
+      oversight.
     </p>
     <h3 id="two-machines">Recording here, replaying there</h3>
     <p>

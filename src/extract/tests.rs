@@ -1955,6 +1955,8 @@ fn empty_steering() -> TraceSteering<'static> {
         kind: "steering",
         chunk_index: None,
         candidates: &[],
+        system_sha256: "",
+        pinned_from: None,
         vocabulary: Vec::new(),
         context_names: &[],
         schema: None,
@@ -6107,10 +6109,12 @@ fn replay_index_parses_normal_records_and_ignores_corrupt_lines() {
     fs::write(&path, text).unwrap();
 
     let index = ReplayIndex::load(&path);
-    assert_eq!(
-        index.system(&system_sha),
-        Some("you are a helpful extractor")
-    );
+    match index.pinned_system() {
+        SystemPinDecision::Pin { content, .. } => {
+            assert_eq!(content, "you are a helpful extractor");
+        }
+        _ => panic!("the one well-formed system record must be the pin candidate"),
+    }
 
     let messages = replay_request_messages(&[
         ("system", "you are a helpful extractor"),
@@ -6502,7 +6506,7 @@ fn replay_index_rejects_a_system_record_whose_hash_does_not_match_its_content() 
     );
 
     let index = ReplayIndex::load(&path);
-    assert_eq!(index.system(&claimed_sha256), None);
+    assert!(matches!(index.pinned_system(), SystemPinDecision::NoRecord));
 }
 
 // ADR 0031 (#819): `Completions`'s replay-aware `complete`/
