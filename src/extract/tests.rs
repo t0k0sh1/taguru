@@ -6426,3 +6426,78 @@ fn replay_index_miss_diagnostic_picks_the_record_with_the_longest_matching_prefi
     assert_eq!(difference.recorded_prefix.as_deref(), Some("not-gamma"));
     assert_eq!(difference.requested_prefix.as_deref(), Some("gamma"));
 }
+
+#[test]
+fn replay_index_rejects_a_wrong_typed_requested_max_tokens() {
+    let path = replay_fixture_path("bad-max-tokens-type");
+    let turns = [("user", "a piece with a corrupt cap")];
+    let mut record = replay_attempt_record(
+        "piece-1",
+        1,
+        "stop_valid",
+        None,
+        &turns,
+        Some("should never be offered"),
+    );
+    // A string where the field should be a number — `as_u64` alone
+    // would silently read this as "no cap", matching an uncapped live
+    // request; the record must be rejected outright instead.
+    record["requested_max_tokens"] = serde_json::json!("512");
+    write_replay_log(&path, &[record]);
+
+    let index = ReplayIndex::load(&path);
+    let messages = replay_request_messages(&turns);
+    match index.lookup("piece-1", &messages, None) {
+        ReplayLookup::Miss(diagnostic) => assert_eq!(diagnostic.recorded, 0),
+        ReplayLookup::Hit(_) => {
+            panic!("a wrong-typed requested_max_tokens must never be offered for replay")
+        }
+    }
+}
+
+#[test]
+fn replay_index_rejects_a_null_answer_on_a_success_state() {
+    let path = replay_fixture_path("null-answer-success-state");
+    let turns = [("user", "a piece with an inconsistent record")];
+    let mut record = replay_attempt_record(
+        "piece-1",
+        1,
+        "stop_valid",
+        None,
+        &turns,
+        Some("placeholder"),
+    );
+    // `stop_valid` must carry an answer (ADR 0025 §3.3); a record
+    // claiming both is internally inconsistent and must be rejected,
+    // never reinterpreted as a replayed transport failure.
+    record["answer"] = serde_json::Value::Null;
+    write_replay_log(&path, &[record]);
+
+    let index = ReplayIndex::load(&path);
+    let messages = replay_request_messages(&turns);
+    match index.lookup("piece-1", &messages, None) {
+        ReplayLookup::Miss(diagnostic) => assert_eq!(diagnostic.recorded, 0),
+        ReplayLookup::Hit(_) => {
+            panic!("a stop_valid record with no answer must never be offered for replay")
+        }
+    }
+}
+
+#[test]
+fn replay_index_rejects_a_system_record_whose_hash_does_not_match_its_content() {
+    let path = replay_fixture_path("bad-system-hash");
+    let real_content = "you are a helpful extractor";
+    let claimed_sha256 = sha256_hex(b"a completely different prompt");
+    write_replay_log(
+        &path,
+        &[serde_json::json!({
+            "kind": "system",
+            "sha256": claimed_sha256,
+            "bytes": real_content.len(),
+            "content": real_content,
+        })],
+    );
+
+    let index = ReplayIndex::load(&path);
+    assert_eq!(index.system(&claimed_sha256), None);
+}

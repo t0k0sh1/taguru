@@ -185,6 +185,7 @@ impl ReplayIndex {
                     Some("system") => {
                         if let (Some(sha256), Some(content)) =
                             (value["sha256"].as_str(), value["content"].as_str())
+                            && sha256_hex(content.as_bytes()) == sha256
                         {
                             systems.insert(sha256.to_string(), content.to_string());
                         }
@@ -251,15 +252,47 @@ impl ReplayIndex {
     }
 }
 
+/// ADR 0001 §7's attempt-state vocabulary (also documented on
+/// [`DiagnosticsAttempt::state`]) — a `state` outside this set is not
+/// one this build recognizes, so the whole record is rejected rather
+/// than silently misclassified.
+const KNOWN_STATES: &[&str] = &[
+    "stop_valid",
+    "stop_malformed",
+    "length_limited",
+    "empty",
+    "refusal",
+    "timeout",
+    "transport",
+];
+
+/// Reads an optional numeric field: absent or `null` is a real
+/// "no value" (`Some(None)`), a JSON number is that value
+/// (`Some(Some(n))`), and anything else — a string, a bool — is a
+/// malformed record (`None`), never silently coerced to "no value"
+/// the way [`serde_json::Value::as_u64`] alone would (a `"512"` string
+/// would otherwise read as an absent cap instead of a corrupt one).
+fn optional_u64(value: &serde_json::Value, key: &str) -> Option<Option<u64>> {
+    match value.get(key) {
+        None | Some(serde_json::Value::Null) => Some(None),
+        Some(field) => field.as_u64().map(Some),
+    }
+}
+
 /// Extracts one `attempt` record's replay-relevant fields from its
 /// parsed JSON. `None` for any record missing what replay needs to
 /// index it (a truncated last line, a future field this build does
-/// not know) — that record is simply not offered for replay, never a
-/// load failure.
+/// not know), carrying a `state` outside [`KNOWN_STATES`], a
+/// wrong-typed optional numeric field, or an `answer`/`state`
+/// combination ADR 0025 §3.3 never produces — that record is simply
+/// not offered for replay, never a load failure.
 fn parse_attempt_record(value: &serde_json::Value) -> Option<StoredAttempt> {
     let attempt = value["attempt"].as_u64()? as usize;
     let state = value["state"].as_str()?.to_string();
-    let requested_max_tokens = value["requested_max_tokens"].as_u64().map(|n| n as usize);
+    if !KNOWN_STATES.contains(&state.as_str()) {
+        return None;
+    }
+    let requested_max_tokens = optional_u64(value, "requested_max_tokens")?.map(|n| n as usize);
     let messages = value["messages"].as_array()?;
     let mut turns = Vec::with_capacity(messages.len());
     for message in messages {
@@ -271,16 +304,27 @@ fn parse_attempt_record(value: &serde_json::Value) -> Option<StoredAttempt> {
         };
         turns.push((role, field));
     }
+    let answer = value["answer"].as_str().map(str::to_string);
+    // ADR 0025 §3.3: `answer` is `null` exactly for `timeout`/
+    // `transport` — every other state carries one. A record that
+    // violates this is internally inconsistent.
+    let expects_answer = state != "timeout" && state != "transport";
+    if expects_answer != answer.is_some() {
+        return None;
+    }
+    let input_tokens = optional_u64(value, "input_tokens")?;
+    let output_tokens = optional_u64(value, "output_tokens")?;
+    let transport_retries = optional_u64(value, "transport_retries")?.unwrap_or(0) as usize;
     Some(StoredAttempt {
         turns,
         requested_max_tokens,
         attempt,
         state,
-        answer: value["answer"].as_str().map(str::to_string),
+        answer,
         finish_reason: value["finish_reason"].as_str().map(str::to_string),
-        input_tokens: value["input_tokens"].as_u64(),
-        output_tokens: value["output_tokens"].as_u64(),
-        transport_retries: value["transport_retries"].as_u64().unwrap_or(0) as usize,
+        input_tokens,
+        output_tokens,
+        transport_retries,
     })
 }
 
