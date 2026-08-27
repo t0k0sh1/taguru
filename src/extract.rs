@@ -97,6 +97,8 @@ mod parse;
 mod prompt;
 #[path = "extract/render.rs"]
 mod render;
+#[path = "extract/replay.rs"]
+mod replay;
 #[path = "extract/run.rs"]
 mod run;
 #[path = "extract/signals.rs"]
@@ -142,7 +144,9 @@ use attempts::{
 use candidates::{candidate_terms, candidates_block, candidates_manifest_value};
 #[cfg(test)]
 use chat_client::RETRY_ATTEMPTS;
-use chat_client::{ChatCompletion, ChatError, ChatFailure, classify_io_error, mint_run_id};
+use chat_client::{
+    ChatCompletion, ChatError, ChatFailure, TokenUsage, classify_io_error, mint_run_id,
+};
 use checkpoint::{CheckpointFingerprint, CheckpointStore, CheckpointUnit};
 use chunking::{
     AnswerFault, ChunkOutput, MIN_SPLIT_CAP, corrective_assistant_turn,
@@ -210,6 +214,8 @@ use mechanical::alias_issue_index;
 use parse::{ModelQuestion, parse_model_output};
 #[cfg(test)]
 use prompt::schema_block;
+#[cfg(test)]
+use replay::{ReplayIndex, ReplayLookup};
 #[cfg(test)]
 use run::with_resume_hint;
 #[cfg(test)]
