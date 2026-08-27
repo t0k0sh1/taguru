@@ -637,7 +637,9 @@ pub fn run(args: &[String]) -> i32 {
         return crate::config::subcommand_usage_error(
             "extract",
             "--structured-output auto needs a live model endpoint to probe \
-             (TAGURU_EXTRACT_URL) — --replay strict alone cannot resolve it",
+             (TAGURU_EXTRACT_URL) — --replay strict alone cannot resolve it; pin a rung \
+             explicitly instead (--structured-output json-schema/json-object), reading the \
+             recorded attempt's own `rung` field to see which one the original run settled on",
         );
     }
     let max_output_tokens = match args.max_output_tokens {

@@ -1122,16 +1122,40 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       corrective turn can fail <code>--replay strict</code> after a validation-rule change, a
       known limit, not an oversight.
     </p>
+    <h3 id="two-machines">Recording here, replaying there</h3>
     <p>
-      <b>Running the expensive step on one machine, the rest on another</b> is what
-      <code>--replay strict</code> without a model endpoint is for: extract with model access,
-      carry the document files themselves, <code>--out/.extract-trace/*.attempts.jsonl</code>, and
-      the <code>--schema</code> document if one was used, to a machine with none, and replay there.
-      The batch, the manifest, and the checkpoint directory do not need to travel. Because matching
-      is by exact conversation content, a setting left out of sync between the two machines is
-      self-diagnosing: it changes what would be sent, which either falls through to a live call
-      (impossible without a URL — <code>--replay strict</code> fails loudly) or is reported as a
-      settings mismatch on stderr — never a silent "used the wrong prompt".
+      Running the expensive step on one machine and the rest on another is what
+      <code>--replay strict</code> without a model endpoint is for — the machine that replays
+      needs no <code>TAGURU_EXTRACT_URL</code> at all; <code>TAGURU_EXTRACT_MODEL</code> is still
+      required even there, since <code>model</code> is a manifest computation input
+      (<a href="#manifest">writing an empty one would be a lie the manifest believes on its next
+      live run</a>). Combining this with <code>--structured-output auto</code> is a usage error:
+      the ADR 0021 probe needs a live call by construction, so pin a rung explicitly instead — the
+      recorded <code>attempt.rung</code> field names the one the original run settled on.
+    </p>
+    <ol>
+      <li>On the machine with model access, run <code>taguru extract</code> as usual — with
+        <code>--diagnostics-out</code>/<code>--force</code> or not, the attempts log is on by
+        default (ADR 0025).</li>
+      <li>Carry three things to the machine with no model endpoint: the document files themselves
+        (the attempts log's <code>messages</code> hold piece text, not the whole document —
+        reconstructing it from the log alone is not attempted), <code>--out/.extract-trace/
+        *.attempts.jsonl</code>, and the <code>--schema</code> document if one was used.</li>
+      <li>Nothing else needs to travel: the batch, the manifest, and the checkpoint directory are
+        all either reproduced by the replay run itself or simply not read under
+        <code>--replay</code> (<a href="#manifest">the manifest skip</a>,
+        <a href="#checkpoints">the checkpoint store</a>).</li>
+      <li>On the second machine, set <code>TAGURU_EXTRACT_MODEL</code> (the same model name — a
+        different one is a different computation input) and run the same <code>taguru extract</code>
+        invocation with <code>--replay strict --replay-from DIR</code> pointed at the carried
+        <code>.extract-trace</code> directory (or place it at <code>--out/.extract-trace</code>,
+        the default).</li>
+    </ol>
+    <p>
+      Because matching is by exact conversation content, a setting left out of sync between the
+      two machines is self-diagnosing: it changes what would be sent, which either falls through
+      to a live call (impossible without a URL — <code>--replay strict</code> fails loudly) or is
+      reported as a settings mismatch on stderr — never a silent "used the wrong prompt".
     </p>
   </section>
 
