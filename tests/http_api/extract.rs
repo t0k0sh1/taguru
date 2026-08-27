@@ -7934,3 +7934,60 @@ fn replay_from_env_var_is_honored_with_no_flag() {
     let _ = std::fs::remove_dir_all(&recorded_out);
     let _ = std::fs::remove_dir_all(&strict_out);
 }
+
+/// #820: `--replay strict` relaxes `TAGURU_EXTRACT_URL`, never
+/// `TAGURU_EXTRACT_MODEL` — the model name is still a manifest
+/// computation input, so writing an empty one would be a lie the
+/// manifest believes on its next live run.
+#[test]
+fn replay_strict_still_requires_the_model_env_var() {
+    let docs = batch_dir("extract-replay-strict-needs-model-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "alpha relates to beta").unwrap();
+    let doc_src = doc.to_str().unwrap();
+    let out = batch_dir("extract-replay-strict-needs-model-out");
+
+    let (code, _stdout, stderr) = run_extract(
+        &out,
+        &[],
+        &["--context", "c", "--replay", "strict", doc_src],
+    );
+    assert_eq!(code, 2, "stderr: {stderr}");
+    assert!(stderr.contains("TAGURU_EXTRACT_MODEL"), "{stderr}");
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// `--structured-output auto` needs a live probe by construction (ADR
+/// 0021) — `--replay strict` with no `TAGURU_EXTRACT_URL` can never
+/// resolve it, so combining the two is a usage error rather than a
+/// silently-skipped probe.
+#[test]
+fn replay_strict_with_structured_output_auto_and_no_url_is_a_usage_error() {
+    let docs = batch_dir("extract-replay-strict-auto-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "alpha relates to beta").unwrap();
+    let doc_src = doc.to_str().unwrap();
+    let out = batch_dir("extract-replay-strict-auto-out");
+
+    let (code, _stdout, stderr) = run_extract(
+        &out,
+        &[("TAGURU_EXTRACT_MODEL", "stub-model")],
+        &[
+            "--context",
+            "c",
+            "--replay",
+            "strict",
+            "--structured-output",
+            "auto",
+            doc_src,
+        ],
+    );
+    assert_eq!(code, 2, "stderr: {stderr}");
+    assert!(stderr.contains("--structured-output auto"), "{stderr}");
+    assert!(stderr.contains("rung"), "{stderr}");
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
