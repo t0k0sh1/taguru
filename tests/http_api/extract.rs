@@ -7879,3 +7879,50 @@ fn replay_is_deterministic_under_parallel() {
         let _ = std::fs::remove_dir_all(out);
     }
 }
+
+/// `TAGURU_EXTRACT_REPLAY_FROM` (the env fallback, no `--replay-from`
+/// flag at all) must be honored exactly like the flag — a run pointed
+/// at a recorded log purely through the environment still replays.
+#[test]
+fn replay_from_env_var_is_honored_with_no_flag() {
+    let docs = batch_dir("extract-replay-from-env-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "alpha relates to beta").unwrap();
+    let doc_src = doc.to_str().unwrap();
+    let recorded_out = batch_dir("extract-replay-from-env-recorded");
+
+    let good = json!({"associations": [
+        {"subject": "alpha", "label": "relates to", "object": "beta", "weight": 1.0}
+    ]})
+    .to_string();
+    let (url, _requests) = stub_chat_server(vec![good]);
+    let (code, stdout, stderr) = run_extract(
+        &recorded_out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &["--context", "c", doc_src],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+
+    let replay_from = recorded_out.join(".extract-trace");
+    let strict_out = batch_dir("extract-replay-from-env-out");
+    let (code2, _stdout2, stderr2) = run_extract(
+        &strict_out,
+        &[
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+            ("TAGURU_EXTRACT_REPLAY_FROM", replay_from.to_str().unwrap()),
+        ],
+        &["--context", "c", "--replay", "strict", doc_src],
+    );
+    assert_eq!(code2, 0, "stderr: {stderr2}");
+    assert!(
+        stderr2.contains("replayed 1/1 completions (0 live)"),
+        "{stderr2}"
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&recorded_out);
+    let _ = std::fs::remove_dir_all(&strict_out);
+}

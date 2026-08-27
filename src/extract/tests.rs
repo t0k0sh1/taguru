@@ -6501,3 +6501,110 @@ fn replay_index_rejects_a_system_record_whose_hash_does_not_match_its_content() 
     let index = ReplayIndex::load(&path);
     assert_eq!(index.system(&claimed_sha256), None);
 }
+
+// ADR 0031 (#819): `Completions`'s replay-aware `complete`/
+// `document_counts`, and the `ReplayMode`/`--replay-from` argument
+// parsing wired up alongside it.
+
+#[test]
+fn replay_mode_parses_all_three_values_and_rejects_anything_else() {
+    assert!(matches!(ReplayMode::parse("auto"), Some(ReplayMode::Auto)));
+    assert!(matches!(
+        ReplayMode::parse("strict"),
+        Some(ReplayMode::Strict)
+    ));
+    assert!(matches!(ReplayMode::parse("off"), Some(ReplayMode::Off)));
+    assert!(ReplayMode::parse("sometimes").is_none());
+}
+
+#[test]
+fn replay_from_flag_parses_once_and_rejects_a_duplicate() {
+    fn parse(words: &[&str]) -> Result<Args, i32> {
+        Args::parse(&words.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+    let parsed = parse(&[
+        "--context",
+        "c",
+        "--out",
+        "o",
+        "--replay-from",
+        "trace-dir",
+        "doc.md",
+    ])
+    .unwrap();
+    assert_eq!(parsed.replay_from.as_deref(), Some(Path::new("trace-dir")));
+    let duplicate = parse(&[
+        "--context",
+        "c",
+        "--out",
+        "o",
+        "--replay-from",
+        "a",
+        "--replay-from",
+        "b",
+        "doc.md",
+    ]);
+    assert!(
+        matches!(duplicate, Err(2)),
+        "a duplicate is a usage error, never a silent last-wins"
+    );
+}
+
+#[test]
+fn completions_document_counts_tracks_both_replayed_and_live() {
+    let path = replay_fixture_path("document-counts");
+    let hit_turns = [("user", "a piece with a recorded answer")];
+    write_replay_log(
+        &path,
+        &[replay_attempt_record(
+            "piece-hit",
+            1,
+            "stop_valid",
+            None,
+            &hit_turns,
+            Some("recorded answer"),
+        )],
+    );
+    let index = ReplayIndex::load(&path);
+
+    let chat = ScriptedChat::start(vec![chat_answer("live answer", "stop")]);
+    let mut completions = Completions::new(Some(chat.client()));
+    completions.begin_document(Some(index), ReplayMode::Auto);
+
+    let hit_messages = replay_request_messages(&hit_turns);
+    let hit = completions
+        .complete("piece-hit", &hit_messages, &RequestOptions::default())
+        .expect("the recorded piece must replay");
+    assert_eq!(hit.content, "recorded answer");
+
+    // A piece with no recorded attempts at all: --replay auto falls
+    // through to the live client instead.
+    let miss_messages = replay_request_messages(&[("user", "an unrecorded piece")]);
+    let live = completions
+        .complete("piece-miss", &miss_messages, &RequestOptions::default())
+        .expect("--replay auto must fall through to the live client");
+    assert_eq!(live.content, "live answer");
+
+    assert_eq!(completions.document_counts(), (1, 1));
+}
+
+#[test]
+fn completions_strict_miss_names_zero_recorded_attempts_for_an_unknown_piece() {
+    let path = replay_fixture_path("strict-miss-unknown-piece");
+    write_replay_log(&path, &[]);
+    let index = ReplayIndex::load(&path);
+
+    // No client at all — exactly `--replay strict` with no
+    // TAGURU_EXTRACT_URL.
+    let mut completions = Completions::new(None);
+    completions.begin_document(Some(index), ReplayMode::Strict);
+
+    let messages = replay_request_messages(&[("user", "anything")]);
+    let Err(error) = completions.complete("piece-unknown", &messages, &RequestOptions::default())
+    else {
+        panic!("a miss under --replay strict must fail, never call a client");
+    };
+    let message = error.to_string();
+    assert!(message.contains("--replay strict"), "{message}");
+    assert!(message.contains("has no recorded attempts"), "{message}");
+}
