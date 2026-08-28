@@ -43,13 +43,22 @@ Entries that change an on-disk format or a response shape say so.
   hint, never a gate — ADR 0031 (#818, #819). **On-disk format change**:
   two new record kinds (`replay`, `replay_summary`) in
   `--out/.extract-trace/*.attempts.jsonl`, written only under `--replay`.
-  The system-prompt pin described in `docs/extract.html` is not yet
-  implemented (#821): a multi-document replay's system turn is recomputed
-  from this run's own settings until then.
 - `docs/extract.html` gains "Recording here, replaying there": the two-machine
   procedure `--replay strict` with no `TAGURU_EXTRACT_URL` is for (extract
   where the model is, carry the documents/`.extract-trace`/`--schema`,
   replay where it isn't) — ADR 0031 §3.8 (#820).
+- `--replay` pins a document's system prompt verbatim from its attempts log
+  when the log names exactly one distinct `system` record, instead of
+  recomputing it — so replaying document two of a multi-document run no
+  longer depends on this run's own vocabulary accumulation matching the
+  original's (ADR 0031 §3.6, #821). A pinned prompt whose hash differs from
+  what this run would have recomputed is reported once on stderr; a log
+  naming more than one distinct `system` record is also reported and falls
+  back to recomputing, never guessing which one applies. The trace's
+  `steering` record gains `system_sha256` (the system prompt actually sent,
+  by hash) and `pinned_from` (the run_id it was pinned from, or `null`).
+  **On-disk format change**: two additive fields on the `steering` record in
+  `--out/.extract-trace/*.jsonl` (the trace).
 
 ### Changed
 

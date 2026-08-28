@@ -142,6 +142,15 @@ pub(super) struct TraceSteering<'a> {
     /// ADR 0014's candidate names, as offered (empty: `--candidates`
     /// off, or a document with none).
     pub(super) candidates: &'a [String],
+    /// The system prompt actually sent, by hash — always present,
+    /// pinned or recomputed alike (ADR 0031 §3.6).
+    pub(super) system_sha256: &'a str,
+    /// ADR 0031 §3.6: the run_id the system prompt was pinned from,
+    /// when `--replay` pinned it (its `ReplayIndex` named exactly one
+    /// distinct recorded system) — the field is absent when this run
+    /// computed its own, pin declined, or no `--replay` at all.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) pinned_from: Option<&'a str>,
     /// #759's reuse list, in prompt order with the prompted counts
     /// (empty: first document of a run with no `--vocabulary`).
     pub(super) vocabulary: Vec<VocabularyEntry<'a>>,

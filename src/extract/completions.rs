@@ -68,6 +68,15 @@ impl Completions {
         self.live.store(0, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// ADR 0031 §3.6: this document's system-prompt pin decision —
+    /// `NoRecord` off `--replay` (nothing recorded to pin from).
+    pub(super) fn pinned_system(&self) -> SystemPinDecision<'_> {
+        self.replay
+            .as_ref()
+            .map(ReplayIndex::pinned_system)
+            .unwrap_or(SystemPinDecision::NoRecord)
+    }
+
     /// This document's `(replayed, live)` counts so far.
     pub(super) fn document_counts(&self) -> (u64, u64) {
         (
