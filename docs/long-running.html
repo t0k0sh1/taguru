@@ -279,6 +279,15 @@ esac</code></pre>
       whole corpus in one shot. Avoid <code>set -e</code> in a wrapping shell script around this
       block — exit <code>130</code> is an expected, not exceptional, outcome here.
     </p>
+    <p>
+      The manifest skip above only ever answers "unchanged, redo nothing" or "changed, redo
+      everything" — a run that has already spent every model call on a document but wants to
+      retry a later step alone (a stricter validation rule, a rendering fix) has no cheaper path
+      through it. <a href="extract.html#resume-from"><code>--resume-from STEP</code></a> is the
+      other tool for that: it satisfies whatever a prior run's attempts log recorded (today,
+      <code>--out/.extract-trace/*.attempts.jsonl</code>'s <code>prompt</code>/<code>call</code>
+      steps) instead of a live call, so downstream-only changes need not pay for the model again.
+    </p>
   </section>
 
   <section id="custom-runner">
@@ -432,7 +441,7 @@ may be half-applied — re-import its batch file or retract the source</code></p
     <h2>Where each guarantee is specified</h2>
     <p>This page is a composition, not a new contract — the normative source for each piece:</p>
     <ul>
-      <li>Extract manifest — <a href="extract.html#manifest">extract.html#manifest</a>; chunk checkpoints and cooperative stop — <a href="extract.html#checkpoints">extract.html#checkpoints</a>; diagnostics sidecar — <a href="extract.html#diagnostics">extract.html#diagnostics</a>.</li>
+      <li>Extract manifest — <a href="extract.html#manifest">extract.html#manifest</a>; chunk checkpoints and cooperative stop — <a href="extract.html#checkpoints">extract.html#checkpoints</a>; diagnostics sidecar — <a href="extract.html#diagnostics">extract.html#diagnostics</a>; replaying a recorded run and <code>--resume-from</code> — <a href="extract.html#replay">extract.html#replay</a>.</li>
       <li>One-source-one-batch idempotency — <a href="import.html#one-file-one-source">import.html#one-file-one-source</a>; validate-then-apply and the batch-open marker — <a href="import.html#validate">import.html#validate</a>; HTTP status semantics — <a href="import.html#http">import.html#http</a>.</li>
       <li>LangChain SDK progress events (issue <a href="https://github.com/t0k0sh1/taguru/issues/177">#177</a>) and checkpoint/resume (issue <a href="https://github.com/t0k0sh1/taguru/issues/179">#179</a>) — <a href="https://github.com/t0k0sh1/taguru/tree/main/sdk/python-langchain#checkpointresume-for-spot-and-preemptible-instances">Python SDK README</a> · <a href="https://github.com/t0k0sh1/taguru/tree/main/sdk/typescript-langchain#checkpointresume-for-spot-and-preemptible-instances">TypeScript SDK README</a>.</li>
       <li>Atomic per-source import (the fix that makes source listing a sound completion test) — <a href="https://github.com/t0k0sh1/taguru/issues/187">issue #187</a>.</li>

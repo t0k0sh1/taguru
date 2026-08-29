@@ -61,6 +61,11 @@ struct StoredAttempt {
     input_tokens: Option<u64>,
     output_tokens: Option<u64>,
     transport_retries: usize,
+    /// This record's own `(run_id, attempt_seq)` (ADR 0023) — the
+    /// origin [`ChatCompletion::replayed_from`] names on a hit (#823),
+    /// so a reader can join a replay run's re-emitted `attempt` record
+    /// back to the one carrying its *real* `elapsed_seconds`/tokens.
+    origin: AttemptRef,
 }
 
 impl StoredAttempt {
@@ -83,6 +88,7 @@ impl StoredAttempt {
                     },
                 ),
                 transport_retries: self.transport_retries,
+                replayed_from: Some(self.origin.clone()),
             }),
             None => {
                 let kind = if self.state == "timeout" {
@@ -438,6 +444,8 @@ fn optional_u64(value: &serde_json::Value, key: &str) -> Option<Option<u64>> {
 /// combination ADR 0025 §3.3 never produces — that record is simply
 /// not offered for replay, never a load failure.
 fn parse_attempt_record(value: &serde_json::Value) -> Option<StoredAttempt> {
+    let run_id = value["run_id"].as_str()?.to_string();
+    let attempt_seq = value["attempt_seq"].as_u64()?;
     let attempt = value["attempt"].as_u64()? as usize;
     let state = value["state"].as_str()?.to_string();
     if !KNOWN_STATES.contains(&state.as_str()) {
@@ -476,6 +484,10 @@ fn parse_attempt_record(value: &serde_json::Value) -> Option<StoredAttempt> {
         input_tokens,
         output_tokens,
         transport_retries,
+        origin: AttemptRef {
+            run_id,
+            attempt_seq,
+        },
     })
 }
 

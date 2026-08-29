@@ -167,6 +167,18 @@ def absorb_document(bucket: dict, document: dict) -> None:
         if kind == "move":
             bucket["moves"][record["move"]] += 1
         elif kind == "attempt":
+            # A `--replay` run re-emits an `attempt` record for a
+            # completion satisfied from an earlier one instead of a
+            # live call — `replayed_from` names that original, already
+            # counted attempt (ADR 0031 §3.2, #823). Its own state/
+            # transport_retries/elapsed_seconds/tokens describe the
+            # replay itself (no model call, so time is near zero and
+            # the tokens are the original's own, restated) — counting
+            # it too would double every one of these for a replayed
+            # completion while zeroing out its time, so it is skipped
+            # here entirely rather than partially.
+            if record.get("replayed_from"):
+                continue
             bucket["attempts"]["total"] += 1
             bucket["attempts"][record["state"]] += 1
             bucket["attempts"]["transport_retries"] += record.get("transport_retries", 0)
@@ -622,6 +634,17 @@ def self_test() -> int:
              "validation_issues": None,
              "removed_items": ["associations[3]: r"],
              "corrects": {"run_id": run_id, "attempt_seq": 1}},
+            # A later --replay run's re-emitted record for attempt 2 —
+            # huge fake seconds/tokens that must never reach the cost
+            # rollup, proving replayed_from is what excludes it (#823).
+            {"kind": "attempt", "run_id": "1" * 16, "attempt_seq": 1, "piece_id": "c" * 64,
+             "source": "a.md", "chunk_index": 0, "stage": "item", "attempt": 1,
+             "max_attempts": 2, "state": "stop_valid", "length_limited": False,
+             "transport_retries": 9, "elapsed_seconds": 1000.0, "requested_max_tokens": None,
+             "finish_reason": "stop", "input_tokens": 999999, "output_tokens": 999999,
+             "messages": [], "answer": "good", "parse_error": None,
+             "validation_issues": None, "removed_items": None,
+             "replayed_from": {"run_id": run_id, "attempt_seq": 2}},
         ]
         (trace_dir / "a.jsonl").write_text(
             "".join(json.dumps(r) + "\n" for r in trace), encoding="utf-8"
@@ -667,6 +690,9 @@ def self_test() -> int:
             (run["corrections"]["flagged_issues"], 2),
             (run["corrections"]["removed_instead"], 1),
             (run["corrections"]["success_rate"], 1.0),
+            # A replayed --replay re-emission of attempt 2 sits in the
+            # fixture (huge fake seconds/tokens/transport_retries) —
+            # every count below must be exactly as if it were absent.
             (run["attempts"]["total"], 2),
             (run["attempts"]["stop_valid_rate"], 0.5),
             (run["attempts"]["transport_retries"], 2),

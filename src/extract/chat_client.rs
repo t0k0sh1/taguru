@@ -140,6 +140,13 @@ pub(crate) struct ChatCompletion {
     /// `transport`/429/5xx retries ADR 0001 §10 folds into one
     /// attempt, now counted on it.
     pub(crate) transport_retries: usize,
+    /// ADR 0031 §3.2 (#823): the original attempt this completion
+    /// reused, when it came from `--replay` instead of a live call —
+    /// `None` for every completion `ChatClient::complete` itself
+    /// builds (the only other construction site). `Completions::complete`
+    /// is the sole caller that can ever see `Some` here, since only it
+    /// consults a `ReplayIndex` at all.
+    pub(crate) replayed_from: Option<AttemptRef>,
 }
 
 /// The optional OpenAI-compatible parameters one completion carries
@@ -360,5 +367,6 @@ pub(super) fn parse_chat_completion(body: ureq::Body) -> Result<ChatCompletion, 
         finish_reason,
         usage,
         transport_retries: 0,
+        replayed_from: None,
     })
 }
