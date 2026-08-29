@@ -7,6 +7,21 @@ Entries that change an on-disk format or a response shape say so.
 
 ## [Unreleased]
 
+### Changed
+
+- `taguru extract`: the Stage 2 cross-chunk corrective turn now climbs
+  the output-cap ladder — a corrective answer that ends at
+  `--max-output-tokens` is resent once at the escalated budget
+  (`TAGURU_EXTRACT_ESCALATION_FACTOR` ×, as ADR 0019 already does for
+  Stage 1), and a correction cut off even then (or with no budget
+  configured) is treated as leaving its issues standing: an alias issue
+  is removed with ADR 0022's accounting and the document lands, any
+  other standing issue still fails the source. Used to fail the source
+  on the first cut-off — the #780 ripgrep README reproducer. The resend
+  writes an `escalate` move record (ADR 0029) naming the cross-chunk
+  correction; **no on-disk format change** (additive use of existing
+  record kinds). ADR 0032 (#811).
+
 ### Added
 
 - `docs/extract.html` gains "The pipeline" section naming `taguru extract`'s

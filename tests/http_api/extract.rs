@@ -4176,6 +4176,250 @@ fn an_uncorrected_shadowing_alias_is_removed_and_the_document_still_lands() {
     let _ = std::fs::remove_dir_all(&out);
 }
 
+/// ADR 0032 (#811): a Stage 2 corrective answer that ends at the
+/// output cap takes ADR 0019's one escalation exactly as a Stage 1
+/// piece does — the same corrective ask resent at the escalated
+/// budget — and the corrected answer lands. The escalation is a
+/// `move` record between two `cross_chunk` attempts.
+#[test]
+fn a_cut_off_cross_chunk_correction_is_resent_once_at_the_escalated_budget() {
+    let docs = batch_dir("extract-stage2-escalate-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "a small b document").unwrap();
+    let out = batch_dir("extract-stage2-escalate-out");
+
+    let bad_reply = json!({
+        "associations": [
+            {"subject": "a", "label": "rel", "object": "b"}
+        ],
+        "aliases": [
+            {"alias": "a", "canonical": "b", "kind": "concept"}
+        ]
+    })
+    .to_string();
+    let good_reply = json!({
+        "associations": [
+            {"subject": "a", "label": "rel", "object": "b"}
+        ],
+        "aliases": [
+            {"alias": "x", "canonical": "a", "kind": "concept"}
+        ]
+    })
+    .to_string();
+    let (url, captured) = stub_chat_server_concurrent(move |_index, attempt| match attempt {
+        0 => chat_ok(&bad_reply),
+        1 => chat_ok_with_finish_reason("truncated correction", "length"),
+        2 => chat_ok(&good_reply),
+        _ => panic!("no fourth call is asked for"),
+    });
+    let provider = [
+        ("TAGURU_EXTRACT_URL", url.as_str()),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &provider,
+        &[
+            "--context",
+            "c",
+            "--max-output-tokens",
+            "512",
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("1 association(s), 1 alias(es)"), "{stdout}");
+    assert!(!stdout.contains("removed"), "{stdout}");
+    assert!(!stderr.contains("cut off"), "{stderr}");
+
+    let requests = captured.lock().unwrap().clone();
+    assert_eq!(requests.len(), 3, "ask, corrective turn, escalated resend");
+    assert_eq!(json_body_of(&requests[1])["max_tokens"], 512);
+    assert_eq!(json_body_of(&requests[2])["max_tokens"], 1024);
+    assert_eq!(
+        json_body_of(&requests[1])["messages"],
+        json_body_of(&requests[2])["messages"],
+        "the escalated resend is the same corrective ask, neutrally resent"
+    );
+
+    let records = read_attempts_log(&out);
+    let attempts: Vec<&Value> = records
+        .iter()
+        .filter(|r| r["kind"] == "attempt" && r["stage"] == "cross_chunk")
+        .collect();
+    assert_eq!(attempts.len(), 2, "{attempts:?}");
+    assert_eq!(attempts[0]["state"], "length_limited");
+    assert_eq!(attempts[0]["requested_max_tokens"], 512);
+    assert_eq!(attempts[1]["state"], "stop_valid");
+    assert_eq!(attempts[1]["requested_max_tokens"], 1024);
+    assert_eq!(attempts[1]["piece_id"], attempts[0]["piece_id"]);
+    let moves: Vec<&Value> = records.iter().filter(|r| r["kind"] == "move").collect();
+    assert_eq!(moves.len(), 1, "{moves:?}");
+    assert_eq!(moves[0]["move"], "escalate");
+    assert_eq!(moves[0]["piece_id"], attempts[0]["piece_id"]);
+    assert_eq!(moves[0]["chunk_index"], 0);
+    assert_eq!(moves[0]["from_max_tokens"], 512);
+    assert_eq!(moves[0]["to_max_tokens"], 1024);
+    assert!(
+        moves[0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("cross-chunk correction"),
+        "{}",
+        moves[0]
+    );
+    let batches = stray_batch_files(&out);
+    assert_eq!(batches.len(), 1, "{batches:?}");
+    let batch = std::fs::read_to_string(out.join(&batches[0])).unwrap();
+    assert!(batch.contains("\"alias\":\"x\""), "{batch}");
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// ADR 0032 (#811): a correction cut off even at the escalated budget
+/// is a correction that left its issues standing — the truncated
+/// answer is discarded, the accepted Stage 1 output kept, and ADR
+/// 0022 rules on what stands: the alias is removed with accounting
+/// and the document lands. The #780 ripgrep README failure mode.
+#[test]
+fn a_correction_cut_off_at_the_escalated_budget_leaves_its_alias_to_the_prune() {
+    let docs = batch_dir("extract-stage2-escalate-twice-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "a small b document").unwrap();
+    let out = batch_dir("extract-stage2-escalate-twice-out");
+
+    let bad_reply = json!({
+        "associations": [
+            {"subject": "a", "label": "rel", "object": "b"}
+        ],
+        "aliases": [
+            {"alias": "a", "canonical": "b", "kind": "concept"}
+        ]
+    })
+    .to_string();
+    let (url, captured) = stub_chat_server_concurrent(move |_index, attempt| match attempt {
+        0 => chat_ok(&bad_reply),
+        1 => chat_ok_with_finish_reason("truncated correction", "length"),
+        2 => chat_ok_with_finish_reason("truncated correction, longer", "length"),
+        _ => panic!("no fourth call is asked for"),
+    });
+    let provider = [
+        ("TAGURU_EXTRACT_URL", url.as_str()),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &provider,
+        &[
+            "--context",
+            "c",
+            "--max-output-tokens",
+            "512",
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("1 association(s), 0 alias(es)"), "{stdout}");
+    assert!(
+        stdout.contains("1 item(s) removed (mechanical validation)"),
+        "{stdout}"
+    );
+    let cut_off = format!(
+        "taguru: extract: {}: chunk 1/1: the cross-chunk correction was cut off at the \
+         output limit even at the escalated budget — the truncated answer is discarded and \
+         its issues stand as uncorrected",
+        doc.display()
+    );
+    assert!(stderr.contains(&cut_off), "{stderr}");
+    let removed = format!(
+        "taguru: extract: {}: removed: aliases[0].alias: names something the associations \
+         already contain — still so after the corrective turn; removed",
+        doc.display()
+    );
+    assert!(stderr.contains(&removed), "{stderr}");
+
+    let requests = captured.lock().unwrap().clone();
+    assert_eq!(
+        requests.len(),
+        3,
+        "ask, corrective turn, escalated resend — no third"
+    );
+    assert_eq!(json_body_of(&requests[2])["max_tokens"], 1024);
+    let records = read_attempts_log(&out);
+    let states: Vec<&Value> = records
+        .iter()
+        .filter(|r| r["kind"] == "attempt" && r["stage"] == "cross_chunk")
+        .map(|r| &r["state"])
+        .collect();
+    assert_eq!(states, ["length_limited", "length_limited"], "{records:?}");
+    // The batch carries the accepted Stage 1 answer minus the alias —
+    // never a byte of the truncated correction.
+    let batches = stray_batch_files(&out);
+    assert_eq!(batches.len(), 1, "{batches:?}");
+    let batch = std::fs::read_to_string(out.join(&batches[0])).unwrap();
+    assert!(batch.contains("\"subject\":\"a\""), "{batch}");
+    assert!(!batch.contains("\"alias\""), "{batch}");
+    assert!(!batch.contains("truncated"), "{batch}");
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// ADR 0032 (#811): with no budget configured there is no ladder and
+/// nothing to escalate — a cut-off correction goes straight to "its
+/// issues stand", one corrective call spent, the alias pruned.
+#[test]
+fn a_cut_off_correction_without_a_budget_is_not_resent() {
+    let docs = batch_dir("extract-stage2-cutoff-nobudget-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "a small b document").unwrap();
+    let out = batch_dir("extract-stage2-cutoff-nobudget-out");
+
+    let bad_reply = json!({
+        "associations": [
+            {"subject": "a", "label": "rel", "object": "b"}
+        ],
+        "aliases": [
+            {"alias": "a", "canonical": "b", "kind": "concept"}
+        ]
+    })
+    .to_string();
+    let (url, captured) = stub_chat_server_concurrent(move |_index, attempt| match attempt {
+        0 => chat_ok(&bad_reply),
+        1 => chat_ok_with_finish_reason("truncated correction", "length"),
+        _ => panic!("no fourth call is asked for"),
+    });
+    let provider = [
+        ("TAGURU_EXTRACT_URL", url.as_str()),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+    let (code, stdout, stderr) =
+        run_extract(&out, &provider, &["--context", "c", doc.to_str().unwrap()]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("1 association(s), 0 alias(es)"), "{stdout}");
+    let cut_off = format!(
+        "taguru: extract: {}: chunk 1/1: the cross-chunk correction was cut off at the \
+         output limit — the truncated answer is discarded and its issues stand as \
+         uncorrected",
+        doc.display()
+    );
+    assert!(stderr.contains(&cut_off), "{stderr}");
+    assert_eq!(
+        captured.lock().unwrap().len(),
+        2,
+        "one ask, one corrective turn"
+    );
+    let records = read_attempts_log(&out);
+    assert!(
+        !records.iter().any(|r| r["kind"] == "move"),
+        "no ladder, no move: {records:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
 /// ADR 0013 (#496 S1): a dangling canonical is no longer a corrective
 /// issue — it is pruned mechanically after Stage 2, with the removal
 /// named on stderr and counted on the report line, and the run spends

@@ -1059,10 +1059,13 @@ impl Run {
     /// its own final answer as the prior bad turn — Stage 1's
     /// rebuild-not-accumulate discipline, at the output level. Bounded
     /// to exactly one extra call per offending output regardless of
-    /// `max_attempts` (the issue's "one targeted corrective turn"): a
-    /// still-invalid, length-limited, refused, or empty reply fails
-    /// the source outright — Stage 2 never splits and never loops a
-    /// second round. An alias issue that the turn leaves standing is
+    /// `max_attempts` (the issue's "one targeted corrective turn"),
+    /// plus ADR 0032's (#811) one escalated resend when that turn
+    /// ends at the output cap under a configured budget: a
+    /// still-invalid, refused, or empty reply fails the source
+    /// outright — Stage 2 never splits and never loops a second
+    /// round. An alias issue that the turn leaves standing — or that
+    /// a correction cut off at the ladder's top never delivered — is
     /// removed with accounting instead (ADR 0022, #763) — the records
     /// are returned for the report line, stderr, and the sidecar; a
     /// standing issue about anything but an alias still fails the
@@ -1096,6 +1099,10 @@ impl Run {
         // 0021) can move the run-wide rung between Stage 1 and here.
         let rung_name = self.ladder.as_ref().map(|ladder| ladder.rung().name());
         let rules = self.item_rules(paragraph_count);
+        let budget = self
+            .ladder
+            .as_ref()
+            .and_then(|ladder| ladder.max_output_tokens);
         for (output_index, issues) in cross_issues {
             let (chunk_index, piece_id, corrected_attempt, user, answer) = {
                 let chunk = &outputs[output_index];
@@ -1107,7 +1114,6 @@ impl Run {
                     chunk.answer.clone(),
                 )
             };
-            let piece_id = piece_id.as_str();
             let label = format!("chunk {}/{chunk_total}", chunk_index + 1);
             let messages = [
                 serde_json::json!({"role": "system", "content": system}),
@@ -1118,270 +1124,68 @@ impl Run {
                     "content": corrective_validation_message(&issues),
                 }),
             ];
-            let started = std::time::Instant::now();
-            let attempt_ref = completions.next_attempt();
-            let response = match completions.complete(piece_id, &messages, &options) {
-                Ok(response) => response,
-                Err(error) => {
-                    {
-                        let message = error.to_string();
-                        let error_retries = error.transport_retries;
-                        observers.emit(
-                            &DiagnosticsAttempt {
-                                source,
-                                stage: "cross_chunk",
-                                chunk_index,
-                                attempt: 1,
-                                attempt_ref: &attempt_ref,
-                                corrects: corrected_attempt.as_ref(),
-                                piece_id,
-                                max_attempts: 1,
-                                state: match error.kind {
-                                    ChatFailure::Timeout => "timeout",
-                                    ChatFailure::Transport => "transport",
-                                },
-                                length_limited: false,
-                                elapsed: started.elapsed(),
-                                response: None,
-                                replayed_from: error.replayed_from.as_ref(),
-                                transport_retries: error_retries,
-                                parse_error: Some(&message),
-                                validation_issues: None,
-                                removed_items: None,
-                                piece_bytes: None,
-                                requested_max_tokens: options.max_tokens,
-                                rung: rung_name,
-                            },
-                            &messages,
-                        );
-                    }
-                    return Err(format!("{label}: {error}"));
-                }
+            let round = CrossChunkRound {
+                completions,
+                observers,
+                source,
+                chunk_index,
+                piece_id: &piece_id,
+                corrected_attempt: corrected_attempt.as_ref(),
+                label: &label,
+                messages: &messages,
+                user: &user,
+                rules: rules.as_ref(),
+                vocabulary: &self.vocabulary_allowlist,
+                rung: rung_name,
             };
-            let elapsed = started.elapsed();
-            if indicates_length_limit(response.finish_reason.as_deref()) {
-                {
-                    let message =
-                        "the cross-chunk correction was cut off at the output limit".to_string();
-                    observers.emit(
-                        &DiagnosticsAttempt {
-                            source,
-                            stage: "cross_chunk",
-                            chunk_index,
-                            attempt: 1,
-                            attempt_ref: &attempt_ref,
-                            corrects: corrected_attempt.as_ref(),
-                            piece_id,
-                            max_attempts: 1,
-                            state: "length_limited",
-                            length_limited: true,
-                            elapsed,
-                            response: Some(&response),
-                            replayed_from: response.replayed_from.as_ref(),
-                            transport_retries: response.transport_retries,
-                            parse_error: Some(&message),
-                            validation_issues: None,
-                            removed_items: None,
-                            piece_bytes: None,
-                            requested_max_tokens: options.max_tokens,
-                            rung: rung_name,
-                        },
-                        &messages,
-                    );
-                }
-                return Err(format!(
-                    "{label}: the cross-chunk correction was cut off at the output \
-                     limit — failing the source rather than importing a truncated correction"
-                ));
+            let mut outcome = round.complete(&options);
+            // ADR 0032 (#811): the corrective turn gets ADR 0019's one
+            // escalation exactly as a Stage 1 piece does — a neutral
+            // resend of the same corrective ask at the escalated
+            // budget, the cut-off answer discarded. Only with a budget
+            // configured; the ladder escalates nothing otherwise.
+            if matches!(outcome, CrossChunkOutcome::LengthLimited) && budget.is_some() {
+                let ladder = self
+                    .ladder
+                    .as_ref()
+                    .expect("a configured budget means a ladder");
+                let mut record = MoveRecord::blank(
+                    "escalate",
+                    completions.run_id(),
+                    &piece_id,
+                    chunk_index,
+                    "the cross-chunk correction ended at the output cap; resending once at \
+                     the escalated budget",
+                );
+                record.from_max_tokens = budget;
+                record.to_max_tokens = ladder.escalated_budget();
+                observers.move_event(&record);
+                let escalated = RequestOptions {
+                    max_tokens: ladder.escalated_budget(),
+                    ..options.clone()
+                };
+                outcome = round.complete(&escalated);
             }
-            if let Some(reason) = response.finish_reason.as_deref()
-                && indicates_refusal(reason)
-            {
-                {
-                    let message = format!(
-                        "the provider refused the cross-chunk correction \
-                         (finish_reason {reason})"
+            match outcome {
+                CrossChunkOutcome::Valid(corrected) => outputs[output_index] = *corrected,
+                CrossChunkOutcome::Failed(message) => return Err(message),
+                CrossChunkOutcome::LengthLimited => {
+                    // ADR 0032: a correction the ladder cannot land is
+                    // a correction that left its issues standing — the
+                    // output keeps its accepted Stage 1 answer and the
+                    // re-check below rules on what stands (ADR 0022:
+                    // an alias is removed with accounting; anything
+                    // else fails the source). Never a truncated
+                    // correction imported.
+                    eprintln!(
+                        "taguru: extract: {source}: {label}: the cross-chunk correction was \
+                         cut off at the output limit{} — the truncated answer is discarded \
+                         and its issues stand as uncorrected",
+                        match budget {
+                            Some(_) => " even at the escalated budget",
+                            None => "",
+                        }
                     );
-                    observers.emit(
-                        &DiagnosticsAttempt {
-                            source,
-                            stage: "cross_chunk",
-                            chunk_index,
-                            attempt: 1,
-                            attempt_ref: &attempt_ref,
-                            corrects: corrected_attempt.as_ref(),
-                            piece_id,
-                            max_attempts: 1,
-                            state: "refusal",
-                            length_limited: false,
-                            elapsed,
-                            response: Some(&response),
-                            replayed_from: response.replayed_from.as_ref(),
-                            transport_retries: response.transport_retries,
-                            parse_error: Some(&message),
-                            validation_issues: None,
-                            removed_items: None,
-                            piece_bytes: None,
-                            requested_max_tokens: options.max_tokens,
-                            rung: rung_name,
-                        },
-                        &messages,
-                    );
-                }
-                return Err(format!(
-                    "{label}: the provider refused the cross-chunk correction \
-                     (finish_reason {reason})"
-                ));
-            }
-            if is_empty_answer(&response.content) {
-                {
-                    let message = empty_answer_diagnosis();
-                    observers.emit(
-                        &DiagnosticsAttempt {
-                            source,
-                            stage: "cross_chunk",
-                            chunk_index,
-                            attempt: 1,
-                            attempt_ref: &attempt_ref,
-                            corrects: corrected_attempt.as_ref(),
-                            piece_id,
-                            max_attempts: 1,
-                            state: "empty",
-                            length_limited: false,
-                            elapsed,
-                            response: Some(&response),
-                            replayed_from: response.replayed_from.as_ref(),
-                            transport_retries: response.transport_retries,
-                            parse_error: Some(&message),
-                            validation_issues: None,
-                            removed_items: None,
-                            piece_bytes: None,
-                            requested_max_tokens: options.max_tokens,
-                            rung: rung_name,
-                        },
-                        &messages,
-                    );
-                }
-                return Err(format!("{label}: {}", empty_answer_diagnosis()));
-            }
-            match evaluate_answer(
-                &response.content,
-                rules.as_ref(),
-                user_message_document(&user),
-                &self.vocabulary_allowlist,
-            ) {
-                Ok(evaluated) => {
-                    {
-                        observers.emit(
-                            &DiagnosticsAttempt {
-                                source,
-                                stage: "cross_chunk",
-                                chunk_index,
-                                attempt: 1,
-                                attempt_ref: &attempt_ref,
-                                corrects: corrected_attempt.as_ref(),
-                                piece_id,
-                                max_attempts: 1,
-                                state: "stop_valid",
-                                length_limited: false,
-                                elapsed,
-                                response: Some(&response),
-                                replayed_from: response.replayed_from.as_ref(),
-                                transport_retries: response.transport_retries,
-                                parse_error: None,
-                                validation_issues: None,
-                                removed_items: removed_item_texts(&evaluated.removed),
-                                piece_bytes: None,
-                                requested_max_tokens: options.max_tokens,
-                                rung: rung_name,
-                            },
-                            &messages,
-                        );
-                    }
-                    outputs[output_index] = ChunkOutput {
-                        output: evaluated.output,
-                        chunk_index,
-                        piece_id: piece_id.to_string(),
-                        attempt: Some(attempt_ref),
-                        user,
-                        answer: response.content,
-                        removed: evaluated.removed,
-                        unparsed: evaluated.unparsed,
-                    };
-                }
-                Err(AnswerFault::Syntax(error)) => {
-                    {
-                        observers.emit(
-                            &DiagnosticsAttempt {
-                                source,
-                                stage: "cross_chunk",
-                                chunk_index,
-                                attempt: 1,
-                                attempt_ref: &attempt_ref,
-                                corrects: corrected_attempt.as_ref(),
-                                piece_id,
-                                max_attempts: 1,
-                                state: "stop_malformed",
-                                length_limited: false,
-                                elapsed,
-                                response: Some(&response),
-                                replayed_from: response.replayed_from.as_ref(),
-                                transport_retries: response.transport_retries,
-                                parse_error: Some(&error),
-                                validation_issues: None,
-                                removed_items: None,
-                                piece_bytes: None,
-                                requested_max_tokens: options.max_tokens,
-                                rung: rung_name,
-                            },
-                            &messages,
-                        );
-                    }
-                    return Err(format!(
-                        "{label}: the cross-chunk correction was not the JSON object \
-                         asked for ({error})"
-                    ));
-                }
-                Err(AnswerFault::Invalid(issues)) => {
-                    {
-                        let message = format!(
-                            "the cross-chunk correction still left {} invalid item(s) \
-                             uncorrected: {}",
-                            issues.len(),
-                            issues.join("; ")
-                        );
-                        observers.emit(
-                            &DiagnosticsAttempt {
-                                source,
-                                stage: "cross_chunk",
-                                chunk_index,
-                                attempt: 1,
-                                attempt_ref: &attempt_ref,
-                                corrects: corrected_attempt.as_ref(),
-                                piece_id,
-                                max_attempts: 1,
-                                state: "stop_malformed",
-                                length_limited: false,
-                                elapsed,
-                                response: Some(&response),
-                                replayed_from: response.replayed_from.as_ref(),
-                                transport_retries: response.transport_retries,
-                                parse_error: Some(&message),
-                                validation_issues: Some(&issues),
-                                removed_items: None,
-                                piece_bytes: None,
-                                requested_max_tokens: options.max_tokens,
-                                rung: rung_name,
-                            },
-                            &messages,
-                        );
-                    }
-                    return Err(format!(
-                        "{label}: the cross-chunk correction still left {} invalid \
-                         item(s) uncorrected: {}",
-                        issues.len(),
-                        issues.join("; ")
-                    ));
                 }
             }
         }
@@ -1553,5 +1357,227 @@ pub(super) fn with_resume_hint(checkpoints: &CheckpointStore, message: String) -
             "{message} ({units} extracted unit(s) are checkpointed — a rerun without \
              --force resumes from them)"
         ),
+    }
+}
+
+/// What one Stage 2 corrective completion came back as. `Valid` is
+/// the corrected output the caller installs in place of the accepted
+/// Stage 1 one; `LengthLimited` is the one outcome the ladder can act
+/// on (ADR 0032: escalate once, then treat the issues as standing);
+/// `Failed` carries the source-failing message for everything else —
+/// transport, timeout, refusal, empty, malformed, or still invalid.
+pub(super) enum CrossChunkOutcome {
+    Valid(Box<ChunkOutput>),
+    LengthLimited,
+    Failed(String),
+}
+
+/// One output's corrective ask, bundled so the escalated resend
+/// (ADR 0032) sends exactly what the first round did — same messages,
+/// same attribution — with only the request options changed.
+pub(super) struct CrossChunkRound<'a> {
+    pub(super) completions: &'a Completions,
+    pub(super) observers: &'a Observers<'a>,
+    pub(super) source: &'a str,
+    pub(super) chunk_index: usize,
+    pub(super) piece_id: &'a str,
+    pub(super) corrected_attempt: Option<&'a AttemptRef>,
+    /// `chunk i/n`, the prefix of every failure message.
+    pub(super) label: &'a str,
+    pub(super) messages: &'a [serde_json::Value],
+    /// The output's own user message — carried into the corrected
+    /// `ChunkOutput` so a later correction can rebuild the same base.
+    pub(super) user: &'a str,
+    pub(super) rules: Option<&'a ItemRules>,
+    pub(super) vocabulary: &'a HashSet<String>,
+    pub(super) rung: Option<&'static str>,
+}
+
+impl CrossChunkRound<'_> {
+    /// One completion of the corrective ask under `options`, every
+    /// outcome recorded as a `stage: "cross_chunk"` attempt (ADR 0025)
+    /// exactly as before ADR 0032 — a round is one attempt, so the
+    /// escalated resend is a second round with its own record whose
+    /// `requested_max_tokens` shows the cap it carried, the `escalate`
+    /// move record between them (ADR 0029).
+    pub(super) fn complete(&self, options: &RequestOptions) -> CrossChunkOutcome {
+        let label = self.label;
+        let started = std::time::Instant::now();
+        let attempt_ref = self.completions.next_attempt();
+        let record = |state: &'static str,
+                      length_limited: bool,
+                      elapsed: std::time::Duration,
+                      response: Option<&ChatCompletion>,
+                      parse_error: Option<&str>,
+                      validation_issues: Option<&[String]>,
+                      removed_items: Option<Vec<String>>,
+                      transport_retries: usize,
+                      replayed_from: Option<&AttemptRef>| {
+            self.observers.emit(
+                &DiagnosticsAttempt {
+                    source: self.source,
+                    stage: "cross_chunk",
+                    chunk_index: self.chunk_index,
+                    attempt: 1,
+                    attempt_ref: &attempt_ref,
+                    corrects: self.corrected_attempt,
+                    piece_id: self.piece_id,
+                    max_attempts: 1,
+                    state,
+                    length_limited,
+                    elapsed,
+                    response,
+                    replayed_from,
+                    transport_retries,
+                    parse_error,
+                    validation_issues,
+                    removed_items,
+                    piece_bytes: None,
+                    requested_max_tokens: options.max_tokens,
+                    rung: self.rung,
+                },
+                self.messages,
+            );
+        };
+        let response = match self
+            .completions
+            .complete(self.piece_id, self.messages, options)
+        {
+            Ok(response) => response,
+            Err(error) => {
+                let message = error.to_string();
+                record(
+                    match error.kind {
+                        ChatFailure::Timeout => "timeout",
+                        ChatFailure::Transport => "transport",
+                    },
+                    false,
+                    started.elapsed(),
+                    None,
+                    Some(&message),
+                    None,
+                    None,
+                    error.transport_retries,
+                    error.replayed_from.as_ref(),
+                );
+                return CrossChunkOutcome::Failed(format!("{label}: {error}"));
+            }
+        };
+        let elapsed = started.elapsed();
+        let transport_retries = response.transport_retries;
+        let replayed_from = response.replayed_from.as_ref();
+        if indicates_length_limit(response.finish_reason.as_deref()) {
+            record(
+                "length_limited",
+                true,
+                elapsed,
+                Some(&response),
+                Some("the cross-chunk correction was cut off at the output limit"),
+                None,
+                None,
+                transport_retries,
+                replayed_from,
+            );
+            return CrossChunkOutcome::LengthLimited;
+        }
+        if let Some(reason) = response.finish_reason.as_deref()
+            && indicates_refusal(reason)
+        {
+            let message =
+                format!("the provider refused the cross-chunk correction (finish_reason {reason})");
+            record(
+                "refusal",
+                false,
+                elapsed,
+                Some(&response),
+                Some(&message),
+                None,
+                None,
+                transport_retries,
+                replayed_from,
+            );
+            return CrossChunkOutcome::Failed(format!("{label}: {message}"));
+        }
+        if is_empty_answer(&response.content) {
+            let message = empty_answer_diagnosis();
+            record(
+                "empty",
+                false,
+                elapsed,
+                Some(&response),
+                Some(&message),
+                None,
+                None,
+                transport_retries,
+                replayed_from,
+            );
+            return CrossChunkOutcome::Failed(format!("{label}: {message}"));
+        }
+        match evaluate_answer(
+            &response.content,
+            self.rules,
+            user_message_document(self.user),
+            self.vocabulary,
+        ) {
+            Ok(evaluated) => {
+                record(
+                    "stop_valid",
+                    false,
+                    elapsed,
+                    Some(&response),
+                    None,
+                    None,
+                    removed_item_texts(&evaluated.removed),
+                    transport_retries,
+                    replayed_from,
+                );
+                CrossChunkOutcome::Valid(Box::new(ChunkOutput {
+                    output: evaluated.output,
+                    chunk_index: self.chunk_index,
+                    piece_id: self.piece_id.to_string(),
+                    attempt: Some(attempt_ref),
+                    user: self.user.to_string(),
+                    answer: response.content,
+                    removed: evaluated.removed,
+                    unparsed: evaluated.unparsed,
+                }))
+            }
+            Err(AnswerFault::Syntax(error)) => {
+                record(
+                    "stop_malformed",
+                    false,
+                    elapsed,
+                    Some(&response),
+                    Some(&error),
+                    None,
+                    None,
+                    transport_retries,
+                    replayed_from,
+                );
+                CrossChunkOutcome::Failed(format!(
+                    "{label}: the cross-chunk correction was not the JSON object asked for \
+                     ({error})"
+                ))
+            }
+            Err(AnswerFault::Invalid(issues)) => {
+                let message = format!(
+                    "the cross-chunk correction still left {} invalid item(s) uncorrected: {}",
+                    issues.len(),
+                    issues.join("; ")
+                );
+                record(
+                    "stop_malformed",
+                    false,
+                    elapsed,
+                    Some(&response),
+                    Some(&message),
+                    Some(&issues),
+                    None,
+                    transport_retries,
+                    replayed_from,
+                );
+                CrossChunkOutcome::Failed(format!("{label}: {message}"))
+            }
+        }
     }
 }

@@ -435,7 +435,7 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
     <p>Model output is treated as untrusted input, and the contract is enforced on this side of the wire:</p>
     <ul>
       <li>Exact duplicate triples fold into one line (the in-document paraphrase rule, applied mechanically).</li>
-      <li>Items that could never import as answered are <b>removed mechanically</b>, before any corrective turn (ADR 0013): an association or alias with a required field missing or empty, an alias that maps a spelling to itself, an alias whose canonical names nothing the document's associations contain, an alias whose spelling an <i>earlier</i> document of the same run (or the <code>--vocabulary</code> context) already settled on as a different concept or label — import would refuse that rewire and stop the stream, so it never gets written — a relation label that is a single character (most often a bare particle picked up as the whole relation; two or more characters survives — same anchor-nothing judgment as a single-character candidate name), and a subject/object that never appears in the document text (a whitespace- and case-blind check, so a normalized compound like <code>プール最大接続数</code> for a document that says <code>プールの最大接続数</code> still passes). Every removal is named path-first on stderr, counted on the report line as <code>removed (mechanical validation)</code>, and listed in the <a href="#diagnostics">diagnostics sidecar</a> — never a silent drop. One removal class is the exception to "before any corrective turn": an alias whose in-document shadowing or conflict the one Stage 2 corrective turn leaves standing is removed <i>after</i> that turn (ADR 0022), with the same accounting.</li>
+      <li>Items that could never import as answered are <b>removed mechanically</b>, before any corrective turn (ADR 0013): an association or alias with a required field missing or empty, an alias that maps a spelling to itself, an alias whose canonical names nothing the document's associations contain, an alias whose spelling an <i>earlier</i> document of the same run (or the <code>--vocabulary</code> context) already settled on as a different concept or label — import would refuse that rewire and stop the stream, so it never gets written — a relation label that is a single character (most often a bare particle picked up as the whole relation; two or more characters survives — same anchor-nothing judgment as a single-character candidate name), and a subject/object that never appears in the document text (a whitespace- and case-blind check, so a normalized compound like <code>プール最大接続数</code> for a document that says <code>プールの最大接続数</code> still passes). Every removal is named path-first on stderr, counted on the report line as <code>removed (mechanical validation)</code>, and listed in the <a href="#diagnostics">diagnostics sidecar</a> — never a silent drop. One removal class is the exception to "before any corrective turn": an alias whose in-document shadowing or conflict the one Stage 2 corrective turn leaves standing is removed <i>after</i> that turn (ADR 0022), with the same accounting — a correction the provider cut off at the output limit counts as leaving its issues standing (ADR 0032; see the ladder under <a href="#structured-output">structured output</a> for the one escalated resend it gets first).</li>
       <li>Invalid items removal cannot judge — wrong-typed or oversized fields, zero/non-finite/over-cap weights, unknown alias kinds, shadowing or conflicting aliases, out-of-range questions — earn a <b>path-addressed corrective turn</b> by default (see below): a present-but-wrong value is content the model can actually fix.</li>
       <li>A missing or out-of-range paragraph tag loses <b>only the tag</b>, never the fact — the association keeps the model's subject/label/object/weight judgment as-is.</li>
       <li>An alias is adopted only when its canonical is a name this file's associations register, and never when the alias spelling is itself such a name (either would fail the batch at apply time).</li>
@@ -646,6 +646,13 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       size (the split is the retry; transport failures, 429 and 5xx keep their four attempts),
       never escalated (a larger output cap cannot make a slow piece faster) — and at the split
       floor it fails the source with the timeout named and the two knobs that would have helped.
+      The Stage 2 cross-chunk corrective turn climbs the same ladder as far as it goes (ADR 0032):
+      a corrective answer that ends at the cap is resent <b>once</b> at the escalated budget, the
+      truncated answer discarded; but there is no piece to split, so a resend cut off too — or a
+      cut-off with no budget configured — is treated as a correction that left its issues
+      standing: the output keeps its accepted Stage 1 answer and ADR 0022 rules on what stands (an
+      alias is removed with accounting, anything else fails the source). A truncated correction is
+      never imported.
       Policy refusals (<code>finish_reason: content_filter</code>) are terminal immediately —
       no corrective turn argues with a policy. Both controls are manifest compute inputs like
       <code>--questions</code>: changing them re-extracts.
@@ -1084,7 +1091,8 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       Nothing is capped. The ladder's own actions land beside the attempts as
       <code>kind: "move"</code> records
       (<a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0029-ladder-move-records.md">ADR
-      0029</a>): <code>move</code> is <code>escalate</code> (ADR 0019;
+      0029</a>): <code>move</code> is <code>escalate</code> (ADR 0019, and ADR 0032's
+      Stage 2 resend — the reason names the cross-chunk correction;
       <code>from_max_tokens</code>/<code>to_max_tokens</code>), <code>demote</code> (ADR 0021;
       <code>from_rung</code>/<code>to_rung</code>), or <code>split</code> (ADR 0001 §7 / ADR
       0020; <code>piece_bytes</code>/<code>split_cap</code>/<code>sub_pieces</code>, the reason
