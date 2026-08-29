@@ -386,6 +386,12 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       <code>--resume-from</code> and <code>--replay</code> are mutually exclusive — the former
       already selects one of the latter's modes, so giving both is a usage error rather than a
       silent "last one wins". <code>--replay-from DIR</code> still applies underneath either.
+      <code>--resume-from</code>, whatever step it names, also bypasses <a
+      href="#manifest">the manifest skip</a> and <a href="#checkpoints">the checkpoint store</a> —
+      naming a resume point is a deliberate ask to redo the document, and an unchanged-document
+      skip answering that ask with nothing at all would defeat it just as much for
+      <code>read</code>/<code>plan</code>/<code>steer</code> (which trigger no replay at all) as
+      it would under a plain <code>--replay</code> run.
     </p>
   </section>
 

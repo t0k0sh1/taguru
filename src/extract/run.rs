@@ -162,6 +162,16 @@ pub(super) struct Run {
     /// (ADR 0031 §3.6). `false` for every other `--resume-from` value
     /// and off `--resume-from` entirely.
     pub(super) disable_system_pin: bool,
+    /// `--resume-from` was given at all, whatever step it named (#822)
+    /// — `true` even for `read`/`plan`/`steer`, where
+    /// [`resume_from_fold`] leaves `replaying` `false` since there is
+    /// nothing to replay against. The manifest skip and the checkpoint
+    /// store both go inert under this too: the whole point of naming a
+    /// resume step is a deliberate redo, and a skip silently answering
+    /// "nothing changed, did nothing" would defeat that intent exactly
+    /// as much here as under `--replay` (ADR 0031 §3.5's reasoning,
+    /// extended).
+    pub(super) resume_requested: bool,
 }
 
 impl Run {
@@ -417,7 +427,7 @@ impl Run {
         // whichever code ran the ORIGINAL extraction, which for "change
         // the validation rule, replay the rest" is exactly the answer
         // replay must not silently reuse.
-        if self.force || self.replaying {
+        if self.force || self.replaying || self.resume_requested {
             CheckpointStore::empty(path, fingerprint)
         } else {
             CheckpointStore::load(path, &fingerprint)
@@ -511,9 +521,14 @@ impl Run {
         // ADR 0031 §3.5: the skip exists to avoid paying for model
         // calls on an unchanged document — under replay a completion is
         // free whether or not it hits, so the skip's reason to exist is
-        // gone.
+        // gone. #822 extends the same reasoning to `--resume-from`
+        // whatever step it names: it is a deliberate ask to redo this
+        // document, and "unchanged, skipped" would silently answer
+        // that ask with nothing at all — even for `read`/`plan`/`steer`,
+        // where nothing is satisfied from a record either.
         if !self.force
             && !self.replaying
+            && !self.resume_requested
             && self.manifest.matches(source, &inputs)
             && let Some(recorded) = recorded_output
                 .as_deref()

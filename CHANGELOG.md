@@ -68,11 +68,14 @@ Entries that change an on-disk format or a response shape say so.
   `read`/`plan`/`steer` fold onto a plain, unreplayed run (nothing before
   them is recorded at all); `prompt` is `--replay auto` with the #821
   system-prompt pin turned off, so a settings change the pin would
-  otherwise absorb falls through to a live call instead. Mutually
-  exclusive with `--replay` (a usage error, not a silent override); an
-  unknown step name is also a usage error naming the closed vocabulary.
-  `docs/extract.html`'s "The pipeline" section gains the step → behavior
-  table.
+  otherwise absorb falls through to a live call instead. Whatever step it
+  names, `--resume-from` also bypasses the manifest skip and the
+  checkpoint store — naming a resume point is a deliberate ask to redo
+  the document, and an unchanged-document skip would silently answer
+  that ask with nothing at all. Mutually exclusive with `--replay` (a
+  usage error, not a silent override); an unknown step name is also a
+  usage error naming the closed vocabulary. `docs/extract.html`'s "The
+  pipeline" section gains the step → behavior table.
 
 ### Changed
 

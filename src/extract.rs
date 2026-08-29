@@ -1011,6 +1011,7 @@ pub fn run(args: &[String]) -> i32 {
         replaying,
         replay_from,
         disable_system_pin,
+        resume_requested: args.resume_from.is_some(),
     };
 
     let mut written = 0usize;

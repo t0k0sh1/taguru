@@ -8292,21 +8292,25 @@ fn resume_from_read_plan_steer_all_fold_into_an_unreplayed_run() {
         );
         assert_eq!(code, 0, "{step}: stdout: {stdout}\nstderr: {stderr}");
 
-        // --force: a plain (non-replaying) second run against the same
-        // unchanged document would otherwise hit the manifest skip and
-        // make no call at all — orthogonal to what --resume-from
-        // itself is being proven here, so it must be bypassed to reach
-        // a genuine live call.
+        // No --force: --resume-from must bypass the manifest skip on
+        // its own (the whole point of naming a resume step is a
+        // deliberate redo — a silent "unchanged, skipped" would defeat
+        // that intent exactly as much here as it would under
+        // --replay).
         let (url2, requests2) = stub_chat_server(vec![good]);
-        let (code2, _stdout2, stderr2) = run_extract(
+        let (code2, stdout2, stderr2) = run_extract(
             &out,
             &[
                 ("TAGURU_EXTRACT_URL", url2.as_str()),
                 ("TAGURU_EXTRACT_MODEL", "stub-model"),
             ],
-            &["--context", "c", "--force", "--resume-from", step, doc_src],
+            &["--context", "c", "--resume-from", step, doc_src],
         );
         assert_eq!(code2, 0, "{step}: stderr: {stderr2}");
+        assert!(
+            !stdout2.contains("unchanged, skipped"),
+            "{step}: --resume-from must bypass the manifest skip: {stdout2}"
+        );
         assert_eq!(
             requests2.join().unwrap().len(),
             1,
