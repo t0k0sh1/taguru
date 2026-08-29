@@ -1017,7 +1017,10 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       group, and run (loss rates by reason, paragraph coverage, correction success, attempt-state
       and ladder-move counts, label concentration, graph shape, and time/token/money cost,
       with <code>--compare</code> for run-to-run deltas); <code>--help</code> documents the
-      ledger and price inputs.
+      ledger and price inputs. A document that failed leaves an attempts log and no trace
+      (there was no batch to trace); the tables count it under <code>failed</code>, apart
+      from <code>docs</code>, with its attempts, moves, and cost in every scope's sums and its
+      quality columns empty — so the cost of failing is part of the run's cost, not invisible.
       Joins: item → piece by <code>piece_id</code>; piece → chunk by <code>chunk_index</code> or
       <code>chunk_sha256</code>; piece → the sidecar's <code>attempt</code> record by
       <code>(run_id, attempt_seq)</code> when that run's sidecar was kept; any record → the
