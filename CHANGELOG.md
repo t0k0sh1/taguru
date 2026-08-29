@@ -76,6 +76,21 @@ Entries that change an on-disk format or a response shape say so.
   usage error, not a silent override); an unknown step name is also a
   usage error naming the closed vocabulary. `docs/extract.html`'s "The
   pipeline" section gains the step → behavior table.
+- The `attempt` record gains `replayed_from` — the original `{run_id,
+  attempt_seq}` a completion satisfied from `--replay` reused, absent on
+  every live completion (ADR 0031 §3.2, #823). `scripts/extract_metrics.py`
+  now skips any `attempt` record carrying it entirely (state, transport
+  retries, elapsed seconds, tokens): the replay's own numbers describe
+  the replay itself (near-zero time, the original's tokens restated),
+  so counting it too would double the cost while zeroing out the time.
+  `docs/extract.html` documents the field, three known limits of
+  content-addressed matching (corrective-turn strict failures,
+  ambiguous-pin fallback, and `rung` never gating a match), and
+  `docs/long-running.html` cross-links `--resume-from` as the cheaper
+  alternative to the manifest skip's all-or-nothing redo.
+  **On-disk format change**: one additive field on the `attempt` record
+  in `--out/.extract-trace/*.attempts.jsonl`, written only under
+  `--replay`.
 
 ### Changed
 

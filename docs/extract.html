@@ -1070,6 +1070,17 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       attempt's own last turn, adoption is the trace <code>piece</code> record naming this
       attempt, and what was flagged-then-removed instead lands in the trace's <code>loss</code>
       records.
+      A completion satisfied from a recorded conversation instead of a live call (<a
+      href="#replay"><code>--replay</code></a>) carries <code>replayed_from</code> — the same
+      <code>{run_id, attempt_seq}</code> shape as <code>corrects</code>, but naming the <em>original</em>
+      attempt this one's answer came from, absent on every live completion (ADR 0031 §3.2, #823).
+      Its own <code>elapsed_seconds</code>/<code>input_tokens</code>/<code>output_tokens</code>
+      describe the replay itself — no model call made, so the time is near zero and the tokens are
+      the original's own, restated — never the replay's real cost, which is nothing; a rollup that
+      sums these across a file must skip any record carrying this field, or double-count every
+      replayed completion's tokens while zeroing out its time
+      (<a href="https://github.com/t0k0sh1/taguru/blob/main/scripts/extract_metrics.py">
+      <code>scripts/extract_metrics.py</code></a> already does).
       Nothing is capped. The ladder's own actions land beside the attempts as
       <code>kind: "move"</code> records
       (<a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0029-ladder-move-records.md">ADR
@@ -1187,6 +1198,20 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       after a validation-rule change, a permanent limit of content-addressed matching, not an
       oversight.
     </p>
+    <p class="note">
+      Three known limits of matching by conversation content, not oversights: <b>(1)</b> a
+      document whose original extraction needed a corrective turn can fail
+      <code>--replay strict</code> after a validation-rule change, since a corrective turn's own
+      ask is never pinned (above); <b>(2)</b> a document whose log names more than one distinct
+      <code>system</code> record never pins one (above) — a checkpoint-resumed document spanning a
+      run where the vocabulary differed; <b>(3)</b> <code>rung</code> (the structured-output rung
+      an attempt was asked under) is never part of the matching key — under
+      <code>--structured-output auto</code> with <code>--parallel</code>, which piece demotes to
+      which rung can interleave differently run to run (<a href="#attempts">the attempts log</a>),
+      so a two-machine replay's single pinned rung (<a href="#two-machines">below</a>) need not
+      match what any individual piece actually recorded; a hit is still decided purely by
+      conversation content, never by rung.
+    </p>
     <h3 id="two-machines">Recording here, replaying there</h3>
     <p>
       Running the expensive step on one machine and the rest on another is what
@@ -1197,6 +1222,11 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       live run</a>). Combining this with <code>--structured-output auto</code> is a usage error:
       the ADR 0021 probe needs a live call by construction, so pin a rung explicitly instead — the
       recorded <code>attempt.rung</code> field names the one the original run settled on.
+      <a href="#resume-from"><code>--resume-from</code></a> is not a substitute here: every one of
+      its step names except <code>read</code>/<code>plan</code>/<code>steer</code> folds onto
+      <code>--replay auto</code>, not <code>strict</code>, so an <code>auto</code> run still needs
+      a live endpoint for whatever falls through — use <code>--replay strict</code> directly for
+      the machine with none.
     </p>
     <ol>
       <li>On the machine with model access, run <code>taguru extract</code> as usual — with

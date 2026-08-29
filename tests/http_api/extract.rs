@@ -7756,6 +7756,31 @@ fn replay_strict_reuses_a_recorded_run_with_no_model_endpoint_at_all() {
     assert_eq!(summary["replayed"], 1);
     assert_eq!(summary["live"], 0);
 
+    // #823: the replay run's own re-emitted `attempt` record names the
+    // original one its answer came from — so extract_metrics.py can
+    // skip it (its elapsed_seconds/tokens describe the replay, not the
+    // real completion) without losing the join back to the real one.
+    let original_attempt = records_before
+        .iter()
+        .find(|r| r["kind"] == "attempt")
+        .expect("the live run must record its one attempt");
+    let replayed_attempt = second_run
+        .iter()
+        .find(|r| r["kind"] == "attempt")
+        .expect("the replay run must also emit an attempt record");
+    assert_eq!(
+        replayed_attempt["replayed_from"]["run_id"], original_attempt["run_id"],
+        "{replayed_attempt}"
+    );
+    assert_eq!(
+        replayed_attempt["replayed_from"]["attempt_seq"], original_attempt["attempt_seq"],
+        "{replayed_attempt}"
+    );
+    assert!(
+        original_attempt.get("replayed_from").is_none(),
+        "the original, live attempt never names an origin: {original_attempt}"
+    );
+
     let _ = std::fs::remove_dir_all(&docs);
     let _ = std::fs::remove_dir_all(&out);
 }

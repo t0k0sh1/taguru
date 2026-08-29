@@ -2937,6 +2937,7 @@ fn classify_attempt_reads_provider_metadata_before_the_parse() {
         finish_reason: Some("length".to_string()),
         usage: None,
         transport_retries: 0,
+        replayed_from: None,
     };
     assert!(matches!(
         classify_attempt(&completion, None, "", &HashSet::new()),
@@ -2950,6 +2951,7 @@ fn classify_attempt_reads_provider_metadata_before_the_parse() {
         finish_reason: Some("max_tokens".to_string()),
         usage: None,
         transport_retries: 0,
+        replayed_from: None,
     };
     assert!(matches!(
         classify_attempt(&empty_at_cap, None, "", &HashSet::new()),
@@ -2960,6 +2962,7 @@ fn classify_attempt_reads_provider_metadata_before_the_parse() {
         finish_reason: Some("content_filter".to_string()),
         usage: None,
         transport_retries: 0,
+        replayed_from: None,
     };
     assert!(matches!(
         classify_attempt(&refused, None, "", &HashSet::new()),
@@ -2970,6 +2973,7 @@ fn classify_attempt_reads_provider_metadata_before_the_parse() {
         finish_reason: Some("stop".to_string()),
         usage: None,
         transport_retries: 0,
+        replayed_from: None,
     };
     assert!(matches!(
         classify_attempt(&empty, None, "", &HashSet::new()),
@@ -2980,6 +2984,7 @@ fn classify_attempt_reads_provider_metadata_before_the_parse() {
         finish_reason: Some("stop".to_string()),
         usage: None,
         transport_retries: 0,
+        replayed_from: None,
     };
     assert!(matches!(
         classify_attempt(&ok, None, "", &HashSet::new()),
@@ -2990,6 +2995,7 @@ fn classify_attempt_reads_provider_metadata_before_the_parse() {
         finish_reason: None,
         usage: None,
         transport_retries: 0,
+        replayed_from: None,
     };
     assert!(matches!(
         classify_attempt(&malformed, None, "", &HashSet::new()),
@@ -3010,6 +3016,7 @@ fn classify_attempt_reads_provider_metadata_before_the_parse() {
         finish_reason: Some("stop".to_string()),
         usage: None,
         transport_retries: 0,
+        replayed_from: None,
     };
     assert!(matches!(
         classify_attempt(&invalid, Some(&strict_rules), "a l b", &HashSet::new()),
@@ -6273,7 +6280,18 @@ fn replay_index_reconstructs_a_timeout_as_a_chat_error() {
     let messages = replay_request_messages(&turns);
 
     match index.lookup("piece-1", &messages, None) {
-        ReplayLookup::Hit(Err(error)) => assert_eq!(error.kind, ChatFailure::Timeout),
+        ReplayLookup::Hit(Err(error)) => {
+            assert_eq!(error.kind, ChatFailure::Timeout);
+            // #823: a replayed failure names its origin too, same as a
+            // replayed success — extract_metrics.py must exclude it
+            // from cost accounting exactly the same way.
+            let origin = error
+                .replayed_from
+                .as_ref()
+                .expect("a replayed timeout must name its origin");
+            assert_eq!(origin.run_id, "run-1");
+            assert_eq!(origin.attempt_seq, 1);
+        }
         _ => panic!("expected a replayed timeout, got a different outcome"),
     }
 }
@@ -6743,6 +6761,72 @@ fn completions_document_counts_tracks_both_replayed_and_live() {
     assert_eq!(live.content, "live answer");
 
     assert_eq!(completions.document_counts(), (1, 1));
+}
+
+/// #823: a hit's `ChatCompletion` names the original `(run_id,
+/// attempt_seq)` it reused — so `AttemptFullRecord::replayed_from`
+/// (attempts.rs) has something to point a reader (or
+/// `extract_metrics.py`'s cost rollup) back at. A live completion
+/// carries no such origin at all.
+#[test]
+fn a_replayed_completion_names_its_original_attempt() {
+    let path = replay_fixture_path("replayed-from");
+    let hit_turns = [("user", "a piece with a recorded answer")];
+    write_replay_log(
+        &path,
+        &[serde_json::json!({
+            "kind": "attempt",
+            "run_id": "run-original",
+            "attempt_seq": 7,
+            "piece_id": "piece-hit",
+            "source": "doc.md",
+            "chunk_index": 0,
+            "stage": "base",
+            "attempt": 1,
+            "max_attempts": 4,
+            "state": "stop_valid",
+            "length_limited": false,
+            "transport_retries": 0,
+            "elapsed_seconds": 1.0,
+            "requested_max_tokens": serde_json::Value::Null,
+            "finish_reason": "stop",
+            "input_tokens": 10,
+            "output_tokens": 20,
+            "messages": hit_turns
+                .iter()
+                .map(|(role, content)| replay_turn_json(role, content))
+                .collect::<Vec<_>>(),
+            "answer": "recorded answer",
+            "parse_error": serde_json::Value::Null,
+            "validation_issues": serde_json::Value::Null,
+            "removed_items": serde_json::Value::Null,
+        })],
+    );
+    let index = ReplayIndex::load(&path);
+
+    let chat = ScriptedChat::start(vec![chat_answer("live answer", "stop")]);
+    let mut completions = Completions::new(Some(chat.client()));
+    completions.begin_document(Some(index), ReplayMode::Auto);
+
+    let hit_messages = replay_request_messages(&hit_turns);
+    let hit = completions
+        .complete("piece-hit", &hit_messages, &RequestOptions::default())
+        .expect("the recorded piece must replay");
+    let origin = hit
+        .replayed_from
+        .as_ref()
+        .expect("a replayed completion must name its origin");
+    assert_eq!(origin.run_id, "run-original");
+    assert_eq!(origin.attempt_seq, 7);
+
+    let miss_messages = replay_request_messages(&[("user", "an unrecorded piece")]);
+    let live = completions
+        .complete("piece-miss", &miss_messages, &RequestOptions::default())
+        .expect("--replay auto must fall through to the live client");
+    assert!(
+        live.replayed_from.is_none(),
+        "a live completion has no origin to name"
+    );
 }
 
 #[test]

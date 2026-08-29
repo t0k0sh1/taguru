@@ -64,6 +64,12 @@ pub(crate) struct ChatError {
     /// (the first try counts as 0) — [`ChatClient::complete`] stamps
     /// it at every return; [`ChatError::new`] starts it at 0.
     pub(crate) transport_retries: usize,
+    /// ADR 0031 §3.2 (#823): the original attempt this error reused,
+    /// when it reconstructs a recorded `timeout`/`transport` outcome
+    /// instead of a live failure — mirrors [`ChatCompletion::replayed_from`];
+    /// `None` at every other construction site, all of them
+    /// [`ChatError::new`].
+    pub(crate) replayed_from: Option<AttemptRef>,
 }
 
 impl ChatError {
@@ -72,6 +78,7 @@ impl ChatError {
             kind,
             message,
             transport_retries: 0,
+            replayed_from: None,
         }
     }
 }
@@ -140,6 +147,13 @@ pub(crate) struct ChatCompletion {
     /// `transport`/429/5xx retries ADR 0001 §10 folds into one
     /// attempt, now counted on it.
     pub(crate) transport_retries: usize,
+    /// ADR 0031 §3.2 (#823): the original attempt this completion
+    /// reused, when it came from `--replay` instead of a live call —
+    /// `None` for every completion `ChatClient::complete` itself
+    /// builds (the only other construction site). `Completions::complete`
+    /// is the sole caller that can ever see `Some` here, since only it
+    /// consults a `ReplayIndex` at all.
+    pub(crate) replayed_from: Option<AttemptRef>,
 }
 
 /// The optional OpenAI-compatible parameters one completion carries
@@ -360,5 +374,6 @@ pub(super) fn parse_chat_completion(body: ureq::Body) -> Result<ChatCompletion, 
         finish_reason,
         usage,
         transport_retries: 0,
+        replayed_from: None,
     })
 }

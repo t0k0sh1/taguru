@@ -134,6 +134,7 @@ impl AttemptLog {
             run_id: &attempt.attempt_ref.run_id,
             attempt_seq: attempt.attempt_ref.attempt_seq,
             corrects: attempt.corrects,
+            replayed_from: attempt.replayed_from,
             piece_id: attempt.piece_id,
             source: attempt.source,
             chunk_index: attempt.chunk_index,
@@ -290,6 +291,15 @@ struct AttemptFullRecord<'a> {
     /// which recorded no attempt to name.
     #[serde(skip_serializing_if = "Option::is_none")]
     corrects: Option<&'a AttemptRef>,
+    /// ADR 0031 §3.2 (#823): the original attempt whose recorded
+    /// answer this one reused, when it came from `--replay` instead of
+    /// a live call — absent on a live completion. `elapsed_seconds`/
+    /// `input_tokens`/`output_tokens` here describe the replay itself
+    /// (near-zero, no model call made — the original's real numbers
+    /// sit on the named attempt), so a cost/time rollup must skip any
+    /// record carrying this field to avoid double-counting.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    replayed_from: Option<&'a AttemptRef>,
     piece_id: &'a str,
     source: &'a str,
     chunk_index: usize,
