@@ -9,6 +9,17 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Fixed
 
+- `scripts/extract_metrics.py` now counts a document that failed — an
+  attempts log with no trace beside it, the log ADR 0025 keeps for
+  exactly this — as `failed`, apart from `documents`, with its attempts,
+  ladder moves, and time/token/money cost rolled into every scope's sums
+  and its quality metrics left empty; the document table marks the row
+  `(failed)`. Before, such a document was silently absent from every
+  table (an out-dir holding only failures answered `no traced documents
+  found`), so lost cost and move counts were understated. Additive
+  `failed` keys in the JSON report; the markdown tables gain a `failed`
+  column. #807.
+
 - `taguru extract --vocabulary DIR` and `taguru anchoring --vocabulary DIR`
   read the directory's `*.jsonl` files only — sorted by name,
   non-recursive, the rule `taguru import DIR` and `taguru anchoring DIR`
