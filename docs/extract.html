@@ -157,7 +157,8 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
                     (ADR 0014)
 --vocabulary PATH   steer spellings toward a target context's existing
                     vocabulary: PATH is an exported batch stream or a
-                    directory of them (taguru export --out DIR); concept
+                    directory of them — its *.jsonl files, so an extract
+                    --out DIR works too (taguru export --out DIR); concept
                     names and labels are offered as preferred spellings,
                     and a context spelling never fails the occurrence
                     check; off by default, content-digest re-extracts
@@ -462,8 +463,11 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
     <p>
       <code>--vocabulary</code> (ADR 0015, #496 S3) is the cross-document half of the same
       idea: point it at an exported batch stream of the target context (<code>taguru export
-      --out DIR</code>, or <code>GET /contexts/{name}/export</code> saved to disk — a file or
-      a directory of files) and the context's own concept names and relation labels are
+      --out DIR</code>, or <code>GET /contexts/{name}/export</code> saved to disk — a file, or
+      a directory read by the same rule as <code>taguru import DIR</code>: its
+      <code>*.jsonl</code> files, sorted, non-recursive, so a previous extract's
+      <code>--out</code> directory serves too, its <code>.extract-manifest.json</code> and
+      <code>.extract-trace/</code> left alone) and the context's own concept names and relation labels are
       offered as preferred spellings, with one extra instruction: use the context's exact
       spelling <i>even when the document spells the same entity differently</i>. That is the
       <code>cargo-nextest</code>/<code>nextest</code> twin being prevented at answer time

@@ -52,8 +52,9 @@ output; directories expand to their *.jsonl files):
   locator validity  cited associations whose paragraph actually holds
                     the subject or the object (alias group included)
 
-  --vocabulary PATH   batch stream file(s) (a file or a directory, the
-                      `taguru export` shape) whose concept aliases
+  --vocabulary PATH   batch stream file(s) (a file, or a directory's
+                      *.jsonl — the `taguru export` shape; an extract
+                      --out works too) whose concept aliases
                       extend each name's alias group — the spellings
                       the target context already settled on
   --json FILE         write the per-document report as JSON (the shape
@@ -225,16 +226,23 @@ fn expand(inputs: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
 }
 
 /// `--vocabulary`'s concept aliases: every batch of every stream under
-/// the path (a file, or a directory of files — the `taguru export`
-/// shape), as (spelling → canonical) pairs.
+/// the path (a file, or a directory of `*.jsonl` files — the `taguru
+/// export` shape, read by [`expand`]'s rule so an extract `--out`
+/// directory's `.extract-manifest.json` is never parsed as a stream,
+/// #805), as (spelling → canonical) pairs.
 fn harvest_aliases(path: &Path) -> Result<Vec<(String, String)>, String> {
     let files: Vec<PathBuf> = if path.is_dir() {
         let mut found: Vec<PathBuf> = std::fs::read_dir(path)
             .map_err(|error| format!("cannot read {}: {error}", path.display()))?
             .filter_map(|entry| entry.ok())
             .map(|entry| entry.path())
-            .filter(|path| path.is_file())
+            .filter(|path| {
+                path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("jsonl")
+            })
             .collect();
+        if found.is_empty() {
+            return Err(format!("no .jsonl files under {}", path.display()));
+        }
         found.sort();
         found
     } else {
@@ -483,6 +491,43 @@ mod tests {
             source: None,
             paragraph,
         }
+    }
+
+    /// #805: `--vocabulary DIR` reads the directory's `*.jsonl` only
+    /// — [`expand`]'s rule — so an extract `--out` directory's
+    /// `.extract-manifest.json` is never parsed as a stream, and a
+    /// directory with no `.jsonl` is named as such.
+    #[test]
+    fn harvest_aliases_reads_only_jsonl_files_from_a_directory() {
+        let dir = std::env::temp_dir().join(format!(
+            "taguru-anchoring-vocab-jsonl-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("prior.jsonl"),
+            "{\"taguru_batch\":1,\"context\":\"c\",\"source\":\"prior.md\"}\n\
+             {\"subject\":\"青嶺酒造\",\"label\":\"杜氏\",\"object\":\"高瀬\",\"weight\":1.0}\n\
+             {\"alias\":\"あおみね\",\"canonical\":\"青嶺酒造\",\"kind\":\"concept\"}\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join(".extract-manifest.json"), "{}\n").unwrap();
+        std::fs::write(dir.join("README.txt"), "not a stream").unwrap();
+
+        let aliases = harvest_aliases(&dir).unwrap();
+        assert_eq!(
+            aliases,
+            vec![("あおみね".to_string(), "青嶺酒造".to_string())]
+        );
+
+        let empty = dir.join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        std::fs::write(empty.join(".extract-manifest.json"), "{}\n").unwrap();
+        let error = harvest_aliases(&empty).unwrap_err();
+        assert_eq!(error, format!("no .jsonl files under {}", empty.display()));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The issue's own example: 「ごはん/ご飯」×「食べる/たべる」 — any

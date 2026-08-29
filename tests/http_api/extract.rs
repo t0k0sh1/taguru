@@ -1691,6 +1691,72 @@ fn extract_vocabulary_steers_spellings_and_is_a_computation_input() {
     let _ = std::fs::remove_dir_all(&docs);
     let _ = std::fs::remove_dir_all(&out);
 }
+/// #805: an extract `--out` directory handed back as `--vocabulary`
+/// — steering a run toward its own previous output — loads the
+/// batches and ignores the `.extract-manifest.json` sidecar beside
+/// them (the `*.jsonl`-only rule `taguru import DIR` reads by).
+#[test]
+fn extract_vocabulary_accepts_a_previous_extract_out_directory() {
+    let docs = batch_dir("extract-vocab-outdir-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "CI のテストランナーは cargo-nextest。").unwrap();
+    let prior = batch_dir("extract-vocab-outdir-prior");
+    let out = batch_dir("extract-vocab-outdir-out");
+
+    let reply = json!({"associations": [
+        {"subject": "CI", "label": "テストランナー", "object": "cargo-nextest"}
+    ]})
+    .to_string();
+    let (url, _requests) = stub_chat_server(vec![reply.clone()]);
+    let provider = [
+        ("TAGURU_EXTRACT_URL", url.as_str()),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+    let (code, stdout, stderr) = run_extract(
+        &prior,
+        &provider,
+        &["--context", "c", doc.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        prior.join(".extract-manifest.json").is_file(),
+        "the sidecar the vocabulary loader must skip"
+    );
+
+    let (url, requests) = stub_chat_server(vec![reply]);
+    let provider = [
+        ("TAGURU_EXTRACT_URL", url.as_str()),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &provider,
+        &[
+            "--context",
+            "c",
+            "--vocabulary",
+            prior.to_str().unwrap(),
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(!stderr.contains("--vocabulary"), "{stderr}");
+    let requests = requests.join().unwrap();
+    let system = json_body_of(&requests[0])["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let block = system
+        .split("Names already in use in the target context")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no context-names block: {system}"));
+    assert!(block.contains("cargo-nextest"), "{block}");
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&prior);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
 /// #758: document A settles on a concept spelling; document C offers
 /// that same spelling as an alias of a different name. Import would
 /// refuse the rewire (409, the stream stopping with A already

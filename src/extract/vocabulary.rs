@@ -54,12 +54,17 @@ impl ContextVocabulary {
 }
 
 /// Loads `--vocabulary`'s path: one batch-stream file, or a directory
-/// of them (every regular file, sorted by name — the shape `taguru
-/// export --out DIR` writes). Any unreadable or unparsable file is a
-/// hard error, and so is a path that yields no names at all: the
-/// operator explicitly asked for vocabulary steering, and silently
-/// extracting without it would let every new document drift — the
-/// `--schema` posture (ADR 0009 §13), for the same reason.
+/// of them — its `*.jsonl` files, sorted by name, non-recursive: the
+/// shape `taguru export --out DIR` writes, and the same rule `taguru
+/// import DIR` and `taguru anchoring DIR` read by (#805). The
+/// extension filter is what lets an extract `--out` directory serve
+/// as vocabulary — steering a run toward its own previous output —
+/// without its `.extract-manifest.json` sidecar being parsed as a
+/// stream. Any unreadable or unparsable file is a hard error, and so
+/// is a path that yields no names at all: the operator explicitly
+/// asked for vocabulary steering, and silently extracting without it
+/// would let every new document drift — the `--schema` posture (ADR
+/// 0009 §13), for the same reason.
 pub(super) fn load_vocabulary(path: &Path) -> Result<ContextVocabulary, String> {
     let mut files: Vec<PathBuf> = Vec::new();
     if path.is_dir() {
@@ -68,13 +73,15 @@ pub(super) fn load_vocabulary(path: &Path) -> Result<ContextVocabulary, String> 
         for entry in entries {
             let entry = entry.map_err(|error| format!("reading {}: {error}", path.display()))?;
             let entry_path = entry.path();
-            if entry_path.is_file() {
+            if entry_path.is_file()
+                && entry_path.extension().and_then(|e| e.to_str()) == Some("jsonl")
+            {
                 files.push(entry_path);
             }
         }
         files.sort();
         if files.is_empty() {
-            return Err(format!("{}: the directory holds no files", path.display()));
+            return Err(format!("no .jsonl files under {}", path.display()));
         }
     } else {
         files.push(path.to_path_buf());
