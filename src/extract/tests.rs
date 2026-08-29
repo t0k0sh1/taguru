@@ -1749,6 +1749,52 @@ fn load_vocabulary_accepts_one_sided_streams() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// #805: a directory expands to its `*.jsonl` files only — the
+/// `taguru import DIR` / `taguru anchoring DIR` rule — so an extract
+/// `--out` directory, with its `.extract-manifest.json` sidecar
+/// beside the batches, serves as vocabulary instead of failing on the
+/// sidecar; a directory with no `.jsonl` at all is the hard error.
+#[test]
+fn load_vocabulary_reads_only_jsonl_files_from_a_directory() {
+    let dir = std::env::temp_dir().join(format!("taguru-vocab-jsonl-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("a.md-0123.jsonl"),
+        concat!(
+            r#"{"taguru_batch":1,"context":"ops","source":"a.md"}"#,
+            "\n",
+            r#"{"subject":"CI","label":"runner","object":"nextest","weight":1.0}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    fs::write(dir.join(".extract-manifest.json"), "{\"a.md\":{}}\n").unwrap();
+    fs::write(dir.join("notes.txt"), "not a stream").unwrap();
+    fs::create_dir_all(dir.join(".extract-trace")).unwrap();
+    fs::write(
+        dir.join(".extract-trace").join("a.trace.jsonl"),
+        "{\"kind\":\"x\"}\n",
+    )
+    .unwrap();
+
+    let loaded = load_vocabulary(&dir).unwrap();
+    assert!(loaded.concepts.contains("nextest"));
+    assert!(loaded.labels.contains("runner"));
+
+    let empty = dir.join("no-streams");
+    fs::create_dir_all(&empty).unwrap();
+    fs::write(empty.join(".extract-manifest.json"), "{}\n").unwrap();
+    let error = match load_vocabulary(&empty) {
+        Ok(_) => panic!("a directory with no .jsonl must not load"),
+        Err(error) => error,
+    };
+    assert!(error.starts_with("no .jsonl files under "), "{error}");
+    assert!(error.ends_with(&empty.display().to_string()), "{error}");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /// `vocabulary_digest` is the benchmark harness's view of the same
 /// fingerprint extract folds into its manifests — it must BE that
 /// digest, and track content.

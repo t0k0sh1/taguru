@@ -7,6 +7,17 @@ Entries that change an on-disk format or a response shape say so.
 
 ## [Unreleased]
 
+### Fixed
+
+- `taguru extract --vocabulary DIR` and `taguru anchoring --vocabulary DIR`
+  read the directory's `*.jsonl` files only — the rule `taguru import DIR`
+  and `taguru anchoring DIR` already read by — instead of every regular
+  file. A previous extract's `--out` directory can now be handed back as
+  vocabulary; before, its `.extract-manifest.json` sidecar was parsed as
+  a batch stream and failed the run at startup. A directory with no
+  `.jsonl` fails as `no .jsonl files under DIR` (was `the directory holds
+  no files`). #805.
+
 ### Changed
 
 - `taguru extract`: the Stage 2 cross-chunk corrective turn now climbs
