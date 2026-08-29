@@ -5745,6 +5745,50 @@ fn force_ignores_existing_checkpoints_and_recalls_every_chunk() {
     let _ = std::fs::remove_dir_all(&out);
 }
 
+/// `--resume-from read/plan/steer` (#822) extends `--force`'s "redo
+/// this document" reach the same way: every chunk is re-asked, even
+/// one whose checkpoint would otherwise be perfectly reusable — a
+/// deliberate resume ask must not be silently answered by stale
+/// checkpoint content either.
+#[test]
+fn resume_from_read_plan_steer_also_ignore_existing_checkpoints() {
+    for step in ["read", "plan", "steer"] {
+        let (doc, out) = setup_one_checkpointed_chunk_and_one_failure(&format!(
+            "extract-resume-checkpoint-{step}"
+        ));
+        let doc_src = doc.to_str().unwrap();
+
+        let (url, requests) = stub_chat_server(vec![
+            json!({"associations": [
+                {"subject": "S", "label": "rel", "object": "chunk0", "weight": 1.0}
+            ]})
+            .to_string(),
+            json!({"associations": [
+                {"subject": "S", "label": "rel", "object": "chunk1", "weight": 1.0}
+            ]})
+            .to_string(),
+        ]);
+        let (code, stdout, stderr) = run_extract(
+            &out,
+            &[
+                ("TAGURU_EXTRACT_URL", url.as_str()),
+                ("TAGURU_EXTRACT_MODEL", "stub-model"),
+            ],
+            &["--context", "c", "--resume-from", step, doc_src],
+        );
+        assert_eq!(code, 0, "{step}: stdout: {stdout}\nstderr: {stderr}");
+        assert_eq!(
+            requests.join().unwrap().len(),
+            2,
+            "{step}: --resume-from {step} must re-call every chunk despite an existing, \
+             fingerprint-compatible checkpoint"
+        );
+
+        let _ = std::fs::remove_dir_all(doc.parent().unwrap());
+        let _ = std::fs::remove_dir_all(&out);
+    }
+}
+
 /// Changing a compute-shaping setting (here `--fact-budget`) between
 /// attempts must invalidate chunk 0's checkpoint even though the
 /// document's own content is byte-for-byte unchanged — never a silent
@@ -8197,6 +8241,224 @@ fn replay_strict_with_structured_output_auto_and_no_url_is_a_usage_error() {
     assert_eq!(code, 2, "stderr: {stderr}");
     assert!(stderr.contains("--structured-output auto"), "{stderr}");
     assert!(stderr.contains("rung"), "{stderr}");
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// #822: `--resume-from` names one of ADR 0030's step names and folds
+/// onto a `--replay` mode instead of taking one directly. `call`
+/// through `verify` all fold onto `--replay auto` — a zero-reply stub
+/// proves the completion still replays with no live call for every one
+/// of them, not just a single representative.
+#[test]
+fn resume_from_call_through_verify_all_fold_into_replay_auto() {
+    for step in [
+        "call",
+        "parse",
+        "validate",
+        "reconcile",
+        "merge",
+        "render",
+        "verify",
+    ] {
+        let docs = batch_dir(&format!("extract-resume-from-{step}-docs"));
+        let doc = docs.join("a.md");
+        std::fs::write(&doc, "alpha relates to beta").unwrap();
+        let doc_src = doc.to_str().unwrap();
+        let out = batch_dir(&format!("extract-resume-from-{step}-out"));
+
+        let good = json!({"associations": [
+            {"subject": "alpha", "label": "relates to", "object": "beta", "weight": 1.0}
+        ]})
+        .to_string();
+        let (url, _requests) = stub_chat_server(vec![good]);
+        let (code, stdout, stderr) = run_extract(
+            &out,
+            &[
+                ("TAGURU_EXTRACT_URL", url.as_str()),
+                ("TAGURU_EXTRACT_MODEL", "stub-model"),
+            ],
+            &["--context", "c", doc_src],
+        );
+        assert_eq!(code, 0, "{step}: stdout: {stdout}\nstderr: {stderr}");
+
+        let (url2, requests2) = stub_chat_server(vec![]);
+        let (code2, _stdout2, stderr2) = run_extract(
+            &out,
+            &[
+                ("TAGURU_EXTRACT_URL", url2.as_str()),
+                ("TAGURU_EXTRACT_MODEL", "stub-model"),
+            ],
+            &["--context", "c", "--resume-from", step, doc_src],
+        );
+        assert_eq!(code2, 0, "{step}: stderr: {stderr2}");
+        assert_eq!(
+            requests2.join().unwrap().len(),
+            0,
+            "{step}: --resume-from {step} must fold onto --replay auto, no live call"
+        );
+        assert!(
+            stderr2.contains("replayed 1/1 completions (0 live)"),
+            "{step}: {stderr2}"
+        );
+
+        let _ = std::fs::remove_dir_all(&docs);
+        let _ = std::fs::remove_dir_all(&out);
+    }
+}
+
+/// `read`/`plan`/`steer` have no usable record in this version (only
+/// `prompt`/`call` are recorded at all) — `--resume-from` on any of
+/// them folds onto a plain, unreplayed run: a prior recorded run
+/// exists, but the second run still pays for a live call.
+#[test]
+fn resume_from_read_plan_steer_all_fold_into_an_unreplayed_run() {
+    for step in ["read", "plan", "steer"] {
+        let docs = batch_dir(&format!("extract-resume-from-{step}-docs"));
+        let doc = docs.join("a.md");
+        std::fs::write(&doc, "alpha relates to beta").unwrap();
+        let doc_src = doc.to_str().unwrap();
+        let out = batch_dir(&format!("extract-resume-from-{step}-out"));
+
+        let good = json!({"associations": [
+            {"subject": "alpha", "label": "relates to", "object": "beta", "weight": 1.0}
+        ]})
+        .to_string();
+        let (url, _requests) = stub_chat_server(vec![good.clone()]);
+        let (code, stdout, stderr) = run_extract(
+            &out,
+            &[
+                ("TAGURU_EXTRACT_URL", url.as_str()),
+                ("TAGURU_EXTRACT_MODEL", "stub-model"),
+            ],
+            &["--context", "c", doc_src],
+        );
+        assert_eq!(code, 0, "{step}: stdout: {stdout}\nstderr: {stderr}");
+
+        // No --force: --resume-from must bypass the manifest skip on
+        // its own (the whole point of naming a resume step is a
+        // deliberate redo — a silent "unchanged, skipped" would defeat
+        // that intent exactly as much here as it would under
+        // --replay).
+        let (url2, requests2) = stub_chat_server(vec![good]);
+        let (code2, stdout2, stderr2) = run_extract(
+            &out,
+            &[
+                ("TAGURU_EXTRACT_URL", url2.as_str()),
+                ("TAGURU_EXTRACT_MODEL", "stub-model"),
+            ],
+            &["--context", "c", "--resume-from", step, doc_src],
+        );
+        assert_eq!(code2, 0, "{step}: stderr: {stderr2}");
+        assert!(
+            !stdout2.contains("unchanged, skipped"),
+            "{step}: --resume-from must bypass the manifest skip: {stdout2}"
+        );
+        assert_eq!(
+            requests2.join().unwrap().len(),
+            1,
+            "{step}: --resume-from {step} must never consult the log, one live call"
+        );
+        assert!(
+            !stderr2.contains("replayed"),
+            "{step}: no replay engaged at all: {stderr2}"
+        );
+
+        let _ = std::fs::remove_dir_all(&docs);
+        let _ = std::fs::remove_dir_all(&out);
+    }
+}
+
+/// `--resume-from prompt` is `--replay auto` with ADR 0031 §3.6's
+/// system-prompt pin turned off (#821, #822): a settings change that a
+/// plain `--replay auto` run absorbs via the pin (proven in
+/// `replay_auto_pins_the_system_prompt_across_a_settings_change_and_reports_both_mismatches`)
+/// instead falls through to a live call here, because `resolve_system`
+/// never even asks whether the log's one recorded `system` could be
+/// pinned.
+#[test]
+fn resume_from_prompt_disables_the_system_pin_so_a_settings_change_falls_through() {
+    let docs = batch_dir("extract-resume-from-prompt-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "alpha relates to beta").unwrap();
+    let doc_src = doc.to_str().unwrap();
+    let out = batch_dir("extract-resume-from-prompt-out");
+
+    let good = json!({"associations": [
+        {"subject": "alpha", "label": "relates to", "object": "beta", "weight": 1.0}
+    ]})
+    .to_string();
+    let (url, _requests) = stub_chat_server(vec![good.clone()]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &["--context", "c", doc_src],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+
+    let (url2, requests2) = stub_chat_server(vec![good]);
+    let (code2, _stdout2, stderr2) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url2.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--resume-from",
+            "prompt",
+            "--fact-budget",
+            "3",
+            doc_src,
+        ],
+    );
+    assert_eq!(code2, 0, "stderr: {stderr2}");
+    assert_eq!(
+        requests2.join().unwrap().len(),
+        1,
+        "the pin is off, so the changed system prompt must miss and fall through live"
+    );
+    assert!(
+        stderr2.contains("replayed 0/1 completions (1 live)"),
+        "{stderr2}"
+    );
+    assert!(
+        !stderr2.contains("the recorded system prompt differs from this run's"),
+        "no pin was ever attempted, so there is nothing to report a mismatch about: {stderr2}"
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// An unknown step name is a usage error naming the closed vocabulary,
+/// exactly like `--replay`'s own closed set of values.
+#[test]
+fn resume_from_rejects_an_unknown_step_name() {
+    let docs = batch_dir("extract-resume-from-unknown-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "alpha relates to beta").unwrap();
+    let doc_src = doc.to_str().unwrap();
+    let out = batch_dir("extract-resume-from-unknown-out");
+
+    let (code, _stdout, stderr) = run_extract(
+        &out,
+        &[("TAGURU_EXTRACT_MODEL", "stub-model")],
+        &["--context", "c", "--resume-from", "escalate", doc_src],
+    );
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains(
+            "--resume-from takes one of: read, plan, steer, prompt, call, parse, validate, \
+             reconcile, merge, render, verify"
+        ),
+        "must list every one of ADR 0030's 11 step names, not just a prefix: {stderr}"
+    );
 
     let _ = std::fs::remove_dir_all(&docs);
     let _ = std::fs::remove_dir_all(&out);

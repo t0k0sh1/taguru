@@ -6588,6 +6588,125 @@ fn replay_from_flag_parses_once_and_rejects_a_duplicate() {
     );
 }
 
+// #822: `--resume-from STEP`'s ADR 0030 step-name vocabulary and its
+// fold onto `(ReplayMode, disable_system_pin)`.
+
+#[test]
+fn resume_from_flag_accepts_every_step_name_and_rejects_an_unknown_one() {
+    fn parse(words: &[&str]) -> Result<Args, i32> {
+        Args::parse(&words.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+    for step in STEP_NAMES {
+        let parsed = parse(&[
+            "--context",
+            "c",
+            "--out",
+            "o",
+            "--resume-from",
+            step,
+            "doc.md",
+        ])
+        .unwrap_or_else(|code| panic!("{step:?} must be accepted, got Err({code})"));
+        assert_eq!(parsed.resume_from.as_deref(), Some(step));
+    }
+    let unknown = parse(&[
+        "--context",
+        "c",
+        "--out",
+        "o",
+        "--resume-from",
+        "escalate",
+        "doc.md",
+    ]);
+    assert!(
+        matches!(unknown, Err(2)),
+        "an unknown step name is a usage error"
+    );
+    let duplicate = parse(&[
+        "--context",
+        "c",
+        "--out",
+        "o",
+        "--resume-from",
+        "call",
+        "--resume-from",
+        "verify",
+        "doc.md",
+    ]);
+    assert!(
+        matches!(duplicate, Err(2)),
+        "a duplicate is a usage error, never a silent last-wins"
+    );
+}
+
+#[test]
+fn resume_from_and_replay_cannot_both_be_given() {
+    let parsed = Args::parse(
+        &[
+            "--context",
+            "c",
+            "--out",
+            "o",
+            "--resume-from",
+            "parse",
+            "--replay",
+            "strict",
+            "doc.md",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>(),
+    );
+    assert!(
+        matches!(parsed, Err(2)),
+        "--resume-from already selects a --replay mode"
+    );
+}
+
+#[test]
+fn resume_from_fold_matches_the_documented_three_way_split() {
+    for step in ["read", "plan", "steer"] {
+        assert_eq!(
+            resume_from_fold(step),
+            (ReplayMode::Off, false),
+            "{step} has no usable record at all"
+        );
+    }
+    assert_eq!(
+        resume_from_fold("prompt"),
+        (ReplayMode::Auto, true),
+        "prompt replays call's record but never pins its own system"
+    );
+    for step in [
+        "call",
+        "parse",
+        "validate",
+        "reconcile",
+        "merge",
+        "render",
+        "verify",
+    ] {
+        assert_eq!(
+            resume_from_fold(step),
+            (ReplayMode::Auto, false),
+            "{step} is exactly --replay auto"
+        );
+    }
+}
+
+#[test]
+#[should_panic(expected = "STEP_NAMES")]
+fn resume_from_fold_panics_on_a_name_outside_step_names() {
+    resume_from_fold("escalate");
+}
+
+#[test]
+fn usage_documents_every_step_name() {
+    for step in STEP_NAMES {
+        assert!(USAGE.contains(step), "USAGE must document {step}");
+    }
+}
+
 #[test]
 fn completions_document_counts_tracks_both_replayed_and_live() {
     let path = replay_fixture_path("document-counts");

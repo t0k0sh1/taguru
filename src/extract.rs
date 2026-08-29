@@ -113,9 +113,11 @@ mod trace;
 #[path = "extract/vocabulary.rs"]
 mod vocabulary;
 
+#[cfg(test)]
+use args::STEP_NAMES;
 use args::{
     Args, CorrectionPolicy, DEFAULT_ESCALATION_FACTOR, LadderConfig, Outcome, ReplayMode, Rung,
-    escalation_manifest_value,
+    escalation_manifest_value, resume_from_fold,
 };
 use diagnostics::DiagnosticsSink;
 use manifest::{ComputationInputs, Manifest};
@@ -235,7 +237,7 @@ usage: taguru extract [--dry-run] [--force] [--no-passage] [--questions N]
                       [--structured-output MODE] [--max-output-tokens N]
                       [--lossy] [--candidates] [--vocabulary PATH] [--coverage]
                       [--diagnostics-out FILE] [--schema FILE]
-                      [--replay MODE] [--replay-from DIR]
+                      [--replay MODE] [--replay-from DIR] [--resume-from STEP]
                       [--source-id ID] [--date WHEN] [--tag TAG]...
                       --context NAME [--description TEXT] --out DIR FILE|DIR...
 
@@ -390,6 +392,18 @@ chat endpoint:
   --replay-from DIR   where --replay reads attempts logs from (default:
                       --out/.extract-trace, the directory a run already
                       writes its own to)
+  --resume-from STEP  fold onto a --replay mode by pipeline step name
+                      (read, plan, steer, prompt, call, parse, validate,
+                      reconcile, merge, render, verify — ADR 0030):
+                      steps before STEP are satisfied from the attempts
+                      log where recorded. 'call' through 'verify' behave
+                      like '--replay auto'; 'read'/'plan'/'steer' behave
+                      like an unreplayed run; 'prompt' is '--replay
+                      auto' with the system-prompt pin (ADR 0031 §3.6)
+                      turned off, so a settings change that would
+                      otherwise be absorbed by the pin instead falls
+                      through on its own. Mutually exclusive with
+                      --replay — an unknown step name is a usage error
 
 Contract and discipline: docs/extract.html.
 ";
@@ -475,21 +489,30 @@ pub fn run(args: &[String]) -> i32 {
 
     // Flag-over-env, same validation strength as --structured-output
     // below (ADR 0031 §3.3's vocabulary is closed too — an unknown
-    // value is a hard usage error, never a silent "off").
-    let replay_mode = match args.replay {
-        Some(mode) => mode,
-        None => match std::env::var("TAGURU_EXTRACT_REPLAY") {
-            Ok(value) => match ReplayMode::parse(&value) {
+    // value is a hard usage error, never a silent "off"). `--resume-from`
+    // (#822, ADR 0030 §3.2's step names) already resolves to one of
+    // these — `Args::parse` rejects it alongside an explicit `--replay`,
+    // so env fallback never applies once it is given.
+    let (replay_mode, disable_system_pin) = match &args.resume_from {
+        Some(step) => resume_from_fold(step),
+        None => (
+            match args.replay {
                 Some(mode) => mode,
-                None => {
-                    return crate::config::subcommand_usage_error(
-                        "extract",
-                        "TAGURU_EXTRACT_REPLAY takes auto, strict, or off",
-                    );
-                }
+                None => match std::env::var("TAGURU_EXTRACT_REPLAY") {
+                    Ok(value) => match ReplayMode::parse(&value) {
+                        Some(mode) => mode,
+                        None => {
+                            return crate::config::subcommand_usage_error(
+                                "extract",
+                                "TAGURU_EXTRACT_REPLAY takes auto, strict, or off",
+                            );
+                        }
+                    },
+                    Err(_) => ReplayMode::Off,
+                },
             },
-            Err(_) => ReplayMode::Off,
-        },
+            false,
+        ),
     };
     let replaying = !matches!(replay_mode, ReplayMode::Off);
 
@@ -987,6 +1010,8 @@ pub fn run(args: &[String]) -> i32 {
         replay_mode,
         replaying,
         replay_from,
+        disable_system_pin,
+        resume_requested: args.resume_from.is_some(),
     };
 
     let mut written = 0usize;
