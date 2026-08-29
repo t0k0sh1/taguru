@@ -5745,6 +5745,50 @@ fn force_ignores_existing_checkpoints_and_recalls_every_chunk() {
     let _ = std::fs::remove_dir_all(&out);
 }
 
+/// `--resume-from read/plan/steer` (#822) extends `--force`'s "redo
+/// this document" reach the same way: every chunk is re-asked, even
+/// one whose checkpoint would otherwise be perfectly reusable — a
+/// deliberate resume ask must not be silently answered by stale
+/// checkpoint content either.
+#[test]
+fn resume_from_read_plan_steer_also_ignore_existing_checkpoints() {
+    for step in ["read", "plan", "steer"] {
+        let (doc, out) = setup_one_checkpointed_chunk_and_one_failure(&format!(
+            "extract-resume-checkpoint-{step}"
+        ));
+        let doc_src = doc.to_str().unwrap();
+
+        let (url, requests) = stub_chat_server(vec![
+            json!({"associations": [
+                {"subject": "S", "label": "rel", "object": "chunk0", "weight": 1.0}
+            ]})
+            .to_string(),
+            json!({"associations": [
+                {"subject": "S", "label": "rel", "object": "chunk1", "weight": 1.0}
+            ]})
+            .to_string(),
+        ]);
+        let (code, stdout, stderr) = run_extract(
+            &out,
+            &[
+                ("TAGURU_EXTRACT_URL", url.as_str()),
+                ("TAGURU_EXTRACT_MODEL", "stub-model"),
+            ],
+            &["--context", "c", "--resume-from", step, doc_src],
+        );
+        assert_eq!(code, 0, "{step}: stdout: {stdout}\nstderr: {stderr}");
+        assert_eq!(
+            requests.join().unwrap().len(),
+            2,
+            "{step}: --resume-from {step} must re-call every chunk despite an existing, \
+             fingerprint-compatible checkpoint"
+        );
+
+        let _ = std::fs::remove_dir_all(doc.parent().unwrap());
+        let _ = std::fs::remove_dir_all(&out);
+    }
+}
+
 /// Changing a compute-shaping setting (here `--fact-budget`) between
 /// attempts must invalidate chunk 0's checkpoint even though the
 /// document's own content is byte-for-byte unchanged — never a silent
