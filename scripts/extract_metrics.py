@@ -83,11 +83,16 @@ def load_documents(out_dirs: list[Path]) -> list[dict]:
 
     A traced document (a `<batch>.jsonl` trace, written only when the
     batch was) carries its attempts log beside it. An attempts log
-    with NO trace is a document that never produced a batch — it
-    failed, or the run was interrupted before it finished — kept
-    exactly so its cost is visible (ADR 0025 §3.2); such an entry has
-    an empty `trace` and `failed: True`, and the attempts log's own
-    `document` record names the source (#807).
+    with NO trace is one of two things, told apart by whether the
+    batch it names — `<out>/<stem>.jsonl`, the trace's own file name
+    one directory up — exists: if it does, the batch landed and only
+    the trace write failed (advisory, ADR 0023 §3.6), so the document
+    counts as a document with an empty trace (`untraced: True`, its
+    quality metrics empty, its cost real); if it does not, the
+    document never produced a batch — it failed, or the run was
+    interrupted before it finished — and the log was kept exactly so
+    its cost is visible (ADR 0025 §3.2): `failed: True`. Either way
+    the attempts log's own `document` record names the source (#807).
     """
     documents = []
     for out_dir in out_dirs:
@@ -133,13 +138,22 @@ def load_documents(out_dirs: list[Path]) -> list[dict]:
                     file=sys.stderr,
                 )
                 continue
+            batch_landed = (out_dir / f"{stem}.jsonl").is_file()
+            if batch_landed:
+                print(
+                    f"warning: {attempts_path} has no trace but its batch exists; "
+                    "counted as a document with no quality metrics (the trace write "
+                    "failed — see the run's stderr)",
+                    file=sys.stderr,
+                )
             documents.append(
                 {
                     "source": header["source"],
                     "out_dir": out_dir,
                     "trace": [],
                     "attempts_log": attempts_log,
-                    "failed": True,
+                    "failed": not batch_landed,
+                    "untraced": batch_landed,
                 }
             )
     return documents
@@ -753,6 +767,31 @@ def self_test() -> int:
         (trace_dir / "f.attempts.jsonl").write_text(
             "".join(json.dumps(r) + "\n" for r in failed_attempts), encoding="utf-8"
         )
+        # A batch that landed but whose trace write failed (advisory,
+        # ADR 0023 §3.6): attempts log, no trace, batch present — a
+        # document, not a failure; its cost counts, its quality is empty.
+        (trace_dir / "h.attempts.jsonl").write_text(
+            "".join(
+                json.dumps(r) + "\n"
+                for r in [
+                    {"kind": "document", "run_id": "3" * 16, "source": "h.md",
+                     "document_sha256": "h" * 64, "resumed": False},
+                    {"kind": "attempt", "run_id": "3" * 16, "attempt_seq": 1,
+                     "piece_id": "b" * 64, "source": "h.md", "chunk_index": 0,
+                     "stage": "item", "attempt": 1, "max_attempts": 2,
+                     "state": "stop_valid", "length_limited": False,
+                     "transport_retries": 0, "elapsed_seconds": 5.0,
+                     "requested_max_tokens": None, "finish_reason": "stop",
+                     "input_tokens": 100, "output_tokens": 100, "messages": [],
+                     "answer": "good", "parse_error": None, "validation_issues": None,
+                     "removed_items": None},
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (out / "h.jsonl").write_text(
+            '{"taguru_batch":1,"context":"c","source":"h.md"}\n', encoding="utf-8"
+        )
         # An attempts log with no document record is neither: skipped.
         (trace_dir / "g.attempts.jsonl").write_text(
             json.dumps({"kind": "system", "sha256": "s" * 64, "bytes": 3, "content": "sys"})
@@ -773,10 +812,10 @@ def self_test() -> int:
             {"sources": {"a.md": {"context": "ch1", "groups": ["book"]}}}["sources"],
             (100.0, 200.0),
         )
-        if sorted(report["documents"]) != ["a.md", "a.md (twin)", "f.md"]:
+        if sorted(report["documents"]) != ["a.md", "a.md (twin)", "f.md", "h.md"]:
             print(f"self-test collision keys failed: {sorted(report['documents'])}")
             return 1
-        if report["run"]["documents"] != 2:
+        if report["run"]["documents"] != 3:
             print("self-test collision run count failed")
             return 1
         report = aggregate(
@@ -787,8 +826,15 @@ def self_test() -> int:
         )
         run = report["run"]
         failed = report["documents"]["f.md"]
+        untraced = report["documents"]["h.md"]
         checks = [
-            (run["documents"], 1),
+            # a.md traced, h.md landed without a trace: both documents.
+            (run["documents"], 2),
+            (untraced["failed"], False),
+            (untraced["metrics"]["documents"], 1),
+            (untraced["metrics"]["failed"], 0),
+            (untraced["metrics"]["loss"], {}),
+            (untraced["metrics"]["cost"]["seconds"], 5.0),
             # The failed document (#807): apart from `documents`, its
             # attempts/moves/cost in the sums, its quality metrics empty.
             (run["failed"], 1),
@@ -821,8 +867,8 @@ def self_test() -> int:
             # A replayed --replay re-emission of attempt 2 sits in the
             # fixture (huge fake seconds/tokens/transport_retries) —
             # every count below must be exactly as if it were absent.
-            (run["attempts"]["total"], 4),
-            (run["attempts"]["stop_valid_rate"], 0.25),
+            (run["attempts"]["total"], 5),
+            (run["attempts"]["stop_valid_rate"], 0.4),
             (run["attempts"]["transport_retries"], 3),
             (run["moves"], {"escalate": 2, "split": 1}),
             (run["labels"]["distinct"], 2),
@@ -832,15 +878,15 @@ def self_test() -> int:
             (run["graph"]["concepts"], 5),
             (run["graph"]["connected_components"], 2),
             (run["graph"]["isolated_share"], 4 / 5),
-            (run["cost"]["seconds"], 35.0),
+            (run["cost"]["seconds"], 40.0),
             (run["cost"]["lost_seconds"], 32.0),
-            (run["cost"]["input_tokens"], 1100),
-            (run["cost"]["output_tokens"], 1100),
+            (run["cost"]["input_tokens"], 1200),
+            (run["cost"]["output_tokens"], 1200),
             (run["cost"]["lost_input_tokens"], 900),
             (run["cost"]["lost_output_tokens"], 950),
-            # 1100 in * 100/1M + 1100 out * 200/1M
-            (run["cost"]["money"], 0.33),
-            (run["cost"]["seconds_per_kb"], 17.5),
+            # 1200 in * 100/1M + 1200 out * 200/1M
+            (run["cost"]["money"], 0.36),
+            (run["cost"]["seconds_per_kb"], 20.0),
             (report["contexts"]["ch1"]["documents"], 1),
             (report["groups"]["book"]["documents"], 1),
             (report["documents"]["a.md"]["context"], "ch1"),
@@ -916,7 +962,10 @@ def main() -> int:
         ledger = json.loads(args.ledger.read_text(encoding="utf-8")).get("sources", {})
     documents = load_documents(args.out_dirs)
     if not documents:
-        print("no documents found (no trace, and no attempts log)", file=sys.stderr)
+        print(
+            "no documents found: no trace, and no attempts log with a document record",
+            file=sys.stderr,
+        )
         return 1
     report = aggregate(documents, ledger, (args.price_in, args.price_out))
     if args.anchoring:
