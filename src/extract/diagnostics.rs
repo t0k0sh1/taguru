@@ -235,6 +235,12 @@ pub(super) struct DiagnosticsAttempt<'a> {
     /// transport) folded into this one attempt — from the completion
     /// on success, from the [`ChatError`] on failure.
     pub(super) transport_retries: usize,
+    /// ADR 0031 §3.2 (#823): the original attempt this one reused,
+    /// when it came from `--replay` instead of a live call — from
+    /// [`ChatCompletion::replayed_from`] on success,
+    /// [`ChatError::replayed_from`] on a replayed `timeout`/`transport`
+    /// reconstruction; `None` for every live completion.
+    pub(super) replayed_from: Option<&'a AttemptRef>,
     pub(super) parse_error: Option<&'a str>,
     pub(super) validation_issues: Option<&'a [String]>,
     /// ADR 0013: the mechanical pass's removals on a `stop_valid`

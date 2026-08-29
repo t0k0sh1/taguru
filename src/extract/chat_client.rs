@@ -64,6 +64,12 @@ pub(crate) struct ChatError {
     /// (the first try counts as 0) — [`ChatClient::complete`] stamps
     /// it at every return; [`ChatError::new`] starts it at 0.
     pub(crate) transport_retries: usize,
+    /// ADR 0031 §3.2 (#823): the original attempt this error reused,
+    /// when it reconstructs a recorded `timeout`/`transport` outcome
+    /// instead of a live failure — mirrors [`ChatCompletion::replayed_from`];
+    /// `None` at every other construction site, all of them
+    /// [`ChatError::new`].
+    pub(crate) replayed_from: Option<AttemptRef>,
 }
 
 impl ChatError {
@@ -72,6 +78,7 @@ impl ChatError {
             kind,
             message,
             transport_retries: 0,
+            replayed_from: None,
         }
     }
 }

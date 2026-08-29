@@ -104,6 +104,7 @@ impl StoredAttempt {
                     ),
                 );
                 error.transport_retries = self.transport_retries;
+                error.replayed_from = Some(self.origin.clone());
                 Err(error)
             }
         }

@@ -645,6 +645,18 @@ def self_test() -> int:
              "messages": [], "answer": "good", "parse_error": None,
              "validation_issues": None, "removed_items": None,
              "replayed_from": {"run_id": run_id, "attempt_seq": 2}},
+            # A replayed *failed* completion (answer: null, ADR 0025
+            # §3.3's timeout/transport shape) — must be excluded the
+            # same way a replayed success is, not just counted with
+            # zeroed-out tokens.
+            {"kind": "attempt", "run_id": "1" * 16, "attempt_seq": 2, "piece_id": "d" * 64,
+             "source": "a.md", "chunk_index": 0, "stage": "item", "attempt": 1,
+             "max_attempts": 2, "state": "timeout", "length_limited": False,
+             "transport_retries": 9, "elapsed_seconds": 1000.0, "requested_max_tokens": None,
+             "finish_reason": None, "input_tokens": None, "output_tokens": None,
+             "messages": [], "answer": None, "parse_error": "e",
+             "validation_issues": None, "removed_items": None,
+             "replayed_from": {"run_id": run_id, "attempt_seq": 2}},
         ]
         (trace_dir / "a.jsonl").write_text(
             "".join(json.dumps(r) + "\n" for r in trace), encoding="utf-8"

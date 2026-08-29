@@ -134,7 +134,7 @@ impl AttemptLog {
             run_id: &attempt.attempt_ref.run_id,
             attempt_seq: attempt.attempt_ref.attempt_seq,
             corrects: attempt.corrects,
-            replayed_from: response.and_then(|r| r.replayed_from.as_ref()),
+            replayed_from: attempt.replayed_from,
             piece_id: attempt.piece_id,
             source: attempt.source,
             chunk_index: attempt.chunk_index,

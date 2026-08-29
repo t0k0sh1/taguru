@@ -6280,7 +6280,18 @@ fn replay_index_reconstructs_a_timeout_as_a_chat_error() {
     let messages = replay_request_messages(&turns);
 
     match index.lookup("piece-1", &messages, None) {
-        ReplayLookup::Hit(Err(error)) => assert_eq!(error.kind, ChatFailure::Timeout),
+        ReplayLookup::Hit(Err(error)) => {
+            assert_eq!(error.kind, ChatFailure::Timeout);
+            // #823: a replayed failure names its origin too, same as a
+            // replayed success — extract_metrics.py must exclude it
+            // from cost accounting exactly the same way.
+            let origin = error
+                .replayed_from
+                .as_ref()
+                .expect("a replayed timeout must name its origin");
+            assert_eq!(origin.run_id, "run-1");
+            assert_eq!(origin.attempt_seq, 1);
+        }
         _ => panic!("expected a replayed timeout, got a different outcome"),
     }
 }
