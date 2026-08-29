@@ -75,6 +75,11 @@ pub(super) struct Args {
     /// its own attempts logs to) — resolved in [`run`], same pattern
     /// as `vocabulary`. ADR 0031 §3.7.
     pub(super) replay_from: Option<PathBuf>,
+    /// One of [`STEP_NAMES`], already validated — `None` off
+    /// `--resume-from`. Mutually exclusive with `--replay` ([`Args::parse`]
+    /// rejects both): `--resume-from` already selects a `ReplayMode`
+    /// via [`resume_from_fold`] (#822).
+    pub(super) resume_from: Option<String>,
     pub(super) context: String,
     pub(super) description: Option<String>,
     /// #466 S1 (ADR 0017): the promotion runbook's `session:{agent}:{id}`
@@ -112,6 +117,7 @@ impl Args {
         let mut schema: Option<PathBuf> = None;
         let mut replay: Option<ReplayMode> = None;
         let mut replay_from: Option<PathBuf> = None;
+        let mut resume_from: Option<String> = None;
         let mut context: Option<String> = None;
         let mut description: Option<String> = None;
         let mut source_id: Option<String> = None;
@@ -332,6 +338,31 @@ impl Args {
                         ));
                     }
                 },
+                "--resume-from" => {
+                    if resume_from.is_some() {
+                        return Err(crate::config::subcommand_usage_error(
+                            "extract",
+                            "--resume-from given twice",
+                        ));
+                    }
+                    match rest.next() {
+                        Some(step) if STEP_NAMES.contains(&step.as_str()) => {
+                            resume_from = Some(step.clone());
+                        }
+                        Some(_) => {
+                            return Err(crate::config::subcommand_usage_error(
+                                "extract",
+                                &format!("--resume-from takes one of: {}", STEP_NAMES.join(", ")),
+                            ));
+                        }
+                        None => {
+                            return Err(crate::config::subcommand_usage_error(
+                                "extract",
+                                "--resume-from needs a step name",
+                            ));
+                        }
+                    }
+                }
                 "--context" => match rest.next() {
                     Some(name) if context.is_none() => context = Some(name.clone()),
                     Some(_) => {
@@ -506,6 +537,13 @@ impl Args {
             eprint!("{USAGE}");
             return Err(2);
         }
+        if resume_from.is_some() && replay.is_some() {
+            return Err(crate::config::subcommand_usage_error(
+                "extract",
+                "--resume-from and --replay cannot both be given — --resume-from already \
+                 selects a --replay mode",
+            ));
+        }
         if questions > 0 && no_passage {
             return Err(crate::config::subcommand_usage_error(
                 "extract",
@@ -561,6 +599,7 @@ impl Args {
             schema,
             replay,
             replay_from,
+            resume_from,
             context,
             description,
             source_id,
@@ -736,6 +775,52 @@ impl ReplayMode {
             Self::Strict => "strict",
             Self::Off => "off",
         }
+    }
+}
+
+/// ADR 0030 §3.2's step names, in pipeline order — `--resume-from`'s
+/// closed vocabulary (#822). An unknown name is a hard usage error,
+/// listing this array so the accepted spelling is always in the
+/// message itself.
+pub(super) const STEP_NAMES: [&str; 11] = [
+    "read",
+    "plan",
+    "steer",
+    "prompt",
+    "call",
+    "parse",
+    "validate",
+    "reconcile",
+    "merge",
+    "render",
+    "verify",
+];
+
+/// `--resume-from STEP`'s fold into `(ReplayMode, disable_system_pin)`
+/// (#822). "Steps before STEP are satisfied from the attempts log
+/// where recorded" — v0.9.6 records only the `prompt` step's full
+/// conversation and the `call` step's answer, so:
+/// - `call` through `verify`: both records are usable in full —
+///   identical to `--replay auto`.
+/// - `prompt`: only what's before `prompt` (nothing, in this version)
+///   would be satisfied from record, so the conversation this run
+///   sends must be *its own*, never a pinned one (ADR 0031 §3.6) —
+///   `call`'s record is still tried, matching on that live-built
+///   conversation exactly as `--replay auto` always has.
+/// - `read`/`plan`/`steer`: nothing before them has a record at all —
+///   a plain, unreplayed run.
+///
+/// `step` must be one of [`STEP_NAMES`] — callers validate that at
+/// parse time; anything else panics rather than silently picking a
+/// fold.
+pub(super) fn resume_from_fold(step: &str) -> (ReplayMode, bool) {
+    match step {
+        "read" | "plan" | "steer" => (ReplayMode::Off, false),
+        "prompt" => (ReplayMode::Auto, true),
+        "call" | "parse" | "validate" | "reconcile" | "merge" | "render" | "verify" => {
+            (ReplayMode::Auto, false)
+        }
+        _ => panic!("resume_from_fold: {step:?} is not one of STEP_NAMES"),
     }
 }
 

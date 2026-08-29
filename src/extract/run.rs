@@ -155,6 +155,13 @@ pub(super) struct Run {
     /// `--replay-from`/TAGURU_EXTRACT_REPLAY_FROM, resolved even when
     /// `!replaying` (`out/.extract-trace` by default) — ADR 0031 §3.7.
     pub(super) replay_from: PathBuf,
+    /// `--resume-from prompt`'s fold (#822): [`Run::resolve_system`]
+    /// never consults [`Completions::pinned_system`] — the whole point
+    /// of naming `prompt` as the resume point is that the prompt
+    /// itself (system included) is rebuilt fresh, not reused verbatim
+    /// (ADR 0031 §3.6). `false` for every other `--resume-from` value
+    /// and off `--resume-from` entirely.
+    pub(super) disable_system_pin: bool,
 }
 
 impl Run {
@@ -275,7 +282,10 @@ impl Run {
     /// (cheap: no model call) to check the pin against — reporting a
     /// mismatch once on stderr, a hint never a gate; matching itself
     /// is still decided completion by completion, by conversation
-    /// content (ADR 0031 §3.2).
+    /// content (ADR 0031 §3.2). `--resume-from prompt` (#822) forces
+    /// `NoRecord` regardless of what the index would otherwise decide —
+    /// silently, since declining a pin the caller never asked for
+    /// needs no stderr line of its own.
     pub(super) fn resolve_system(&self, source: &str, candidates: &[String]) -> ResolvedSystem {
         let recompute = || {
             system_prompt(
@@ -287,11 +297,14 @@ impl Run {
                 candidates,
             )
         };
-        let decision = self
-            .completions
-            .as_ref()
-            .map(Completions::pinned_system)
-            .unwrap_or(SystemPinDecision::NoRecord);
+        let decision = if self.disable_system_pin {
+            SystemPinDecision::NoRecord
+        } else {
+            self.completions
+                .as_ref()
+                .map(Completions::pinned_system)
+                .unwrap_or(SystemPinDecision::NoRecord)
+        };
         let (content, pinned_from): (String, Option<String>) = match decision {
             SystemPinDecision::Pin { content, run_id } => {
                 (content.to_string(), Some(run_id.to_string()))

@@ -56,9 +56,23 @@ Entries that change an on-disk format or a response shape say so.
   naming more than one distinct `system` record is also reported and falls
   back to recomputing, never guessing which one applies. The trace's
   `steering` record gains `system_sha256` (the system prompt actually sent,
-  by hash) and `pinned_from` (the run_id it was pinned from, or `null`).
+  by hash) and `pinned_from` (the run_id it was pinned from; absent when
+  this run computed its own).
   **On-disk format change**: two additive fields on the `steering` record in
   `--out/.extract-trace/*.jsonl` (the trace).
+- `taguru extract --resume-from STEP` selects a `--replay` mode by naming
+  one of ADR 0030's pipeline step names instead — "steps before STEP are
+  satisfied from the attempts log where recorded" (#822). This version's
+  log only ever records `prompt`/`call` in full, so it folds onto one of
+  three behaviors: `call` through `verify` fold onto `--replay auto`;
+  `read`/`plan`/`steer` fold onto a plain, unreplayed run (nothing before
+  them is recorded at all); `prompt` is `--replay auto` with the #821
+  system-prompt pin turned off, so a settings change the pin would
+  otherwise absorb falls through to a live call instead. Mutually
+  exclusive with `--replay` (a usage error, not a silent override); an
+  unknown step name is also a usage error naming the closed vocabulary.
+  `docs/extract.html`'s "The pipeline" section gains the step → behavior
+  table.
 
 ### Changed
 

@@ -253,9 +253,9 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       Extract takes each document through a fixed, ordered sequence of named steps. The names
       are a public contract (<a
       href="https://github.com/t0k0sh1/taguru/blob/main/adr/0030-extraction-pipeline-steps.md">ADR
-      0030</a>): the same name is used in the records below, in <code>--resume-from</code>
-      (once it ships — see <a href="https://github.com/t0k0sh1/taguru/issues/781">#781</a>), and
-      in this table. <strong>The list is not closed</strong> — a later version can add a step (a
+      0030</a>): the same name is used in the records below, in <a
+      href="#resume-from"><code>--resume-from</code></a>, and in this table. <strong>The list is
+      not closed</strong> — a later version can add a step (a
       document-structure pass and a context-generation pass are expected from <a
       href="https://github.com/t0k0sh1/taguru/issues/782">#782</a>), and the order to read them
       in always comes from this table, never from a number: positions shift, names do not.
@@ -343,6 +343,49 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       record (<a href="#attempts">The attempts log</a>). Writing the trace, the attempts log, and
       the manifest entry, and clearing the checkpoint, are bookkeeping <em>about</em> a step, not
       steps themselves.
+    </p>
+    <h3 id="resume-from">Naming a step to resume from</h3>
+    <p>
+      <code>taguru extract --resume-from STEP ...</code> (#822) accepts any name from the Step
+      column above. Its meaning is always the same — "steps before <code>STEP</code> are
+      satisfied from the attempts log where a record exists" — but this version's attempts log
+      only ever records two steps' output in full (<code>prompt</code>'s conversation and
+      <code>call</code>'s answer, both under <a href="#replay"><code>--replay</code></a>'s
+      existing matching), so the rule folds onto one of three concrete behaviors today:
+    </p>
+    <table>
+      <thead>
+        <tr><th>STEP</th><th>Folds onto</th><th>Why</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>call</code>, <code>parse</code>, <code>validate</code>, <code>reconcile</code>,
+            <code>merge</code>, <code>render</code>, <code>verify</code></td>
+          <td><code>--replay auto</code></td>
+          <td>everything before each of these is <code>prompt</code>+<code>call</code>, both
+            recorded in full — a completion replays exactly as an unnamed <code>--replay auto</code>
+            run would</td>
+        </tr>
+        <tr>
+          <td><code>prompt</code></td>
+          <td><code>--replay auto</code> with the system-prompt pin (ADR 0031 §3.6) turned off</td>
+          <td>naming <code>prompt</code> means <code>prompt</code> itself is rebuilt, not reused —
+            the system half of its output is never pinned from the log, so a change the pin would
+            otherwise have absorbed instead falls through to a live call on its own; <code>call</code>'s
+            record is still tried against whatever conversation this run actually builds</td>
+        </tr>
+        <tr>
+          <td><code>read</code>, <code>plan</code>, <code>steer</code></td>
+          <td>a plain, unreplayed run</td>
+          <td>nothing before any of these has a record in this version — there is nothing to
+            satisfy from the log at all</td>
+        </tr>
+      </tbody>
+    </table>
+    <p class="note">
+      <code>--resume-from</code> and <code>--replay</code> are mutually exclusive — the former
+      already selects one of the latter's modes, so giving both is a usage error rather than a
+      silent "last one wins". <code>--replay-from DIR</code> still applies underneath either.
     </p>
   </section>
 
@@ -1068,6 +1111,11 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
           <td><code>TAGURU_EXTRACT_REPLAY_FROM</code></td>
           <td>Where to read attempts logs from (default: the same
             <code>--out/.extract-trace</code> a run already writes its own to).</td></tr>
+        <tr><td><code>--resume-from STEP</code></td>
+          <td>—</td>
+          <td>Selects a <code>--replay</code> mode by naming a <a href="#pipeline">pipeline
+            step</a> instead — mutually exclusive with <code>--replay</code> itself. See
+            <a href="#resume-from">Naming a step to resume from</a> for the exact fold.</td></tr>
       </tbody>
     </table>
     <p>
