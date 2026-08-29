@@ -1757,6 +1757,318 @@ fn extract_vocabulary_accepts_a_previous_extract_out_directory() {
     let _ = std::fs::remove_dir_all(&out);
 }
 
+/// ADR 0033 (#782): `--chunk-context structure` prefixes every chunk
+/// with its block — position, references, preceding text — in the
+/// user turn's preamble, label-free; prefers a chunk boundary at the
+/// outermost heading; records `structure` and `chunk_context` in the
+/// trace; and is a computation input (same mode skips, another mode
+/// re-extracts). `off` sends today's prompt byte for byte.
+#[test]
+fn chunk_context_structure_prefixes_chunks_and_is_a_computation_input() {
+    let docs = batch_dir("extract-chunk-context-docs");
+    let doc = docs.join("guide.md");
+    let filler = "x".repeat(600);
+    std::fs::write(
+        &doc,
+        format!(
+            "# Alpha\n\nParagraph 0: s value- {filler}\n\n# Beta\n\nParagraph 1: s value- {filler}"
+        ),
+    )
+    .unwrap();
+    let out = batch_dir("extract-chunk-context-out");
+    let reply = |index: usize| {
+        chat_ok(
+            &json!({"associations": [
+                {"subject": "S", "label": "rel", "object": format!("value-{index}")}
+            ]})
+            .to_string(),
+        )
+    };
+    let (url, captured) = stub_chat_server_concurrent(move |index, _attempt| reply(index));
+    let provider = [
+        ("TAGURU_EXTRACT_URL", url.as_str()),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &provider,
+        &[
+            "--context",
+            "c",
+            "--chunk-bytes",
+            "700",
+            "--chunk-context",
+            "structure",
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let requests: Vec<String> = captured.lock().unwrap().clone();
+    assert_eq!(
+        requests.len(),
+        2,
+        "the outermost heading `# Beta` is a preferred boundary: {requests:?}"
+    );
+    let user_of = |request: &str| -> String {
+        json_body_of(request)["messages"][1]["content"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let first = user_of(&requests[0]);
+    let second = user_of(&requests[1]);
+    // The preamble section: the part line, the block's own preamble,
+    // then the block — single newlines — and the labeled chunk after
+    // the first blank line.
+    let (preamble, chunk) = second.split_once("\n\n").unwrap();
+    let lines: Vec<&str> = preamble.lines().collect();
+    assert_eq!(
+        lines[0],
+        format!("Document '{}', part 2 of 2:", doc.display())
+    );
+    assert!(lines[1].starts_with("Chunk context ("), "{preamble}");
+    assert!(
+        lines[1].contains("extract facts from part 2 of 2 only"),
+        "{preamble}"
+    );
+    assert_eq!(lines[2], "Position: Beta");
+    assert!(lines[3].starts_with("Preceding text: …"), "{preamble}");
+    assert!(lines[3].ends_with("xxx"), "{preamble}");
+    assert!(
+        !lines[2..].iter().any(|line| line.contains('[')),
+        "no paragraph label inside the block: {preamble}"
+    );
+    assert!(
+        chunk.starts_with("[2] # Beta\n\n[3] Paragraph 1"),
+        "{chunk}"
+    );
+    // The first chunk: position only (nothing precedes it).
+    let (preamble, chunk) = first.split_once("\n\n").unwrap();
+    assert!(preamble.contains("\nPosition: Alpha"), "{preamble}");
+    assert!(!preamble.contains("Preceding text"), "{preamble}");
+    assert!(chunk.starts_with("[0] # Alpha"), "{chunk}");
+    assert!(stdout.contains("2 association(s)"), "{stdout}");
+    assert!(!stdout.contains("removed"), "{stdout}");
+
+    // The trace: one `structure` record per unit, one `chunk_context`
+    // per chunk right after its `chunk`, citing units by index.
+    let (_, trace) = read_trace(&out);
+    let structure: Vec<&Value> = trace.iter().filter(|r| r["kind"] == "structure").collect();
+    assert_eq!(structure.len(), 2, "{structure:?}");
+    assert_eq!(structure[0]["unit"], 0);
+    assert_eq!(structure[0]["level"], 1);
+    assert_eq!(structure[0]["heading"], "Alpha");
+    assert_eq!(structure[0]["paragraph_first"], 0);
+    assert_eq!(structure[0]["paragraph_last"], 1);
+    assert_eq!(structure[1]["heading"], "Beta");
+    assert_eq!(structure[1]["paragraph_first"], 2);
+    assert_eq!(structure[1]["paragraph_last"], 3);
+    let kinds: Vec<&str> = trace.iter().map(|r| r["kind"].as_str().unwrap()).collect();
+    let chunk_at = kinds.iter().position(|k| *k == "chunk").unwrap();
+    assert_eq!(kinds[chunk_at + 1], "chunk_context");
+    assert_eq!(kinds[chunk_at + 2], "chunk");
+    assert_eq!(kinds[chunk_at + 3], "chunk_context");
+    let contexts: Vec<&Value> = trace
+        .iter()
+        .filter(|r| r["kind"] == "chunk_context")
+        .collect();
+    assert_eq!(contexts[0]["chunk_index"], 0);
+    assert_eq!(contexts[0]["position"], json!([0]));
+    assert!(contexts[0].get("overlap_paragraphs").is_none());
+    assert_eq!(contexts[1]["chunk_index"], 1);
+    assert_eq!(contexts[1]["position"], json!([1]));
+    assert_eq!(contexts[1]["references"], json!([]));
+    assert_eq!(contexts[1]["overlap_paragraphs"], json!([1, 1]));
+    assert!(contexts[1]["sha256"].as_str().unwrap().len() == 64);
+    assert!(contexts[1]["bytes"].as_u64().unwrap() > 0);
+
+    // Same mode again: an unchanged document. Another mode: a
+    // computation-input change, so it re-extracts.
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &provider,
+        &[
+            "--context",
+            "c",
+            "--chunk-bytes",
+            "700",
+            "--chunk-context",
+            "structure",
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("unchanged, skipped"), "{stdout}");
+    let before = captured.lock().unwrap().len();
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &provider,
+        &[
+            "--context",
+            "c",
+            "--chunk-bytes",
+            "700",
+            "--chunk-context",
+            "off",
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(!stdout.contains("unchanged, skipped"), "{stdout}");
+    let requests: Vec<String> = captured.lock().unwrap().clone();
+    assert!(requests.len() > before, "the mode change re-extracted");
+    let off = user_of(&requests[before]);
+    assert!(
+        !off.contains("Chunk context"),
+        "off sends today's prompt: {off}"
+    );
+    assert!(
+        off.starts_with(&format!("Document '{}', part 1 of ", doc.display())),
+        "{off}"
+    );
+    let (_, trace) = read_trace(&out);
+    assert!(
+        !trace
+            .iter()
+            .any(|r| r["kind"] == "structure" || r["kind"] == "chunk_context")
+    );
+
+    // The env default, and a mode outside the list.
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+            ("TAGURU_EXTRACT_CHUNK_CONTEXT", "structure"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--chunk-bytes",
+            "700",
+            "--dry-run",
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("would extract"), "{stdout}");
+    let (code, _, stderr) = run_extract(
+        &out,
+        &provider,
+        &[
+            "--context",
+            "c",
+            "--chunk-context",
+            "overview",
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains("--chunk-context takes one of: off, structure"),
+        "{stderr}"
+    );
+    let (code, _, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+            ("TAGURU_EXTRACT_CHUNK_CONTEXT", "bogus"),
+        ],
+        &["--context", "c", doc.to_str().unwrap()],
+    );
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains("TAGURU_EXTRACT_CHUNK_CONTEXT takes one of: off, structure"),
+        "{stderr}"
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// ADR 0033 §3.6.2: a name the block states is the document's own —
+/// the occurrence check reads the block, so `同法` resolved to the
+/// act's name on the heading path is kept, where the chunk alone
+/// would have had it removed as a fabrication.
+#[test]
+fn chunk_context_names_pass_the_occurrence_check() {
+    let docs = batch_dir("extract-chunk-context-occurrence-docs");
+    let doc = docs.join("law.md");
+    let filler = "x".repeat(600);
+    std::fs::write(
+        &doc,
+        format!("# 電子署名法\n\nfiller value- {filler}\n\n## 第三条\n\n同法の規定により value- が定まる。"),
+    )
+    .unwrap();
+    let out = batch_dir("extract-chunk-context-occurrence-out");
+    let reply = |index: usize| {
+        chat_ok(
+            &json!({"associations": [
+                {"subject": if index == 0 { "filler" } else { "電子署名法" },
+                 "label": "規定", "object": "value-"}
+            ]})
+            .to_string(),
+        )
+    };
+    let (url, _captured) = stub_chat_server_concurrent(move |index, _attempt| reply(index));
+    let provider = [
+        ("TAGURU_EXTRACT_URL", url.as_str()),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &provider,
+        &[
+            "--context",
+            "c",
+            "--chunk-bytes",
+            "700",
+            "--chunk-context",
+            "structure",
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("2 association(s)"), "{stdout}");
+    assert!(!stdout.contains("removed"), "{stdout}");
+    let batches = stray_batch_files(&out);
+    let batch = std::fs::read_to_string(out.join(&batches[0])).unwrap();
+    assert!(batch.contains("\"subject\":\"電子署名法\""), "{batch}");
+
+    // The contrast: off, the second chunk never saw the act's name,
+    // and the mechanical pass removes the subject as unattested.
+    let (url, _captured) = stub_chat_server_concurrent(move |index, _attempt| reply(index));
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--chunk-bytes",
+            "700",
+            "--force",
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("1 association(s)"), "{stdout}");
+    assert!(
+        stdout.contains("1 item(s) removed (mechanical validation)"),
+        "{stdout}"
+    );
+    assert!(
+        stderr.contains("does not appear in the document text"),
+        "{stderr}"
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
 /// #758: document A settles on a concept spelling; document C offers
 /// that same spelling as an alias of a different name. Import would
 /// refuse the rewire (409, the stream stopping with A already
@@ -8789,10 +9101,11 @@ fn resume_from_rejects_an_unknown_step_name() {
     assert_eq!(code, 2, "{stderr}");
     assert!(
         stderr.contains(
-            "--resume-from takes one of: read, plan, steer, prompt, call, parse, validate, \
-             reconcile, merge, render, verify"
+            "--resume-from takes one of: read, structure, plan, annotate, steer, prompt, call, \
+             parse, validate, reconcile, merge, render, verify"
         ),
-        "must list every one of ADR 0030's 11 step names, not just a prefix: {stderr}"
+        "must list every one of ADR 0030's step names (ADR 0033 added two), not just a \
+         prefix: {stderr}"
     );
 
     let _ = std::fs::remove_dir_all(&docs);

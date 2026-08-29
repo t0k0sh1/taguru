@@ -353,13 +353,16 @@ pub(super) struct RecordedSettings {
     pub(super) structured_output: String,
     pub(super) max_output_tokens: u64,
     pub(super) chunk_bytes: String,
+    /// ADR 0033; absent in a record written before the field existed,
+    /// read as `""` (off) — the mode it was necessarily taken under.
+    pub(super) chunk_context: String,
     pub(super) lossy: bool,
     pub(super) schema_digest: String,
     pub(super) candidates: String,
     pub(super) vocabulary_digest: String,
 }
 
-fn parse_settings_record(value: &serde_json::Value) -> Option<RecordedSettings> {
+pub(super) fn parse_settings_record(value: &serde_json::Value) -> Option<RecordedSettings> {
     Some(RecordedSettings {
         prompt_version: value["prompt_version"].as_u64()?,
         model: value["model"].as_str()?.to_string(),
@@ -368,6 +371,7 @@ fn parse_settings_record(value: &serde_json::Value) -> Option<RecordedSettings> 
         structured_output: value["structured_output"].as_str()?.to_string(),
         max_output_tokens: value["max_output_tokens"].as_u64()?,
         chunk_bytes: value["chunk_bytes"].as_str()?.to_string(),
+        chunk_context: value["chunk_context"].as_str().unwrap_or("").to_string(),
         lossy: value["lossy"].as_bool()?,
         schema_digest: value["schema_digest"].as_str()?.to_string(),
         candidates: value["candidates"].as_str()?.to_string(),
@@ -403,6 +407,7 @@ pub(super) fn settings_differences(
     diff!(structured_output, "structured_output");
     diff!(max_output_tokens, "max_output_tokens");
     diff!(chunk_bytes, "chunk_bytes");
+    diff!(chunk_context, "chunk_context");
     diff!(lossy, "lossy");
     diff!(schema_digest, "schema_digest");
     diff!(candidates, "candidates");

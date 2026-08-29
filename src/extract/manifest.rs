@@ -70,6 +70,13 @@ pub(super) struct ManifestEntry {
     /// before the field existed matching an all-defaults run.
     #[serde(default)]
     pub(super) escalation_factor: String,
+    /// --chunk-context of the run that wrote this batch, as
+    /// [`ChunkContextMode::manifest_value`] encodes it (`""` = off —
+    /// ADR 0033): the mode decides what every chunk is prefixed with,
+    /// so any other value re-extracts; the empty default keeps entries
+    /// written before the field existed matching an all-defaults run.
+    #[serde(default)]
+    pub(super) chunk_context: String,
     /// --chunk-bytes of the run that wrote this batch, as
     /// [`chunk_bytes_manifest_value`] encodes it (`""` = the default
     /// cap — ADR 0020): the cap decides what every chunk the model is
@@ -169,6 +176,7 @@ impl Manifest {
                 && entry.max_output_tokens == inputs.max_output_tokens
                 && entry.escalation_factor == inputs.escalation_factor
                 && entry.chunk_bytes == inputs.chunk_bytes
+                && entry.chunk_context == inputs.chunk_context
                 && entry.lossy == inputs.lossy
                 && entry.schema_digest == inputs.schema_digest
                 && entry.candidates == inputs.candidates
@@ -206,6 +214,7 @@ impl Manifest {
                 max_output_tokens: inputs.max_output_tokens,
                 escalation_factor: inputs.escalation_factor.to_string(),
                 chunk_bytes: inputs.chunk_bytes.to_string(),
+                chunk_context: inputs.chunk_context.to_string(),
                 lossy: inputs.lossy,
                 schema_digest: inputs.schema_digest.to_string(),
                 candidates: inputs.candidates.to_string(),
@@ -243,6 +252,7 @@ pub(super) struct ComputationInputs<'a> {
     pub(super) max_output_tokens: usize,
     pub(super) escalation_factor: &'a str,
     pub(super) chunk_bytes: &'a str,
+    pub(super) chunk_context: &'a str,
     pub(super) lossy: bool,
     pub(super) schema_digest: &'a str,
     pub(super) candidates: &'a str,

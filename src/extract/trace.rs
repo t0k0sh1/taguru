@@ -277,6 +277,8 @@ pub(super) fn render_trace(
     extraction: &Extraction,
     uncovered: &[CoverageGap],
     steering: &TraceSteering,
+    units: &[Unit],
+    blocks: &[Option<ContextBlock>],
 ) -> String {
     let mut lines = Vec::new();
     let mut push = |record: &dyn erased_serialize::Serialize| {
@@ -299,6 +301,14 @@ pub(super) fn render_trace(
     // ADR 0027: the prompt's steering lists, right after the document
     // record — they hold for every chunk below.
     push(steering);
+    // ADR 0033 §3.4: the document's structural units, before the
+    // chunks that cite them by index.
+    for unit in units {
+        push(&TraceStructure {
+            kind: "structure",
+            unit,
+        });
+    }
     for (chunk_index, descriptor) in chunks.iter().enumerate() {
         push(&TraceChunk {
             kind: "chunk",
@@ -309,6 +319,14 @@ pub(super) fn render_trace(
             paragraph_first: descriptor.paragraph_first,
             paragraph_last: descriptor.paragraph_last,
         });
+        // ADR 0033 §3.6.4: what this chunk was told, right after it.
+        if let Some(block) = blocks.get(chunk_index).and_then(Option::as_ref) {
+            push(&TraceChunkContext {
+                kind: "chunk_context",
+                chunk_index,
+                block,
+            });
+        }
     }
     for piece in pieces {
         push(&TracePiece {

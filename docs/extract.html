@@ -114,6 +114,7 @@ TAGURU_EXTRACT_ESCALATION_FACTOR  cap of the one escalated resend after an
                     answer ends at --max-output-tokens, as a multiple of that
                     budget; 0 = uncapped (default 2)
 TAGURU_EXTRACT_CHUNK_BYTES  default for --chunk-bytes (default 24576)
+TAGURU_EXTRACT_CHUNK_CONTEXT  default for --chunk-context (default off)
 TAGURU_EXTRACT_TRACE_ATTEMPTS  `off` disables the per-document attempts log (on by default; see Trace)
 TAGURU_EXTRACT_LOSSY  default for --lossy (default 0/false)
 TAGURU_EXTRACT_CANDIDATES  default for --candidates (default 0/false)
@@ -144,6 +145,13 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
                     512); chunks split at paragraph boundaries — lower it for
                     a slow provider or output-dense documents (statutes,
                     minutes); overrides TAGURU_EXTRACT_CHUNK_BYTES
+--chunk-context MODE  what each chunk is told about its place in the
+                    document (ADR 0033): off (default) sends the chunk
+                    alone; structure prefixes every chunk with its
+                    heading path, the openings of the units it refers
+                    to, and the paragraphs just before it, and prefers
+                    chunk boundaries at the outermost headings — no
+                    model call; a computation input
 --parallel N        chunk completions to run concurrently within one
                     document (default 1, sequential); overrides
                     TAGURU_EXTRACT_PARALLEL when both are set
@@ -256,9 +264,10 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       href="https://github.com/t0k0sh1/taguru/blob/main/adr/0030-extraction-pipeline-steps.md">ADR
       0030</a>): the same name is used in the records below, in <a
       href="#resume-from"><code>--resume-from</code></a>, and in this table. <strong>The list is
-      not closed</strong> — a later version can add a step (a
-      document-structure pass and a context-generation pass are expected from <a
-      href="https://github.com/t0k0sh1/taguru/issues/782">#782</a>), and the order to read them
+      not closed</strong> — a later version can add a step (<a
+      href="https://github.com/t0k0sh1/taguru/blob/main/adr/0033-chunk-context.md">ADR 0033</a>
+      added <code>structure</code> and <code>annotate</code>, table edition 2; its
+      <code>overview</code> pass, a model call, is next), and the order to read them
       in always comes from this table, never from a number: positions shift, names do not.
     </p>
     <table>
@@ -272,9 +281,23 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
           <td>—</td>
         </tr>
         <tr>
+          <td><code>structure</code></td><td>per document</td><td>—</td>
+          <td>the document's structural units — headings, statute articles, speakers — each
+            with a level and a paragraph range (empty under <code>--chunk-context off</code>)</td>
+          <td><a href="#chunk-context">Chunk context</a>, <a href="#trace">Trace</a>
+            (<code>structure</code>)</td>
+        </tr>
+        <tr>
           <td><code>plan</code></td><td>per document</td><td>—</td>
           <td>the chunk plan (index, hash, byte length, paragraph range per chunk)</td>
           <td><a href="#chunking">Chunking</a></td>
+        </tr>
+        <tr>
+          <td><code>annotate</code></td><td>per chunk</td><td>—</td>
+          <td>the chunk's context block — heading path, referenced units' openings, preceding
+            paragraphs — as prefixed to its user turn (none under <code>off</code>)</td>
+          <td><a href="#chunk-context">Chunk context</a>, <a href="#trace">Trace</a>
+            (<code>chunk_context</code>)</td>
         </tr>
         <tr>
           <td><code>steer</code></td><td>per document</td><td>—</td>
@@ -376,7 +399,8 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
             record is still tried against whatever conversation this run actually builds</td>
         </tr>
         <tr>
-          <td><code>read</code>, <code>plan</code>, <code>steer</code></td>
+          <td><code>read</code>, <code>structure</code>, <code>plan</code>, <code>annotate</code>,
+            <code>steer</code></td>
           <td>a plain, unreplayed run</td>
           <td>nothing before any of these has a record in this version — there is nothing to
             satisfy from the log at all</td>
@@ -663,6 +687,60 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
     </p>
   </section>
 
+  <section id="chunk-context">
+    <h2>Chunk context: what a chunk is told about its place in the document</h2>
+    <p>
+      These are the <a href="#pipeline"><code>structure</code></a> and
+      <a href="#pipeline"><code>annotate</code></a> steps (<a
+      href="https://github.com/t0k0sh1/taguru/blob/main/adr/0033-chunk-context.md">ADR 0033</a>,
+      #782). "Context" here is what a reader needs in mind to read a chunk — never a Taguru
+      context, the namespace <code>--context NAME</code> targets. By default (<code>--chunk-context
+      off</code>, or <code>TAGURU_EXTRACT_CHUNK_CONTEXT</code>) a chunk is sent alone: part K of
+      N, and the labeled text. It does not know the chapter it sits in, the definitions an
+      earlier article gave, or which act <code>同法</code> names three chunks back — the gap the
+      v0.9.5 baseline measured as near-zero cross-unit recall on statutes, minutes, and
+      technical documents.
+    </p>
+    <p>
+      <code>--chunk-context structure</code> closes the mechanical half of that gap with no model
+      call. The <code>structure</code> step reads the document's own lines for headings:
+      Markdown <code>#</code> levels; statute <code>第N章</code>/<code>第N節</code>/<code>第N条</code>
+      (a parenthesized <code>（見出し）</code> line names its article, <code>第三条の二</code>
+      branches ride along); minutes <code>◆</code> sections and <code>○</code> speaker lines;
+      dotted or <code>§</code> numbering (<code>1.2 Setup</code>, <code>§ 3</code> — never a bare
+      <code>1. item</code>, which is a list). Each heading opens a <i>unit</i> with a level and
+      the paragraph range up to the next heading. The <code>annotate</code> step then prefixes
+      every chunk's user turn with a <b>chunk context block</b>, in this order and only while a
+      cap (a quarter of <code>--chunk-bytes</code>, never under 512 bytes) holds:
+      <code>Position:</code> the heading path in force at the chunk's first paragraph, outermost
+      first (<code>第二章 › 第三条</code>); <code>References:</code> the heading and opening of
+      every unit the chunk names and does not itself hold — an article by number, <code>前条</code>,
+      <code>§2</code>, a heading quoted verbatim — in mention order, at most four;
+      <code>Preceding text:</code> the paragraphs just before the chunk, whole ones as far as the
+      cap allows and the nearest one's tail otherwise. The block's own first line tells the model
+      to extract from the chunk only.
+    </p>
+    <p>
+      Three rules keep the block from leaking into the batch. It carries <b>no <code>[N]</code>
+      paragraph label</b>, so nothing in it can be the paragraph a fact is tagged with — the
+      passage and every locator are exactly what they were. It is <b>the document's own
+      text</b>, so the <a href="#prompt">occurrence check</a> reads it: <code>電子署名法</code>
+      answered for a chunk that only says <code>同法</code> is kept when the act's name is on the
+      heading path, where the chunk alone would have had it removed as unattested. And it is
+      <b>recorded</b>: the <a href="#trace">trace</a> carries one <code>structure</code> record
+      per unit and one <code>chunk_context</code> record per chunk (its <code>sha256</code> and
+      <code>bytes</code>, the unit indices on the <code>position</code> path and among the
+      <code>references</code>, and the <code>overlap_paragraphs</code> range), so a gained fact
+      can be credited to the kind of context that carried it. The mode is a computation input:
+      switching it re-extracts, and a manifest or checkpoint from before the flag matches
+      <code>off</code>. Split sub-pieces (the ladder's split rung) keep their chunk's block — a
+      sub-piece is still part K, read in part K's context. Two further modes, an
+      <code>overview</code> pass (per-unit synopses and a cast list, one model pass) and
+      <code>ingested</code> (the target context's known relations for that cast, from the
+      <code>--vocabulary</code> export), are specified by ADR 0033 and land after this one.
+    </p>
+  </section>
+
   <section id="chunking">
     <h2>Chunking</h2>
     <p>
@@ -680,6 +758,11 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       <code>--chunk-bytes</code> re-extracts (the default cap matches manifests written before the
       flag existed). Lower it for a slow local provider or for output-dense documents — statutes,
       minutes — whose answers outrun the time or token budget at the default cap (ADR 0020).
+      Under <a href="#chunk-context"><code>--chunk-context structure</code></a> the packing gains
+      one preference: a paragraph that opens a unit at the document's outermost level (a
+      chapter, a top-level heading, a speaker block) ends the current chunk once that chunk is
+      past half the cap — so boundaries fall on chapters when they can, no chunk exceeds the cap,
+      and a document with no structure chunks exactly as before.
     </p>
     <p>
       <code>--parallel N</code> (or <code>TAGURU_EXTRACT_PARALLEL</code>; the flag wins when both
@@ -949,10 +1032,16 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       The file is a tagged JSONL stream like the sidecar (<code>kind</code>; skip kinds you do
       not know), in this order: one <code>document</code> (<code>run_id</code>,
       <code>source</code>, <code>document_sha256</code> — the manifest's hash of the text,
-      <code>batch_path</code>, <code>chunk_total</code>); one <code>chunk</code> per chunk of
+      <code>batch_path</code>, <code>chunk_total</code>); under <a
+      href="#chunk-context"><code>--chunk-context structure</code></a>, one <code>structure</code>
+      per unit (<code>unit</code>, <code>level</code>, <code>heading</code>,
+      <code>paragraph_first</code>/<code>paragraph_last</code>); one <code>chunk</code> per chunk of
       the plan (the same <code>chunk_index</code>/<code>chunk_sha256</code>/
       <code>chunk_bytes</code>/<code>paragraph_first</code>/<code>paragraph_last</code> the
-      sidecar's chunk record carries); one <code>piece</code> per answer the chunk loop kept —
+      sidecar's chunk record carries), each followed under that mode by its
+      <code>chunk_context</code> (<code>chunk_index</code>, the block's <code>sha256</code>/
+      <code>bytes</code>, <code>position</code> and <code>references</code> as unit indices,
+      <code>overlap_paragraphs</code>); one <code>piece</code> per answer the chunk loop kept —
       a chunk, or each sub-piece the split rung made of one, so several pieces can share a
       <code>chunk_index</code> — with <code>piece_id</code> (sha256 of the piece text as sent;
       the checkpoint unit's key, so an unsplit chunk's <code>piece_id</code> equals its
@@ -1044,8 +1133,9 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       0031</a>) — a diagnostic snapshot of this run's compute inputs (<code>model</code>,
       <code>prompt_version</code>, <code>questions_n</code>, <code>fact_budget</code>,
       <code>structured_output</code>, <code>max_output_tokens</code>, <code>chunk_bytes</code>,
-      <code>lossy</code>, <code>schema_digest</code>, <code>candidates</code>,
-      <code>vocabulary_digest</code>, and the current <code>rung</code>), the same field set the
+      <code>chunk_context</code>, <code>lossy</code>, <code>schema_digest</code>,
+      <code>candidates</code>, <code>vocabulary_digest</code>, and the current
+      <code>rung</code>), the same field set the
       manifest and checkpoint fingerprint check, minus what only names the document or never
       reaches the model (<code>sha256</code>, <code>context</code>, <code>no_passage</code>,
       <code>description</code>, <code>escalation_factor</code>). Never a manifest/checkpoint
@@ -1297,9 +1387,16 @@ l=out/.extract-trace/a.attempts.jsonl      # the attempts log</code></pre>
             <code>batch_path</code>/<code>chunk_total</code>); attempts log <code>document</code>;
             the manifest entry's <code>sha256</code>. Paragraph numbering only shows up
             indirectly, through <code>paragraph</code> records (also <code>verify</code>'s).</td></tr>
+        <tr><td><code>structure</code></td>
+          <td>trace <code>structure</code>, one per unit (none under <code>--chunk-context
+            off</code>).</td></tr>
         <tr><td><code>plan</code></td>
           <td>trace <code>chunk</code>, one per chunk; the diagnostics sidecar's own
             <code>chunk</code> record; the <code>--dry-run</code> per-document line.</td></tr>
+        <tr><td><code>annotate</code></td>
+          <td>trace <code>chunk_context</code>, one per chunk that got a block, right after its
+            <code>chunk</code>; the block text itself is in each <code>attempt</code>'s
+            <code>messages</code> (the user turn's preamble section).</td></tr>
         <tr><td><code>steer</code></td>
           <td>trace <code>steering</code> — one record, one to one with the step.</td></tr>
         <tr><td><code>prompt</code></td>

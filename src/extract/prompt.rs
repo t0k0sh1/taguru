@@ -214,15 +214,37 @@ pub(super) fn relation_line(
     }
 }
 
-pub(super) fn user_message(source: &str, index: usize, total: usize, text: &str) -> String {
-    if total > 1 {
-        format!(
-            "Document '{source}', part {} of {total}:\n\n{text}",
-            index + 1
-        )
+pub(super) fn user_message(
+    source: &str,
+    index: usize,
+    total: usize,
+    text: &str,
+    block: Option<&str>,
+) -> String {
+    let mut preamble = if total > 1 {
+        format!("Document '{source}', part {} of {total}:", index + 1)
     } else {
-        format!("Document '{source}':\n\n{text}")
+        format!("Document '{source}':")
+    };
+    // ADR 0033 §3.6: the chunk context block rides in the preamble
+    // section — single newlines only, so the first blank line is
+    // still where the document starts (`user_message_document`).
+    if let Some(block) = block {
+        preamble.push('\n');
+        preamble.push_str(&block_preamble(index, total));
+        preamble.push('\n');
+        preamble.push_str(block);
     }
+    format!("{preamble}\n\n{text}")
+}
+
+/// The text the occurrence check (ADR 0013) judges names against:
+/// everything after the first line — the chunk context block when
+/// there is one (ADR 0033 §3.6.2: a name the block states is the
+/// document's own, never a fabrication) and the chunk. The first
+/// line embeds the source path and is never text of the document.
+pub(super) fn user_message_occurrence_text(user: &str) -> &str {
+    user.split_once('\n').map(|(_, rest)| rest).unwrap_or(user)
 }
 
 /// [`user_message`]'s inverse: the document text a user turn carried,
@@ -230,9 +252,10 @@ pub(super) fn user_message(source: &str, index: usize, total: usize, text: &str)
 /// 0013) must judge names against the DOCUMENT alone — the preamble
 /// embeds the source path, and letting a name pass because it happens
 /// to appear in a directory name would make validation depend on
-/// where the file lives. Every preamble is a single line, so the
-/// first blank line is always the boundary, even when the document's
-/// own text contains more of them.
+/// where the file lives. A preamble holds no blank line (its one line,
+/// or ADR 0033's block joined by single newlines), so the first blank
+/// line is always the boundary, even when the document's own text
+/// contains more of them.
 pub(super) fn user_message_document(user: &str) -> &str {
     user.split_once("\n\n")
         .map(|(_, text)| text)

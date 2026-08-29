@@ -77,6 +77,8 @@ mod candidates;
 mod chat_client;
 #[path = "extract/checkpoint.rs"]
 mod checkpoint;
+#[path = "extract/chunk_context.rs"]
+mod chunk_context;
 #[path = "extract/chunking.rs"]
 mod chunking;
 #[path = "extract/completions.rs"]
@@ -127,7 +129,9 @@ use structured_output::resolve_rung;
 pub(crate) use args::StructuredOutputMode;
 pub(crate) use chat_client::{AttemptRef, ChatClient, RequestOptions};
 pub(crate) use documents::{ChunkDescriptor, chunk_plan, expand_documents, read_document};
-use documents::{chunk_bytes_manifest_value, chunk_plan_with_cap};
+use documents::{chunk_bytes_manifest_value, chunk_plan_preferring};
+#[cfg(test)]
+use documents::{chunk_plan_with_cap, leading_paragraph_number};
 pub(crate) use signals::{StopSignal, block_stop_signals_on_this_thread};
 use structured_output::json_object_response_format;
 pub(crate) use structured_output::json_schema_response_format;
@@ -151,6 +155,12 @@ use chat_client::{
     ChatCompletion, ChatError, ChatFailure, TokenUsage, classify_io_error, mint_run_id,
 };
 use checkpoint::{CheckpointFingerprint, CheckpointStore, CheckpointUnit};
+use chunk_context::{
+    CHUNK_CONTEXT_MODES, ChunkContextMode, ContextBlock, TraceChunkContext, TraceStructure, Unit,
+    block_cap, block_preamble, detect_units, preferred_breaks, render_block,
+};
+#[cfg(test)]
+use chunk_context::{position, references};
 use chunking::{
     AnswerFault, ChunkOutput, MIN_SPLIT_CAP, corrective_assistant_turn,
     corrective_validation_message, evaluate_answer, extract_chunk_or_ladder,
@@ -174,9 +184,15 @@ use parse::{
 use prompt::VOCABULARY_CAP;
 use prompt::{
     ranked_vocabulary, schema_constrained_relations, schema_type_names, system_prompt,
-    user_message, user_message_document,
+    user_message, user_message_document, user_message_occurrence_text,
 };
-use render::{chunk, floor_char_boundary, render_batch, split_labeled_piece, split_oversized};
+#[cfg(test)]
+use render::chunk;
+use render::{
+    chunk_preferring, floor_char_boundary, render_batch, split_labeled_piece, split_oversized,
+};
+#[cfg(test)]
+use replay::parse_settings_record;
 use replay::{
     MissDiagnostic, RecordedSettings, ReplayIndex, ReplayLookup, SystemPinDecision,
     settings_differences,
@@ -235,6 +251,7 @@ const USAGE: &str = "\
 usage: taguru extract [--dry-run] [--force] [--no-passage] [--questions N]
                       [--fact-budget N] [--config FILE] [--parallel N]
                       [--structured-output MODE] [--max-output-tokens N]
+                      [--chunk-bytes N] [--chunk-context MODE]
                       [--lossy] [--candidates] [--vocabulary PATH] [--coverage]
                       [--diagnostics-out FILE] [--schema FILE]
                       [--replay MODE] [--replay-from DIR] [--resume-from STEP]
@@ -262,6 +279,7 @@ chat endpoint:
                       answer ends at --max-output-tokens, as a multiple of
                       that budget; 0 = uncapped (2)
   TAGURU_EXTRACT_CHUNK_BYTES  default for --chunk-bytes (24576)
+  TAGURU_EXTRACT_CHUNK_CONTEXT  default for --chunk-context (off)
   TAGURU_EXTRACT_LOSSY  default for --lossy (0/false)
   TAGURU_EXTRACT_CANDIDATES  default for --candidates (0/false)
   TAGURU_EXTRACT_VOCABULARY  default for --vocabulary (unset, off)
@@ -302,6 +320,18 @@ chat endpoint:
                       512); chunks split at paragraph boundaries — lower it
                       for a slow provider or output-dense documents (statutes,
                       minutes); overrides TAGURU_EXTRACT_CHUNK_BYTES
+  --chunk-context MODE  what each chunk is told about its place in the
+                      document (ADR 0033): off (default) sends the chunk
+                      alone; structure detects the document's headings,
+                      articles, and speakers, prefers chunk boundaries at
+                      the outermost ones, and prefixes every chunk with
+                      its heading path, the openings of the units it
+                      refers to (第三条, 前条, §2, a quoted heading), and
+                      the paragraphs just before it — document text
+                      only, no model call, capped at a quarter of
+                      --chunk-bytes. A computation input: changing it
+                      re-extracts. The pipeline steps it adds are
+                      structure (after read) and annotate (after plan)
   --config F          read KEY=VALUE environment from F (same dialect as serve)
   --parallel N        chunk completions to run concurrently within one
                       document (1, sequential); documents themselves stay
@@ -700,6 +730,25 @@ pub fn run(args: &[String]) -> i32 {
             Err(_) => CHUNK_BYTES,
         },
     };
+    // ADR 0033: chunk context. Same resolution as --chunk-bytes; a
+    // spelling outside the mode list is a usage error either way.
+    let chunk_context = match args.chunk_context {
+        Some(mode) => mode,
+        None => match std::env::var("TAGURU_EXTRACT_CHUNK_CONTEXT") {
+            Ok(value) => match ChunkContextMode::parse(&value) {
+                Some(mode) => mode,
+                None => {
+                    return crate::config::subcommand_usage_error(
+                        "extract",
+                        &format!(
+                            "TAGURU_EXTRACT_CHUNK_CONTEXT takes one of: {CHUNK_CONTEXT_MODES}"
+                        ),
+                    );
+                }
+            },
+            Err(_) => ChunkContextMode::Off,
+        },
+    };
     // ADR 0019: the escalation rung's cap as a multiple of the budget.
     // Read unconditionally (a bad value is a usage error whether or not
     // a budget is set, like every other TAGURU_EXTRACT_* knob), applied
@@ -952,6 +1001,7 @@ pub fn run(args: &[String]) -> i32 {
         max_output_tokens,
         escalation_factor,
         chunk_bytes,
+        chunk_context,
         ladder,
         out: args.out,
         completions,

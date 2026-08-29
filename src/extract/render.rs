@@ -82,11 +82,27 @@ pub(super) fn render_batch(
 /// verbatim document — so exact reassembly does not matter; keeping
 /// sentences whole does. A blank document yields no chunks.
 pub(super) fn chunk(text: &str, cap: usize) -> Vec<String> {
+    chunk_preferring(text, cap, &|_| false)
+}
+
+/// [`chunk`] with ADR 0033 §3.4's one added preference: a block for
+/// which `break_before` holds (a paragraph that opens an outermost
+/// structural unit) ends the current chunk when that chunk is already
+/// past half the cap — so boundaries fall on chapters when they can,
+/// no chunk exceeds the cap, and a document with no such block chunks
+/// exactly as [`chunk`] does.
+pub(super) fn chunk_preferring(
+    text: &str,
+    cap: usize,
+    break_before: &dyn Fn(&str) -> bool,
+) -> Vec<String> {
     let mut chunks = Vec::new();
     let mut current = String::new();
     for paragraph in text.split("\n\n") {
         for piece in split_oversized(paragraph, cap) {
-            if !current.is_empty() && current.len() + 2 + piece.len() > cap {
+            let overflows = current.len() + 2 + piece.len() > cap;
+            let preferred = current.len() > cap / 2 && break_before(piece);
+            if !current.is_empty() && (overflows || preferred) {
                 chunks.push(std::mem::take(&mut current));
             }
             if !current.is_empty() {

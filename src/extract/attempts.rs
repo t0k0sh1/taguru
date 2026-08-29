@@ -222,6 +222,8 @@ pub(super) struct SettingsRecord<'a> {
     pub(super) structured_output: &'a str,
     pub(super) max_output_tokens: usize,
     pub(super) chunk_bytes: &'a str,
+    /// ADR 0033: `""` = off, the mode name otherwise.
+    pub(super) chunk_context: &'a str,
     pub(super) lossy: bool,
     pub(super) schema_digest: &'a str,
     pub(super) candidates: &'a str,

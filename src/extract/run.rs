@@ -69,6 +69,9 @@ pub(super) struct Run {
     /// `--chunk-bytes`/TAGURU_EXTRACT_CHUNK_BYTES, resolved
     /// ([`CHUNK_BYTES`] by default) — ADR 0020 (#762).
     pub(super) chunk_bytes: usize,
+    /// `--chunk-context`/TAGURU_EXTRACT_CHUNK_CONTEXT, resolved
+    /// (`Off` by default) — ADR 0033 (#782).
+    pub(super) chunk_context: ChunkContextMode,
     /// `Some` exactly when a mechanism or an output budget is engaged
     /// on a live run: the §7 ladder replaces the legacy corrective
     /// loop. `None` under all-defaults — byte-for-byte today's
@@ -403,6 +406,7 @@ impl Run {
                 self.escalation_factor,
             ),
             chunk_bytes: chunk_bytes_manifest_value(self.chunk_bytes),
+            chunk_context: self.chunk_context.manifest_value().to_string(),
             lossy: self.lossy,
             schema_digest: self.schema_digest.clone(),
             candidates: candidates_manifest_value(self.candidates).to_string(),
@@ -510,6 +514,7 @@ impl Run {
             max_output_tokens: self.max_output_tokens.unwrap_or(0),
             escalation_factor: &escalation_factor,
             chunk_bytes: &chunk_bytes,
+            chunk_context: self.chunk_context.manifest_value(),
             lossy: self.lossy,
             schema_digest: &self.schema_digest,
             candidates: candidates_manifest_value(self.candidates),
@@ -566,7 +571,36 @@ impl Run {
         } else {
             Vec::new()
         };
-        let plan = chunk_plan_with_cap(&text, self.chunk_bytes);
+        // ADR 0033 (#782): the `structure` step — the document's
+        // headings, articles, and speakers, from its own lines — and
+        // the chunk boundaries it makes `plan` prefer. Off: no units,
+        // no preferred breaks, today's plan byte for byte.
+        let units: Vec<Unit> = if self.chunk_context.is_on() {
+            detect_units(&text, &paragraph_spans)
+        } else {
+            Vec::new()
+        };
+        let plan = chunk_plan_preferring(&text, self.chunk_bytes, &preferred_breaks(&units));
+        // The `annotate` step: one block per chunk, or none under `off`
+        // (and none for a chunk nothing applies to).
+        let blocks: Vec<Option<ContextBlock>> = if self.chunk_context.is_on() {
+            let cap = block_cap(self.chunk_bytes);
+            plan.iter()
+                .map(|descriptor| {
+                    render_block(
+                        &text,
+                        &paragraph_spans,
+                        &units,
+                        descriptor.paragraph_first,
+                        descriptor.paragraph_last,
+                        &descriptor.text,
+                        cap,
+                    )
+                })
+                .collect()
+        } else {
+            vec![None; plan.len()]
+        };
         if self.dry_run {
             // Read-only: a dry run still calls/writes nothing, but
             // reusable-count reporting is exactly what --dry-run is for
@@ -644,6 +678,7 @@ impl Run {
                 structured_output: self.structured_output.manifest_value(),
                 max_output_tokens: self.max_output_tokens.unwrap_or(0),
                 chunk_bytes: &chunk_bytes,
+                chunk_context: self.chunk_context.manifest_value(),
                 lossy: self.lossy,
                 schema_digest: &self.schema_digest,
                 candidates: candidates_manifest_value(self.candidates),
@@ -673,6 +708,7 @@ impl Run {
                 structured_output: self.structured_output.manifest_value().to_string(),
                 max_output_tokens: self.max_output_tokens.unwrap_or(0) as u64,
                 chunk_bytes: chunk_bytes.clone(),
+                chunk_context: self.chunk_context.manifest_value().to_string(),
                 lossy: self.lossy,
                 schema_digest: self.schema_digest.clone(),
                 candidates: candidates_manifest_value(self.candidates).to_string(),
@@ -702,10 +738,15 @@ impl Run {
             .iter()
             .map(|descriptor| descriptor.text.clone())
             .collect();
+        let context_blocks: Vec<Option<&str>> = blocks
+            .iter()
+            .map(|block| block.as_ref().map(|block| block.text.as_str()))
+            .collect();
         let chunk_result = self
             .extract_chunks(
                 source,
                 &chunks,
+                &context_blocks,
                 canonical_paragraphs,
                 &resolved_system.text,
                 &checkpoints,
@@ -845,6 +886,8 @@ impl Run {
                 &extraction,
                 &uncovered,
                 &self.steering_record(&candidates, &resolved_system),
+                &units,
+                &blocks,
             ),
         );
         self.manifest.record(source, &inputs, &file_name);
@@ -931,10 +974,12 @@ impl Run {
     /// `--parallel` is scoped to between-documents instead). A stop
     /// observed mid-loop returns [`ChunkLoopResult::Interrupted`]
     /// immediately, keeping whatever units already landed.
+    #[allow(clippy::too_many_arguments)] // one call site; the blocks ride beside the chunks
     pub(super) fn extract_chunks(
         &self,
         source: &str,
         chunks: &[String],
+        context_blocks: &[Option<&str>],
         paragraph_count: usize,
         system: &str,
         checkpoints: &CheckpointStore,
@@ -944,6 +989,7 @@ impl Run {
             return self.extract_chunks_concurrently(
                 source,
                 chunks,
+                context_blocks,
                 paragraph_count,
                 system,
                 checkpoints,
@@ -967,6 +1013,7 @@ impl Run {
                 index,
                 chunks.len(),
                 piece,
+                context_blocks.get(index).copied().flatten(),
                 &self.correction,
                 self.fact_budget,
                 self.ladder.as_ref(),
@@ -1003,10 +1050,12 @@ impl Run {
     /// documents — every already-claimed chunk in this document runs to
     /// completion (and gets checkpointed) before the run notices the
     /// request.
+    #[allow(clippy::too_many_arguments)] // mirrors `extract_chunks`
     pub(super) fn extract_chunks_concurrently(
         &self,
         source: &str,
         chunks: &[String],
+        context_blocks: &[Option<&str>],
         paragraph_count: usize,
         system: &str,
         checkpoints: &CheckpointStore,
@@ -1029,6 +1078,7 @@ impl Run {
                     index,
                     chunks.len(),
                     piece,
+                    context_blocks.get(index).copied().flatten(),
                     &self.correction,
                     self.fact_budget,
                     self.ladder.as_ref(),
