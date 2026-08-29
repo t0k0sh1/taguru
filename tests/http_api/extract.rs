@@ -8452,8 +8452,13 @@ fn resume_from_rejects_an_unknown_step_name() {
         &["--context", "c", "--resume-from", "escalate", doc_src],
     );
     assert_eq!(code, 2, "{stderr}");
-    assert!(stderr.contains("--resume-from takes one of"), "{stderr}");
-    assert!(stderr.contains("verify"), "{stderr}");
+    assert!(
+        stderr.contains(
+            "--resume-from takes one of: read, plan, steer, prompt, call, parse, validate, \
+             reconcile, merge, render, verify"
+        ),
+        "must list every one of ADR 0030's 11 step names, not just a prefix: {stderr}"
+    );
 
     let _ = std::fs::remove_dir_all(&docs);
     let _ = std::fs::remove_dir_all(&out);
