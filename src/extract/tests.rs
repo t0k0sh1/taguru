@@ -6152,7 +6152,11 @@ fn heading_of_pins_its_length_and_shape_limits() {
     assert_eq!(heading_of(&format!("{at_cap}a")), None);
     // 第 needs digits and one of 章/節/条 after them.
     assert_eq!(heading_of("第章"), None);
+    assert_eq!(heading_of("第三"), None);
+    assert_eq!(heading_of("第三項"), None);
     assert_eq!(heading_of("第三項の規定"), None);
+    // § needs a number.
+    assert_eq!(heading_of("§ Intro"), None);
     assert_eq!(heading_of("第三条"), Some((3, "第三条".to_string())));
     assert_eq!(
         heading_of("第一条　この法律は"),
@@ -6227,6 +6231,13 @@ fn references_skip_the_title_the_path_and_minutes_labels_even_when_quoted() {
         .map(|unit| unit.heading.as_str())
         .collect();
     assert_eq!(refs, vec!["Usage"], "minutes labels are never references");
+    // … not even quoted from a chunk that does not hold them.
+    let chunk = "[3] see ◆田中太郎（党） and ○田中委員 and Usage";
+    let refs: Vec<&str> = references(&units, chunk, 2, 3, &path, 4)
+        .into_iter()
+        .map(|unit| unit.heading.as_str())
+        .collect();
+    assert_eq!(refs, vec!["Usage"]);
 }
 
 #[test]
@@ -6330,6 +6341,52 @@ fn block_text_helpers_strip_comments_and_cut_at_char_boundaries() {
     assert_eq!(truncate_at_char("ああ", 6), "ああ");
     assert_eq!(truncate_at_char("ああ", 7), "ああ");
     assert_eq!(truncate_at_char("abc", 0), "");
+}
+
+#[test]
+fn render_block_accounts_for_every_byte_of_a_two_reference_line() {
+    let text = "## Alpha\n\nalpha body.\n\n## Beta\n\nbeta body.\n\n## Last\n\nsee Alpha and Beta";
+    let spans = spans_of(text);
+    let units = detect_units(text, &spans);
+    let chunk = "[4] ## Last\n\n[5] see Alpha and Beta";
+    // Unbounded: both references, every preceding paragraph.
+    let full = render_block(text, &spans, &units, 4, 5, chunk, 4096).unwrap();
+    assert_eq!(
+        full.text,
+        "Position: Last\nReferences: Alpha — alpha body. | Beta — beta body.\nPreceding text: ## Alpha alpha body. ## Beta beta body."
+    );
+    assert_eq!(full.references, vec![0, 1]);
+    assert_eq!(full.overlap_paragraphs, Some((0, 3)));
+    // The two-entry line fits at exactly (its length + 1 for the
+    // newline after the position line) and not one byte under.
+    let two = "Position: Last\nReferences: Alpha — alpha body. | Beta — beta body.";
+    let exact = render_block(text, &spans, &units, 4, 5, chunk, two.len() + 1).unwrap();
+    assert_eq!(exact.text, two);
+    assert_eq!(exact.bytes, two.len());
+    assert!(exact.overlap_paragraphs.is_none());
+    let under = render_block(text, &spans, &units, 4, 5, chunk, two.len()).unwrap();
+    assert_eq!(
+        under.text,
+        "Position: Last\nReferences: Alpha — alpha body."
+    );
+    assert_eq!(under.references, vec![0]);
+    // With the references line charged, a 30-byte overlap budget
+    // (after "Preceding text: " and its newline) holds exactly three
+    // of the four preceding paragraphs.
+    let three = "Position: Last\nReferences: Alpha — alpha body. | Beta — beta body.\nPreceding text: alpha body. ## Beta beta body.";
+    let snug = render_block(
+        text,
+        &spans,
+        &units,
+        4,
+        5,
+        chunk,
+        two.len() + 1 + "Preceding text: ".len() + 1 + 30,
+    )
+    .unwrap();
+    assert_eq!(snug.text, three);
+    assert_eq!(snug.bytes, three.len());
+    assert_eq!(snug.overlap_paragraphs, Some((1, 3)));
 }
 
 #[test]

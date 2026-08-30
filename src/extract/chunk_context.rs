@@ -388,7 +388,9 @@ pub(super) fn references<'a>(
         // heading under 4 chars is too common a word to be a quoted
         // reference (a numbered one — `第二条`, `§ 1 x`, `1.2 x` — is
         // always at least three).
-        if unit.level == 0 || unit.heading.starts_with('◆') || unit.heading.starts_with('○') {
+        // (The level-0 title needs no clause of its own: it heads
+        // every position path, and `note` drops path units.)
+        if unit.heading.starts_with('◆') || unit.heading.starts_with('○') {
             continue;
         }
         let key = reference_key(&unit.heading);
@@ -516,8 +518,9 @@ pub(super) fn truncate_at_char(text: &str, cap: usize) -> &str {
     if text.len() <= cap {
         return text;
     }
+    // 0 is always a boundary, so this terminates without a guard.
     let mut end = cap;
-    while end > 0 && !text.is_char_boundary(end) {
+    while !text.is_char_boundary(end) {
         end -= 1;
     }
     &text[..end]
@@ -611,12 +614,13 @@ pub(super) fn render_block(
         lines.push(line);
     }
     let mut overlap = None;
-    if chunk_first > 0 {
+    {
         // What the preceding text may occupy after its own prefix
         // and newline. Under a paragraph's worth of room (a tail
         // shorter than the ellipsis and a few words says nothing)
         // the kind is skipped outright, never recorded as carrying
-        // nothing.
+        // nothing. A chunk opening the document has no paragraph
+        // before it and the loop never runs.
         const MIN_OVERLAP_BYTES: usize = 24;
         let budget = cap.saturating_sub(used + PRECEDING_PREFIX.len() + 1);
         let mut first = chunk_first;
