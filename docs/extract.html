@@ -415,8 +415,8 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       href="#manifest">the manifest skip</a> and <a href="#checkpoints">the checkpoint store</a> —
       naming a resume point is a deliberate ask to redo the document, and an unchanged-document
       skip answering that ask with nothing at all would defeat it just as much for
-      <code>read</code>/<code>plan</code>/<code>steer</code> (which trigger no replay at all) as
-      it would under a plain <code>--replay</code> run.
+      <code>read</code>/<code>structure</code>/<code>plan</code>/<code>annotate</code>/<code>steer</code>
+      (which trigger no replay at all) as it would under a plain <code>--replay</code> run.
     </p>
   </section>
 
@@ -1583,10 +1583,11 @@ jq -c 'select(.kind=="uncovered") | {paragraph, sentence}' "$t"</code></pre>
         <tr>
           <td>Referent in another chunk: items citing a paragraph outside their piece's
             range, or a subject that only occurs in some other chunk's range</td>
-          <td>Raise <code>--chunk-bytes</code> so mention and referent share a chunk. Supplying
-            per-chunk context is the planned control
-            (<a href="https://github.com/t0k0sh1/taguru/issues/782">#782</a>) — the steering
-            record's <code>chunk_index</code> is already reserved for it.</td>
+          <td><a href="#chunk-context"><code>--chunk-context structure</code></a>: the chunk is
+            told its heading path, the referenced units' openings, and the preceding
+            paragraphs, and a name the block states passes the occurrence check (ADR 0033).
+            Otherwise raise <code>--chunk-bytes</code> so mention and referent share a
+            chunk.</td>
         </tr>
       </tbody>
     </table>

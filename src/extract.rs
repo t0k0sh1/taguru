@@ -156,11 +156,11 @@ use chat_client::{
 };
 use checkpoint::{CheckpointFingerprint, CheckpointStore, CheckpointUnit};
 use chunk_context::{
-    CHUNK_CONTEXT_MODES, ChunkContextMode, ContextBlock, TraceChunkContext, TraceStructure, Unit,
-    block_cap, block_preamble, detect_units, preferred_breaks, render_block,
+    BLOCK_PREAMBLE_OPENING, CHUNK_CONTEXT_MODES, ChunkContextMode, ContextBlock, TraceChunkContext,
+    TraceStructure, Unit, block_cap, block_preamble, detect_units, preferred_breaks, render_block,
 };
 #[cfg(test)]
-use chunk_context::{position, references};
+use chunk_context::{heading_of, position, references, strip_html_comments, truncate_at_char};
 use chunking::{
     AnswerFault, ChunkOutput, MIN_SPLIT_CAP, corrective_assistant_turn,
     corrective_validation_message, evaluate_answer, extract_chunk_or_ladder,

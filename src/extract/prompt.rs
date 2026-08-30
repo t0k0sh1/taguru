@@ -239,12 +239,18 @@ pub(super) fn user_message(
 }
 
 /// The text the occurrence check (ADR 0013) judges names against:
-/// everything after the first line — the chunk context block when
-/// there is one (ADR 0033 §3.6.2: a name the block states is the
-/// document's own, never a fabrication) and the chunk. The first
-/// line embeds the source path and is never text of the document.
+/// the chunk context block when there is one (ADR 0033 §3.6.2: a name
+/// the block states is the document's own, never a fabrication) and
+/// the chunk. Never the first line — it embeds the source path — and
+/// never the block's own preamble sentence, which is taguru's
+/// instruction, not the document's text: a name that occurs only in
+/// it (`document`, `paragraph`) must not pass on that account.
 pub(super) fn user_message_occurrence_text(user: &str) -> &str {
-    user.split_once('\n').map(|(_, rest)| rest).unwrap_or(user)
+    let rest = user.split_once('\n').map(|(_, rest)| rest).unwrap_or(user);
+    match rest.strip_prefix(BLOCK_PREAMBLE_OPENING) {
+        Some(after) => after.split_once('\n').map(|(_, rest)| rest).unwrap_or(""),
+        None => rest,
+    }
 }
 
 /// [`user_message`]'s inverse: the document text a user turn carried,

@@ -5979,7 +5979,7 @@ fn structure_detects_markdown_headings_by_level() {
 fn structure_detects_statute_chapters_and_captioned_articles() {
     // e-Gov shape: a chapter line, then `（見出し）` + `第N条` lines
     // inside ONE paragraph, then the body — and 第三条の二 branches.
-    let text = "電子署名法\n（目的）\n第一条\nこの法律は…\n\n第二章　電磁的記録の真正な成立の推定\n第三条\n電磁的記録であって…\n\n第三条の二　前条の規定は…\n\n（定義）\n第二条　この法律において…";
+    let text = "電子署名法\n（目的）\n第一条\nこの法律は…\n\n第二章　電磁的記録の真正な成立の推定\n第一節　総則\n第三条\n電磁的記録であって…\n\n第三条の二　前条の規定は…\n\n（定義）\n第二条　この法律において…";
     let units = detect_units(text, &spans_of(text));
     assert_eq!(
         unit_view(&units),
@@ -5987,6 +5987,7 @@ fn structure_detects_statute_chapters_and_captioned_articles() {
             (0, "電子署名法", 0, 0),
             (3, "第一条（目的）", 0, 0),
             (1, "第二章　電磁的記録の真正な成立の推定", 1, 1),
+            (2, "第一節　総則", 1, 1),
             (3, "第三条", 1, 1),
             (3, "第三条の二", 2, 3),
             (3, "第二条（定義）", 3, 3),
@@ -6143,6 +6144,195 @@ fn references_resolve_a_repeated_article_number_to_the_nearest_unit_before_the_c
 }
 
 #[test]
+fn heading_of_pins_its_length_and_shape_limits() {
+    // A line over 200 bytes is prose, at exactly 200 still a heading.
+    let at_cap = format!("# {}", "a".repeat(198));
+    assert_eq!(at_cap.len(), 200);
+    assert_eq!(heading_of(&at_cap), Some((1, "a".repeat(198))));
+    assert_eq!(heading_of(&format!("{at_cap}a")), None);
+    // 第 needs digits and one of 章/節/条 after them.
+    assert_eq!(heading_of("第章"), None);
+    assert_eq!(heading_of("第三項の規定"), None);
+    assert_eq!(heading_of("第三条"), Some((3, "第三条".to_string())));
+    assert_eq!(
+        heading_of("第一条　この法律は"),
+        Some((3, "第一条".to_string()))
+    );
+    assert_eq!(
+        heading_of("第三条の二　前条の規定は"),
+        Some((3, "第三条の二".to_string()))
+    );
+    assert_eq!(
+        heading_of("第二節　総則"),
+        Some((2, "第二節　総則".to_string()))
+    );
+    // Prose that merely opens with a reference is not a heading.
+    assert_eq!(heading_of("第二条の用語により。"), None);
+    assert_eq!(heading_of("第二章の規定により"), None);
+    assert_eq!(heading_of("第三条の二の規定"), None);
+    // A speaker label ends at any whitespace, ASCII or ideographic.
+    assert_eq!(heading_of("○Tanaka said"), Some((2, "○Tanaka".to_string())));
+    assert_eq!(
+        heading_of("○田中委員　発言"),
+        Some((2, "○田中委員".to_string()))
+    );
+    // A numbered heading over 80 bytes is a sentence; at 80 a heading.
+    let numbered = format!("1.2 {}", "x".repeat(76));
+    assert_eq!(numbered.len(), 80);
+    assert_eq!(heading_of(&numbered), Some((2, numbered.clone())));
+    assert_eq!(heading_of(&format!("{numbered}x")), None);
+    assert_eq!(heading_of("1.2 Setup"), Some((2, "1.2 Setup".to_string())));
+    assert_eq!(heading_of("1. a list item"), None);
+}
+
+#[test]
+fn structure_attaches_only_a_real_caption_to_an_article() {
+    // An empty `（）` and a caption over 40 chars are not captions.
+    let text = "（）\n第一条\n本文";
+    assert_eq!(
+        unit_view(&detect_units(text, &spans_of(text))),
+        vec![(3, "第一条", 0, 0)]
+    );
+    let long = format!("（{}）\n第一条\n本文", "あ".repeat(41));
+    assert_eq!(
+        unit_view(&detect_units(&long, &spans_of(&long))),
+        vec![(3, "第一条", 0, 0)]
+    );
+    let exact = format!("（{}）\n第一条\n本文", "あ".repeat(40));
+    let units = detect_units(&exact, &spans_of(&exact));
+    assert_eq!(units[0].heading, format!("第一条（{}）", "あ".repeat(40)));
+}
+
+#[test]
+fn references_skip_the_title_the_path_and_minutes_labels_even_when_quoted() {
+    let text = "Handbook\n\n# Guide\n\n## Setup\n\nsee Guide, Handbook, Usage\n\n## Usage\n\nrun\n\n◆田中太郎（党）\n○田中委員　Usage について";
+    let spans = spans_of(text);
+    let units = detect_units(text, &spans);
+    let chunk = "[2] ## Setup\n\n[3] see Guide, Handbook, Usage";
+    let path = position(&units, 2);
+    assert_eq!(
+        path.iter()
+            .map(|unit| unit.heading.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Handbook", "Guide", "Setup"]
+    );
+    let refs: Vec<&str> = references(&units, chunk, 2, 3, &path, 4)
+        .into_iter()
+        .map(|unit| unit.heading.as_str())
+        .collect();
+    assert_eq!(refs, vec!["Usage"], "not the title, not the path");
+    let chunk = "[6] ◆田中太郎（党） ○田中委員 Usage";
+    let refs: Vec<&str> = references(&units, chunk, 6, 6, &position(&units, 6), 4)
+        .into_iter()
+        .map(|unit| unit.heading.as_str())
+        .collect();
+    assert_eq!(refs, vec!["Usage"], "minutes labels are never references");
+}
+
+#[test]
+fn chunk_context_flag_parses_once_and_rejects_a_duplicate_or_unknown_mode() {
+    fn parse(words: &[&str]) -> Result<Args, i32> {
+        Args::parse(&words.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+    let parsed = parse(&[
+        "--context",
+        "c",
+        "--out",
+        "o",
+        "--chunk-context",
+        "structure",
+        "d.md",
+    ])
+    .unwrap();
+    assert_eq!(parsed.chunk_context, Some(ChunkContextMode::Structure));
+    assert_eq!(
+        parse(&["--context", "c", "--out", "o", "d.md"])
+            .unwrap()
+            .chunk_context,
+        None
+    );
+    let twice = parse(&[
+        "--context",
+        "c",
+        "--out",
+        "o",
+        "--chunk-context",
+        "off",
+        "--chunk-context",
+        "structure",
+        "d.md",
+    ]);
+    assert!(matches!(twice, Err(2)), "given twice is a usage error");
+    assert!(matches!(
+        parse(&[
+            "--context",
+            "c",
+            "--out",
+            "o",
+            "--chunk-context",
+            "overview",
+            "d.md"
+        ]),
+        Err(2)
+    ));
+    assert!(matches!(
+        parse(&["--context", "c", "--out", "o", "--chunk-context"]),
+        Err(2)
+    ));
+}
+
+#[test]
+fn reference_openings_start_after_the_heading_line_inside_a_multi_line_paragraph() {
+    // e-Gov shape: caption, article number, and body on their own
+    // lines of ONE paragraph — the opening is the body, and a later
+    // article quoting the number gets it.
+    let text = "（定義）\n第二条\n用語を定める。\n続き。\n\n第三条\n第二条の用語により。";
+    let spans = spans_of(text);
+    let units = detect_units(text, &spans);
+    let block = render_block(
+        text,
+        &spans,
+        &units,
+        1,
+        1,
+        "[1] 第三条\n第二条の用語により。",
+        4096,
+    )
+    .unwrap();
+    assert_eq!(
+        block.text,
+        "Position: 第三条\nReferences: 第二条（定義） — 用語を定める。 続き。\nPreceding text: （定義） 第二条 用語を定める。 続き。"
+    );
+    // An unnumbered heading is quoted as a reference only from 4 chars.
+    let text = "## ABC\n\nx\n\n## ABCD\n\ny\n\n## Last\n\nsee ABC and ABCD";
+    let spans = spans_of(text);
+    let units = detect_units(text, &spans);
+    let refs: Vec<&str> = references(
+        &units,
+        "[5] see ABC and ABCD",
+        4,
+        5,
+        &position(&units, 4),
+        4,
+    )
+    .into_iter()
+    .map(|unit| unit.heading.as_str())
+    .collect();
+    assert_eq!(refs, vec!["ABCD"]);
+}
+
+#[test]
+fn block_text_helpers_strip_comments_and_cut_at_char_boundaries() {
+    assert_eq!(strip_html_comments("a<!--x-->b<!-- y\nz -->c"), "abc");
+    assert_eq!(strip_html_comments("a<!--unterminated"), "a");
+    assert_eq!(strip_html_comments("plain"), "plain");
+    assert_eq!(truncate_at_char("ああ", 4), "あ");
+    assert_eq!(truncate_at_char("ああ", 6), "ああ");
+    assert_eq!(truncate_at_char("ああ", 7), "ああ");
+    assert_eq!(truncate_at_char("abc", 0), "");
+}
+
+#[test]
 fn preferred_breaks_are_the_outermost_units_first_paragraphs() {
     let text = "# A\n\nx\n\n## A1\n\ny\n\n# B\n\nz";
     let units = detect_units(text, &spans_of(text));
@@ -6229,7 +6419,8 @@ fn render_block_respects_the_cap_by_dropping_references_and_keeping_the_overlap_
     let units = detect_units(&text, &spans);
     let chunk = "[2] ## Beta\n\n[3] see Alpha now";
     let block = render_block(&text, &spans, &units, 2, 3, chunk, 512).unwrap();
-    assert!(block.bytes <= 512 + 64, "{}", block.bytes);
+    assert!(block.bytes <= 512, "the cap is exact: {}", block.bytes);
+    assert_eq!(block.bytes, block.text.len());
     assert!(block.text.starts_with("Position: Beta\n"));
     assert!(
         block.text.contains("Preceding text: …"),
@@ -6252,14 +6443,23 @@ fn render_block_respects_the_cap_by_dropping_references_and_keeping_the_overlap_
     );
     assert!(references_line.len() < 280, "{}", references_line.len());
     assert_eq!(block.references, vec![0]);
-    assert_eq!(block.cap_check(), ());
-}
-
-impl ContextBlock {
-    /// Test-only: the block never holds a blank line.
-    fn cap_check(&self) {
-        assert!(!self.text.contains("\n\n"));
-    }
+    assert!(!block.text.contains("\n\n"));
+    // Under a tight cap the overlap is skipped outright, never
+    // recorded as an empty `Preceding text: …`: after the position
+    // line, its prefix, and the newlines, 48 bytes leave under the
+    // 24-byte minimum a tail needs to say anything.
+    let tight = render_block(&text, &spans, &units, 2, 3, chunk, 48).unwrap();
+    assert_eq!(tight.text, "Position: Beta");
+    assert!(tight.overlap_paragraphs.is_none());
+    assert!(tight.references.is_empty());
+    assert!(tight.bytes <= 48);
+    // Just enough room for a short tail: the ellipsis is charged too.
+    let snug = render_block(&text, &spans, &units, 2, 3, chunk, 80).unwrap();
+    // 14 (position) + 1 + 16 (prefix) + 48 (the budget the tail
+    // fills exactly, ellipsis included) = 79: the accounting is exact.
+    assert_eq!(snug.bytes, 79);
+    assert!(snug.text.contains("Preceding text: …"), "{}", snug.text);
+    assert_eq!(snug.overlap_paragraphs, Some((1, 1)));
 }
 
 #[test]
@@ -6314,13 +6514,13 @@ fn user_message_carries_the_block_in_the_preamble_and_the_inverses_split_it_righ
         )
     );
     assert_eq!(user_message_document(&user), "[4] chunk text");
+    // The occurrence text is the block and the chunk — never the
+    // source line, never the block's preamble sentence.
     assert_eq!(
         user_message_occurrence_text(&user),
-        format!(
-            "{}\nPosition: A › B\nPreceding text: before\n\n[4] chunk text",
-            block_preamble(1, 3)
-        )
+        "Position: A › B\nPreceding text: before\n\n[4] chunk text"
     );
+    assert!(block_preamble(1, 3).starts_with(BLOCK_PREAMBLE_OPENING));
     // Without a block: today's message byte for byte, and the
     // occurrence text is the chunk (behind one newline).
     let plain = user_message("doc.md", 0, 1, "[0] chunk", None);

@@ -89,7 +89,7 @@ pub(super) struct Unit {
 }
 
 /// What one line is, structurally, when it heads a unit.
-fn heading_of(line: &str) -> Option<(u8, String)> {
+pub(super) fn heading_of(line: &str) -> Option<(u8, String)> {
     let trimmed = line.trim();
     if trimmed.is_empty() || trimmed.len() > 200 {
         return None;
@@ -120,7 +120,7 @@ fn heading_of(line: &str) -> Option<(u8, String)> {
                 let number: String = rest.chars().take(digits).collect();
                 // 第三条の二: the branch number rides on the article.
                 let mut heading = format!("第{number}{kind}");
-                let tail: String = after.chars().skip(1).collect();
+                let mut tail: String = after.chars().skip(1).collect();
                 if kind == '条'
                     && let Some(branch) = tail.strip_prefix('の')
                 {
@@ -131,10 +131,20 @@ fn heading_of(line: &str) -> Option<(u8, String)> {
                     if !branch_digits.is_empty() {
                         heading.push('の');
                         heading.push_str(&branch_digits);
+                        tail = branch[branch_digits.len()..].to_string();
                     }
-                } else if kind != '条' {
+                }
+                // What follows the number is either nothing, or a
+                // title/body after whitespace (`第一条　この法律は`);
+                // `第二条の用語により` and `第二章の規定` are prose
+                // that merely opens with a reference.
+                if !tail.is_empty() && !tail.starts_with(char::is_whitespace) {
+                    return None;
+                }
+                if kind != '条' {
                     // A chapter/section line carries its title.
-                    let title = tail.trim_matches(|c: char| c.is_whitespace() || c == '　');
+                    // U+3000 is whitespace to `trim`, so 第二章　題 splits here.
+                    let title = tail.trim();
                     if !title.is_empty() {
                         heading.push('　');
                         heading.push_str(title);
@@ -251,7 +261,9 @@ pub(super) fn detect_units(text: &str, spans: &[crate::paragraph::ParagraphSpan]
                     heading: one_line(trimmed),
                     paragraph_first: span.index,
                     paragraph_last: span.index,
-                    body_start: line_start + line.len(),
+                    // Never quoted as a reference (§3.1: the title is
+                    // on every path), so its opening is moot.
+                    body_start: span.end as usize,
                 });
                 continue;
             }
@@ -278,8 +290,8 @@ pub(super) fn detect_units(text: &str, spans: &[crate::paragraph::ParagraphSpan]
                 // A heading that opens its paragraph ends the previous
                 // unit at the paragraph before; one further down a
                 // paragraph shares that paragraph with it.
-                last.paragraph_last = if line_start == start && span.index > 0 {
-                    span.index - 1
+                last.paragraph_last = if line_start == start {
+                    span.index.saturating_sub(1)
                 } else {
                     span.index
                 };
@@ -372,9 +384,10 @@ pub(super) fn references<'a>(
     let mut by_key: Vec<(String, &Unit)> = Vec::new();
     for unit in units {
         // Speaker and section labels of minutes are positions, never
-        // references; the title is on every path already. Headings
-        // under 4 chars are too common to be quoted references unless
-        // they are numbered.
+        // references; the title is on every path already. An unnumbered
+        // heading under 4 chars is too common a word to be a quoted
+        // reference (a numbered one — `第二条`, `§ 1 x`, `1.2 x` — is
+        // always at least three).
         if unit.level == 0 || unit.heading.starts_with('◆') || unit.heading.starts_with('○') {
             continue;
         }
@@ -386,7 +399,7 @@ pub(super) fn references<'a>(
                 .bytes()
                 .next()
                 .is_some_and(|b| b.is_ascii_digit());
-        if key.chars().count() < 2 || (!is_named && key.chars().count() < 4) {
+        if !is_named && key.chars().count() < 4 {
             continue;
         }
         match by_key.iter_mut().find(|(seen, _)| *seen == key) {
@@ -477,7 +490,7 @@ fn one_line(text: &str) -> String {
 
 /// `<!-- … -->` spans removed — a bilingual Markdown source keeps the
 /// original text in comments, which is not what the reader reads.
-fn strip_html_comments(text: &str) -> String {
+pub(super) fn strip_html_comments(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(open) = rest.find("<!--") {
@@ -499,7 +512,7 @@ fn looks_like_title(line: &str) -> bool {
         && line.chars().any(char::is_alphabetic)
 }
 
-fn truncate_at_char(text: &str, cap: usize) -> &str {
+pub(super) fn truncate_at_char(text: &str, cap: usize) -> &str {
     if text.len() <= cap {
         return text;
     }
@@ -547,8 +560,16 @@ pub(super) fn render_block(
         lines.push(line);
         position_ids = path.iter().map(|unit| unit.unit).collect();
     }
+    // Every line's exact cost — prefix, separators, and the newline
+    // before it — is charged against the cap, so the block never
+    // exceeds it (ADR 0033 §3.6.3; the docs promise a quarter of
+    // `--chunk-bytes`, not roughly that).
+    const REFERENCES_PREFIX: &str = "References: ";
+    const REFERENCES_SEPARATOR: &str = " | ";
+    const PRECEDING_PREFIX: &str = "Preceding text: ";
     let mut reference_ids = Vec::new();
     let mut reference_entries = Vec::new();
+    let mut references_len = 0usize;
     for unit in &refs {
         let end = spans
             .get(unit.paragraph_last as usize)
@@ -564,29 +585,51 @@ pub(super) fn render_block(
         } else {
             format!("{} — {opening}", one_line(&unit.heading))
         };
-        if used + entry.len() + 16 > cap {
+        // The line as it would stand with this entry added, newline
+        // included, must still fit.
+        let line_len = REFERENCES_PREFIX.len()
+            + references_len
+            + if reference_entries.is_empty() {
+                0
+            } else {
+                REFERENCES_SEPARATOR.len()
+            }
+            + entry.len();
+        if used + line_len + 1 > cap {
             break;
         }
-        used += entry.len() + 3;
+        references_len = line_len - REFERENCES_PREFIX.len();
         reference_entries.push(entry);
         reference_ids.push(unit.unit);
     }
     if !reference_entries.is_empty() {
-        lines.push(format!("References: {}", reference_entries.join(" | ")));
+        let line = format!(
+            "{REFERENCES_PREFIX}{}",
+            reference_entries.join(REFERENCES_SEPARATOR)
+        );
+        used += line.len() + 1;
+        lines.push(line);
     }
     let mut overlap = None;
     if chunk_first > 0 {
-        let budget = cap.saturating_sub(used + 16);
+        // What the preceding text may occupy after its own prefix
+        // and newline. Under a paragraph's worth of room (a tail
+        // shorter than the ellipsis and a few words says nothing)
+        // the kind is skipped outright, never recorded as carrying
+        // nothing.
+        const MIN_OVERLAP_BYTES: usize = 24;
+        let budget = cap.saturating_sub(used + PRECEDING_PREFIX.len() + 1);
         let mut first = chunk_first;
         let mut carried = 0usize;
         let mut pieces: Vec<String> = Vec::new();
-        while first > 0 {
+        while first > 0 && budget >= MIN_OVERLAP_BYTES {
             let span = spans[(first - 1) as usize];
             let paragraph = one_line(&text[span.start as usize..span.end as usize]);
             if pieces.is_empty() && paragraph.len() > budget {
-                // Even the nearest paragraph is too long: keep its tail.
-                let keep = paragraph.len().saturating_sub(budget);
-                let mut cut = keep;
+                // Even the nearest paragraph is too long: keep its
+                // tail, the ellipsis charged against the same budget.
+                let room = budget - "…".len();
+                let mut cut = paragraph.len() - room;
                 while cut < paragraph.len() && !paragraph.is_char_boundary(cut) {
                     cut += 1;
                 }
@@ -594,16 +637,17 @@ pub(super) fn render_block(
                 first -= 1;
                 break;
             }
-            if carried + paragraph.len() + 1 > budget {
+            let separator = usize::from(!pieces.is_empty());
+            if carried + separator + paragraph.len() > budget {
                 break;
             }
-            carried += paragraph.len() + 1;
+            carried += separator + paragraph.len();
             pieces.push(paragraph);
             first -= 1;
         }
         if !pieces.is_empty() {
             pieces.reverse();
-            lines.push(format!("Preceding text: {}", pieces.join(" ")));
+            lines.push(format!("{PRECEDING_PREFIX}{}", pieces.join(" ")));
             overlap = Some((first, chunk_first - 1));
         }
     }
@@ -612,6 +656,7 @@ pub(super) fn render_block(
     }
     let body = lines.join("\n");
     debug_assert!(!body.contains("\n\n"));
+    debug_assert!(body.len() <= cap, "{} > {cap}", body.len());
     Some(ContextBlock {
         sha256: sha256_hex(body.as_bytes()),
         bytes: body.len(),
@@ -621,6 +666,10 @@ pub(super) fn render_block(
         text: body,
     })
 }
+
+/// How the block's preamble line opens — what
+/// `user_message_occurrence_text` recognizes it by.
+pub(super) const BLOCK_PREAMBLE_OPENING: &str = "Chunk context (";
 
 /// The block's own preamble line — what tells the model the block is
 /// not the part to extract from (ADR 0033 §3.6, rules 1 and 2 in the
@@ -632,7 +681,7 @@ pub(super) fn block_preamble(index: usize, total: usize) -> String {
         "the document".to_string()
     };
     format!(
-        "Chunk context (this document's own text and structure, for reading {part} — \
+        "{BLOCK_PREAMBLE_OPENING}this document's own text and structure, for reading {part} — \
          extract facts from {part} only; nothing below carries a [N] paragraph number, so \
          a fact stated only here is not extracted):"
     )
