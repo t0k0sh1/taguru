@@ -2208,7 +2208,9 @@ fn chunk_context_overview_is_checkpointed_and_a_cut_off_answer_is_skipped() {
                     .to_string(),
             ),
             (1, _) => chat_ok_with_finish_reason("", "content_filter"),
-            _ => unreachable!(),
+            // Never a panic here: a responder that panics leaves the
+            // extract subprocess waiting forever (a hang, not a failure).
+            _ => chat_ok("unexpected call"),
         });
     let provider = [
         ("TAGURU_EXTRACT_URL", url.as_str()),
@@ -2277,7 +2279,7 @@ fn chunk_context_overview_is_checkpointed_and_a_cut_off_answer_is_skipped() {
                 &json!({"associations": [{"subject": "S", "label": "rel", "object": "value-1"}]})
                     .to_string(),
             ),
-            _ => unreachable!("({index}, {attempt})"),
+            _ => chat_ok("unexpected call"),
         });
     let (code, stdout, stderr) = run_extract(
         &out,
