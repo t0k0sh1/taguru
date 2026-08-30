@@ -5959,8 +5959,16 @@ fn chunk_context_mode_parses_and_records_off_as_empty() {
         ChunkContextMode::parse("overview"),
         Some(ChunkContextMode::Overview)
     );
-    assert_eq!(ChunkContextMode::parse("ingested"), None);
+    assert_eq!(
+        ChunkContextMode::parse("ingested"),
+        Some(ChunkContextMode::Ingested)
+    );
+    assert_eq!(ChunkContextMode::parse("live"), None);
     assert_eq!(ChunkContextMode::parse(""), None);
+    assert_eq!(ChunkContextMode::Ingested.manifest_value(), "ingested");
+    assert!(ChunkContextMode::Ingested.overview(), "cumulative");
+    assert!(ChunkContextMode::Ingested.ingested());
+    assert!(!ChunkContextMode::Overview.ingested());
     assert_eq!(ChunkContextMode::Off.manifest_value(), "");
     assert_eq!(ChunkContextMode::Structure.manifest_value(), "structure");
     assert_eq!(ChunkContextMode::Overview.manifest_value(), "overview");
@@ -6316,7 +6324,7 @@ fn chunk_context_flag_parses_once_and_rejects_a_duplicate_or_unknown_mode() {
             "--out",
             "o",
             "--chunk-context",
-            "ingested",
+            "live",
             "d.md"
         ]),
         Err(2)
@@ -6344,6 +6352,8 @@ fn reference_openings_start_after_the_heading_line_inside_a_multi_line_paragraph
         "[1] 第三条\n第二条の用語により。",
         4096,
         None,
+        None,
+        &[],
     )
     .unwrap();
     assert_eq!(
@@ -6386,7 +6396,7 @@ fn render_block_accounts_for_every_byte_of_a_two_reference_line() {
     let units = detect_units(text, &spans);
     let chunk = "[4] ## Last\n\n[5] see Alpha and Beta";
     // Unbounded: both references, every preceding paragraph.
-    let full = render_block(text, &spans, &units, 4, 5, chunk, 4096, None).unwrap();
+    let full = render_block(text, &spans, &units, 4, 5, chunk, 4096, None, None, &[]).unwrap();
     assert_eq!(
         full.text,
         "Position: Last\nReferences: Alpha — alpha body. | Beta — beta body.\nPreceding text: ## Alpha alpha body. ## Beta beta body."
@@ -6396,11 +6406,35 @@ fn render_block_accounts_for_every_byte_of_a_two_reference_line() {
     // The two-entry line fits at exactly (its length + 1 for the
     // newline after the position line) and not one byte under.
     let two = "Position: Last\nReferences: Alpha — alpha body. | Beta — beta body.";
-    let exact = render_block(text, &spans, &units, 4, 5, chunk, two.len() + 1, None).unwrap();
+    let exact = render_block(
+        text,
+        &spans,
+        &units,
+        4,
+        5,
+        chunk,
+        two.len() + 1,
+        None,
+        None,
+        &[],
+    )
+    .unwrap();
     assert_eq!(exact.text, two);
     assert_eq!(exact.bytes, two.len());
     assert!(exact.overlap_paragraphs.is_none());
-    let under = render_block(text, &spans, &units, 4, 5, chunk, two.len(), None).unwrap();
+    let under = render_block(
+        text,
+        &spans,
+        &units,
+        4,
+        5,
+        chunk,
+        two.len(),
+        None,
+        None,
+        &[],
+    )
+    .unwrap();
     assert_eq!(
         under.text,
         "Position: Last\nReferences: Alpha — alpha body."
@@ -6419,6 +6453,8 @@ fn render_block_accounts_for_every_byte_of_a_two_reference_line() {
         chunk,
         two.len() + 1 + "Preceding text: ".len() + 1 + 30,
         None,
+        None,
+        &[],
     )
     .unwrap();
     assert_eq!(snug.text, three);
@@ -6435,6 +6471,8 @@ fn render_block_accounts_for_every_byte_of_a_two_reference_line() {
         chunk,
         two.len() + 1 + "Preceding text: ".len() + 1 + 29,
         None,
+        None,
+        &[],
     )
     .unwrap();
     assert_eq!(
@@ -6464,6 +6502,8 @@ fn render_block_keeps_a_paragraph_exactly_as_long_as_the_budget_and_cuts_tails_o
         "[2] ## B\n\n[3] body",
         cap,
         None,
+        None,
+        &[],
     )
     .unwrap();
     assert_eq!(
@@ -6487,6 +6527,8 @@ fn render_block_keeps_a_paragraph_exactly_as_long_as_the_budget_and_cuts_tails_o
         "[2] ## B\n\n[3] body",
         cap,
         None,
+        None,
+        &[],
     )
     .unwrap();
     let tail = block.text.split("Preceding text: ").nth(1).unwrap();
@@ -6614,7 +6656,19 @@ fn render_block_carries_cast_and_synopsis_between_references_and_overlap() {
     // path (no synopsis); Setup is wholly before (synopsis); Usage
     // holds the chunk (none).
     let chunk = "[4] ## Usage\n\n[5] see Setup.";
-    let block = render_block(text, &spans, &units, 4, 5, chunk, 4096, Some(&overview)).unwrap();
+    let block = render_block(
+        text,
+        &spans,
+        &units,
+        4,
+        5,
+        chunk,
+        4096,
+        Some(&overview),
+        None,
+        &[],
+    )
+    .unwrap();
     assert_eq!(
         block.text,
         "Position: Guide › Usage\nReferences: Setup — setup body.\nCast: Tool — the product\nBefore: Setup — How to set up.\nPreceding text: # Guide intro. ## Setup setup body."
@@ -6634,6 +6688,8 @@ fn render_block_carries_cast_and_synopsis_between_references_and_overlap() {
         "Position: Guide › Usage\nReferences: Setup — setup body.\nCast: Tool — the product".len()
             + 1,
         Some(&overview),
+        None,
+        &[],
     )
     .unwrap();
     assert!(
@@ -6644,7 +6700,7 @@ fn render_block_carries_cast_and_synopsis_between_references_and_overlap() {
     assert!(tight.synopsis.is_empty());
     assert!(tight.overlap_paragraphs.is_none());
     // No overview at all: the structure-only block, byte for byte.
-    let plain = render_block(text, &spans, &units, 4, 5, chunk, 4096, None).unwrap();
+    let plain = render_block(text, &spans, &units, 4, 5, chunk, 4096, None, None, &[]).unwrap();
     assert!(!plain.text.contains("Cast:") && !plain.text.contains("Before:"));
     assert!(plain.cast.is_empty() && plain.synopsis.is_empty());
 }
@@ -6744,6 +6800,8 @@ fn render_block_accounts_for_every_byte_of_the_cast_and_synopsis_lines() {
         chunk,
         two.len() + 1,
         Some(&overview),
+        None,
+        &[],
     )
     .unwrap();
     assert_eq!(block.text, two);
@@ -6757,6 +6815,8 @@ fn render_block_accounts_for_every_byte_of_the_cast_and_synopsis_lines() {
         chunk,
         two.len(),
         Some(&overview),
+        None,
+        &[],
     )
     .unwrap();
     assert_eq!(block.text, format!("{position}\nCast: P — pp"));
@@ -6772,6 +6832,8 @@ fn render_block_accounts_for_every_byte_of_the_cast_and_synopsis_lines() {
         chunk,
         three.len() + 1,
         Some(&overview),
+        None,
+        &[],
     )
     .unwrap();
     assert_eq!(block.text, three);
@@ -6785,6 +6847,8 @@ fn render_block_accounts_for_every_byte_of_the_cast_and_synopsis_lines() {
         chunk,
         three.len(),
         Some(&overview),
+        None,
+        &[],
     )
     .unwrap();
     assert_eq!(
@@ -6804,6 +6868,8 @@ fn render_block_accounts_for_every_byte_of_the_cast_and_synopsis_lines() {
         chunk,
         three.len() + 1 + "Preceding text: ".len() + 1 + 30,
         Some(&overview),
+        None,
+        &[],
     )
     .unwrap();
     assert_eq!(block.text, full);
@@ -6817,12 +6883,222 @@ fn render_block_accounts_for_every_byte_of_the_cast_and_synopsis_lines() {
         chunk,
         three.len() + 1 + "Preceding text: ".len() + 1 + 29,
         Some(&overview),
+        None,
+        &[],
     )
     .unwrap();
     assert!(
         block.text.ends_with("Preceding text: ## Beta beta body."),
         "{}",
         block.text
+    );
+}
+
+#[test]
+fn load_vocabulary_harvests_each_names_strongest_relations() {
+    let dir = std::env::temp_dir().join(format!("taguru-vocab-known-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("export.jsonl"),
+        concat!(
+            r#"{"taguru_batch":1,"context":"law","source":"s1"}"#,
+            "\n",
+            r#"{"subject":"電子署名法","label":"定める","object":"電子署名","weight":1.0}"#,
+            "\n",
+            r#"{"subject":"主務大臣","label":"認定","object":"特定認証業務","weight":2.0}"#,
+            "\n",
+            r#"{"subject":"電子署名法","label":"委任","object":"主務大臣","weight":-1.5}"#,
+            "\n",
+            r#"{"subject":"電子署名法","label":"a","object":"x1","weight":0.5}"#,
+            "\n",
+            r#"{"subject":"電子署名法","label":"b","object":"x2","weight":0.5}"#,
+            "\n",
+            r#"{"subject":"電子署名法","label":"c","object":"x3","weight":0.5}"#,
+            "\n",
+            r#"{"subject":"電子署名法","label":"d","object":"x4","weight":0.5}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    let loaded = load_vocabulary(&dir.join("export.jsonl")).unwrap();
+    // Strongest by |weight| first, export order among equals, at most
+    // five; both ends of an association know it.
+    let act: Vec<(&str, &str, bool)> = loaded.known["電子署名法"]
+        .iter()
+        .map(|r| (r.label.as_str(), r.other.as_str(), r.outgoing))
+        .collect();
+    assert_eq!(
+        act,
+        vec![
+            ("委任", "主務大臣", true),
+            ("定める", "電子署名", true),
+            ("a", "x1", true),
+            ("b", "x2", true),
+            ("c", "x3", true),
+        ]
+    );
+    let minister: Vec<(&str, &str, bool)> = loaded.known["主務大臣"]
+        .iter()
+        .map(|r| (r.label.as_str(), r.other.as_str(), r.outgoing))
+        .collect();
+    assert_eq!(
+        minister,
+        vec![
+            ("認定", "特定認証業務", true),
+            ("委任", "電子署名法", false)
+        ]
+    );
+    assert_eq!(loaded.known_digest.len(), 64);
+    // The name digest is untouched by relations; the known digest
+    // tracks them.
+    fs::write(
+        dir.join("export.jsonl"),
+        concat!(
+            r#"{"taguru_batch":1,"context":"law","source":"s1"}"#,
+            "\n",
+            r#"{"subject":"電子署名法","label":"廃止","object":"電子署名","weight":1.0}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    let changed = load_vocabulary(&dir.join("export.jsonl")).unwrap();
+    assert_ne!(changed.known_digest, loaded.known_digest);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn render_block_offers_known_relations_for_cast_and_candidate_names() {
+    let text = "# Guide\n\nintro.\n\n## Setup\n\nsee Setup.";
+    let spans = spans_of(text);
+    let units = detect_units(text, &spans);
+    let overview = Overview::merge(&[Some(OverviewAnswer {
+        units: vec![],
+        cast: vec![
+            CastEntry {
+                name: "Tool".to_string(),
+                gloss: "the product".to_string(),
+            },
+            CastEntry {
+                name: "Nobody".to_string(),
+                gloss: "unknown to the export".to_string(),
+            },
+        ],
+    })]);
+    let mut known: BTreeMap<String, Vec<KnownRelation>> = BTreeMap::new();
+    known.insert(
+        "Tool".to_string(),
+        vec![
+            KnownRelation {
+                label: "made by".to_string(),
+                other: "Acme".to_string(),
+                outgoing: true,
+                weight: 1.0,
+            },
+            KnownRelation {
+                label: "uses".to_string(),
+                other: "Team".to_string(),
+                outgoing: false,
+                weight: 1.0,
+            },
+        ],
+    );
+    known.insert(
+        "Team".to_string(),
+        vec![KnownRelation {
+            label: "leads".to_string(),
+            other: "Lead".to_string(),
+            outgoing: true,
+            weight: 1.0,
+        }],
+    );
+    known.insert("Empty".to_string(), vec![]);
+    let chunk = "[2] ## Setup\n\n[3] see Setup.";
+    let candidates = vec!["Team".to_string(), "Empty".to_string(), "Tool".to_string()];
+    let block = render_block(
+        text,
+        &spans,
+        &units,
+        2,
+        3,
+        chunk,
+        4096,
+        Some(&overview),
+        Some(&known),
+        &candidates,
+    )
+    .unwrap();
+    // Cast names first (known ones only), then candidates not already
+    // listed; an outgoing relation reads `label → other`, an incoming
+    // one `other → label`; the line sits right after the cast.
+    assert_eq!(
+        block.text,
+        "Position: Guide › Setup\nCast: Tool — the product | Nobody — unknown to the export\nKnown: Tool — made by → Acme; Team → uses | Team — leads → Lead\nPreceding text: # Guide intro."
+    );
+    assert_eq!(block.known, vec!["Tool", "Team"]);
+    // Below the mode (no relations offered) the line is absent.
+    let plain = render_block(
+        text,
+        &spans,
+        &units,
+        2,
+        3,
+        chunk,
+        4096,
+        Some(&overview),
+        None,
+        &candidates,
+    )
+    .unwrap();
+    assert!(!plain.text.contains("Known:"));
+    assert!(plain.known.is_empty());
+    // The cap: the two-entry line fits at exactly its length and not
+    // one byte under.
+    let two = "Position: Guide › Setup\nCast: Tool — the product | Nobody — unknown to the export\nKnown: Tool — made by → Acme; Team → uses | Team — leads → Lead";
+    let exact = render_block(
+        text,
+        &spans,
+        &units,
+        2,
+        3,
+        chunk,
+        two.len() + 1,
+        Some(&overview),
+        Some(&known),
+        &candidates,
+    )
+    .unwrap();
+    assert_eq!(exact.text, two);
+    let under = render_block(
+        text,
+        &spans,
+        &units,
+        2,
+        3,
+        chunk,
+        two.len(),
+        Some(&overview),
+        Some(&known),
+        &candidates,
+    )
+    .unwrap();
+    assert!(
+        under
+            .text
+            .ends_with("Known: Tool — made by → Acme; Team → uses"),
+        "{}",
+        under.text
+    );
+    assert_eq!(under.known, vec!["Tool"]);
+}
+
+#[test]
+fn occurrence_text_leaves_out_the_known_line_too() {
+    let block = "Position: A\nKnown: Ghost — haunts → House\nPreceding text: before";
+    let user = user_message("doc.md", 1, 2, "[3] chunk", Some(block));
+    assert_eq!(
+        user_message_occurrence_text(&user),
+        "Position: A\nPreceding text: before\n\n[3] chunk"
     );
 }
 
@@ -6880,7 +7156,7 @@ fn render_block_carries_position_references_and_overlap_within_the_cap() {
     let units = detect_units(text, &spans);
     // Chunk = paragraphs 2..=3 ("## Setup" + its body).
     let chunk = "[2] ## Setup\n\n[3] see Usage for details.";
-    let block = render_block(text, &spans, &units, 2, 3, chunk, 4096, None).unwrap();
+    let block = render_block(text, &spans, &units, 2, 3, chunk, 4096, None, None, &[]).unwrap();
     assert_eq!(
         block.text,
         "Position: Guide › Setup\nReferences: Usage — run it.\nPreceding text: # Guide intro paragraph one."
@@ -6897,9 +7173,35 @@ fn render_block_carries_position_references_and_overlap_within_the_cap() {
     assert_eq!(block.sha256, sha256_hex(block.text.as_bytes()));
     // The first chunk of a structureless document gets nothing.
     let plain = "a\n\nb";
-    assert!(render_block(plain, &spans_of(plain), &[], 0, 0, "[0] a", 4096, None).is_none());
+    assert!(
+        render_block(
+            plain,
+            &spans_of(plain),
+            &[],
+            0,
+            0,
+            "[0] a",
+            4096,
+            None,
+            None,
+            &[]
+        )
+        .is_none()
+    );
     // A later chunk of it still gets overlap.
-    let later = render_block(plain, &spans_of(plain), &[], 1, 1, "[1] b", 4096, None).unwrap();
+    let later = render_block(
+        plain,
+        &spans_of(plain),
+        &[],
+        1,
+        1,
+        "[1] b",
+        4096,
+        None,
+        None,
+        &[],
+    )
+    .unwrap();
     assert_eq!(later.text, "Preceding text: a");
     assert_eq!(later.overlap_paragraphs, Some((0, 0)));
     assert!(later.position.is_empty());
@@ -6912,7 +7214,7 @@ fn render_block_respects_the_cap_by_dropping_references_and_keeping_the_overlap_
     let spans = spans_of(&text);
     let units = detect_units(&text, &spans);
     let chunk = "[2] ## Beta\n\n[3] see Alpha now";
-    let block = render_block(&text, &spans, &units, 2, 3, chunk, 512, None).unwrap();
+    let block = render_block(&text, &spans, &units, 2, 3, chunk, 512, None, None, &[]).unwrap();
     assert!(block.bytes <= 512, "the cap is exact: {}", block.bytes);
     assert_eq!(block.bytes, block.text.len());
     assert!(block.text.starts_with("Position: Beta\n"));
@@ -6942,13 +7244,13 @@ fn render_block_respects_the_cap_by_dropping_references_and_keeping_the_overlap_
     // recorded as an empty `Preceding text: …`: after the position
     // line, its prefix, and the newlines, 48 bytes leave under the
     // 24-byte minimum a tail needs to say anything.
-    let tight = render_block(&text, &spans, &units, 2, 3, chunk, 48, None).unwrap();
+    let tight = render_block(&text, &spans, &units, 2, 3, chunk, 48, None, None, &[]).unwrap();
     assert_eq!(tight.text, "Position: Beta");
     assert!(tight.overlap_paragraphs.is_none());
     assert!(tight.references.is_empty());
     assert!(tight.bytes <= 48);
     // Just enough room for a short tail: the ellipsis is charged too.
-    let snug = render_block(&text, &spans, &units, 2, 3, chunk, 80, None).unwrap();
+    let snug = render_block(&text, &spans, &units, 2, 3, chunk, 80, None, None, &[]).unwrap();
     // 14 (position) + 1 + 16 (prefix) + 48 (the budget the tail
     // fills exactly, ellipsis included) = 79: the accounting is exact.
     assert_eq!(snug.bytes, 79);

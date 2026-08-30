@@ -256,15 +256,17 @@ pub(super) fn user_message_occurrence_text(user: &str) -> Cow<'_, str> {
     // there is not attested. Everything else in the block is
     // document text and stays.
     let (preamble, chunk) = body.split_once("\n\n").unwrap_or((body, ""));
-    if !preamble
-        .lines()
-        .any(|line| line.starts_with(CAST_PREFIX) || line.starts_with(SYNOPSIS_PREFIX))
-    {
+    let model_or_export = |line: &str| {
+        line.starts_with(CAST_PREFIX)
+            || line.starts_with(SYNOPSIS_PREFIX)
+            || line.starts_with(KNOWN_PREFIX)
+    };
+    if !preamble.lines().any(model_or_export) {
         return Cow::Borrowed(body);
     }
     let kept: Vec<&str> = preamble
         .lines()
-        .filter(|line| !line.starts_with(CAST_PREFIX) && !line.starts_with(SYNOPSIS_PREFIX))
+        .filter(|line| !model_or_export(line))
         .collect();
     Cow::Owned(format!("{}\n\n{chunk}", kept.join("\n")))
 }

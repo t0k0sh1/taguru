@@ -40,7 +40,31 @@ pub(super) struct ContextVocabulary {
     /// computation-input fingerprint like `schema_digest`: same names,
     /// same digest, whatever file layout or op order produced them.
     pub(super) digest: String,
+    /// ADR 0033 §3.2 (`--chunk-context ingested`): what the export
+    /// holds about each concept — its associations, at most
+    /// [`KNOWN_RELATIONS_PER_NAME`] by weight, in export order among
+    /// equals — keyed by the concept's spelling. Harvested always
+    /// (cheap), offered only under the mode.
+    pub(super) known: BTreeMap<String, Vec<KnownRelation>>,
+    /// sha256 over the canonical serialization of `known` — the
+    /// computation-input fingerprint of what `ingested` offers, folded
+    /// into the manifest's `chunk_context` value under that mode.
+    pub(super) known_digest: String,
 }
+
+/// One association the export holds about a name: `label` and the
+/// other end, `outgoing` when the name is the subject.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct KnownRelation {
+    pub(super) label: String,
+    pub(super) other: String,
+    pub(super) outgoing: bool,
+    pub(super) weight: f64,
+}
+
+/// How many of a name's relations `ingested` offers at most — the
+/// strongest by |weight|, export order among equals.
+pub(super) const KNOWN_RELATIONS_PER_NAME: usize = 5;
 
 impl ContextVocabulary {
     /// The capped, deterministic prompt list.
@@ -89,6 +113,7 @@ pub(super) fn load_vocabulary(path: &Path) -> Result<ContextVocabulary, String> 
 
     let mut concepts: BTreeSet<String> = BTreeSet::new();
     let mut labels: BTreeSet<String> = BTreeSet::new();
+    let mut known: BTreeMap<String, Vec<KnownRelation>> = BTreeMap::new();
     for file in &files {
         let handle =
             fs::File::open(file).map_err(|error| format!("reading {}: {error}", file.display()))?;
@@ -101,6 +126,49 @@ pub(super) fn load_vocabulary(path: &Path) -> Result<ContextVocabulary, String> 
         for batch in &stream.batches {
             concepts.extend(batch.concept_vocabulary());
             labels.extend(batch.label_vocabulary());
+            for op in batch.associations() {
+                known
+                    .entry(op.subject.clone())
+                    .or_default()
+                    .push(KnownRelation {
+                        label: op.label.clone(),
+                        other: op.object.clone(),
+                        outgoing: true,
+                        weight: op.weight,
+                    });
+                known
+                    .entry(op.object.clone())
+                    .or_default()
+                    .push(KnownRelation {
+                        label: op.label.clone(),
+                        other: op.subject.clone(),
+                        outgoing: false,
+                        weight: op.weight,
+                    });
+            }
+        }
+    }
+    // The strongest few per name, a stable sort so equals keep export
+    // order and the digest below is a function of the export alone.
+    for relations in known.values_mut() {
+        relations.sort_by(|a, b| {
+            b.weight
+                .abs()
+                .partial_cmp(&a.weight.abs())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        relations.truncate(KNOWN_RELATIONS_PER_NAME);
+    }
+    let mut known_canonical = String::new();
+    for (name, relations) in &known {
+        for relation in relations {
+            known_canonical.push_str(&format!(
+                "{name}\u{0}{}\u{0}{}\u{0}{}\u{0}{}\n",
+                relation.label,
+                relation.other,
+                u8::from(relation.outgoing),
+                relation.weight
+            ));
         }
     }
     if concepts.is_empty() && labels.is_empty() {
@@ -126,9 +194,11 @@ pub(super) fn load_vocabulary(path: &Path) -> Result<ContextVocabulary, String> 
         .collect();
     Ok(ContextVocabulary {
         digest: sha256_hex(canonical.as_bytes()),
+        known_digest: sha256_hex(known_canonical.as_bytes()),
         allowlist,
         concepts,
         labels,
+        known,
     })
 }
 

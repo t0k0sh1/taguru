@@ -38,6 +38,11 @@ pub(super) enum ChunkContextMode {
     /// list, from one overview pass over the document (ADR 0033
     /// §3.5) — one model call per chunk before extraction.
     Overview,
+    /// `Overview` plus what the target context already holds about
+    /// the cast (and the document's candidate names): their
+    /// associations from the `--vocabulary` export (ADR 0033 §3.2's
+    /// ingested lane). No further model call; needs `--vocabulary`.
+    Ingested,
 }
 
 impl ChunkContextMode {
@@ -46,13 +51,19 @@ impl ChunkContextMode {
             "off" => Some(Self::Off),
             "structure" => Some(Self::Structure),
             "overview" => Some(Self::Overview),
+            "ingested" => Some(Self::Ingested),
             _ => None,
         }
     }
 
-    /// Whether the overview pass runs.
+    /// Whether the overview pass runs (cumulative: `ingested` too).
     pub(super) fn overview(self) -> bool {
-        self == Self::Overview
+        matches!(self, Self::Overview | Self::Ingested)
+    }
+
+    /// Whether the ingested lane's relations are offered.
+    pub(super) fn ingested(self) -> bool {
+        self == Self::Ingested
     }
 
     /// The manifest/checkpoint/settings record of the mode: `""` when
@@ -65,6 +76,7 @@ impl ChunkContextMode {
             Self::Off => "",
             Self::Structure => "structure",
             Self::Overview => "overview",
+            Self::Ingested => "ingested",
         }
     }
 
@@ -74,7 +86,7 @@ impl ChunkContextMode {
 }
 
 /// The accepted spellings, for usage text and errors.
-pub(super) const CHUNK_CONTEXT_MODES: &str = "off, structure, overview";
+pub(super) const CHUNK_CONTEXT_MODES: &str = "off, structure, overview, ingested";
 
 /// One structural unit of a document (ADR 0033 §3.4): a heading and
 /// the paragraphs it governs, up to the next heading. `level` is
@@ -487,6 +499,10 @@ pub(super) struct ContextBlock {
     /// below `overview`).
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub(super) cast: Vec<String>,
+    /// ADR 0033 §3.2: the names whose ingested relations the block
+    /// carries, in list order (empty below `ingested`).
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub(super) known: Vec<String>,
     /// ADR 0033 §3.5: the units whose synopsis the block carries —
     /// those wholly before the chunk — in document order.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
@@ -561,6 +577,8 @@ pub(super) fn render_block(
     chunk_text: &str,
     cap: usize,
     overview: Option<&Overview>,
+    known: Option<&BTreeMap<String, Vec<KnownRelation>>>,
+    candidates: &[String],
 ) -> Option<ContextBlock> {
     let path = position(units, chunk_first);
     let refs = references(
@@ -642,6 +660,7 @@ pub(super) fn render_block(
     // output both, so they ride under their own prefixes and the
     // occurrence check leaves them out (`user_message_occurrence_text`).
     let mut cast_names = Vec::new();
+    let mut known_names = Vec::new();
     let mut synopsis_ids = Vec::new();
     if let Some(overview) = overview {
         let mut entries = Vec::new();
@@ -668,6 +687,68 @@ pub(super) fn render_block(
             let line = format!("{CAST_PREFIX}{}", entries.join(ENTRY_SEPARATOR));
             used += line.len() + 1;
             lines.push(line);
+        }
+        // ADR 0033 §3.2, the ingested lane: for each cast name — then
+        // each candidate name — the export knows, its strongest
+        // relations, right after the cast it glosses.
+        if let Some(known) = known {
+            let mut names: Vec<&str> = overview
+                .cast
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect();
+            for candidate in candidates {
+                if !names.contains(&candidate.as_str()) {
+                    names.push(candidate);
+                }
+            }
+            let mut entries = Vec::new();
+            let mut line_len = KNOWN_PREFIX.len();
+            for name in names {
+                let Some(relations) = known.get(name).filter(|relations| !relations.is_empty())
+                else {
+                    continue;
+                };
+                let rendered = format!(
+                    "{} — {}",
+                    one_line(name),
+                    relations
+                        .iter()
+                        .map(|relation| {
+                            if relation.outgoing {
+                                format!(
+                                    "{} → {}",
+                                    one_line(&relation.label),
+                                    one_line(&relation.other)
+                                )
+                            } else {
+                                format!(
+                                    "{} → {}",
+                                    one_line(&relation.other),
+                                    one_line(&relation.label)
+                                )
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                );
+                let separator = if entries.is_empty() {
+                    0
+                } else {
+                    ENTRY_SEPARATOR.len()
+                };
+                if used + line_len + separator + rendered.len() + 1 > cap {
+                    break;
+                }
+                line_len += separator + rendered.len();
+                entries.push(rendered);
+                known_names.push(name.to_string());
+            }
+            if !entries.is_empty() {
+                let line = format!("{KNOWN_PREFIX}{}", entries.join(ENTRY_SEPARATOR));
+                used += line.len() + 1;
+                lines.push(line);
+            }
         }
         let mut entries = Vec::new();
         let mut line_len = SYNOPSIS_PREFIX.len();
@@ -758,6 +839,7 @@ pub(super) fn render_block(
         position: position_ids,
         references: reference_ids,
         cast: cast_names,
+        known: known_names,
         synopsis: synopsis_ids,
         overlap_paragraphs: overlap,
         text: body,
@@ -809,6 +891,10 @@ pub(super) struct TraceChunkContext<'a> {
 /// these, and only these.
 pub(super) const CAST_PREFIX: &str = "Cast: ";
 pub(super) const SYNOPSIS_PREFIX: &str = "Before: ";
+/// ADR 0033 §3.2: the ingested lane's line — the export's words about
+/// the cast, not this document's, so it too is left out of the
+/// occurrence check (its names are already allowlisted by ADR 0015).
+pub(super) const KNOWN_PREFIX: &str = "Known: ";
 
 /// One cast entry as the model answered it: a recurring subject —
 /// person, organization, product, defined term — and a short gloss.

@@ -291,6 +291,14 @@ Rules, each of which a test pins:
   of one ask — a chunk, not a structural unit — and what a failed ask
   leaves in the checkpoint are ADR 0034's, which supersedes §3.5 on
   those two points.
+- **`ingested` names its export in the manifest**: the mode value is
+  `ingested:<digest>` where the digest is over the relations the
+  export offers (each concept's strongest five by |weight|), so a
+  changed export re-extracts as a changed vocabulary already does —
+  §3.2's "no new computation input" holds for the *source* (the same
+  export file `--vocabulary` reads) while the *offered* relations,
+  being prompt content, are fingerprinted. The `Known:` line is the
+  export's words, left out of the occurrence check like the cast.
 - **Not done**: a chunk-by-chunk running summary (rejected, §3.1);
   live retrieval at extract time (rejected, §3.2); novel-grade
   comprehension (out of scope, §2).

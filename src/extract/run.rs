@@ -127,6 +127,13 @@ pub(super) struct Run {
     /// Content digest of the harvested name sets (`""` = off) — a
     /// manifest/checkpoint computation input like `schema_digest`.
     pub(super) vocabulary_digest: String,
+    /// ADR 0033 §3.2: the export's relations per concept name,
+    /// offered under `--chunk-context ingested` (empty otherwise, or
+    /// with no `--vocabulary`).
+    pub(super) vocabulary_known: BTreeMap<String, Vec<KnownRelation>>,
+    /// The digest of `vocabulary_known` — part of the manifest's
+    /// `chunk_context` value under `ingested`.
+    pub(super) known_digest: String,
     /// Resolved from `--diagnostics-out`/TAGURU_EXTRACT_DIAGNOSTICS
     /// (`None`, the default: no sidecar, stdout/stderr byte-for-byte
     /// today's). Issue #200.
@@ -385,6 +392,19 @@ pub(super) enum ChunkLoopResult {
 }
 
 impl Run {
+    /// ADR 0033: the manifest/checkpoint/settings record of the chunk
+    /// context in force — the mode name, and under `ingested` the
+    /// digest of the relations the export offers appended
+    /// (`ingested:<digest>`), since those relations are prompt content
+    /// and a changed export changes what every chunk is told.
+    pub(super) fn chunk_context_value(&self) -> String {
+        if self.chunk_context.ingested() {
+            format!("ingested:{}", self.known_digest)
+        } else {
+            self.chunk_context.manifest_value().to_string()
+        }
+    }
+
     /// The checkpoint compatibility fingerprint for one document — the
     /// same fields [`Manifest::matches`]/[`Manifest::record`] already
     /// carry, minus `output`. Any mismatch against a loaded file's own
@@ -406,7 +426,7 @@ impl Run {
                 self.escalation_factor,
             ),
             chunk_bytes: chunk_bytes_manifest_value(self.chunk_bytes),
-            chunk_context: self.chunk_context.manifest_value().to_string(),
+            chunk_context: self.chunk_context_value(),
             lossy: self.lossy,
             schema_digest: self.schema_digest.clone(),
             candidates: candidates_manifest_value(self.candidates).to_string(),
@@ -502,6 +522,7 @@ impl Run {
         let escalation_factor =
             escalation_manifest_value(self.max_output_tokens, self.escalation_factor);
         let chunk_bytes = chunk_bytes_manifest_value(self.chunk_bytes);
+        let chunk_context_value = self.chunk_context_value();
         let inputs = ComputationInputs {
             sha256: &hash,
             model: &self.model_name,
@@ -514,7 +535,7 @@ impl Run {
             max_output_tokens: self.max_output_tokens.unwrap_or(0),
             escalation_factor: &escalation_factor,
             chunk_bytes: &chunk_bytes,
-            chunk_context: self.chunk_context.manifest_value(),
+            chunk_context: &chunk_context_value,
             lossy: self.lossy,
             schema_digest: &self.schema_digest,
             candidates: candidates_manifest_value(self.candidates),
@@ -658,7 +679,7 @@ impl Run {
                 structured_output: self.structured_output.manifest_value(),
                 max_output_tokens: self.max_output_tokens.unwrap_or(0),
                 chunk_bytes: &chunk_bytes,
-                chunk_context: self.chunk_context.manifest_value(),
+                chunk_context: &chunk_context_value,
                 lossy: self.lossy,
                 schema_digest: &self.schema_digest,
                 candidates: candidates_manifest_value(self.candidates),
@@ -688,7 +709,7 @@ impl Run {
                 structured_output: self.structured_output.manifest_value().to_string(),
                 max_output_tokens: self.max_output_tokens.unwrap_or(0) as u64,
                 chunk_bytes: chunk_bytes.clone(),
-                chunk_context: self.chunk_context.manifest_value().to_string(),
+                chunk_context: self.chunk_context_value(),
                 lossy: self.lossy,
                 schema_digest: self.schema_digest.clone(),
                 candidates: candidates_manifest_value(self.candidates).to_string(),
@@ -754,6 +775,10 @@ impl Run {
                         &descriptor.text,
                         cap,
                         overview.as_ref(),
+                        self.chunk_context
+                            .ingested()
+                            .then_some(&self.vocabulary_known),
+                        &candidates,
                     )
                 })
                 .collect()

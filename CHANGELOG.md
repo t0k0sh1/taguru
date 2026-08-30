@@ -26,8 +26,7 @@ Entries that change an on-disk format or a response shape say so.
   records under the mode. The mode is a manifest/checkpoint computation
   input (`""` = off, so existing manifests keep matching); the attempts
   log's `settings` record gains `chunk_context`. **On-disk format
-  change**: additive record kinds and fields only. ADR 0033 (#782); the
-  `ingested` mode it specifies follows.
+  change**: additive record kinds and fields only. ADR 0033 (#782).
 - `taguru extract --chunk-context overview`: the `overview` pipeline step
   (after `plan`) asks the model once per chunk, before any extraction, for
   a synopsis of each structural unit opening in the chunk and the cast it
@@ -45,6 +44,16 @@ Entries that change an on-disk format or a response shape say so.
   `overview_digest` (extraction units are discarded when the overview
   they saw changed). `--resume-from overview` is accepted. **On-disk
   format change**: additive. ADR 0033 §3.5 (#782).
+- `taguru extract --chunk-context ingested` (needs `--vocabulary`): the
+  export's associations are harvested beside its names — each concept's
+  strongest five by |weight| — and a chunk's block carries, after
+  `Cast:`, a `Known:` line with those relations for every cast name (then
+  every `--candidates` name) the export knows. No further model call; the
+  line does not attest a name for the occurrence check (the export's
+  allowlist already does). The manifest records the mode as
+  `ingested:<digest of the offered relations>`, so a changed export
+  re-extracts; the trace's `chunk_context` record gains `known`. ADR 0033
+  §3.2 (#782) — the last of the modes it specifies.
 
 ### Fixed
 
