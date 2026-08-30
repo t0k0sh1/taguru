@@ -151,7 +151,9 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
                     heading path, the openings of the units it refers
                     to, and the paragraphs just before it, and prefers
                     chunk boundaries at the outermost headings — no
-                    model call; a computation input
+                    model call; overview adds an overview pass first
+                    (one call per chunk) whose per-unit synopses and
+                    cast list ride in the block too; a computation input
 --parallel N        chunk completions to run concurrently within one
                     document (default 1, sequential); overrides
                     TAGURU_EXTRACT_PARALLEL when both are set
@@ -266,8 +268,8 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       href="#resume-from"><code>--resume-from</code></a>, and in this table. <strong>The list is
       not closed</strong> — a later version can add a step (<a
       href="https://github.com/t0k0sh1/taguru/blob/main/adr/0033-chunk-context.md">ADR 0033</a>
-      added <code>structure</code> and <code>annotate</code>, table edition 2; its
-      <code>overview</code> pass, a model call, is next), and the order to read them
+      added <code>structure</code>, <code>overview</code>, and <code>annotate</code>, table
+      edition 2), and the order to read them
       in always comes from this table, never from a number: positions shift, names do not.
     </p>
     <table>
@@ -291,6 +293,14 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
           <td><code>plan</code></td><td>per document</td><td>—</td>
           <td>the chunk plan (index, hash, byte length, paragraph range per chunk)</td>
           <td><a href="#chunking">Chunking</a></td>
+        </tr>
+        <tr>
+          <td><code>overview</code></td><td>per document</td><td>yes</td>
+          <td>under <code>--chunk-context overview</code>: one call per chunk, before any
+            extraction — a synopsis of each unit opening in it and the cast it introduces,
+            cached in the checkpoint (none under other modes)</td>
+          <td><a href="#chunk-context">Chunk context</a>, <a href="#trace">Trace</a>
+            (<code>overview</code>)</td>
         </tr>
         <tr>
           <td><code>annotate</code></td><td>per chunk</td><td>—</td>
@@ -399,8 +409,8 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
             record is still tried against whatever conversation this run actually builds</td>
         </tr>
         <tr>
-          <td><code>read</code>, <code>structure</code>, <code>plan</code>, <code>annotate</code>,
-            <code>steer</code></td>
+          <td><code>read</code>, <code>structure</code>, <code>plan</code>, <code>overview</code>,
+            <code>annotate</code>, <code>steer</code></td>
           <td>a plain, unreplayed run</td>
           <td>nothing before any of these has a record in this version — there is nothing to
             satisfy from the log at all</td>
@@ -415,7 +425,7 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       href="#manifest">the manifest skip</a> and <a href="#checkpoints">the checkpoint store</a> —
       naming a resume point is a deliberate ask to redo the document, and an unchanged-document
       skip answering that ask with nothing at all would defeat it just as much for
-      <code>read</code>/<code>structure</code>/<code>plan</code>/<code>annotate</code>/<code>steer</code>
+      <code>read</code>/<code>structure</code>/<code>plan</code>/<code>overview</code>/<code>annotate</code>/<code>steer</code>
       (which trigger no replay at all) as it would under a plain <code>--replay</code> run.
     </p>
   </section>
@@ -734,10 +744,33 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       can be credited to the kind of context that carried it. The mode is a computation input:
       switching it re-extracts, and a manifest or checkpoint from before the flag matches
       <code>off</code>. Split sub-pieces (the ladder's split rung) keep their chunk's block — a
-      sub-piece is still part K, read in part K's context. Two further modes, an
-      <code>overview</code> pass (per-unit synopses and a cast list, one model pass) and
-      <code>ingested</code> (the target context's known relations for that cast, from the
-      <code>--vocabulary</code> export), are specified by ADR 0033 and land after this one.
+      sub-piece is still part K, read in part K's context.
+    </p>
+    <p>
+      <code>--chunk-context overview</code> adds the model's half. Before any extraction, the
+      <code>overview</code> step asks the model once per chunk — with the units opening in that
+      chunk listed by number and heading, and the chunk exactly as extraction will see it — for
+      a one-to-two-sentence synopsis of each such unit (what it establishes: definitions made,
+      decisions taken) and the <i>cast</i> the chunk introduces or relies on (people,
+      organizations, products, defined terms, each with a gloss), as one JSON object. Every
+      chunk's block then carries, after position and references and before the preceding text,
+      <code>Cast:</code> the merged cast (first-seen order, duplicate names folded, at most 40)
+      and <code>Before:</code> the synopses of the units wholly before the chunk — cut at
+      structural boundaries, each summarized from its own text, never a running summary. Two
+      rules keep this honest: the cast and synopsis lines are the <b>overview model's words, not
+      the document's</b>, so the occurrence check leaves them out (a name that occurs only there
+      is still unattested); and the pass is <b>advisory</b> — an answer the pass cannot land
+      (cut off even at ADR 0019's one escalated resend, refused, empty, or not JSON) is reported
+      once on stderr and that chunk contributes no synopsis or cast, never a failed document.
+      Each completion is an attempts-log record with <code>stage: "overview"</code>, so its cost
+      is priced apart; the trace carries one <code>overview</code> record per answered chunk. The
+      answers are cached in the document's checkpoint by chunk hash and reused on a resume; the
+      extraction units are bound to the merged overview's digest, so a changed overview discards
+      them (they would have been extracted against a different block) and says so. Under the
+      <code>json_schema</code> rung the pass sends <code>json_object</code> — the extraction
+      schema is the wrong shape for this answer. The last mode, <code>ingested</code> (the target
+      context's known relations for the cast, from the <code>--vocabulary</code> export), is
+      specified by ADR 0033 and lands after this one.
     </p>
   </section>
 
@@ -1038,9 +1071,13 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       <code>paragraph_first</code>/<code>paragraph_last</code>); one <code>chunk</code> per chunk of
       the plan (the same <code>chunk_index</code>/<code>chunk_sha256</code>/
       <code>chunk_bytes</code>/<code>paragraph_first</code>/<code>paragraph_last</code> the
-      sidecar's chunk record carries), each followed under that mode by its
+      sidecar's chunk record carries), each followed under that mode by — under
+      <code>overview</code> — its <code>overview</code> record (<code>chunk_index</code>,
+      <code>units</code> as <code>[{unit, summary}]</code>, <code>cast</code> as
+      <code>[{name, gloss}]</code>) and by its
       <code>chunk_context</code> (<code>chunk_index</code>, the block's <code>sha256</code>/
       <code>bytes</code>, <code>position</code> and <code>references</code> as unit indices,
+      <code>cast</code> names and <code>synopsis</code> unit indices when carried,
       <code>overlap_paragraphs</code>); one <code>piece</code> per answer the chunk loop kept —
       a chunk, or each sub-piece the split rung made of one, so several pieces can share a
       <code>chunk_index</code> — with <code>piece_id</code> (sha256 of the piece text as sent;
@@ -1393,6 +1430,11 @@ l=out/.extract-trace/a.attempts.jsonl      # the attempts log</code></pre>
         <tr><td><code>plan</code></td>
           <td>trace <code>chunk</code>, one per chunk; the diagnostics sidecar's own
             <code>chunk</code> record; the <code>--dry-run</code> per-document line.</td></tr>
+        <tr><td><code>overview</code></td>
+          <td>attempts log <code>attempt</code> records with <code>stage: "overview"</code> (one
+            per chunk, plus an escalated resend when the first was cut off); trace
+            <code>overview</code>, one per chunk the pass answered for; the checkpoint file's
+            <code>overview</code> map and <code>overview_digest</code>.</td></tr>
         <tr><td><code>annotate</code></td>
           <td>trace <code>chunk_context</code>, one per chunk that got a block, right after its
             <code>chunk</code>; the block text itself is in each <code>attempt</code>'s

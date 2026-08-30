@@ -810,10 +810,11 @@ impl ReplayMode {
 /// closed vocabulary (#822). An unknown name is a hard usage error,
 /// listing this array so the accepted spelling is always in the
 /// message itself.
-pub(super) const STEP_NAMES: [&str; 13] = [
+pub(super) const STEP_NAMES: [&str; 14] = [
     "read",
     "structure",
     "plan",
+    "overview",
     "annotate",
     "steer",
     "prompt",
@@ -837,16 +838,21 @@ pub(super) const STEP_NAMES: [&str; 13] = [
 ///   sends must be *its own*, never a pinned one (ADR 0031 §3.6) —
 ///   `call`'s record is still tried, matching on that live-built
 ///   conversation exactly as `--replay auto` always has.
-/// - `read`/`structure`/`plan`/`annotate`/`steer`: nothing before them
-///   has a record at all — a plain, unreplayed run (ADR 0033 added
-///   `structure` and `annotate`; neither calls the model).
+/// - `read`/`structure`/`plan`/`overview`/`annotate`/`steer`: nothing
+///   before them has a record at all — a plain, unreplayed run (ADR
+///   0033 added `structure`, `overview`, and `annotate`; `overview`'s
+///   own completions are recorded like any other, but naming it
+///   means redoing the pass, and `--resume-from` bypasses the
+///   checkpoint store where its answers live).
 ///
 /// `step` must be one of [`STEP_NAMES`] — callers validate that at
 /// parse time; anything else panics rather than silently picking a
 /// fold.
 pub(super) fn resume_from_fold(step: &str) -> (ReplayMode, bool) {
     match step {
-        "read" | "structure" | "plan" | "annotate" | "steer" => (ReplayMode::Off, false),
+        "read" | "structure" | "plan" | "overview" | "annotate" | "steer" => {
+            (ReplayMode::Off, false)
+        }
         "prompt" => (ReplayMode::Auto, true),
         "call" | "parse" | "validate" | "reconcile" | "merge" | "render" | "verify" => {
             (ReplayMode::Auto, false)

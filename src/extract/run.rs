@@ -581,26 +581,6 @@ impl Run {
             Vec::new()
         };
         let plan = chunk_plan_preferring(&text, self.chunk_bytes, &preferred_breaks(&units));
-        // The `annotate` step: one block per chunk, or none under `off`
-        // (and none for a chunk nothing applies to).
-        let blocks: Vec<Option<ContextBlock>> = if self.chunk_context.is_on() {
-            let cap = block_cap(self.chunk_bytes);
-            plan.iter()
-                .map(|descriptor| {
-                    render_block(
-                        &text,
-                        &paragraph_spans,
-                        &units,
-                        descriptor.paragraph_first,
-                        descriptor.paragraph_last,
-                        &descriptor.text,
-                        cap,
-                    )
-                })
-                .collect()
-        } else {
-            vec![None; plan.len()]
-        };
         if self.dry_run {
             // Read-only: a dry run still calls/writes nothing, but
             // reusable-count reporting is exactly what --dry-run is for
@@ -733,6 +713,52 @@ impl Run {
         let observers = Observers {
             sink: self.diagnostics.as_ref(),
             log: attempt_log.as_ref(),
+        };
+        // ADR 0033 §3.5: the `overview` step — one call per chunk,
+        // before any extraction, answers cached in the checkpoint —
+        // and the extraction units bound to the overview they saw.
+        let overview_answers: Vec<Option<OverviewAnswer>> = if self.chunk_context.overview() {
+            let answers = self.overview_pass(source, &plan, &units, &checkpoints, &observers);
+            if self.stop.check() {
+                return Ok(Outcome::Interrupted);
+            }
+            answers
+        } else {
+            vec![None; plan.len()]
+        };
+        let overview = self
+            .chunk_context
+            .overview()
+            .then(|| Overview::merge(&overview_answers));
+        if let Some(overview) = overview.as_ref() {
+            let discarded = checkpoints.bind_overview(source, &overview.digest);
+            if discarded > 0 {
+                eprintln!(
+                    "taguru: extract: {source}: chunk context: the overview changed since \
+                     {discarded} unit(s) were checkpointed — they are re-extracted"
+                );
+            }
+        }
+        // The `annotate` step: one block per chunk, or none under `off`
+        // (and none for a chunk nothing applies to).
+        let blocks: Vec<Option<ContextBlock>> = if self.chunk_context.is_on() {
+            let cap = block_cap(self.chunk_bytes);
+            plan.iter()
+                .map(|descriptor| {
+                    render_block(
+                        &text,
+                        &paragraph_spans,
+                        &units,
+                        descriptor.paragraph_first,
+                        descriptor.paragraph_last,
+                        &descriptor.text,
+                        cap,
+                        overview.as_ref(),
+                    )
+                })
+                .collect()
+        } else {
+            vec![None; plan.len()]
         };
         let chunks: Vec<String> = plan
             .iter()
@@ -888,6 +914,7 @@ impl Run {
                 &self.steering_record(&candidates, &resolved_system),
                 &units,
                 &blocks,
+                &overview_answers,
             ),
         );
         self.manifest.record(source, &inputs, &file_name);
@@ -968,6 +995,267 @@ impl Run {
     /// document-to-document and concurrent documents could diverge on
     /// label spellings.
     ///
+    /// ADR 0033 §3.5: the overview pass. One completion per chunk, in
+    /// document order, asking for a synopsis of each unit opening in
+    /// the chunk and the cast it introduces; the answer is cached in
+    /// the checkpoint by `chunk_sha256` and reused on resume. Its
+    /// ladder is escalation only (ADR 0019 — the same capped resend
+    /// Stage 1 gets; there is no piece to split): a chunk whose
+    /// answer the pass cannot land is reported once and skipped —
+    /// the block simply carries no synopsis from it — never a
+    /// failed document, since context is advisory. Every completion
+    /// is a `stage: "overview"` attempt record.
+    pub(super) fn overview_pass(
+        &self,
+        source: &str,
+        plan: &[ChunkDescriptor],
+        units: &[Unit],
+        checkpoints: &CheckpointStore,
+        observers: &Observers,
+    ) -> Vec<Option<OverviewAnswer>> {
+        let completions = self
+            .completions
+            .as_ref()
+            .expect("a non-dry run built the completions");
+        let system = overview_system_prompt();
+        // The extraction schema is the wrong shape for this answer, so
+        // the json_schema rung steps down to json_object here; the
+        // other rungs are what they are.
+        let rung = self.ladder.as_ref().map(|ladder| ladder.rung());
+        let response_format = match rung {
+            Some(Rung::JsonSchema | Rung::JsonObject) => Some(json_object_response_format()),
+            Some(Rung::Prompted) | None => None,
+        };
+        let budget = self
+            .ladder
+            .as_ref()
+            .and_then(|ladder| ladder.max_output_tokens);
+        let mut answers = Vec::with_capacity(plan.len());
+        for (index, descriptor) in plan.iter().enumerate() {
+            if self.stop.check() {
+                answers.resize(plan.len(), None);
+                return answers;
+            }
+            if let Some(cached) = checkpoints.overview_answer(&descriptor.sha256) {
+                answers.push(Some(cached));
+                continue;
+            }
+            let here: Vec<&Unit> = units
+                .iter()
+                .filter(|unit| {
+                    unit.level > 0
+                        && unit.paragraph_first >= descriptor.paragraph_first
+                        && unit.paragraph_first <= descriptor.paragraph_last
+                })
+                .collect();
+            let offered: Vec<usize> = here.iter().map(|unit| unit.unit).collect();
+            let user = overview_user_message(source, index, plan.len(), &descriptor.text, &here);
+            let messages = [
+                serde_json::json!({"role": "system", "content": &system}),
+                serde_json::json!({"role": "user", "content": &user}),
+            ];
+            let mut options = RequestOptions {
+                response_format: response_format.clone(),
+                max_tokens: budget,
+                fail_fast_on_timeout: false,
+            };
+            let mut outcome = self.overview_round(
+                completions,
+                observers,
+                source,
+                index,
+                &descriptor.sha256,
+                &messages,
+                &options,
+                &offered,
+            );
+            if matches!(outcome, OverviewOutcome::LengthLimited)
+                && let Some(ladder) = self.ladder.as_ref()
+                && budget.is_some()
+            {
+                let mut record = MoveRecord::blank(
+                    "escalate",
+                    completions.run_id(),
+                    &descriptor.sha256,
+                    index,
+                    "the overview answer ended at the output cap; resending once at the \
+                     escalated budget",
+                );
+                record.from_max_tokens = budget;
+                record.to_max_tokens = ladder.escalated_budget();
+                observers.move_event(&record);
+                options.max_tokens = ladder.escalated_budget();
+                outcome = self.overview_round(
+                    completions,
+                    observers,
+                    source,
+                    index,
+                    &descriptor.sha256,
+                    &messages,
+                    &options,
+                    &offered,
+                );
+            }
+            match outcome {
+                OverviewOutcome::Answered(answer) => {
+                    checkpoints.record_overview(source, descriptor.sha256.clone(), answer.clone());
+                    answers.push(Some(answer));
+                }
+                OverviewOutcome::LengthLimited => {
+                    eprintln!(
+                        "taguru: extract: {source}: chunk {}/{}: the overview answer was cut \
+                         off at the output limit — this chunk contributes no synopsis or cast",
+                        index + 1,
+                        plan.len()
+                    );
+                    answers.push(None);
+                }
+                OverviewOutcome::Failed(message) => {
+                    eprintln!(
+                        "taguru: extract: {source}: chunk {}/{}: overview: {message} — this \
+                         chunk contributes no synopsis or cast",
+                        index + 1,
+                        plan.len()
+                    );
+                    answers.push(None);
+                }
+            }
+        }
+        answers
+    }
+
+    /// One overview completion, recorded as a `stage: "overview"`
+    /// attempt whatever it came back as.
+    #[allow(clippy::too_many_arguments)]
+    fn overview_round(
+        &self,
+        completions: &Completions,
+        observers: &Observers,
+        source: &str,
+        chunk_index: usize,
+        chunk_sha256: &str,
+        messages: &[serde_json::Value],
+        options: &RequestOptions,
+        offered: &[usize],
+    ) -> OverviewOutcome {
+        let started = std::time::Instant::now();
+        let attempt_ref = completions.next_attempt();
+        let rung = self.ladder.as_ref().map(|ladder| ladder.rung().name());
+        let record = |state: &'static str,
+                      length_limited: bool,
+                      response: Option<&ChatCompletion>,
+                      parse_error: Option<&str>,
+                      transport_retries: usize,
+                      replayed_from: Option<&AttemptRef>| {
+            observers.emit(
+                &DiagnosticsAttempt {
+                    source,
+                    stage: "overview",
+                    chunk_index,
+                    attempt: 1,
+                    attempt_ref: &attempt_ref,
+                    corrects: None,
+                    piece_id: chunk_sha256,
+                    max_attempts: 1,
+                    state,
+                    length_limited,
+                    elapsed: started.elapsed(),
+                    response,
+                    replayed_from,
+                    transport_retries,
+                    parse_error,
+                    validation_issues: None,
+                    removed_items: None,
+                    piece_bytes: None,
+                    requested_max_tokens: options.max_tokens,
+                    rung,
+                },
+                messages,
+            );
+        };
+        let response = match completions.complete(chunk_sha256, messages, options) {
+            Ok(response) => response,
+            Err(error) => {
+                let message = error.to_string();
+                record(
+                    match error.kind {
+                        ChatFailure::Timeout => "timeout",
+                        ChatFailure::Transport => "transport",
+                    },
+                    false,
+                    None,
+                    Some(&message),
+                    error.transport_retries,
+                    error.replayed_from.as_ref(),
+                );
+                return OverviewOutcome::Failed(message);
+            }
+        };
+        if indicates_length_limit(response.finish_reason.as_deref()) {
+            record(
+                "length_limited",
+                true,
+                Some(&response),
+                Some("the overview answer was cut off at the output limit"),
+                response.transport_retries,
+                response.replayed_from.as_ref(),
+            );
+            return OverviewOutcome::LengthLimited;
+        }
+        if let Some(reason) = response.finish_reason.as_deref()
+            && indicates_refusal(reason)
+        {
+            let message = format!("the provider refused the overview (finish_reason {reason})");
+            record(
+                "refusal",
+                false,
+                Some(&response),
+                Some(&message),
+                response.transport_retries,
+                response.replayed_from.as_ref(),
+            );
+            return OverviewOutcome::Failed(message);
+        }
+        if is_empty_answer(&response.content) {
+            let message = empty_answer_diagnosis();
+            record(
+                "empty",
+                false,
+                Some(&response),
+                Some(&message),
+                response.transport_retries,
+                response.replayed_from.as_ref(),
+            );
+            return OverviewOutcome::Failed(message);
+        }
+        match parse_overview_answer(&response.content, offered) {
+            Ok(answer) => {
+                record(
+                    "stop_valid",
+                    false,
+                    Some(&response),
+                    None,
+                    response.transport_retries,
+                    response.replayed_from.as_ref(),
+                );
+                OverviewOutcome::Answered(answer)
+            }
+            Err(error) => {
+                record(
+                    "stop_malformed",
+                    false,
+                    Some(&response),
+                    Some(&error),
+                    response.transport_retries,
+                    response.replayed_from.as_ref(),
+                );
+                OverviewOutcome::Failed(format!(
+                    "the overview answer was not the JSON object asked for ({error})"
+                ))
+            }
+        }
+    }
+
     /// Issue #179: the cooperative stop flag is checked between
     /// top-level chunks here (sequential path only — see
     /// [`Run::extract_chunks_concurrently`]'s doc comment for why
@@ -1630,4 +1918,11 @@ impl CrossChunkRound<'_> {
             }
         }
     }
+}
+
+/// What one overview completion came back as (ADR 0033 §3.5).
+pub(super) enum OverviewOutcome {
+    Answered(OverviewAnswer),
+    LengthLimited,
+    Failed(String),
 }

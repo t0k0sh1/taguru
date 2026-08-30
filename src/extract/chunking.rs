@@ -183,7 +183,7 @@ pub(super) fn extract_chunk(
         match evaluate_answer(
             &response.content,
             rules,
-            user_message_occurrence_text(user),
+            &user_message_occurrence_text(user),
             vocabulary,
         ) {
             Ok(evaluated) => {
@@ -763,7 +763,7 @@ pub(super) fn extract_round(
         match classify_attempt(
             &response,
             context.rules,
-            user_message_occurrence_text(user),
+            &user_message_occurrence_text(user),
             context.vocabulary,
         ) {
             AttemptOutcome::Valid(evaluated) => {

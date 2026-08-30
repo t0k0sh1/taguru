@@ -114,6 +114,17 @@ pub(super) struct DocumentCheckpoints {
     pub(super) fingerprint: CheckpointFingerprint,
     #[serde(default)]
     pub(super) units: BTreeMap<String, CheckpointUnit>,
+    /// ADR 0033 §3.5: the overview pass's answer per chunk (by
+    /// `chunk_sha256`), so a resumed document reuses the pass without
+    /// a call. Empty below `--chunk-context overview`.
+    #[serde(default)]
+    pub(super) overview: BTreeMap<String, OverviewAnswer>,
+    /// The digest of the merged overview the cached `units` were
+    /// extracted under: every block depends on it, so a unit is only
+    /// reused when the overview it saw is the one in force
+    /// (`CheckpointStore::bind_overview`). `""` below `overview`.
+    #[serde(default)]
+    pub(super) overview_digest: String,
 }
 
 impl DocumentCheckpoints {
@@ -130,6 +141,8 @@ impl DocumentCheckpoints {
             _ => Self {
                 fingerprint: fingerprint.clone(),
                 units: BTreeMap::new(),
+                overview: BTreeMap::new(),
+                overview_digest: String::new(),
             },
         }
     }
@@ -173,6 +186,8 @@ impl CheckpointStore {
             state: Mutex::new(DocumentCheckpoints {
                 fingerprint,
                 units: BTreeMap::new(),
+                overview: BTreeMap::new(),
+                overview_digest: String::new(),
             }),
         }
     }
@@ -209,6 +224,61 @@ impl CheckpointStore {
                 self.path.display()
             );
         }
+    }
+
+    /// ADR 0033 §3.5: the overview answer cached for a chunk, if any.
+    pub(super) fn overview_answer(&self, chunk_sha256: &str) -> Option<OverviewAnswer> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.overview.get(chunk_sha256).cloned()
+    }
+
+    /// Records one chunk's fresh overview answer, durably — the same
+    /// posture as [`CheckpointStore::record`].
+    pub(super) fn record_overview(
+        &self,
+        source: &str,
+        chunk_sha256: String,
+        answer: OverviewAnswer,
+    ) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.overview.insert(chunk_sha256, answer);
+        if let Err(error) = state.save(&self.path) {
+            eprintln!(
+                "taguru: extract: {source}: saving checkpoint {}: {error} — the overview \
+                 still counts this run; a resume may repeat it",
+                self.path.display()
+            );
+        }
+    }
+
+    /// Binds the cached extraction units to the overview in force:
+    /// units extracted under a different overview digest saw
+    /// different blocks and are discarded (never reused against a
+    /// prompt they did not answer). Returns how many were discarded.
+    pub(super) fn bind_overview(&self, source: &str, digest: &str) -> usize {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.overview_digest == digest {
+            return 0;
+        }
+        let discarded = state.units.len();
+        state.units.clear();
+        state.overview_digest = digest.to_string();
+        if let Err(error) = state.save(&self.path) {
+            eprintln!(
+                "taguru: extract: {source}: saving checkpoint {}: {error}",
+                self.path.display()
+            );
+        }
+        discarded
     }
 
     /// How many extracted units the store holds — what a failure
