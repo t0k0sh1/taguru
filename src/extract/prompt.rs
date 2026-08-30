@@ -245,12 +245,28 @@ pub(super) fn user_message(
 /// never the block's own preamble sentence, which is taguru's
 /// instruction, not the document's text: a name that occurs only in
 /// it (`document`, `paragraph`) must not pass on that account.
-pub(super) fn user_message_occurrence_text(user: &str) -> &str {
+pub(super) fn user_message_occurrence_text(user: &str) -> Cow<'_, str> {
     let rest = user.split_once('\n').map(|(_, rest)| rest).unwrap_or(user);
-    match rest.strip_prefix(BLOCK_PREAMBLE_OPENING) {
-        Some(after) => after.split_once('\n').map(|(_, rest)| rest).unwrap_or(""),
-        None => rest,
+    let Some(after) = rest.strip_prefix(BLOCK_PREAMBLE_OPENING) else {
+        return Cow::Borrowed(rest);
+    };
+    let body = after.split_once('\n').map(|(_, rest)| rest).unwrap_or("");
+    // ADR 0033 §3.5: the cast and synopsis lines are the overview
+    // model's words, not the document's — a name that occurs only
+    // there is not attested. Everything else in the block is
+    // document text and stays.
+    let (preamble, chunk) = body.split_once("\n\n").unwrap_or((body, ""));
+    if !preamble
+        .lines()
+        .any(|line| line.starts_with(CAST_PREFIX) || line.starts_with(SYNOPSIS_PREFIX))
+    {
+        return Cow::Borrowed(body);
     }
+    let kept: Vec<&str> = preamble
+        .lines()
+        .filter(|line| !line.starts_with(CAST_PREFIX) && !line.starts_with(SYNOPSIS_PREFIX))
+        .collect();
+    Cow::Owned(format!("{}\n\n{chunk}", kept.join("\n")))
 }
 
 /// [`user_message`]'s inverse: the document text a user turn carried,

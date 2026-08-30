@@ -27,7 +27,24 @@ Entries that change an on-disk format or a response shape say so.
   input (`""` = off, so existing manifests keep matching); the attempts
   log's `settings` record gains `chunk_context`. **On-disk format
   change**: additive record kinds and fields only. ADR 0033 (#782); the
-  `overview` and `ingested` modes it specifies follow.
+  `ingested` mode it specifies follows.
+- `taguru extract --chunk-context overview`: the `overview` pipeline step
+  (after `plan`) asks the model once per chunk, before any extraction, for
+  a synopsis of each structural unit opening in the chunk and the cast it
+  introduces; every chunk's block then carries `Cast:` and `Before:` (the
+  synopses of the units wholly before it) between the references and the
+  preceding text. The cast and synopsis lines are model output and do
+  not attest a name for the occurrence check; an answer the pass cannot
+  land (cut off even at the one escalated resend, refused, empty, not
+  JSON) is reported and skipped, never a failed document, and recorded
+  in the checkpoint as an empty answer so a resume neither re-asks it
+  nor re-binds the extraction units (ADR 0034). Completions
+  are `stage: "overview"` attempts records; the trace gains an
+  `overview` record per answered chunk; the checkpoint file gains an
+  `overview` map (answers by chunk hash, reused on resume) and
+  `overview_digest` (extraction units are discarded when the overview
+  they saw changed). `--resume-from overview` is accepted. **On-disk
+  format change**: additive. ADR 0033 §3.5 (#782).
 
 ### Fixed
 

@@ -48,6 +48,7 @@
 //! `ChatClient`, and `RequestOptions` via `crate::extract::`,
 //! re-exported here unchanged.
 
+use std::borrow::Cow;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
@@ -156,11 +157,15 @@ use chat_client::{
 };
 use checkpoint::{CheckpointFingerprint, CheckpointStore, CheckpointUnit};
 use chunk_context::{
-    BLOCK_PREAMBLE_OPENING, CHUNK_CONTEXT_MODES, ChunkContextMode, ContextBlock, TraceChunkContext,
-    TraceStructure, Unit, block_cap, block_preamble, detect_units, preferred_breaks, render_block,
+    BLOCK_PREAMBLE_OPENING, CAST_PREFIX, CHUNK_CONTEXT_MODES, ChunkContextMode, ContextBlock,
+    Overview, OverviewAnswer, SYNOPSIS_PREFIX, TraceChunkContext, TraceOverview, TraceStructure,
+    Unit, block_cap, block_preamble, detect_units, overview_system_prompt, overview_user_message,
+    parse_overview_answer, preferred_breaks, render_block, units_opening_in,
 };
 #[cfg(test)]
-use chunk_context::{heading_of, position, references, strip_html_comments, truncate_at_char};
+use chunk_context::{
+    CastEntry, UnitSummary, heading_of, position, references, strip_html_comments, truncate_at_char,
+};
 use chunking::{
     AnswerFault, ChunkOutput, MIN_SPLIT_CAP, corrective_assistant_turn,
     corrective_validation_message, evaluate_answer, extract_chunk_or_ladder,
@@ -329,9 +334,12 @@ chat endpoint:
                       refers to (第三条, 前条, §2, a quoted heading), and
                       the paragraphs just before it — document text
                       only, no model call, capped at a quarter of
-                      --chunk-bytes. A computation input: changing it
-                      re-extracts. The pipeline steps it adds are
-                      structure (after read) and annotate (after plan)
+                      --chunk-bytes; overview adds an overview pass
+                      first (one call per chunk, before extraction)
+                      whose per-unit synopses and cast list also ride
+                      in the block. A computation input: changing it
+                      re-extracts. The pipeline steps: structure
+                      (after read), overview (after plan), annotate
   --config F          read KEY=VALUE environment from F (same dialect as serve)
   --parallel N        chunk completions to run concurrently within one
                       document (1, sequential); documents themselves stay

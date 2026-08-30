@@ -1959,13 +1959,13 @@ fn chunk_context_structure_prefixes_chunks_and_is_a_computation_input() {
             "--context",
             "c",
             "--chunk-context",
-            "overview",
+            "ingested",
             doc.to_str().unwrap(),
         ],
     );
     assert_eq!(code, 2, "{stderr}");
     assert!(
-        stderr.contains("--chunk-context takes one of: off, structure"),
+        stderr.contains("--chunk-context takes one of: off, structure, overview"),
         "{stderr}"
     );
     let (code, _, stderr) = run_extract(
@@ -1979,9 +1979,327 @@ fn chunk_context_structure_prefixes_chunks_and_is_a_computation_input() {
     );
     assert_eq!(code, 2, "{stderr}");
     assert!(
-        stderr.contains("TAGURU_EXTRACT_CHUNK_CONTEXT takes one of: off, structure"),
+        stderr.contains("TAGURU_EXTRACT_CHUNK_CONTEXT takes one of: off, structure, overview"),
         "{stderr}"
     );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// ADR 0033 §3.5: `--chunk-context overview` runs one overview call
+/// per chunk before any extraction (`stage: "overview"` attempts,
+/// its own system prompt), and every extraction chunk's block then
+/// carries `Cast:` and — for units wholly before it — `Before:`; the
+/// trace records each chunk's answer; a cast name is NOT attested
+/// for the occurrence check; and the cached answers are reused on a
+/// resume, extraction units discarded only when the overview changed.
+#[test]
+fn chunk_context_overview_runs_a_pass_first_and_feeds_cast_and_synopsis() {
+    let docs = batch_dir("extract-chunk-context-overview-docs");
+    let doc = docs.join("guide.md");
+    let filler = "x".repeat(600);
+    std::fs::write(
+        &doc,
+        format!(
+            "# Alpha\n\nParagraph 0: s value- {filler}\n\n# Beta\n\nParagraph 1: s value- {filler}"
+        ),
+    )
+    .unwrap();
+    let out = batch_dir("extract-chunk-context-overview-out");
+    // Overview asks are told apart by their system prompt; the stub
+    // answers them by chunk index, then answers extraction.
+    let (url, captured) = stub_chat_server_concurrent(move |index, attempt| {
+        let overview = attempt == 0;
+        if overview {
+            chat_ok(
+                &json!({
+                    "units": [{"unit": index, "summary": format!("Unit {index} summary.")}],
+                    "cast": [{"name": "Tool", "gloss": "the product"},
+                             {"name": "Ghost", "gloss": "never in the document"}]
+                })
+                .to_string(),
+            )
+        } else {
+            chat_ok(
+                &json!({"associations": [
+                    {"subject": "S", "label": "rel", "object": format!("value-{index}")},
+                    {"subject": "Ghost", "label": "rel", "object": format!("value-{index}")}
+                ]})
+                .to_string(),
+            )
+        }
+    });
+    let provider = [
+        ("TAGURU_EXTRACT_URL", url.as_str()),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &provider,
+        &[
+            "--context",
+            "c",
+            "--chunk-bytes",
+            "700",
+            "--chunk-context",
+            "overview",
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let requests: Vec<String> = captured.lock().unwrap().clone();
+    assert_eq!(
+        requests.len(),
+        4,
+        "two overview calls, then two extractions"
+    );
+    let system_of = |request: &str| -> String {
+        json_body_of(request)["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let user_of = |request: &str| -> String {
+        json_body_of(request)["messages"][1]["content"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    // The first two requests are the overview pass, in chunk order,
+    // each listing the units opening in its chunk.
+    assert!(system_of(&requests[0]).starts_with("You read one part of a document"));
+    assert!(system_of(&requests[1]).starts_with("You read one part of a document"));
+    assert!(
+        user_of(&requests[0]).contains("- unit 0: Alpha"),
+        "{}",
+        user_of(&requests[0])
+    );
+    assert!(
+        user_of(&requests[1]).contains("- unit 1: Beta"),
+        "{}",
+        user_of(&requests[1])
+    );
+    // Each overview ask lists only the units opening in ITS chunk.
+    assert!(
+        !user_of(&requests[0]).contains("unit 1"),
+        "{}",
+        user_of(&requests[0])
+    );
+    assert!(
+        !user_of(&requests[1]).contains("unit 0"),
+        "{}",
+        user_of(&requests[1])
+    );
+    // Nothing was checkpointed before this run: no discard notice.
+    assert!(!stderr.contains("the overview changed"), "{stderr}");
+    assert!(system_of(&requests[2]).starts_with("You extract knowledge"));
+    // The second extraction chunk's block: cast, and Alpha's synopsis
+    // (wholly before it); the first chunk's block has cast only.
+    let second = user_of(&requests[3]);
+    let (preamble, _) = second.split_once("\n\n").unwrap();
+    assert!(preamble.contains("\nPosition: Beta\n"), "{preamble}");
+    assert!(
+        preamble.contains("\nCast: Tool — the product | Ghost — never in the document\n"),
+        "{preamble}"
+    );
+    assert!(
+        preamble.contains("\nBefore: Alpha — Unit 0 summary.\n"),
+        "{preamble}"
+    );
+    let first = user_of(&requests[2]);
+    let (preamble, _) = first.split_once("\n\n").unwrap();
+    assert!(preamble.contains("\nCast: Tool"), "{preamble}");
+    assert!(!preamble.contains("Before:"), "{preamble}");
+    // A cast name is the overview model's word, not the document's:
+    // "Ghost" is removed as unattested in both chunks.
+    assert!(stdout.contains("2 association(s)"), "{stdout}");
+    assert!(
+        stdout.contains("2 item(s) removed (mechanical validation)"),
+        "{stdout}"
+    );
+    assert!(
+        stderr.contains("\"Ghost\" does not appear in the document text"),
+        "{stderr}"
+    );
+
+    // The attempts log: two `overview` attempts before any `item` one,
+    // keyed to their chunks; the trace: one `overview` record per chunk.
+    let records = read_attempts_log(&out);
+    let stages: Vec<&str> = records
+        .iter()
+        .filter(|r| r["kind"] == "attempt")
+        .map(|r| r["stage"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        stages,
+        ["overview", "overview", "item", "item"],
+        "{stages:?}"
+    );
+    let (_, trace) = read_trace(&out);
+    let overview: Vec<&Value> = trace.iter().filter(|r| r["kind"] == "overview").collect();
+    assert_eq!(overview.len(), 2, "{overview:?}");
+    assert_eq!(overview[0]["chunk_index"], 0);
+    assert_eq!(overview[0]["units"][0]["unit"], 0);
+    assert_eq!(overview[0]["units"][0]["summary"], "Unit 0 summary.");
+    assert_eq!(overview[0]["cast"][0]["name"], "Tool");
+    let contexts: Vec<&Value> = trace
+        .iter()
+        .filter(|r| r["kind"] == "chunk_context")
+        .collect();
+    assert_eq!(contexts[1]["cast"], json!(["Tool", "Ghost"]));
+    assert_eq!(contexts[1]["synopsis"], json!([0]));
+    assert!(contexts[0].get("synopsis").is_none());
+
+    // The mode is a computation input distinct from `structure`.
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &provider,
+        &[
+            "--context",
+            "c",
+            "--chunk-bytes",
+            "700",
+            "--chunk-context",
+            "overview",
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("unchanged, skipped"), "{stdout}");
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &provider,
+        &[
+            "--context",
+            "c",
+            "--chunk-bytes",
+            "700",
+            "--chunk-context",
+            "structure",
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(!stdout.contains("unchanged, skipped"), "{stdout}");
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// ADR 0033 §3.5: a resumed document reuses the overview answers its
+/// checkpoint holds — no overview call — and keeps its extraction
+/// units, since the overview they saw is the one in force; an
+/// overview answer the pass cannot land (cut off even at the
+/// escalated budget) is reported and skipped, never a failed document.
+#[test]
+fn chunk_context_overview_is_checkpointed_and_a_cut_off_answer_is_skipped() {
+    let docs = batch_dir("extract-chunk-context-overview-resume-docs");
+    let doc = docs.join("guide.md");
+    let filler = "x".repeat(600);
+    std::fs::write(
+        &doc,
+        format!(
+            "# Alpha\n\nParagraph 0: s value- {filler}\n\n# Beta\n\nParagraph 1: s value- {filler}"
+        ),
+    )
+    .unwrap();
+    let out = batch_dir("extract-chunk-context-overview-resume-out");
+    // Run 1: chunk 0's overview is cut off twice (escalated too);
+    // chunk 1's lands; extraction of chunk 1 is refused (terminal, no
+    // corrective turn), so the document fails with chunk 0's unit
+    // checkpointed.
+    let (url, captured) =
+        stub_chat_server_concurrent(move |index, attempt| match (index, attempt) {
+            (0, 0) | (0, 1) => chat_ok_with_finish_reason("cut", "length"),
+            (1, 0) => chat_ok(
+                &json!({"units": [{"unit": 1, "summary": "Beta summary."}], "cast": []})
+                    .to_string(),
+            ),
+            (0, _) => chat_ok(
+                &json!({"associations": [{"subject": "S", "label": "rel", "object": "value-0"}]})
+                    .to_string(),
+            ),
+            (1, _) => chat_ok_with_finish_reason("", "content_filter"),
+            // Never a panic here: a responder that panics leaves the
+            // extract subprocess waiting forever (a hang, not a failure).
+            _ => chat_ok("unexpected call"),
+        });
+    let provider = [
+        ("TAGURU_EXTRACT_URL", url.as_str()),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+    let args = [
+        "--context",
+        "c",
+        "--chunk-bytes",
+        "700",
+        "--max-output-tokens",
+        "512",
+        "--chunk-context",
+        "overview",
+        doc.to_str().unwrap(),
+    ];
+    let (code, stdout, stderr) = run_extract(&out, &provider, &args);
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("chunk 1/2: the overview answer was cut off at the output limit — this chunk contributes no synopsis or cast (recorded so for this document's resume; --force re-asks)"),
+        "{stderr}"
+    );
+    let requests: Vec<String> = captured.lock().unwrap().clone();
+    // chunk 0: two overview tries (512, then 1024); chunk 1: one.
+    assert_eq!(json_body_of(&requests[0])["max_tokens"], 512);
+    assert_eq!(json_body_of(&requests[1])["max_tokens"], 1024);
+    let records = read_attempts_log(&out);
+    let overview_states: Vec<&str> = records
+        .iter()
+        .filter(|r| r["kind"] == "attempt" && r["stage"] == "overview")
+        .map(|r| r["state"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        overview_states,
+        ["length_limited", "length_limited", "stop_valid"]
+    );
+    let moves: Vec<&Value> = records.iter().filter(|r| r["kind"] == "move").collect();
+    assert_eq!(moves[0]["move"], "escalate");
+    assert!(moves[0]["reason"].as_str().unwrap().contains("overview"));
+    let overview_calls_before = requests
+        .iter()
+        .filter(|r| {
+            json_body_of(r)["messages"][0]["content"]
+                .as_str()
+                .unwrap()
+                .starts_with("You read one part")
+        })
+        .count();
+    assert_eq!(overview_calls_before, 3);
+
+    // Run 2: both overview answers are cached — chunk 1's as given,
+    // chunk 0's as the EMPTY answer its failure was recorded as (ADR
+    // 0034 §3.3) — so no overview call is made, the merged overview
+    // is the one run 1 bound chunk 0's unit to (no discard), and only
+    // chunk 1's extraction is asked.
+    let (url, captured) =
+        stub_chat_server_concurrent(move |index, attempt| match (index, attempt) {
+            (1, 0) => chat_ok(
+                &json!({"associations": [{"subject": "S", "label": "rel", "object": "value-1"}]})
+                    .to_string(),
+            ),
+            _ => chat_ok("unexpected call"),
+        });
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &args,
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let requests: Vec<String> = captured.lock().unwrap().clone();
+    assert!(!stderr.contains("the overview changed"), "{stderr}");
+    assert_eq!(requests.len(), 1, "chunk 1's extraction only: {requests:?}");
+    assert!(stdout.contains("2 association(s)"), "{stdout}");
 
     let _ = std::fs::remove_dir_all(&docs);
     let _ = std::fs::remove_dir_all(&out);
@@ -9101,8 +9419,8 @@ fn resume_from_rejects_an_unknown_step_name() {
     assert_eq!(code, 2, "{stderr}");
     assert!(
         stderr.contains(
-            "--resume-from takes one of: read, structure, plan, annotate, steer, prompt, call, \
-             parse, validate, reconcile, merge, render, verify"
+            "--resume-from takes one of: read, structure, plan, overview, annotate, steer, \
+             prompt, call, parse, validate, reconcile, merge, render, verify"
         ),
         "must list every one of ADR 0030's step names (ADR 0033 added two), not just a \
          prefix: {stderr}"

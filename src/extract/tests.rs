@@ -5150,6 +5150,7 @@ fn render_trace_joins_items_to_pieces_across_a_split_and_a_reuse() {
         &empty_steering(),
         &[],
         &[],
+        &[],
     );
     let records: Vec<serde_json::Value> = text
         .lines()
@@ -5508,6 +5509,7 @@ fn render_trace_shows_every_loss_in_the_original_text() {
         &empty_steering(),
         &[],
         &[],
+        &[],
     );
     let losses: Vec<serde_json::Value> = text
         .lines()
@@ -5722,6 +5724,7 @@ fn lossy_parse_drops_are_recorded_as_unparsed_losses() {
         &empty_steering(),
         &[],
         &[],
+        &[],
     );
     let losses: Vec<serde_json::Value> = text
         .lines()
@@ -5878,6 +5881,7 @@ fn render_trace_reports_paragraph_coverage_and_gap_sentences() {
         &empty_steering(),
         &[],
         &[],
+        &[],
     );
     let records: Vec<serde_json::Value> = rendered
         .lines()
@@ -5951,12 +5955,20 @@ fn chunk_context_mode_parses_and_records_off_as_empty() {
         ChunkContextMode::parse(" Structure "),
         Some(ChunkContextMode::Structure)
     );
-    assert_eq!(ChunkContextMode::parse("overview"), None);
+    assert_eq!(
+        ChunkContextMode::parse("overview"),
+        Some(ChunkContextMode::Overview)
+    );
+    assert_eq!(ChunkContextMode::parse("ingested"), None);
     assert_eq!(ChunkContextMode::parse(""), None);
     assert_eq!(ChunkContextMode::Off.manifest_value(), "");
     assert_eq!(ChunkContextMode::Structure.manifest_value(), "structure");
+    assert_eq!(ChunkContextMode::Overview.manifest_value(), "overview");
     assert!(!ChunkContextMode::Off.is_on());
     assert!(ChunkContextMode::Structure.is_on());
+    assert!(ChunkContextMode::Overview.is_on());
+    assert!(!ChunkContextMode::Structure.overview());
+    assert!(ChunkContextMode::Overview.overview());
     assert_eq!(ChunkContextMode::default(), ChunkContextMode::Off);
 }
 
@@ -6304,7 +6316,7 @@ fn chunk_context_flag_parses_once_and_rejects_a_duplicate_or_unknown_mode() {
             "--out",
             "o",
             "--chunk-context",
-            "overview",
+            "ingested",
             "d.md"
         ]),
         Err(2)
@@ -6331,6 +6343,7 @@ fn reference_openings_start_after_the_heading_line_inside_a_multi_line_paragraph
         1,
         "[1] 第三条\n第二条の用語により。",
         4096,
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -6373,7 +6386,7 @@ fn render_block_accounts_for_every_byte_of_a_two_reference_line() {
     let units = detect_units(text, &spans);
     let chunk = "[4] ## Last\n\n[5] see Alpha and Beta";
     // Unbounded: both references, every preceding paragraph.
-    let full = render_block(text, &spans, &units, 4, 5, chunk, 4096).unwrap();
+    let full = render_block(text, &spans, &units, 4, 5, chunk, 4096, None).unwrap();
     assert_eq!(
         full.text,
         "Position: Last\nReferences: Alpha — alpha body. | Beta — beta body.\nPreceding text: ## Alpha alpha body. ## Beta beta body."
@@ -6383,11 +6396,11 @@ fn render_block_accounts_for_every_byte_of_a_two_reference_line() {
     // The two-entry line fits at exactly (its length + 1 for the
     // newline after the position line) and not one byte under.
     let two = "Position: Last\nReferences: Alpha — alpha body. | Beta — beta body.";
-    let exact = render_block(text, &spans, &units, 4, 5, chunk, two.len() + 1).unwrap();
+    let exact = render_block(text, &spans, &units, 4, 5, chunk, two.len() + 1, None).unwrap();
     assert_eq!(exact.text, two);
     assert_eq!(exact.bytes, two.len());
     assert!(exact.overlap_paragraphs.is_none());
-    let under = render_block(text, &spans, &units, 4, 5, chunk, two.len()).unwrap();
+    let under = render_block(text, &spans, &units, 4, 5, chunk, two.len(), None).unwrap();
     assert_eq!(
         under.text,
         "Position: Last\nReferences: Alpha — alpha body."
@@ -6405,6 +6418,7 @@ fn render_block_accounts_for_every_byte_of_a_two_reference_line() {
         5,
         chunk,
         two.len() + 1 + "Preceding text: ".len() + 1 + 30,
+        None,
     )
     .unwrap();
     assert_eq!(snug.text, three);
@@ -6420,6 +6434,7 @@ fn render_block_accounts_for_every_byte_of_a_two_reference_line() {
         5,
         chunk,
         two.len() + 1 + "Preceding text: ".len() + 1 + 29,
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -6440,7 +6455,17 @@ fn render_block_keeps_a_paragraph_exactly_as_long_as_the_budget_and_cuts_tails_o
     let spans = spans_of(&text);
     let units = detect_units(&text, &spans);
     let cap = "Position: B".len() + 1 + "Preceding text: ".len() + 1 + 30;
-    let block = render_block(&text, &spans, &units, 2, 3, "[2] ## B\n\n[3] body", cap).unwrap();
+    let block = render_block(
+        &text,
+        &spans,
+        &units,
+        2,
+        3,
+        "[2] ## B\n\n[3] body",
+        cap,
+        None,
+    )
+    .unwrap();
     assert_eq!(
         block.text,
         format!("Position: B\nPreceding text: {paragraph}")
@@ -6453,12 +6478,352 @@ fn render_block_keeps_a_paragraph_exactly_as_long_as_the_budget_and_cuts_tails_o
     let spans = spans_of(&text);
     let units = detect_units(&text, &spans);
     let cap = "Position: B".len() + 1 + "Preceding text: ".len() + 1 + 29;
-    let block = render_block(&text, &spans, &units, 2, 3, "[2] ## B\n\n[3] body", cap).unwrap();
+    let block = render_block(
+        &text,
+        &spans,
+        &units,
+        2,
+        3,
+        "[2] ## B\n\n[3] body",
+        cap,
+        None,
+    )
+    .unwrap();
     let tail = block.text.split("Preceding text: ").nth(1).unwrap();
     // 29 - 3 (…) = 26 bytes of room → cut at 60 - 26 = 34, not a
     // boundary, so 36: eight characters (24 bytes) plus the ellipsis.
     assert_eq!(tail, format!("…{}", "あ".repeat(8)));
     assert!(block.bytes <= cap);
+}
+
+#[test]
+fn overview_answers_parse_leniently_and_merge_first_wins() {
+    let answer = parse_overview_answer(
+        r#"{"units": [{"unit": 1, "summary": " Defines  terms. "}, {"unit": 9, "summary": "not offered"},
+                     {"unit": 1, "summary": "duplicate"}, {"unit": 2, "summary": ""}],
+            "cast": [{"name": "電子署名法", "gloss": "この法律"}, {"name": "電子署名法", "gloss": "again"},
+                     {"name": "", "gloss": "nameless"}, {"name": "主務大臣"}]}"#,
+        &[1, 2],
+    )
+    .unwrap();
+    assert_eq!(
+        answer.units,
+        vec![UnitSummary {
+            unit: 1,
+            summary: "Defines terms.".to_string()
+        }]
+    );
+    assert_eq!(
+        answer.cast,
+        vec![
+            CastEntry {
+                name: "電子署名法".to_string(),
+                gloss: "この法律".to_string()
+            },
+            CastEntry {
+                name: "主務大臣".to_string(),
+                gloss: String::new()
+            },
+        ]
+    );
+    // Not an object: the caller's error. Prose around the object: fine.
+    assert!(parse_overview_answer("[1, 2]", &[1]).is_err());
+    assert!(parse_overview_answer("not json at all", &[1]).is_err());
+    let wrapped = parse_overview_answer("Here: {\"units\": [], \"cast\": []} done", &[]).unwrap();
+    assert_eq!(wrapped, OverviewAnswer::default());
+    // Merged across chunks: the first summary for a unit wins, the
+    // cast keeps first-seen order with duplicates folded, and the
+    // digest tracks content.
+    let first = OverviewAnswer {
+        units: vec![UnitSummary {
+            unit: 1,
+            summary: "first".to_string(),
+        }],
+        cast: vec![CastEntry {
+            name: "A".to_string(),
+            gloss: "a".to_string(),
+        }],
+    };
+    let second = OverviewAnswer {
+        units: vec![
+            UnitSummary {
+                unit: 1,
+                summary: "second".to_string(),
+            },
+            UnitSummary {
+                unit: 2,
+                summary: "two".to_string(),
+            },
+        ],
+        cast: vec![
+            CastEntry {
+                name: "B".to_string(),
+                gloss: "b".to_string(),
+            },
+            CastEntry {
+                name: "A".to_string(),
+                gloss: "other".to_string(),
+            },
+        ],
+    };
+    let merged = Overview::merge(&[Some(first.clone()), None, Some(second.clone())]);
+    assert_eq!(merged.summaries.get(&1).map(String::as_str), Some("first"));
+    assert_eq!(merged.summaries.get(&2).map(String::as_str), Some("two"));
+    assert_eq!(
+        merged
+            .cast
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["A", "B"]
+    );
+    assert_eq!(merged.digest.len(), 64);
+    assert_ne!(
+        merged.digest,
+        Overview::merge(&[Some(second), Some(first)]).digest
+    );
+    assert_eq!(Overview::merge(&[None]).digest, Overview::merge(&[]).digest);
+}
+
+#[test]
+fn render_block_carries_cast_and_synopsis_between_references_and_overlap() {
+    let text = "# Guide\n\nintro.\n\n## Setup\n\nsetup body.\n\n## Usage\n\nsee Setup.";
+    let spans = spans_of(text);
+    let units = detect_units(text, &spans);
+    let overview = Overview::merge(&[Some(OverviewAnswer {
+        units: vec![
+            UnitSummary {
+                unit: 0,
+                summary: "The guide.".to_string(),
+            },
+            UnitSummary {
+                unit: 1,
+                summary: "How to set up.".to_string(),
+            },
+            UnitSummary {
+                unit: 2,
+                summary: "Never shown: this unit holds the chunk.".to_string(),
+            },
+        ],
+        cast: vec![CastEntry {
+            name: "Tool".to_string(),
+            gloss: "the product".to_string(),
+        }],
+    })]);
+    // Chunk = "## Usage" + body (paragraphs 4..5). Guide is on the
+    // path (no synopsis); Setup is wholly before (synopsis); Usage
+    // holds the chunk (none).
+    let chunk = "[4] ## Usage\n\n[5] see Setup.";
+    let block = render_block(text, &spans, &units, 4, 5, chunk, 4096, Some(&overview)).unwrap();
+    assert_eq!(
+        block.text,
+        "Position: Guide › Usage\nReferences: Setup — setup body.\nCast: Tool — the product\nBefore: Setup — How to set up.\nPreceding text: # Guide intro. ## Setup setup body."
+    );
+    assert_eq!(block.cast, vec!["Tool"]);
+    assert_eq!(block.synopsis, vec![1]);
+    assert_eq!(block.bytes, block.text.len());
+    // Below the cap the cast and synopsis lines go before the
+    // overlap does — and the trace fields say what was carried.
+    let tight = render_block(
+        text,
+        &spans,
+        &units,
+        4,
+        5,
+        chunk,
+        "Position: Guide › Usage\nReferences: Setup — setup body.\nCast: Tool — the product".len()
+            + 1,
+        Some(&overview),
+    )
+    .unwrap();
+    assert!(
+        tight.text.ends_with("Cast: Tool — the product"),
+        "{}",
+        tight.text
+    );
+    assert!(tight.synopsis.is_empty());
+    assert!(tight.overlap_paragraphs.is_none());
+    // No overview at all: the structure-only block, byte for byte.
+    let plain = render_block(text, &spans, &units, 4, 5, chunk, 4096, None).unwrap();
+    assert!(!plain.text.contains("Cast:") && !plain.text.contains("Before:"));
+    assert!(plain.cast.is_empty() && plain.synopsis.is_empty());
+}
+
+#[test]
+fn occurrence_text_leaves_out_the_cast_and_synopsis_lines() {
+    let block = "Position: A\nCast: Ghost — never in the document\nBefore: A — a summary\nPreceding text: before";
+    let user = user_message("doc.md", 1, 2, "[3] chunk", Some(block));
+    assert_eq!(
+        user_message_occurrence_text(&user),
+        "Position: A\nPreceding text: before\n\n[3] chunk"
+    );
+    assert_eq!(user_message_document(&user), "[3] chunk");
+    // Without those lines the text is returned as-is (borrowed).
+    let user = user_message("doc.md", 1, 2, "[3] chunk", Some("Position: A"));
+    assert!(matches!(
+        user_message_occurrence_text(&user),
+        Cow::Borrowed(_)
+    ));
+}
+
+#[test]
+fn overview_user_message_lists_the_units_opening_in_the_chunk() {
+    let text = "# A\n\nx\n\n## B\n\ny";
+    let units = detect_units(text, &spans_of(text));
+    let here: Vec<&Unit> = units.iter().collect();
+    let message = overview_user_message("doc.md", 0, 2, "[0] # A\n\n[1] x", &here);
+    assert_eq!(
+        message,
+        "Document 'doc.md', part 1 of 2.\nUnits opening in this part:\n- unit 0: A\n- unit 1: B\n\n[0] # A\n\n[1] x"
+    );
+    let none = overview_user_message("doc.md", 0, 1, "[0] plain", &[]);
+    assert!(none.starts_with(
+        "Document 'doc.md', the whole.\nNo structural unit opens in this part; answer cast only.\n\n[0] plain"
+    ));
+    assert!(overview_system_prompt().contains("\"cast\""));
+}
+
+#[test]
+fn units_opening_in_a_chunk_exclude_the_title_and_respect_both_bounds() {
+    let text = "Handbook\n\n# A\n\nx\n\n## B\n\ny\n\n# C\n\nz";
+    let units = detect_units(text, &spans_of(text));
+    let ids = |first: u32, last: u32| -> Vec<usize> {
+        units_opening_in(&units, first, last)
+            .into_iter()
+            .map(|unit| unit.unit)
+            .collect()
+    };
+    // Title at 0 (level 0), A at 1, B at 3, C at 5.
+    assert_eq!(ids(0, 2), vec![1], "the title is never offered");
+    assert_eq!(ids(1, 3), vec![1, 2], "both bounds inclusive");
+    assert_eq!(ids(2, 2), Vec::<usize>::new());
+    assert_eq!(ids(4, 6), vec![3]);
+    assert_eq!(ids(3, 5), vec![2, 3]);
+}
+
+#[test]
+fn render_block_accounts_for_every_byte_of_the_cast_and_synopsis_lines() {
+    let text = "## Alpha\n\nalpha body.\n\n## Beta\n\nbeta body.\n\n## Last\n\nlast";
+    let spans = spans_of(text);
+    let units = detect_units(text, &spans);
+    let overview = Overview::merge(&[Some(OverviewAnswer {
+        units: vec![
+            UnitSummary {
+                unit: 0,
+                summary: "one.".to_string(),
+            },
+            UnitSummary {
+                unit: 1,
+                summary: "two.".to_string(),
+            },
+        ],
+        cast: vec![
+            CastEntry {
+                name: "P".to_string(),
+                gloss: "pp".to_string(),
+            },
+            CastEntry {
+                name: "Q".to_string(),
+                gloss: "qq".to_string(),
+            },
+        ],
+    })]);
+    let chunk = "[4] ## Last\n\n[5] last";
+    let position = "Position: Last";
+    let cast = "Cast: P — pp | Q — qq";
+    let before = "Before: Alpha — one. | Beta — two.";
+    // The two-entry cast line fits at exactly its length (+ the
+    // newline after the position line) and not one byte under.
+    let two = format!("{position}\n{cast}");
+    let block = render_block(
+        text,
+        &spans,
+        &units,
+        4,
+        5,
+        chunk,
+        two.len() + 1,
+        Some(&overview),
+    )
+    .unwrap();
+    assert_eq!(block.text, two);
+    assert_eq!(block.cast, vec!["P", "Q"]);
+    let block = render_block(
+        text,
+        &spans,
+        &units,
+        4,
+        5,
+        chunk,
+        two.len(),
+        Some(&overview),
+    )
+    .unwrap();
+    assert_eq!(block.text, format!("{position}\nCast: P — pp"));
+    assert_eq!(block.cast, vec!["P"]);
+    // Likewise the two-entry synopsis line after the cast line.
+    let three = format!("{position}\n{cast}\n{before}");
+    let block = render_block(
+        text,
+        &spans,
+        &units,
+        4,
+        5,
+        chunk,
+        three.len() + 1,
+        Some(&overview),
+    )
+    .unwrap();
+    assert_eq!(block.text, three);
+    assert_eq!(block.synopsis, vec![0, 1]);
+    let block = render_block(
+        text,
+        &spans,
+        &units,
+        4,
+        5,
+        chunk,
+        three.len(),
+        Some(&overview),
+    )
+    .unwrap();
+    assert_eq!(
+        block.text,
+        format!("{position}\n{cast}\nBefore: Alpha — one.")
+    );
+    assert_eq!(block.synopsis, vec![0]);
+    // And the overlap budget after both is charged exactly: 30 bytes
+    // of room hold "beta body." + "## Beta" + "alpha body." (30).
+    let full = format!("{three}\nPreceding text: alpha body. ## Beta beta body.");
+    let block = render_block(
+        text,
+        &spans,
+        &units,
+        4,
+        5,
+        chunk,
+        three.len() + 1 + "Preceding text: ".len() + 1 + 30,
+        Some(&overview),
+    )
+    .unwrap();
+    assert_eq!(block.text, full);
+    assert_eq!(block.bytes, full.len());
+    let block = render_block(
+        text,
+        &spans,
+        &units,
+        4,
+        5,
+        chunk,
+        three.len() + 1 + "Preceding text: ".len() + 1 + 29,
+        Some(&overview),
+    )
+    .unwrap();
+    assert!(
+        block.text.ends_with("Preceding text: ## Beta beta body."),
+        "{}",
+        block.text
+    );
 }
 
 #[test]
@@ -6515,7 +6880,7 @@ fn render_block_carries_position_references_and_overlap_within_the_cap() {
     let units = detect_units(text, &spans);
     // Chunk = paragraphs 2..=3 ("## Setup" + its body).
     let chunk = "[2] ## Setup\n\n[3] see Usage for details.";
-    let block = render_block(text, &spans, &units, 2, 3, chunk, 4096).unwrap();
+    let block = render_block(text, &spans, &units, 2, 3, chunk, 4096, None).unwrap();
     assert_eq!(
         block.text,
         "Position: Guide › Setup\nReferences: Usage — run it.\nPreceding text: # Guide intro paragraph one."
@@ -6532,9 +6897,9 @@ fn render_block_carries_position_references_and_overlap_within_the_cap() {
     assert_eq!(block.sha256, sha256_hex(block.text.as_bytes()));
     // The first chunk of a structureless document gets nothing.
     let plain = "a\n\nb";
-    assert!(render_block(plain, &spans_of(plain), &[], 0, 0, "[0] a", 4096).is_none());
+    assert!(render_block(plain, &spans_of(plain), &[], 0, 0, "[0] a", 4096, None).is_none());
     // A later chunk of it still gets overlap.
-    let later = render_block(plain, &spans_of(plain), &[], 1, 1, "[1] b", 4096).unwrap();
+    let later = render_block(plain, &spans_of(plain), &[], 1, 1, "[1] b", 4096, None).unwrap();
     assert_eq!(later.text, "Preceding text: a");
     assert_eq!(later.overlap_paragraphs, Some((0, 0)));
     assert!(later.position.is_empty());
@@ -6547,7 +6912,7 @@ fn render_block_respects_the_cap_by_dropping_references_and_keeping_the_overlap_
     let spans = spans_of(&text);
     let units = detect_units(&text, &spans);
     let chunk = "[2] ## Beta\n\n[3] see Alpha now";
-    let block = render_block(&text, &spans, &units, 2, 3, chunk, 512).unwrap();
+    let block = render_block(&text, &spans, &units, 2, 3, chunk, 512, None).unwrap();
     assert!(block.bytes <= 512, "the cap is exact: {}", block.bytes);
     assert_eq!(block.bytes, block.text.len());
     assert!(block.text.starts_with("Position: Beta\n"));
@@ -6577,13 +6942,13 @@ fn render_block_respects_the_cap_by_dropping_references_and_keeping_the_overlap_
     // recorded as an empty `Preceding text: …`: after the position
     // line, its prefix, and the newlines, 48 bytes leave under the
     // 24-byte minimum a tail needs to say anything.
-    let tight = render_block(&text, &spans, &units, 2, 3, chunk, 48).unwrap();
+    let tight = render_block(&text, &spans, &units, 2, 3, chunk, 48, None).unwrap();
     assert_eq!(tight.text, "Position: Beta");
     assert!(tight.overlap_paragraphs.is_none());
     assert!(tight.references.is_empty());
     assert!(tight.bytes <= 48);
     // Just enough room for a short tail: the ellipsis is charged too.
-    let snug = render_block(&text, &spans, &units, 2, 3, chunk, 80).unwrap();
+    let snug = render_block(&text, &spans, &units, 2, 3, chunk, 80, None).unwrap();
     // 14 (position) + 1 + 16 (prefix) + 48 (the budget the tail
     // fills exactly, ellipsis included) = 79: the accounting is exact.
     assert_eq!(snug.bytes, 79);

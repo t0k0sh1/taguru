@@ -279,6 +279,7 @@ pub(super) fn render_trace(
     steering: &TraceSteering,
     units: &[Unit],
     blocks: &[Option<ContextBlock>],
+    overview: &[Option<OverviewAnswer>],
 ) -> String {
     let mut lines = Vec::new();
     let mut push = |record: &dyn erased_serialize::Serialize| {
@@ -319,7 +320,15 @@ pub(super) fn render_trace(
             paragraph_first: descriptor.paragraph_first,
             paragraph_last: descriptor.paragraph_last,
         });
-        // ADR 0033 §3.6.4: what this chunk was told, right after it.
+        // ADR 0033 §3.5: what the overview pass answered for this
+        // chunk, then §3.6.4: what the chunk was told.
+        if let Some(answer) = overview.get(chunk_index).and_then(Option::as_ref) {
+            push(&TraceOverview {
+                kind: "overview",
+                chunk_index,
+                answer,
+            });
+        }
         if let Some(block) = blocks.get(chunk_index).and_then(Option::as_ref) {
             push(&TraceChunkContext {
                 kind: "chunk_context",
