@@ -39,6 +39,9 @@ pub(super) struct Args {
     /// [`CHUNK_BYTES`] — resolved in [`run`]. ADR 0020 (#762): the
     /// caller-selectable unit policy ADR 0001 §7 D anticipated.
     pub(super) chunk_bytes: Option<usize>,
+    /// `None` defers to TAGURU_EXTRACT_CHUNK_CONTEXT, and then to
+    /// [`ChunkContextMode::Off`] — resolved in [`run`]. ADR 0033 (#782).
+    pub(super) chunk_context: Option<ChunkContextMode>,
     /// `None` defers to TAGURU_EXTRACT_LOSSY, and then to `false`
     /// (issue #199's default: an invalid item earns a corrective turn,
     /// never a silent drop) — resolved in [`run`], same pattern as
@@ -109,6 +112,7 @@ impl Args {
         let mut structured_output: Option<StructuredOutputMode> = None;
         let mut max_output_tokens: Option<usize> = None;
         let mut chunk_bytes: Option<usize> = None;
+        let mut chunk_context: Option<ChunkContextMode> = None;
         let mut lossy: Option<bool> = None;
         let mut candidates: Option<bool> = None;
         let mut vocabulary: Option<PathBuf> = None;
@@ -271,6 +275,29 @@ impl Args {
                         return Err(crate::config::subcommand_usage_error(
                             "extract",
                             "--chunk-bytes needs an integer of at least 512",
+                        ));
+                    }
+                },
+                "--chunk-context" => match rest.next() {
+                    Some(_) if chunk_context.is_some() => {
+                        return Err(crate::config::subcommand_usage_error(
+                            "extract",
+                            "--chunk-context given twice",
+                        ));
+                    }
+                    Some(value) => match ChunkContextMode::parse(value) {
+                        Some(mode) => chunk_context = Some(mode),
+                        None => {
+                            return Err(crate::config::subcommand_usage_error(
+                                "extract",
+                                &format!("--chunk-context takes one of: {CHUNK_CONTEXT_MODES}"),
+                            ));
+                        }
+                    },
+                    None => {
+                        return Err(crate::config::subcommand_usage_error(
+                            "extract",
+                            "--chunk-context needs a mode",
                         ));
                     }
                 },
@@ -591,6 +618,7 @@ impl Args {
             structured_output,
             max_output_tokens,
             chunk_bytes,
+            chunk_context,
             lossy,
             candidates,
             vocabulary,
@@ -782,9 +810,11 @@ impl ReplayMode {
 /// closed vocabulary (#822). An unknown name is a hard usage error,
 /// listing this array so the accepted spelling is always in the
 /// message itself.
-pub(super) const STEP_NAMES: [&str; 11] = [
+pub(super) const STEP_NAMES: [&str; 13] = [
     "read",
+    "structure",
     "plan",
+    "annotate",
     "steer",
     "prompt",
     "call",
@@ -807,15 +837,16 @@ pub(super) const STEP_NAMES: [&str; 11] = [
 ///   sends must be *its own*, never a pinned one (ADR 0031 §3.6) —
 ///   `call`'s record is still tried, matching on that live-built
 ///   conversation exactly as `--replay auto` always has.
-/// - `read`/`plan`/`steer`: nothing before them has a record at all —
-///   a plain, unreplayed run.
+/// - `read`/`structure`/`plan`/`annotate`/`steer`: nothing before them
+///   has a record at all — a plain, unreplayed run (ADR 0033 added
+///   `structure` and `annotate`; neither calls the model).
 ///
 /// `step` must be one of [`STEP_NAMES`] — callers validate that at
 /// parse time; anything else panics rather than silently picking a
 /// fold.
 pub(super) fn resume_from_fold(step: &str) -> (ReplayMode, bool) {
     match step {
-        "read" | "plan" | "steer" => (ReplayMode::Off, false),
+        "read" | "structure" | "plan" | "annotate" | "steer" => (ReplayMode::Off, false),
         "prompt" => (ReplayMode::Auto, true),
         "call" | "parse" | "validate" | "reconcile" | "merge" | "render" | "verify" => {
             (ReplayMode::Auto, false)

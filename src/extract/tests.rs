@@ -19,6 +19,7 @@ fn base_inputs<'a>(sha256: &'a str, model: &'a str) -> ComputationInputs<'a> {
         max_output_tokens: 0,
         escalation_factor: "",
         chunk_bytes: "",
+        chunk_context: "",
         lossy: false,
         schema_digest: "",
         candidates: "",
@@ -1472,6 +1473,7 @@ fn with_resume_hint_names_the_checkpointed_units_only_when_there_are_any() {
         max_output_tokens: 0,
         escalation_factor: String::new(),
         chunk_bytes: String::new(),
+        chunk_context: String::new(),
         lossy: false,
         schema_digest: String::new(),
         candidates: String::new(),
@@ -4310,6 +4312,7 @@ fn drive_ladder_on(
             max_output_tokens: ladder.max_output_tokens.unwrap_or(0),
             escalation_factor: String::new(),
             chunk_bytes: String::new(),
+            chunk_context: String::new(),
             lossy: true,
             schema_digest: String::new(),
             candidates: String::new(),
@@ -4322,6 +4325,7 @@ fn drive_ladder_on(
         source: "doc.md",
         chunk_index: 0,
         chunk_total: 1,
+        context_block: None,
         ladder,
         policy: &policy,
         fact_budget: 0,
@@ -5096,7 +5100,7 @@ fn render_trace_joins_items_to_pieces_across_a_split_and_a_reuse() {
         (piece_b, 0, "0000000000000001"),
         (piece_c, 1, "ffffffffffffffff"),
     ]) {
-        output.user = user_message("doc.md", chunk_index, 2, piece);
+        output.user = user_message("doc.md", chunk_index, 2, piece, None);
         output.chunk_index = chunk_index;
         output.piece_id = sha256_hex(piece.as_bytes());
         output.attempt = Some(AttemptRef {
@@ -5144,6 +5148,8 @@ fn render_trace_joins_items_to_pieces_across_a_split_and_a_reuse() {
         &extraction,
         &[],
         &empty_steering(),
+        &[],
+        &[],
     );
     let records: Vec<serde_json::Value> = text
         .lines()
@@ -5448,7 +5454,7 @@ fn render_trace_shows_every_loss_in_the_original_text() {
         }),
     ];
     for (output, (piece, chunk_index)) in outputs.iter_mut().zip([(piece_a, 0), (piece_b, 1)]) {
-        output.user = user_message("doc.md", chunk_index, 2, piece);
+        output.user = user_message("doc.md", chunk_index, 2, piece, None);
         output.chunk_index = chunk_index;
         output.piece_id = sha256_hex(piece.as_bytes());
         output.attempt = Some(AttemptRef {
@@ -5500,6 +5506,8 @@ fn render_trace_shows_every_loss_in_the_original_text() {
         &extraction,
         &[],
         &empty_steering(),
+        &[],
+        &[],
     );
     let losses: Vec<serde_json::Value> = text
         .lines()
@@ -5695,7 +5703,7 @@ fn lossy_parse_drops_are_recorded_as_unparsed_losses() {
     // The trace renders them as `dropped` losses after the piece's
     // removals, against the piece text.
     let mut output = chunk_output(lossy.output);
-    output.user = user_message("doc.md", 0, 1, "[0] a b");
+    output.user = user_message("doc.md", 0, 1, "[0] a b", None);
     output.piece_id = "p".repeat(64);
     output.unparsed = lossy.unparsed;
     output.removed = vec![Removal::new("aliases[3]", "r", &serde_json::json!({}))];
@@ -5712,6 +5720,8 @@ fn lossy_parse_drops_are_recorded_as_unparsed_losses() {
         &extraction,
         &[],
         &empty_steering(),
+        &[],
+        &[],
     );
     let losses: Vec<serde_json::Value> = text
         .lines()
@@ -5866,6 +5876,8 @@ fn render_trace_reports_paragraph_coverage_and_gap_sentences() {
         &extraction,
         &gaps,
         &empty_steering(),
+        &[],
+        &[],
     );
     let records: Vec<serde_json::Value> = rendered
         .lines()
@@ -5910,6 +5922,794 @@ fn render_trace_reports_paragraph_coverage_and_gap_sentences() {
             .all(|kind| *kind != "uncovered")
     );
     assert_eq!(kinds.last(), Some(&"uncovered"));
+}
+
+// ================ #782 / ADR 0033: chunk context (structure) ================
+
+fn spans_of(text: &str) -> Vec<crate::paragraph::ParagraphSpan> {
+    crate::paragraph::split(text)
+}
+
+fn unit_view(units: &[Unit]) -> Vec<(u8, &str, u32, u32)> {
+    units
+        .iter()
+        .map(|unit| {
+            (
+                unit.level,
+                unit.heading.as_str(),
+                unit.paragraph_first,
+                unit.paragraph_last,
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn chunk_context_mode_parses_and_records_off_as_empty() {
+    assert_eq!(ChunkContextMode::parse("off"), Some(ChunkContextMode::Off));
+    assert_eq!(
+        ChunkContextMode::parse(" Structure "),
+        Some(ChunkContextMode::Structure)
+    );
+    assert_eq!(ChunkContextMode::parse("overview"), None);
+    assert_eq!(ChunkContextMode::parse(""), None);
+    assert_eq!(ChunkContextMode::Off.manifest_value(), "");
+    assert_eq!(ChunkContextMode::Structure.manifest_value(), "structure");
+    assert!(!ChunkContextMode::Off.is_on());
+    assert!(ChunkContextMode::Structure.is_on());
+    assert_eq!(ChunkContextMode::default(), ChunkContextMode::Off);
+}
+
+#[test]
+fn structure_detects_markdown_headings_by_level() {
+    let text = "# Title\n\nintro text\n\n## Part A\n\nbody a\n\n### A.1\n\nbody a1\n\n## Part B\n\nbody b\n\n1. a list item\n2. another";
+    let units = detect_units(text, &spans_of(text));
+    assert_eq!(
+        unit_view(&units),
+        vec![
+            (1, "Title", 0, 1),
+            (2, "Part A", 2, 3),
+            (3, "A.1", 4, 5),
+            (2, "Part B", 6, 8),
+        ]
+    );
+}
+
+#[test]
+fn structure_detects_statute_chapters_and_captioned_articles() {
+    // e-Gov shape: a chapter line, then `（見出し）` + `第N条` lines
+    // inside ONE paragraph, then the body — and 第三条の二 branches.
+    let text = "電子署名法\n（目的）\n第一条\nこの法律は…\n\n第二章　電磁的記録の真正な成立の推定\n第一節　総則\n第三条\n電磁的記録であって…\n\n第三条の二　前条の規定は…\n\n（定義）\n第二条　この法律において…";
+    let units = detect_units(text, &spans_of(text));
+    assert_eq!(
+        unit_view(&units),
+        vec![
+            (0, "電子署名法", 0, 0),
+            (3, "第一条（目的）", 0, 0),
+            (1, "第二章　電磁的記録の真正な成立の推定", 1, 1),
+            (2, "第一節　総則", 1, 1),
+            (3, "第三条", 1, 1),
+            (3, "第三条の二", 2, 3),
+            (3, "第二条（定義）", 3, 3),
+        ]
+    );
+}
+
+#[test]
+fn structure_detects_minutes_sections_and_speakers() {
+    let text = "衆議院 総務委員会\n\n◆会議録情報\n令和六年五月二十八日\n\n◆古屋範子（公明党）\n○古屋委員長　これより会議を開きます。\n\n○吉川（元）委員　立憲民主党の吉川元です。\n続きの発言。";
+    let units = detect_units(text, &spans_of(text));
+    assert_eq!(
+        unit_view(&units),
+        vec![
+            (0, "衆議院 総務委員会", 0, 0),
+            (1, "◆会議録情報", 1, 1),
+            (1, "◆古屋範子（公明党）", 2, 2),
+            (2, "○古屋委員長", 2, 2),
+            (2, "○吉川（元）委員", 3, 3),
+        ]
+    );
+}
+
+#[test]
+fn structure_detects_dotted_and_section_sign_numbering_but_not_list_items() {
+    let text = "§ 1 Introduction\n\n1. install it\n\n1.2 Setup\n\nmore\n\n2.1.3 Deep\n\n3. This is a sentence.";
+    let units = detect_units(text, &spans_of(text));
+    assert_eq!(
+        unit_view(&units),
+        vec![
+            (1, "§ 1 Introduction", 0, 1),
+            (2, "1.2 Setup", 2, 3),
+            (3, "2.1.3 Deep", 4, 5)
+        ]
+    );
+    // Prose with no heading: only the title unit, which is no boundary.
+    let prose = detect_units(
+        "plain prose\n\nmore prose",
+        &spans_of("plain prose\n\nmore prose"),
+    );
+    assert_eq!(unit_view(&prose), vec![(0, "plain prose", 0, 1)]);
+    assert!(preferred_breaks(&prose).is_empty());
+}
+
+#[test]
+fn structure_reads_a_title_line_skips_html_comments_and_files_supplementary_provisions() {
+    // A bilingual Markdown source: the English headings sit in HTML
+    // comments and are not headings; the title is `#`-less prose.
+    let text = "<!--\n# Understanding Ownership\n-->\n\n# 所有権を理解する\n\n<!-- one-line comment -->\nbody\n\n<!--\n## Ownership Rules\n-->\n\n## 所有権規則";
+    let units = detect_units(text, &spans_of(text));
+    assert_eq!(
+        unit_view(&units),
+        vec![(1, "所有権を理解する", 1, 3), (2, "所有権規則", 4, 4)]
+    );
+    // A statute: the act's name is the title (level 0), its
+    // supplementary provisions a chapter-level unit whose articles
+    // repeat the act's numbers.
+    let text = "平成十一年法律第百二十八号不正アクセス行為の禁止等に関する法律\n（目的）\n第一条\nこの法律は…\n\n附　則\n（施行期日）\n第一条\nこの法律は、公布の日から…";
+    let units = detect_units(text, &spans_of(text));
+    assert_eq!(
+        unit_view(&units),
+        vec![
+            (
+                0,
+                "平成十一年法律第百二十八号不正アクセス行為の禁止等に関する法律",
+                0,
+                0
+            ),
+            (3, "第一条（目的）", 0, 0),
+            (1, "附 則", 1, 1),
+            (3, "第一条（施行期日）", 1, 1),
+        ]
+    );
+    let path: Vec<&str> = position(&units, 1)
+        .into_iter()
+        .map(|unit| unit.heading.as_str())
+        .collect();
+    assert_eq!(
+        path,
+        vec![
+            "平成十一年法律第百二十八号不正アクセス行為の禁止等に関する法律",
+            "附 則",
+            "第一条（施行期日）"
+        ]
+    );
+    // The title is not a preferred boundary; the chapter level is.
+    let breaks: Vec<u32> = preferred_breaks(&units).into_iter().collect();
+    assert_eq!(breaks, vec![1]);
+    // Not titles: markup, captions, one-letter lines.
+    for text in [
+        "<!--\nx\n-->",
+        "（目的）\n第一条",
+        "a\n\nb",
+        "| a | b |\n\nc",
+    ] {
+        assert!(
+            detect_units(text, &spans_of(text))
+                .iter()
+                .all(|unit| unit.level > 0),
+            "{text:?}"
+        );
+    }
+}
+
+#[test]
+fn references_resolve_a_repeated_article_number_to_the_nearest_unit_before_the_chunk() {
+    let text = "法律名\n第一条　目的。\n\n第二条　第一条の目的のため。\n\n附　則\n第一条　施行期日。\n\n第二条　前条及び第一条の規定は…\n\n○田中委員　第一条について。";
+    let spans = spans_of(text);
+    let units = detect_units(text, &spans);
+    let headings = |refs: Vec<&Unit>| -> Vec<String> {
+        refs.into_iter().map(|unit| unit.heading.clone()).collect()
+    };
+    // Chunk = paragraph 1 (the act's 第二条): 第一条 is the act's own.
+    let refs = references(
+        &units,
+        "[1] 第二条　第一条の目的のため。",
+        1,
+        1,
+        &position(&units, 1),
+        4,
+    );
+    assert_eq!(headings(refs), vec!["第一条"]);
+    assert_eq!(
+        references(
+            &units,
+            "[1] 第二条　第一条の目的のため。",
+            1,
+            1,
+            &position(&units, 1),
+            4
+        )[0]
+        .paragraph_first,
+        0
+    );
+    // Chunk = paragraph 3 (the supplementary 第二条): 第一条 and 前条
+    // both mean the supplementary 第一条 (paragraph 2), nearest before.
+    let refs = references(
+        &units,
+        "[3] 第二条　前条及び第一条の規定は…",
+        3,
+        3,
+        &position(&units, 3),
+        4,
+    );
+    assert_eq!(refs.len(), 1, "{:?}", headings(refs.clone()));
+    assert_eq!(refs[0].paragraph_first, 2);
+    // A speaker line is never a reference, even when quoted.
+    let refs = references(&units, "[1] ○田中委員 said", 1, 1, &position(&units, 1), 4);
+    assert!(
+        headings(refs)
+            .iter()
+            .all(|heading| !heading.starts_with('○'))
+    );
+    // 前条 counts back over articles only: a chapter heading between
+    // the chunk's article and the previous one is skipped, both when
+    // finding the current article and the previous.
+    let text = "第一条　甲。\n\n第二章　乙\n第一節　丙\n\n第二条　前条の規定。";
+    let units = detect_units(text, &spans_of(text));
+    let refs = references(
+        &units,
+        "[2] 第二条　前条の規定。",
+        2,
+        2,
+        &position(&units, 2),
+        4,
+    );
+    assert_eq!(headings(refs), vec!["第一条"]);
+    // A chunk sitting in a chapter with no article of its own has no
+    // 前条 to resolve.
+    let refs = references(&units, "[1] 第二章 前条", 1, 1, &position(&units, 1), 4);
+    assert!(headings(refs).is_empty());
+}
+
+#[test]
+fn heading_of_pins_its_length_and_shape_limits() {
+    // A line over 200 bytes is prose, at exactly 200 still a heading.
+    let at_cap = format!("# {}", "a".repeat(198));
+    assert_eq!(at_cap.len(), 200);
+    assert_eq!(heading_of(&at_cap), Some((1, "a".repeat(198))));
+    assert_eq!(heading_of(&format!("{at_cap}a")), None);
+    // One to six `#` followed by a space; a hashtag and a seven-`#`
+    // line are neither.
+    assert_eq!(heading_of("#tag"), None);
+    assert_eq!(heading_of("####### seven"), None);
+    assert_eq!(heading_of("###### six"), Some((6, "six".to_string())));
+    // 第 needs digits and one of 章/節/条 after them.
+    assert_eq!(heading_of("第章"), None);
+    assert_eq!(heading_of("第三"), None);
+    assert_eq!(heading_of("第三項"), None);
+    assert_eq!(heading_of("第三項の規定"), None);
+    // § needs a number.
+    assert_eq!(heading_of("§ Intro"), None);
+    assert_eq!(heading_of("第三条"), Some((3, "第三条".to_string())));
+    assert_eq!(
+        heading_of("第一条　この法律は"),
+        Some((3, "第一条".to_string()))
+    );
+    assert_eq!(
+        heading_of("第三条の二　前条の規定は"),
+        Some((3, "第三条の二".to_string()))
+    );
+    assert_eq!(
+        heading_of("第二節　総則"),
+        Some((2, "第二節　総則".to_string()))
+    );
+    // Prose that merely opens with a reference is not a heading.
+    assert_eq!(heading_of("第二条の用語により。"), None);
+    assert_eq!(heading_of("第二章の規定により"), None);
+    assert_eq!(heading_of("第三条の二の規定"), None);
+    // A speaker label ends at any whitespace, ASCII or ideographic.
+    assert_eq!(heading_of("○Tanaka said"), Some((2, "○Tanaka".to_string())));
+    assert_eq!(
+        heading_of("○田中委員　発言"),
+        Some((2, "○田中委員".to_string()))
+    );
+    // A numbered heading over 80 bytes is a sentence; at 80 a heading.
+    let numbered = format!("1.2 {}", "x".repeat(76));
+    assert_eq!(numbered.len(), 80);
+    assert_eq!(heading_of(&numbered), Some((2, numbered.clone())));
+    assert_eq!(heading_of(&format!("{numbered}x")), None);
+    assert_eq!(heading_of("1.2 Setup"), Some((2, "1.2 Setup".to_string())));
+    assert_eq!(heading_of("1. a list item"), None);
+}
+
+#[test]
+fn structure_attaches_only_a_real_caption_to_an_article() {
+    // An empty `（）` and a caption over 40 chars are not captions.
+    let text = "（）\n第一条\n本文";
+    assert_eq!(
+        unit_view(&detect_units(text, &spans_of(text))),
+        vec![(3, "第一条", 0, 0)]
+    );
+    let long = format!("（{}）\n第一条\n本文", "あ".repeat(41));
+    assert_eq!(
+        unit_view(&detect_units(&long, &spans_of(&long))),
+        vec![(3, "第一条", 0, 0)]
+    );
+    let exact = format!("（{}）\n第一条\n本文", "あ".repeat(40));
+    let units = detect_units(&exact, &spans_of(&exact));
+    assert_eq!(units[0].heading, format!("第一条（{}）", "あ".repeat(40)));
+}
+
+#[test]
+fn references_skip_the_title_the_path_and_minutes_labels_even_when_quoted() {
+    let text = "Handbook\n\n# Guide\n\n## Setup\n\nsee Guide, Handbook, Usage\n\n## Usage\n\nrun\n\n◆田中太郎（党）\n○田中委員　Usage について";
+    let spans = spans_of(text);
+    let units = detect_units(text, &spans);
+    let chunk = "[2] ## Setup\n\n[3] see Guide, Handbook, Usage";
+    let path = position(&units, 2);
+    assert_eq!(
+        path.iter()
+            .map(|unit| unit.heading.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Handbook", "Guide", "Setup"]
+    );
+    let refs: Vec<&str> = references(&units, chunk, 2, 3, &path, 4)
+        .into_iter()
+        .map(|unit| unit.heading.as_str())
+        .collect();
+    assert_eq!(refs, vec!["Usage"], "not the title, not the path");
+    let chunk = "[6] ◆田中太郎（党） ○田中委員 Usage";
+    let refs: Vec<&str> = references(&units, chunk, 6, 6, &position(&units, 6), 4)
+        .into_iter()
+        .map(|unit| unit.heading.as_str())
+        .collect();
+    assert_eq!(refs, vec!["Usage"], "minutes labels are never references");
+    // … not even quoted from a chunk that does not hold them.
+    let chunk = "[3] see ◆田中太郎（党） and ○田中委員 and Usage";
+    let refs: Vec<&str> = references(&units, chunk, 2, 3, &path, 4)
+        .into_iter()
+        .map(|unit| unit.heading.as_str())
+        .collect();
+    assert_eq!(refs, vec!["Usage"]);
+}
+
+#[test]
+fn chunk_context_flag_parses_once_and_rejects_a_duplicate_or_unknown_mode() {
+    fn parse(words: &[&str]) -> Result<Args, i32> {
+        Args::parse(&words.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+    let parsed = parse(&[
+        "--context",
+        "c",
+        "--out",
+        "o",
+        "--chunk-context",
+        "structure",
+        "d.md",
+    ])
+    .unwrap();
+    assert_eq!(parsed.chunk_context, Some(ChunkContextMode::Structure));
+    assert_eq!(
+        parse(&["--context", "c", "--out", "o", "d.md"])
+            .unwrap()
+            .chunk_context,
+        None
+    );
+    let twice = parse(&[
+        "--context",
+        "c",
+        "--out",
+        "o",
+        "--chunk-context",
+        "off",
+        "--chunk-context",
+        "structure",
+        "d.md",
+    ]);
+    assert!(matches!(twice, Err(2)), "given twice is a usage error");
+    assert!(matches!(
+        parse(&[
+            "--context",
+            "c",
+            "--out",
+            "o",
+            "--chunk-context",
+            "overview",
+            "d.md"
+        ]),
+        Err(2)
+    ));
+    assert!(matches!(
+        parse(&["--context", "c", "--out", "o", "--chunk-context"]),
+        Err(2)
+    ));
+}
+
+#[test]
+fn reference_openings_start_after_the_heading_line_inside_a_multi_line_paragraph() {
+    // e-Gov shape: caption, article number, and body on their own
+    // lines of ONE paragraph — the opening is the body, and a later
+    // article quoting the number gets it.
+    let text = "（定義）\n第二条\n用語を定める。\n続き。\n\n第三条\n第二条の用語により。";
+    let spans = spans_of(text);
+    let units = detect_units(text, &spans);
+    let block = render_block(
+        text,
+        &spans,
+        &units,
+        1,
+        1,
+        "[1] 第三条\n第二条の用語により。",
+        4096,
+    )
+    .unwrap();
+    assert_eq!(
+        block.text,
+        "Position: 第三条\nReferences: 第二条（定義） — 用語を定める。 続き。\nPreceding text: （定義） 第二条 用語を定める。 続き。"
+    );
+    // An unnumbered heading is quoted as a reference only from 4 chars.
+    let text = "## ABC\n\nx\n\n## ABCD\n\ny\n\n## Last\n\nsee ABC and ABCD";
+    let spans = spans_of(text);
+    let units = detect_units(text, &spans);
+    let refs: Vec<&str> = references(
+        &units,
+        "[5] see ABC and ABCD",
+        4,
+        5,
+        &position(&units, 4),
+        4,
+    )
+    .into_iter()
+    .map(|unit| unit.heading.as_str())
+    .collect();
+    assert_eq!(refs, vec!["ABCD"]);
+}
+
+#[test]
+fn block_text_helpers_strip_comments_and_cut_at_char_boundaries() {
+    assert_eq!(strip_html_comments("a<!--x-->b<!-- y\nz -->c"), "abc");
+    assert_eq!(strip_html_comments("a<!--unterminated"), "a");
+    assert_eq!(strip_html_comments("plain"), "plain");
+    assert_eq!(truncate_at_char("ああ", 4), "あ");
+    assert_eq!(truncate_at_char("ああ", 6), "ああ");
+    assert_eq!(truncate_at_char("ああ", 7), "ああ");
+    assert_eq!(truncate_at_char("abc", 0), "");
+}
+
+#[test]
+fn render_block_accounts_for_every_byte_of_a_two_reference_line() {
+    let text = "## Alpha\n\nalpha body.\n\n## Beta\n\nbeta body.\n\n## Last\n\nsee Alpha and Beta";
+    let spans = spans_of(text);
+    let units = detect_units(text, &spans);
+    let chunk = "[4] ## Last\n\n[5] see Alpha and Beta";
+    // Unbounded: both references, every preceding paragraph.
+    let full = render_block(text, &spans, &units, 4, 5, chunk, 4096).unwrap();
+    assert_eq!(
+        full.text,
+        "Position: Last\nReferences: Alpha — alpha body. | Beta — beta body.\nPreceding text: ## Alpha alpha body. ## Beta beta body."
+    );
+    assert_eq!(full.references, vec![0, 1]);
+    assert_eq!(full.overlap_paragraphs, Some((0, 3)));
+    // The two-entry line fits at exactly (its length + 1 for the
+    // newline after the position line) and not one byte under.
+    let two = "Position: Last\nReferences: Alpha — alpha body. | Beta — beta body.";
+    let exact = render_block(text, &spans, &units, 4, 5, chunk, two.len() + 1).unwrap();
+    assert_eq!(exact.text, two);
+    assert_eq!(exact.bytes, two.len());
+    assert!(exact.overlap_paragraphs.is_none());
+    let under = render_block(text, &spans, &units, 4, 5, chunk, two.len()).unwrap();
+    assert_eq!(
+        under.text,
+        "Position: Last\nReferences: Alpha — alpha body."
+    );
+    assert_eq!(under.references, vec![0]);
+    // With the references line charged, a 30-byte overlap budget
+    // (after "Preceding text: " and its newline) holds exactly three
+    // of the four preceding paragraphs.
+    let three = "Position: Last\nReferences: Alpha — alpha body. | Beta — beta body.\nPreceding text: alpha body. ## Beta beta body.";
+    let snug = render_block(
+        text,
+        &spans,
+        &units,
+        4,
+        5,
+        chunk,
+        two.len() + 1 + "Preceding text: ".len() + 1 + 30,
+    )
+    .unwrap();
+    assert_eq!(snug.text, three);
+    assert_eq!(snug.bytes, three.len());
+    assert_eq!(snug.overlap_paragraphs, Some((1, 3)));
+    // One byte less of budget (29) and the third paragraph — which
+    // needs its separator counted — no longer fits.
+    let two_paragraphs = render_block(
+        text,
+        &spans,
+        &units,
+        4,
+        5,
+        chunk,
+        two.len() + 1 + "Preceding text: ".len() + 1 + 29,
+    )
+    .unwrap();
+    assert_eq!(
+        two_paragraphs.text,
+        "Position: Last\nReferences: Alpha — alpha body. | Beta — beta body.\nPreceding text: ## Beta beta body."
+    );
+    assert_eq!(two_paragraphs.overlap_paragraphs, Some((2, 3)));
+}
+
+#[test]
+fn render_block_keeps_a_paragraph_exactly_as_long_as_the_budget_and_cuts_tails_on_char_boundaries()
+{
+    // The nearest paragraph is exactly the budget: kept whole, no
+    // ellipsis (the tail branch is for strictly longer ones).
+    let paragraph = "paragraph of thirty bytes!!!!!";
+    assert_eq!(paragraph.len(), 30);
+    let text = format!("## A\n\n{paragraph}\n\n## B\n\nbody");
+    let spans = spans_of(&text);
+    let units = detect_units(&text, &spans);
+    let cap = "Position: B".len() + 1 + "Preceding text: ".len() + 1 + 30;
+    let block = render_block(&text, &spans, &units, 2, 3, "[2] ## B\n\n[3] body", cap).unwrap();
+    assert_eq!(
+        block.text,
+        format!("Position: B\nPreceding text: {paragraph}")
+    );
+    assert_eq!(block.overlap_paragraphs, Some((1, 1)));
+    // A multi-byte tail: the cut lands inside a 3-byte character and
+    // advances to the next boundary, and the ellipsis is charged.
+    let long = "あ".repeat(20);
+    let text = format!("## A\n\n{long}\n\n## B\n\nbody");
+    let spans = spans_of(&text);
+    let units = detect_units(&text, &spans);
+    let cap = "Position: B".len() + 1 + "Preceding text: ".len() + 1 + 29;
+    let block = render_block(&text, &spans, &units, 2, 3, "[2] ## B\n\n[3] body", cap).unwrap();
+    let tail = block.text.split("Preceding text: ").nth(1).unwrap();
+    // 29 - 3 (…) = 26 bytes of room → cut at 60 - 26 = 34, not a
+    // boundary, so 36: eight characters (24 bytes) plus the ellipsis.
+    assert_eq!(tail, format!("…{}", "あ".repeat(8)));
+    assert!(block.bytes <= cap);
+}
+
+#[test]
+fn preferred_breaks_are_the_outermost_units_first_paragraphs() {
+    let text = "# A\n\nx\n\n## A1\n\ny\n\n# B\n\nz";
+    let units = detect_units(text, &spans_of(text));
+    let mut breaks: Vec<u32> = preferred_breaks(&units).into_iter().collect();
+    breaks.sort_unstable();
+    assert_eq!(breaks, vec![0, 4]);
+    assert!(preferred_breaks(&[]).is_empty());
+}
+
+#[test]
+fn position_is_the_heading_stack_in_force_at_a_paragraph() {
+    let text = "# A\n\nx\n\n## A1\n\ny\n\n### A1a\n\nz\n\n## A2\n\nw\n\n# B\n\nv";
+    let units = detect_units(text, &spans_of(text));
+    let path = |paragraph: u32| -> Vec<&str> {
+        position(&units, paragraph)
+            .into_iter()
+            .map(|unit| unit.heading.as_str())
+            .collect()
+    };
+    assert_eq!(path(1), vec!["A"]);
+    assert_eq!(path(5), vec!["A", "A1", "A1a"]);
+    assert_eq!(path(7), vec!["A", "A2"], "A2 closes A1 and A1a");
+    assert_eq!(path(9), vec!["B"]);
+    assert!(position(&[], 3).is_empty());
+}
+
+#[test]
+fn references_resolve_article_numbers_the_previous_article_and_quoted_headings() {
+    let text = "（定義）\n第二条　用語を定める。\n\n第三条　推定の規定。\n\n第四条　前条及び第二条の規定により、Installation の手順は…\n\n## Installation\n\nsteps";
+    let units = detect_units(text, &spans_of(text));
+    // The chunk is paragraph 2 alone (第四条): it names 第二条 by
+    // number, 前条 (= 第三条), and quotes the heading "Installation".
+    let path = position(&units, 2);
+    let chunk = "[2] 第四条　前条及び第二条の規定により、Installation の手順は…";
+    let refs: Vec<&str> = references(&units, chunk, 2, 2, &path, 4)
+        .into_iter()
+        .map(|unit| unit.heading.as_str())
+        .collect();
+    assert_eq!(refs, vec!["第三条", "第二条（定義）", "Installation"]);
+    // Capped, in mention order; units on the path or in the chunk
+    // are never references.
+    assert_eq!(references(&units, chunk, 2, 2, &path, 1).len(), 1);
+    let self_ref = "[1] 第三条　推定の規定。";
+    assert!(references(&units, self_ref, 1, 1, &position(&units, 1), 4).is_empty());
+}
+
+#[test]
+fn render_block_carries_position_references_and_overlap_within_the_cap() {
+    let text = "# Guide\n\nintro paragraph one.\n\n## Setup\n\nsee Usage for details.\n\n## Usage\n\nrun it.";
+    let spans = spans_of(text);
+    let units = detect_units(text, &spans);
+    // Chunk = paragraphs 2..=3 ("## Setup" + its body).
+    let chunk = "[2] ## Setup\n\n[3] see Usage for details.";
+    let block = render_block(text, &spans, &units, 2, 3, chunk, 4096).unwrap();
+    assert_eq!(
+        block.text,
+        "Position: Guide › Setup\nReferences: Usage — run it.\nPreceding text: # Guide intro paragraph one."
+    );
+    assert!(!block.text.contains("\n\n"));
+    assert!(
+        !block.text.contains('['),
+        "no paragraph label rides in the block"
+    );
+    assert_eq!(block.position, vec![0, 1]);
+    assert_eq!(block.references, vec![2]);
+    assert_eq!(block.overlap_paragraphs, Some((0, 1)));
+    assert_eq!(block.bytes, block.text.len());
+    assert_eq!(block.sha256, sha256_hex(block.text.as_bytes()));
+    // The first chunk of a structureless document gets nothing.
+    let plain = "a\n\nb";
+    assert!(render_block(plain, &spans_of(plain), &[], 0, 0, "[0] a", 4096).is_none());
+    // A later chunk of it still gets overlap.
+    let later = render_block(plain, &spans_of(plain), &[], 1, 1, "[1] b", 4096).unwrap();
+    assert_eq!(later.text, "Preceding text: a");
+    assert_eq!(later.overlap_paragraphs, Some((0, 0)));
+    assert!(later.position.is_empty());
+}
+
+#[test]
+fn render_block_respects_the_cap_by_dropping_references_and_keeping_the_overlap_tail() {
+    let long = "y".repeat(3000);
+    let text = format!("## Alpha\n\n{long}\n\n## Beta\n\nsee Alpha now");
+    let spans = spans_of(&text);
+    let units = detect_units(&text, &spans);
+    let chunk = "[2] ## Beta\n\n[3] see Alpha now";
+    let block = render_block(&text, &spans, &units, 2, 3, chunk, 512).unwrap();
+    assert!(block.bytes <= 512, "the cap is exact: {}", block.bytes);
+    assert_eq!(block.bytes, block.text.len());
+    assert!(block.text.starts_with("Position: Beta\n"));
+    assert!(
+        block.text.contains("Preceding text: …"),
+        "the nearest paragraph's tail: {}",
+        block.text
+    );
+    assert!(block.text.ends_with("yyy"));
+    assert_eq!(block.overlap_paragraphs, Some((1, 1)));
+    // The reference's opening is the long paragraph, quoted only up
+    // to REFERENCE_OPENING_BYTES — so it fits, and the overlap still
+    // gets the rest of the cap.
+    let references_line = block
+        .text
+        .lines()
+        .find(|line| line.starts_with("References: "))
+        .unwrap();
+    assert!(
+        references_line.starts_with("References: Alpha — yyy"),
+        "{references_line}"
+    );
+    assert!(references_line.len() < 280, "{}", references_line.len());
+    assert_eq!(block.references, vec![0]);
+    assert!(!block.text.contains("\n\n"));
+    // Under a tight cap the overlap is skipped outright, never
+    // recorded as an empty `Preceding text: …`: after the position
+    // line, its prefix, and the newlines, 48 bytes leave under the
+    // 24-byte minimum a tail needs to say anything.
+    let tight = render_block(&text, &spans, &units, 2, 3, chunk, 48).unwrap();
+    assert_eq!(tight.text, "Position: Beta");
+    assert!(tight.overlap_paragraphs.is_none());
+    assert!(tight.references.is_empty());
+    assert!(tight.bytes <= 48);
+    // Just enough room for a short tail: the ellipsis is charged too.
+    let snug = render_block(&text, &spans, &units, 2, 3, chunk, 80).unwrap();
+    // 14 (position) + 1 + 16 (prefix) + 48 (the budget the tail
+    // fills exactly, ellipsis included) = 79: the accounting is exact.
+    assert_eq!(snug.bytes, 79);
+    assert!(snug.text.contains("Preceding text: …"), "{}", snug.text);
+    assert_eq!(snug.overlap_paragraphs, Some((1, 1)));
+}
+
+#[test]
+fn block_cap_is_a_quarter_of_the_chunk_cap_with_a_floor() {
+    assert_eq!(block_cap(24576), 6144);
+    assert_eq!(block_cap(1000), 512);
+}
+
+#[test]
+fn chunk_preferring_ends_a_chunk_at_a_preferred_block_once_past_half_the_cap() {
+    let blocks = ["[0] aaaa", "[1] bbbb", "[2] cccc", "[3] dddd"];
+    let text = blocks.join("\n\n");
+    let breaks: HashSet<u32> = [2u32].into_iter().collect();
+    let prefer = |block: &str| breaks.contains(&leading_paragraph_number(block));
+    // Cap 40: 0+1 = 18 bytes (past 20? no) — under half, so [2] joins.
+    assert_eq!(chunk_preferring(&text, 40, &prefer), chunk(&text, 40));
+    // Cap 30: [0]+[1] = 18 > 15, so [2] opens a new chunk.
+    assert_eq!(
+        chunk_preferring(&text, 30, &prefer),
+        vec![
+            "[0] aaaa\n\n[1] bbbb".to_string(),
+            "[2] cccc\n\n[3] dddd".to_string()
+        ]
+    );
+    // No preference at all: byte-for-byte `chunk`.
+    assert_eq!(chunk_preferring(&text, 30, &|_| false), chunk(&text, 30));
+    // At exactly half the cap the preference does not bite yet
+    // ("past half", not "at half"), and a chunk that fits the cap to
+    // the byte is one chunk.
+    let half = "[0] aaaaaa\n\n[1] bb";
+    let prefer_one = |block: &str| leading_paragraph_number(block) == 1;
+    assert_eq!(
+        chunk_preferring(half, 20, &prefer_one),
+        vec![half.to_string()]
+    );
+    assert_eq!(
+        chunk_preferring(half, 19, &prefer_one),
+        vec!["[0] aaaaaa".to_string(), "[1] bb".to_string()]
+    );
+    let exact = "[0] aaaa\n\n[1] bbbb";
+    assert_eq!(
+        chunk_preferring(exact, exact.len(), &|_| false),
+        vec![exact.to_string()]
+    );
+    assert_eq!(
+        chunk_preferring(exact, exact.len() - 1, &|_| false).len(),
+        2
+    );
+    // The plan seam: empty breaks is byte-for-byte the old plan.
+    let doc = "# A\n\nx\n\n# B\n\ny";
+    let texts = |plan: Vec<ChunkDescriptor>| -> Vec<String> {
+        plan.into_iter().map(|descriptor| descriptor.text).collect()
+    };
+    assert_eq!(
+        texts(chunk_plan_preferring(doc, 1000, &HashSet::new())),
+        texts(chunk_plan_with_cap(doc, 1000))
+    );
+    let units = detect_units(doc, &spans_of(doc));
+    let plan = chunk_plan_preferring(doc, 24, &preferred_breaks(&units));
+    assert_eq!(plan.len(), 2, "{:?}", texts(plan.clone()));
+    assert_eq!((plan[0].paragraph_first, plan[0].paragraph_last), (0, 1));
+    assert_eq!((plan[1].paragraph_first, plan[1].paragraph_last), (2, 3));
+}
+
+#[test]
+fn user_message_carries_the_block_in_the_preamble_and_the_inverses_split_it_right() {
+    let block = "Position: A › B\nPreceding text: before";
+    let user = user_message("doc.md", 1, 3, "[4] chunk text", Some(block));
+    assert_eq!(
+        user,
+        format!(
+            "Document 'doc.md', part 2 of 3:\n{}\nPosition: A › B\nPreceding text: before\n\n[4] chunk text",
+            block_preamble(1, 3)
+        )
+    );
+    assert_eq!(user_message_document(&user), "[4] chunk text");
+    // The occurrence text is the block and the chunk — never the
+    // source line, never the block's preamble sentence.
+    assert_eq!(
+        user_message_occurrence_text(&user),
+        "Position: A › B\nPreceding text: before\n\n[4] chunk text"
+    );
+    assert!(block_preamble(1, 3).starts_with(BLOCK_PREAMBLE_OPENING));
+    // Without a block: today's message byte for byte, and the
+    // occurrence text is the chunk (behind one newline).
+    let plain = user_message("doc.md", 0, 1, "[0] chunk", None);
+    assert_eq!(plain, "Document 'doc.md':\n\n[0] chunk");
+    assert_eq!(user_message_document(&plain), "[0] chunk");
+    assert_eq!(user_message_occurrence_text(&plain), "\n[0] chunk");
+    assert!(block_preamble(0, 1).contains("the document only"));
+    assert!(block_preamble(2, 5).contains("part 3 of 5 only"));
+}
+
+#[test]
+fn chunk_context_is_a_manifest_and_checkpoint_input() {
+    let inputs = base_inputs("h", "m");
+    let mut manifest = Manifest::default();
+    manifest.record("doc.md", &inputs, "doc.jsonl");
+    assert!(manifest.matches("doc.md", &inputs));
+    let structured = ComputationInputs {
+        chunk_context: "structure",
+        ..base_inputs("h", "m")
+    };
+    assert!(!manifest.matches("doc.md", &structured));
+    manifest.record("doc.md", &structured, "doc.jsonl");
+    assert!(manifest.matches("doc.md", &structured));
+    assert!(!manifest.matches("doc.md", &inputs));
+    // A settings record from before the field parses as off.
+    let value = serde_json::json!({
+        "prompt_version": 1, "model": "m", "questions_n": 0, "fact_budget": 0,
+        "structured_output": "", "max_output_tokens": 0, "chunk_bytes": "",
+        "lossy": false, "schema_digest": "", "candidates": "", "vocabulary_digest": ""
+    });
+    let recorded = parse_settings_record(&value).unwrap();
+    assert_eq!(recorded.chunk_context, "");
+    let mut current = parse_settings_record(&value).unwrap();
+    current.chunk_context = "structure".to_string();
+    assert_eq!(
+        settings_differences(&recorded, &current),
+        vec!["chunk_context \"\" \u{2192} \"structure\""]
+    );
 }
 
 // ================ #789 / ADR 0027: the steering record ================
@@ -6729,7 +7529,7 @@ fn resume_from_and_replay_cannot_both_be_given() {
 
 #[test]
 fn resume_from_fold_matches_the_documented_three_way_split() {
-    for step in ["read", "plan", "steer"] {
+    for step in ["read", "structure", "plan", "annotate", "steer"] {
         assert_eq!(
             resume_from_fold(step),
             (ReplayMode::Off, false),

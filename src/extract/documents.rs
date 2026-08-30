@@ -10,6 +10,7 @@ use super::*;
 /// value a checkpoint stores its unit under
 /// ([`CheckpointStore::lookup`]), so a caller that already has a
 /// [`ChunkDescriptor`] never re-hashes to consult the checkpoint.
+#[derive(Clone)]
 pub(crate) struct ChunkDescriptor {
     pub(crate) text: String,
     pub(crate) sha256: String,
@@ -54,7 +55,20 @@ pub(super) fn chunk_bytes_manifest_value(cap: usize) -> String {
 }
 
 pub(super) fn chunk_plan_with_cap(text: &str, cap: usize) -> Vec<ChunkDescriptor> {
-    chunk(&labeled_document(text, cap), cap)
+    chunk_plan_preferring(text, cap, &HashSet::new())
+}
+
+/// [`chunk_plan_with_cap`] under ADR 0033 §3.4: `breaks` names the
+/// paragraphs a chunk prefers to end before (the outermost structural
+/// units' first paragraphs). Empty is byte-for-byte
+/// [`chunk_plan_with_cap`].
+pub(super) fn chunk_plan_preferring(
+    text: &str,
+    cap: usize,
+    breaks: &HashSet<u32>,
+) -> Vec<ChunkDescriptor> {
+    let break_before = |block: &str| breaks.contains(&leading_paragraph_number(block));
+    chunk_preferring(&labeled_document(text, cap), cap, &break_before)
         .into_iter()
         .map(|piece| {
             // Every block in a chunk is `[N] `-labeled and no block is

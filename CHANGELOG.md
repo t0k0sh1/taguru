@@ -7,6 +7,28 @@ Entries that change an on-disk format or a response shape say so.
 
 ## [Unreleased]
 
+### Added
+
+- `taguru extract --chunk-context structure` (env
+  `TAGURU_EXTRACT_CHUNK_CONTEXT`; default `off`, today's prompt byte for
+  byte): every chunk's user turn is prefixed with a chunk context block —
+  the heading path in force at the chunk (`Position:`), the heading and
+  opening of each unit the chunk refers to by number or name
+  (`References:` — `第三条`, `前条`, `§2`, a quoted heading), and the
+  paragraphs just before it (`Preceding text:`) — built mechanically from
+  the document's own headings, statute articles, and minutes speakers, no
+  model call, capped at a quarter of `--chunk-bytes`. Chunk boundaries
+  prefer the outermost headings under the mode. The block carries no `[N]`
+  label (paragraph locators and passages are untouched) and counts as
+  document text for the occurrence check. Two pipeline steps are added,
+  `structure` (after `read`) and `annotate` (after `plan`) — `--resume-from`
+  accepts both — and the trace gains `structure` and `chunk_context`
+  records under the mode. The mode is a manifest/checkpoint computation
+  input (`""` = off, so existing manifests keep matching); the attempts
+  log's `settings` record gains `chunk_context`. **On-disk format
+  change**: additive record kinds and fields only. ADR 0033 (#782); the
+  `overview` and `ingested` modes it specifies follow.
+
 ### Fixed
 
 - `scripts/extract_metrics.py` now counts a document that failed — an

@@ -183,7 +183,7 @@ pub(super) fn extract_chunk(
         match evaluate_answer(
             &response.content,
             rules,
-            user_message_document(user),
+            user_message_occurrence_text(user),
             vocabulary,
         ) {
             Ok(evaluated) => {
@@ -378,6 +378,7 @@ pub(super) fn extract_chunk_or_ladder(
     chunk_index: usize,
     chunk_total: usize,
     piece: &str,
+    context_block: Option<&str>,
     policy: &CorrectionPolicy,
     fact_budget: usize,
     ladder: Option<&LadderConfig>,
@@ -391,7 +392,7 @@ pub(super) fn extract_chunk_or_ladder(
             if let Some(cached) = checkpointed_unit(checkpoints, piece) {
                 return Ok(vec![cached]);
             }
-            let user = user_message(source, chunk_index, chunk_total, piece);
+            let user = user_message(source, chunk_index, chunk_total, piece, context_block);
             let output = extract_chunk(
                 completions,
                 system,
@@ -415,6 +416,7 @@ pub(super) fn extract_chunk_or_ladder(
                 source,
                 chunk_index,
                 chunk_total,
+                context_block,
                 ladder,
                 policy,
                 fact_budget,
@@ -439,6 +441,10 @@ pub(super) struct PieceContext<'a> {
     pub(super) source: &'a str,
     pub(super) chunk_index: usize,
     pub(super) chunk_total: usize,
+    /// ADR 0033: the ORIGINAL chunk's context block, carried down to
+    /// every split sub-piece the same way `chunk_index` is — a
+    /// sub-piece is still part K, read in part K's context.
+    pub(super) context_block: Option<&'a str>,
     pub(super) ladder: &'a LadderConfig,
     pub(super) policy: &'a CorrectionPolicy,
     pub(super) fact_budget: usize,
@@ -498,6 +504,7 @@ pub(super) fn extract_piece(
         context.chunk_index,
         context.chunk_total,
         piece,
+        context.context_block,
     );
     // ADR 0021: the rung is read once per piece and carried through
     // its rounds, so a demotion is judged against the rung this piece
@@ -756,7 +763,7 @@ pub(super) fn extract_round(
         match classify_attempt(
             &response,
             context.rules,
-            user_message_document(user),
+            user_message_occurrence_text(user),
             context.vocabulary,
         ) {
             AttemptOutcome::Valid(evaluated) => {

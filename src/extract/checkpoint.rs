@@ -38,6 +38,12 @@ pub(super) struct CheckpointFingerprint {
     /// relying on every hash missing.
     #[serde(default)]
     pub(super) chunk_bytes: String,
+    /// `--chunk-context` as [`ChunkContextMode::manifest_value`]
+    /// encodes it (`""` = off) — ADR 0033. Same `default` reasoning as
+    /// `chunk_bytes`: a unit's prompt changes with the mode, so a
+    /// checkpoint written under another mode is not consulted.
+    #[serde(default)]
+    pub(super) chunk_context: String,
     pub(super) lossy: bool,
     /// `--schema`'s document digest (`""` = no schema). Same default
     /// as [`ManifestEntry::schema_digest`] and the same reasoning: a
