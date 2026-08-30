@@ -761,7 +761,12 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       the document's</b>, so the occurrence check leaves them out (a name that occurs only there
       is still unattested); and the pass is <b>advisory</b> — an answer the pass cannot land
       (cut off even at ADR 0019's one escalated resend, refused, empty, or not JSON) is reported
-      once on stderr and that chunk contributes no synopsis or cast, never a failed document.
+      once on stderr and that chunk contributes no synopsis or cast, never a failed document —
+      and is recorded in the checkpoint as an empty answer, so a resumed document neither re-asks
+      it nor (a different answer changing the overview) re-binds its extraction units;
+      <code>--force</code> starts over (<a
+      href="https://github.com/t0k0sh1/taguru/blob/main/adr/0034-overview-per-chunk.md">ADR
+      0034</a>, which also fixes the unit of one ask as the chunk, not the structural unit).
       Each completion is an attempts-log record with <code>stage: "overview"</code>, so its cost
       is priced apart; the trace carries one <code>overview</code> record per answered chunk. The
       answers are cached in the document's checkpoint by chunk hash and reused on a resume; the

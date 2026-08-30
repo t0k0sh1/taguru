@@ -995,14 +995,16 @@ impl Run {
     /// document-to-document and concurrent documents could diverge on
     /// label spellings.
     ///
-    /// ADR 0033 §3.5: the overview pass. One completion per chunk, in
-    /// document order, asking for a synopsis of each unit opening in
-    /// the chunk and the cast it introduces; the answer is cached in
-    /// the checkpoint by `chunk_sha256` and reused on resume. Its
-    /// ladder is escalation only (ADR 0019 — the same capped resend
-    /// Stage 1 gets; there is no piece to split): a chunk whose
-    /// answer the pass cannot land is reported once and skipped —
-    /// the block simply carries no synopsis from it — never a
+    /// ADR 0033 §3.5 as ADR 0034 amends it: the overview pass. One
+    /// completion per chunk, in document order, asking for a synopsis
+    /// of each unit opening in the chunk and the cast it introduces;
+    /// the answer is cached in the checkpoint by `chunk_sha256` and
+    /// reused on resume. Its ladder is escalation only (ADR 0019 —
+    /// the same capped resend Stage 1 gets; there is no piece to
+    /// split): a chunk whose answer the pass cannot land is reported
+    /// once and recorded as an EMPTY answer (ADR 0034 §3.3) — the
+    /// block carries no synopsis from it, and a resumed document
+    /// neither re-asks nor re-binds its extraction units — never a
     /// failed document, since context is advisory. Every completion
     /// is a `stage: "overview"` attempt record.
     pub(super) fn overview_pass(
@@ -1098,18 +1100,30 @@ impl Run {
                 OverviewOutcome::LengthLimited => {
                     eprintln!(
                         "taguru: extract: {source}: chunk {}/{}: the overview answer was cut \
-                         off at the output limit — this chunk contributes no synopsis or cast",
+                         off at the output limit — this chunk contributes no synopsis or cast \
+                         (recorded so for this document's resume; --force re-asks)",
                         index + 1,
                         plan.len()
+                    );
+                    checkpoints.record_overview(
+                        source,
+                        descriptor.sha256.clone(),
+                        OverviewAnswer::default(),
                     );
                     answers.push(None);
                 }
                 OverviewOutcome::Failed(message) => {
                     eprintln!(
                         "taguru: extract: {source}: chunk {}/{}: overview: {message} — this \
-                         chunk contributes no synopsis or cast",
+                         chunk contributes no synopsis or cast (recorded so for this \
+                         document's resume; --force re-asks)",
                         index + 1,
                         plan.len()
+                    );
+                    checkpoints.record_overview(
+                        source,
+                        descriptor.sha256.clone(),
+                        OverviewAnswer::default(),
                     );
                     answers.push(None);
                 }

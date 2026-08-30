@@ -279,15 +279,18 @@ Rules, each of which a test pins:
   `src/cli.rs`, `src/config.rs`, `src/extract.rs`'s usage, and
   `docs/extract.html` (the four places ADR 0019's factor taught).
 - **The overview's ladder is escalation only, and its failure is not
-  the document's** (§3.5's "same ladder" read precisely): a chunk-sized
-  ask has no piece to split, so a cut-off answer is resent once at ADR
-  0019's escalated budget and, if cut off again — or refused, empty,
-  or not JSON — that chunk contributes no synopsis or cast, reported
-  once on stderr; context is advisory, so the document proceeds. Under
-  the `json_schema` rung the pass sends `json_object`, the extraction
+  the document's** (§3.5's "same ladder" read precisely): the ask has
+  no piece to split, so a cut-off answer is resent once at ADR 0019's
+  escalated budget and, if cut off again — or refused, empty, or not
+  JSON — that ask contributes no synopsis or cast, reported once on
+  stderr; context is advisory, so the document proceeds. Under the
+  `json_schema` rung the pass sends `json_object`, the extraction
   schema being the wrong shape for this answer. The cast and synopsis
   lines are the overview model's words: §3.6.2's "the occurrence check
-  reads the block" applies to the document-text lines only.
+  reads the block" applies to the document-text lines only. The unit
+  of one ask — a chunk, not a structural unit — and what a failed ask
+  leaves in the checkpoint are ADR 0034's, which supersedes §3.5 on
+  those two points.
 - **Not done**: a chunk-by-chunk running summary (rejected, §3.1);
   live retrieval at extract time (rejected, §3.2); novel-grade
   comprehension (out of scope, §2).

@@ -36,7 +36,9 @@ Entries that change an on-disk format or a response shape say so.
   preceding text. The cast and synopsis lines are model output and do
   not attest a name for the occurrence check; an answer the pass cannot
   land (cut off even at the one escalated resend, refused, empty, not
-  JSON) is reported and skipped, never a failed document. Completions
+  JSON) is reported and skipped, never a failed document, and recorded
+  in the checkpoint as an empty answer so a resume neither re-asks it
+  nor re-binds the extraction units (ADR 0034). Completions
   are `stage: "overview"` attempts records; the trace gains an
   `overview` record per answered chunk; the checkpoint file gains an
   `overview` map (answers by chunk hash, reused on resume) and

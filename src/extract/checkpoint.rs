@@ -116,7 +116,9 @@ pub(super) struct DocumentCheckpoints {
     pub(super) units: BTreeMap<String, CheckpointUnit>,
     /// ADR 0033 §3.5: the overview pass's answer per chunk (by
     /// `chunk_sha256`), so a resumed document reuses the pass without
-    /// a call. Empty below `--chunk-context overview`.
+    /// a call — an EMPTY answer for a chunk whose ask failed (ADR 0034
+    /// §3.3: fixed for the checkpoint's life, never re-asked). Empty
+    /// below `--chunk-context overview`.
     #[serde(default)]
     pub(super) overview: BTreeMap<String, OverviewAnswer>,
     /// The digest of the merged overview the cached `units` were

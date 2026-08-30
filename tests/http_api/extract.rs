@@ -2243,7 +2243,7 @@ fn chunk_context_overview_is_checkpointed_and_a_cut_off_answer_is_skipped() {
     let (code, stdout, stderr) = run_extract(&out, &provider, &args);
     assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
     assert!(
-        stderr.contains("chunk 1/2: the overview answer was cut off at the output limit — this chunk contributes no synopsis or cast"),
+        stderr.contains("chunk 1/2: the overview answer was cut off at the output limit — this chunk contributes no synopsis or cast (recorded so for this document's resume; --force re-asks)"),
         "{stderr}"
     );
     let requests: Vec<String> = captured.lock().unwrap().clone();
@@ -2274,20 +2274,13 @@ fn chunk_context_overview_is_checkpointed_and_a_cut_off_answer_is_skipped() {
         .count();
     assert_eq!(overview_calls_before, 3);
 
-    // Run 2: chunk 1's overview answer is cached (no call); chunk 0's
-    // never landed, so it is asked again — and lands this time, which
-    // changes the merged overview, so chunk 0's checkpointed unit is
-    // discarded and re-extracted; chunk 1's extraction lands.
+    // Run 2: both overview answers are cached — chunk 1's as given,
+    // chunk 0's as the EMPTY answer its failure was recorded as (ADR
+    // 0034 §3.3) — so no overview call is made, the merged overview
+    // is the one run 1 bound chunk 0's unit to (no discard), and only
+    // chunk 1's extraction is asked.
     let (url, captured) =
         stub_chat_server_concurrent(move |index, attempt| match (index, attempt) {
-            (0, 0) => chat_ok(
-                &json!({"units": [{"unit": 0, "summary": "Alpha summary."}], "cast": []})
-                    .to_string(),
-            ),
-            (0, 1) => chat_ok(
-                &json!({"associations": [{"subject": "S", "label": "rel", "object": "value-0"}]})
-                    .to_string(),
-            ),
             (1, 0) => chat_ok(
                 &json!({"associations": [{"subject": "S", "label": "rel", "object": "value-1"}]})
                     .to_string(),
@@ -2304,24 +2297,8 @@ fn chunk_context_overview_is_checkpointed_and_a_cut_off_answer_is_skipped() {
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     let requests: Vec<String> = captured.lock().unwrap().clone();
-    // One overview re-ask (chunk 0), no overview call for chunk 1
-    // (cached), then both extractions — chunk 0's because the merged
-    // overview differs from run 1's.
-    assert!(
-        stderr.contains("the overview changed since 1 unit(s) were checkpointed"),
-        "{stderr}"
-    );
-    assert_eq!(requests.len(), 3, "{requests:?}");
-    let overview_calls: usize = requests
-        .iter()
-        .filter(|r| {
-            json_body_of(r)["messages"][0]["content"]
-                .as_str()
-                .unwrap()
-                .starts_with("You read one part")
-        })
-        .count();
-    assert_eq!(overview_calls, 1);
+    assert!(!stderr.contains("the overview changed"), "{stderr}");
+    assert_eq!(requests.len(), 1, "chunk 1's extraction only: {requests:?}");
     assert!(stdout.contains("2 association(s)"), "{stdout}");
 
     let _ = std::fs::remove_dir_all(&docs);
