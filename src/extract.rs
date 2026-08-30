@@ -136,6 +136,7 @@ use documents::{chunk_plan_with_cap, leading_paragraph_number};
 pub(crate) use signals::{StopSignal, block_stop_signals_on_this_thread};
 use structured_output::json_object_response_format;
 pub(crate) use structured_output::json_schema_response_format;
+use vocabulary::KnownRelation;
 pub(crate) use vocabulary::vocabulary_digest;
 
 // Cross-submodule wiring: each of these is private to the one
@@ -158,9 +159,9 @@ use chat_client::{
 use checkpoint::{CheckpointFingerprint, CheckpointStore, CheckpointUnit};
 use chunk_context::{
     BLOCK_PREAMBLE_OPENING, CAST_PREFIX, CHUNK_CONTEXT_MODES, ChunkContextMode, ContextBlock,
-    Overview, OverviewAnswer, SYNOPSIS_PREFIX, TraceChunkContext, TraceOverview, TraceStructure,
-    Unit, block_cap, block_preamble, detect_units, overview_system_prompt, overview_user_message,
-    parse_overview_answer, preferred_breaks, render_block, units_opening_in,
+    KNOWN_PREFIX, Overview, OverviewAnswer, SYNOPSIS_PREFIX, TraceChunkContext, TraceOverview,
+    TraceStructure, Unit, block_cap, block_preamble, detect_units, overview_system_prompt,
+    overview_user_message, parse_overview_answer, preferred_breaks, render_block, units_opening_in,
 };
 #[cfg(test)]
 use chunk_context::{
@@ -337,9 +338,14 @@ chat endpoint:
                       --chunk-bytes; overview adds an overview pass
                       first (one call per chunk, before extraction)
                       whose per-unit synopses and cast list also ride
-                      in the block. A computation input: changing it
-                      re-extracts. The pipeline steps: structure
-                      (after read), overview (after plan), annotate
+                      in the block; ingested (needs --vocabulary) adds,
+                      from that export, what the target context already
+                      holds about the cast — and, under --candidates,
+                      about the document's own candidate names (their
+                      strongest relations). A
+                      computation input: changing it re-extracts. The
+                      pipeline steps: structure (after read), overview
+                      (after plan), annotate
   --config F          read KEY=VALUE environment from F (same dialect as serve)
   --parallel N        chunk completions to run concurrently within one
                       document (1, sequential); documents themselves stay
@@ -867,6 +873,15 @@ pub fn run(args: &[String]) -> i32 {
         },
         None => None,
     };
+    // ADR 0033 §3.2: the ingested lane reads the export; without one
+    // there is nothing to offer, and silently running as `overview`
+    // would misreport what the run did.
+    if chunk_context.ingested() && context_vocabulary.is_none() {
+        return crate::config::subcommand_usage_error(
+            "extract",
+            "--chunk-context ingested needs --vocabulary (the target context's export)",
+        );
+    }
     // Flag-over-env, same pattern as --parallel above. Unlike a parsed
     // knob, any nonempty path is a valid value, so there is no "bad env
     // value" usage error here.
@@ -1059,6 +1074,14 @@ pub fn run(args: &[String]) -> i32 {
         vocabulary_digest: context_vocabulary
             .as_ref()
             .map(|vocabulary| vocabulary.digest.clone())
+            .unwrap_or_default(),
+        vocabulary_known: context_vocabulary
+            .as_ref()
+            .map(|vocabulary| vocabulary.known.clone())
+            .unwrap_or_default(),
+        known_digest: context_vocabulary
+            .as_ref()
+            .map(|vocabulary| vocabulary.known_digest.clone())
             .unwrap_or_default(),
         diagnostics,
         schema,

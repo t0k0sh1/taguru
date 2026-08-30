@@ -1959,13 +1959,13 @@ fn chunk_context_structure_prefixes_chunks_and_is_a_computation_input() {
             "--context",
             "c",
             "--chunk-context",
-            "ingested",
+            "live",
             doc.to_str().unwrap(),
         ],
     );
     assert_eq!(code, 2, "{stderr}");
     assert!(
-        stderr.contains("--chunk-context takes one of: off, structure, overview"),
+        stderr.contains("--chunk-context takes one of: off, structure, overview, ingested"),
         "{stderr}"
     );
     let (code, _, stderr) = run_extract(
@@ -1979,7 +1979,9 @@ fn chunk_context_structure_prefixes_chunks_and_is_a_computation_input() {
     );
     assert_eq!(code, 2, "{stderr}");
     assert!(
-        stderr.contains("TAGURU_EXTRACT_CHUNK_CONTEXT takes one of: off, structure, overview"),
+        stderr.contains(
+            "TAGURU_EXTRACT_CHUNK_CONTEXT takes one of: off, structure, overview, ingested"
+        ),
         "{stderr}"
     );
 
@@ -2300,6 +2302,195 @@ fn chunk_context_overview_is_checkpointed_and_a_cut_off_answer_is_skipped() {
     assert!(!stderr.contains("the overview changed"), "{stderr}");
     assert_eq!(requests.len(), 1, "chunk 1's extraction only: {requests:?}");
     assert!(stdout.contains("2 association(s)"), "{stdout}");
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// ADR 0033 §3.2: `--chunk-context ingested` offers, for each cast
+/// name the `--vocabulary` export knows, that name's strongest
+/// relations as a `Known:` line after the cast — from the export, no
+/// further call — and needs `--vocabulary` to exist at all.
+#[test]
+fn chunk_context_ingested_offers_the_exports_relations_for_the_cast() {
+    let docs = batch_dir("extract-chunk-context-ingested-docs");
+    let doc = docs.join("minutes.md");
+    std::fs::write(
+        &doc,
+        "# 第2回\n\n議題 value- の続き。前回の決定を確認する。",
+    )
+    .unwrap();
+    let export = docs.join("export.jsonl");
+    std::fs::write(
+        &export,
+        concat!(
+            r#"{"taguru_batch":1,"context":"c","source":"minutes-1.md"}"#,
+            "\n",
+            r#"{"subject":"委員会","label":"決定","object":"予算案","weight":2.0}"#,
+            "\n",
+            r#"{"subject":"委員会","label":"設置","object":"作業部会","weight":1.0}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    let out = batch_dir("extract-chunk-context-ingested-out");
+    let (url, captured) = stub_chat_server_concurrent(move |_index, attempt| {
+        if attempt == 0 {
+            chat_ok(
+                &json!({"units": [{"unit": 0, "summary": "第2回の議事。"}],
+                        "cast": [{"name": "委員会", "gloss": "本委員会"}]})
+                .to_string(),
+            )
+        } else {
+            chat_ok(
+                &json!({"associations": [
+                    {"subject": "委員会", "label": "確認", "object": "value-"}
+                ]})
+                .to_string(),
+            )
+        }
+    });
+    let provider = [
+        ("TAGURU_EXTRACT_URL", url.as_str()),
+        ("TAGURU_EXTRACT_MODEL", "stub-model"),
+    ];
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &provider,
+        &[
+            "--context",
+            "c",
+            "--chunk-context",
+            "ingested",
+            "--vocabulary",
+            export.to_str().unwrap(),
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let requests: Vec<String> = captured.lock().unwrap().clone();
+    assert_eq!(
+        requests.len(),
+        2,
+        "one overview call, one extraction — nothing more"
+    );
+    let user = json_body_of(&requests[1])["messages"][1]["content"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (preamble, _) = user.split_once("\n\n").unwrap();
+    assert!(
+        preamble.contains("\nCast: 委員会 — 本委員会\n"),
+        "{preamble}"
+    );
+    assert!(
+        preamble.contains("\nKnown: 委員会 — 決定 → 予算案; 設置 → 作業部会"),
+        "{preamble}"
+    );
+    // The subject "委員会" appears in the chunk nowhere; it passes the
+    // occurrence check through the export's allowlist (ADR 0015),
+    // not through the Known line.
+    assert!(stdout.contains("1 association(s)"), "{stdout}");
+    assert!(!stdout.contains("removed"), "{stdout}");
+    let (_, trace) = read_trace(&out);
+    let context = trace.iter().find(|r| r["kind"] == "chunk_context").unwrap();
+    assert_eq!(context["known"], json!(["委員会"]));
+
+    // The manifest value carries the relations' digest: the same
+    // export skips, a changed export re-extracts.
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &provider,
+        &[
+            "--context",
+            "c",
+            "--chunk-context",
+            "ingested",
+            "--vocabulary",
+            export.to_str().unwrap(),
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("unchanged, skipped"), "{stdout}");
+
+    // Swap the two relations' weights: the name set is unchanged (the
+    // vocabulary digest would still match) but the offered relations'
+    // order isn't, so known_digest re-extracts the document.
+    std::fs::write(
+        &export,
+        concat!(
+            r#"{"taguru_batch":1,"context":"c","source":"minutes-1.md"}"#,
+            "\n",
+            r#"{"subject":"委員会","label":"決定","object":"予算案","weight":1.0}"#,
+            "\n",
+            r#"{"subject":"委員会","label":"設置","object":"作業部会","weight":2.0}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    let (url, captured) = stub_chat_server_concurrent(move |_index, attempt| {
+        if attempt == 0 {
+            chat_ok(
+                &json!({"units": [{"unit": 0, "summary": "第2回の議事。"}],
+                        "cast": [{"name": "委員会", "gloss": "本委員会"}]})
+                .to_string(),
+            )
+        } else {
+            chat_ok(
+                &json!({"associations": [
+                    {"subject": "委員会", "label": "確認", "object": "value-"}
+                ]})
+                .to_string(),
+            )
+        }
+    });
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--chunk-context",
+            "ingested",
+            "--vocabulary",
+            export.to_str().unwrap(),
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(!stdout.contains("unchanged, skipped"), "{stdout}");
+    let requests: Vec<String> = captured.lock().unwrap().clone();
+    assert_eq!(requests.len(), 2, "re-extracted: {requests:?}");
+    let user = json_body_of(&requests[1])["messages"][1]["content"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        user.contains("Known: 委員会 — 設置 → 作業部会; 決定 → 予算案"),
+        "the reweighted order: {user}"
+    );
+
+    // Without --vocabulary the mode has nothing to offer: a usage error.
+    let (code, _, stderr) = run_extract(
+        &out,
+        &provider,
+        &[
+            "--context",
+            "c",
+            "--chunk-context",
+            "ingested",
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains("--chunk-context ingested needs --vocabulary"),
+        "{stderr}"
+    );
 
     let _ = std::fs::remove_dir_all(&docs);
     let _ = std::fs::remove_dir_all(&out);

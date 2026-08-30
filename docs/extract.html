@@ -153,7 +153,10 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
                     chunk boundaries at the outermost headings — no
                     model call; overview adds an overview pass first
                     (one call per chunk) whose per-unit synopses and
-                    cast list ride in the block too; a computation input
+                    cast list ride in the block too; ingested (needs
+                    --vocabulary) adds, from that export, what the target
+                    context already holds about the cast; a computation
+                    input
 --parallel N        chunk completions to run concurrently within one
                     document (default 1, sequential); overrides
                     TAGURU_EXTRACT_PARALLEL when both are set
@@ -773,9 +776,27 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       extraction units are bound to the merged overview's digest, so a changed overview discards
       them (they would have been extracted against a different block) and says so. Under the
       <code>json_schema</code> rung the pass sends <code>json_object</code> — the extraction
-      schema is the wrong shape for this answer. The last mode, <code>ingested</code> (the target
-      context's known relations for the cast, from the <code>--vocabulary</code> export), is
-      specified by ADR 0033 and lands after this one.
+      schema is the wrong shape for this answer.
+    </p>
+    <p>
+      <code>--chunk-context ingested</code> adds the second source ADR 0033 §3.2 names: what the
+      target context <i>already holds</i>. It needs <a href="#prompt"><code>--vocabulary</code></a>
+      — the same export of the target context — and reads, beside the names, every association
+      the export carries, keeping for each concept its strongest few (at most five by
+      <code>|weight|</code>, export order among equals). A chunk's block then carries, right
+      after <code>Cast:</code>, a <code>Known:</code> line: for each cast name — and then each
+      <code>--candidates</code> name — the export knows, that name's relations, an outgoing one
+      as <code>label → other</code>, an incoming one as <code>other → label</code>
+      (<code>Known: 委員会 — 決定 → 予算案; 設置 → 作業部会</code>). No further model call; the
+      minutes case is the point (the earlier meeting's bills and decisions are in the export,
+      not in this document). A live lookup against a running server is deliberately not what
+      this is (ADR 0033 §3.2): an export is a file with a digest, so the run stays resumable and
+      replayable. The line is the export's words, not this document's, so the occurrence check
+      leaves it out too (its names already pass through the export's allowlist). The manifest
+      records the mode as <code>ingested:&lt;digest&gt;</code>, the digest being that of the
+      relations the export offers — a changed export re-extracts, as a changed vocabulary
+      already did. The trace's <code>chunk_context</code> record lists the <code>known</code>
+      names carried.
     </p>
   </section>
 
@@ -1082,8 +1103,9 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       <code>[{name, gloss}]</code>) and by its
       <code>chunk_context</code> (<code>chunk_index</code>, the block's <code>sha256</code>/
       <code>bytes</code>, <code>position</code> and <code>references</code> as unit indices,
-      <code>cast</code> names and <code>synopsis</code> unit indices when carried,
-      <code>overlap_paragraphs</code>); one <code>piece</code> per answer the chunk loop kept —
+      <code>cast</code> names, <code>known</code> names, and <code>synopsis</code> unit indices
+      when carried, <code>overlap_paragraphs</code>); one <code>piece</code> per answer the chunk
+      loop kept —
       a chunk, or each sub-piece the split rung made of one, so several pieces can share a
       <code>chunk_index</code> — with <code>piece_id</code> (sha256 of the piece text as sent;
       the checkpoint unit's key, so an unsplit chunk's <code>piece_id</code> equals its
