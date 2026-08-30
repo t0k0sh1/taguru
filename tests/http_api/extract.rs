@@ -2414,6 +2414,66 @@ fn chunk_context_ingested_offers_the_exports_relations_for_the_cast() {
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(stdout.contains("unchanged, skipped"), "{stdout}");
 
+    // Swap the two relations' weights: the name set is unchanged (the
+    // vocabulary digest would still match) but the offered relations'
+    // order isn't, so known_digest re-extracts the document.
+    std::fs::write(
+        &export,
+        concat!(
+            r#"{"taguru_batch":1,"context":"c","source":"minutes-1.md"}"#,
+            "\n",
+            r#"{"subject":"委員会","label":"決定","object":"予算案","weight":1.0}"#,
+            "\n",
+            r#"{"subject":"委員会","label":"設置","object":"作業部会","weight":2.0}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    let (url, captured) = stub_chat_server_concurrent(move |_index, attempt| {
+        if attempt == 0 {
+            chat_ok(
+                &json!({"units": [{"unit": 0, "summary": "第2回の議事。"}],
+                        "cast": [{"name": "委員会", "gloss": "本委員会"}]})
+                .to_string(),
+            )
+        } else {
+            chat_ok(
+                &json!({"associations": [
+                    {"subject": "委員会", "label": "確認", "object": "value-"}
+                ]})
+                .to_string(),
+            )
+        }
+    });
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--chunk-context",
+            "ingested",
+            "--vocabulary",
+            export.to_str().unwrap(),
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(!stdout.contains("unchanged, skipped"), "{stdout}");
+    let requests: Vec<String> = captured.lock().unwrap().clone();
+    assert_eq!(requests.len(), 2, "re-extracted: {requests:?}");
+    let user = json_body_of(&requests[1])["messages"][1]["content"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        user.contains("Known: 委員会 — 設置 → 作業部会; 決定 → 予算案"),
+        "the reweighted order: {user}"
+    );
+
     // Without --vocabulary the mode has nothing to offer: a usage error.
     let (code, _, stderr) = run_extract(
         &out,

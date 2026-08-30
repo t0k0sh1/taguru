@@ -338,9 +338,11 @@ chat endpoint:
                       --chunk-bytes; overview adds an overview pass
                       first (one call per chunk, before extraction)
                       whose per-unit synopses and cast list also ride
-                      in the block; ingested adds, from --vocabulary's
-                      export, what the target context already holds
-                      about the cast (their strongest relations). A
+                      in the block; ingested (needs --vocabulary) adds,
+                      from that export, what the target context already
+                      holds about the cast — and, under --candidates,
+                      about the document's own candidate names (their
+                      strongest relations). A
                       computation input: changing it re-extracts. The
                       pipeline steps: structure (after read), overview
                       (after plan), annotate

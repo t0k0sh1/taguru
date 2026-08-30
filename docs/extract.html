@@ -153,9 +153,10 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
                     chunk boundaries at the outermost headings — no
                     model call; overview adds an overview pass first
                     (one call per chunk) whose per-unit synopses and
-                    cast list ride in the block too; ingested adds, from
-                    --vocabulary's export, what the target context already
-                    holds about the cast; a computation input
+                    cast list ride in the block too; ingested (needs
+                    --vocabulary) adds, from that export, what the target
+                    context already holds about the cast; a computation
+                    input
 --parallel N        chunk completions to run concurrently within one
                     document (default 1, sequential); overrides
                     TAGURU_EXTRACT_PARALLEL when both are set

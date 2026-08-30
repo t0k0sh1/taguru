@@ -7090,8 +7090,10 @@ fn render_block_offers_known_relations_for_cast_and_candidate_names() {
         under.text
     );
     assert_eq!(under.known, vec!["Tool"]);
-    // The overlap budget after the Known line is charged exactly:
-    // 14 bytes of room hold "# Guide intro." (14) whole, 13 do not.
+    // The overlap budget after the Known line is charged exactly: a
+    // 24-byte budget (the MIN_OVERLAP_BYTES floor itself) holds
+    // "# Guide intro." (14 bytes) whole; at 23 the budget is under
+    // the floor and the overlap is skipped outright.
     let full = format!("{two}\nPreceding text: # Guide intro.");
     let block = render_block(
         text,

@@ -52,8 +52,10 @@ Entries that change an on-disk format or a response shape say so.
   line does not attest a name for the occurrence check (the export's
   allowlist already does). The manifest records the mode as
   `ingested:<digest of the offered relations>`, so a changed export
-  re-extracts; the trace's `chunk_context` record gains `known`. ADR 0033
-  §3.2 (#782) — the last of the modes it specifies.
+  re-extracts; the trace's `chunk_context` record gains `known`.
+  **On-disk format change**: additive (the trace field, and the manifest
+  value's new spelling under this mode only). ADR 0033 §3.2 (#782) — the
+  last of the modes it specifies.
 
 ### Fixed
 
