@@ -7090,6 +7090,41 @@ fn render_block_offers_known_relations_for_cast_and_candidate_names() {
         under.text
     );
     assert_eq!(under.known, vec!["Tool"]);
+    // The overlap budget after the Known line is charged exactly:
+    // 14 bytes of room hold "# Guide intro." (14) whole, 13 do not.
+    let full = format!("{two}\nPreceding text: # Guide intro.");
+    let block = render_block(
+        text,
+        &spans,
+        &units,
+        2,
+        3,
+        chunk,
+        two.len() + 1 + "Preceding text: ".len() + 1 + 24,
+        Some(&overview),
+        Some(&known),
+        &candidates,
+    )
+    .unwrap();
+    assert_eq!(block.text, full);
+    assert_eq!(block.bytes, full.len());
+    let block = render_block(
+        text,
+        &spans,
+        &units,
+        2,
+        3,
+        chunk,
+        two.len() + 1 + "Preceding text: ".len() + 1 + 23,
+        Some(&overview),
+        Some(&known),
+        &candidates,
+    )
+    .unwrap();
+    assert_eq!(
+        block.text, two,
+        "under the 24-byte minimum no overlap is carried"
+    );
 }
 
 #[test]
