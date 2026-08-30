@@ -6168,6 +6168,11 @@ fn heading_of_pins_its_length_and_shape_limits() {
     assert_eq!(at_cap.len(), 200);
     assert_eq!(heading_of(&at_cap), Some((1, "a".repeat(198))));
     assert_eq!(heading_of(&format!("{at_cap}a")), None);
+    // One to six `#` followed by a space; a hashtag and a seven-`#`
+    // line are neither.
+    assert_eq!(heading_of("#tag"), None);
+    assert_eq!(heading_of("####### seven"), None);
+    assert_eq!(heading_of("###### six"), Some((6, "six".to_string())));
     // 第 needs digits and one of 章/節/条 after them.
     assert_eq!(heading_of("第章"), None);
     assert_eq!(heading_of("第三"), None);
@@ -6405,6 +6410,55 @@ fn render_block_accounts_for_every_byte_of_a_two_reference_line() {
     assert_eq!(snug.text, three);
     assert_eq!(snug.bytes, three.len());
     assert_eq!(snug.overlap_paragraphs, Some((1, 3)));
+    // One byte less of budget (29) and the third paragraph — which
+    // needs its separator counted — no longer fits.
+    let two_paragraphs = render_block(
+        text,
+        &spans,
+        &units,
+        4,
+        5,
+        chunk,
+        two.len() + 1 + "Preceding text: ".len() + 1 + 29,
+    )
+    .unwrap();
+    assert_eq!(
+        two_paragraphs.text,
+        "Position: Last\nReferences: Alpha — alpha body. | Beta — beta body.\nPreceding text: ## Beta beta body."
+    );
+    assert_eq!(two_paragraphs.overlap_paragraphs, Some((2, 3)));
+}
+
+#[test]
+fn render_block_keeps_a_paragraph_exactly_as_long_as_the_budget_and_cuts_tails_on_char_boundaries()
+{
+    // The nearest paragraph is exactly the budget: kept whole, no
+    // ellipsis (the tail branch is for strictly longer ones).
+    let paragraph = "paragraph of thirty bytes!!!!!";
+    assert_eq!(paragraph.len(), 30);
+    let text = format!("## A\n\n{paragraph}\n\n## B\n\nbody");
+    let spans = spans_of(&text);
+    let units = detect_units(&text, &spans);
+    let cap = "Position: B".len() + 1 + "Preceding text: ".len() + 1 + 30;
+    let block = render_block(&text, &spans, &units, 2, 3, "[2] ## B\n\n[3] body", cap).unwrap();
+    assert_eq!(
+        block.text,
+        format!("Position: B\nPreceding text: {paragraph}")
+    );
+    assert_eq!(block.overlap_paragraphs, Some((1, 1)));
+    // A multi-byte tail: the cut lands inside a 3-byte character and
+    // advances to the next boundary, and the ellipsis is charged.
+    let long = "あ".repeat(20);
+    let text = format!("## A\n\n{long}\n\n## B\n\nbody");
+    let spans = spans_of(&text);
+    let units = detect_units(&text, &spans);
+    let cap = "Position: B".len() + 1 + "Preceding text: ".len() + 1 + 29;
+    let block = render_block(&text, &spans, &units, 2, 3, "[2] ## B\n\n[3] body", cap).unwrap();
+    let tail = block.text.split("Preceding text: ").nth(1).unwrap();
+    // 29 - 3 (…) = 26 bytes of room → cut at 60 - 26 = 34, not a
+    // boundary, so 36: eight characters (24 bytes) plus the ellipsis.
+    assert_eq!(tail, format!("…{}", "あ".repeat(8)));
+    assert!(block.bytes <= cap);
 }
 
 #[test]
@@ -6561,6 +6615,28 @@ fn chunk_preferring_ends_a_chunk_at_a_preferred_block_once_past_half_the_cap() {
     );
     // No preference at all: byte-for-byte `chunk`.
     assert_eq!(chunk_preferring(&text, 30, &|_| false), chunk(&text, 30));
+    // At exactly half the cap the preference does not bite yet
+    // ("past half", not "at half"), and a chunk that fits the cap to
+    // the byte is one chunk.
+    let half = "[0] aaaaaa\n\n[1] bb";
+    let prefer_one = |block: &str| leading_paragraph_number(block) == 1;
+    assert_eq!(
+        chunk_preferring(half, 20, &prefer_one),
+        vec![half.to_string()]
+    );
+    assert_eq!(
+        chunk_preferring(half, 19, &prefer_one),
+        vec!["[0] aaaaaa".to_string(), "[1] bb".to_string()]
+    );
+    let exact = "[0] aaaa\n\n[1] bbbb";
+    assert_eq!(
+        chunk_preferring(exact, exact.len(), &|_| false),
+        vec![exact.to_string()]
+    );
+    assert_eq!(
+        chunk_preferring(exact, exact.len() - 1, &|_| false).len(),
+        2
+    );
     // The plan seam: empty breaks is byte-for-byte the old plan.
     let doc = "# A\n\nx\n\n# B\n\ny";
     let texts = |plan: Vec<ChunkDescriptor>| -> Vec<String> {

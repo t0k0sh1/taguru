@@ -635,8 +635,9 @@ pub(super) fn render_block(
                 // Even the nearest paragraph is too long: keep its
                 // tail, the ellipsis charged against the same budget.
                 let room = budget - "…".len();
+                // `len` is always a boundary, so this terminates.
                 let mut cut = paragraph.len() - room;
-                while cut < paragraph.len() && !paragraph.is_char_boundary(cut) {
+                while !paragraph.is_char_boundary(cut) {
                     cut += 1;
                 }
                 pieces.push(format!("…{}", &paragraph[cut..]));

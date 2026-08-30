@@ -67,8 +67,7 @@ pub(super) fn chunk_plan_preferring(
     cap: usize,
     breaks: &HashSet<u32>,
 ) -> Vec<ChunkDescriptor> {
-    let break_before =
-        |block: &str| !breaks.is_empty() && breaks.contains(&leading_paragraph_number(block));
+    let break_before = |block: &str| breaks.contains(&leading_paragraph_number(block));
     chunk_preferring(&labeled_document(text, cap), cap, &break_before)
         .into_iter()
         .map(|piece| {
