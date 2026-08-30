@@ -6684,6 +6684,149 @@ fn overview_user_message_lists_the_units_opening_in_the_chunk() {
 }
 
 #[test]
+fn units_opening_in_a_chunk_exclude_the_title_and_respect_both_bounds() {
+    let text = "Handbook\n\n# A\n\nx\n\n## B\n\ny\n\n# C\n\nz";
+    let units = detect_units(text, &spans_of(text));
+    let ids = |first: u32, last: u32| -> Vec<usize> {
+        units_opening_in(&units, first, last)
+            .into_iter()
+            .map(|unit| unit.unit)
+            .collect()
+    };
+    // Title at 0 (level 0), A at 1, B at 3, C at 5.
+    assert_eq!(ids(0, 2), vec![1], "the title is never offered");
+    assert_eq!(ids(1, 3), vec![1, 2], "both bounds inclusive");
+    assert_eq!(ids(2, 2), Vec::<usize>::new());
+    assert_eq!(ids(4, 6), vec![3]);
+    assert_eq!(ids(3, 5), vec![2, 3]);
+}
+
+#[test]
+fn render_block_accounts_for_every_byte_of_the_cast_and_synopsis_lines() {
+    let text = "## Alpha\n\nalpha body.\n\n## Beta\n\nbeta body.\n\n## Last\n\nlast";
+    let spans = spans_of(text);
+    let units = detect_units(text, &spans);
+    let overview = Overview::merge(&[Some(OverviewAnswer {
+        units: vec![
+            UnitSummary {
+                unit: 0,
+                summary: "one.".to_string(),
+            },
+            UnitSummary {
+                unit: 1,
+                summary: "two.".to_string(),
+            },
+        ],
+        cast: vec![
+            CastEntry {
+                name: "P".to_string(),
+                gloss: "pp".to_string(),
+            },
+            CastEntry {
+                name: "Q".to_string(),
+                gloss: "qq".to_string(),
+            },
+        ],
+    })]);
+    let chunk = "[4] ## Last\n\n[5] last";
+    let position = "Position: Last";
+    let cast = "Cast: P — pp | Q — qq";
+    let before = "Before: Alpha — one. | Beta — two.";
+    // The two-entry cast line fits at exactly its length (+ the
+    // newline after the position line) and not one byte under.
+    let two = format!("{position}\n{cast}");
+    let block = render_block(
+        text,
+        &spans,
+        &units,
+        4,
+        5,
+        chunk,
+        two.len() + 1,
+        Some(&overview),
+    )
+    .unwrap();
+    assert_eq!(block.text, two);
+    assert_eq!(block.cast, vec!["P", "Q"]);
+    let block = render_block(
+        text,
+        &spans,
+        &units,
+        4,
+        5,
+        chunk,
+        two.len(),
+        Some(&overview),
+    )
+    .unwrap();
+    assert_eq!(block.text, format!("{position}\nCast: P — pp"));
+    assert_eq!(block.cast, vec!["P"]);
+    // Likewise the two-entry synopsis line after the cast line.
+    let three = format!("{position}\n{cast}\n{before}");
+    let block = render_block(
+        text,
+        &spans,
+        &units,
+        4,
+        5,
+        chunk,
+        three.len() + 1,
+        Some(&overview),
+    )
+    .unwrap();
+    assert_eq!(block.text, three);
+    assert_eq!(block.synopsis, vec![0, 1]);
+    let block = render_block(
+        text,
+        &spans,
+        &units,
+        4,
+        5,
+        chunk,
+        three.len(),
+        Some(&overview),
+    )
+    .unwrap();
+    assert_eq!(
+        block.text,
+        format!("{position}\n{cast}\nBefore: Alpha — one.")
+    );
+    assert_eq!(block.synopsis, vec![0]);
+    // And the overlap budget after both is charged exactly: 30 bytes
+    // of room hold "beta body." + "## Beta" + "alpha body." (30).
+    let full = format!("{three}\nPreceding text: alpha body. ## Beta beta body.");
+    let block = render_block(
+        text,
+        &spans,
+        &units,
+        4,
+        5,
+        chunk,
+        three.len() + 1 + "Preceding text: ".len() + 1 + 30,
+        Some(&overview),
+    )
+    .unwrap();
+    assert_eq!(block.text, full);
+    assert_eq!(block.bytes, full.len());
+    let block = render_block(
+        text,
+        &spans,
+        &units,
+        4,
+        5,
+        chunk,
+        three.len() + 1 + "Preceding text: ".len() + 1 + 29,
+        Some(&overview),
+    )
+    .unwrap();
+    assert!(
+        block.text.ends_with("Preceding text: ## Beta beta body."),
+        "{}",
+        block.text
+    );
+}
+
+#[test]
 fn preferred_breaks_are_the_outermost_units_first_paragraphs() {
     let text = "# A\n\nx\n\n## A1\n\ny\n\n# B\n\nz";
     let units = detect_units(text, &spans_of(text));

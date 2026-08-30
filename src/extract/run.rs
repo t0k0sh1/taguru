@@ -1040,14 +1040,8 @@ impl Run {
                 answers.push(Some(cached));
                 continue;
             }
-            let here: Vec<&Unit> = units
-                .iter()
-                .filter(|unit| {
-                    unit.level > 0
-                        && unit.paragraph_first >= descriptor.paragraph_first
-                        && unit.paragraph_first <= descriptor.paragraph_last
-                })
-                .collect();
+            let here =
+                units_opening_in(units, descriptor.paragraph_first, descriptor.paragraph_last);
             let offered: Vec<usize> = here.iter().map(|unit| unit.unit).collect();
             let user = overview_user_message(source, index, plan.len(), &descriptor.text, &here);
             let messages = [

@@ -1002,6 +1002,18 @@ pub(super) fn parse_overview_answer(
     Ok(answer)
 }
 
+/// The units the overview pass asks about for one chunk: those
+/// opening inside its paragraph range, the level-0 title excluded (it
+/// is on every path already and is never summarized).
+pub(super) fn units_opening_in(units: &[Unit], first: u32, last: u32) -> Vec<&Unit> {
+    units
+        .iter()
+        .filter(|unit| {
+            unit.level > 0 && unit.paragraph_first >= first && unit.paragraph_first <= last
+        })
+        .collect()
+}
+
 /// ADR 0033 §3.5's `overview` trace record: one per chunk the pass
 /// answered for.
 #[derive(serde::Serialize)]

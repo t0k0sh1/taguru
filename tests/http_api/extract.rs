@@ -2080,6 +2080,19 @@ fn chunk_context_overview_runs_a_pass_first_and_feeds_cast_and_synopsis() {
         "{}",
         user_of(&requests[1])
     );
+    // Each overview ask lists only the units opening in ITS chunk.
+    assert!(
+        !user_of(&requests[0]).contains("unit 1"),
+        "{}",
+        user_of(&requests[0])
+    );
+    assert!(
+        !user_of(&requests[1]).contains("unit 0"),
+        "{}",
+        user_of(&requests[1])
+    );
+    // Nothing was checkpointed before this run: no discard notice.
+    assert!(!stderr.contains("the overview changed"), "{stderr}");
     assert!(system_of(&requests[2]).starts_with("You extract knowledge"));
     // The second extraction chunk's block: cast, and Alpha's synopsis
     // (wholly before it); the first chunk's block has cast only.

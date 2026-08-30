@@ -160,7 +160,7 @@ use chunk_context::{
     BLOCK_PREAMBLE_OPENING, CAST_PREFIX, CHUNK_CONTEXT_MODES, ChunkContextMode, ContextBlock,
     Overview, OverviewAnswer, SYNOPSIS_PREFIX, TraceChunkContext, TraceOverview, TraceStructure,
     Unit, block_cap, block_preamble, detect_units, overview_system_prompt, overview_user_message,
-    parse_overview_answer, preferred_breaks, render_block,
+    parse_overview_answer, preferred_breaks, render_block, units_opening_in,
 };
 #[cfg(test)]
 use chunk_context::{
