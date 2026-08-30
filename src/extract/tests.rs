@@ -6141,6 +6141,24 @@ fn references_resolve_a_repeated_article_number_to_the_nearest_unit_before_the_c
             .iter()
             .all(|heading| !heading.starts_with('○'))
     );
+    // 前条 counts back over articles only: a chapter heading between
+    // the chunk's article and the previous one is skipped, both when
+    // finding the current article and the previous.
+    let text = "第一条　甲。\n\n第二章　乙\n第一節　丙\n\n第二条　前条の規定。";
+    let units = detect_units(text, &spans_of(text));
+    let refs = references(
+        &units,
+        "[2] 第二条　前条の規定。",
+        2,
+        2,
+        &position(&units, 2),
+        4,
+    );
+    assert_eq!(headings(refs), vec!["第一条"]);
+    // A chunk sitting in a chapter with no article of its own has no
+    // 前条 to resolve.
+    let refs = references(&units, "[1] 第二章 前条", 1, 1, &position(&units, 1), 4);
+    assert!(headings(refs).is_empty());
 }
 
 #[test]

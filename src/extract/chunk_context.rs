@@ -394,22 +394,18 @@ pub(super) fn references<'a>(
             continue;
         }
         let key = reference_key(&unit.heading);
-        let is_named = unit.heading.starts_with('第')
-            || unit.heading.starts_with('§')
-            || unit
-                .heading
-                .bytes()
-                .next()
-                .is_some_and(|b| b.is_ascii_digit());
-        if !is_named && key.chars().count() < 4 {
+        // A statute number (`第二条`) is three chars; every other
+        // numbered form (`§ 1 x`, `1.2 x`) is at least four by
+        // construction, so only 第 needs exempting from the length rule.
+        if !unit.heading.starts_with('第') && key.chars().count() < 4 {
             continue;
         }
         match by_key.iter_mut().find(|(seen, _)| *seen == key) {
             Some((_, chosen)) => {
-                let before = |candidate: &Unit| candidate.paragraph_first <= chunk_first;
-                if (before(unit) && unit.paragraph_first >= chosen.paragraph_first)
-                    || (!before(chosen) && unit.paragraph_first < chosen.paragraph_first)
-                {
+                // Units come in document order, so a later unit at or
+                // before the chunk is nearer than the one held; the
+                // first unit after the chunk is the one already held.
+                if unit.paragraph_first <= chunk_first {
                     *chosen = unit;
                 }
             }
@@ -425,18 +421,24 @@ pub(super) fn references<'a>(
         let current = position(units, chunk_first)
             .into_iter()
             .rev()
-            .find(|unit| unit.heading.starts_with('第') && unit.heading.contains('条'));
+            .find(|unit| is_article(unit));
         if let Some(current) = current
             && let Some(previous) = units[..current.unit]
                 .iter()
                 .rev()
-                .find(|unit| unit.heading.starts_with('第') && unit.heading.contains('条'))
+                .find(|unit| is_article(unit))
         {
             note(at, previous);
         }
     }
     found.sort_by_key(|(at, unit)| (*at, unit.unit));
     found.into_iter().map(|(_, unit)| unit).take(cap).collect()
+}
+
+/// A statute article (`第N条`, `第N条の二`, captioned or not) — what
+/// `前条` counts back over; chapters and sections are skipped.
+fn is_article(unit: &Unit) -> bool {
+    unit.heading.starts_with('第') && unit.heading.contains('条')
 }
 
 /// The part of a heading a chunk would quote to refer to it: a
