@@ -405,6 +405,7 @@ pub(super) fn references<'a>(
     // start (statutes refer backward), or the first one after when
     // none precedes — and to nothing when that unit is the chunk's own.
     let mut by_key: Vec<(String, &Unit)> = Vec::new();
+    let mut key_index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for unit in units {
         // Speaker and section labels of minutes are positions, never
         // references; the title is on every path already. An unnumbered
@@ -423,16 +424,25 @@ pub(super) fn references<'a>(
         if !unit.heading.starts_with('第') && key.chars().count() < 4 {
             continue;
         }
-        match by_key.iter_mut().find(|(seen, _)| *seen == key) {
-            Some((_, chosen)) => {
+        // `key_index` keeps the lookup O(1), `by_key` the order:
+        // scanning `by_key` itself made this O(units^2), and the whole
+        // map is rebuilt for every chunk of the document (the choice
+        // below depends on `chunk_first`), so the square was paid once
+        // per chunk — thousands of headings turned one document into
+        // millions of string compares.
+        match key_index.get(&key) {
+            Some(&index) => {
                 // Units come in document order, so a later unit at or
                 // before the chunk is nearer than the one held; the
                 // first unit after the chunk is the one already held.
                 if unit.paragraph_first <= chunk_first {
-                    *chosen = unit;
+                    by_key[index].1 = unit;
                 }
             }
-            None => by_key.push((key, unit)),
+            None => {
+                key_index.insert(key.clone(), by_key.len());
+                by_key.push((key, unit));
+            }
         }
     }
     for (key, unit) in &by_key {

@@ -567,13 +567,17 @@ impl PassageStore {
             Ok(bytes) => {
                 let size = bytes.len() as u64;
                 let (sources, watermark) = snapshot_from_bytes(&bytes).ok_or_else(|| {
+                    // The path goes to the log, not into the error: this
+                    // one travels all the way out to a client as the body
+                    // of `passages_unreadable`'s 500, and the server's
+                    // filesystem layout is not the caller's business. The
+                    // operator reading the log gets the whole story; the
+                    // caller gets what it can act on.
+                    tracing::error!("corrupt passage snapshot at {}", snapshot_path.display());
                     io::Error::new(
                         io::ErrorKind::InvalidData,
-                        format!(
-                            "corrupt passage snapshot at {} — it holds acknowledged \
-                             passages, restore it from backup",
-                            snapshot_path.display()
-                        ),
+                        "corrupt passage snapshot — it holds acknowledged passages, restore \
+                         it from backup",
                     )
                 })?;
                 (sources, watermark, size)
@@ -2646,6 +2650,16 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        // This error is the body of a client-facing 500
+        // (`passages_unreadable`), so the server's own filesystem
+        // layout must not ride along in it — the operator's copy of
+        // that detail is the log line beside the error, not this
+        // string. Pinned here because the path is one `format!` away
+        // from coming back and nothing about the kind would notice.
+        assert!(
+            !error.to_string().contains("t.passages.bin"),
+            "the client-facing error must not carry the snapshot path: {error}"
+        );
     }
 
     #[test]

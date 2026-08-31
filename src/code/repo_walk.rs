@@ -16,6 +16,14 @@ use std::process::Command;
 /// One repository, pinned to its top-level directory.
 pub(crate) struct RepoWalk {
     root: PathBuf,
+    /// `root` with every symlink resolved, settled once at discovery:
+    /// the prefix [`RepoWalk::inside`] holds each read against. It is
+    /// kept beside `root` rather than replacing it because `root` is
+    /// what the operator typed and what every message quotes back;
+    /// this is only ever a comparison boundary. `None` when the root
+    /// cannot be resolved at all (it vanished between `git rev-parse`
+    /// and here), which fails every read closed.
+    canonical_root: Option<PathBuf>,
 }
 
 /// One path's fate between two commits, from `--name-status -z -M`.
@@ -43,8 +51,10 @@ impl RepoWalk {
         if root.is_empty() {
             return Err(format!("{} is not inside a git work tree", start.display()));
         }
+        let root = PathBuf::from(root);
         Ok(RepoWalk {
-            root: PathBuf::from(root),
+            canonical_root: root.canonicalize().ok(),
+            root,
         })
     }
 
@@ -129,10 +139,78 @@ impl RepoWalk {
             .map(|path| {
                 (
                     path.clone(),
-                    std::fs::read_to_string(self.root.join(path)).ok(),
+                    self.open_inside(path).and_then(|mut file| {
+                        let mut text = String::new();
+                        std::io::Read::read_to_string(&mut file, &mut text)
+                            .ok()
+                            .map(|_| text)
+                    }),
                 )
             })
             .collect()
+    }
+
+    /// Resolves one worktree-relative path to the file it actually
+    /// names, or `None` when that file is not a plain file inside this
+    /// repository.
+    ///
+    /// ripgrep — the universe this module mirrors — does not follow a
+    /// symlink it meets while walking, and neither do we. To git a
+    /// tracked symlink is a blob whose *content* is the link target,
+    /// so following one is not reading the repository, it is reading
+    /// whatever the repository points at: a hostile commit carrying
+    /// `notes.rs -> ../../../.env` (or the work tree's own
+    /// `.git/config`, credentials and all) would otherwise pull
+    /// secrets from outside the checkout into the searchable index the
+    /// next `taguru-code sync` builds, on nothing more than a `git
+    /// pull` and a sync. The canonical-prefix check behind it catches
+    /// the same escape made through a symlinked parent directory
+    /// instead of the leaf.
+    /// [`Self::inside`], opened. Reading goes through this rather than
+    /// re-opening the path `inside` returned, because a check and a
+    /// later open are two moments: `O_NOFOLLOW` makes the leaf's
+    /// refusal part of the open itself, so a leaf swapped for a
+    /// symlink after the check fails the open instead of being
+    /// followed.
+    ///
+    /// (`O_NOFOLLOW` is a POSIX flag; off Unix the open is a plain one
+    /// and only [`Self::inside`]'s own check stands, exactly as before.)
+    ///
+    /// What this does NOT close is the same swap made on a *directory*
+    /// component of the path; sealing that needs an `openat` walk
+    /// holding a descriptor per component. Not done, deliberately: it
+    /// buys nothing against the attacker this guard exists for — a
+    /// hostile commit, whose content never executes during a sync —
+    /// and only matters against one who can already write this work
+    /// tree while the sync runs, which is strictly more access than
+    /// reading the file they were trying to reach through it.
+    pub(crate) fn open_inside(&self, path: &str) -> Option<std::fs::File> {
+        let resolved = self.inside(path)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW);
+        }
+        options.open(resolved).ok()
+    }
+
+    pub(crate) fn inside(&self, path: &str) -> Option<PathBuf> {
+        let boundary = self.canonical_root.as_ref()?;
+        let full = self.root.join(path);
+        // symlink_metadata does not follow the leaf, which is the whole
+        // point: metadata() would report the *target's* type and let a
+        // link to a regular file through.
+        if std::fs::symlink_metadata(&full)
+            .ok()?
+            .file_type()
+            .is_symlink()
+        {
+            return None;
+        }
+        let resolved = full.canonicalize().ok()?;
+        resolved.starts_with(boundary).then_some(resolved)
     }
 
     fn git(&self, args: &[&str]) -> Result<Vec<u8>, String> {
@@ -312,6 +390,88 @@ mod tests {
             ("src/a.rs".to_string(), Some("fn edited() {}\n".to_string()))
         );
         assert_eq!(contents[1], ("src/nope.rs".to_string(), None));
+    }
+
+    /// A tracked symlink is a blob whose content is its target, never
+    /// a window onto the target: following one would let any repository
+    /// an agent syncs read whatever it can name — a secret beside the
+    /// checkout, or the work tree's own `.git/config` and the
+    /// credentials a remote URL carries — into a searchable index.
+    #[test]
+    fn read_worktree_never_follows_a_symlink_out_of_the_repository() {
+        let repo = TestRepo::new("symlink");
+        repo.write("src/real.rs", "fn real() {}\n");
+        repo.commit("base");
+
+        // The secret lives beside the repository, the way a checkout
+        // sits next to the environment file of the service it builds.
+        let secret = repo.dir.parent().unwrap().join(format!(
+            "taguru-code-symlink-secret-{}.env",
+            std::process::id()
+        ));
+        fs::write(&secret, "TOKEN=super-secret\n").unwrap();
+
+        std::os::unix::fs::symlink(&secret, repo.dir.join("src/escape.rs")).unwrap();
+        std::os::unix::fs::symlink(repo.dir.join(".git/config"), repo.dir.join("src/dotgit.rs"))
+            .unwrap();
+        // An in-repo directory reached through a symlink is the same
+        // escape wearing a parent instead of a leaf.
+        std::os::unix::fs::symlink(repo.dir.parent().unwrap(), repo.dir.join("up")).unwrap();
+        repo.git(&["add", "-A"]);
+        repo.commit("links");
+
+        let walk = RepoWalk::discover(&repo.dir).unwrap();
+        let contents = walk.read_worktree(&[
+            "src/real.rs".to_string(),
+            "src/escape.rs".to_string(),
+            "src/dotgit.rs".to_string(),
+            format!("up/{}", secret.file_name().unwrap().to_string_lossy()),
+        ]);
+        assert_eq!(
+            contents[0],
+            (
+                "src/real.rs".to_string(),
+                Some("fn real() {}\n".to_string())
+            ),
+            "a plain file inside the repository still reads"
+        );
+        assert_eq!(
+            contents[1],
+            ("src/escape.rs".to_string(), None),
+            "a symlink out of the repository must not be read"
+        );
+        assert_eq!(
+            contents[2],
+            ("src/dotgit.rs".to_string(), None),
+            "a symlink into .git must not be read either"
+        );
+        assert_eq!(
+            contents[3].1, None,
+            "the same escape through a symlinked parent must not be read"
+        );
+
+        let _ = fs::remove_file(&secret);
+    }
+
+    /// The guard is a boundary check, not a blanket refusal: the plain
+    /// files the sync exists to read keep reading, and `inside` hands
+    /// back the resolved path for them.
+    #[test]
+    fn inside_admits_a_plain_file_and_refuses_what_is_not_one() {
+        let repo = TestRepo::new("inside");
+        repo.write("src/a.rs", "fn a() {}\n");
+        repo.commit("base");
+        let walk = RepoWalk::discover(&repo.dir).unwrap();
+        assert_eq!(
+            walk.inside("src/a.rs"),
+            Some(repo.dir.join("src/a.rs").canonicalize().unwrap())
+        );
+        assert_eq!(walk.inside("src/missing.rs"), None);
+        assert_eq!(
+            walk.inside("../"),
+            None,
+            "a relative path climbing out of the root resolves outside the boundary"
+        );
     }
 
     #[test]

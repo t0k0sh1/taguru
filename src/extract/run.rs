@@ -1021,8 +1021,11 @@ impl Run {
     /// label spellings.
     ///
     /// ADR 0033 §3.5 as ADR 0034 amends it: the overview pass. One
-    /// completion per chunk, in document order, asking for a synopsis
-    /// of each unit opening in the chunk and the cast it introduces;
+    /// completion per chunk — dispatched `--parallel` at a time, the
+    /// answers always collected back in document order, so the merged
+    /// overview and its digest do not depend on the fan-out — asking
+    /// for a synopsis of each unit opening in the chunk and the cast
+    /// it introduces;
     /// the answer is cached in the checkpoint by `chunk_sha256` and
     /// reused on resume. Its ladder is escalation only (ADR 0019 —
     /// the same capped resend Stage 1 gets; there is no piece to
@@ -1057,30 +1060,133 @@ impl Run {
             .ladder
             .as_ref()
             .and_then(|ladder| ladder.max_output_tokens);
+        // `--parallel` fans out within one document (see the help text
+        // and `extract_chunks_concurrently`), and an overview call is a
+        // chunk completion like any other — leaving this loop serial
+        // made it the whole phase's floor: eight workers finished the
+        // extraction of a hundred chunks while the overview ahead of it
+        // still cost one round trip per chunk, end to end.
+        if self.parallel > 1 {
+            let indexed: Vec<(usize, &ChunkDescriptor)> = plan.iter().enumerate().collect();
+            // The stop flag is deliberately not polled per chunk here,
+            // the same way the concurrent extraction path does not poll
+            // it: under `--parallel` the interrupt is honoured between
+            // documents, and `extract_document` checks it the moment
+            // this pass returns.
+            let outcomes = crate::registry::dispatch_chunks_concurrently(
+                &indexed,
+                self.parallel,
+                |&(index, descriptor)| -> Result<Option<OverviewAnswer>, String> {
+                    Ok(self.overview_for_chunk(
+                        completions,
+                        observers,
+                        checkpoints,
+                        source,
+                        units,
+                        plan.len(),
+                        index,
+                        descriptor,
+                        &system,
+                        response_format.as_ref(),
+                        budget,
+                    ))
+                },
+            );
+            // Never an `Err` — the closure above cannot produce one, so
+            // no chunk is ever left undispatched — but a `None` from
+            // either layer means no answer was recorded for that chunk,
+            // which is exactly what `None` says here.
+            return outcomes
+                .into_iter()
+                .map(|outcome| outcome.and_then(Result::ok).flatten())
+                .collect();
+        }
         let mut answers = Vec::with_capacity(plan.len());
         for (index, descriptor) in plan.iter().enumerate() {
             if self.stop.check() {
                 answers.resize(plan.len(), None);
                 return answers;
             }
-            if let Some(cached) = checkpoints.overview_answer(&descriptor.sha256) {
-                answers.push(Some(cached));
-                continue;
-            }
-            let here =
-                units_opening_in(units, descriptor.paragraph_first, descriptor.paragraph_last);
-            let offered: Vec<usize> = here.iter().map(|unit| unit.unit).collect();
-            let user = overview_user_message(source, index, plan.len(), &descriptor.text, &here);
-            let messages = [
-                serde_json::json!({"role": "system", "content": &system}),
-                serde_json::json!({"role": "user", "content": &user}),
-            ];
-            let mut options = RequestOptions {
-                response_format: response_format.clone(),
-                max_tokens: budget,
-                fail_fast_on_timeout: false,
-            };
-            let mut outcome = self.overview_round(
+            answers.push(self.overview_for_chunk(
+                completions,
+                observers,
+                checkpoints,
+                source,
+                units,
+                plan.len(),
+                index,
+                descriptor,
+                &system,
+                response_format.as_ref(),
+                budget,
+            ));
+        }
+        answers
+    }
+
+    /// One chunk's overview: the cached answer when the checkpoint
+    /// already holds one, otherwise the ask (with ADR 0019's one
+    /// escalated resend behind it) and whatever it recorded. `None`
+    /// only when nothing was recorded at all; a chunk whose answer did
+    /// not land records — and returns — an EMPTY answer, so a resume
+    /// reads this chunk back exactly as the run that failed it left it.
+    #[allow(clippy::too_many_arguments)] // one loop's body, hoisted to be shared by both paths
+    fn overview_for_chunk(
+        &self,
+        completions: &Completions,
+        observers: &Observers,
+        checkpoints: &CheckpointStore,
+        source: &str,
+        units: &[Unit],
+        chunk_total: usize,
+        index: usize,
+        descriptor: &ChunkDescriptor,
+        system: &str,
+        response_format: Option<&serde_json::Value>,
+        budget: Option<usize>,
+    ) -> Option<OverviewAnswer> {
+        if let Some(cached) = checkpoints.overview_answer(&descriptor.sha256) {
+            return Some(cached);
+        }
+        let here = units_opening_in(units, descriptor.paragraph_first, descriptor.paragraph_last);
+        let offered: Vec<usize> = here.iter().map(|unit| unit.unit).collect();
+        let user = overview_user_message(source, index, chunk_total, &descriptor.text, &here);
+        let messages = [
+            serde_json::json!({"role": "system", "content": system}),
+            serde_json::json!({"role": "user", "content": &user}),
+        ];
+        let mut options = RequestOptions {
+            response_format: response_format.cloned(),
+            max_tokens: budget,
+            fail_fast_on_timeout: false,
+        };
+        let mut outcome = self.overview_round(
+            completions,
+            observers,
+            source,
+            index,
+            &descriptor.sha256,
+            &messages,
+            &options,
+            &offered,
+        );
+        if matches!(outcome, OverviewOutcome::LengthLimited)
+            && let Some(ladder) = self.ladder.as_ref()
+            && budget.is_some()
+        {
+            let mut record = MoveRecord::blank(
+                "escalate",
+                completions.run_id(),
+                &descriptor.sha256,
+                index,
+                "the overview answer ended at the output cap; resending once at the \
+                 escalated budget",
+            );
+            record.from_max_tokens = budget;
+            record.to_max_tokens = ladder.escalated_budget();
+            observers.move_event(&record);
+            options.max_tokens = ladder.escalated_budget();
+            outcome = self.overview_round(
                 completions,
                 observers,
                 source,
@@ -1090,71 +1196,30 @@ impl Run {
                 &options,
                 &offered,
             );
-            if matches!(outcome, OverviewOutcome::LengthLimited)
-                && let Some(ladder) = self.ladder.as_ref()
-                && budget.is_some()
-            {
-                let mut record = MoveRecord::blank(
-                    "escalate",
-                    completions.run_id(),
-                    &descriptor.sha256,
-                    index,
-                    "the overview answer ended at the output cap; resending once at the \
-                     escalated budget",
-                );
-                record.from_max_tokens = budget;
-                record.to_max_tokens = ladder.escalated_budget();
-                observers.move_event(&record);
-                options.max_tokens = ladder.escalated_budget();
-                outcome = self.overview_round(
-                    completions,
-                    observers,
-                    source,
-                    index,
-                    &descriptor.sha256,
-                    &messages,
-                    &options,
-                    &offered,
-                );
-            }
-            match outcome {
-                OverviewOutcome::Answered(answer) => {
-                    checkpoints.record_overview(source, descriptor.sha256.clone(), answer.clone());
-                    answers.push(Some(answer));
-                }
-                OverviewOutcome::LengthLimited => {
-                    eprintln!(
-                        "taguru: extract: {source}: chunk {}/{}: the overview answer was cut \
-                         off at the output limit — this chunk contributes no synopsis or cast \
-                         (recorded so for this document's resume; --force re-asks)",
-                        index + 1,
-                        plan.len()
-                    );
-                    checkpoints.record_overview(
-                        source,
-                        descriptor.sha256.clone(),
-                        OverviewAnswer::default(),
-                    );
-                    answers.push(None);
-                }
-                OverviewOutcome::Failed(message) => {
-                    eprintln!(
-                        "taguru: extract: {source}: chunk {}/{}: overview: {message} — this \
-                         chunk contributes no synopsis or cast (recorded so for this \
-                         document's resume; --force re-asks)",
-                        index + 1,
-                        plan.len()
-                    );
-                    checkpoints.record_overview(
-                        source,
-                        descriptor.sha256.clone(),
-                        OverviewAnswer::default(),
-                    );
-                    answers.push(None);
-                }
-            }
         }
-        answers
+        let why = match outcome {
+            OverviewOutcome::Answered(answer) => {
+                checkpoints.record_overview(source, descriptor.sha256.clone(), answer.clone());
+                return Some(answer);
+            }
+            OverviewOutcome::LengthLimited => {
+                "the overview answer was cut off at the output limit".to_string()
+            }
+            OverviewOutcome::Failed(message) => format!("overview: {message}"),
+        };
+        eprintln!(
+            "taguru: extract: {source}: chunk {}/{chunk_total}: {why} — this chunk contributes \
+             no synopsis or cast (recorded so for this document's resume; --force re-asks)",
+            index + 1
+        );
+        checkpoints.record_overview(source, descriptor.sha256.clone(), OverviewAnswer::default());
+        // The empty answer travels as `Some`, not as a gap: it is what
+        // the checkpoint now holds, so a resumed document — which reads
+        // that record back as a cache hit — describes this chunk
+        // exactly as this run does. `None` stays reserved for a chunk
+        // with no record at all (the stop check in the caller), which
+        // is the only state a resume would re-ask.
+        Some(OverviewAnswer::default())
     }
 
     /// One overview completion, recorded as a `stage: "overview"`

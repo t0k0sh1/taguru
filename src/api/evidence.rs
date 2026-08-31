@@ -481,7 +481,12 @@ pub(crate) struct CitationEntry {
 /// sort by `(source, paragraph)` separately.
 #[derive(Default)]
 pub(crate) struct CitationCollector {
-    seen: HashSet<(String, u32)>,
+    /// Keyed source-first rather than by a `(String, u32)` tuple so
+    /// that [`Self::contains`] — called once per citation contribution
+    /// of every candidate of every unit, deep inside the packing loop —
+    /// can look up a borrowed `&str`. A tuple key has no `Borrow<(&str,
+    /// u32)>`, so membership there cost a fresh `String` per check.
+    seen: HashMap<String, HashSet<u32>>,
     entries: Vec<CitationEntry>,
 }
 
@@ -493,7 +498,12 @@ impl CitationCollector {
     /// Adds one citation locator's text if `(source, paragraph)` was
     /// not already collected. Returns whether it was newly added.
     pub(crate) fn insert(&mut self, source: String, paragraph: u32, citation: Citation) -> bool {
-        if !self.seen.insert((source.clone(), paragraph)) {
+        if !self
+            .seen
+            .entry(source.clone())
+            .or_default()
+            .insert(paragraph)
+        {
             return false;
         }
         self.entries.push(CitationEntry {
@@ -509,7 +519,9 @@ impl CitationCollector {
     /// insert, e.g. to cost a not-yet-committed candidate against what
     /// a package already carries.
     pub(crate) fn contains(&self, source: &str, paragraph: u32) -> bool {
-        self.seen.contains(&(source.to_string(), paragraph))
+        self.seen
+            .get(source)
+            .is_some_and(|paragraphs| paragraphs.contains(&paragraph))
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -1032,7 +1044,26 @@ mod tests {
         let mut collector = CitationCollector::new();
         assert!(collector.insert("book.txt".to_string(), 3, citation()));
         assert!(!collector.insert("book.txt".to_string(), 3, citation()));
-        assert_eq!(collector.into_entries().len(), 1);
+
+        // `contains` answers for the same key `insert` deduped on, and
+        // discriminates on BOTH halves of it — the source-first map it
+        // reads (chosen so the check need not allocate a key) must not
+        // collapse two paragraphs of one source, nor one paragraph
+        // across sources.
+        assert!(collector.contains("book.txt", 3));
+        assert!(
+            !collector.contains("book.txt", 4),
+            "the paragraph is part of the key"
+        );
+        assert!(!collector.contains("other.txt", 3), "so is the source");
+        assert!(collector.insert("book.txt".to_string(), 4, citation()));
+        assert!(collector.contains("book.txt", 4));
+        assert!(
+            collector.contains("book.txt", 3),
+            "a second paragraph joins the first"
+        );
+
+        assert_eq!(collector.into_entries().len(), 2);
     }
 
     // --- Serde ---
