@@ -7,6 +7,29 @@ Entries that change an on-disk format or a response shape say so.
 
 ## [Unreleased]
 
+## [0.9.6] - 2026-08-31
+
+An `extract` context-and-replay release. A chunk no longer arrives at
+the model stripped of where it sits: `--chunk-context` prefixes each
+one with the heading path in force, the units it refers to by number or
+name, and the text just before it — built mechanically from the
+document's own structure — and, above that, a model-written synopsis of
+each unit with the cast the document has introduced so far, optionally
+grounded in an existing context's own relations for the names it
+already knows (`structure` / `overview` / `ingested`, the last needing
+`--vocabulary`; ADR 0033 and ADR 0034, #782). And a recorded run can be
+re-driven: the attempts log ADR 0025 keeps holds enough to replay a
+document step by step — on this machine or another one — pinning the
+system prompt and the recorded answers verbatim, with `--resume-from`
+naming the step to pick up from (`--replay`, ADR 0030 and ADR 0031,
+#781). Alongside them, a cross-cutting audit's fixes (#847): a cue
+length cap on the four `resolve` endpoints, `taguru-code sync` refusing
+to follow a symlink out of the repository, the overview pass honouring
+`--parallel`, and three unbounded-growth or quadratic paths closed.
+**On-disk format change**: additive record kinds and fields only —
+older checkpoints and manifests still load, and the batch wire format
+is untouched.
+
 ### Added
 
 - `taguru extract --chunk-context structure` (env
@@ -3827,7 +3850,8 @@ OTLP tracing, OAuth for remote MCP), the MCP stdio bridge, and the
 offline tooling (`import`, `extract`, `inspect`, `estimate`).
 Published to crates.io and GHCR.
 
-[Unreleased]: https://github.com/t0k0sh1/taguru/compare/v0.9.5...HEAD
+[Unreleased]: https://github.com/t0k0sh1/taguru/compare/v0.9.6...HEAD
+[0.9.6]: https://github.com/t0k0sh1/taguru/compare/v0.9.5...v0.9.6
 [0.9.5]: https://github.com/t0k0sh1/taguru/compare/v0.9.4...v0.9.5
 [0.9.4]: https://github.com/t0k0sh1/taguru/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/t0k0sh1/taguru/compare/v0.9.2...v0.9.3
