@@ -139,8 +139,12 @@ impl RepoWalk {
             .map(|path| {
                 (
                     path.clone(),
-                    self.inside(path)
-                        .and_then(|full| std::fs::read_to_string(full).ok()),
+                    self.open_inside(path).and_then(|mut file| {
+                        let mut text = String::new();
+                        std::io::Read::read_to_string(&mut file, &mut text)
+                            .ok()
+                            .map(|_| text)
+                    }),
                 )
             })
             .collect()
@@ -162,6 +166,36 @@ impl RepoWalk {
     /// pull` and a sync. The canonical-prefix check behind it catches
     /// the same escape made through a symlinked parent directory
     /// instead of the leaf.
+    /// [`Self::inside`], opened. Reading goes through this rather than
+    /// re-opening the path `inside` returned, because a check and a
+    /// later open are two moments: `O_NOFOLLOW` makes the leaf's
+    /// refusal part of the open itself, so a leaf swapped for a
+    /// symlink after the check fails the open instead of being
+    /// followed.
+    ///
+    /// (`O_NOFOLLOW` is a POSIX flag; off Unix the open is a plain one
+    /// and only [`Self::inside`]'s own check stands, exactly as before.)
+    ///
+    /// What this does NOT close is the same swap made on a *directory*
+    /// component of the path; sealing that needs an `openat` walk
+    /// holding a descriptor per component. Not done, deliberately: it
+    /// buys nothing against the attacker this guard exists for — a
+    /// hostile commit, whose content never executes during a sync —
+    /// and only matters against one who can already write this work
+    /// tree while the sync runs, which is strictly more access than
+    /// reading the file they were trying to reach through it.
+    pub(crate) fn open_inside(&self, path: &str) -> Option<std::fs::File> {
+        let resolved = self.inside(path)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW);
+        }
+        options.open(resolved).ok()
+    }
+
     pub(crate) fn inside(&self, path: &str) -> Option<PathBuf> {
         let boundary = self.canonical_root.as_ref()?;
         let full = self.root.join(path);

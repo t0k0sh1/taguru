@@ -2650,6 +2650,16 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        // This error is the body of a client-facing 500
+        // (`passages_unreadable`), so the server's own filesystem
+        // layout must not ride along in it — the operator's copy of
+        // that detail is the log line beside the error, not this
+        // string. Pinned here because the path is one `format!` away
+        // from coming back and nothing about the kind would notice.
+        assert!(
+            !error.to_string().contains("t.passages.bin"),
+            "the client-facing error must not carry the snapshot path: {error}"
+        );
     }
 
     #[test]

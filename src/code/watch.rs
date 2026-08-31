@@ -174,7 +174,10 @@ fn snapshot(walk: &RepoWalk, data_dir: &std::path::Path) -> Result<String, Strin
         // Through the same guard sync reads content with: a path that
         // leaves the repository is not ours to hash, and hashing what
         // it points at would make an outside edit tick the watcher.
-        let digest = match walk.inside(&path).map(std::fs::read) {
+        let digest = match walk.open_inside(&path).map(|mut file| {
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(&mut file, &mut bytes).map(|_| bytes)
+        }) {
             Some(Ok(bytes)) => crate::sha256::sha256_hex(&bytes),
             _ => "gone".to_string(),
         };
