@@ -22,7 +22,7 @@ re-driven: the attempts log ADR 0025 keeps holds enough to replay a
 document step by step — on this machine or another one — pinning the
 system prompt and the recorded answers verbatim, with `--resume-from`
 naming the step to pick up from (`--replay`, ADR 0030 and ADR 0031,
-#781). Alongside them, a cross-cutting audit's fixes (#847): a cue
+issue #781). Alongside them, a cross-cutting audit's fixes (#847): a cue
 length cap on the four `resolve` endpoints, `taguru-code sync` refusing
 to follow a symlink out of the repository, the overview pass honouring
 `--parallel`, and three unbounded-growth or quadratic paths closed.
