@@ -108,7 +108,7 @@ from .ingest_connectors import (
 )
 from .retrievers import TaguruRetriever
 
-__version__ = "0.9.5"
+__version__ = "0.9.6"
 
 __all__ = [
     "TaguruRetriever",
