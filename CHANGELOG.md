@@ -59,6 +59,61 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Fixed
 
+- The four `resolve` endpoints (`POST /contexts/{name}/resolve`,
+  `/resolve_label`, and both `/explain` twins) now refuse a `cue` — and
+  an `explain` `expected` — over the 1024-byte name cap every other
+  free-text name is held to, with the usual `invalid_argument` refusal.
+  The entry sweep behind them tests every stored spelling against the
+  cue for containment in both directions with no deadline check inside
+  that loop and no heavy-ops limiter in front of it, so an uncapped cue
+  held a worker thread for as long as the vocabulary took to sweep. A
+  cue longer than any spelling that could be stored never resolved to
+  anything anyway.
+
+- `taguru-code sync` (and the watcher's dirty-file hashing) no longer
+  follow a symlink out of the repository. To git a tracked symlink is a
+  blob whose content is the link target, and ripgrep — the universe this
+  walker mirrors — does not follow one either; reading through it meant a
+  repository carrying `notes.rs -> ../../../.env`, or a link to the work
+  tree's own `.git/config`, could pull secrets from outside the checkout
+  into the searchable index on nothing more than a pull and a sync. The
+  same escape made through a symlinked parent directory is refused too.
+
+- `taguru extract --chunk-context overview`: a chunk whose overview
+  answer does not land is now traced as an EMPTY `overview` record
+  rather than omitted. The empty answer was already what the checkpoint
+  recorded (ADR 0034 §3.3), so the run that failed the ask and the
+  resume that read the record back described the same document
+  differently — the resume wrote a record the original run had no line
+  for. Trace records only; the batch, manifest, checkpoint digest, and
+  extraction results are unchanged.
+
+- `taguru extract --chunk-context overview --parallel N` now runs the
+  overview pass N asks at a time, like every other chunk completion
+  `--parallel` covers within one document. The pass ignored the flag, so
+  it became the phase's floor: the extraction fanned out while the
+  overview ahead of it still cost one round trip per chunk. Answers are
+  collected back in document order, so the merged overview and its
+  digest do not depend on the fan-out; at `--parallel 1` the pass still
+  polls the interrupt between chunks.
+
+- `Context::retract_association` now prunes the source-to-edges reverse
+  index as it unlinks, holding in memory the invariant an image rebuild
+  already produced from the live attribution chains. Before, an unlinked
+  edge kept its entry and a retract-then-reassert cycle added a second
+  one every round, so a long-lived process grew the index without bound
+  on churn (readers compensated, so no answer was ever wrong).
+
+- The BM25 index no longer interns a source for an upsert that
+  tombstones nothing and lands nothing. Interning is permanent until the
+  full rebuild tombstone pressure asks for, which such an upsert never
+  creates, so repeating one grew the index's three name tables without
+  bound in a server that does not restart.
+
+- A corrupt passage snapshot's 500 no longer carries the server's own
+  filesystem path to the caller; the path goes to the log, where the
+  operator reading it gets the whole story.
+
 - `scripts/extract_metrics.py` now counts a document that failed — an
   attempts log with no trace beside it, the log ADR 0025 keeps for
   exactly this — as `failed`, apart from `documents`, with its attempts,

@@ -9620,3 +9620,404 @@ fn resume_from_rejects_an_unknown_step_name() {
     let _ = std::fs::remove_dir_all(&docs);
     let _ = std::fs::remove_dir_all(&out);
 }
+
+/// The overview pass runs to completion before the first extraction
+/// call, so per chunk index the stub's attempt 0 is always the
+/// overview ask and attempt 1 the extraction — what lets these tests
+/// script the two apart through `stub_chat_server_concurrent`'s
+/// `(index, attempt)` seam.
+fn overview_reply(index: usize) -> String {
+    json!({"units": [], "cast": [{"name": format!("名{index}"), "gloss": "説明"}]}).to_string()
+}
+
+/// The `overview` records of a written document's trace, by chunk.
+fn overview_records(out: &std::path::Path) -> Vec<Value> {
+    let (_name, records) = read_trace(out);
+    records
+        .into_iter()
+        .filter(|record| record["kind"] == "overview")
+        .collect()
+}
+
+/// ADR 0034 §3.3/§4: a chunk whose overview does not land is recorded
+/// as an EMPTY answer, not left as a gap — so a resumed document
+/// neither re-asks it nor loses the units checkpointed under it. The
+/// trace says the same thing on both sides of the resume: an empty
+/// record, never a missing one (a run and its resume must not describe
+/// the same document differently).
+#[test]
+fn a_failed_overview_is_recorded_once_and_never_re_asked_on_resume() {
+    let docs = batch_dir("extract-overview-resume-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, format!("{}\n\n{}", "a".repeat(600), "b".repeat(600))).unwrap();
+    let out = batch_dir("extract-overview-resume-out");
+    let args = [
+        "--context",
+        "c",
+        "--chunk-bytes",
+        "700",
+        "--chunk-context",
+        "overview",
+        doc.to_str().unwrap(),
+    ];
+
+    // Chunk 0's overview comes back as prose, not the JSON object asked
+    // for — the pass reports it once and records an empty answer.
+    // Chunk 1's extraction then fails, so the document fails with both
+    // overview answers already checkpointed.
+    let (url, captured) = stub_chat_server_concurrent(|index, attempt| match (index, attempt) {
+        (0, 0) => chat_ok("I am afraid I cannot summarize that."),
+        (_, 0) => chat_ok(&overview_reply(index)),
+        (1, _) => chat_error(400, "Bad Request", "", "no thanks"),
+        _ => chat_ok(&json!({"associations": []}).to_string()),
+    });
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &args,
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("chunk 1/2: overview:"),
+        "the failed overview is reported once, naming its chunk: {stderr}"
+    );
+    assert!(
+        stderr.contains("contributes no synopsis or cast"),
+        "{stderr}"
+    );
+    assert_eq!(
+        captured.lock().unwrap().len(),
+        4,
+        "two overview asks, then two extraction asks"
+    );
+
+    // The resume: neither overview is asked again — the failed one is
+    // held by its empty record exactly as the answered one is held by
+    // its answer — and only the extraction that failed is re-asked.
+    let (url, captured) = stub_chat_server_concurrent(|_index, _attempt| {
+        chat_ok(&json!({"associations": []}).to_string())
+    });
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &args,
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("1 written"), "{stdout}");
+    let seen = captured.lock().unwrap().clone();
+    assert_eq!(
+        seen.len(),
+        1,
+        "only the failed extraction is re-asked: {seen:?}"
+    );
+    assert_eq!(chunk_index_of(&seen[0]), 1);
+    assert!(
+        !seen[0].contains("summarize its structure"),
+        "a checkpointed overview — empty or not — must never be re-asked: {}",
+        seen[0]
+    );
+
+    // Both chunks carry an overview record; chunk 0's is the empty one
+    // the failure recorded, read back from the checkpoint.
+    let overview = overview_records(&out);
+    assert_eq!(overview.len(), 2, "{overview:?}");
+    assert_eq!(overview[0]["chunk_index"], json!(0));
+    assert_eq!(overview[0]["units"], json!([]), "{overview:?}");
+    assert_eq!(overview[0]["cast"], json!([]), "{overview:?}");
+    assert_eq!(overview[1]["chunk_index"], json!(1));
+    assert_eq!(
+        overview[1]["cast"][0]["name"],
+        json!("名1"),
+        "the answered chunk keeps its cast across the resume: {overview:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// The live half of the same symmetry: a document that COMPLETES with
+/// one chunk's overview failed writes that chunk an empty `overview`
+/// trace record too. Before this, the failure left a gap the trace
+/// simply omitted, so the run that failed the ask and the resume that
+/// read its record back described the same document differently.
+#[test]
+fn a_failed_overview_is_traced_as_an_empty_record_not_a_gap() {
+    let docs = batch_dir("extract-overview-trace-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, format!("{}\n\n{}", "a".repeat(600), "b".repeat(600))).unwrap();
+    let out = batch_dir("extract-overview-trace-out");
+
+    let (url, _captured) = stub_chat_server_concurrent(|index, attempt| match (index, attempt) {
+        (0, 0) => chat_ok("I am afraid I cannot summarize that."),
+        (_, 0) => chat_ok(&overview_reply(index)),
+        _ => chat_ok(&json!({"associations": []}).to_string()),
+    });
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--chunk-bytes",
+            "700",
+            "--chunk-context",
+            "overview",
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+
+    let overview = overview_records(&out);
+    assert_eq!(
+        overview.len(),
+        2,
+        "every chunk the pass recorded an answer for is traced: {overview:?}"
+    );
+    assert_eq!(overview[0]["chunk_index"], json!(0));
+    assert_eq!(overview[0]["units"], json!([]), "{overview:?}");
+    assert_eq!(overview[0]["cast"], json!([]), "{overview:?}");
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// `--parallel N` is documented as "chunk completions to run
+/// concurrently within one document", and an overview ask is a chunk
+/// completion. The pass used to ignore the flag entirely, so under
+/// `--chunk-context overview` it became the phase's floor: the
+/// extraction fanned out four ways while the overview ahead of it
+/// still cost one round trip per chunk, end to end. The stub counts
+/// how many overview asks are in flight at once — serial can never
+/// exceed one — and the fan-out must not change a byte of what the run
+/// produces (the merged overview and its digest are collected back in
+/// document order, whatever order the answers arrive in).
+#[test]
+fn the_overview_pass_fans_out_under_parallel_and_matches_the_sequential_run() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let docs = batch_dir("extract-overview-par-docs");
+    let doc = docs.join("a.md");
+    let body = ["a", "b", "c", "d"]
+        .iter()
+        .map(|letter| letter.repeat(600))
+        .collect::<Vec<String>>()
+        .join("\n\n");
+    std::fs::write(&doc, &body).unwrap();
+    let doc_src = doc.to_str().unwrap().to_string();
+    let args = |extra: Vec<&'static str>| {
+        let mut all = vec![
+            "--context",
+            "c",
+            "--chunk-bytes",
+            "700",
+            "--chunk-context",
+            "overview",
+        ];
+        all.extend(extra);
+        all
+    };
+
+    fn extraction_reply(index: usize) -> String {
+        json!({"associations": [
+            {"subject": "S", "label": "chunk", "object": format!("value-{index}"), "weight": 1.0}
+        ]})
+        .to_string()
+    }
+
+    let seq_out = batch_dir("extract-overview-par-seq-out");
+    let (seq_url, _seq) = stub_chat_server_concurrent(|index, attempt| {
+        if attempt == 0 {
+            chat_ok(&overview_reply(index))
+        } else {
+            chat_ok(&extraction_reply(index))
+        }
+    });
+    let mut seq_args = args(vec![]);
+    seq_args.push(&doc_src);
+    let (code, seq_stdout, stderr) = run_extract(
+        &seq_out,
+        &[
+            ("TAGURU_EXTRACT_URL", seq_url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &seq_args,
+    );
+    assert_eq!(code, 0, "stdout: {seq_stdout}\nstderr: {stderr}");
+
+    let inflight = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+    let inflight_stub = Arc::clone(&inflight);
+    let peak_stub = Arc::clone(&peak);
+    let (par_url, par_captured) = stub_chat_server_concurrent(move |index, attempt| {
+        if attempt == 0 {
+            let now = inflight_stub.fetch_add(1, Ordering::SeqCst) + 1;
+            peak_stub.fetch_max(now, Ordering::SeqCst);
+            // Long enough that a genuine fan-out overlaps; a serial
+            // pass simply serves them one after another and peaks at 1.
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            inflight_stub.fetch_sub(1, Ordering::SeqCst);
+            chat_ok(&overview_reply(index))
+        } else {
+            chat_ok(&extraction_reply(index))
+        }
+    });
+    let par_out = batch_dir("extract-overview-par-par-out");
+    let mut par_args = args(vec!["--parallel", "4"]);
+    par_args.push(&doc_src);
+    let (code, par_stdout, stderr) = run_extract(
+        &par_out,
+        &[
+            ("TAGURU_EXTRACT_URL", par_url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &par_args,
+    );
+    assert_eq!(code, 0, "stdout: {par_stdout}\nstderr: {stderr}");
+
+    assert!(
+        peak.load(Ordering::SeqCst) > 1,
+        "the overview pass must honour --parallel; peak concurrent overview asks was {}",
+        peak.load(Ordering::SeqCst)
+    );
+    assert_eq!(
+        par_captured
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|body| body.contains("summarize its structure"))
+            .count(),
+        4,
+        "every chunk is asked for its overview exactly once"
+    );
+
+    let seq_files = stray_batch_files(&seq_out);
+    let par_files = stray_batch_files(&par_out);
+    assert_eq!(seq_files.len(), 1, "{seq_files:?}");
+    assert_eq!(par_files.len(), 1, "{par_files:?}");
+    assert_eq!(
+        std::fs::read_to_string(seq_out.join(&seq_files[0])).unwrap(),
+        std::fs::read_to_string(par_out.join(&par_files[0])).unwrap(),
+        "the fan-out must not change the batch"
+    );
+    assert_eq!(
+        overview_records(&seq_out),
+        overview_records(&par_out),
+        "nor the overview the trace records"
+    );
+    assert_eq!(
+        seq_stdout.replace(seq_out.to_str().unwrap(), "OUT_DIR"),
+        par_stdout.replace(par_out.to_str().unwrap(), "OUT_DIR"),
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&seq_out);
+    let _ = std::fs::remove_dir_all(&par_out);
+}
+
+/// Issue #179's cooperative stop applies to the overview pass exactly
+/// as it applies to the extraction loop below it: at `--parallel 1`
+/// the pass polls the flag between chunks, so an interrupt taken while
+/// chunk 0's overview is in flight ends the pass there instead of
+/// asking every remaining chunk first. (Above `--parallel 1` the pass
+/// fans out and the interrupt is honoured between documents, the same
+/// scoping `extract_chunks_concurrently` documents for its own loop —
+/// which is why the two paths are not one.)
+///
+/// Structured like `cooperative_sigint_stops_between_chunks_and_a_
+/// rerun_resumes`, and for the same reason: the stub signals once
+/// chunk 0's request has actually arrived, so the SIGINT lands with
+/// that ask genuinely in flight rather than on a guessed sleep, and
+/// every wait carries its own bound so a surprise fails fast.
+#[test]
+fn a_sigint_during_the_overview_pass_stops_it_between_chunks() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    let docs = batch_dir("extract-overview-sigint-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, multi_chunk_document(9)).unwrap();
+    let out = batch_dir("extract-overview-sigint-out");
+
+    let asked = Arc::new(AtomicUsize::new(0));
+    let asked_stub = Arc::clone(&asked);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let (first_received_tx, first_received_rx) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        use std::io::Write;
+        for (index, stream) in listener.incoming().enumerate() {
+            let Ok(mut stream) = stream else { continue };
+            let asked = Arc::clone(&asked_stub);
+            let first_received_tx = first_received_tx.clone();
+            std::thread::spawn(move || {
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+                let Some((_headers, body)) = read_http_request(&mut stream) else {
+                    return;
+                };
+                if body.contains("summarize its structure") {
+                    asked.fetch_add(1, Ordering::SeqCst);
+                }
+                if index == 0 {
+                    let _ = first_received_tx.send(());
+                    // Held long enough for the SIGINT to land while
+                    // this first ask is genuinely outstanding.
+                    std::thread::sleep(Duration::from_millis(4000));
+                }
+                let _ = stream
+                    .write_all(chat_ok(&json!({"units": [], "cast": []}).to_string()).as_bytes());
+            });
+        }
+    });
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_taguru"));
+    scrub_extract_env(&mut command)
+        .arg("extract")
+        .env("TAGURU_EXTRACT_URL", &url)
+        .env("TAGURU_EXTRACT_MODEL", "stub-model")
+        .args(["--out", out.to_str().unwrap(), "--context", "c"])
+        .args(["--chunk-context", "overview"])
+        // One paragraph per chunk, so the pass has eight more chunks
+        // ahead of it when the interrupt lands — the gap between
+        // stopping there and running the pass out is unmistakable.
+        .args(["--chunk-bytes", "4000"])
+        .arg(&doc)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().expect("extract must spawn");
+    wait_for_stop_signal_handlers(child.stderr.take().unwrap());
+    first_received_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the first overview ask must reach the stub before SIGINT is sent");
+
+    let pid = child.id().to_string();
+    Command::new("kill")
+        .args(["-INT", &pid])
+        .status()
+        .expect("kill must run");
+
+    let output = wait_with_deadline(child, Duration::from_secs(30));
+    assert_eq!(output.status.code(), Some(130), "{output:?}");
+    let asked = asked.load(Ordering::SeqCst);
+    assert!(
+        asked <= 2,
+        "the pass must stop between chunks, not ask the whole document first; it asked {asked}"
+    );
+    assert!(
+        stray_batch_files(&out).is_empty(),
+        "an interrupted document must not leave a batch file behind"
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}

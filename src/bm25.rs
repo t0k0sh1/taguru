@@ -223,12 +223,25 @@ impl Bm25Index {
     /// tombstone, a paragraph appended, or both. `false` only for the
     /// otherwise-inert case CodeRabbit caught on #574 (issue #563 item
     /// 2's own review): an empty or whitespace-only `record` upserted
-    /// for a source with nothing live to tombstone either — `intern`
-    /// still registers the source name, but nothing search-observable
-    /// moved, so callers deciding whether to mark the index dirty must
-    /// not read this as a change.
+    /// for a source with nothing live to tombstone either — nothing
+    /// search-observable moved, so callers deciding whether to mark the
+    /// index dirty must not read this as a change. Such a call now
+    /// leaves the source uninterned as well, so repeating it cannot
+    /// grow the index either (see the comment on the lookup below).
     pub(crate) fn upsert_source(&mut self, source: &str, record: &PassageRecord) -> bool {
-        let source_id = self.intern(source);
+        // Interning is permanent: a name, its id, and its slot list are
+        // only ever dropped by the full rebuild `needs_reclaim` asks
+        // for, and that asks on tombstone pressure alone. An upsert
+        // with nothing to tombstone and nothing to land would register
+        // a name this index holds nothing for and never will, so a
+        // churn of such records grows all three interning tables
+        // without bound in a process that does not restart. Look the
+        // source up first; intern only once there is something to hold.
+        let source_id = match self.source_ids.get(source) {
+            Some(&known) => known,
+            None if record.paragraph_texts().next().is_none() => return false,
+            None => self.intern(source),
+        };
         let mut changed = self.tombstone(source_id);
         let slot_list = self.by_source.entry(source_id).or_default();
         // The record's questions are sorted by paragraph, so one cursor
@@ -1558,6 +1571,40 @@ mod tests {
             !index.upsert_source("real", &record("")),
             "and once nothing is left live, upserting empty again is inert"
         );
+    }
+
+    /// The inert upsert above must also be inert in memory. Interning
+    /// is permanent — a name, its id and its slot list only ever leave
+    /// on the full rebuild `needs_reclaim` asks for, and that asks on
+    /// tombstone pressure alone, which an inert upsert never creates.
+    /// Registering the name anyway meant a churn of such records grew
+    /// all three interning tables without bound in a server that does
+    /// not restart.
+    #[test]
+    fn an_inert_upsert_does_not_intern_the_source() {
+        let mut index = Bm25Index::empty();
+        for n in 0..100 {
+            assert!(!index.upsert_source(&format!("empty-{n}"), &record("")));
+        }
+        assert!(
+            index.source_ids.is_empty() && index.sources.is_empty() && index.by_source.is_empty(),
+            "a source the index holds nothing for must not be registered at all"
+        );
+        assert!(!index.needs_reclaim(), "and nothing asked for a rebuild");
+
+        // A source with content is interned, and stays interned across
+        // a tombstone so a later re-assert folds back into the same id
+        // (and so `remove_source` can still find it).
+        assert!(index.upsert_source("real", &record("霧沢町の湧き水。")));
+        assert_eq!(index.sources.len(), 1);
+        assert!(index.upsert_source("real", &record("")));
+        assert_eq!(
+            index.sources.len(),
+            1,
+            "an emptied source keeps its id — the tombstones are addressed by it"
+        );
+        assert!(!index.upsert_source("real", &record("")));
+        assert_eq!(index.sources.len(), 1);
     }
 
     #[test]

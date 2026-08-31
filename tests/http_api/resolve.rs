@@ -434,3 +434,73 @@ fn resolve_serves_weak_lexical_results_when_the_cue_embed_fails_but_lexical_matc
         "the weak lexical match must still be served: {body}"
     );
 }
+
+/// The entry sweep behind every resolve endpoint tests each stored
+/// spelling against the cue for containment in BOTH directions, with
+/// no deadline check inside that loop and no `HeavyOpsLimiter` in
+/// front of it. Every other free-text field on a write path is held to
+/// `MAX_NAME_BYTES`; the cue was not held to anything, so a body-limit
+/// -sized cue bought a worker thread for as long as the vocabulary
+/// took to sweep. A cue longer than any spelling that could be stored
+/// is past the point of resolving anyway, so it is refused the way an
+/// over-long alias is.
+#[test]
+fn a_cue_over_the_name_byte_cap_is_refused_by_every_resolve_endpoint() {
+    let server = Server::start("resolve-cue-too-long");
+    server.ok("PUT", "/contexts/sake", Some(json!({"description": "d"})));
+
+    let long_cue = "字".repeat(400); // 1200 bytes, over the 1024-byte cap
+    for path in [
+        "/contexts/sake/resolve",
+        "/contexts/sake/resolve_label",
+        "/contexts/sake/resolve/explain",
+        "/contexts/sake/resolve_label/explain",
+    ] {
+        let (status, body) = server.call(
+            "POST",
+            path,
+            Some(json!({"cue": long_cue, "expected": "青嶺酒造"})),
+        );
+        assert_eq!(status, 400, "{path}: {body}");
+        assert_eq!(body["code"], json!("invalid_argument"), "{path}: {body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("the cue is 1200 bytes"),
+            "{path}: {body}"
+        );
+    }
+
+    // `expected` is swept the same way the cue is, so it is capped the
+    // same way — with a cue short enough to prove the refusal is about
+    // `expected` and not about the cue again.
+    for path in [
+        "/contexts/sake/resolve/explain",
+        "/contexts/sake/resolve_label/explain",
+    ] {
+        let (status, body) = server.call(
+            "POST",
+            path,
+            Some(json!({"cue": "青嶺", "expected": long_cue})),
+        );
+        assert_eq!(status, 400, "{path}: {body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("the expected name is 1200 bytes"),
+            "{path}: {body}"
+        );
+    }
+
+    // A cue at the cap still resolves — the guard is a ceiling, not a
+    // new shape for the endpoint.
+    let at_cap = "字".repeat(341); // 1023 bytes
+    let (status, body) = server.call(
+        "POST",
+        "/contexts/sake/resolve",
+        Some(json!({"cue": at_cap})),
+    );
+    assert_eq!(status, 200, "{body}");
+}

@@ -12,8 +12,8 @@ use crate::metrics::{ResolveTier, SearchOp};
 use crate::registry::AppState;
 
 use super::{
-    AppJson, AppPath, ErrorCode, MAX_MATCH_LIMIT, access_error, clamp, deadline_exceeded, error,
-    not_found, ok, search_log_enabled,
+    AppJson, AppPath, ErrorCode, MAX_MATCH_LIMIT, MAX_NAME_BYTES, access_error, clamp,
+    deadline_exceeded, error, not_found, ok, oversized, search_log_enabled,
 };
 
 #[derive(Debug, Deserialize)]
@@ -376,6 +376,15 @@ fn resolve_with_fallback(
     if deadline.expired() {
         return deadline_exceeded(started_at);
     }
+    // The entry sweep below is O(spellings x cue length): every span is
+    // tested for containment against the cue in BOTH directions, with no
+    // deadline check inside that loop. An uncapped cue therefore buys a
+    // whole worker thread for the length of the body limit, so cap it
+    // here at the same ceiling a stored spelling gets -- a cue longer
+    // than any name that could be stored is past the point of resolving.
+    if let Some(refusal) = oversized("the cue", &request.cue, MAX_NAME_BYTES, started_at) {
+        return refusal;
+    }
     match resolve_served(state, name, request, labels, deadline, started_at) {
         Ok(served) => ok(served, started_at),
         Err(response) => response,
@@ -590,6 +599,20 @@ fn explain_resolve_verdict(
     // own lexical read.
     if deadline.expired() {
         return deadline_exceeded(started_at);
+    }
+    // Same unbounded-sweep exposure resolve_with_fallback caps, twice
+    // over: explain runs several lexical sweeps per call, and `expected`
+    // is swept the same way the cue is.
+    if let Some(refusal) = oversized("the cue", &request.cue, MAX_NAME_BYTES, started_at) {
+        return refusal;
+    }
+    if let Some(refusal) = oversized(
+        "the expected name",
+        &request.expected,
+        MAX_NAME_BYTES,
+        started_at,
+    ) {
+        return refusal;
     }
     // Several lexical sweeps in one read_context (see the comment above
     // this function) — the same unconditional whole-table cost as

@@ -178,17 +178,15 @@ impl Context {
     /// anything — `POST /import?dry_run=true`'s preview of what a
     /// retraction would report.
     ///
-    /// `source_edges` is not pruned by [`Self::retract_association`],
-    /// which can unlink this source's attribution on one of its edges
-    /// without touching the reverse index — so a raw `Vec::len` would
-    /// overcount past that edge. Worse, if the source later re-asserts
-    /// onto that same edge, `attribute` has no way to tell the stale
-    /// reverse-index entry apart from a fresh one and appends a second
-    /// one, so the same live edge can appear twice. Each candidate is
-    /// confirmed live against `attribution_ids` (the same check
-    /// `retract_source` itself relies on to skip a dead entry) and
-    /// deduplicated so a retract-then-reassert cycle is still counted
-    /// once.
+    /// [`Self::retract_association`] prunes `source_edges` as it
+    /// unlinks, so the index no longer drifts from the live chains the
+    /// way it once did (an unlinked edge kept its entry, and a
+    /// retract-then-reassert cycle added a second one). The live check
+    /// against `attribution_ids` (the same one `retract_source` relies
+    /// on to skip a dead entry) and the dedup stay all the same: they
+    /// are what make this count correct on an index that drifted
+    /// before the prune existed, and cheap enough — one hash lookup per
+    /// candidate edge — not to be worth trading for the assumption.
     pub fn count_source_edges(&self, source: &str) -> usize {
         let Some(&source_id) = self.source_ids.get(source) else {
             return 0;
@@ -252,8 +250,25 @@ impl Context {
         let mut unlinked = 0usize;
         while cursor != NIL {
             let record = &self.attributions[cursor as usize];
-            self.attribution_ids.remove(&(edge_id, record.source));
+            let source = record.source;
             cursor = record.next;
+            self.attribution_ids.remove(&(edge_id, source));
+            // The reverse index goes with it. Leaving the entry behind
+            // used to be harmless only because every reader re-checked
+            // it against `attribution_ids`: the entry outlived the
+            // attribution it stood for, and a source that retracted and
+            // then re-asserted the same edge grew a second entry for it
+            // every cycle, so the index drifted from the live chains
+            // until the next load rebuilt it from them. Pruning here
+            // holds in memory the same invariant `Image` rebuilds on
+            // load — `source_edges` names exactly the edges this source
+            // still attributes.
+            if let Some(edges) = self.source_edges.get_mut(&source) {
+                edges.retain(|&held| held != edge_id);
+                if edges.is_empty() {
+                    self.source_edges.remove(&source);
+                }
+            }
             unlinked += 1;
         }
         let edge = &mut self.edges[edge_index];
@@ -463,8 +478,7 @@ mod tests {
         assert_eq!(context.count_source_edges("旧版"), 2);
 
         // retract_association unlinks (a, r, b) outright, every source
-        // included — the reverse index still lists the edge under
-        // "旧版", but the attribution itself is gone.
+        // included, and prunes the reverse index with it.
         assert_eq!(context.retract_association("a", "r", "b"), Some(1));
         assert_eq!(context.count_source_edges("旧版"), 1);
 
@@ -481,21 +495,79 @@ mod tests {
             .unwrap();
         assert_eq!(context.count_source_edges("旧版"), 1);
 
-        // retract_association unlinks the attribution but leaves the
-        // reverse-index entry for (a, r, b) under "旧版" in place.
+        // retract_association unlinks the attribution and drops the
+        // reverse-index entry for (a, r, b) under "旧版" with it.
         assert_eq!(context.retract_association("a", "r", "b"), Some(1));
         assert_eq!(context.count_source_edges("旧版"), 0);
 
-        // Re-asserting from the same source onto the same edge appends a
-        // second reverse-index entry — attribute() cannot tell it apart
-        // from the stale one. Both now resolve to the same, single live
-        // attribution, so the edge must still count once, not twice.
+        // Re-asserting from the same source onto the same edge adds the
+        // entry back. The count must be one either way: the dedup and
+        // the live check behind it also have to hold on an index
+        // written before the prune existed, where the cycle really did
+        // leave two entries for the one live attribution.
         context
             .associate_from("a", "r", "b", 1.0, "旧版", None)
             .unwrap();
         assert_eq!(context.count_source_edges("旧版"), 1);
         assert_eq!(context.retract_source("旧版"), Some(1));
     }
+    /// The reverse index is pruned as each attribution is unlinked, so
+    /// it names exactly the edges the source still attributes — the
+    /// invariant `Image` rebuilds from the live chains on load, now
+    /// held in memory between loads too. Before the prune, an unlinked
+    /// edge kept its entry and a retract-then-reassert cycle added a
+    /// second one every round, so a long-lived process grew the index
+    /// without bound on churn no reader could see.
+    #[test]
+    fn retract_association_prunes_the_source_reverse_index() {
+        let mut context = Context::default();
+        context
+            .associate_from("a", "r", "b", 1.0, "旧版", None)
+            .unwrap();
+        context
+            .associate_from("a", "r", "c", 1.0, "旧版", None)
+            .unwrap();
+        let source_id = *context.source_ids.get("旧版").unwrap();
+        let held = |context: &Context| context.source_edges.get(&source_id).map(Vec::len);
+        assert_eq!(held(&context), Some(2));
+
+        assert_eq!(context.retract_association("a", "r", "b"), Some(1));
+        assert_eq!(
+            held(&context),
+            Some(1),
+            "the unlinked edge leaves the index with the attribution it stood for"
+        );
+
+        context
+            .associate_from("a", "r", "b", 1.0, "旧版", None)
+            .unwrap();
+        assert_eq!(held(&context), Some(2));
+        for _ in 0..5 {
+            assert_eq!(context.retract_association("a", "r", "b"), Some(1));
+            context
+                .associate_from("a", "r", "b", 1.0, "旧版", None)
+                .unwrap();
+        }
+        assert_eq!(
+            held(&context),
+            Some(2),
+            "a retract-then-reassert cycle must not grow the index"
+        );
+
+        assert_eq!(context.retract_association("a", "r", "b"), Some(1));
+        assert_eq!(context.retract_association("a", "r", "c"), Some(1));
+        assert_eq!(
+            context.source_edges.get(&source_id),
+            None,
+            "the source's last edge leaving drops the entry, not leaves an empty Vec"
+        );
+        // The name stays interned, so re-asserting from it still works.
+        context
+            .associate_from("a", "r", "b", 1.0, "旧版", None)
+            .unwrap();
+        assert_eq!(held(&context), Some(1));
+    }
+
     /// Retracting twice is idempotent — the second call finds no live
     /// attributions (the source → edges reverse index was emptied) and
     /// reports zero — and the name stays usable for a fresh assertion,
