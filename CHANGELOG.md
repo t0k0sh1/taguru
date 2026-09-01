@@ -7,6 +7,17 @@ Entries that change an on-disk format or a response shape say so.
 
 ## [Unreleased]
 
+### Changed
+
+- `extract`: the system prompt now states two ground rules the model was
+  previously left to infer — extraction draws on the document's text
+  alone (no outside knowledge, no subject/object words the document
+  never uses), and an empty `associations` array is a valid answer for
+  a piece with nothing to extract. A near-empty piece could otherwise be
+  padded with fabricated associations until the output cap, failing the
+  whole document (#852). `PROMPT_VERSION` 3 → 4, so already-extracted
+  documents re-extract under the new wording instead of being reused.
+
 ## [0.9.6] - 2026-08-31
 
 An `extract` context-and-replay release. A chunk no longer arrives at

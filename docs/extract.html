@@ -439,7 +439,10 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       This is <a href="#pipeline"><code>steer</code></a> (what goes into the prompt) and
       <a href="#pipeline"><code>prompt</code></a> (the messages actually sent) together.
       The system prompt is the <code>/protocol</code> ingest loop distilled for a producer that
-      cannot <code>resolve</code> live: one fact per association, short names in the document's
+      cannot <code>resolve</code> live: extraction from the document's text alone — never the
+      model's own knowledge, never subject/object words the document does not contain, and an
+      empty answer is the correct one for a piece that states nothing extractable (#852) — one
+      fact per association, short names in the document's
       language, one spelling per referent, negation as negative weight, no paraphrase
       re-assertion, membership edges made explicit, procedures chained with a single next-step
       label. The document is presented with every paragraph numbered (blank-line boundaries

@@ -55,6 +55,13 @@ pub(super) fn system_prompt(
          \"aliases\": [{\"alias\": \"…\", \"canonical\": \"…\", \"kind\": \"concept\"}]}\n\
          \n\
          The discipline:\n\
+         - Extract from the document's text alone: a fact is something THIS \
+         document states, not something you know. Never build a subject or \
+         object out of words the document does not contain — reuse the \
+         document's own spellings, or ones this prompt offers below.\n\
+         - A document can state nothing extractable. Then an empty \
+         \"associations\" array is the correct answer — never fill the space \
+         with outside knowledge or invented variations.\n\
          - One association per fact the document states. Keep names SHORT \
          (headings, not sentences); keep the document's language; never translate names. \
          Tag it with the bracketed paragraph number, shown in the text, that states the fact.\n\

@@ -7998,7 +7998,7 @@ fn attempts_log_keeps_every_completions_full_prompt_and_answer() {
     // a diagnostic snapshot of this run's compute inputs.
     let settings = &records[1];
     assert_eq!(settings["model"], "stub-model");
-    assert_eq!(settings["prompt_version"], 3);
+    assert_eq!(settings["prompt_version"], 4);
     assert_eq!(settings["questions_n"], 0);
     assert_eq!(settings["fact_budget"], 0);
     assert_eq!(settings["structured_output"], "");
