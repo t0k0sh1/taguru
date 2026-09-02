@@ -3169,6 +3169,11 @@ fn the_system_prompt_grounds_extraction_in_the_text_and_allows_an_empty_answer()
     let prompt = system_prompt(&BTreeMap::new(), 0, 0, None, &[], &[]);
     assert!(prompt.contains("the document's text alone"), "{prompt}");
     assert!(
+        prompt
+            .contains("Never build a subject or object out of words the document does not contain"),
+        "{prompt}"
+    );
+    assert!(
         prompt.contains("empty \"associations\" array is the correct answer"),
         "{prompt}"
     );

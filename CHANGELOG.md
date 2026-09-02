@@ -17,6 +17,8 @@ Entries that change an on-disk format or a response shape say so.
   padded with fabricated associations until the output cap, failing the
   whole document (#852). `PROMPT_VERSION` 3 → 4, so already-extracted
   documents re-extract under the new wording instead of being reused.
+  No response-shape or on-disk format change — the manifest and the
+  attempts log's `settings` record simply carry the new number.
 
 ## [0.9.6] - 2026-08-31
 
