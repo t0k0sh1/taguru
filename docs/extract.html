@@ -115,7 +115,8 @@ TAGURU_EXTRACT_ESCALATION_FACTOR  cap of the one escalated resend after an
                     budget; 0 = uncapped (default 2)
 TAGURU_EXTRACT_RUNAWAY_RATIO  a length-limited answer bigger than this many
                     times its piece's bytes is a runaway: no escalation, no
-                    split — the source fails after a demotion attempt;
+                    split — the source fails, after a demotion attempt under
+                    an auto-resolved rung (a pinned rung never demotes);
                     0 = no runaway judgment (default 8)
 TAGURU_EXTRACT_CHUNK_BYTES  default for --chunk-bytes (default 24576)
 TAGURU_EXTRACT_CHUNK_CONTEXT  default for --chunk-context (default off)
@@ -698,10 +699,11 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       length-limited answer whose bytes exceed <code>TAGURU_EXTRACT_RUNAWAY_RATIO</code> ×
       the piece's bytes (default 8 — measured successful answers top out near 5.5×, observed
       runaways start at 10×; <code>0</code> disables the judgment) is treated as a
-      <b>runaway</b> (ADR 0035): no escalated resend, no split — a demotion is still tried
-      (a constrained rung looping produces the same signature), and with nothing left to
-      demote the source fails immediately with both sizes named, rather than paying for
-      rounds that cannot converge.
+      <b>runaway</b> (ADR 0035): no escalated resend, no split — under an <code>auto</code>-resolved
+      rung, a demotion is still tried first (a constrained rung looping produces the same
+      signature; a pinned rung never demotes, same as every other exhausted-ladder case), and
+      with nothing left to demote the source fails immediately with both sizes named, rather
+      than paying for rounds that cannot converge.
       A completion that runs <code>TAGURU_EXTRACT_TIMEOUT_SECS</code> out under the ladder is
       treated the same way as <code>length</code> (ADR 0020): the piece is too big for the
       <i>time</i> budget, so it goes straight to the split rung — never retried at the same
@@ -1656,7 +1658,7 @@ jq -c 'select(.kind=="uncovered") | {paragraph, sentence}' "$t"</code></pre>
         <tr>
           <td><code>runaway</code> moves: sources failing with "the answer outgrew the
             piece"</td>
-          <td>Read the recorded answer beside its piece (walkthrough step 4) — the usual cause
+          <td>Read the recorded answer beside its piece (walkthrough step 3) — the usual cause
             is fabrication on a near-empty piece, not a budget problem. If the answers turn
             out honest for your corpus, raise <code>TAGURU_EXTRACT_RUNAWAY_RATIO</code>
             (or <code>0</code> to disable); under an <code>auto</code> rung, a
