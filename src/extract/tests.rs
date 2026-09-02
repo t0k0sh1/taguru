@@ -3162,6 +3162,24 @@ fn split_labeled_piece_halves_blocks_with_their_labels_repeated() {
 }
 
 #[test]
+fn the_system_prompt_grounds_extraction_in_the_text_and_allows_an_empty_answer() {
+    // #852: both ground rules are unconditional — a piece with nothing
+    // extractable must be answerable with an empty array, and a fact
+    // must come from the document, not the model's world knowledge.
+    let prompt = system_prompt(&BTreeMap::new(), 0, 0, None, &[], &[]);
+    assert!(prompt.contains("the document's text alone"), "{prompt}");
+    assert!(
+        prompt
+            .contains("Never build a subject or object out of words the document does not contain"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("empty \"associations\" array is the correct answer"),
+        "{prompt}"
+    );
+}
+
+#[test]
 fn the_system_prompt_offers_the_accumulated_vocabulary() {
     assert!(!system_prompt(&BTreeMap::new(), 0, 0, None, &[], &[]).contains("already in use"));
     let vocabulary: BTreeMap<String, usize> =

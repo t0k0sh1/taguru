@@ -464,10 +464,18 @@ Contract and discipline: docs/extract.html.
 /// division `--fact-budget` (a computation input) and `PROMPT_VERSION`
 /// (the prompt's wording) already draw.
 ///
+/// 4 (#852): the discipline gained two ground rules — extraction
+/// draws on the document's text alone (no outside knowledge, no
+/// subject/object words the document never uses), and an empty
+/// `associations` array is a valid answer for a piece with nothing
+/// to extract. Under 3's wording a near-empty piece could be padded
+/// with fabricated associations until the output cap, so extractions
+/// made under it must not be silently reused.
+///
 /// `pub(crate)` so `benchmark`'s manifest can record the same prompt
 /// version a cell actually ran under (ADR 0003 §9.1) without
 /// re-declaring it.
-pub(crate) const PROMPT_VERSION: u32 = 3;
+pub(crate) const PROMPT_VERSION: u32 = 4;
 
 /// Document bytes per model call. Chunks split at paragraph
 /// boundaries; facts spanning a boundary can be missed, so the cap
