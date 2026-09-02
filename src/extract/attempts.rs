@@ -359,14 +359,19 @@ pub(super) struct MoveRecord<'a> {
     pub(super) from_rung: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) to_rung: Option<&'static str>,
-    /// `split` only: the piece's size, the sub-piece cap, and how many
-    /// sub-pieces it divided into.
+    /// `split`: the piece's size, the sub-piece cap, and how many
+    /// sub-pieces it divided into. `runaway` (ADR 0035): the piece's
+    /// size again, beside `answer_bytes`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) piece_bytes: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) split_cap: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) sub_pieces: Option<usize>,
+    /// `runaway` only (ADR 0035): the length-limited answer's bytes
+    /// that exceeded the ratio against `piece_bytes`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) answer_bytes: Option<usize>,
 }
 
 impl<'a> MoveRecord<'a> {
@@ -391,6 +396,7 @@ impl<'a> MoveRecord<'a> {
             piece_bytes: None,
             split_cap: None,
             sub_pieces: None,
+            answer_bytes: None,
         }
     }
 }

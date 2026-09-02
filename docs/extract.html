@@ -113,6 +113,11 @@ TAGURU_EXTRACT_MAX_OUTPUT_TOKENS  default for --max-output-tokens (default unset
 TAGURU_EXTRACT_ESCALATION_FACTOR  cap of the one escalated resend after an
                     answer ends at --max-output-tokens, as a multiple of that
                     budget; 0 = uncapped (default 2)
+TAGURU_EXTRACT_RUNAWAY_RATIO  a length-limited answer bigger than this many
+                    times its piece's bytes is a runaway: no escalation, no
+                    split — the source fails, after a demotion attempt under
+                    an auto-resolved rung (a pinned rung never demotes);
+                    0 = no runaway judgment (default 8)
 TAGURU_EXTRACT_CHUNK_BYTES  default for --chunk-bytes (default 24576)
 TAGURU_EXTRACT_CHUNK_CONTEXT  default for --chunk-context (default off)
 TAGURU_EXTRACT_TRACE_ATTEMPTS  `off` disables the per-document attempts log (on by default; see Trace)
@@ -687,6 +692,18 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       and falls through to the split. Raise the factor for a provider whose honest answers
       routinely need more than twice the budget; set it to <code>0</code> only for one that is
       known not to loop.
+      Both rungs assume the output's size is a function of the input's — and a fabricating
+      model breaks that assumption (#854: a piece whose body was one heading line answered
+      with 21&#8239;KB of associations built from words the input never contained; escalation
+      got <code>length</code> again, and every split sub-piece reproduced it). So a
+      length-limited answer whose bytes exceed <code>TAGURU_EXTRACT_RUNAWAY_RATIO</code> ×
+      the piece's bytes (default 8 — measured successful answers top out near 5.5×, observed
+      runaways start at 10×; <code>0</code> disables the judgment) is treated as a
+      <b>runaway</b> (ADR 0035): no escalated resend, no split — under an <code>auto</code>-resolved
+      rung, a demotion is still tried first (a constrained rung looping produces the same
+      signature; a pinned rung never demotes, same as every other exhausted-ladder case), and
+      with nothing left to demote the source fails immediately with both sizes named, rather
+      than paying for rounds that cannot converge.
       A completion that runs <code>TAGURU_EXTRACT_TIMEOUT_SECS</code> out under the ladder is
       treated the same way as <code>length</code> (ADR 0020): the piece is too big for the
       <i>time</i> budget, so it goes straight to the split rung — never retried at the same
@@ -1261,9 +1278,11 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       0029</a>): <code>move</code> is <code>escalate</code> (ADR 0019, and ADR 0032's
       Stage 2 resend — the reason names the cross-chunk correction;
       <code>from_max_tokens</code>/<code>to_max_tokens</code>), <code>demote</code> (ADR 0021;
-      <code>from_rung</code>/<code>to_rung</code>), or <code>split</code> (ADR 0001 §7 / ADR
+      <code>from_rung</code>/<code>to_rung</code>), <code>split</code> (ADR 0001 §7 / ADR
       0020; <code>piece_bytes</code>/<code>split_cap</code>/<code>sub_pieces</code>, the reason
-      telling the output cap from a timeout), each with <code>run_id</code>,
+      telling the output cap from a timeout), or <code>runaway</code> (ADR 0035;
+      <code>piece_bytes</code>/<code>answer_bytes</code>, recorded at the judgment — before
+      the demotion or failure it leads to), each with <code>run_id</code>,
       <code>piece_id</code>, <code>chunk_index</code>, and <code>reason</code> in the stderr
       line's own words — so per-document-kind frequency and cost of every retry-machinery action
       is a fold over this file. It is written incrementally (a killed run keeps every completion made),
@@ -1635,6 +1654,15 @@ jq -c 'select(.kind=="uncovered") | {paragraph, sentence}' "$t"</code></pre>
           <td><code>--structured-output json-object</code> (or <code>off</code>) — pin the
             rung <code>auto</code> keeps demoting to, instead of paying the failed ladder
             again at the start of every run.</td>
+        </tr>
+        <tr>
+          <td><code>runaway</code> moves: sources failing with "the answer outgrew the
+            piece"</td>
+          <td>Read the recorded answer beside its piece (walkthrough step 3) — the usual cause
+            is fabrication on a near-empty piece, not a budget problem. If the answers turn
+            out honest for your corpus, raise <code>TAGURU_EXTRACT_RUNAWAY_RATIO</code>
+            (or <code>0</code> to disable); under an <code>auto</code> rung, a
+            <code>demote</code> beside it says constrained decoding was looping instead.</td>
         </tr>
         <tr>
           <td>Corrections don't take: correction success low, <code>removed_instead</code>

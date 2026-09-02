@@ -357,6 +357,8 @@ ENVIRONMENT (every knob; unset = the shown default):
   TAGURU_EXTRACT_MAX_OUTPUT_TOKENS  default for --max-output-tokens (unset)
   TAGURU_EXTRACT_ESCALATION_FACTOR  cap of the escalated resend, as a multiple
                       of --max-output-tokens; 0 = uncapped (2)
+  TAGURU_EXTRACT_RUNAWAY_RATIO  fail a piece whose length-limited answer
+                      outgrows this multiple of its bytes; 0 = off (8)
   TAGURU_EXTRACT_CHUNK_BYTES  default for --chunk-bytes (24576)
   TAGURU_EXTRACT_CHUNK_CONTEXT  default for --chunk-context (off)
   TAGURU_EXTRACT_TRACE_ATTEMPTS  `off` disables the per-document attempts log (ADR 0025)
