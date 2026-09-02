@@ -70,6 +70,14 @@ pub(super) struct ManifestEntry {
     /// before the field existed matching an all-defaults run.
     #[serde(default)]
     pub(super) escalation_factor: String,
+    /// TAGURU_EXTRACT_RUNAWAY_RATIO of the run that wrote this batch,
+    /// as [`runaway_manifest_value`] encodes it (`""` = the default —
+    /// ADR 0035): the judgment changes which length-limited answers
+    /// the ladder keeps pursuing, so a non-default ratio re-extracts
+    /// like `escalation_factor`; the empty default keeps entries
+    /// written before the field existed matching an all-defaults run.
+    #[serde(default)]
+    pub(super) runaway_ratio: String,
     /// --chunk-context of the run that wrote this batch, as
     /// [`ChunkContextMode::manifest_value`] encodes it (`""` = off —
     /// ADR 0033): the mode decides what every chunk is prefixed with,
@@ -175,6 +183,7 @@ impl Manifest {
                 && entry.structured_output == inputs.structured_output
                 && entry.max_output_tokens == inputs.max_output_tokens
                 && entry.escalation_factor == inputs.escalation_factor
+                && entry.runaway_ratio == inputs.runaway_ratio
                 && entry.chunk_bytes == inputs.chunk_bytes
                 && entry.chunk_context == inputs.chunk_context
                 && entry.lossy == inputs.lossy
@@ -213,6 +222,7 @@ impl Manifest {
                 structured_output: inputs.structured_output.to_string(),
                 max_output_tokens: inputs.max_output_tokens,
                 escalation_factor: inputs.escalation_factor.to_string(),
+                runaway_ratio: inputs.runaway_ratio.to_string(),
                 chunk_bytes: inputs.chunk_bytes.to_string(),
                 chunk_context: inputs.chunk_context.to_string(),
                 lossy: inputs.lossy,
@@ -251,6 +261,7 @@ pub(super) struct ComputationInputs<'a> {
     pub(super) structured_output: &'a str,
     pub(super) max_output_tokens: usize,
     pub(super) escalation_factor: &'a str,
+    pub(super) runaway_ratio: &'a str,
     pub(super) chunk_bytes: &'a str,
     pub(super) chunk_context: &'a str,
     pub(super) lossy: bool,

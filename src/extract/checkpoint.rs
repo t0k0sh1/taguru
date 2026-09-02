@@ -31,6 +31,13 @@ pub(super) struct CheckpointFingerprint {
     /// factor invalidates it.
     #[serde(default)]
     pub(super) escalation_factor: String,
+    /// TAGURU_EXTRACT_RUNAWAY_RATIO as [`runaway_manifest_value`]
+    /// encodes it (`""` = default) — ADR 0035. Same `default`
+    /// reasoning: a checkpoint file predating this field was written
+    /// under the then-only (unjudged) ladder, and still matches a
+    /// default rerun; only a non-default ratio invalidates it.
+    #[serde(default)]
+    pub(super) runaway_ratio: String,
     /// `--chunk-bytes` as [`chunk_bytes_manifest_value`] encodes it
     /// (`""` = default) — ADR 0020. A different cap re-cuts every
     /// chunk, and each cached unit is keyed by its chunk's content

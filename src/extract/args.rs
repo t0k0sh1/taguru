@@ -929,6 +929,12 @@ pub(super) struct LadderConfig {
     /// ends with the client timeout, retried, and the split rung is
     /// never reached.
     pub(super) escalation_factor: usize,
+    /// ADR 0035 (#854): a `length` answer whose bytes exceed this
+    /// multiple of the piece's bytes is a runaway — the output is not
+    /// tracking the input, so the escalated resend and the split rung
+    /// are skipped (only ADR 0021's demotion is still tried before
+    /// the source fails). `0` disables the judgment.
+    pub(super) runaway_ratio: usize,
 }
 
 /// The default for `TAGURU_EXTRACT_ESCALATION_FACTOR`: twice the
@@ -937,19 +943,37 @@ pub(super) struct LadderConfig {
 /// original budget's wall-clock instead of the timeout's.
 pub(super) const DEFAULT_ESCALATION_FACTOR: usize = 2;
 
+/// The default for `TAGURU_EXTRACT_RUNAWAY_RATIO` (ADR 0035 §3.1):
+/// above every legitimate answer/piece byte ratio the verification
+/// corpus has produced (max 5.43×, p99 4.07× over 490 attempts), with
+/// headroom for answer encodings that inflate bytes (a model that
+/// `\u`-escapes non-ASCII roughly doubles a Japanese answer), and
+/// below every observed runaway (10–23×).
+pub(super) const DEFAULT_RUNAWAY_RATIO: usize = 8;
+
 impl LadderConfig {
     pub(super) fn new(
         rung: Rung,
         demotable: bool,
         max_output_tokens: Option<usize>,
         escalation_factor: usize,
+        runaway_ratio: usize,
     ) -> Self {
         Self {
             rung: std::sync::Mutex::new(rung),
             demotable,
             max_output_tokens,
             escalation_factor,
+            runaway_ratio,
         }
+    }
+
+    /// ADR 0035: is a `length` answer of `answer_bytes` a runaway for
+    /// a `piece_bytes`-byte piece? Strictly over the multiple, so a
+    /// ratio of exactly the cap still takes the ordinary rungs, and
+    /// `0` disables the judgment entirely.
+    pub(super) fn runaway(&self, piece_bytes: usize, answer_bytes: usize) -> bool {
+        self.runaway_ratio > 0 && answer_bytes > self.runaway_ratio.saturating_mul(piece_bytes)
     }
 
     /// The rung an extraction request sends right now. A piece reads
@@ -1020,5 +1044,20 @@ pub(super) fn escalation_manifest_value(budget: Option<usize>, factor: usize) ->
     match budget {
         Some(_) if factor != DEFAULT_ESCALATION_FACTOR => factor.to_string(),
         _ => String::new(),
+    }
+}
+
+/// The manifest's record of the runaway ratio (ADR 0035 §3.7): `""`
+/// at the default — so a manifest or checkpoint written before the
+/// field existed keeps matching a default rerun — and verbatim
+/// otherwise (including `0`, which disables a judgment the default
+/// run applies). Unlike [`escalation_manifest_value`] there is no
+/// budget gate: the judgment engages whenever the ladder runs, budget
+/// or not (a backend-ceiling `length` is judged the same way).
+pub(super) fn runaway_manifest_value(ratio: usize) -> String {
+    if ratio == DEFAULT_RUNAWAY_RATIO {
+        String::new()
+    } else {
+        ratio.to_string()
     }
 }

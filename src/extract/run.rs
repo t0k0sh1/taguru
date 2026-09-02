@@ -66,6 +66,9 @@ pub(super) struct Run {
     /// TAGURU_EXTRACT_ESCALATION_FACTOR (ADR 0019) — carried here only
     /// for the manifest record; the ladder reads its own copy.
     pub(super) escalation_factor: usize,
+    /// TAGURU_EXTRACT_RUNAWAY_RATIO (ADR 0035) — carried here only
+    /// for the manifest record, like `escalation_factor`.
+    pub(super) runaway_ratio: usize,
     /// `--chunk-bytes`/TAGURU_EXTRACT_CHUNK_BYTES, resolved
     /// ([`CHUNK_BYTES`] by default) — ADR 0020 (#762).
     pub(super) chunk_bytes: usize,
@@ -425,6 +428,7 @@ impl Run {
                 self.max_output_tokens,
                 self.escalation_factor,
             ),
+            runaway_ratio: runaway_manifest_value(self.runaway_ratio),
             chunk_bytes: chunk_bytes_manifest_value(self.chunk_bytes),
             chunk_context: self.chunk_context_value(),
             lossy: self.lossy,
@@ -521,6 +525,7 @@ impl Run {
         // alike, so the two can never drift field by field.
         let escalation_factor =
             escalation_manifest_value(self.max_output_tokens, self.escalation_factor);
+        let runaway_ratio = runaway_manifest_value(self.runaway_ratio);
         let chunk_bytes = chunk_bytes_manifest_value(self.chunk_bytes);
         let chunk_context_value = self.chunk_context_value();
         let inputs = ComputationInputs {
@@ -534,6 +539,7 @@ impl Run {
             structured_output: self.structured_output.manifest_value(),
             max_output_tokens: self.max_output_tokens.unwrap_or(0),
             escalation_factor: &escalation_factor,
+            runaway_ratio: &runaway_ratio,
             chunk_bytes: &chunk_bytes,
             chunk_context: &chunk_context_value,
             lossy: self.lossy,

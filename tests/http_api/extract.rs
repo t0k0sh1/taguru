@@ -4141,6 +4141,120 @@ fn length_limited_after_escalation_splits_the_piece_and_sub_pieces_restart_at_th
     let _ = std::fs::remove_dir_all(&out);
 }
 
+/// ADR 0035 (#854): a length-limited answer that outgrew its piece
+/// fails the source after the one round — no escalated resend, no
+/// split — with the sizes named on stderr and the judgment in the
+/// attempts log as a `runaway` move record.
+#[test]
+fn a_runaway_answer_fails_the_source_after_one_round_with_the_move_recorded() {
+    let docs = batch_dir("extract-runaway-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "a".repeat(300)).unwrap();
+    let out = batch_dir("extract-runaway-out");
+
+    // Over 8× the ~300-byte piece, cut off at the cap: without the
+    // judgment this script would escalate and then fail at the split
+    // floor, spending extra rounds first.
+    let oversized = "z".repeat(4000);
+    let (url, captured) = stub_chat_server_concurrent(move |_index, _attempt| {
+        chat_ok_with_finish_reason(&oversized, "length")
+    });
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--max-output-tokens",
+            "512",
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("the answer outgrew the piece: 4000 bytes"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("TAGURU_EXTRACT_RUNAWAY_RATIO"), "{stderr}");
+
+    let requests = captured.lock().unwrap();
+    assert_eq!(requests.len(), 1, "no escalated resend, no split rounds");
+    assert_eq!(json_body_of(&requests[0])["max_tokens"], 512);
+    drop(requests);
+
+    let records = read_attempts_log(&out);
+    let moves: Vec<&Value> = records.iter().filter(|r| r["kind"] == "move").collect();
+    assert_eq!(moves.len(), 1, "{moves:?}");
+    assert_eq!(moves[0]["move"], "runaway");
+    assert_eq!(moves[0]["answer_bytes"], 4000);
+    assert!(moves[0]["piece_bytes"].as_u64().unwrap() >= 300);
+    assert!(
+        moves[0]["reason"].as_str().unwrap().contains("outgrew"),
+        "{}",
+        moves[0]
+    );
+    let attempts: Vec<&Value> = records.iter().filter(|r| r["kind"] == "attempt").collect();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0]["state"], "length_limited");
+    assert_eq!(attempts[0]["piece_id"], moves[0]["piece_id"]);
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// TAGURU_EXTRACT_RUNAWAY_RATIO=0 restores the unjudged ladder for the
+/// same script: escalate, then fail at the split floor (a 300-byte
+/// piece cannot split), with no `runaway` move recorded.
+#[test]
+fn runaway_ratio_zero_keeps_the_pre_0035_path_end_to_end() {
+    let docs = batch_dir("extract-runawayoff-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "a".repeat(300)).unwrap();
+    let out = batch_dir("extract-runawayoff-out");
+
+    let oversized = "z".repeat(4000);
+    let (url, captured) = stub_chat_server_concurrent(move |_index, _attempt| {
+        chat_ok_with_finish_reason(&oversized, "length")
+    });
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+            ("TAGURU_EXTRACT_RUNAWAY_RATIO", "0"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--max-output-tokens",
+            "512",
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("cannot split further"),
+        "the pre-0035 split-floor diagnosis, not the runaway one: {stderr}"
+    );
+    let requests = captured.lock().unwrap();
+    assert_eq!(requests.len(), 2, "budgeted ask, then the escalated one");
+    assert_eq!(json_body_of(&requests[1])["max_tokens"], 1024);
+    drop(requests);
+    let records = read_attempts_log(&out);
+    assert!(
+        !records
+            .iter()
+            .any(|r| r["kind"] == "move" && r["move"] == "runaway"),
+        "ratio 0 records no runaway judgment"
+    );
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
 /// ADR 0029 (#791): the transport-layer retries ADR 0001 §10 folds
 /// into one attempt are now counted on it — a 500 answered twice
 /// before success is one `attempt` record with `transport_retries: 2`,

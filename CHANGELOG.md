@@ -7,6 +7,22 @@ Entries that change an on-disk format or a response shape say so.
 
 ## [Unreleased]
 
+### Added
+
+- `extract`: runaway output detection (ADR 0035, #854). A
+  length-limited answer whose bytes exceed
+  `TAGURU_EXTRACT_RUNAWAY_RATIO` × its piece's bytes (default 8;
+  `0` disables) is judged a runaway — the output is not tracking the
+  input, so the escalated resend and the split rung are skipped
+  (demotion under an `auto` rung is still tried) and the source fails
+  immediately with both sizes named, instead of paying for rounds
+  that cannot converge. The judgment lands in the attempts log as a
+  `move` record, action `runaway`, with `piece_bytes`/`answer_bytes`.
+  **On-disk format change**: additive only — the new move action and
+  field, and a `runaway_ratio` manifest/checkpoint field recorded
+  only at a non-default ratio, so existing manifests and checkpoints
+  keep matching a default rerun. No response-shape change.
+
 ### Changed
 
 - `extract`: the system prompt now states two ground rules the model was

@@ -485,6 +485,14 @@ pub(super) struct PieceContext<'a> {
 /// escalated — a larger output cap cannot make a slow piece faster.
 /// At the split floor it fails the source with the timeout named.
 ///
+/// A runaway (ADR 0035, #854) — a `length` answer that has already
+/// outgrown the piece, over `TAGURU_EXTRACT_RUNAWAY_RATIO` × its
+/// bytes — takes neither rung: output that is not tracking input
+/// converges under no budget and no split (measured in #783: every
+/// sub-piece reproduced it). Only the demotion above is still tried;
+/// with nothing left to demote the source fails immediately, the
+/// judgment recorded as a `runaway` move.
+///
 /// Checked against issue #179's checkpoint store before doing any of
 /// that: a cache hit on THIS piece's own content hash returns
 /// immediately with no model call. Since a split's sub-pieces re-enter
@@ -519,7 +527,15 @@ pub(super) fn extract_piece(
         rung,
         context.ladder.max_output_tokens,
     );
-    if matches!(outcome, RoundOutcome::LengthLimited) && context.ladder.max_output_tokens.is_some()
+    // ADR 0035 (#854): a length-limited answer that has already
+    // outgrown the piece is not a budget problem. No rung that grows
+    // the budget or shrinks the piece converges on an output that is
+    // not tracking the input, so a runaway skips the escalated resend
+    // here and the split rung below.
+    let mut runaway = runaway_answer_bytes(context.ladder, piece.len(), &outcome);
+    if runaway.is_none()
+        && matches!(outcome, RoundOutcome::LengthLimited { .. })
+        && context.ladder.max_output_tokens.is_some()
     {
         // ADR 0029: the escalation, as a record — the budget the
         // answer overran and the one the neutral resend gets.
@@ -541,6 +557,22 @@ pub(super) fn extract_piece(
             rung,
             context.ladder.escalated_budget(),
         );
+        runaway = runaway_answer_bytes(context.ladder, piece.len(), &outcome);
+    }
+    if let Some(answer_bytes) = runaway {
+        // ADR 0035 §3.5: the judgment as a record, at detection —
+        // before the demotion or failure it leads to.
+        let mut record = MoveRecord::blank(
+            "runaway",
+            context.completions.run_id(),
+            &piece_id,
+            context.chunk_index,
+            "the length-limited answer outgrew the piece — the output is not tracking \
+             the input; skipping escalation and split (ADR 0035)",
+        );
+        record.piece_bytes = Some(piece.len());
+        record.answer_bytes = Some(answer_bytes);
+        context.observers.move_event(&record);
     }
     match outcome {
         RoundOutcome::Valid(chunk_output) => {
@@ -552,16 +584,23 @@ pub(super) fn extract_piece(
             "the provider refused this content (finish_reason {reason}) — a policy \
              refusal is terminal; no corrective turn can change it"
         )),
-        RoundOutcome::LengthLimited | RoundOutcome::TimedOut(_) => {
+        RoundOutcome::LengthLimited { .. } | RoundOutcome::TimedOut(_) => {
             // ADR 0021 (#760): under an `auto`-resolved constrained
             // rung, a piece that exhausts the ladder is first read as
             // the rung looping (a probe that passed on a tiny ask says
             // nothing about a real document) — demote the RUN one
             // rung and restart this piece at the ladder's top. Only a
             // piece that exhausts the ladder with nothing left to
-            // demote splits.
+            // demote splits. A runaway still demotes (ADR 0035 §3.3:
+            // a decoding loop is a plausible cause of exactly this
+            // signature, and demotion is one cheap round) — it skips
+            // only the rungs that assume output tracks input.
             if let Some((from, to)) = context.ladder.demote_from(rung) {
-                let why = demotion_reason(&outcome, context.ladder.max_output_tokens.is_some());
+                let why = demotion_reason(
+                    &outcome,
+                    context.ladder.max_output_tokens.is_some(),
+                    runaway.is_some(),
+                );
                 let mut record = MoveRecord::blank(
                     "demote",
                     context.completions.run_id(),
@@ -581,6 +620,20 @@ pub(super) fn extract_piece(
                     from.name()
                 );
                 return extract_piece(context, piece);
+            }
+            if let Some(answer_bytes) = runaway {
+                // ADR 0035 §3.4: nothing left to demote — fail the
+                // source now instead of splitting a piece whose
+                // output was never a function of its input.
+                return Err(format!(
+                    "the answer outgrew the piece: {answer_bytes} bytes at the output cap \
+                     for a {}-byte piece, over {}× its size — the output is not tracking \
+                     the input, so neither a bigger budget nor a split can converge; \
+                     failing the source rather than paying for more of it \
+                     (TAGURU_EXTRACT_RUNAWAY_RATIO tunes the ratio, 0 disables)",
+                    piece.len(),
+                    context.ladder.runaway_ratio,
+                ));
             }
             let cap = (piece.len() / 2).max(MIN_SPLIT_CAP);
             let sub_pieces = split_labeled_piece(piece, cap);
@@ -629,13 +682,37 @@ pub(super) fn extract_piece(
 /// `budgeted` tells a `length` under `--max-output-tokens` (the
 /// escalated resend was already spent) from one at the backend's own
 /// ceiling (no budget configured, so nothing was escalated).
-pub(super) fn demotion_reason(outcome: &RoundOutcome, budgeted: bool) -> String {
+/// `runaway` (ADR 0035) overrides both `length` spellings: the answer
+/// did not merely fill the cap, it outgrew the piece — and under a
+/// runaway the escalated resend was deliberately skipped, so neither
+/// spelling below would be true.
+pub(super) fn demotion_reason(outcome: &RoundOutcome, budgeted: bool, runaway: bool) -> String {
     match outcome {
         RoundOutcome::TimedOut(message) => format!("the completion timed out ({message})"),
+        _ if runaway => "the length-limited answer outgrew the piece (ADR 0035)".to_string(),
         _ if budgeted => {
             "the answer ended at the output cap even after the escalated resend".to_string()
         }
         _ => "the answer ended at the backend's output ceiling".to_string(),
+    }
+}
+
+/// ADR 0035 (#854): the truncated answer's bytes when `outcome` is a
+/// runaway for a `piece_bytes`-byte piece under the ladder's ratio —
+/// `None` when the round did not end at the cap, the judgment is off
+/// (ratio 0), or the answer is within the ratio.
+pub(super) fn runaway_answer_bytes(
+    ladder: &LadderConfig,
+    piece_bytes: usize,
+    outcome: &RoundOutcome,
+) -> Option<usize> {
+    match outcome {
+        RoundOutcome::LengthLimited { answer_bytes }
+            if ladder.runaway(piece_bytes, *answer_bytes) =>
+        {
+            Some(*answer_bytes)
+        }
+        _ => None,
     }
 }
 
@@ -646,8 +723,12 @@ pub(super) enum RoundOutcome {
     Valid(Box<ChunkOutput>),
     /// The provider's metadata says this round's answer ended at the
     /// output cap — the ladder decides what changes; the round itself
-    /// never re-asks under the limit it just hit.
-    LengthLimited,
+    /// never re-asks under the limit it just hit. Carries the
+    /// truncated answer's byte count so the ladder can judge whether
+    /// the output was even tracking the input (ADR 0035, #854).
+    LengthLimited {
+        answer_bytes: usize,
+    },
     /// The completion ran `TAGURU_EXTRACT_TIMEOUT_SECS` out (ADR 0020,
     /// #762): the piece is too big for the time budget, so — like
     /// `LengthLimited` — the ladder's next step is the split rung,
@@ -837,7 +918,9 @@ pub(super) fn extract_round(
                         &messages,
                     );
                 }
-                return RoundOutcome::LengthLimited;
+                return RoundOutcome::LengthLimited {
+                    answer_bytes: response.content.len(),
+                };
             }
             AttemptOutcome::Refusal(reason) => {
                 {

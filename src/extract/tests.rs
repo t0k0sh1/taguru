@@ -18,6 +18,7 @@ fn base_inputs<'a>(sha256: &'a str, model: &'a str) -> ComputationInputs<'a> {
         structured_output: "",
         max_output_tokens: 0,
         escalation_factor: "",
+        runaway_ratio: "",
         chunk_bytes: "",
         chunk_context: "",
         lossy: false,
@@ -1472,6 +1473,7 @@ fn with_resume_hint_names_the_checkpointed_units_only_when_there_are_any() {
         structured_output: String::new(),
         max_output_tokens: 0,
         escalation_factor: String::new(),
+        runaway_ratio: String::new(),
         chunk_bytes: String::new(),
         chunk_context: String::new(),
         lossy: false,
@@ -4294,7 +4296,13 @@ fn drive_ladder_with_factor(
     max_output_tokens: Option<usize>,
     escalation_factor: usize,
 ) -> Result<Vec<ChunkOutput>, String> {
-    let ladder = LadderConfig::new(Rung::Prompted, false, max_output_tokens, escalation_factor);
+    let ladder = LadderConfig::new(
+        Rung::Prompted,
+        false,
+        max_output_tokens,
+        escalation_factor,
+        DEFAULT_RUNAWAY_RATIO,
+    );
     drive_ladder_on(chat, tag, piece, &ladder)
 }
 
@@ -4329,6 +4337,7 @@ fn drive_ladder_on(
             structured_output: String::new(),
             max_output_tokens: ladder.max_output_tokens.unwrap_or(0),
             escalation_factor: String::new(),
+            runaway_ratio: String::new(),
             chunk_bytes: String::new(),
             chunk_context: String::new(),
             lossy: true,
@@ -4501,7 +4510,13 @@ fn ladder_escalation_factor_caps_the_resend_and_zero_uncaps_it() {
 #[test]
 fn escalated_budget_follows_the_factor_and_saturates() {
     let ladder = |max_output_tokens, escalation_factor| {
-        LadderConfig::new(Rung::Prompted, false, max_output_tokens, escalation_factor)
+        LadderConfig::new(
+            Rung::Prompted,
+            false,
+            max_output_tokens,
+            escalation_factor,
+            DEFAULT_RUNAWAY_RATIO,
+        )
     };
     assert_eq!(DEFAULT_ESCALATION_FACTOR, 2);
     assert_eq!(
@@ -4567,6 +4582,206 @@ fn manifests_reextract_when_the_escalation_factor_changes_under_a_budget() {
     };
     assert!(legacy.matches("b.md", &legacy_inputs("")));
     assert!(!legacy.matches("b.md", &legacy_inputs("3")));
+}
+
+/// The runaway judgment itself (ADR 0035): strictly over the ratio —
+/// exactly the multiple still takes the ordinary rungs — and 0
+/// disables it entirely, pinned beside the default's literal value.
+#[test]
+fn runaway_judgment_is_strictly_over_the_ratio_and_zero_disables() {
+    let ladder = |ratio| LadderConfig::new(Rung::Prompted, false, Some(64), 2, ratio);
+    assert_eq!(DEFAULT_RUNAWAY_RATIO, 8);
+    assert!(!ladder(8).runaway(100, 800), "exactly 8× is not a runaway");
+    assert!(ladder(8).runaway(100, 801));
+    assert!(!ladder(0).runaway(100, usize::MAX), "0 disables");
+    assert!(ladder(2).runaway(100, 201));
+}
+
+/// The manifest encoding (ADR 0035 §3.7): `""` at the default — so
+/// entries written before the field existed keep matching — and the
+/// literal ratio otherwise, including `0`, which disables a judgment
+/// the default run applies.
+#[test]
+fn runaway_manifest_value_is_empty_at_the_default_and_verbatim_otherwise() {
+    assert_eq!(runaway_manifest_value(DEFAULT_RUNAWAY_RATIO), "");
+    assert_eq!(runaway_manifest_value(12), "12");
+    assert_eq!(runaway_manifest_value(0), "0");
+    assert_eq!(runaway_manifest_value(1), "1");
+}
+
+/// A non-default ratio is a computation input: changing it re-extracts,
+/// while a legacy entry (no field) still matches a default rerun.
+#[test]
+fn manifests_reextract_when_the_runaway_ratio_changes() {
+    let with_ratio = |ratio: &'static str| ComputationInputs {
+        runaway_ratio: ratio,
+        ..base_inputs("hash-1", "model-1")
+    };
+    let mut manifest = Manifest::default();
+    manifest.record("a.md", &with_ratio("0"), "a.md.jsonl");
+    assert!(manifest.matches("a.md", &with_ratio("0")));
+    assert!(!manifest.matches("a.md", &with_ratio("")));
+    assert!(!manifest.matches("a.md", &with_ratio("12")));
+
+    // A pre-0035 entry deserializes with the field empty and keeps
+    // matching the default ratio, never a non-default one.
+    let legacy: Manifest = serde_json::from_str(&format!(
+        r#"{{"documents":{{"b.md":{{"sha256":"hash-2","model":"model-1",
+            "prompt_version":{PROMPT_VERSION},"context":"sake","questions_n":0,
+            "no_passage":false,"description":"","fact_budget":0,
+            "structured_output":"","max_output_tokens":0,"lossy":false,
+            "output":"b.md.jsonl"}}}}}}"#
+    ))
+    .expect("a manifest without the field deserializes");
+    let legacy_inputs = |ratio: &'static str| ComputationInputs {
+        runaway_ratio: ratio,
+        ..base_inputs("hash-2", "model-1")
+    };
+    assert!(legacy.matches("b.md", &legacy_inputs("")));
+    assert!(!legacy.matches("b.md", &legacy_inputs("0")));
+}
+
+/// ADR 0035 (#854): a length-limited answer that outgrew the piece
+/// skips the escalated resend AND the split rung — this splittable
+/// piece would otherwise take four requests (see
+/// `ladder_length_limited_escalates_once_then_splits_the_piece`) —
+/// and the source fails with the sizes and the knob named.
+#[test]
+fn ladder_a_runaway_answer_fails_the_source_without_escalation_or_split() {
+    let block_a = "あ".repeat(200);
+    let block_b = "い".repeat(200);
+    let piece = format!("{block_a}\n\n{block_b}");
+    let oversized = "x".repeat(DEFAULT_RUNAWAY_RATIO * piece.len() + 1);
+    let chat = ScriptedChat::start(vec![chat_answer(&oversized, "length")]);
+    let ladder = LadderConfig::new(Rung::Prompted, false, Some(64), 2, DEFAULT_RUNAWAY_RATIO);
+    let error = drive_ladder_on(&chat, "runaway", &piece, &ladder).unwrap_err();
+    assert!(error.contains("the answer outgrew the piece"), "{error}");
+    assert!(
+        error.contains(&format!("{} bytes", oversized.len()))
+            && error.contains(&format!("{}-byte piece", piece.len())),
+        "{error}"
+    );
+    assert!(error.contains("TAGURU_EXTRACT_RUNAWAY_RATIO"), "{error}");
+    assert_eq!(
+        chat.requests().len(),
+        1,
+        "no escalated resend, no split rounds"
+    );
+}
+
+/// The escalated resend's own answer is judged too: a first `length`
+/// within the ratio escalates as ADR 0019 says, and a runaway on the
+/// resend stops the ladder before the split it would otherwise take.
+#[test]
+fn ladder_a_runaway_on_the_escalated_resend_stops_before_the_split() {
+    let block_a = "あ".repeat(200);
+    let block_b = "い".repeat(200);
+    let piece = format!("{block_a}\n\n{block_b}");
+    let within = "t".repeat(100);
+    let oversized = "x".repeat(DEFAULT_RUNAWAY_RATIO * piece.len() + 1);
+    let chat = ScriptedChat::start(vec![
+        chat_answer(&within, "length"),
+        chat_answer(&oversized, "length"),
+    ]);
+    let ladder = LadderConfig::new(Rung::Prompted, false, Some(64), 2, DEFAULT_RUNAWAY_RATIO);
+    let error = drive_ladder_on(&chat, "runaway-resend", &piece, &ladder).unwrap_err();
+    assert!(error.contains("the answer outgrew the piece"), "{error}");
+    let requests = chat.requests();
+    assert_eq!(
+        requests.len(),
+        2,
+        "budget round, escalated round — no split"
+    );
+    assert_eq!(
+        requests[1]["max_tokens"],
+        serde_json::json!(128),
+        "the within-ratio length still escalated first: {:?}",
+        requests[1]
+    );
+}
+
+/// ADR 0035 §3.3: a runaway under an `auto`-resolved constrained rung
+/// still demotes (a decoding loop is a plausible cause of exactly this
+/// signature) — only the escalation and split rungs are skipped.
+#[test]
+fn ladder_a_runaway_under_auto_demotes_before_failing() {
+    let piece = "短い文書。";
+    let oversized = "x".repeat(DEFAULT_RUNAWAY_RATIO * piece.len() + 1);
+    let chat = ScriptedChat::start(vec![
+        chat_answer(&oversized, "length"),
+        chat_answer(VALID_ANSWER, "stop"),
+    ]);
+    let ladder = LadderConfig::new(Rung::JsonSchema, true, Some(64), 2, DEFAULT_RUNAWAY_RATIO);
+    let outputs = drive_ladder_on(&chat, "runaway-demote", piece, &ladder).unwrap();
+    assert_eq!(outputs.len(), 1, "the piece never split");
+    let requests = chat.requests();
+    assert_eq!(requests.len(), 2, "no escalated resend before the demotion");
+    assert_eq!(requests[0]["response_format"]["type"], "json_schema");
+    assert_eq!(requests[0]["max_tokens"], serde_json::json!(64));
+    assert_eq!(requests[1]["response_format"]["type"], "json_object");
+    assert_eq!(
+        requests[1]["max_tokens"],
+        serde_json::json!(64),
+        "the demoted restart begins at the budget round, not the escalated one: {:?}",
+        requests[1]
+    );
+    assert_eq!(ladder.rung(), Rung::JsonObject);
+}
+
+/// A ratio of 0 restores the unjudged ladder: the same oversized
+/// answer escalates and splits exactly as before ADR 0035.
+#[test]
+fn ladder_ratio_zero_keeps_the_pre_0035_escalate_then_split_path() {
+    let block_a = "あ".repeat(200);
+    let block_b = "い".repeat(200);
+    let piece = format!("{block_a}\n\n{block_b}");
+    let oversized = "x".repeat(DEFAULT_RUNAWAY_RATIO * piece.len() + 1);
+    let chat = ScriptedChat::start(vec![
+        chat_answer(&oversized, "length"),
+        chat_answer(&oversized, "length"),
+        chat_answer(VALID_ANSWER, "stop"),
+        chat_answer(VALID_ANSWER, "stop"),
+    ]);
+    let ladder = LadderConfig::new(Rung::Prompted, false, Some(64), 2, 0);
+    let outputs = drive_ladder_on(&chat, "ratio-off", &piece, &ladder).unwrap();
+    assert_eq!(
+        outputs.len(),
+        2,
+        "escalated, then split into two sub-pieces"
+    );
+    assert_eq!(chat.requests().len(), 4);
+}
+
+/// The demotion line's "why" under a runaway (ADR 0035): neither
+/// `length` spelling is true — the resend was skipped — so the line
+/// names the outgrown piece instead.
+#[test]
+fn demotion_reason_names_the_runaway_over_either_length_spelling() {
+    assert_eq!(
+        demotion_reason(
+            &RoundOutcome::LengthLimited { answer_bytes: 9999 },
+            true,
+            true
+        ),
+        "the length-limited answer outgrew the piece (ADR 0035)"
+    );
+    assert_eq!(
+        demotion_reason(
+            &RoundOutcome::LengthLimited { answer_bytes: 9999 },
+            false,
+            true
+        ),
+        "the length-limited answer outgrew the piece (ADR 0035)"
+    );
+    // A timeout is never a runaway — the answer never arrived.
+    assert_eq!(
+        demotion_reason(
+            &RoundOutcome::TimedOut("timeout: global".into()),
+            true,
+            false
+        ),
+        "the completion timed out (timeout: global)"
+    );
 }
 
 /// ADR 0020 (#762): a timeout under the ladder is a too-big piece, the
@@ -4768,7 +4983,7 @@ fn ladder_auto_demotes_one_rung_per_exhausted_piece_and_restarts_it() {
         chat_answer(VALID_ANSWER, "stop"),
         chat_answer(VALID_ANSWER, "stop"),
     ]);
-    let ladder = LadderConfig::new(Rung::JsonSchema, true, Some(64), 2);
+    let ladder = LadderConfig::new(Rung::JsonSchema, true, Some(64), 2, DEFAULT_RUNAWAY_RATIO);
     let outputs = drive_ladder_on(&chat, "demote", "短い文書。", &ladder).unwrap();
     assert_eq!(outputs.len(), 1, "the piece never split");
     let requests = chat.requests();
@@ -4813,7 +5028,7 @@ fn ladder_a_pinned_rung_never_demotes() {
     let block_a = "あ".repeat(200);
     let block_b = "い".repeat(200);
     let piece = format!("{block_a}\n\n{block_b}");
-    let ladder = LadderConfig::new(Rung::JsonSchema, false, Some(64), 2);
+    let ladder = LadderConfig::new(Rung::JsonSchema, false, Some(64), 2, DEFAULT_RUNAWAY_RATIO);
     let outputs = drive_ladder_on(&chat, "pinned", &piece, &ladder).unwrap();
     assert_eq!(outputs.len(), 2, "split, not demoted");
     let requests = chat.requests();
@@ -4835,7 +5050,7 @@ fn ladder_a_timeout_under_auto_demotes_before_splitting() {
         vec![STALL.to_string(), chat_answer(VALID_ANSWER, "stop")],
         Some(1),
     );
-    let ladder = LadderConfig::new(Rung::JsonSchema, true, Some(64), 2);
+    let ladder = LadderConfig::new(Rung::JsonSchema, true, Some(64), 2, DEFAULT_RUNAWAY_RATIO);
     let outputs = drive_ladder_on(&chat, "timeout-demote", "短い文書。", &ladder).unwrap();
     assert_eq!(outputs.len(), 1, "restarted whole, not split");
     let requests = chat.requests();
@@ -4857,7 +5072,7 @@ fn ladder_at_the_bottom_rung_a_length_still_splits() {
         chat_answer(VALID_ANSWER, "stop"),
     ]);
     let piece = format!("{}\n\n{}", "あ".repeat(200), "い".repeat(200));
-    let ladder = LadderConfig::new(Rung::Prompted, true, Some(64), 2);
+    let ladder = LadderConfig::new(Rung::Prompted, true, Some(64), 2, DEFAULT_RUNAWAY_RATIO);
     let outputs = drive_ladder_on(&chat, "bottom", &piece, &ladder).unwrap();
     assert_eq!(outputs.len(), 2);
     assert_eq!(chat.requests().len(), 4);
@@ -4887,12 +5102,12 @@ fn rungs_order_name_format_and_demote_from_guards() {
     );
     assert_eq!(Rung::Prompted.response_format(), None);
 
-    let pinned = LadderConfig::new(Rung::JsonSchema, false, None, 2);
+    let pinned = LadderConfig::new(Rung::JsonSchema, false, None, 2, DEFAULT_RUNAWAY_RATIO);
     assert_eq!(pinned.demote_from(Rung::JsonSchema), None);
     assert_eq!(pinned.rung(), Rung::JsonSchema);
     assert_eq!(pinned.response_format().unwrap()["type"], "json_schema");
 
-    let auto = LadderConfig::new(Rung::JsonSchema, true, None, 2);
+    let auto = LadderConfig::new(Rung::JsonSchema, true, None, 2, DEFAULT_RUNAWAY_RATIO);
     assert_eq!(
         auto.demote_from(Rung::JsonSchema),
         Some((Rung::JsonSchema, Rung::JsonObject))
@@ -4924,19 +5139,35 @@ fn rungs_order_name_format_and_demote_from_guards() {
 #[test]
 fn demotion_reason_names_the_timeout_or_the_cap_that_was_hit() {
     assert_eq!(
-        demotion_reason(&RoundOutcome::TimedOut("timeout: global".into()), true),
+        demotion_reason(
+            &RoundOutcome::TimedOut("timeout: global".into()),
+            true,
+            false
+        ),
         "the completion timed out (timeout: global)"
     );
     assert_eq!(
-        demotion_reason(&RoundOutcome::TimedOut("timeout: global".into()), false),
+        demotion_reason(
+            &RoundOutcome::TimedOut("timeout: global".into()),
+            false,
+            false
+        ),
         "the completion timed out (timeout: global)"
     );
     assert_eq!(
-        demotion_reason(&RoundOutcome::LengthLimited, true),
+        demotion_reason(
+            &RoundOutcome::LengthLimited { answer_bytes: 0 },
+            true,
+            false
+        ),
         "the answer ended at the output cap even after the escalated resend"
     );
     assert_eq!(
-        demotion_reason(&RoundOutcome::LengthLimited, false),
+        demotion_reason(
+            &RoundOutcome::LengthLimited { answer_bytes: 0 },
+            false,
+            false
+        ),
         "the answer ended at the backend's output ceiling"
     );
 }

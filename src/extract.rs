@@ -119,8 +119,8 @@ mod vocabulary;
 #[cfg(test)]
 use args::STEP_NAMES;
 use args::{
-    Args, CorrectionPolicy, DEFAULT_ESCALATION_FACTOR, LadderConfig, Outcome, ReplayMode, Rung,
-    escalation_manifest_value, resume_from_fold,
+    Args, CorrectionPolicy, DEFAULT_ESCALATION_FACTOR, DEFAULT_RUNAWAY_RATIO, LadderConfig,
+    Outcome, ReplayMode, Rung, escalation_manifest_value, resume_from_fold, runaway_manifest_value,
 };
 use diagnostics::DiagnosticsSink;
 use manifest::{ComputationInputs, Manifest};
@@ -284,6 +284,10 @@ chat endpoint:
   TAGURU_EXTRACT_ESCALATION_FACTOR  cap of the one escalated resend after an
                       answer ends at --max-output-tokens, as a multiple of
                       that budget; 0 = uncapped (2)
+  TAGURU_EXTRACT_RUNAWAY_RATIO  a length-limited answer bigger than this many
+                      times its piece's bytes is a runaway: no escalation, no
+                      split — the source fails after a demotion attempt;
+                      0 = no runaway judgment (8)
   TAGURU_EXTRACT_CHUNK_BYTES  default for --chunk-bytes (24576)
   TAGURU_EXTRACT_CHUNK_CONTEXT  default for --chunk-context (off)
   TAGURU_EXTRACT_LOSSY  default for --lossy (0/false)
@@ -788,6 +792,21 @@ pub fn run(args: &[String]) -> i32 {
         },
         Err(_) => DEFAULT_ESCALATION_FACTOR,
     };
+    // ADR 0035: the runaway judgment's byte ratio. Read
+    // unconditionally for the same reason.
+    let runaway_ratio = match std::env::var("TAGURU_EXTRACT_RUNAWAY_RATIO") {
+        Ok(value) => match value.parse::<usize>() {
+            Ok(n) => n,
+            Err(_) => {
+                return crate::config::subcommand_usage_error(
+                    "extract",
+                    "TAGURU_EXTRACT_RUNAWAY_RATIO needs an integer of at least 0 \
+                     (0 = no runaway judgment)",
+                );
+            }
+        },
+        Err(_) => DEFAULT_RUNAWAY_RATIO,
+    };
     // ADR 0001 §4/§6: the structured-output rung is resolved once per
     // run — probed when asked to, never assumed, never re-derived per
     // chunk. Any engaged control (a mechanism, or an output budget)
@@ -804,6 +823,7 @@ pub fn run(args: &[String]) -> i32 {
             matches!(mode, StructuredOutputMode::Auto),
             budget,
             escalation_factor,
+            runaway_ratio,
         )),
     };
     // Unlike the old `client.map(...)`, dry-run is the only reason
@@ -1031,6 +1051,7 @@ pub fn run(args: &[String]) -> i32 {
         structured_output,
         max_output_tokens,
         escalation_factor,
+        runaway_ratio,
         chunk_bytes,
         chunk_context,
         ladder,
