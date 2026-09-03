@@ -25,6 +25,24 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Changed
 
+- `extract`: the mechanical occurrence check (ADR 0013) judges a
+  subject/object written entirely in a Latin-style script — no
+  ideograph, kana, or hangul in it — by whole words and word stems
+  instead of shared character pairs (ADR 0036, #853). The pair rule
+  was calibrated on ideographs and let nearly any English phrase pass
+  against English text (90% of fabricated phrases on the verification
+  corpus; 0.8% now), so an object built from words the input never
+  uses — the #783 `a permanent position` shape — is now removed with
+  the usual accounting even when the chunk or its context block is
+  English. Names holding an ideograph are judged exactly as before;
+  runs with digits or symbols (`20→100`, `v1.2`) keep the pair rule.
+  Measured cost on every accepted answer in the corpus: 0.85% of
+  names newly removed, all English renderings of a Japanese document,
+  the prompt's own words used as objects, or paraphrase sentences.
+  `--coverage` inherits the rule and may flag more sentences in
+  English documents (report-only). Not a manifest input — already
+  extracted documents are not re-extracted. No response-shape or
+  on-disk format change.
 - `extract`: the system prompt now states two ground rules the model was
   previously left to infer — extraction draws on the document's text
   alone (no outside knowledge, no subject/object words the document

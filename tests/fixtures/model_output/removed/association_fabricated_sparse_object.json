@@ -1,0 +1,53 @@
+{
+  "rules": {
+    "paragraph_count": 1,
+    "questions_cap": 0
+  },
+  "document": "[0] 会計年度任用職員の任期は一会計年度以内とする。An adaptive continuous router dynamically selects both the number and identity of exits.",
+  "answer": {
+    "associations": [
+      {
+        "subject": "会計年度任用職員",
+        "label": "is not",
+        "object": "a permanent position",
+        "weight": -1.0,
+        "paragraph": 0
+      },
+      {
+        "subject": "会計年度任用職員",
+        "label": "任期",
+        "object": "一会計年度",
+        "weight": 1.0,
+        "paragraph": 0
+      },
+      {
+        "subject": "adaptive continuous router",
+        "label": "selects",
+        "object": "number of exits",
+        "weight": 1.0,
+        "paragraph": 0
+      },
+      {
+        "subject": "adaptive continuous router",
+        "label": "performs",
+        "object": "exit selection",
+        "weight": 1.0,
+        "paragraph": 0
+      },
+      {
+        "subject": "adaptive continuous router",
+        "label": "is a",
+        "object": "Kubernetes cluster autoscaler",
+        "weight": 1.0,
+        "paragraph": 0
+      }
+    ],
+    "aliases": []
+  },
+  "removed": [
+    "associations[0]: object \"a permanent position\" does not appear in the document text",
+    "associations[4]: object \"Kubernetes cluster autoscaler\" does not appear in the document text"
+  ],
+  "surviving_associations": 3,
+  "surviving_aliases": 0
+}
