@@ -34,13 +34,24 @@ use crate::registry::{
 use crate::schema;
 use crate::wal;
 
+mod attempts;
+
 const USAGE: &str = "\
 usage: taguru inspect PATH [--json]   (a data directory, one .ctx image, or one .group record)
+       taguru inspect PATH.attempts.jsonl [--piece ID | --paragraph N] [--json]
 
   --json   one JSON document instead of per-context/group text lines:
            {target, kind, contexts, groups, notices, total, corrupt}.
            The exit code and what counts as CORRUPT are unchanged —
            only how the result is rendered.
+
+  An extract attempts log (<out>/.extract-trace/<batch stem>.attempts.jsonl,
+  ADR 0025) reads as one line per completion — chunk, piece, the
+  paragraphs the piece spans, state, cost — with the ladder's moves
+  between them (ADR 0037, #850):
+  --piece ID      the attempts of the piece whose id starts with ID, with
+                  the piece text as sent and the answer, verbatim
+  --paragraph N   the same for every piece whose paragraphs cover [N]
 ";
 
 pub fn run(args: &[String]) -> i32 {
@@ -50,20 +61,57 @@ pub fn run(args: &[String]) -> i32 {
     // into the same loop as --json's own parsing, rather than a
     // separate up-front scan, since both need one pass over `args`.
     let mut as_json = false;
+    let mut filter = attempts::Filter::All;
     let mut positionals: Vec<&str> = Vec::new();
+    let mut pending: Option<&str> = None;
     for arg in args {
+        if let Some(flag) = pending.take() {
+            if filter != attempts::Filter::All {
+                eprintln!(
+                    "taguru: inspect: --piece and --paragraph are one filter each — give one \
+                     of them, once"
+                );
+                return 2;
+            }
+            filter = match flag {
+                "--piece" if !arg.is_empty() && arg.chars().all(|c| c.is_ascii_hexdigit()) => {
+                    attempts::Filter::Piece(arg.to_ascii_lowercase())
+                }
+                "--paragraph" => match arg.parse() {
+                    Ok(n) => attempts::Filter::Paragraph(n),
+                    Err(_) => {
+                        eprintln!(
+                            "taguru: inspect: --paragraph takes a paragraph number, got '{arg}'"
+                        );
+                        return 2;
+                    }
+                },
+                _ => {
+                    eprintln!(
+                        "taguru: inspect: --piece takes a hex piece id (or its prefix), got '{arg}'"
+                    );
+                    return 2;
+                }
+            };
+            continue;
+        }
         match arg.as_str() {
             "--help" | "-h" => {
                 print!("{USAGE}");
                 return 0;
             }
             "--json" => as_json = true,
+            "--piece" | "--paragraph" => pending = Some(arg.as_str()),
             other if other.starts_with('-') => {
                 eprint!("{USAGE}");
                 return 2;
             }
             value => positionals.push(value),
         }
+    }
+    if let Some(flag) = pending {
+        eprintln!("taguru: inspect: {flag} needs a value");
+        return 2;
     }
     let path = match positionals.as_slice() {
         [path] => Path::new(*path),
@@ -72,10 +120,24 @@ pub fn run(args: &[String]) -> i32 {
             return 2;
         }
     };
+    let is_attempts_log = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".attempts.jsonl"));
+    if filter != attempts::Filter::All && !is_attempts_log {
+        eprintln!(
+            "taguru: inspect: --piece/--paragraph apply to an extract attempts log \
+             (<out>/.extract-trace/<batch stem>.attempts.jsonl), not to {}",
+            path.display()
+        );
+        return 2;
+    }
     if path.is_dir() {
         inspect_directory(path, as_json)
     } else if path.is_file() {
-        if path.extension().and_then(|e| e.to_str()) == Some("group") {
+        if is_attempts_log {
+            attempts::inspect_attempts_log(path, &filter, as_json)
+        } else if path.extension().and_then(|e| e.to_str()) == Some("group") {
             inspect_group_file(path, as_json)
         } else {
             inspect_file(path, as_json)

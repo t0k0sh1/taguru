@@ -4174,3 +4174,66 @@ fn a_failing_files_apply_does_not_stop_the_files_after_it() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// ADR 0037 (#850): `inspect`'s attempts-log flags are refused with a
+/// usage exit anywhere they cannot apply, and a file that merely ends
+/// in `.attempts.jsonl` without a single log record is named as such.
+#[test]
+fn inspect_attempts_flags_are_validated_and_a_non_log_is_named() {
+    let dir = common::scratch_dir("cli-inspect-attempts");
+    std::fs::create_dir_all(&dir).unwrap();
+    let image = dir.join("sake.ctx");
+    std::fs::write(&image, taguru::context::Context::default().to_bytes()).unwrap();
+    let image_arg = image.display().to_string();
+
+    // The filters apply to an attempts log only.
+    let output = run(&["inspect", &image_arg, "--piece", "abcd"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("--piece/--paragraph apply to an extract attempts log"),
+    );
+    // A malformed value or a missing one is a usage error too.
+    let output = run(&["inspect", &image_arg, "--paragraph", "seven"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("--paragraph takes a paragraph number")
+    );
+    let output = run(&["inspect", &image_arg, "--piece", "not-hex"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--piece takes a hex piece id"));
+    let output = run(&["inspect", &image_arg, "--piece"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--piece needs a value"));
+    // The two filters are exclusive, and neither repeats.
+    for args in [
+        ["--piece", "abcd", "--paragraph", "1"],
+        ["--paragraph", "1", "--piece", "abcd"],
+        ["--piece", "abcd", "--piece", "abce"],
+        ["--paragraph", "1", "--paragraph", "2"],
+    ] {
+        let output = run(&["inspect", &image_arg, args[0], args[1], args[2], args[3]]);
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("one filter each"),
+            "{args:?}"
+        );
+    }
+
+    // A file named like a log but holding no record of one.
+    let bogus = dir.join("x.attempts.jsonl");
+    std::fs::write(&bogus, "{\"kind\": \"other\"}\nnot json\n").unwrap();
+    let output = run(&["inspect", &bogus.display().to_string()]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("not an extract attempts log"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // The usage text names the new form.
+    let output = run(&["inspect", "--help"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("--paragraph N"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

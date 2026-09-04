@@ -1210,6 +1210,24 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
     </p>
     <h3 id="attempts">The attempts log: every prompt and every answer, in full</h3>
     <p>
+      <b>Read it with <code>taguru inspect</code></b> (<a
+      href="https://github.com/t0k0sh1/taguru/blob/main/adr/0037-failure-output-addressability.md">ADR
+      0037</a>, #850): <code>taguru inspect &lt;out&gt;/.extract-trace/&lt;batch
+      stem&gt;.attempts.jsonl</code> prints one line per completion in issue order — chunk,
+      piece id, the paragraphs the piece spans, stage and attempt, state, token cap, time,
+      tokens — with the ladder's moves (escalate, split, demote, runaway) between them and a
+      tally at the end, plus the one command to type next: the piece that never reached a
+      valid answer. <code>--piece ID</code> (the id or any prefix of it) or
+      <code>--paragraph N</code> (every piece whose paragraphs cover <code>[N]</code>) then
+      prints that piece's attempts with the piece text exactly as the model saw it, the
+      corrective ask of a retry, and the answer, unescaped between <code>---</code> fences —
+      so "which paragraphs did the failed piece hold, and what came back" is two commands,
+      not a script over the JSONL. <code>--json</code> renders the same rows as one document
+      (<code>{target, kind: "attempts", document, runs, settings, filter, attempts, moves,
+      unreadable_lines, matched}</code>; the texts ride only under a filter). A torn last line
+      (a killed run) is counted and said, never a failure.
+    </p>
+    <p>
       Beside the trace, <code>&lt;out&gt;/.extract-trace/&lt;batch stem&gt;.attempts.jsonl</code>
       keeps the text of every conversation the document had with the model, by default
       (<a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0025-attempts-log.md">ADR

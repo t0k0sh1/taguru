@@ -905,6 +905,24 @@ fn evaluate_answer_accepts_after_mechanical_removal_and_records_it() {
     assert!(evaluated.output.aliases.is_empty());
 }
 
+/// ADR 0037 (#850): `user_message_part` is `user_message`'s inverse
+/// for the `part K of N` a multi-chunk turn announces — read by
+/// `taguru inspect` off an attempts log, which records the chunk
+/// index but not the count.
+#[test]
+fn user_message_part_reads_the_part_line_and_declines_a_single_chunk_turn() {
+    let multi = user_message("docs/a, part 1 of 2.md", 1, 3, "[4] text", None);
+    assert_eq!(user_message_part(&multi), Some((2, 3)));
+    let single = user_message("docs/a.md", 0, 1, "[0] text", None);
+    assert_eq!(user_message_part(&single), None);
+    // A source path that itself contains ", part 9 of 9:" cannot fool
+    // the parse: the announcement is the line's last such clause.
+    let tricky = user_message("x, part 9 of 9:", 0, 4, "[0] t", None);
+    assert_eq!(user_message_part(&tricky), Some((1, 4)));
+    assert_eq!(user_message_part("Fix these aliases: …"), None);
+    assert_eq!(user_message_part(""), None);
+}
+
 #[test]
 fn name_occurrence_is_whitespace_and_case_blind_and_covers_compounds() {
     let haystack = normalize_for_occurrence(

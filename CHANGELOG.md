@@ -9,6 +9,16 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Added
 
+- `inspect`: reads an extract attempts log (ADR 0037, #850). `taguru
+  inspect <out>/.extract-trace/<batch stem>.attempts.jsonl` prints one
+  line per completion — chunk, piece id, the paragraphs the piece
+  spans, state, cost — with the ladder's moves between them and, at the
+  end, the piece worth opening; `--piece ID` / `--paragraph N` print
+  that piece's attempts with the piece text as sent and the answer
+  verbatim, `--json` renders the same rows as one document. Before, the
+  log's `messages` were readable only through a script. No on-disk
+  format change; the attempts log itself is unchanged.
+
 - `extract`: runaway output detection (ADR 0035, #854). A
   length-limited answer whose bytes exceed
   `TAGURU_EXTRACT_RUNAWAY_RATIO` × its piece's bytes (default 8;
