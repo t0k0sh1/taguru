@@ -92,11 +92,13 @@ files = ["src"]
 
 [[tool.mypy.overrides]]
 # `opentelemetry-api` is optional (the `otel` extra) — CI's mypy job
-# installs `dev` only, so the package is genuinely absent there. This
-# override, not a `# type: ignore[import-not-found]` comment, is what
-# makes `taguru._tracing` typecheck identically whether or not a
-# developer's own environment happens to have it installed too (a
-# comment-based ignore flips to "unused" the moment the package IS
-# present and ships its own `py.typed` types).
+# installs `dev` only, so the package is absent there unless some
+# transitive dependency happens to pull it in (google-api-core 2.36
+# did, 2026-09-03). This override, not a `# type: ignore[import-not-found]`
+# comment, is what makes `taguru._tracing` typecheck identically whether
+# or not the environment has it installed (a comment-based ignore flips
+# to "unused" the moment the package IS present and ships its own
+# `py.typed` types); `_tracing` itself types its module handles `Any`
+# for the same reason — see the comment above its import.
 module = ["opentelemetry", "opentelemetry.*"]
 ignore_missing_imports = true
