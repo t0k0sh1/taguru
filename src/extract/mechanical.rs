@@ -369,49 +369,175 @@ const OCCURRENCE_VERBATIM_MAX: usize = 3;
 const OCCURRENCE_COVERAGE_NUM: usize = 3;
 const OCCURRENCE_COVERAGE_DEN: usize = 4;
 
+/// ADR 0036 (#853): in a name written entirely in a sparse script —
+/// Latin, Cyrillic, Greek…: no ideograph, kana, or hangul anywhere in
+/// it — a run of letters counts toward coverage only as a whole word
+/// of the name at least this long (`std`, `API`, `Copy`, `heap`; a
+/// two-letter word is `of`/`at`/`is`, which any text of the language
+/// contains) …
+const SPARSE_WORD_MIN_RUN: usize = 3;
+
+/// … or as a stem at least this long inside a longer word — the
+/// inflected or pluralized form the document has (`selects` for
+/// `selection`, `recommendation` for `recommendations`). Two-letter
+/// runs are [`OCCURRENCE_MIN_RUN`]'s unit for ideographs, where each
+/// character is a morpheme; in a sparse script the morpheme is the
+/// word, and two shared letters are a bigram any paragraph of the
+/// language supplies (measured on the verification corpus: 90% of
+/// fabricated English phrases passed against unrelated English text).
+const SPARSE_STEM_MIN_RUN: usize = 5;
+
+/// One character of a name as the cover walks it: lowercased, with
+/// whether it opened or closed a word of the ORIGINAL name — a word
+/// boundary is the name's edge or a neighboring non-alphanumeric
+/// character (whitespace, `-`, `_`, `::`), read before whitespace is
+/// dropped so `Copy trait` still knows where `copy` ends.
+#[derive(Clone, Copy)]
+struct OccurrenceGlyph {
+    ch: char,
+    word_start: bool,
+    word_end: bool,
+}
+
+/// [`normalize_for_occurrence`] with word boundaries kept: the
+/// glyphs' characters, concatenated, are exactly the normal form.
+fn occurrence_glyphs(name: &str) -> Vec<OccurrenceGlyph> {
+    let original: Vec<char> = name.chars().collect();
+    let mut glyphs = Vec::with_capacity(original.len());
+    for (index, &c) in original.iter().enumerate() {
+        if c.is_whitespace() {
+            continue;
+        }
+        let word_start = index == 0 || !original[index - 1].is_alphanumeric();
+        let word_end = index + 1 == original.len() || !original[index + 1].is_alphanumeric();
+        // Lowercasing can expand one character to several (`İ`);
+        // the flags stay on the outermost of them.
+        let lowered: Vec<char> = c.to_lowercase().collect();
+        let last = lowered.len() - 1;
+        for (offset, ch) in lowered.into_iter().enumerate() {
+            glyphs.push(OccurrenceGlyph {
+                ch,
+                word_start: word_start && offset == 0,
+                word_end: word_end && offset == last,
+            });
+        }
+    }
+    glyphs
+}
+
+/// A character of a script where one character is a morpheme — CJK
+/// ideographs (with kana and the other East Asian scripts in the
+/// same block range), hangul (syllables and the conjoining jamo a
+/// decomposed spelling uses), halfwidth katakana, the ideograph
+/// extension planes — as opposed to a sparse script where the
+/// morpheme is the word. Alphabetic only: CJK punctuation in a name
+/// is a symbol like any other.
+fn is_dense_script(c: char) -> bool {
+    c.is_alphabetic()
+        && matches!(
+            c as u32,
+            0x1100..=0x11FF
+                | 0x2E80..=0x9FFF
+                | 0xA960..=0xA97F
+                | 0xAC00..=0xD7AF
+                | 0xD7B0..=0xD7FF
+                | 0xF900..=0xFAFF
+                | 0xFF66..=0xFF9F
+                | 0x20000..=0x3134F
+        )
+}
+
+/// Where a run of a sparse-script name's characters that the document
+/// contains must stop (ADR 0036 §3.2): a run of letters never crosses
+/// a word boundary of the name, so it is cut after the first word end
+/// inside it — the cover then takes the longest run WITHIN the word
+/// (`prediction` still counts when the document goes on with `heads`
+/// and the name with `head insertion`), and letters of two adjacent
+/// words never assemble a stem neither word has (`ab cd ef` against
+/// `abcde`). A run holding a digit or symbol is left whole, as under
+/// ADR 0013.
+fn clip_at_word_end(run: &[OccurrenceGlyph]) -> usize {
+    if run.iter().any(|glyph| !glyph.ch.is_alphabetic()) {
+        return run.len();
+    }
+    run.iter()
+        .position(|glyph| glyph.word_end)
+        .map_or(run.len(), |index| index + 1)
+}
+
+/// Whether a run of a sparse-script name's characters that the
+/// document contains counts toward coverage (ADR 0036): any run
+/// holding a digit or symbol does, as under ADR 0013 (`20→100`,
+/// `v1.2`); a run of letters only as a whole word of the name of
+/// [`SPARSE_WORD_MIN_RUN`]+ letters or a stem of
+/// [`SPARSE_STEM_MIN_RUN`]+.
+fn sparse_run_counts(run: &[OccurrenceGlyph]) -> bool {
+    if run.iter().any(|glyph| !glyph.ch.is_alphabetic()) {
+        return true;
+    }
+    run.len() >= SPARSE_STEM_MIN_RUN
+        || (run.len() >= SPARSE_WORD_MIN_RUN && run[0].word_start && run[run.len() - 1].word_end)
+}
+
 /// Whether a subject/object name plausibly appears in the document:
 /// verbatim substring after normalization, or — for names long enough
 /// to judge — greedy coverage by document substrings. Deterministic,
 /// dictionary-free, same answer every attempt; the corrective loop's
-/// nondeterminism is exactly what this replaces (#496).
+/// nondeterminism is exactly what this replaces (#496). A name with
+/// no dense-script character is judged by words and stems, not
+/// character pairs (ADR 0036, #853): the pair rule was calibrated on
+/// ideographs and admits nearly any English phrase against English
+/// text.
 pub(super) fn name_occurs(haystack: &str, name: &str) -> bool {
-    let needle = normalize_for_occurrence(name);
+    let glyphs = occurrence_glyphs(name);
+    let needle: String = glyphs.iter().map(|glyph| glyph.ch).collect();
     if needle.is_empty() {
         return true; // emptiness is field_absence's finding, not this one's
     }
     if haystack.contains(&needle) {
         return true;
     }
-    let chars: Vec<char> = needle.chars().collect();
-    if chars.len() <= OCCURRENCE_VERBATIM_MAX {
+    if glyphs.len() <= OCCURRENCE_VERBATIM_MAX {
         return false;
     }
+    let sparse_script = !glyphs.iter().any(|glyph| is_dense_script(glyph.ch));
     // Greedy left-to-right cover: at each position take the longest
     // run that appears in the document (containment is monotone in
     // run length, so the longest run binary-searches), count it if it
     // meets the minimum, then continue after it.
     let mut covered = 0usize;
     let mut start = 0usize;
-    while start < chars.len() {
+    // `get`, not `start < len()`: the extra iteration a `<=` would add
+    // (empty tail, no run) is unobservable — the form leaves no such
+    // mutant to test.
+    while glyphs.get(start).is_some() {
         let mut low = 0usize;
-        let mut high = chars.len() - start;
+        let mut high = glyphs.len() - start;
         while low < high {
             let mid = (low + high).div_ceil(2);
-            let probe: String = chars[start..start + mid].iter().collect();
+            let probe: String = glyphs[start..start + mid]
+                .iter()
+                .map(|glyph| glyph.ch)
+                .collect();
             if haystack.contains(&probe) {
                 low = mid;
             } else {
                 high = mid - 1;
             }
         }
-        if low >= OCCURRENCE_MIN_RUN {
+        if sparse_script {
+            low = clip_at_word_end(&glyphs[start..start + low]);
+        }
+        if low >= OCCURRENCE_MIN_RUN
+            && (!sparse_script || sparse_run_counts(&glyphs[start..start + low]))
+        {
             covered += low;
             start += low;
         } else {
             start += 1;
         }
     }
-    covered * OCCURRENCE_COVERAGE_DEN >= chars.len() * OCCURRENCE_COVERAGE_NUM
+    covered * OCCURRENCE_COVERAGE_DEN >= glyphs.len() * OCCURRENCE_COVERAGE_NUM
 }
 
 /// The Stage 2 mechanical half (ADR 0013): an alias whose canonical

@@ -9,7 +9,11 @@
   stands) / **Superseded by**: ADR 0022 (§3.2–3.3's "shadowing and
   conflicting aliases stay corrective" — they still get their corrective
   turn, but one that leaves them standing now removes them with accounting
-  instead of failing the source; everything else here stands)
+  instead of failing the source; everything else here stands), ADR 0036
+  (§4's run rule for a name with no ideograph, kana, or hangul — a run
+  of letters counts as a whole word or a stem, not as a character pair;
+  runs holding a digit or symbol keep the pair rule, and everything
+  else here stands)
 
 Once Accepted, this document's Decision is immutable: a changed decision gets a
 new `adr/000N-*.md` that names this one in *Supersedes*, never an edit here.

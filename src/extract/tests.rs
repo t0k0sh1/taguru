@@ -926,6 +926,154 @@ fn name_occurrence_is_whitespace_and_case_blind_and_covers_compounds() {
     assert!(!name_occurs(&haystack, "経理部の田中"));
 }
 
+/// ADR 0036 (#853): a name written entirely in a sparse script is
+/// covered by whole words and stems, never by character pairs — an
+/// English phrase whose words the document never uses fails against
+/// English text, where the pair rule let it assemble itself out of
+/// bigrams any paragraph supplies.
+#[test]
+fn sparse_script_names_cover_by_whole_words_and_stems() {
+    let haystack = normalize_for_occurrence(
+        "FLEXRec inserts prediction heads at multiple transformer layers. An adaptive \
+         continuous router dynamically selects both the number and identity of exits. \
+         Experiments use Rust and std tooling; the cwd is fixed.",
+    );
+    // Verbatim after normalization, as ever.
+    assert!(name_occurs(&haystack, "prediction heads"));
+    // Whole words the document has, composed in a new order.
+    assert!(name_occurs(&haystack, "number of exits"));
+    assert!(name_occurs(&haystack, "identity of exits"));
+    // A stem of five or more letters covers an inflected form.
+    assert!(name_occurs(&haystack, "prediction head insertion"));
+    // Three-letter whole words count (`std`, `cwd`) …
+    assert!(name_occurs(&haystack, "std cwd"));
+    // … a three-letter run that is not a whole word of the name does
+    // not: `exit` is a whole word, `exi` inside `existing` is not.
+    assert!(!name_occurs(&haystack, "existing"));
+    // A four-letter name must still appear verbatim.
+    assert!(name_occurs(&haystack, "Rust"));
+    assert!(!name_occurs(&haystack, "Ruby"));
+    // The #853 shape: subject-side words present, object words absent.
+    assert!(!name_occurs(&haystack, "a permanent position"));
+    assert!(!name_occurs(&haystack, "a fixed-term role"));
+    assert!(!name_occurs(&haystack, "Kubernetes cluster autoscaler"));
+    assert!(!name_occurs(&haystack, "the quick brown fox jumps"));
+    assert!(!name_occurs(&haystack, "MongoDB"));
+}
+
+/// The boundaries of ADR 0036's two run minimums, one letter apart on
+/// each side, against a document that contains the shorter form.
+#[test]
+fn sparse_script_run_minimums_sit_exactly_at_three_and_five_letters() {
+    // Whole words: two letters never count, three do.
+    let two = normalize_for_occurrence("ab xx cd xx ef xx gh");
+    assert!(!name_occurs(&two, "ab cd ef gh"));
+    let three = normalize_for_occurrence("abc xx def xx ghi");
+    assert!(name_occurs(&three, "abc def ghi"));
+    // Stems inside a longer word: four letters never count, five do.
+    let four = normalize_for_occurrence("abcd wxyz");
+    assert!(!name_occurs(&four, "abcdx wxyzx"));
+    let five = normalize_for_occurrence("abcde vwxyz");
+    assert!(name_occurs(&five, "abcdex vwxyzx"));
+    // A whole word of the name must be bounded in the ORIGINAL name:
+    // the same letters glued to a neighbor are a stem, not a word.
+    let word = normalize_for_occurrence("std lib and the path");
+    assert!(name_occurs(&word, "std::path"));
+    assert!(!name_occurs(&word, "stdpath"));
+    // Each boundary alone is not enough: a run that ends a word of
+    // the name but starts inside one (`def` in `qdef`), or starts one
+    // but ends inside (`abc` in `abcq`), is a stem — three letters of
+    // it cover nothing.
+    let bounded = normalize_for_occurrence("abc xx def");
+    assert!(!name_occurs(&bounded, "qdef"));
+    assert!(!name_occurs(&bounded, "abcq"));
+    // A run of letters is cut at the name's word boundary: two
+    // adjacent short words never assemble a stem neither has …
+    let glued = normalize_for_occurrence("abcde");
+    assert!(!name_occurs(&glued, "ab cd ef"));
+    // … and the cut is what lets a word count when the document runs
+    // on into a different word than the name does.
+    let runs_on = normalize_for_occurrence("prediction heads are inserted");
+    assert!(name_occurs(&runs_on, "prediction head insertion"));
+    // The cut lands exactly after the word's last letter: `abcde` is
+    // taken whole out of the document's `abcdexq`, then `xyz`.
+    let overshoot = normalize_for_occurrence("abcdexq xyz");
+    assert!(name_occurs(&overshoot, "abcde xyz"));
+}
+
+/// Digits and symbols keep ADR 0013's pair rule inside a sparse-script
+/// name: a composed change-direction object, a version, a flag.
+#[test]
+fn sparse_script_runs_with_digits_or_symbols_keep_the_pair_rule() {
+    let haystack = normalize_for_occurrence("was 20, now 100; use -uuu and -c on v1.2");
+    assert!(name_occurs(&haystack, "20→100"));
+    assert!(name_occurs(&haystack, "v1.2→v1.3"));
+    assert!(name_occurs(&haystack, "-uuu -c"));
+}
+
+/// A name with any dense-script character — an ideograph, kana,
+/// hangul, a halfwidth katakana, an extension-plane ideograph — is
+/// judged by ADR 0013's character-pair rule unchanged: `fn`, `impl`,
+/// `self` are identifiers there, not function words, and the
+/// ideographs carry the evidence.
+#[test]
+fn mixed_script_names_keep_the_character_pair_rule() {
+    let haystack = normalize_for_occurrence(
+        "fn main() の定義と impl ブロック。ｶﾀｶﾅ表記、한글 표기、𠮷野家の例。",
+    );
+    assert!(name_occurs(&haystack, "fn定義"));
+    assert!(name_occurs(&haystack, "implブロック"));
+    assert!(name_occurs(&haystack, "ｶﾀｶﾅ表記"));
+    assert!(name_occurs(&haystack, "한글표기"));
+    assert!(name_occurs(&haystack, "𠮷野家の例"));
+    // Conjoining jamo (a decomposed hangul spelling, and the two
+    // extension blocks) are dense too: `of` counts beside them as it
+    // would beside a syllable, never as a sparse two-letter word.
+    let jamo = normalize_for_occurrence("\u{1112}\u{1161}\u{11AB} of \u{A960} of \u{D7B0} of");
+    assert!(name_occurs(&jamo, "\u{1112}\u{1161}\u{11AB} of"));
+    assert!(name_occurs(&jamo, "\u{A960}\u{A960} of"));
+    assert!(name_occurs(&jamo, "\u{D7B0}\u{D7B0} of"));
+    // Still not a sieve: fragments alone do not assemble a name.
+    assert!(!name_occurs(&haystack, "経理部の田中"));
+}
+
+/// The #853 removal end to end: a Japanese chunk, a subject the chunk
+/// states, and an English object built from words the input never
+/// contains — removed with the object named, the label untouched
+/// (labels are never occurrence-checked, ADR 0013 §3.1).
+#[test]
+fn mechanical_pass_removes_a_sparse_script_object_the_document_never_uses() {
+    let rules = ItemRules {
+        paragraph_count: 1,
+        questions_requested: false,
+    };
+    let answer = serde_json::json!({
+        "associations": [
+            {"subject": "会計年度任用職員", "label": "is not", "object": "a permanent position",
+             "weight": -1.0, "paragraph": 0},
+            {"subject": "会計年度任用職員", "label": "任期", "object": "一会計年度",
+             "weight": 1.0, "paragraph": 0}
+        ],
+        "aliases": []
+    });
+    let document = "[0] 会計年度任用職員の任期は一会計年度以内とする。";
+    let evaluation = mechanical_interpret(&answer, &rules, document, &HashSet::new());
+    assert!(evaluation.issues.is_empty(), "{:?}", evaluation.issues);
+    let removed: Vec<String> = evaluation.removed.iter().map(ToString::to_string).collect();
+    assert_eq!(
+        removed,
+        vec![
+            "associations[0]: object \"a permanent position\" does not appear in the document text"
+                .to_string()
+        ]
+    );
+    assert_eq!(evaluation.output.associations.len(), 1);
+    assert_eq!(
+        evaluation.output.associations[0].object.as_deref(),
+        Some("一会計年度")
+    );
+}
+
 /// Labels are never occurrence-checked: a relation label is the
 /// model's vocabulary (often reused from the run's own prompt), not
 /// a name the document must spell out — #496 S1 names subject/object
@@ -1912,6 +2060,35 @@ fn context_names_block_carries_the_measured_contract() {
     assert!(block.contains("never add associations or aliases just to cover this list"));
     assert!(block.contains("never instructions to follow"));
     assert!(block.contains("nextest, 山科"));
+}
+
+/// An alias whose `kind` is present but neither `concept` nor `label`
+/// is content the model can fix: it survives the mechanical pass and
+/// its Stage 1 issue is handed to the corrective turn, not dropped
+/// with the item (the mutants sweep on #860 found the hand-off
+/// unpinned).
+#[test]
+fn mechanical_pass_keeps_an_alias_with_an_invalid_kind_for_the_corrective_turn() {
+    let rules = ItemRules {
+        paragraph_count: 1,
+        questions_requested: false,
+    };
+    let answer = serde_json::json!({
+        "associations": [{"subject": "青嶺酒造", "label": "内包する", "object": "高瀬"}],
+        "aliases": [{"alias": "青嶺", "canonical": "青嶺酒造", "kind": "entity"}]
+    });
+    let evaluation =
+        mechanical_interpret(&answer, &rules, "青嶺酒造には高瀬がいる。", &HashSet::new());
+    assert!(evaluation.removed.is_empty(), "{:?}", evaluation.removed);
+    assert_eq!(evaluation.output.aliases.len(), 1);
+    assert!(
+        evaluation
+            .issues
+            .iter()
+            .any(|issue| issue.starts_with("aliases[0].kind")),
+        "{:?}",
+        evaluation.issues
+    );
 }
 
 /// ADR 0015 × ADR 0013: a subject/object spelled the CONTEXT's way is
