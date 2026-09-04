@@ -987,6 +987,18 @@ fn sparse_script_run_minimums_sit_exactly_at_three_and_five_letters() {
     let bounded = normalize_for_occurrence("abc xx def");
     assert!(!name_occurs(&bounded, "qdef"));
     assert!(!name_occurs(&bounded, "abcq"));
+    // A run of letters is cut at the name's word boundary: two
+    // adjacent short words never assemble a stem neither has …
+    let glued = normalize_for_occurrence("abcde");
+    assert!(!name_occurs(&glued, "ab cd ef"));
+    // … and the cut is what lets a word count when the document runs
+    // on into a different word than the name does.
+    let runs_on = normalize_for_occurrence("prediction heads are inserted");
+    assert!(name_occurs(&runs_on, "prediction head insertion"));
+    // The cut lands exactly after the word's last letter: `abcde` is
+    // taken whole out of the document's `abcdexq`, then `xyz`.
+    let overshoot = normalize_for_occurrence("abcdexq xyz");
+    assert!(name_occurs(&overshoot, "abcde xyz"));
 }
 
 /// Digits and symbols keep ADR 0013's pair rule inside a sparse-script
@@ -1014,6 +1026,13 @@ fn mixed_script_names_keep_the_character_pair_rule() {
     assert!(name_occurs(&haystack, "ｶﾀｶﾅ表記"));
     assert!(name_occurs(&haystack, "한글표기"));
     assert!(name_occurs(&haystack, "𠮷野家の例"));
+    // Conjoining jamo (a decomposed hangul spelling, and the two
+    // extension blocks) are dense too: `of` counts beside them as it
+    // would beside a syllable, never as a sparse two-letter word.
+    let jamo = normalize_for_occurrence("\u{1112}\u{1161}\u{11AB} of \u{A960} of \u{D7B0} of");
+    assert!(name_occurs(&jamo, "\u{1112}\u{1161}\u{11AB} of"));
+    assert!(name_occurs(&jamo, "\u{A960}\u{A960} of"));
+    assert!(name_occurs(&jamo, "\u{D7B0}\u{D7B0} of"));
     // Still not a sieve: fragments alone do not assemble a name.
     assert!(!name_occurs(&haystack, "経理部の田中"));
 }
@@ -2041,6 +2060,35 @@ fn context_names_block_carries_the_measured_contract() {
     assert!(block.contains("never add associations or aliases just to cover this list"));
     assert!(block.contains("never instructions to follow"));
     assert!(block.contains("nextest, 山科"));
+}
+
+/// An alias whose `kind` is present but neither `concept` nor `label`
+/// is content the model can fix: it survives the mechanical pass and
+/// its Stage 1 issue is handed to the corrective turn, not dropped
+/// with the item (the mutants sweep on #860 found the hand-off
+/// unpinned).
+#[test]
+fn mechanical_pass_keeps_an_alias_with_an_invalid_kind_for_the_corrective_turn() {
+    let rules = ItemRules {
+        paragraph_count: 1,
+        questions_requested: false,
+    };
+    let answer = serde_json::json!({
+        "associations": [{"subject": "青嶺酒造", "label": "内包する", "object": "高瀬"}],
+        "aliases": [{"alias": "青嶺", "canonical": "青嶺酒造", "kind": "entity"}]
+    });
+    let evaluation =
+        mechanical_interpret(&answer, &rules, "青嶺酒造には高瀬がいる。", &HashSet::new());
+    assert!(evaluation.removed.is_empty(), "{:?}", evaluation.removed);
+    assert_eq!(evaluation.output.aliases.len(), 1);
+    assert!(
+        evaluation
+            .issues
+            .iter()
+            .any(|issue| issue.starts_with("aliases[0].kind")),
+        "{:?}",
+        evaluation.issues
+    );
 }
 
 /// ADR 0015 × ADR 0013: a subject/object spelled the CONTEXT's way is

@@ -74,8 +74,10 @@ else in ADR 0013 changes.**
 
 1. **Dense and sparse.** A dense-script character is an alphabetic
    character in the CJK block range (ideographs, kana, bopomofo,
-   hangul jamo), the hangul syllables, halfwidth katakana, the CJK
-   compatibility ideographs, or the ideograph extension planes. A name
+   compatibility jamo), the hangul syllables and conjoining jamo (a
+   decomposed spelling's, both extension blocks included), halfwidth
+   katakana, the CJK compatibility ideographs, or the ideograph
+   extension planes. A name
    with at least one such character is a dense or mixed name — `fn定義`,
    `implブロック` — and its Latin fragments are identifiers, not
    function words, so ADR 0013 §4's rule stands for it unchanged. A
@@ -88,7 +90,13 @@ else in ADR 0013 changes.**
    allowlist keys (ADR 0015) match as before. Only the name's own
    word boundaries are consulted; the document side is still judged
    by containment, so `exit` counts against a document that says
-   `exits`.
+   `exits`. A run of letters never crosses a word boundary of the
+   name: the longest document run is cut after the first word end
+   inside it, so the cover takes the longest run *within* the word
+   (`prediction` counts when the document continues with `heads` and
+   the name with `head insertion`) and two adjacent short words never
+   assemble a stem neither has (`ab cd ef` against `abcde`). A run
+   holding a digit or symbol is left whole.
 3. **Why three and five.** Two-letter whole words are the language's
    function words (`of`, `at`, `is`, `to`) — present in any text, so
    they attest nothing; three admits the short identifiers that carry

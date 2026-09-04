@@ -427,16 +427,42 @@ fn occurrence_glyphs(name: &str) -> Vec<OccurrenceGlyph> {
 
 /// A character of a script where one character is a morpheme — CJK
 /// ideographs (with kana and the other East Asian scripts in the
-/// same block range), hangul syllables, halfwidth katakana, the
-/// ideograph extension planes — as opposed to a sparse script where
-/// the morpheme is the word. Alphabetic only: CJK punctuation in a
-/// name is a symbol like any other.
+/// same block range), hangul (syllables and the conjoining jamo a
+/// decomposed spelling uses), halfwidth katakana, the ideograph
+/// extension planes — as opposed to a sparse script where the
+/// morpheme is the word. Alphabetic only: CJK punctuation in a name
+/// is a symbol like any other.
 fn is_dense_script(c: char) -> bool {
     c.is_alphabetic()
         && matches!(
             c as u32,
-            0x2E80..=0x9FFF | 0xAC00..=0xD7AF | 0xF900..=0xFAFF | 0xFF66..=0xFF9F | 0x20000..=0x3134F
+            0x1100..=0x11FF
+                | 0x2E80..=0x9FFF
+                | 0xA960..=0xA97F
+                | 0xAC00..=0xD7AF
+                | 0xD7B0..=0xD7FF
+                | 0xF900..=0xFAFF
+                | 0xFF66..=0xFF9F
+                | 0x20000..=0x3134F
         )
+}
+
+/// Where a run of a sparse-script name's characters that the document
+/// contains must stop (ADR 0036 §3.2): a run of letters never crosses
+/// a word boundary of the name, so it is cut after the first word end
+/// inside it — the cover then takes the longest run WITHIN the word
+/// (`prediction` still counts when the document goes on with `heads`
+/// and the name with `head insertion`), and letters of two adjacent
+/// words never assemble a stem neither word has (`ab cd ef` against
+/// `abcde`). A run holding a digit or symbol is left whole, as under
+/// ADR 0013.
+fn clip_at_word_end(run: &[OccurrenceGlyph]) -> usize {
+    if run.iter().any(|glyph| !glyph.ch.is_alphabetic()) {
+        return run.len();
+    }
+    run.iter()
+        .position(|glyph| glyph.word_end)
+        .map_or(run.len(), |index| index + 1)
 }
 
 /// Whether a run of a sparse-script name's characters that the
@@ -498,6 +524,9 @@ pub(super) fn name_occurs(haystack: &str, name: &str) -> bool {
             } else {
                 high = mid - 1;
             }
+        }
+        if sparse_script {
+            low = clip_at_word_end(&glyphs[start..start + low]);
         }
         if low >= OCCURRENCE_MIN_RUN
             && (!sparse_script || sparse_run_counts(&glyphs[start..start + low]))
