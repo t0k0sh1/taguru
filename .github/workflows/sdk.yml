@@ -185,13 +185,19 @@ jobs:
       # timeout at registry.npmjs.org, seen four runs in a row on
       # 2026-09-04). Only the outage is retried; a finding fails on the
       # first attempt as before.
+      # No pipe: this workflow declares no `shell`, so `run` gets `bash -e`
+      # without `pipefail`, and `npm audit | tee` would return tee's exit
+      # status — the gate judges npm's own.
       - name: Audit dependencies
+        shell: bash
         run: |
           for attempt in 1 2 3 4 5; do
-            if npm audit --workspaces --audit-level=high 2>&1 | tee audit.log; then
+            if npm audit --workspaces --audit-level=high > audit.log 2>&1; then
+              cat audit.log
               exit 0
             fi
-            if ! grep -q "audit endpoint returned an error" audit.log; then
+            cat audit.log
+            if ! grep -q "audit endpoint returned an error" audit.log || [ "$attempt" -eq 5 ]; then
               exit 1
             fi
             echo "::warning::npm audit endpoint error (attempt ${attempt}/5); retrying"
