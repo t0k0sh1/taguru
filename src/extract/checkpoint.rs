@@ -136,23 +136,71 @@ pub(super) struct DocumentCheckpoints {
     pub(super) overview_digest: String,
 }
 
+/// ADR 0037 §3.4: the line for a checkpoint whose fingerprint is not
+/// this run's — only when it holds units, since discarding nothing
+/// costs nothing (an overview-only or empty file changes settings
+/// silently, as a first run would).
+pub(super) fn stale_checkpoint_notice(path: &Path, units: usize) -> Option<String> {
+    (units > 0).then(|| {
+        format!(
+            "taguru: extract: checkpoint at {} was written under different settings — \
+             {units} unit(s) re-extract",
+            path.display()
+        )
+    })
+}
+
 impl DocumentCheckpoints {
     /// Missing, unreadable, or fingerprint-mismatched checkpoints all
     /// degrade to "nothing cached" — never an error, and never a false
     /// reuse of an incompatible output. Mirrors [`Manifest::load`]'s
     /// posture exactly.
     pub(super) fn load(path: &Path, fingerprint: &CheckpointFingerprint) -> Self {
-        let loaded: Option<Self> = fs::read(path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+        // ADR 0037 §3.4 (#850): each of the three ways to "nothing
+        // cached" is told apart on stderr where it costs something —
+        // a damaged file and a settings change both re-bill every
+        // unit of the document, and were indistinguishable from a
+        // first run. A missing file IS the first run, and stays quiet.
+        let loaded: Option<Self> = match fs::read(path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                eprintln!(
+                    "taguru: extract: ignoring an unreadable checkpoint at {}: {error} — \
+                     every unit of this document re-extracts",
+                    path.display()
+                );
+                None
+            }
+            Ok(bytes) => match serde_json::from_slice(&bytes) {
+                Ok(checkpoints) => Some(checkpoints),
+                Err(error) => {
+                    eprintln!(
+                        "taguru: extract: ignoring an unreadable checkpoint at {}: {error} — \
+                         every unit of this document re-extracts",
+                        path.display()
+                    );
+                    None
+                }
+            },
+        };
         match loaded {
             Some(checkpoints) if checkpoints.fingerprint == *fingerprint => checkpoints,
-            _ => Self {
-                fingerprint: fingerprint.clone(),
-                units: BTreeMap::new(),
-                overview: BTreeMap::new(),
-                overview_digest: String::new(),
-            },
+            Some(stale) => {
+                if let Some(line) = stale_checkpoint_notice(path, stale.units.len()) {
+                    eprintln!("{line}");
+                }
+                Self::fresh(fingerprint)
+            }
+            None => Self::fresh(fingerprint),
+        }
+    }
+
+    fn fresh(fingerprint: &CheckpointFingerprint) -> Self {
+        Self {
+            fingerprint: fingerprint.clone(),
+            units: BTreeMap::new(),
+            overview: BTreeMap::new(),
+            overview_digest: String::new(),
         }
     }
 

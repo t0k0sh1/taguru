@@ -809,7 +809,14 @@ impl Run {
                 &checkpoints,
                 &observers,
             )
-            .map_err(|message| with_resume_hint(&checkpoints, message))?;
+            .map_err(|message| {
+                document_failure(
+                    &checkpoints,
+                    attempt_log.as_ref(),
+                    self.diagnostics.as_ref(),
+                    message,
+                )
+            })?;
         let mut outputs = match chunk_result {
             ChunkLoopResult::Complete(outputs) => outputs,
             // Whatever units already landed stay on disk — a rerun
@@ -838,7 +845,14 @@ impl Run {
                     &resolved_system.text,
                     &observers,
                 )
-                .map_err(|message| with_resume_hint(&checkpoints, message))?;
+                .map_err(|message| {
+                    document_failure(
+                        &checkpoints,
+                        attempt_log.as_ref(),
+                        self.diagnostics.as_ref(),
+                        message,
+                    )
+                })?;
             }
             prune_unresolvable_aliases(&mut outputs);
             // #758: an alias that would rewire a name an EARLIER
@@ -888,8 +902,10 @@ impl Run {
         // cleared only once the batch has landed), so they carry the
         // same resume hint as a chunk or Stage 2 failure.
         if let Err(message) = crate::ingest::parse_batch(Cursor::new(body.as_bytes())) {
-            return Err(with_resume_hint(
+            return Err(document_failure(
                 &checkpoints,
+                attempt_log.as_ref(),
+                self.diagnostics.as_ref(),
                 format!(
                     "the emitted batch failed self-validation \
                      ({message}) — a bug in taguru, not in the document"
@@ -897,8 +913,10 @@ impl Run {
             ));
         }
         if let Err(error) = crate::storage::write_atomic(&out_path, body.as_bytes()) {
-            return Err(with_resume_hint(
+            return Err(document_failure(
                 &checkpoints,
+                attempt_log.as_ref(),
+                self.diagnostics.as_ref(),
                 format!("writing {}: {error}", out_path.display()),
             ));
         }
@@ -1800,6 +1818,65 @@ pub(super) fn with_resume_hint(checkpoints: &CheckpointStore, message: String) -
              --force resumes from them)"
         ),
     }
+}
+
+/// ADR 0037 §3.2 (#850): the document's failure line ends by pointing
+/// at the records the run left — the attempts log (with the one
+/// `taguru inspect` command that opens the piece the message named,
+/// when it named one) and the diagnostics sidecar when there is one.
+/// Never a file that does not exist: with the log off or unopened, and
+/// no sidecar, the message is returned as it came.
+pub(super) fn with_records_hint(
+    attempt_log: Option<&AttemptLog>,
+    diagnostics: Option<&DiagnosticsSink>,
+    message: String,
+) -> String {
+    let mut hint = String::new();
+    if let Some(log) = attempt_log {
+        let path = log.path().display();
+        hint.push_str(&format!(" — records: {path} (taguru inspect {path}"));
+        if let Some(piece) = named_piece(&message) {
+            hint.push_str(&format!(" --piece {piece}"));
+        }
+        hint.push(')');
+    }
+    if let Some(sink) = diagnostics {
+        hint.push_str(&format!(
+            "{} diagnostics: {}",
+            if hint.is_empty() { " —" } else { "," },
+            sink.path.display()
+        ));
+    }
+    message + &hint
+}
+
+/// The piece a failure message names (`piece <id> (`, as
+/// [`super::chunking::piece_failure`] writes it) — the first such
+/// clause, which is the innermost piece's. `None` for a message that
+/// names none (a Stage 2 or batch-write failure).
+pub(super) fn named_piece(message: &str) -> Option<&str> {
+    let (_, rest) = message.split_once("piece ")?;
+    let (id, after) = rest.split_once(' ')?;
+    (id.len() == PIECE_ID_SHORT
+        && id.chars().all(|c| c.is_ascii_hexdigit())
+        && after.starts_with('('))
+    .then_some(id)
+}
+
+/// ADR 0022's resume hint and ADR 0037's records hint together, in
+/// that order — how every document-level failure leaves
+/// `extract_document`.
+pub(super) fn document_failure(
+    checkpoints: &CheckpointStore,
+    attempt_log: Option<&AttemptLog>,
+    diagnostics: Option<&DiagnosticsSink>,
+    message: String,
+) -> String {
+    with_records_hint(
+        attempt_log,
+        diagnostics,
+        with_resume_hint(checkpoints, message),
+    )
 }
 
 /// What one Stage 2 corrective completion came back as. `Valid` is

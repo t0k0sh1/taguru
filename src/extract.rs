@@ -143,7 +143,7 @@ pub(crate) use vocabulary::vocabulary_digest;
 // about where a user turn's document starts or which paragraphs a
 // piece spans.
 pub(crate) use prompt::{user_message_document, user_message_part};
-pub(crate) use trace::paragraph_range;
+pub(crate) use trace::{PIECE_ID_SHORT, paragraph_range, short_piece_id};
 
 // Cross-submodule wiring: each of these is private to the one
 // submodule that defines it, but at least one *other* submodule
@@ -162,6 +162,8 @@ use chat_client::RETRY_ATTEMPTS;
 use chat_client::{
     ChatCompletion, ChatError, ChatFailure, TokenUsage, classify_io_error, mint_run_id,
 };
+#[cfg(test)]
+use checkpoint::stale_checkpoint_notice;
 use checkpoint::{CheckpointFingerprint, CheckpointStore, CheckpointUnit};
 use chunk_context::{
     BLOCK_PREAMBLE_OPENING, CAST_PREFIX, CHUNK_CONTEXT_MODES, ChunkContextMode, ContextBlock,
@@ -237,7 +239,7 @@ use chunking::non_object_elements;
 #[cfg(test)]
 use chunking::{
     AttemptOutcome, MAX_LISTED_ISSUES, PieceContext, RoundOutcome, classify_attempt,
-    corrective_message, demotion_reason, extract_piece,
+    corrective_message, demotion_reason, extract_piece, piece_failure,
 };
 #[cfg(test)]
 use coverage::GAP_QUOTE_MAX_BYTES;
@@ -250,7 +252,8 @@ use parse::{ModelQuestion, parse_model_output};
 #[cfg(test)]
 use prompt::schema_block;
 #[cfg(test)]
-use run::with_resume_hint;
+#[cfg(test)]
+use run::{named_piece, with_records_hint, with_resume_hint};
 #[cfg(test)]
 use structured_output::{
     ProbeVerdict, RETRY_MAX_BACKOFF, conforms_to_model_output_shape, probe_structured_output,

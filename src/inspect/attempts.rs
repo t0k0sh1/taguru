@@ -19,7 +19,7 @@ use std::path::Path;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::extract::{paragraph_range, user_message_document, user_message_part};
+use crate::extract::{paragraph_range, short_piece_id, user_message_document, user_message_part};
 
 /// What `--piece`/`--paragraph` narrowed the view to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -385,19 +385,10 @@ fn describe_filter(filter: &Filter) -> String {
     }
 }
 
-/// How many hex characters of a piece id the rows print — enough to
-/// tell a document's pieces apart (a split makes a handful) and to
-/// paste back into `--piece`.
-pub(super) const PIECE_ID_SHORT: usize = 12;
-
+/// The rows print piece ids as the failure line does (ADR 0037 §3.1),
+/// so the one pastes into `--piece` as the other.
 pub(super) fn short_id(piece_id: &str) -> &str {
-    // By characters, not bytes: the log's `piece_id` is whatever the
-    // file says, and a byte cut inside a multi-byte character would
-    // panic where an odd id should merely print oddly.
-    piece_id
-        .char_indices()
-        .nth(PIECE_ID_SHORT)
-        .map_or(piece_id, |(end, _)| &piece_id[..end])
+    short_piece_id(piece_id)
 }
 
 /// The row's "where": `chunk 1/3`, then the piece and its paragraphs.

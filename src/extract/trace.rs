@@ -503,6 +503,21 @@ pub(super) fn render_trace(
     lines.join("\n") + "\n"
 }
 
+/// How many characters of a `piece_id` a human-facing line prints
+/// (ADR 0037): enough to tell a document's pieces apart and to paste
+/// back into `taguru inspect --piece`, which accepts any prefix.
+pub(crate) const PIECE_ID_SHORT: usize = 12;
+
+/// The printed form of a piece id — cut by characters, never bytes,
+/// so an id read back from a hand-edited log prints oddly instead of
+/// panicking.
+pub(crate) fn short_piece_id(piece_id: &str) -> &str {
+    piece_id
+        .char_indices()
+        .nth(PIECE_ID_SHORT)
+        .map_or(piece_id, |(end, _)| &piece_id[..end])
+}
+
 /// The `[N] ` labels' range of a labeled piece, or `None` when the
 /// text is not a [`labeled_document`] rendering — the lenient twin of
 /// [`leading_paragraph_number`], for a record that prefers `null` to a

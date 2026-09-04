@@ -393,19 +393,23 @@ pub(super) fn extract_chunk_or_ladder(
                 return Ok(vec![cached]);
             }
             let user = user_message(source, chunk_index, chunk_total, piece, context_block);
+            let piece_id = sha256_hex(piece.as_bytes());
+            // Off the ladder the chunk is the piece; its failure is
+            // named the same way (ADR 0037 §3.1).
             let output = extract_chunk(
                 completions,
                 system,
                 &user,
                 source,
                 chunk_index,
-                &sha256_hex(piece.as_bytes()),
+                &piece_id,
                 policy,
                 fact_budget,
                 rules,
                 vocabulary,
                 observers,
-            )?;
+            )
+            .map_err(|message| piece_failure(piece, &piece_id, message))?;
             record_checkpoint(checkpoints, source, piece, &output);
             Ok(vec![output])
         }
@@ -579,10 +583,14 @@ pub(super) fn extract_piece(
             record_checkpoint(context.checkpoints, context.source, piece, &chunk_output);
             Ok(vec![*chunk_output])
         }
-        RoundOutcome::Failed(message) => Err(message),
-        RoundOutcome::Refusal(reason) => Err(format!(
-            "the provider refused this content (finish_reason {reason}) — a policy \
-             refusal is terminal; no corrective turn can change it"
+        RoundOutcome::Failed(message) => Err(piece_failure(piece, &piece_id, message)),
+        RoundOutcome::Refusal(reason) => Err(piece_failure(
+            piece,
+            &piece_id,
+            format!(
+                "the provider refused this content (finish_reason {reason}) — a policy \
+                 refusal is terminal; no corrective turn can change it"
+            ),
         )),
         RoundOutcome::LengthLimited { .. } | RoundOutcome::TimedOut(_) => {
             // ADR 0021 (#760): under an `auto`-resolved constrained
@@ -625,20 +633,24 @@ pub(super) fn extract_piece(
                 // ADR 0035 §3.4: nothing left to demote — fail the
                 // source now instead of splitting a piece whose
                 // output was never a function of its input.
-                return Err(format!(
-                    "the answer outgrew the piece: {answer_bytes} bytes at the output cap \
-                     for a {}-byte piece, over {}× its size — the output is not tracking \
-                     the input, so neither a bigger budget nor a split can converge; \
-                     failing the source rather than paying for more of it \
-                     (TAGURU_EXTRACT_RUNAWAY_RATIO tunes the ratio, 0 disables)",
-                    piece.len(),
-                    context.ladder.runaway_ratio,
+                return Err(piece_failure(
+                    piece,
+                    &piece_id,
+                    format!(
+                        "the answer outgrew the piece: {answer_bytes} bytes at the output \
+                         cap for a {}-byte piece, over {}× its size — the output is not \
+                         tracking the input, so neither a bigger budget nor a split can \
+                         converge; failing the source rather than paying for more of it \
+                         (TAGURU_EXTRACT_RUNAWAY_RATIO tunes the ratio, 0 disables)",
+                        piece.len(),
+                        context.ladder.runaway_ratio,
+                    ),
                 ));
             }
             let cap = (piece.len() / 2).max(MIN_SPLIT_CAP);
             let sub_pieces = split_labeled_piece(piece, cap);
             if sub_pieces.len() <= 1 {
-                return Err(match outcome {
+                let floor = match outcome {
                     RoundOutcome::TimedOut(message) => format!(
                         "the completion timed out for a {}-byte piece that cannot split \
                          further ({message}) — failing the source; raise \
@@ -651,7 +663,8 @@ pub(super) fn extract_piece(
                          truncated extraction",
                         piece.len()
                     ),
-                });
+                };
+                return Err(piece_failure(piece, &piece_id, floor));
             }
             // ADR 0029: the split, as a record — reason in the same
             // vocabulary the attempt states use.
@@ -676,6 +689,23 @@ pub(super) fn extract_piece(
             Ok(outputs)
         }
     }
+}
+
+/// ADR 0037 §3.1 (#850): a piece's own failure names the piece — its
+/// id as `taguru inspect --piece` takes it, the `[N]` paragraphs it
+/// spans, its bytes — in front of what happened, so `chunk 1/3` no
+/// longer points at 23 KiB when 4 KiB of it failed. Applied only where
+/// [`extract_piece`] fails the piece it was given; a sub-piece's
+/// failure passes up through its parents untouched, so the innermost
+/// piece is the one named, once.
+pub(super) fn piece_failure(piece: &str, piece_id: &str, message: String) -> String {
+    let bytes = piece.len();
+    let place = match paragraph_range(piece) {
+        Some((first, last)) if first == last => format!("paragraph {first}, {bytes} B"),
+        Some((first, last)) => format!("paragraphs {first}–{last}, {bytes} B"),
+        None => format!("{bytes} B"),
+    };
+    format!("piece {} ({place}): {message}", short_piece_id(piece_id))
 }
 
 /// The "why" of an ADR 0021 demotion line: what exhausted the ladder.

@@ -35,6 +35,19 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Changed
 
+- `extract`: a failed document's stderr line now names the piece that
+  failed and points at its records (ADR 0037, #850). After the `chunk
+  K/N:` clause comes `piece <12 hex> (paragraphs a–b, N B):` — the
+  innermost piece the ladder was working on, not the chunk it was cut
+  from — and the line ends with `— records: <attempts log> (taguru
+  inspect <attempts log> --piece <id>)`, plus `, diagnostics: <path>`
+  under `--diagnostics-out`; the pointer is omitted when the attempts
+  log is off. A checkpoint file that cannot be read, or one written
+  under other settings, is now said on stderr (`ignoring an unreadable
+  checkpoint at …` / `checkpoint at … was written under different
+  settings — N unit(s) re-extract`) instead of silently re-billing the
+  document. Message texts behind the prefix are unchanged; no on-disk
+  format change.
 - `extract`: the mechanical occurrence check (ADR 0013) judges a
   subject/object written entirely in a Latin-style script — no
   ideograph, kana, or hangul in it — by whole words and word stems

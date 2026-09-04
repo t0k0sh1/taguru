@@ -1210,6 +1210,20 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
     </p>
     <h3 id="attempts">The attempts log: every prompt and every answer, in full</h3>
     <p>
+      <b>A failed document's line names the piece and points here.</b> Under the ladder a
+      chunk can be split, so <code>chunk K/N:</code> alone points at the unit <i>before</i> the
+      split; the failure line now continues with <code>piece &lt;12 hex&gt; (paragraphs a–b,
+      N B):</code> — the innermost piece the ladder was working on, its <code>[N]</code> label
+      range, its bytes — before the message, and ends with <code>— records: &lt;attempts
+      log&gt; (taguru inspect &lt;attempts log&gt; --piece &lt;id&gt;)</code>, plus
+      <code>, diagnostics: &lt;path&gt;</code> under <code>--diagnostics-out</code> (ADR 0037;
+      omitted when the log is off). Paste that command to read the piece. A checkpoint file that
+      cannot be read, or one written under other settings, is said on stderr too
+      (<code>ignoring an unreadable checkpoint at …</code> / <code>checkpoint at … was written
+      under different settings — N unit(s) re-extract</code>) instead of silently re-asking the
+      model for the whole document.
+    </p>
+    <p>
       <b>Read it with <code>taguru inspect</code></b> (<a
       href="https://github.com/t0k0sh1/taguru/blob/main/adr/0037-failure-output-addressability.md">ADR
       0037</a>, #850): <code>taguru inspect &lt;out&gt;/.extract-trace/&lt;batch

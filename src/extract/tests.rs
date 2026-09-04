@@ -905,6 +905,99 @@ fn evaluate_answer_accepts_after_mechanical_removal_and_records_it() {
     assert!(evaluated.output.aliases.is_empty());
 }
 
+/// ADR 0037 §3.1 (#850): a piece's failure names the piece — id as
+/// `inspect --piece` takes it, its paragraphs, its bytes — in front
+/// of what happened; a single paragraph and an unlabeled piece each
+/// have their own spelling.
+#[test]
+fn piece_failure_names_the_piece_its_paragraphs_and_its_bytes() {
+    let id = "3199a3ec6d0d5042ce92012539a74ee418c2aa7c";
+    assert_eq!(
+        piece_failure("[6] six\n\n[7] seven", id, "boom".to_string()),
+        "piece 3199a3ec6d0d (paragraphs 6–7, 18 B): boom"
+    );
+    assert_eq!(
+        piece_failure("[12] twelve", id, "boom".to_string()),
+        "piece 3199a3ec6d0d (paragraph 12, 11 B): boom"
+    );
+    assert_eq!(
+        piece_failure("no labels here", id, "boom".to_string()),
+        "piece 3199a3ec6d0d (14 B): boom"
+    );
+    // An id shorter than the printed width prints whole.
+    assert_eq!(
+        piece_failure("[0] a", "abc", "x".to_string()),
+        "piece abc (paragraph 0, 5 B): x"
+    );
+    // The prefix is what `named_piece` reads back, chunk clause and all.
+    let line = format!(
+        "chunk 1/3: {}",
+        piece_failure("[6] six", id, "boom".to_string())
+    );
+    assert_eq!(named_piece(&line), Some("3199a3ec6d0d"));
+    assert_eq!(named_piece("chunk 1/3: the model would not produce"), None);
+    assert_eq!(named_piece("piece notahexid12 (x"), None);
+    assert_eq!(named_piece("piece 3199a3ec6d0d"), None);
+    assert_eq!(named_piece("a piece 3199a3ec6d0d of cake"), None);
+}
+
+/// ADR 0037 §3.4: a stale checkpoint is announced only when it holds
+/// units to discard — one unit is enough, none is silence.
+#[test]
+fn stale_checkpoint_notice_counts_the_units_it_discards() {
+    let path = Path::new("/tmp/x.json");
+    assert_eq!(stale_checkpoint_notice(path, 0), None);
+    assert_eq!(
+        stale_checkpoint_notice(path, 1).as_deref(),
+        Some(
+            "taguru: extract: checkpoint at /tmp/x.json was written under different settings \
+             — 1 unit(s) re-extract"
+        )
+    );
+    assert!(
+        stale_checkpoint_notice(path, 7)
+            .unwrap()
+            .contains("7 unit(s)")
+    );
+}
+
+/// ADR 0037 §3.2: the records hint names the attempts log with the
+/// `inspect` command that opens the named piece, the sidecar when
+/// there is one, and nothing when neither exists.
+#[test]
+fn records_hint_points_at_the_log_and_the_sidecar_that_exist() {
+    let dir = std::env::temp_dir().join(format!("taguru-records-hint-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let log_path = dir.join("a.attempts.jsonl");
+    let log = AttemptLog::open(log_path.clone(), false, "r1", "a.md", "d").unwrap();
+    let sink_path = dir.join("diag.jsonl");
+    let sink = DiagnosticsSink::open(sink_path.clone(), None, "r1").unwrap();
+    let named = "chunk 1/1: piece 3199a3ec6d0d (paragraph 0, 5 B): boom".to_string();
+    assert_eq!(
+        with_records_hint(Some(&log), None, named.clone()),
+        format!(
+            "{named} — records: {p} (taguru inspect {p} --piece 3199a3ec6d0d)",
+            p = log_path.display()
+        )
+    );
+    assert_eq!(
+        with_records_hint(Some(&log), Some(&sink), "Stage 2: nope".to_string()),
+        format!(
+            "Stage 2: nope — records: {p} (taguru inspect {p}), diagnostics: {d}",
+            p = log_path.display(),
+            d = sink_path.display()
+        )
+    );
+    assert_eq!(
+        with_records_hint(None, Some(&sink), "nope".to_string()),
+        format!("nope — diagnostics: {}", sink_path.display())
+    );
+    assert_eq!(with_records_hint(None, None, "nope".to_string()), "nope");
+    drop(log);
+    drop(sink);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// ADR 0037 (#850): `user_message_part` is `user_message`'s inverse
 /// for the `part K of N` a multi-chunk turn announces — read by
 /// `taguru inspect` off an attempts log, which records the chunk
