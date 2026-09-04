@@ -287,8 +287,21 @@ pub(super) fn user_message_occurrence_text(user: &str) -> Cow<'_, str> {
 /// or ADR 0033's block joined by single newlines), so the first blank
 /// line is always the boundary, even when the document's own text
 /// contains more of them.
-pub(super) fn user_message_document(user: &str) -> &str {
+pub(crate) fn user_message_document(user: &str) -> &str {
     user.split_once("\n\n")
         .map(|(_, text)| text)
         .unwrap_or(user)
+}
+
+/// [`user_message`]'s other inverse: the `part K of N` a user turn's
+/// first line announces, as `(K, N)` (1-based, as printed), or `None`
+/// for a single-chunk document's `Document '…':` line — and for any
+/// text that is not a user turn at all. Read by `taguru inspect` off
+/// an attempts log, where the record carries `chunk_index` but not
+/// the chunk count.
+pub(crate) fn user_message_part(user: &str) -> Option<(usize, usize)> {
+    let first_line = user.lines().next()?;
+    let (_, rest) = first_line.rsplit_once(", part ")?;
+    let (index, total) = rest.strip_suffix(':')?.split_once(" of ")?;
+    Some((index.parse().ok()?, total.parse().ok()?))
 }

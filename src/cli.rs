@@ -67,7 +67,10 @@ USAGE:
   taguru inspect PATH                   verify a data directory, one .ctx
                                         image, or one .group record offline
                                         (backup check) — the same validating
-                                        load the server runs
+                                        load the server runs; or read an
+                                        extract attempts log (PATH ending
+                                        .attempts.jsonl) piece by piece
+                                        (--piece ID / --paragraph N)
   taguru estimate --associations N ...  size memory/disk for a target corpus
                                         by building and measuring one
                                         (see: taguru estimate --help)

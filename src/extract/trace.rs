@@ -507,7 +507,7 @@ pub(super) fn render_trace(
 /// text is not a [`labeled_document`] rendering — the lenient twin of
 /// [`leading_paragraph_number`], for a record that prefers `null` to a
 /// panic.
-pub(super) fn paragraph_range(piece: &str) -> Option<(u32, u32)> {
+pub(crate) fn paragraph_range(piece: &str) -> Option<(u32, u32)> {
     let number = |block: &str| -> Option<u32> {
         block
             .strip_prefix('[')

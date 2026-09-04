@@ -10135,3 +10135,130 @@ fn a_sigint_during_the_overview_pass_stops_it_between_chunks() {
     let _ = std::fs::remove_dir_all(&docs);
     let _ = std::fs::remove_dir_all(&out);
 }
+
+// =====================================================================
+// ADR 0037 (#850): `taguru inspect <batch stem>.attempts.jsonl` — the
+// human's way from "1 failed" to the piece text the model saw.
+// =====================================================================
+
+fn run_inspect(args: &[&str]) -> (i32, String, String) {
+    let output = Command::new(env!("CARGO_BIN_EXE_taguru"))
+        .arg("inspect")
+        .args(args)
+        .env_remove("TAGURU_CONFIG")
+        .output()
+        .expect("inspect must run");
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// A document that fails on a malformed answer: the attempts log
+/// names the failing piece with its paragraphs, `--paragraph` opens
+/// the piece text and the answer verbatim, and `--json` carries the
+/// same rows — no script over the JSONL needed.
+#[test]
+fn inspect_reads_a_failed_documents_attempts_log_down_to_the_piece_text() {
+    let docs = batch_dir("inspect-attempts-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "alpha relates to beta.\n\ngamma relates to delta.").unwrap();
+    let out = batch_dir("inspect-attempts-out");
+
+    let (url, requests) = stub_chat_server(vec!["not json at all".to_string()]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+            ("TAGURU_EXTRACT_MAX_ATTEMPTS", "1"),
+        ],
+        &["--context", "c", doc.to_str().unwrap()],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert_eq!(requests.join().unwrap().len(), 1);
+
+    let dir = out.join(".extract-trace");
+    let log: std::path::PathBuf = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.to_string_lossy().ends_with(".attempts.jsonl"))
+        .expect("the failed document keeps its attempts log");
+    let log_arg = log.to_str().unwrap();
+
+    // The unfiltered view: one row, located by chunk, piece, and the
+    // paragraphs the piece spans, and a pointer at the piece to open.
+    let (code, text, stderr) = run_inspect(&[log_arg]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        text.starts_with(&format!("{log_arg}: attempts log for '{}'", doc.display())),
+        "{text}"
+    );
+    assert!(text.contains("  #1  chunk 1/1  piece "), "{text}");
+    assert!(text.contains("  paragraphs 0–1 ("), "{text}");
+    assert!(text.contains("  attempt 1/1  stop_malformed"), "{text}");
+    assert!(
+        text.contains("  1 attempt(s) (1 stop_malformed), 0 move(s)\n"),
+        "{text}"
+    );
+    let pointer = text
+        .lines()
+        .last()
+        .and_then(|line| line.rsplit_once("--piece "))
+        .map(|(_, id)| id.to_string())
+        .expect("the footer names the piece to open");
+    assert_eq!(pointer.len(), 12, "{text}");
+    assert!(!text.contains("--- piece text"), "{text}");
+
+    // By paragraph: the piece text as the model saw it (labels and
+    // all) and the answer, unescaped, between `---` fences.
+    let (code, text, stderr) = run_inspect(&[log_arg, "--paragraph", "1"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(text.contains("--- piece text as sent (#1, "), "{text}");
+    assert!(
+        text.contains("[0] alpha relates to beta.\n\n[1] gamma relates to delta.\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("--- answer (#1, 15 B) ---\nnot json at all\n--- end ---\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("  1 attempt(s) matched paragraph 1\n"),
+        "{text}"
+    );
+
+    // By piece id prefix — the footer's own suggestion works verbatim.
+    let (code, by_piece, _) = run_inspect(&[log_arg, "--piece", &pointer]);
+    assert_eq!(code, 0);
+    assert!(
+        by_piece.contains("--- answer (#1, 15 B) ---\nnot json at all\n"),
+        "{by_piece}"
+    );
+    // A paragraph no piece covers is said, not failed.
+    let (code, none, _) = run_inspect(&[log_arg, "--paragraph", "7"]);
+    assert_eq!(code, 0);
+    assert!(
+        none.contains("  0 attempt(s) matched paragraph 7\n"),
+        "{none}"
+    );
+
+    // `--json`: the same rows; the texts only under the filter.
+    let (code, json, _) = run_inspect(&[log_arg, "--json"]);
+    assert_eq!(code, 0);
+    let report: Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(report["kind"], "attempts");
+    assert_eq!(report["document"]["source"], doc.to_str().unwrap());
+    assert_eq!(report["attempts"][0]["paragraph_first"], 0);
+    assert_eq!(report["attempts"][0]["paragraph_last"], 1);
+    assert_eq!(report["attempts"][0]["state"], "stop_malformed");
+    assert!(report["attempts"][0].get("answer").is_none(), "{json}");
+    let (_, json, _) = run_inspect(&[log_arg, "--json", "--piece", &pointer]);
+    let report: Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(report["attempts"][0]["answer"], "not json at all");
+    assert_eq!(report["matched"], 1);
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}

@@ -138,6 +138,12 @@ use structured_output::json_object_response_format;
 pub(crate) use structured_output::json_schema_response_format;
 use vocabulary::KnownRelation;
 pub(crate) use vocabulary::vocabulary_digest;
+// `taguru inspect` reads an attempts log (ADR 0037, #850) with the
+// same inverses extract's own trace uses, so the two never disagree
+// about where a user turn's document starts or which paragraphs a
+// piece spans.
+pub(crate) use prompt::{user_message_document, user_message_part};
+pub(crate) use trace::paragraph_range;
 
 // Cross-submodule wiring: each of these is private to the one
 // submodule that defines it, but at least one *other* submodule
@@ -190,7 +196,7 @@ use parse::{
 use prompt::VOCABULARY_CAP;
 use prompt::{
     ranked_vocabulary, schema_constrained_relations, schema_type_names, system_prompt,
-    user_message, user_message_document, user_message_occurrence_text,
+    user_message, user_message_occurrence_text,
 };
 #[cfg(test)]
 use render::chunk;
@@ -250,8 +256,6 @@ use structured_output::{
     ProbeVerdict, RETRY_MAX_BACKOFF, conforms_to_model_output_shape, probe_structured_output,
     random_duration_up_to,
 };
-#[cfg(test)]
-use trace::paragraph_range;
 
 const USAGE: &str = "\
 usage: taguru extract [--dry-run] [--force] [--no-passage] [--questions N]
