@@ -180,8 +180,24 @@ jobs:
       - name: Install workspace
         run: npm install --no-fund --no-audit
         working-directory: sdk
+      # `npm audit` exits 1 both for a real finding and for a registry
+      # outage (`audit endpoint returned an error` — 5xx or a network
+      # timeout at registry.npmjs.org, seen four runs in a row on
+      # 2026-09-04). Only the outage is retried; a finding fails on the
+      # first attempt as before.
       - name: Audit dependencies
-        run: npm audit --workspaces --audit-level=high
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if npm audit --workspaces --audit-level=high 2>&1 | tee audit.log; then
+              exit 0
+            fi
+            if ! grep -q "audit endpoint returned an error" audit.log; then
+              exit 1
+            fi
+            echo "::warning::npm audit endpoint error (attempt ${attempt}/5); retrying"
+            sleep $((attempt * 30))
+          done
+          exit 1
         working-directory: sdk
       - name: Build packages (langchain-taguru consumes taguru's dist; the examples consume both)
         run: |
