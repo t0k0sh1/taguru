@@ -558,7 +558,6 @@ pub(super) fn render_text(report: &AttemptsReport, filter: &Filter) -> String {
                 Value::String(text) => Some(format!("{key} {text}")),
                 Value::Number(number) if number.as_u64() == Some(0) => None,
                 Value::Number(number) => Some(format!("{key} {number}")),
-                Value::Bool(flag) => Some(format!("{key} {flag}")),
                 _ => None,
             })
         })
@@ -833,6 +832,60 @@ mod tests {
         let report = build_report("log", &sample_log(), &none);
         assert_eq!(report.matched, 0);
         assert!(render_text(&report, &none).contains("  0 attempt(s) matched paragraph 5\n"));
+    }
+
+    /// The rows the sample log does not reach: every move kind, a
+    /// resumed document's second run, a settings line with a zero
+    /// budget (hidden) and a rung (shown), an overflowing issue list,
+    /// and a log with no torn tail.
+    #[test]
+    fn every_move_kind_a_second_run_and_the_overflow_lines_render() {
+        let issues: Vec<String> = (0..4)
+            .map(|i| format!("associations[{i}].weight: bad"))
+            .collect();
+        let many = json!({
+            "kind": "attempt", "run_id": "r2", "attempt_seq": 2, "piece_id": "cafe000000000000",
+            "source": "a.md", "chunk_index": 0, "stage": "item", "attempt": 1, "max_attempts": 2,
+            "state": "stop_malformed", "length_limited": false, "transport_retries": 0,
+            "elapsed_seconds": 1.0, "requested_max_tokens": null, "finish_reason": "stop",
+            "input_tokens": null, "output_tokens": null,
+            "messages": [{"role": "user", "content": "Document 'a.md':\n\n[0] a"}],
+            "answer": "{}", "parse_error": null, "validation_issues": issues, "removed_items": null
+        })
+        .to_string();
+        let log = [
+            json!({"kind": "document", "run_id": "r1", "source": "a.md", "document_sha256": "d", "resumed": false}).to_string(),
+            json!({"kind": "document", "run_id": "r2", "source": "a.md", "document_sha256": "d", "resumed": true}).to_string(),
+            json!({"kind": "settings", "prompt_version": 4, "model": "stub", "max_output_tokens": 0, "rung": "json_schema", "lossy": true, "chunk_bytes": ""}).to_string(),
+            attempt(1, "cafe000000000000", 0, "length_limited", "[0] a", Some("{")),
+            json!({"kind": "move", "move": "escalate", "run_id": "r2", "piece_id": "cafe000000000000", "chunk_index": 0, "reason": "the answer ended at the output cap", "from_max_tokens": 4000, "to_max_tokens": 8000}).to_string(),
+            json!({"kind": "move", "move": "demote", "run_id": "r2", "piece_id": "cafe000000000000", "chunk_index": 0, "reason": "the rung looped", "from_rung": "json_schema", "to_rung": "json_object"}).to_string(),
+            json!({"kind": "move", "move": "runaway", "run_id": "r2", "piece_id": "cafe000000000000", "chunk_index": 0, "reason": "outgrew the piece", "piece_bytes": 50, "answer_bytes": 21745}).to_string(),
+            many,
+        ]
+        .join("\n");
+        let report = build_report("log", &log, &Filter::All);
+        assert_eq!(report.runs, ["r1", "r2"]);
+        let text = render_text(&report, &Filter::All);
+        assert!(
+            text.starts_with("log: attempts log for 'a.md', 2 run(s) — latest run r2 (resumed)\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("  settings: model stub, prompt_version 4, rung json_schema\n"),
+            "{text}"
+        );
+        assert!(text.contains("      ↳ escalate  max_tokens 4000 → 8000 — the answer ended at the output cap\n      ↳ demote  json_schema → json_object — the rung looped\n      ↳ runaway  21745 B answered for a 50 B piece — outgrew the piece\n  #2  "), "{text}");
+        assert!(
+            text.contains("        associations[2].weight: bad\n        … and 1 more issue(s)\n"),
+            "{text}"
+        );
+        assert!(!text.contains("associations[3].weight"), "{text}");
+        assert!(!text.contains("unreadable line"), "{text}");
+        assert!(
+            text.contains("  2 attempt(s) (1 length_limited, 1 stop_malformed), 3 move(s)\n"),
+            "{text}"
+        );
     }
 
     #[test]
