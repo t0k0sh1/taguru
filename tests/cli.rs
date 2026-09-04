@@ -4205,6 +4205,20 @@ fn inspect_attempts_flags_are_validated_and_a_non_log_is_named() {
     let output = run(&["inspect", &image_arg, "--piece"]);
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("--piece needs a value"));
+    // The two filters are exclusive, and neither repeats.
+    for args in [
+        ["--piece", "abcd", "--paragraph", "1"],
+        ["--paragraph", "1", "--piece", "abcd"],
+        ["--piece", "abcd", "--piece", "abce"],
+        ["--paragraph", "1", "--paragraph", "2"],
+    ] {
+        let output = run(&["inspect", &image_arg, args[0], args[1], args[2], args[3]]);
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("one filter each"),
+            "{args:?}"
+        );
+    }
 
     // A file named like a log but holding no record of one.
     let bogus = dir.join("x.attempts.jsonl");

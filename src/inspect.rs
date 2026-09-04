@@ -66,6 +66,13 @@ pub fn run(args: &[String]) -> i32 {
     let mut pending: Option<&str> = None;
     for arg in args {
         if let Some(flag) = pending.take() {
+            if filter != attempts::Filter::All {
+                eprintln!(
+                    "taguru: inspect: --piece and --paragraph are one filter each — give one \
+                     of them, once"
+                );
+                return 2;
+            }
             filter = match flag {
                 "--piece" if !arg.is_empty() && arg.chars().all(|c| c.is_ascii_hexdigit()) => {
                     attempts::Filter::Piece(arg.to_ascii_lowercase())

@@ -256,29 +256,26 @@ pub(super) fn build_report(target: &str, text: &str, filter: &Filter) -> Attempt
     }
     // The filter decides which rows keep their texts; every row keeps
     // its summary so a narrowed view still reads in the log's order.
-    let mut matched = 0;
-    for row in &mut report.attempts {
-        let hit = match filter {
-            Filter::All => true,
-            Filter::Piece(prefix) => row.piece_id.starts_with(prefix.as_str()),
-            Filter::Paragraph(n) => matches!(
-                (row.paragraph_first, row.paragraph_last),
-                (Some(first), Some(last)) if first <= *n && *n <= last
-            ),
-        };
-        if hit {
-            matched += 1;
-        }
-        if !hit || *filter == Filter::All {
+    let hit = |row: &AttemptRow| match filter {
+        Filter::All => true,
+        Filter::Piece(prefix) => row.piece_id.starts_with(prefix.as_str()),
+        Filter::Paragraph(n) => matches!(
+            (row.paragraph_first, row.paragraph_last),
+            (Some(first), Some(last)) if first <= *n && *n <= last
+        ),
+    };
+    let matched = report.attempts.iter().filter(|row| hit(row)).count();
+    if *filter == Filter::All {
+        for row in &mut report.attempts {
             row.piece_text = None;
             row.corrective_ask = None;
             row.answer = None;
         }
-    }
-    if *filter != Filter::All {
-        report
-            .attempts
-            .retain(|row| row.piece_text.is_some() || row.answer.is_some());
+    } else {
+        // The matched rows stay whether or not they carry a text — an
+        // attempt that sent nothing (transport failure) or got nothing
+        // back (timeout) is still the piece's row.
+        report.attempts.retain(|row| hit(row));
         let kept: std::collections::BTreeSet<String> = report
             .attempts
             .iter()
@@ -394,7 +391,13 @@ fn describe_filter(filter: &Filter) -> String {
 pub(super) const PIECE_ID_SHORT: usize = 12;
 
 pub(super) fn short_id(piece_id: &str) -> &str {
-    &piece_id[..piece_id.len().min(PIECE_ID_SHORT)]
+    // By characters, not bytes: the log's `piece_id` is whatever the
+    // file says, and a byte cut inside a multi-byte character would
+    // panic where an odd id should merely print oddly.
+    piece_id
+        .char_indices()
+        .nth(PIECE_ID_SHORT)
+        .map_or(piece_id, |(end, _)| &piece_id[..end])
 }
 
 /// The row's "where": `chunk 1/3`, then the piece and its paragraphs.
@@ -932,7 +935,11 @@ mod tests {
         .to_string();
         let empty = attempt(10, "e0e0000000000000", 1, "stop_valid", "", Some("{}"));
         let text = render_text(
-            &build_report("log", &[bare, empty].join("\n"), &Filter::All),
+            &build_report(
+                "log",
+                &[bare.clone(), empty.clone()].join("\n"),
+                &Filter::All,
+            ),
             &Filter::All,
         );
         assert!(
@@ -946,6 +953,23 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("0 B"), "{text}");
+        // Filtered to that textless piece, its row is still the row
+        // (nothing sent, nothing back — said as such).
+        let filter = Filter::Piece("bare".to_string());
+        let report = build_report("log", &[bare.clone(), empty.clone()].join("\n"), &filter);
+        assert_eq!(report.matched, 1);
+        assert_eq!(report.attempts.len(), 1);
+        let text = render_text(&report, &filter);
+        assert!(text.contains("  #9  chunk 3  piece bare00000000  attempt 1/2  transport  0.1 s\n--- answer (#9) --- none arrived\n--- end ---\n"), "{text}");
+        assert!(
+            text.contains("  1 attempt(s) matched piece bare\n"),
+            "{text}"
+        );
+        // An odd piece id — multi-byte, or shorter than the prefix —
+        // prints, never panics.
+        assert_eq!(short_id("ééééééééééééééé"), "éééééééééééé");
+        assert_eq!(short_id("short"), "short");
+        assert_eq!(short_id(""), "");
         let filter = Filter::Piece("0123".to_string());
         let text = render_text(&build_report("log", &log, &filter), &filter);
         assert!(
