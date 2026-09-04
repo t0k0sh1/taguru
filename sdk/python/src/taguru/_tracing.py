@@ -32,18 +32,26 @@ from collections.abc import Iterator, MutableMapping
 from contextlib import contextmanager
 from typing import Any, Literal
 
-# `[[tool.mypy.overrides]]` in pyproject.toml marks the whole
-# `opentelemetry.*` namespace `ignore_missing_imports` — both names below
-# typecheck as `Any` regardless of whether the package is actually
-# installed in whatever environment is running mypy, which is what lets
-# the `except` branch's fallback assignment need no `type: ignore` of its
-# own here.
+# Both module handles are declared `Any` so this file typechecks the same
+# whether or not `opentelemetry-api` is installed in the environment
+# running mypy: absent, `[[tool.mypy.overrides]]` in pyproject.toml
+# (`ignore_missing_imports` for `opentelemetry.*`) makes the imports
+# `Any`; present, they are real `Module`s — and a `Module`-typed name
+# cannot be reassigned `None`, which is what broke the typecheck the day
+# a transitive dependency started pulling the package into the "otel-less"
+# CI environment. `import a.b as c`, not `from a import b`, because
+# `opentelemetry` is a namespace package and the `from` form resolves
+# `b` as an attribute of it, which mypy cannot see.
+_trace: Any = None
+_propagate: Any = None
 try:
-    from opentelemetry import propagate as _propagate
-    from opentelemetry import trace as _trace
+    import opentelemetry.propagate as _otel_propagate
+    import opentelemetry.trace as _otel_trace
 except ImportError:  # pragma: no cover - exercised by the otel-less CI run
-    _trace = None
-    _propagate = None
+    pass
+else:
+    _trace = _otel_trace
+    _propagate = _otel_propagate
 
 __all__ = ["Span", "span", "inject_headers", "Reason"]
 
