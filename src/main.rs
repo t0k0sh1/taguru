@@ -706,6 +706,12 @@ async fn serve(serve_args: cli::ServeArgs, auth_source: auth::AuthSource) {
     // extensions — the per-source-IP throttles (failed-auth in the gate,
     // the anonymous request budget) read it from there. Without it those
     // fall back to a single shared bucket.
+    // Built HERE — before the graceful-shutdown block, which axum
+    // spawns as its own task and which therefore runs no earlier than
+    // that task's first poll (#892): `shutdown_signal()` installs the
+    // handlers when called, so the SIGTERM window is closed at this
+    // line, not at the block's first poll.
+    let shutdown = shutdown_signal();
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
@@ -713,7 +719,7 @@ async fn serve(serve_args: cli::ServeArgs, auth_source: auth::AuthSource) {
     .with_graceful_shutdown({
         let embed_shutdown = embed_shutdown.clone();
         async move {
-            shutdown_signal().await;
+            shutdown.await;
             // Before axum begins the drain: any in-flight (or future)
             // embedding provider wait gives up promptly, so the drain
             // waits for requests, never for the provider timeout.
@@ -993,22 +999,27 @@ fn spawn_keyring_reload_tasks(
         let keyring = keyring.clone();
         let source = Arc::clone(&source);
         let state = state.clone();
-        tokio::spawn(async move {
-            use tokio::signal::unix::{SignalKind, signal};
-            let mut hangup = match signal(SignalKind::hangup()) {
-                Ok(stream) => stream,
-                Err(error) => {
-                    warn!(%error, "could not register the SIGHUP keyring-reload handler");
-                    return;
-                }
-            };
-            while hangup.recv().await.is_some() {
-                let outcome = auth::reload_keyring(&keyring, &source, "sighup");
-                state
-                    .metrics()
-                    .record_keyring_reload(outcome != auth::ReloadOutcome::Refused);
+        // Registered before the task is spawned, for the same reason
+        // `shutdown_signal` installs at construction (#892): a SIGHUP
+        // landing before the spawned task's first poll would be the
+        // default action — termination — not a reload.
+        let hangup = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) {
+            Ok(stream) => Some(stream),
+            Err(error) => {
+                warn!(%error, "could not register the SIGHUP keyring-reload handler");
+                None
             }
-        });
+        };
+        if let Some(mut hangup) = hangup {
+            tokio::spawn(async move {
+                while hangup.recv().await.is_some() {
+                    let outcome = auth::reload_keyring(&keyring, &source, "sighup");
+                    state
+                        .metrics()
+                        .record_keyring_reload(outcome != auth::ReloadOutcome::Refused);
+                }
+            });
+        }
     }
     let Some(path) = source.config_path().map(std::path::Path::to_path_buf) else {
         return;
@@ -1361,15 +1372,26 @@ pub(crate) fn init_telemetry() -> Option<opentelemetry_sdk::trace::SdkTracerProv
 /// stream when the first signal fired and installed a new one only after
 /// the spawn — a window in which a second signal would land on no handler
 /// and be lost, defeating the very escape hatch this arms.
-pub(crate) async fn shutdown_signal() {
+pub(crate) fn shutdown_signal() -> impl std::future::Future<Output = ()> {
+    // Installed HERE, when the future is built — not on its first
+    // poll. axum spawns the graceful-shutdown future as its own task,
+    // and the accept loop does not wait for that task to run: under
+    // load a request can be served, and a SIGTERM sent, before the
+    // handler exists — and a SIGTERM with no handler is the default
+    // action, the process dying with no drain and no trace flush
+    // (#892: a tracing test saw an empty collector after a graceful
+    // stop). `tokio::signal::unix::signal` registers synchronously,
+    // so by the time this function returns the signal is ours.
     let mut signals = TerminateSignals::install();
-    signals.recv().await;
-    tokio::spawn(async move {
+    async move {
         signals.recv().await;
-        warn!("second shutdown signal received — forcing an immediate exit");
-        // 128 + SIGINT(2), the shell convention for signal-terminated.
-        std::process::exit(130);
-    });
+        tokio::spawn(async move {
+            signals.recv().await;
+            warn!("second shutdown signal received — forcing an immediate exit");
+            // 128 + SIGINT(2), the shell convention for signal-terminated.
+            std::process::exit(130);
+        });
+    }
 }
 
 /// The SIGINT/SIGTERM streams axum's graceful drain listens on, held for
@@ -1470,6 +1492,25 @@ async fn wait_signal(stream: Option<&mut tokio::signal::unix::Signal>) {
 
 #[cfg(test)]
 mod tests {
+    /// #892: the terminate handlers are installed when `shutdown_signal`
+    /// is CALLED, not when its future is first polled — a SIGTERM that
+    /// lands in between must be ours (with no handler it is the
+    /// default action, and this test process would simply die).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn shutdown_signal_owns_sigterm_before_it_is_first_polled() {
+        let signal = super::shutdown_signal();
+        // Built, not polled. Delivered to this very process.
+        let status = std::process::Command::new("kill")
+            .args(["-TERM", &std::process::id().to_string()])
+            .status()
+            .expect("kill must run");
+        assert!(status.success(), "{status}");
+        tokio::time::timeout(std::time::Duration::from_secs(5), signal)
+            .await
+            .expect("the SIGTERM sent before the first poll completes the future");
+    }
+
     /// Whether `handlers` calls axum's `name` method router: the token
     /// followed by an open paren, not preceded by an identifier byte —
     /// so `get(` matches in `get(api::get_context)` but never inside
