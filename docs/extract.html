@@ -1202,7 +1202,15 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       <code>taguru anchoring OUT_DIR --json report.json</code> judges the written batches
       against their own passage text — the anchoring rate (strict and alias-group) and locator
       validity, hallucination's mechanical floor; batch files are all it needs, so pre-0.9.5
-      output qualifies (<code>taguru anchoring --help</code>). <b>Read the strict rate within
+      output qualifies (<code>taguru anchoring --help</code>). The rates alone cannot point at a
+      fabricated name, so after the table every association that is not strictly anchored — or
+      cites a paragraph holding neither name — is <b>named</b> (#864): its batch line, subject,
+      label, object, cited paragraph, and the reason (<code>unanchored</code>,
+      <code>alias-only</code>, <code>invalid locator</code>), the first <code>--list N</code> per
+      document on stdout (default 3, <code>0</code> for none) and every one under
+      <code>unanchored</code> in the <code>--json</code> report with the three judgments as
+      booleans; a batch file that cannot be parsed is named, counted under <code>failed</code>,
+      and skipped rather than stopping the run (exit 1, report intact). <b>Read the strict rate within
       a document type, never across types.</b> Strict is defined as "the subject <i>and</i> the
       object both occur, under the same folding the server resolves names with, in the cited
       paragraph (else the whole passage)" — exactly what the implementation checks. A document

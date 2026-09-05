@@ -8736,8 +8736,40 @@ fn anchoring_command_rates_a_real_run_and_the_script_folds_it_in() {
         !table.contains("skipped"),
         "nothing was skipped, so no skipped line: {table}"
     );
+    // #864: the alias-only association is NAMED after the table — its
+    // batch line (line 3 of b.jsonl), the triple, and the reason — and
+    // a.md, strictly anchored with a valid locator, gets no block.
+    assert!(table.contains("b.md: 1 alias-only\n"), "{table}");
+    assert!(
+        table.contains("  line 3: あおみね —[所在]→ 山: alias-only\n"),
+        "{table}"
+    );
+    assert!(!table.contains("a.md: "), "{table}");
     let report: Value =
         serde_json::from_str(&std::fs::read_to_string(&report_path).unwrap()).unwrap();
+    let named = &report["documents"]["b.md"]["unanchored"];
+    assert_eq!(named.as_array().map(Vec::len), Some(1), "{report}");
+    assert_eq!(named[0]["line"], 3);
+    assert_eq!(named[0]["subject"], "あおみね");
+    assert_eq!(named[0]["label"], "所在");
+    assert_eq!(named[0]["object"], "山");
+    assert_eq!(named[0]["strict"], false);
+    assert_eq!(named[0]["with_aliases"], true);
+    assert!(
+        named[0].get("paragraph").is_none(),
+        "uncited: no paragraph key"
+    );
+    assert!(
+        named[0].get("locator_valid").is_none(),
+        "uncited: nothing to validate"
+    );
+    assert_eq!(
+        report["documents"][doc.to_str().unwrap()]["unanchored"]
+            .as_array()
+            .map(Vec::len),
+        Some(0)
+    );
+    assert_eq!(report["failed"].as_object().map(|map| map.len()), Some(0));
     let totals = &report["totals"];
     assert_eq!(totals["associations"], 2, "{report}");
     assert_eq!(totals["anchored_strict"], 1, "あおみね is not in the text");
@@ -10418,4 +10450,69 @@ fn extract_says_when_a_checkpoint_is_unreadable_or_from_other_settings() {
 
     let _ = std::fs::remove_dir_all(&docs);
     let _ = std::fs::remove_dir_all(&out);
+}
+
+/// #864: a batch file that cannot be parsed no longer stops the run —
+/// it is named on stderr, counted under `failed` in the JSON, the
+/// other files are still judged, and the exit code is 1. `--list 0`
+/// silences the stdout naming while the JSON keeps every item.
+#[test]
+fn anchoring_skips_an_unparseable_file_and_still_reports_the_rest() {
+    let out = batch_dir("extract-anchoring-failed");
+    std::fs::write(
+        out.join("good.jsonl"),
+        "{\"taguru_batch\":1,\"context\":\"c\",\"source\":\"good.md\"}\n\
+         {\"passage\":\"青嶺酒造の杜氏は高瀬。\"}\n\
+         {\"subject\":\"青嶺酒造\",\"label\":\"杜氏\",\"object\":\"ラーメン\",\"weight\":1.0,\"paragraph\":0}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        out.join("broken.jsonl"),
+        "{\"taguru_batch\":1,\"context\":\"c\"}\n",
+    )
+    .unwrap();
+    let report_path = out.join("anchoring.json");
+    let output = Command::new(env!("CARGO_BIN_EXE_taguru"))
+        .args(["anchoring", out.to_str().unwrap(), "--list", "0"])
+        .args(["--json", report_path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stdout}{stderr}");
+    assert!(
+        stderr.contains(&format!("{}: ", out.join("broken.jsonl").display()))
+            && stderr.contains("— skipped"),
+        "{stderr}"
+    );
+    assert!(
+        stdout.contains("good.md\t1\t0.000"),
+        "the good file is still judged: {stdout}"
+    );
+    assert!(
+        stdout.contains("(1 batch file(s) could not be read or parsed — named on stderr)"),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("good.md: 1 unanchored"),
+        "--list 0 names nothing: {stdout}"
+    );
+    let report: Value =
+        serde_json::from_str(&std::fs::read_to_string(&report_path).unwrap()).unwrap();
+    let failed = report["failed"].as_object().unwrap();
+    assert_eq!(failed.len(), 1, "{report}");
+    assert!(failed.keys().next().unwrap().ends_with("broken.jsonl"));
+    let named = &report["documents"]["good.md"]["unanchored"];
+    assert_eq!(
+        named.as_array().map(Vec::len),
+        Some(1),
+        "the JSON keeps every item: {report}"
+    );
+    assert_eq!(named[0]["object"], "ラーメン");
+    assert_eq!(named[0]["with_aliases"], false);
+    assert_eq!(
+        named[0]["locator_valid"], true,
+        "the subject IS in paragraph 0"
+    );
+    assert_eq!(named[0]["paragraph"], 0);
 }
