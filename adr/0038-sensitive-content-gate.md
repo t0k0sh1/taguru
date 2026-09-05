@@ -128,7 +128,22 @@ Deliberately **not** in `redact1`, each for a stated reason:
 A user file (`--redact-rules FILE`, one `name<TAB>regex` per line,
 applied after the built-ins) extends the set; the file's SHA-256
 joins the version (§3.5), so a changed file re-extracts exactly as a
-changed built-in would.
+changed built-in would. A rule name is `[a-z0-9_]+` (it is written
+into the placeholder) and may not repeat a built-in's.
+
+**Matching is per paragraph, in a fixed order, and non-overlapping.**
+The scanner runs every rule over one paragraph at a time (ADR 0003
+§7's splitter, the same one the batch's `paragraph` locator uses),
+so no match — built-in or user — can span a paragraph separator,
+whatever the regex says; a private-key block that a blank line has
+split is two matches, one per paragraph. Within a paragraph the
+candidate matches of every rule are collected, ordered by start
+offset ascending, then length descending, then rule order (built-ins
+in the order §3.1 lists them, then the user file's lines in order),
+and accepted greedily: a candidate overlapping an already accepted
+match is dropped. One placeholder per accepted match, and the counts
+in §3.6 are counts of accepted matches — so a bearer token that is
+also e-mail-shaped is one `authorization` redaction, not two.
 
 ### 3.2 The placeholder
 
@@ -145,6 +160,14 @@ candidate name and never looks like a label. The replacement holds no
 newline: paragraph N of the redacted text is paragraph N of the
 original file, so every paragraph coordinate the batch, the trace, and
 the passage store carry still points into the file a person has.
+
+A document may already contain the placeholder form — a passage
+exported from a redacted run and fed back in, or a document quoting
+one. The scanner recognises `«redacted <rule> <4 hex>»` as its own
+(rule `preexisting`), leaves it byte for byte, and counts it apart in
+§3.6's accounting, so a run reports what it masked and what arrived
+masked as two numbers; §3.3's placeholder removal applies to a
+pre-existing placeholder exactly as to a new one.
 
 ### 3.3 The redacted text is the document
 
@@ -183,9 +206,10 @@ pure function of the document text take the redacted text.
 
 ### 3.4 `taguru import --refuse-sensitive`
 
-The same rule set, run over each batch's `passage`, association
-`subject`/`label`/`object`, alias spellings, and question text before
-the batch is applied locally or packed for `--url`. A hit refuses the
+The same rule set — the built-ins, both groups, plus the same
+`--redact-rules FILE` when given — run over each batch's `passage`,
+association `subject`/`label`/`object`, alias spellings, and question
+text before the batch is applied locally or packed for `--url`. A hit refuses the
 **batch** (the unit import already refuses on — a partial batch is
 never written), as issues in the shape `schema/check` already emits:
 `batches[3].passage` / `batches[3].associations[7].object`, `rule`,
@@ -200,10 +224,16 @@ batch), not for import to mask on the way in.
 `redaction` is a computation input of ADR 0030's manifest and of the
 checkpoint fingerprint: `""` when off (existing manifests keep
 matching default runs, the `candidates`/`structured_output`
-precedent), `redact1` when on with the built-ins, `redact1+<8 hex of
-the rules file>` with a user file, and the group selection folded in
-(`redact1:secrets`). Toggling, changing the group, editing the rules
-file, or a new built-in version each re-extract. `--replay strict`
+precedent), `redact1` when on with the built-ins, the group selection
+folded in (`redact1:secrets`), and with a user file the file's full
+SHA-256 appended (`redact1+<64 hex>`) — the whole digest, so two rule
+files never share a version by a truncated prefix. A manifest entry
+or checkpoint written before this ADR has no `redaction` field and
+reads as `""` (ADR 0024 §3.4's posture for a missing field), so it
+keeps matching a default run and is invalidated by the first
+`--redact` run over the same document; the implementation pins this
+with a pre-ADR fixture. Toggling, changing the group, editing the
+rules file, or a new built-in version each re-extract. `--replay strict`
 replays what was sent — the redacted prompt — and a version mismatch
 is a manifest mismatch, not a replay failure.
 
