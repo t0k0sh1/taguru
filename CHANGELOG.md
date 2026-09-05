@@ -35,6 +35,22 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Changed
 
+- `extract`: the mechanical pass now removes an association whose
+  label, subject, or object — or an alias whose spelling — uses an
+  ideograph outside JIS X 0208's repertoire that the document never
+  writes (ADR 0039, #813): `适用法律` for a document that says
+  `適用法律`, a multilingual model's simplified-Chinese rendering that
+  `query`, `resolve`, and the label reuse vocabulary would treat as a
+  second label. Removed with ADR 0013's accounting (the stderr line
+  names every offending field and character, the report line counts
+  it, the trace's `loss` record carries the item), never corrected. A
+  document that uses the character itself clears it, so a Chinese or
+  Korean document, or a Japanese one quoting either, is untouched.
+  Measured on the #780 runs: 10 of 2,813 labels, 0 of 5,272 names,
+  every one a simplified-Chinese spelling. Not a fingerprint input —
+  manifests and checkpoints are unchanged and nothing re-extracts. No
+  response-shape or on-disk format change.
+
 - `extract`: the system prompt's citation rule now names the paragraph
   to cite — the one whose sentences state the fact, never a
   heading-only paragraph such as `[3] ## Abstract` (#812). Under the
