@@ -166,6 +166,85 @@ fn an_offline_import_refuses_a_sensitive_batch_by_path_and_applies_the_rest() {
     let _ = std::fs::remove_dir_all(&batches);
 }
 
+/// The offline exit code is 1 for EACH failure kind on its own — a
+/// schema record for a context that does not exist, a group naming a
+/// member that does not exist, an embedding refresh that cannot reach
+/// its provider — with the batches themselves applied and reported.
+#[test]
+fn an_offline_import_exits_one_for_each_failure_kind_alone() {
+    let batches = batch_dir("import-exit-code-per-failure");
+    let batch = "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \"create\": {\"description\": \"酒蔵\"}}\n\
+                 {\"subject\": \"青嶺酒造\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n";
+    // A schema record for a context no batch creates.
+    let schema = batches.join("schema.jsonl");
+    std::fs::write(
+        &schema,
+        format!(
+            "{batch}{{\"taguru_schema\": 1, \"context\": \"nowhere\", \"mode\": \"warn\", \
+             \"closed_labels\": false, \"types\": {{}}, \"relations\": {{}}}}\n"
+        ),
+    )
+    .unwrap();
+    let data_dir = common::scratch_dir("http-import-exit-schema");
+    let (code, stdout, stderr) = run_import(&data_dir, &[schema.to_str().unwrap()]);
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains("import: 1 of 1 batch(es) applied"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("import: 0 of 1 schema record(s) installed"),
+        "{stdout}"
+    );
+    assert!(stderr.contains("context 'nowhere'"), "{stderr}");
+
+    // A group naming a member that does not exist.
+    let group = batches.join("group.jsonl");
+    std::fs::write(
+        &group,
+        format!("{batch}{{\"taguru_group\": 1, \"name\": \"g\", \"contexts\": [\"nowhere\"]}}\n"),
+    )
+    .unwrap();
+    let data_dir = common::scratch_dir("http-import-exit-group");
+    let (code, stdout, stderr) = run_import(&data_dir, &[group.to_str().unwrap()]);
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains("import: 1 of 1 batch(es) applied"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("import: 0 of 1 group record(s) restored"),
+        "{stdout}"
+    );
+
+    // An embedding provider nothing listens on, with a passage to
+    // embed: the graph and the passage land, the refresh fails, and
+    // that alone is exit 1.
+    let plain = batches.join("plain.jsonl");
+    std::fs::write(
+        &plain,
+        format!("{batch}{{\"passage\": \"青嶺酒造の杜氏は高瀬。\"}}\n"),
+    )
+    .unwrap();
+    let data_dir = common::scratch_dir("http-import-exit-embed");
+    let (code, stdout, stderr) = run_cli(
+        &["import", plain.to_str().unwrap()],
+        &[
+            ("TAGURU_DATA_DIR", &data_dir.to_string_lossy()),
+            ("TAGURU_EMBED_URL", "http://127.0.0.1:9/v1/embeddings"),
+            ("TAGURU_EMBED_MODEL", "dead-mock"),
+            ("TAGURU_EMBED_PASSAGES", "1"),
+        ],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains("import: 1 of 1 batch(es) applied"),
+        "{stdout}"
+    );
+    assert!(stderr.contains("embedding refresh failed"), "{stderr}");
+    let _ = std::fs::remove_dir_all(&batches);
+}
+
 /// `import --json` (issue #371) must answer the same shape `POST
 /// /import` does for the identical batch against an equally-empty
 /// starting state — one schema, not two that could drift.
