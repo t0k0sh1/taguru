@@ -706,6 +706,12 @@ async fn serve(serve_args: cli::ServeArgs, auth_source: auth::AuthSource) {
     // extensions — the per-source-IP throttles (failed-auth in the gate,
     // the anonymous request budget) read it from there. Without it those
     // fall back to a single shared bucket.
+    // Built HERE — before the graceful-shutdown block, which axum
+    // spawns as its own task and which therefore runs no earlier than
+    // that task's first poll (#892): `shutdown_signal()` installs the
+    // handlers when called, so the SIGTERM window is closed at this
+    // line, not at the block's first poll.
+    let shutdown = shutdown_signal();
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
@@ -713,7 +719,7 @@ async fn serve(serve_args: cli::ServeArgs, auth_source: auth::AuthSource) {
     .with_graceful_shutdown({
         let embed_shutdown = embed_shutdown.clone();
         async move {
-            shutdown_signal().await;
+            shutdown.await;
             // Before axum begins the drain: any in-flight (or future)
             // embedding provider wait gives up promptly, so the drain
             // waits for requests, never for the provider timeout.
