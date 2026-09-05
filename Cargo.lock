@@ -2993,6 +2993,7 @@ dependencies = [
  "opentelemetry_sdk",
  "parking_lot",
  "proptest",
+ "regex",
  "reqwest 0.13.4",
  "serde",
  "serde_json",

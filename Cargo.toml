@@ -53,6 +53,12 @@ http = "1.4"
 # and already ubiquitous in the wider tree.
 sha2 = "0.11"
 getrandom = "0.4"
+# Already in the tree through jsonschema (fancy-regex); made direct
+# for the sensitive-content gate (ADR 0038): the built-in `redact1`
+# patterns and a user's `--redact-rules` file are regular expressions
+# — deterministic, no model, no dictionary — and a hand-rolled matcher
+# for a dozen token shapes would be the riskier dependency.
+regex = "1.13"
 # Already in the tree through getrandom/mio; made direct for
 # pthread_sigmask — issue #213's fix needs main-thread signal blocking
 # that std has no safe API for.

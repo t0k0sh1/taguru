@@ -42,6 +42,7 @@ mod remote_mcp;
 mod replica;
 mod route;
 mod schema;
+mod sensitive;
 mod sha256;
 mod ship;
 mod storage;
