@@ -1345,6 +1345,21 @@ mod tests {
             .collect()
     }
 
+    /// [`batch`] with `stored_at` pinned, so two stores of the same
+    /// entries append byte-identical WAL records (#867): `store()`
+    /// stamps `now_epoch_secs()` into an unpinned submission, and the
+    /// record's trailing `"crc":N` is a decimal of variable width, so
+    /// a probe measured in one second and a store made in the next can
+    /// differ by a byte — exactly the byte the threshold tests below
+    /// land on.
+    fn pinned_batch(entries: &[(&str, &str)]) -> BTreeMap<String, PassageSubmission> {
+        let mut submissions = batch(entries);
+        for submission in submissions.values_mut() {
+            submission.meta.stored_at = Some(1_700_000_000);
+        }
+        submissions
+    }
+
     /// The stored text behind a source, for assertions.
     fn text(store: &PassageStore, source: &str) -> Option<String> {
         store.get(source).map(|record| record.text.to_string())
@@ -2717,7 +2732,7 @@ mod tests {
         // formula triggers compaction there.
         let probe_dir = scratch_dir("append-compact-trigger-factor-probe");
         let probe = open(&probe_dir);
-        probe.store(batch(&[("a", "x")])).unwrap();
+        probe.store(pinned_batch(&[("a", "x")])).unwrap();
         let appended = probe.pending_log_bytes();
         assert!(appended > 0);
 
@@ -2729,7 +2744,7 @@ mod tests {
             inner.snapshot_bytes = snapshot_bytes;
             inner.log_bytes = snapshot_bytes + 1 - appended;
         }
-        store.store(batch(&[("a", "x")])).unwrap();
+        store.store(pinned_batch(&[("a", "x")])).unwrap();
         assert_eq!(
             store.compaction_totals().0,
             1,
@@ -2745,7 +2760,7 @@ mod tests {
         // must NOT trigger.
         let probe_dir = scratch_dir("append-compact-trigger-strict-probe");
         let probe = open(&probe_dir);
-        probe.store(batch(&[("a", "x")])).unwrap();
+        probe.store(pinned_batch(&[("a", "x")])).unwrap();
         let appended = probe.pending_log_bytes();
         assert!(appended > 0);
 
@@ -2757,11 +2772,45 @@ mod tests {
             inner.snapshot_bytes = snapshot_bytes;
             inner.log_bytes = snapshot_bytes - appended;
         }
-        store.store(batch(&[("a", "x")])).unwrap();
+        store.store(pinned_batch(&[("a", "x")])).unwrap();
         assert_eq!(
             store.compaction_totals().0,
             0,
             "log_bytes landing exactly at the threshold must not trigger a compaction"
+        );
+    }
+
+    /// The mechanism behind the #867 flake, pinned so the threshold
+    /// tests above stay honest: the WAL record ends in a decimal CRC
+    /// of variable width over content that includes `stored_at`, so an
+    /// unpinned submission's appended size can change from one second
+    /// to the next, while a pinned one appends the same bytes in every
+    /// store — the probe-then-land technique is sound only with the
+    /// stamp pinned.
+    #[test]
+    fn a_pinned_stored_at_appends_the_same_wal_bytes_in_every_store() {
+        let first = open(&scratch_dir("pinned-append-first"));
+        first.store(pinned_batch(&[("a", "x")])).unwrap();
+        let second = open(&scratch_dir("pinned-append-second"));
+        second.store(pinned_batch(&[("a", "x")])).unwrap();
+        assert_eq!(first.pending_log_bytes(), second.pending_log_bytes());
+        // And the size really does depend on the stamp: a different
+        // `stored_at` whose record CRC has a different decimal width
+        // appends a different count — searched for, since which stamps
+        // produce which widths is the checksum's business, not ours.
+        let base = first.pending_log_bytes();
+        let differing = (1_700_000_001u64..1_700_000_400).find(|&stamp| {
+            let store = open(&scratch_dir("pinned-append-search"));
+            let mut submissions = batch(&[("a", "x")]);
+            for submission in submissions.values_mut() {
+                submission.meta.stored_at = Some(stamp);
+            }
+            store.store(submissions).unwrap();
+            store.pending_log_bytes() != base
+        });
+        assert!(
+            differing.is_some(),
+            "some stamp within 400 seconds must yield a CRC of another decimal width"
         );
     }
 
