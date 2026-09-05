@@ -267,6 +267,28 @@ fn association_mechanically(
         .object
         .as_deref()
         .expect("no absence and no issue means the field parsed");
+    // ADR 0038 §3.3: a redaction placeholder is not an entity — a
+    // model that copies `«redacted …»` into a subject or object has
+    // named the mask, not a thing. Removed with accounting like the
+    // rules around it.
+    let placeholders: Vec<String> = [("subject", subject), ("object", object)]
+        .into_iter()
+        .filter(|(_, name)| crate::sensitive::is_placeholder_bearing(name))
+        .map(|(field, name)| {
+            format!(
+                "{field} {} is a redaction placeholder",
+                quote_for_issue(name)
+            )
+        })
+        .collect();
+    if !placeholders.is_empty() {
+        removed.push(Removal::new(
+            &path,
+            format!("{} — not an entity", placeholders.join(", ")),
+            item,
+        ));
+        return None;
+    }
     let allowed = |name: &str| vocabulary.contains(&normalize_for_occurrence(name));
     let foreign: Vec<(&str, &str, Vec<char>)> = [
         ("label", label, false),
@@ -345,6 +367,23 @@ fn alias_mechanically(
     }
     let mut item_issues = Vec::new();
     let parsed = interpret_alias_item(index, item, &mut item_issues)?;
+    // ADR 0038 §3.3: an alias spelling that is a placeholder records
+    // the mask, not a spelling — judged before the self-alias rule, so
+    // a placeholder that is also its own canonical is accounted as the
+    // placeholder it is.
+    if let Some(spelling) = parsed.alias.as_deref()
+        && crate::sensitive::is_placeholder_bearing(spelling)
+    {
+        removed.push(Removal::new(
+            &path,
+            format!(
+                "alias {} is a redaction placeholder — not a spelling",
+                quote_for_issue(spelling)
+            ),
+            item,
+        ));
+        return None;
+    }
     if let (Some(spelling), Some(canonical)) = (&parsed.alias, &parsed.canonical)
         && spelling == canonical
     {

@@ -11,6 +11,19 @@ use super::*;
 /// reads a trace as a batch — ADR 0023 §3.3).
 pub(super) const TRACE_DIR_NAME: &str = ".extract-trace";
 
+/// ADR 0038 §3.6: what the read masked, addressed by rule and
+/// paragraph — the record deliberately has no `raw`.
+#[derive(serde::Serialize)]
+struct TraceRedaction<'a> {
+    kind: &'static str,
+    rule: &'a str,
+    paragraph: u32,
+    placeholder: &'a str,
+    bytes: usize,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    preexisting: bool,
+}
+
 /// ADR 0023 §3.4's `document` record — the file's first line.
 #[derive(serde::Serialize)]
 pub(super) struct TraceDocument<'a> {
@@ -271,6 +284,7 @@ pub(super) fn render_trace(
     source: &str,
     document_sha256: &str,
     batch_path: &Path,
+    redactions: &[crate::sensitive::Redaction],
     chunks: &[ChunkDescriptor],
     pieces: &[PieceOrigin],
     paragraphs: &[&str],
@@ -299,6 +313,20 @@ pub(super) fn render_trace(
         batch_path: batch_path.display().to_string(),
         chunk_total: chunks.len(),
     });
+    // ADR 0038 §3.6: one `redaction` record per match the read masked
+    // (and per placeholder the input already carried), right after the
+    // document record — rule, paragraph, placeholder, bytes; never the
+    // matched text (no `raw`, on purpose).
+    for redaction in redactions {
+        push(&TraceRedaction {
+            kind: "redaction",
+            rule: &redaction.rule,
+            paragraph: redaction.paragraph,
+            placeholder: &redaction.placeholder,
+            bytes: redaction.bytes,
+            preexisting: redaction.preexisting,
+        });
+    }
     // ADR 0027: the prompt's steering lists, right after the document
     // record — they hold for every chunk below.
     push(steering);

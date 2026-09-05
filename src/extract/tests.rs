@@ -24,6 +24,7 @@ fn base_inputs<'a>(sha256: &'a str, model: &'a str) -> ComputationInputs<'a> {
         lossy: false,
         schema_digest: "",
         candidates: "",
+        redaction: "",
         vocabulary_digest: "",
         source_id: "",
         date: 0,
@@ -1992,6 +1993,7 @@ fn with_resume_hint_names_the_checkpointed_units_only_when_there_are_any() {
         lossy: false,
         schema_digest: String::new(),
         candidates: String::new(),
+        redaction: String::new(),
         vocabulary_digest: String::new(),
     };
     let store = CheckpointStore::empty(dir.join("unit.json"), fingerprint);
@@ -2187,6 +2189,196 @@ fn manifests_reextract_when_the_candidates_mode_changes() {
             ..base_inputs("hash-2", "model-1")
         }
     ));
+}
+
+/// ADR 0038 §3.5: the redaction version is a computation input like
+/// `candidates` — toggling it, or a group change, re-extracts; entries
+/// written before the control existed default to `""` and keep
+/// matching a default-off run.
+#[test]
+fn manifests_reextract_when_the_redaction_version_changes() {
+    let mut manifest = Manifest::default();
+    manifest.record(
+        "a.md",
+        &ComputationInputs {
+            redaction: "redact1",
+            ..base_inputs("hash-1", "model-1")
+        },
+        "a.md.jsonl",
+    );
+    assert!(manifest.matches(
+        "a.md",
+        &ComputationInputs {
+            redaction: "redact1",
+            ..base_inputs("hash-1", "model-1")
+        }
+    ));
+    assert!(!manifest.matches(
+        "a.md",
+        &ComputationInputs {
+            redaction: "redact1:secrets",
+            ..base_inputs("hash-1", "model-1")
+        }
+    ));
+    assert!(!manifest.matches("a.md", &base_inputs("hash-1", "model-1")));
+    let mut legacy = Manifest::default();
+    legacy.record("b.md", &base_inputs("hash-2", "model-1"), "b.md.jsonl");
+    assert!(legacy.matches("b.md", &base_inputs("hash-2", "model-1")));
+    assert!(!legacy.matches(
+        "b.md",
+        &ComputationInputs {
+            redaction: "redact1",
+            ..base_inputs("hash-2", "model-1")
+        }
+    ));
+    // A checkpoint fingerprint from before the field existed reads as
+    // "" — off.
+    let fingerprint: CheckpointFingerprint = serde_json::from_value(serde_json::json!({
+        "sha256": "h", "model": "m", "prompt_version": 1, "context": "c",
+        "questions_n": 0, "no_passage": false, "description": "", "fact_budget": 0,
+        "structured_output": "", "max_output_tokens": 0, "lossy": false
+    }))
+    .unwrap();
+    assert_eq!(fingerprint.redaction, "");
+}
+
+/// `--redact` takes an optional group: bare means both, `secrets` or
+/// `pii` one; anything else after it is the next argument (a document
+/// path, say), and a second `--redact` is a usage error.
+#[test]
+fn redact_flag_takes_an_optional_group_and_rejects_a_duplicate() {
+    fn parse(words: &[&str]) -> Result<Args, i32> {
+        Args::parse(&words.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+    let base = ["--context", "c", "--out", "o"];
+    let with = |tail: &[&str]| parse(&[&base[..], tail].concat());
+    let parsed = with(&["--redact", "doc.md"]).unwrap();
+    assert_eq!(parsed.redact, Some(crate::sensitive::Groups::BOTH));
+    assert_eq!(parsed.paths, vec!["doc.md".to_string()]);
+    let parsed = with(&["--redact", "secrets", "doc.md"]).unwrap();
+    assert_eq!(parsed.redact.map(|g| g.version_suffix()), Some(":secrets"));
+    assert_eq!(parsed.paths, vec!["doc.md".to_string()]);
+    let parsed = with(&["doc.md", "--redact", "pii"]).unwrap();
+    assert_eq!(parsed.redact.map(|g| g.version_suffix()), Some(":pii"));
+    assert_eq!(with(&["doc.md"]).unwrap().redact, None);
+    assert!(matches!(with(&["--redact", "--redact", "doc.md"]), Err(2)));
+}
+
+/// TAGURU_EXTRACT_REDACT: every off spelling, every on spelling, the
+/// two groups, and the rest a usage error — pinned one by one.
+#[test]
+fn redact_env_value_reads_every_spelling() {
+    use crate::sensitive::Groups;
+    for off in ["", "0", "false", "FALSE", "off", "Off"] {
+        assert_eq!(redact_env_value(off), Some(None), "{off:?}");
+    }
+    for on in ["1", "true", "True", "on", "ON", "both", "Both"] {
+        assert_eq!(redact_env_value(on), Some(Some(Groups::BOTH)), "{on:?}");
+    }
+    assert_eq!(
+        redact_env_value("secrets")
+            .flatten()
+            .map(Groups::version_suffix),
+        Some(":secrets")
+    );
+    assert_eq!(
+        redact_env_value("PII")
+            .flatten()
+            .map(Groups::version_suffix),
+        Some(":pii")
+    );
+    for bad in ["nope", "2", "secret", "yes", "none"] {
+        assert_eq!(redact_env_value(bad), None, "{bad:?}");
+    }
+}
+
+/// ADR 0038 §3.7's notice names the endpoint's host only when it is
+/// not this machine.
+#[test]
+fn non_loopback_host_names_only_a_remote_endpoint() {
+    for local in [
+        "http://127.0.0.1:11434/v1",
+        "http://localhost:11434",
+        "http://LOCALHOST/v1",
+        "http://[::1]:8080/v1",
+        "http://127.10.0.3",
+        "not a url",
+        "http:///v1",
+    ] {
+        assert_eq!(non_loopback_host(local), None, "{local}");
+    }
+    assert_eq!(
+        non_loopback_host("https://api.openai.com/v1").as_deref(),
+        Some("api.openai.com")
+    );
+    assert_eq!(
+        non_loopback_host("http://user:pw@model.internal:8080/v1?x=1").as_deref(),
+        Some("model.internal")
+    );
+    assert_eq!(
+        non_loopback_host("http://[2001:db8::1]:8080/v1").as_deref(),
+        Some("2001:db8::1")
+    );
+    assert_eq!(
+        non_loopback_host("http://10.0.0.5").as_deref(),
+        Some("10.0.0.5")
+    );
+}
+
+/// ADR 0038 §3.6: the stderr line, the dry-run note, and the output
+/// scan's hit name rules, paragraphs, and lines — never content.
+#[test]
+fn redaction_accounting_names_rules_and_positions_never_content() {
+    use super::run::{batch_sensitive_hit, redaction_plan_note, redaction_stderr_line};
+    use crate::sensitive::Redaction;
+    let redaction = |rule: &str, paragraph: u32, preexisting: bool| Redaction {
+        rule: rule.to_string(),
+        paragraph,
+        placeholder: format!("«redacted {rule} abcd»"),
+        bytes: 20,
+        preexisting,
+    };
+    assert_eq!(redaction_stderr_line(&[]), None);
+    assert_eq!(redaction_plan_note(&[]), "");
+    let found = vec![
+        redaction("email", 3, false),
+        redaction("aws_access_key", 0, false),
+        redaction("email", 3, false),
+        redaction("email", 1, false),
+        redaction("preexisting", 2, true),
+    ];
+    assert_eq!(
+        redaction_stderr_line(&found).as_deref(),
+        Some(
+            "redacted 4 match(es): aws_access_key ×1 (paragraph 0), email ×3 (paragraphs 1, 3); \
+             1 pre-existing placeholder(s)"
+        )
+    );
+    assert_eq!(redaction_plan_note(&found), ", 4 redaction(s)");
+    // No pre-existing placeholder: no clause about them.
+    assert_eq!(
+        redaction_stderr_line(&found[..1]).as_deref(),
+        Some("redacted 1 match(es): email ×1 (paragraph 3)")
+    );
+    // Only pre-existing placeholders: nothing masked, still reported.
+    let only = vec![redaction("preexisting", 0, true)];
+    assert_eq!(
+        redaction_stderr_line(&only).as_deref(),
+        Some("redacted 0 match(es); 1 pre-existing placeholder(s)")
+    );
+    assert_eq!(redaction_plan_note(&only), "");
+    // The output scan: the first hit's 1-based batch line and rule; a
+    // body made only of placeholders is clean.
+    let rules = crate::sensitive::RuleSet::builtin(crate::sensitive::Groups::BOTH);
+    let body = "{\"a\":1}\n{\"label\":\"«redacted email abcd»\"}\n{\"label\":\"x@example.com\"}\n";
+    assert_eq!(
+        batch_sensitive_hit(body, &rules),
+        Some((3, "email".to_string()))
+    );
+    assert_eq!(
+        batch_sensitive_hit(&body[..body.rfind('{').unwrap()], &rules),
+        None
+    );
 }
 
 #[test]
@@ -4899,6 +5091,7 @@ fn drive_ladder_on(
             lossy: true,
             schema_digest: String::new(),
             candidates: String::new(),
+            redaction: String::new(),
             vocabulary_digest: String::new(),
         },
     );
@@ -5947,6 +6140,7 @@ fn render_trace_joins_items_to_pieces_across_a_split_and_a_reuse() {
         "doc.md",
         "d".repeat(64).as_str(),
         Path::new("out/doc.jsonl"),
+        &[],
         &chunks,
         &pieces,
         &[],
@@ -6158,6 +6352,48 @@ fn merge_records_a_loss_for_every_dropped_or_folded_item() {
 }
 
 /// The mechanical pass and every Stage 2 prune record the item they
+/// ADR 0038 §3.3: a placeholder in a subject, object, or alias is the
+/// mask, not an entity — judged before the self-alias rule, so a
+/// placeholder that is also its own canonical is accounted as a
+/// placeholder; the rest of the answer is untouched.
+#[test]
+fn a_placeholder_is_removed_as_a_placeholder_even_as_its_own_canonical() {
+    let rules = ItemRules {
+        paragraph_count: 2,
+        questions_requested: false,
+    };
+    let text = "[0] alpha «redacted email abcd»\n\n[1] beta";
+    let answer = serde_json::json!({
+        "associations": [
+            {"subject": "alpha", "label": "rel", "object": "beta", "weight": 1.0},
+            {"subject": "alpha", "label": "mail", "object": "«redacted email abcd»", "weight": 1.0}
+        ],
+        "aliases": [
+            {"alias": "«redacted email abcd»", "canonical": "«redacted email abcd»", "kind": "concept"},
+            {"alias": "«redacted email abcd»", "canonical": "alpha", "kind": "concept"}
+        ]
+    });
+    let evaluation = mechanical_interpret(&answer, &rules, text, &HashSet::new());
+    assert!(evaluation.issues.is_empty(), "{:?}", evaluation.issues);
+    let texts: Vec<String> = evaluation.removed.iter().map(ToString::to_string).collect();
+    assert_eq!(texts.len(), 3, "{texts:?}");
+    assert!(
+        texts[0].starts_with("associations[1]: object")
+            && texts[0].ends_with("is a redaction placeholder — not an entity"),
+        "{texts:?}"
+    );
+    for text in &texts[1..] {
+        assert!(text.starts_with("aliases["), "{texts:?}");
+        assert!(
+            text.ends_with("is a redaction placeholder — not a spelling"),
+            "{texts:?}"
+        );
+        assert!(!text.contains("equals its canonical"), "{texts:?}");
+    }
+    assert_eq!(evaluation.output.associations.len(), 1);
+    assert!(evaluation.output.aliases.is_empty());
+}
+
 /// removed, not only the message — and the message is byte for byte
 /// the pre-#786 one. A checkpoint from before #786 (string removals)
 /// still loads, as item-less removals.
@@ -6306,6 +6542,7 @@ fn render_trace_shows_every_loss_in_the_original_text() {
         "doc.md",
         "d".repeat(64).as_str(),
         Path::new("out/doc.jsonl"),
+        &[],
         &chunks,
         &pieces,
         &["alpha text", "beta text", "gamma text"],
@@ -6522,6 +6759,7 @@ fn lossy_parse_drops_are_recorded_as_unparsed_losses() {
         "d".repeat(64).as_str(),
         Path::new("out/doc.jsonl"),
         &[],
+        &[],
         &pieces,
         &["a b"],
         &extraction,
@@ -6678,6 +6916,7 @@ fn render_trace_reports_paragraph_coverage_and_gap_sentences() {
         "doc.md",
         "d".repeat(64).as_str(),
         Path::new("out/doc.jsonl"),
+        &[],
         &chunks,
         &pieces,
         &paragraphs,

@@ -123,6 +123,8 @@ TAGURU_EXTRACT_CHUNK_CONTEXT  default for --chunk-context (default off)
 TAGURU_EXTRACT_TRACE_ATTEMPTS  `off` disables the per-document attempts log (on by default; see Trace)
 TAGURU_EXTRACT_LOSSY  default for --lossy (default 0/false)
 TAGURU_EXTRACT_CANDIDATES  default for --candidates (default 0/false)
+TAGURU_EXTRACT_REDACT  default for --redact: 1/true (both groups), secrets,
+                    pii, or 0/false (default 0/false)
 TAGURU_EXTRACT_VOCABULARY  default for --vocabulary (default unset, off)
 TAGURU_EXTRACT_COVERAGE  default for --coverage (default 0/false)
 TAGURU_EXTRACT_DIAGNOSTICS  default for --diagnostics-out (default unset, off)
@@ -173,6 +175,15 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
                     dictionary) as preferred subject/object spellings;
                     non-restrictive, off by default; toggling re-extracts
                     (ADR 0014)
+--redact [GROUP]    mask secrets and pattern-recognisable personal data in
+                    the document before anything reads it: each match
+                    becomes «redacted &lt;rule&gt; &lt;hex&gt;» in the prompt, the
+                    passage, the checkpoint, the trace, and the attempts
+                    log alike; GROUP = secrets | pii, none = both; every
+                    redaction is named on stderr by rule and paragraph,
+                    never by content; off by default; a computation
+                    input (toggling re-extracts) — see Redaction below
+                    (ADR 0038)
 --vocabulary PATH   steer spellings toward a target context's existing
                     vocabulary: PATH is an exported batch stream or a
                     directory of them — its *.jsonl files, so an extract
@@ -223,6 +234,65 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       format for the model's answer shape. Extract is offline and has no running server to fetch
       one from, so unlike the LangChain SDK ingesters (which pull it live), the operator hands it
       the file explicitly.
+    </p>
+  </section>
+
+  <section id="redact">
+    <h2>Redaction: what never reaches the model</h2>
+    <p>
+      A document handed to <code>extract</code> goes to the model as written — and, for a
+      hosted endpoint, out of the machine. <code>--redact</code> is the gate for the cases a
+      regular expression can recognise: the document is scanned before anything reads it, and
+      each match is replaced by a placeholder, so the prompt, the passage the batch quotes,
+      the checkpoint, the trace, and the attempts log all hold the placeholder and none holds
+      the text (<a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0038-sensitive-content-gate.md">ADR
+      0038</a>). Two groups, both on when no group is named:
+    </p>
+    <ul>
+      <li>
+        <b>secrets</b>: AWS access keys, GitHub tokens, OpenAI keys, Slack tokens, Google API
+        keys, PEM private-key blocks, JWTs, credential assignments
+        (<code>password = …</code>, <code>api_key: …</code>), <code>Authorization:</code>
+        headers, and the password in a URL's userinfo. For an assignment, a header, and a
+        userinfo the <i>value</i> is masked and the name around it stays, so the sentence
+        still reads.
+      </li>
+      <li>
+        <b>pii</b>: e-mail addresses, Japanese and international phone numbers,
+        個人番号 (check digit verified), and payment card numbers (issuer range and Luhn
+        verified).
+      </li>
+    </ul>
+    <p>
+      The placeholder is <code>«redacted &lt;rule&gt; &lt;hex&gt;»</code>: the rule that
+      matched and a short prefix of a digest of the matched text salted with the document's
+      hash — the same secret in one document masks the same way every time, so the model can
+      still see that two sentences mention the same key, and distinct matches under one rule
+      never share a placeholder. A placeholder already present in the input (a document
+      redacted upstream) is kept as it is and counted apart. Matching is per paragraph;
+      overlapping candidates resolve to the earliest, then the longest, then the rule order
+      above.
+    </p>
+    <p>
+      What is <b>not</b> judged, on purpose: names, addresses, dates, IP addresses,
+      high-entropy strings without a known shape, and anything only context can tell apart.
+      Those need a model or a dictionary, and a gate that sends the document to a model to
+      decide what not to send is no gate. The rule set is versioned (<code>redact1</code>)
+      and is a computation input: turning the flag on, off, or to another group re-extracts
+      the document; the manifest's <code>sha256</code> stays the file's own, so "did the
+      file change" is unaffected.
+    </p>
+    <p>
+      Accounting is by rule and paragraph, never by content: one stderr line per document
+      (<code>redacted 2 match(es): aws_access_key ×1 (paragraph 0), email ×1 (paragraph 3)</code>),
+      a <code>, N redacted</code> note on the report line, one <code>redaction</code> record
+      per match at the top of the <a href="#trace">trace</a>, and a <code>, N redaction(s)</code>
+      note on <code>--dry-run</code>'s plan line. The answer is scanned with the same rules
+      before the batch is written: a label or question carrying what the masked text never
+      showed fails the document with the batch line and the rule, and a subject, object, or
+      alias that <i>is</i> a placeholder is removed as not an entity, with the usual
+      accounting. With redaction off and <code>TAGURU_EXTRACT_URL</code> pointing anywhere
+      but this machine, the run says so once on stderr, before the first document is read.
     </p>
   </section>
 
@@ -1129,7 +1199,10 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       The file is a tagged JSONL stream like the sidecar (<code>kind</code>; skip kinds you do
       not know), in this order: one <code>document</code> (<code>run_id</code>,
       <code>source</code>, <code>document_sha256</code> — the manifest's hash of the text,
-      <code>batch_path</code>, <code>chunk_total</code>); under <a
+      <code>batch_path</code>, <code>chunk_total</code>); under <a href="#redact"><code>--redact</code></a>,
+      one <code>redaction</code> per match (<code>rule</code>, <code>paragraph</code>,
+      <code>placeholder</code>, <code>bytes</code>, and <code>preexisting</code> when the input
+      already carried it — never the matched text); under <a
       href="#chunk-context"><code>--chunk-context structure</code></a>, one <code>structure</code>
       per unit (<code>unit</code>, <code>level</code>, <code>heading</code>,
       <code>paragraph_first</code>/<code>paragraph_last</code>); one <code>chunk</code> per chunk of
