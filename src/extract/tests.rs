@@ -6352,6 +6352,48 @@ fn merge_records_a_loss_for_every_dropped_or_folded_item() {
 }
 
 /// The mechanical pass and every Stage 2 prune record the item they
+/// ADR 0038 §3.3: a placeholder in a subject, object, or alias is the
+/// mask, not an entity — judged before the self-alias rule, so a
+/// placeholder that is also its own canonical is accounted as a
+/// placeholder; the rest of the answer is untouched.
+#[test]
+fn a_placeholder_is_removed_as_a_placeholder_even_as_its_own_canonical() {
+    let rules = ItemRules {
+        paragraph_count: 2,
+        questions_requested: false,
+    };
+    let text = "[0] alpha «redacted email abcd»\n\n[1] beta";
+    let answer = serde_json::json!({
+        "associations": [
+            {"subject": "alpha", "label": "rel", "object": "beta", "weight": 1.0},
+            {"subject": "alpha", "label": "mail", "object": "«redacted email abcd»", "weight": 1.0}
+        ],
+        "aliases": [
+            {"alias": "«redacted email abcd»", "canonical": "«redacted email abcd»", "kind": "concept"},
+            {"alias": "«redacted email abcd»", "canonical": "alpha", "kind": "concept"}
+        ]
+    });
+    let evaluation = mechanical_interpret(&answer, &rules, text, &HashSet::new());
+    assert!(evaluation.issues.is_empty(), "{:?}", evaluation.issues);
+    let texts: Vec<String> = evaluation.removed.iter().map(ToString::to_string).collect();
+    assert_eq!(texts.len(), 3, "{texts:?}");
+    assert!(
+        texts[0].starts_with("associations[1]: object")
+            && texts[0].ends_with("is a redaction placeholder — not an entity"),
+        "{texts:?}"
+    );
+    for text in &texts[1..] {
+        assert!(text.starts_with("aliases["), "{texts:?}");
+        assert!(
+            text.ends_with("is a redaction placeholder — not a spelling"),
+            "{texts:?}"
+        );
+        assert!(!text.contains("equals its canonical"), "{texts:?}");
+    }
+    assert_eq!(evaluation.output.associations.len(), 1);
+    assert!(evaluation.output.aliases.is_empty());
+}
+
 /// removed, not only the message — and the message is byte for byte
 /// the pre-#786 one. A checkpoint from before #786 (string removals)
 /// still loads, as item-less removals.

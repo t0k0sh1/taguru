@@ -177,7 +177,7 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
                     (ADR 0014)
 --redact [GROUP]    mask secrets and pattern-recognisable personal data in
                     the document before anything reads it: each match
-                    becomes «redacted <rule> <hex>» in the prompt, the
+                    becomes «redacted &lt;rule&gt; &lt;hex&gt;» in the prompt, the
                     passage, the checkpoint, the trace, and the attempts
                     log alike; GROUP = secrets | pii, none = both; every
                     redaction is named on stderr by rule and paragraph,

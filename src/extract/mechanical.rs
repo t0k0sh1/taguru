@@ -367,16 +367,10 @@ fn alias_mechanically(
     }
     let mut item_issues = Vec::new();
     let parsed = interpret_alias_item(index, item, &mut item_issues)?;
-    if let (Some(spelling), Some(canonical)) = (&parsed.alias, &parsed.canonical)
-        && spelling == canonical
-    {
-        // interpret_alias_item's own self-alias issue is in item_issues;
-        // it dies with the item rather than becoming a corrective ask.
-        removed.push(Removal::new(&path, "alias equals its canonical", item));
-        return None;
-    }
     // ADR 0038 §3.3: an alias spelling that is a placeholder records
-    // the mask, not a spelling.
+    // the mask, not a spelling — judged before the self-alias rule, so
+    // a placeholder that is also its own canonical is accounted as the
+    // placeholder it is.
     if let Some(spelling) = parsed.alias.as_deref()
         && crate::sensitive::is_placeholder_bearing(spelling)
     {
@@ -388,6 +382,14 @@ fn alias_mechanically(
             ),
             item,
         ));
+        return None;
+    }
+    if let (Some(spelling), Some(canonical)) = (&parsed.alias, &parsed.canonical)
+        && spelling == canonical
+    {
+        // interpret_alias_item's own self-alias issue is in item_issues;
+        // it dies with the item rather than becoming a corrective ask.
+        removed.push(Removal::new(&path, "alias equals its canonical", item));
         return None;
     }
     // ADR 0039, the alias-spelling half: a spelling in another
