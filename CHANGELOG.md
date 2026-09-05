@@ -48,7 +48,11 @@ Entries that change an on-disk format or a response shape say so.
   `PROMPT_VERSION` 4 → 5, so already-extracted documents re-extract
   under the new wording instead of being reused. No response-shape or
   on-disk format change — the manifest and the attempts log's
-  `settings` record carry the new number.
+  `settings` record carry the new number. Both LangChain producers
+  (`sdk/python-langchain`, `sdk/typescript-langchain`) now mirror the
+  Rust prompt at 5 — they had stayed at 3, so they also gain #852's
+  text-alone and empty-answer rules — and their checkpoints re-extract
+  likewise.
 
 - `anchoring`: the `--help` text and docs/extract.html now say how to
   read the strict rate (#806) — within one document type, never
