@@ -290,27 +290,31 @@ fn spawn_route_map_reload_tasks(state: RouterState, path: PathBuf, boot_digest: 
     {
         let state = state.clone();
         let path = path.clone();
-        tokio::spawn(async move {
-            use tokio::signal::unix::{SignalKind, signal};
-            let mut hangup = match signal(SignalKind::hangup()) {
-                Ok(stream) => stream,
-                Err(error) => {
-                    warn!(%error, "could not register the SIGHUP route-map-reload handler");
-                    return;
-                }
-            };
-            while hangup.recv().await.is_some() {
-                match read_off_worker(path.clone()).await {
-                    Some(bytes) => {
-                        reload_route_map(&state, &bytes, "sighup");
-                    }
-                    None => warn!(
-                        path = %path.display(),
-                        "route map unreadable on SIGHUP — the map already serving stays in effect"
-                    ),
-                }
+        // Registered before the task is spawned (#892, the same window
+        // `shutdown_signal` closes): a SIGHUP before the task's first
+        // poll would terminate the router instead of reloading the map.
+        let hangup = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) {
+            Ok(stream) => Some(stream),
+            Err(error) => {
+                warn!(%error, "could not register the SIGHUP route-map-reload handler");
+                None
             }
-        });
+        };
+        if let Some(mut hangup) = hangup {
+            tokio::spawn(async move {
+                while hangup.recv().await.is_some() {
+                    match read_off_worker(path.clone()).await {
+                        Some(bytes) => {
+                            reload_route_map(&state, &bytes, "sighup");
+                        }
+                        None => warn!(
+                            path = %path.display(),
+                            "route map unreadable on SIGHUP — the map already serving stays in effect"
+                        ),
+                    }
+                }
+            });
+        }
     }
     tokio::spawn(async move {
         // Each tick's read is THE read the reload uses — its bytes go
