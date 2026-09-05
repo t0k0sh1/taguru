@@ -1014,6 +1014,26 @@ mod tests {
             "exactly at the cap: no remainder"
         );
         assert!(listing_lines("a.md", &document, 0).is_empty());
+        // A reason with a zero count is left out of the header, not
+        // printed as "0 alias-only".
+        let one_reason = DocumentReport {
+            context: "c".to_string(),
+            counts: Counts::default(),
+            unanchored: vec![named(Some(2), false, false, None)],
+        };
+        assert_eq!(
+            listing_lines("a.md", &one_reason, 3)[0],
+            "a.md: 1 unanchored"
+        );
+        let alias_and_locator = DocumentReport {
+            context: "c".to_string(),
+            counts: Counts::default(),
+            unanchored: vec![named(Some(2), false, true, Some(false))],
+        };
+        assert_eq!(
+            listing_lines("a.md", &alias_and_locator, 3)[0],
+            "a.md: 1 alias-only, 1 invalid locator(s)"
+        );
         let clean = DocumentReport {
             context: "c".to_string(),
             counts: Counts::default(),
