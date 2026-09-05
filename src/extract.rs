@@ -90,6 +90,8 @@ mod coverage;
 mod diagnostics;
 #[path = "extract/documents.rs"]
 mod documents;
+#[path = "extract/jis_x0208.rs"]
+mod jis_x0208;
 #[path = "extract/manifest.rs"]
 mod manifest;
 #[path = "extract/mechanical.rs"]
@@ -247,6 +249,8 @@ use coverage::GAP_QUOTE_MAX_BYTES;
 use diagnostics::{AttemptRecord, ChunkRecord, DocumentRecord, ProviderMetadataRecord};
 #[cfg(test)]
 use mechanical::alias_issue_index;
+#[cfg(test)]
+use mechanical::foreign_ideographs;
 #[cfg(test)]
 use parse::{ModelQuestion, parse_model_output};
 #[cfg(test)]

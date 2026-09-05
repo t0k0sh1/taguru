@@ -162,7 +162,9 @@ pub(super) fn mechanical_interpret(
         Some(serde_json::Value::Array(items)) => items
             .iter()
             .enumerate()
-            .filter_map(|(index, item)| alias_mechanically(index, item, &mut issues, &mut removed))
+            .filter_map(|(index, item)| {
+                alias_mechanically(index, item, &haystack, &mut issues, &mut removed)
+            })
             .collect(),
         Some(other) => {
             issues.push(format!(
@@ -248,6 +250,40 @@ fn association_mechanically(
         ));
         return None;
     }
+    // ADR 0039: a label or name written with an ideograph from another
+    // language's repertoire (`适用法律` for a document that says
+    // `適用法律`) is a second spelling of one term that `query`,
+    // `resolve`, and the reuse vocabulary (#778) would all treat as a
+    // different label — removed before it can be offered back to a
+    // later document. Every offending field of the item is named in the
+    // one record, as the occurrence check below names both positions.
+    // Subject and object keep ADR 0015's allowlist exactly as the
+    // occurrence check applies it; a label has no allowlist.
+    let subject = parsed
+        .subject
+        .as_deref()
+        .expect("no absence and no issue means the field parsed");
+    let object = parsed
+        .object
+        .as_deref()
+        .expect("no absence and no issue means the field parsed");
+    let allowed = |name: &str| vocabulary.contains(&normalize_for_occurrence(name));
+    let foreign: Vec<(&str, &str, Vec<char>)> = [
+        ("label", label, false),
+        ("subject", subject, allowed(subject)),
+        ("object", object, allowed(object)),
+    ]
+    .into_iter()
+    .filter(|(_, _, allowlisted)| !allowlisted)
+    .filter_map(|(field, name, _)| {
+        let chars = foreign_ideographs(name, haystack);
+        (!chars.is_empty()).then_some((field, name, chars))
+    })
+    .collect();
+    if !foreign.is_empty() {
+        removed.push(Removal::new(&path, foreign_script_reason(&foreign), item));
+        return None;
+    }
     // Both positions are checked before anything is recorded, so an
     // item fabricating subject AND object names them together — the
     // one removal record is the complete diagnosis, not whichever
@@ -286,6 +322,7 @@ fn association_mechanically(
 fn alias_mechanically(
     index: usize,
     item: &serde_json::Value,
+    haystack: &str,
     issues: &mut Vec<String>,
     removed: &mut Vec<Removal>,
 ) -> Option<ModelAlias> {
@@ -316,10 +353,73 @@ fn alias_mechanically(
         removed.push(Removal::new(&path, "alias equals its canonical", item));
         return None;
     }
+    // ADR 0039, the alias-spelling half: a spelling in another
+    // language's repertoire records a form the document never uses.
+    // The canonical is judged where it is asserted — the association
+    // it must match.
+    if let Some(spelling) = parsed.alias.as_deref() {
+        let chars = foreign_ideographs(spelling, haystack);
+        if !chars.is_empty() {
+            removed.push(Removal::new(
+                &path,
+                foreign_script_reason(&[("alias", spelling, chars)]),
+                item,
+            ));
+            return None;
+        }
+    }
     if !item_issues.is_empty() {
         issues.append(&mut item_issues);
     }
     Some(parsed)
+}
+
+/// ADR 0039 §3.1–3.2: the ideographs of `name` that are outside JIS X
+/// 0208's repertoire AND do not occur in the document — in first-
+/// appearance order, each once. `haystack` is the occurrence check's
+/// normal form, which leaves ideographs untouched, so containment is
+/// by character. Empty for a name in the document's own script, for a
+/// Chinese or Korean document (every character it uses is in the
+/// text), and for anything that is not an ideograph at all.
+pub(super) fn foreign_ideographs(name: &str, haystack: &str) -> Vec<char> {
+    let mut found: Vec<char> = Vec::new();
+    for c in name.chars() {
+        if jis_x0208::is_ideograph(c)
+            && !jis_x0208::in_jis_x0208(c)
+            && !haystack.contains(c)
+            && !found.contains(&c)
+        {
+            found.push(c);
+        }
+    }
+    found
+}
+
+/// The one removal reason for every field of an item ADR 0039 flags:
+/// `label "适用法律" uses 适, object "处分" uses 处 — ideographs outside
+/// the document's script` (singular when one character in all).
+fn foreign_script_reason(fields: &[(&str, &str, Vec<char>)]) -> String {
+    let parts: Vec<String> = fields
+        .iter()
+        .map(|(field, name, chars)| {
+            let listed: Vec<String> = chars.iter().map(char::to_string).collect();
+            format!(
+                "{field} {} uses {}",
+                quote_for_issue(name),
+                listed.join(", ")
+            )
+        })
+        .collect();
+    let total: usize = fields.iter().map(|(_, _, chars)| chars.len()).sum();
+    let noun = if total == 1 {
+        "an ideograph"
+    } else {
+        "ideographs"
+    };
+    format!(
+        "{} — {noun} outside the document's script",
+        parts.join(", ")
+    )
 }
 
 /// A required field that is mechanically absent: missing (or null —
@@ -443,7 +543,7 @@ fn is_dense_script(c: char) -> bool {
                 | 0xD7B0..=0xD7FF
                 | 0xF900..=0xFAFF
                 | 0xFF66..=0xFF9F
-                | 0x20000..=0x3134F
+                | 0x20000..=0x3347F
         )
 }
 
