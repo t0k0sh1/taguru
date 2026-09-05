@@ -14,6 +14,18 @@
 //! offered, multi-word Latin noun phrases arrive one word at a time),
 //! measured against the extraction benchmark before any heavier
 //! segmenter (lindera/vibrato) buys its way in — ADR 0014 §4.
+//!
+//! Measured at corpus scale (#808, 63 documents): in Japanese text the
+//! stray Latin fragments (`CC`/`BY` from a licence line) take at most
+//! 6 of the [`CANDIDATE_CAP`] slots and push nothing out; in
+//! Latin-script prose the cap fills within the first 1–2 KB with
+//! ordinary English words (60–75 of 100 slots), so the list there is
+//! "the first hundred distinct words" — the one-word-at-a-time limit
+//! above, not a fragment problem. A short-token or lowercase-token
+//! filter moved the cap by ~150 bytes and was not adopted: it would
+//! drop real names (`OS`, `rg`, `std`) to buy nothing. The fix for
+//! Latin prose, if it is ever wanted, is a stop-word list or a
+//! segmenter — a new decision, not a rule here.
 
 use super::*;
 
