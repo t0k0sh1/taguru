@@ -543,7 +543,7 @@ fn is_dense_script(c: char) -> bool {
                 | 0xD7B0..=0xD7FF
                 | 0xF900..=0xFAFF
                 | 0xFF66..=0xFF9F
-                | 0x20000..=0x3134F
+                | 0x20000..=0x3347F
         )
 }
 

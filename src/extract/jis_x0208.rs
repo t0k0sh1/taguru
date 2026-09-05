@@ -10,12 +10,14 @@
 //! reads it is `mechanical::foreign_ideographs`.
 
 /// Whether `c` is a CJK ideograph at all — the Unified Ideographs
-/// block, its extension blocks, or the compatibility ideographs.
-/// Kana, punctuation, and every non-ideograph are not judged.
+/// block, Extension A, the compatibility ideographs, and the whole
+/// supplementary run of Extensions B through J with the compatibility
+/// supplement between them (U+20000–U+3347F as of Unicode 17). Kana,
+/// punctuation, and every non-ideograph are not judged.
 pub(super) fn is_ideograph(c: char) -> bool {
     matches!(
         c as u32,
-        0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF | 0x20000..=0x3134F
+        0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF | 0x20000..=0x3347F
     )
 }
 
