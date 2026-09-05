@@ -502,7 +502,18 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       be extracted. Off by default; toggling it (a computation input) re-extracts. All-hiragana
       nouns and multi-word Latin noun phrases are known blind spots of the dictionary-free
       segmenter — ADR 0014 documents the limits and the measured path to a morphological
-      analyzer if they ever cost recall. Pair it with
+      analyzer if they ever cost recall. <b>The list earns its keep on Japanese and mixed-script
+      text; on Latin-script prose it is the document's first hundred distinct words.</b>
+      Measured over the 63-document verification corpus (#808): in Japanese documents the
+      stray Latin fragments (<code>CC</code>/<code>BY</code> from a licence line, <code>CPU</code>,
+      <code>NHK</code>) take at most 6 of the 100 slots and most of those are real names, so no
+      compound is pushed out by them; in English papers, the Rust Book, and source files the cap
+      fills within the first 1–2 KB and 60–75 of the slots are ordinary English words
+      (<code>the</code>, <code>ownership</code>, <code>searches</code>), which is the
+      one-word-at-a-time limit above at corpus scale, not a fragment problem — dropping short or
+      lowercase tokens moved the cap by ~150 bytes and changed nothing downstream. For such
+      documents leave the flag off (identifiers survive the occurrence check on their own) or
+      accept that the block anchors only the opening. Pair it with
       <a href="#structured-output"><code>--structured-output</code></a>: under a candidate
       block, a mid-size model was measured emitting the offered spellings as unquoted JSON
       values — a syntax failure class constrained decoding removes structurally, which is

@@ -45,6 +45,15 @@ Entries that change an on-disk format or a response shape say so.
   and `with_aliases` carry the cross-type comparison. No output or
   format change.
 
+- `extract --candidates`: docs/extract.html now says where the list
+  earns its keep (#808, measured over the 63-document verification
+  corpus): Japanese and mixed-script text, where stray Latin fragments
+  take at most 6 of the 100 slots and push nothing out; on
+  Latin-script prose the cap fills within the first 1–2 KB with
+  ordinary English words, so the list is the document's first hundred
+  distinct words. No segmentation change — a short-token filter was
+  measured and moved the cap by ~150 bytes while dropping real names.
+
 - `extract`: a failed document's stderr line now names the piece that
   failed and points at its records (ADR 0037, #850). After the `chunk
   K/N:` clause comes `piece <12 hex> (paragraphs a–b, N B):` — the
