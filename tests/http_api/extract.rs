@@ -3103,7 +3103,9 @@ fn extract_redact_rules_file_extends_the_built_ins_and_joins_the_version() {
     assert!(stdout.contains("unchanged, skipped"), "{stdout}");
     // An edited file: a new version, re-extracted.
     std::fs::write(&rules, "# ids\nemp_id\t\\bEMP-\\d{6}\\b\nbrewer\t高瀬\n").unwrap();
-    let (url, requests) = stub_chat_server(vec![reply]);
+    // A never-joined acceptor here: a run that exits before it
+    // connects must fail the assertions below, not hang on a join.
+    let (url, captured) = stub_chat_server_concurrent(move |_index, _attempt| chat_ok(&reply));
     let (code, stdout, stderr) = run_extract(
         &out,
         &[
@@ -3123,7 +3125,8 @@ fn extract_redact_rules_file_extends_the_built_ins_and_joins_the_version() {
     // no longer occurs in the text — the document fails, which is
     // exactly the point: the run re-extracted instead of skipping.
     assert!(!stdout.contains("unchanged, skipped"), "{stdout}");
-    let requests = requests.join().unwrap();
+    let requests = captured.lock().unwrap().clone();
+    assert_eq!(requests.len(), 1, "{stdout}\n{stderr}");
     assert!(requests[0].contains("«redacted brewer "), "{}", requests[0]);
     assert!(stderr.contains("brewer ×"), "code {code}: {stderr}");
 
