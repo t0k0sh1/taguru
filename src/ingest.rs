@@ -127,7 +127,8 @@ use sensitive_gate::SensitiveHit;
 
 const USAGE: &str = "\
 usage: taguru import [--dry-run] [--no-embed] [--json] [--config FILE]
-                      [--refuse-sensitive] [--url URL] FILE|DIR...
+                      [--refuse-sensitive [--redact-rules FILE]] [--url URL]
+                      FILE|DIR...
 
 Applies JSONL batch files to TAGURU_DATA_DIR offline (the server must
 not be running — the directory lock enforces it), or to a RUNNING
@@ -163,6 +164,13 @@ sorted by name. Format: docs/import.html.
                is sent). Import never rewrites content: the fix is to
                re-extract with --redact, or to edit the batch. Exit 1
                when any batch was refused
+  --redact-rules FILE
+               with --refuse-sensitive: your own rules on top of the
+               built-ins, the same file extract --redact-rules takes
+               (one `name<TAB>regex` per line); a bad line is a usage
+               error naming it. Without --refuse-sensitive this is a
+               usage error — a rules file that judges nothing is a
+               misconfiguration, not a no-op
 
   --url URL    import into a RUNNING server instead of TAGURU_DATA_DIR
                directly: POST /import, one request per chunk. The
@@ -225,6 +233,7 @@ pub fn run(args: &[String]) -> i32 {
     let mut no_embed = false;
     let mut as_json = false;
     let mut refuse_sensitive = false;
+    let mut redact_rules: Option<PathBuf> = None;
     let mut config: Option<PathBuf> = None;
     let mut url: Option<String> = None;
     let mut paths: Vec<String> = Vec::new();
@@ -239,6 +248,15 @@ pub fn run(args: &[String]) -> i32 {
             "--no-embed" => no_embed = true,
             "--json" => as_json = true,
             "--refuse-sensitive" => refuse_sensitive = true,
+            "--redact-rules" => match rest.next() {
+                Some(path) => redact_rules = Some(PathBuf::from(path)),
+                None => {
+                    return crate::config::subcommand_usage_error(
+                        "import",
+                        "--redact-rules needs a file path",
+                    );
+                }
+            },
             "--config" => match rest.next() {
                 Some(path) => config = Some(PathBuf::from(path)),
                 None => {
@@ -306,8 +324,33 @@ pub fn run(args: &[String]) -> i32 {
     // ADR 0038 §3.4: the gate's rules, built once — the built-ins of
     // both groups, the same set `extract --redact` (no group) masks
     // with.
-    let sensitive_rules = refuse_sensitive
-        .then(|| crate::sensitive::RuleSet::builtin(crate::sensitive::Groups::BOTH));
+    let sensitive_rules = match (refuse_sensitive, redact_rules) {
+        (false, None) => None,
+        (false, Some(_)) => {
+            return crate::config::subcommand_usage_error(
+                "import",
+                "--redact-rules needs --refuse-sensitive — a rules file that judges nothing \
+                 would be a silent no-op",
+            );
+        }
+        (true, None) => Some(crate::sensitive::RuleSet::builtin(
+            crate::sensitive::Groups::BOTH,
+        )),
+        // The user's rules join the built-ins the way `extract
+        // --redact-rules` reads them (#884): the same file, the same
+        // refusals, before any batch is read.
+        (true, Some(path)) => {
+            match crate::sensitive::RuleSet::builtin_with_file(
+                crate::sensitive::Groups::BOTH,
+                &path,
+            ) {
+                Ok(rules) => Some(rules),
+                Err(message) => {
+                    return crate::config::subcommand_usage_error("import", &message);
+                }
+            }
+        }
+    };
     match url {
         // ADR 0002 §5/§6: `--url` is the only way `import` goes
         // remote — no positional URL argument, no TAGURU_URL or

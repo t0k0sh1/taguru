@@ -125,6 +125,7 @@ TAGURU_EXTRACT_LOSSY  default for --lossy (default 0/false)
 TAGURU_EXTRACT_CANDIDATES  default for --candidates (default 0/false)
 TAGURU_EXTRACT_REDACT  default for --redact: 1/true (both groups), secrets,
                     pii, or 0/false (default 0/false)
+TAGURU_EXTRACT_REDACT_RULES  default for --redact-rules (default unset)
 TAGURU_EXTRACT_VOCABULARY  default for --vocabulary (default unset, off)
 TAGURU_EXTRACT_COVERAGE  default for --coverage (default 0/false)
 TAGURU_EXTRACT_DIAGNOSTICS  default for --diagnostics-out (default unset, off)
@@ -184,6 +185,12 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
                     never by content; off by default; a computation
                     input (toggling re-extracts) — see Redaction below
                     (ADR 0038)
+--redact-rules FILE your own rules on top of the built-ins (one
+                    name&lt;TAB&gt;regex per line, # lines ignored; a name is
+                    [a-z0-9_]+ and may not repeat a built-in's; a bad line
+                    is a usage error naming it); the file's SHA-256 joins
+                    the redaction version, so editing it re-extracts;
+                    needs --redact (ADR 0038)
 --vocabulary PATH   steer spellings toward a target context's existing
                     vocabulary: PATH is an exported batch stream or a
                     directory of them — its *.jsonl files, so an extract
@@ -294,6 +301,27 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       accounting. With redaction off and <code>TAGURU_EXTRACT_URL</code> pointing anywhere
       but this machine, the run says so once on stderr, before the first document is read.
     </p>
+    <p id="redact-rules">
+      <b>Your own rules.</b> What the built-ins cannot know — an employee-number format, an
+      internal ticket id, a customer code — goes in a file handed to <code>--redact-rules FILE</code>
+      (default <code>TAGURU_EXTRACT_REDACT_RULES</code>), applied after the built-ins in file
+      order: one <code>name&lt;TAB&gt;regex</code> per line, blank lines and lines starting with
+      <code>#</code> ignored. A name is <code>[a-z0-9_]+</code> — it is written into the
+      placeholder, <code>«redacted emp_id 3f9a»</code> — and may not repeat a built-in's or an
+      earlier line's; the pattern is a <a href="https://docs.rs/regex/latest/regex/#syntax">Rust
+      <code>regex</code></a> (no look-around; bound with <code>\b</code>), matched within one
+      paragraph like every built-in. A bad line is a usage error naming it, never a skipped
+      rule. The file's SHA-256 joins the redaction version
+      (<code>redact1+&lt;64 hex&gt;</code>, <code>redact1:pii+…</code>), so editing the file
+      re-extracts every document exactly as a changed built-in would. The file needs
+      <code>--redact</code> on: a rules file with redaction off would run nothing.
+    </p>
+    <pre><code><span class="c"># redact-rules.tsv — one rule per line, name TAB regex</span>
+emp_id	\bEMP-\d{6}\b
+ticket	\bTCK-[0-9]{4,}\b
+customer_code	\bC[A-Z]{2}-\d{5}\b
+
+taguru extract --context ops --out batches/ --redact --redact-rules redact-rules.tsv docs/</code></pre>
   </section>
 
   <section id="boundary">

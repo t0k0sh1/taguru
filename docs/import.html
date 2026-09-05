@@ -95,7 +95,8 @@ taguru import --dry-run batch/        <span class="c"># validate and report; tou
 taguru import --config prod.env a.jsonl b.jsonl
 taguru import --url http://127.0.0.1:8248 batch/   <span class="c"># send to a running server instead</span>
 taguru import --json batch/           <span class="c"># {dry_run, batches: [...], schemas: [...], groups: [...]} instead of text</span>
-taguru import --refuse-sensitive batch/   <span class="c"># refuse a batch carrying a secret or personal data, by path and rule (ADR 0038)</span></code></pre>
+taguru import --refuse-sensitive batch/   <span class="c"># refuse a batch carrying a secret or personal data, by path and rule (ADR 0038)</span>
+taguru import --refuse-sensitive --redact-rules rules.tsv batch/   <span class="c"># … with your own rules on top of the built-ins</span></code></pre>
     <p>Exit codes: <code>0</code> everything applied · <code>1</code> something was refused or failed (details on stderr) · <code>2</code> usage error.</p>
     <p>
       <code>--no-embed</code> is offline-only — combined with <code>--url</code> it is a usage
@@ -124,7 +125,11 @@ taguru import --refuse-sensitive batch/   <span class="c"># refuse a batch carry
       (<code>«redacted …»</code>) is not a hit. Import never rewrites content — it validates or
       refuses — so the fix is to re-extract the document with <code>--redact</code>, or to edit
       the batch. Off by default; the server's own <code>POST /import</code> does not judge this
-      (a later ADR's).
+      (a later ADR's). <code>--redact-rules FILE</code> adds your own rules on top of the
+      built-ins — the same file <a href="extract.html#redact-rules"><code>extract
+      --redact-rules</code></a> takes, read and refused the same way — and needs
+      <code>--refuse-sensitive</code>: a rules file that judges nothing is a usage error, not a
+      no-op.
     </p>
     <p>
       <code>--json</code> answers the same <code>{batches, schemas, groups}</code> fields
