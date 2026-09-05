@@ -10164,7 +10164,8 @@ fn inspect_reads_a_failed_documents_attempts_log_down_to_the_piece_text() {
     let docs = batch_dir("inspect-attempts-docs");
     let doc = docs.join("a.md");
     std::fs::write(&doc, "alpha relates to beta.\n\ngamma relates to delta.").unwrap();
-    let out = batch_dir("inspect-attempts-out");
+    // A space in --out: the pasted command must still open the log.
+    let out = batch_dir("inspect attempts out");
 
     let (url, requests) = stub_chat_server(vec!["not json at all".to_string()]);
     let (code, stdout, stderr) = run_extract(
@@ -10207,7 +10208,7 @@ fn inspect_reads_a_failed_documents_attempts_log_down_to_the_piece_text() {
     assert_eq!(named.len(), 12, "{failure}");
     assert!(
         failure.ends_with(&format!(
-            " — records: {log_arg} (taguru inspect {log_arg} --piece {named})"
+            " — records: {log_arg} (taguru inspect '{log_arg}' --piece {named})"
         )),
         "{failure}"
     );
@@ -10234,6 +10235,10 @@ fn inspect_reads_a_failed_documents_attempts_log_down_to_the_piece_text() {
         .map(|(_, id)| id.to_string())
         .expect("the footer names the piece to open");
     assert_eq!(pointer.len(), 12, "{text}");
+    assert!(
+        text.ends_with(&format!("taguru inspect '{log_arg}' --piece {pointer}\n")),
+        "{text}"
+    );
     assert_eq!(
         pointer, named,
         "the failure line and the footer name the same piece"

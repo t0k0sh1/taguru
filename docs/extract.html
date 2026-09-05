@@ -1215,13 +1215,16 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       split; the failure line now continues with <code>piece &lt;12 hex&gt; (paragraphs a–b,
       N B):</code> — the innermost piece the ladder was working on, its <code>[N]</code> label
       range, its bytes — before the message, and ends with <code>— records: &lt;attempts
-      log&gt; (taguru inspect &lt;attempts log&gt; --piece &lt;id&gt;)</code>, plus
-      <code>, diagnostics: &lt;path&gt;</code> under <code>--diagnostics-out</code> (ADR 0037;
-      omitted when the log is off). Paste that command to read the piece. A checkpoint file that
-      cannot be read, or one written under other settings, is said on stderr too
-      (<code>ignoring an unreadable checkpoint at …</code> / <code>checkpoint at … was written
-      under different settings — N unit(s) re-extract</code>) instead of silently re-asking the
-      model for the whole document.
+      log&gt; (taguru inspect '&lt;attempts log&gt;' --piece &lt;id&gt;)</code> — the command's
+      path shell-quoted when it needs it — and, under <code>--diagnostics-out</code>,
+      <code>, diagnostics: &lt;path&gt;</code> (ADR 0037). Each part appears exactly when its
+      file exists: with the attempts log off the sidecar's path still shows. Paste that command
+      to read the piece. A checkpoint file that cannot be read, or one written under other
+      settings, is said on stderr too (<code>ignoring an unreadable checkpoint at &lt;path&gt;:
+      &lt;error&gt; — every unit of this document re-extracts</code> — an unparseable file has
+      no unit count to give — / <code>checkpoint at &lt;path&gt; was written under different
+      settings — N unit(s) re-extract</code>) instead of silently re-asking the model for the
+      whole document.
     </p>
     <p>
       <b>Read it with <code>taguru inspect</code></b> (<a

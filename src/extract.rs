@@ -251,6 +251,7 @@ use mechanical::alias_issue_index;
 use parse::{ModelQuestion, parse_model_output};
 #[cfg(test)]
 use prompt::schema_block;
+pub(crate) use run::shell_quote;
 #[cfg(test)]
 #[cfg(test)]
 use run::{named_piece, with_records_hint, with_resume_hint};

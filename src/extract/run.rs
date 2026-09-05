@@ -1833,8 +1833,11 @@ pub(super) fn with_records_hint(
 ) -> String {
     let mut hint = String::new();
     if let Some(log) = attempt_log {
-        let path = log.path().display();
-        hint.push_str(&format!(" — records: {path} (taguru inspect {path}"));
+        let path = log.path().display().to_string();
+        hint.push_str(&format!(
+            " — records: {path} (taguru inspect {}",
+            shell_quote(&path)
+        ));
         if let Some(piece) = named_piece(&message) {
             hint.push_str(&format!(" --piece {piece}"));
         }
@@ -1848,6 +1851,22 @@ pub(super) fn with_records_hint(
         ));
     }
     message + &hint
+}
+
+/// A path (or any word) as a POSIX shell reads it back unchanged: as
+/// is when it holds only characters no shell interprets, otherwise
+/// single-quoted with embedded quotes spliced (`'\''`) — so a pasted
+/// `taguru inspect …` still opens an `--out` with a space in it.
+pub(crate) fn shell_quote(text: &str) -> String {
+    let plain = !text.is_empty()
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-+=:,@%".contains(c));
+    if plain {
+        text.to_string()
+    } else {
+        format!("'{}'", text.replace('\'', "'\\''"))
+    }
 }
 
 /// The piece a failure message names (`piece <id> (`, as

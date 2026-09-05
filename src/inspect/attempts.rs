@@ -19,7 +19,9 @@ use std::path::Path;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::extract::{paragraph_range, short_piece_id, user_message_document, user_message_part};
+use crate::extract::{
+    paragraph_range, shell_quote, short_piece_id, user_message_document, user_message_part,
+};
 
 /// What `--piece`/`--paragraph` narrowed the view to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -659,7 +661,7 @@ pub(super) fn render_text(report: &AttemptsReport, filter: &Filter) -> String {
     {
         out.push_str(&format!(
             "  to read a piece as the model saw it: taguru inspect {} --piece {}\n",
-            report.target,
+            shell_quote(&report.target),
             short_id(&row.piece_id)
         ));
     }

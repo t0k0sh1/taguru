@@ -961,6 +961,36 @@ fn stale_checkpoint_notice_counts_the_units_it_discards() {
     );
 }
 
+/// The pasted `taguru inspect …` must survive a shell: a plain path
+/// stays bare, anything else is single-quoted with embedded quotes
+/// spliced.
+#[test]
+fn shell_quote_leaves_plain_paths_bare_and_quotes_the_rest() {
+    assert_eq!(
+        shell_quote("out/.extract-trace/a.md-1f.attempts.jsonl"),
+        "out/.extract-trace/a.md-1f.attempts.jsonl"
+    );
+    assert_eq!(shell_quote("/tmp/my out/a.jsonl"), "'/tmp/my out/a.jsonl'");
+    assert_eq!(shell_quote("it's"), "'it'\\''s'");
+    assert_eq!(shell_quote("a$b"), "'a$b'");
+    assert_eq!(shell_quote("資料/a.jsonl"), "'資料/a.jsonl'");
+    assert_eq!(shell_quote(""), "''");
+    // The records hint quotes the command's path, not the display one.
+    let dir = std::env::temp_dir().join(format!("taguru quote hint {}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let log_path = dir.join("a.attempts.jsonl");
+    let log = AttemptLog::open(log_path.clone(), false, "r1", "a.md", "d").unwrap();
+    assert_eq!(
+        with_records_hint(Some(&log), None, "nope".to_string()),
+        format!(
+            "nope — records: {p} (taguru inspect '{p}')",
+            p = log_path.display()
+        )
+    );
+    drop(log);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// ADR 0037 §3.2: the records hint names the attempts log with the
 /// `inspect` command that opens the named piece, the sidecar when
 /// there is one, and nothing when neither exists.
