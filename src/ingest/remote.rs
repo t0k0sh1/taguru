@@ -93,6 +93,34 @@ pub(super) fn refusal_issue_lines(body: &Value, units: &[Unit]) -> Vec<String> {
     lines
 }
 
+/// The never-sent tally after a mid-stream stop — one line per unit
+/// kind still queued, with the count and the first such unit's label
+/// as the resume point (#863). All three record kinds a chunk can
+/// carry, group records included: a refusal or a lost connection
+/// mid-stream leaves the queued groups exactly as unsent as the
+/// batches and schemas beside them. Empty when nothing is queued.
+pub(super) fn never_sent_lines(queue: &VecDeque<Chunk>) -> Vec<String> {
+    let mut lines = Vec::new();
+    for (kind, what) in [
+        (UnitKind::Batch, "batch(es)"),
+        (UnitKind::Schema, "schema record(s)"),
+        (UnitKind::Group, "group record(s)"),
+    ] {
+        let mut unsent = queue
+            .iter()
+            .flat_map(|chunk| &chunk.units)
+            .filter(|unit| unit.kind == kind);
+        if let Some(first) = unsent.next() {
+            let count = 1 + unsent.count();
+            lines.push(format!(
+                "{count} {what} after this chunk were never sent, from {}",
+                first.label
+            ));
+        }
+    }
+    lines
+}
+
 /// `batches[N]` and what follows its closing bracket (a leading `.`
 /// dropped), or `None` for any other path shape.
 fn batch_index_prefix(path: &str) -> Option<(usize, &str)> {
@@ -665,6 +693,11 @@ pub(super) fn run_remote(base: &str, files: &[PathBuf], dry_run: bool, as_json: 
                     "taguru: import: not confirmed — this chunk carried {}",
                     chunk.carried()
                 );
+                // The chunks still queued behind the dropped one were
+                // never sent either — tallied exactly as after a refusal.
+                for line in never_sent_lines(&queue) {
+                    eprintln!("taguru: import: {line}");
+                }
                 if as_json {
                     print_import_json_values(
                         dry_run,
@@ -702,29 +735,8 @@ pub(super) fn run_remote(base: &str, files: &[PathBuf], dry_run: bool, as_json: 
                 for line in refusal_issue_lines(&body, &chunk.units) {
                     eprintln!("taguru: import: {line}");
                 }
-                // All three record kinds a chunk can carry, group
-                // records included: a refusal mid-stream leaves the
-                // queued groups exactly as unsent as the batches and
-                // schemas beside them.
-                for (kind, what) in [
-                    (UnitKind::Batch, "batch(es)"),
-                    (UnitKind::Schema, "schema record(s)"),
-                    (UnitKind::Group, "group record(s)"),
-                ] {
-                    let mut unsent = queue
-                        .iter()
-                        .flat_map(|chunk| &chunk.units)
-                        .filter(|unit| unit.kind == kind);
-                    if let Some(first) = unsent.next() {
-                        // The first never-sent unit of each kind names the
-                        // resume point by file and source (#863).
-                        let count = 1 + unsent.count();
-                        eprintln!(
-                            "taguru: import: {count} {what} after this chunk were never sent, \
-                             from {}",
-                            first.label
-                        );
-                    }
+                for line in never_sent_lines(&queue) {
+                    eprintln!("taguru: import: {line}");
                 }
                 if dry_run {
                     eprintln!(

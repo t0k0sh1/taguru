@@ -96,9 +96,9 @@ mod tests;
 use local::{
     duplicate_group_message, duplicate_schema_message, duplicate_source_message, run_local,
 };
-#[cfg(test)]
-use remote::refusal_issue_lines;
 use remote::{expand, run_remote};
+#[cfg(test)]
+use remote::{never_sent_lines, refusal_issue_lines};
 use report::report;
 
 pub(crate) use model::{Batch, parse_batch, parse_stream, split_batches};

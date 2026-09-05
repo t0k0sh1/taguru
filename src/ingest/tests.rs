@@ -1849,6 +1849,44 @@ fn restore_groups_error_names_its_group_when_it_has_one() {
         .group(),
         Some("g")
     );
+    assert_eq!(
+        E::Nesting(crate::groups::NestingViolation::Cycle("g".to_string())).group(),
+        Some("g")
+    );
+    assert_eq!(
+        E::Nesting(crate::groups::NestingViolation::TooDeep("g".to_string())).group(),
+        Some("g")
+    );
     assert_eq!(E::InvalidName.group(), None);
     assert_eq!(E::Timeout { applied: 1 }.group(), None);
+}
+
+/// The never-sent tally counts every queued unit of each kind across
+/// every queued chunk and names the first of each kind; a kind with
+/// nothing queued gets no line, and an empty queue none at all.
+#[test]
+fn never_sent_lines_count_each_kind_across_the_queue_and_name_the_first() {
+    let mut queue: VecDeque<Chunk> = VecDeque::new();
+    queue.push_back(Chunk {
+        units: vec![
+            labeled("a.jsonl: context 'a' source 'c.md'", UnitKind::Batch),
+            labeled("a.jsonl: context 'a' source 'd.md'", UnitKind::Batch),
+        ],
+    });
+    queue.push_back(Chunk {
+        units: vec![
+            labeled("a.jsonl: context 'a' source 'e.md'", UnitKind::Batch),
+            labeled("b.jsonl: group 'g'", UnitKind::Group),
+        ],
+    });
+    assert_eq!(
+        never_sent_lines(&queue),
+        vec![
+            "3 batch(es) after this chunk were never sent, from a.jsonl: context 'a' source 'c.md'"
+                .to_string(),
+            "1 group record(s) after this chunk were never sent, from b.jsonl: group 'g'"
+                .to_string(),
+        ]
+    );
+    assert!(never_sent_lines(&VecDeque::new()).is_empty());
 }
