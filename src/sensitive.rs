@@ -348,7 +348,7 @@ pub(crate) fn scan(text: &str, rules: &RuleSet) -> Vec<Match> {
                 candidates.push(Candidate {
                     start: value.start(),
                     end: value.end(),
-                    order: order + 1,
+                    order,
                     rule: rule.name.clone(),
                     preexisting: false,
                     owns,
@@ -372,15 +372,20 @@ pub(crate) fn scan(text: &str, rules: &RuleSet) -> Vec<Match> {
                     *rule != candidate.rule && candidate.start < *to && candidate.end > *from
                 })
         });
+        // Start ascending, then length descending — which, once the
+        // starts tie, is end descending — then rule order (a
+        // pre-existing placeholder shares order 0 with the first rule,
+        // but the two can never tie on a span: the placeholder form
+        // matches no rule).
         candidates.sort_by(|a, b| {
             a.start
                 .cmp(&b.start)
-                .then((b.end - b.start).cmp(&(a.end - a.start)))
+                .then(b.end.cmp(&a.end))
                 .then(a.order.cmp(&b.order))
         });
         let mut taken_until = 0usize;
         for candidate in candidates {
-            if candidate.start < taken_until && taken_until > 0 {
+            if candidate.start < taken_until {
                 continue;
             }
             if candidate.end <= candidate.start {
@@ -484,14 +489,12 @@ fn distinguishing_prefix(digests: &[&str]) -> usize {
         .map(|digest| digest.len())
         .max()
         .unwrap_or(MIN_DIGEST_HEX);
-    let mut len = MIN_DIGEST_HEX;
-    while len < full {
+    for len in MIN_DIGEST_HEX..full {
         let mut seen: Vec<&str> = digests.iter().map(|digest| &digest[..len]).collect();
         seen.sort_unstable();
         if seen.windows(2).all(|pair| pair[0] != pair[1]) {
             return len;
         }
-        len += 1;
     }
     full
 }
@@ -545,8 +548,9 @@ fn payment_card_holds(candidate: &str) -> bool {
         .enumerate()
         .map(|(index, digit)| {
             if index % 2 == 1 {
-                let doubled = digit * 2;
-                if doubled > 9 { doubled - 9 } else { doubled }
+                // The doubled digit with its own digits summed.
+                const DOUBLED: [u32; 10] = [0, 2, 4, 6, 8, 1, 3, 5, 7, 9];
+                DOUBLED[*digit as usize]
             } else {
                 *digit
             }
@@ -725,6 +729,8 @@ mod tests {
             "5555-5555-5555-4444",
             "378282246310005",
             "3530111333300000",
+            "6011111111111117",
+            "6500000000000002",
         ] {
             assert_eq!(
                 names_of(&scan(card, &rules)),
@@ -736,7 +742,7 @@ mod tests {
         // 個人番号 shape, so the assertion is "no card", not "nothing".)
         assert!(!names_of(&scan("4111 1111 1111 1112", &rules)).contains(&"payment_card"));
         assert!(
-            !names_of(&scan("9111111111111111", &rules)).contains(&"payment_card"),
+            !names_of(&scan("9111111111111110", &rules)).contains(&"payment_card"),
             "no issuer range"
         );
         // 個人番号: the check digit decides; the same digits with a
@@ -800,6 +806,36 @@ mod tests {
         // Paragraph numbering: a match in the third paragraph says so.
         let text = "one\n\ntwo\n\nmail me@example.com";
         assert_eq!(scan(text, &rules)[0].paragraph, 2);
+    }
+
+    /// A value-only rule's whole match shadows what lies INSIDE it and
+    /// nothing that merely touches its edges: a candidate starting
+    /// exactly where the owned match ends, or ending exactly where it
+    /// begins, is still its own match.
+    #[test]
+    fn shadowing_covers_the_owned_span_but_not_its_edges() {
+        let rules = RuleSet::builtin(Groups::parse(Some("secrets")).unwrap());
+        // Inside: the key in the userinfo secret is the secret, once.
+        let text = "https://u:AKIAIOSFODNN7EXAMPLE@h";
+        let found = scan(text, &rules);
+        assert_eq!(names_of(&found), vec!["url_userinfo"]);
+        assert_eq!(matched(text, &found[0]), "AKIAIOSFODNN7EXAMPLE");
+        // Starting exactly at the owned match's end (right after `@`).
+        let text = "https://u:p@AKIAIOSFODNN7EXAMPLE";
+        let found = scan(text, &rules);
+        assert_eq!(names_of(&found), vec!["url_userinfo", "aws_access_key"]);
+        // Ending exactly at the owned match's start (the key block's
+        // closing dashes run into the scheme).
+        let text = "-----BEGIN PRIVATE KEY-----\nX\n-----END PRIVATE KEY-----https://u:p@h";
+        let found = scan(text, &rules);
+        assert_eq!(names_of(&found), vec!["private_key", "url_userinfo"]);
+        assert_eq!(matched(text, &found[1]), "p");
+        // Two accepted spans that touch: the key starts on the byte the
+        // key block ends on, and both are taken.
+        let text = "-----BEGIN PRIVATE KEY-----\nX\n-----END PRIVATE KEY-----AKIAIOSFODNN7EXAMPLE";
+        let found = scan(text, &rules);
+        assert_eq!(names_of(&found), vec!["private_key", "aws_access_key"]);
+        assert_eq!(found[0].end, found[1].start);
     }
 
     #[test]
