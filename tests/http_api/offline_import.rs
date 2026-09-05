@@ -277,6 +277,28 @@ fn an_offline_import_exits_one_for_each_failure_kind_alone() {
         "{stdout}"
     );
 
+    // A batch refused at the apply stage — the second re-points an
+    // alias the first registered — with the first applied: exit 1.
+    let conflict = batches.join("conflict.jsonl");
+    std::fs::write(
+        &conflict,
+        "{\"taguru_batch\": 1, \"context\": \"c\", \"source\": \"s1\", \"create\": {}}\n\
+         {\"subject\": \"X\", \"label\": \"l\", \"object\": \"Z\", \"weight\": 1.0}\n\
+         {\"alias\": \"A\", \"canonical\": \"X\", \"kind\": \"concept\"}\n\
+         {\"taguru_batch\": 1, \"context\": \"c\", \"source\": \"s2\"}\n\
+         {\"subject\": \"Y\", \"label\": \"l\", \"object\": \"Z\", \"weight\": 1.0}\n\
+         {\"alias\": \"A\", \"canonical\": \"Y\", \"kind\": \"concept\"}\n",
+    )
+    .unwrap();
+    let data_dir = common::scratch_dir("http-import-exit-apply");
+    let (code, stdout, stderr) = run_import(&data_dir, &[conflict.to_str().unwrap()]);
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains("import: 1 of 2 batch(es) applied"),
+        "{stdout}"
+    );
+    assert!(stderr.contains("alias 'A'"), "{stderr}");
+
     // An embedding provider nothing listens on, with a passage to
     // embed: the graph and the passage land, the refresh fails, and
     // that alone is exit 1.

@@ -121,7 +121,7 @@ use model::MAX_LINE_BYTES;
 #[cfg(test)]
 use rejection::AliasNamespace;
 #[cfg(test)]
-use remote::{Chunk, Unit, UnitKind, pack_chunks};
+use remote::{Chunk, Unit, UnitKind, oversized_unit_message, pack_chunks};
 #[cfg(test)]
 use sensitive_gate::SensitiveHit;
 

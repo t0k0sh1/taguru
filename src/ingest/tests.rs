@@ -1979,3 +1979,15 @@ fn sensitive_hits_name_path_rule_and_paragraph_never_content() {
     .unwrap();
     assert!(sensitive_hits(&clean, 0, &rules).is_empty());
 }
+
+/// The client-side oversized-unit refusal names the unit, its size,
+/// and the budget — and says which knob will NOT help.
+#[test]
+fn the_oversized_unit_message_names_unit_size_and_budget() {
+    let message = oversized_unit_message("a.jsonl: context 'c' source 's'", 5_000_001, 4_194_304);
+    assert!(message.starts_with("a.jsonl: context 'c' source 's' alone is 5000001 byte(s), over the 4194304-byte chunk budget"), "{message}");
+    assert!(
+        message.contains("TAGURU_MAX_BODY_BYTES alone will not help"),
+        "{message}"
+    );
+}

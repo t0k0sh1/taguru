@@ -228,7 +228,7 @@ pub(super) fn pack_chunks(units: Vec<Unit>, budget: usize) -> VecDeque<Chunk> {
 /// The hard failure for a single batch (or group record) that alone
 /// exceeds the byte budget — reported and refused before the network
 /// is ever touched, naming the two real fixes (ADR 0002 §9).
-fn oversized_unit_message(label: &str, size: usize, budget: usize) -> String {
+pub(super) fn oversized_unit_message(label: &str, size: usize, budget: usize) -> String {
     format!(
         "{label} alone is {size} byte(s), over the {budget}-byte chunk \
          budget — splitting a batch's own record set client-side would break the \
