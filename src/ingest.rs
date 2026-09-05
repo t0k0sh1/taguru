@@ -57,7 +57,7 @@
 //! `src/api/import.rs`, `extract.rs`, `compact.rs`, `export.rs`, and
 //! the router consume via `crate::ingest::`, re-exported unchanged.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
@@ -97,6 +97,8 @@ use local::{
     duplicate_group_message, duplicate_schema_message, duplicate_source_message, run_local,
 };
 use remote::{expand, run_remote};
+#[cfg(test)]
+use remote::{never_sent_lines, refusal_issue_lines};
 use report::report;
 
 pub(crate) use model::{Batch, parse_batch, parse_stream, split_batches};

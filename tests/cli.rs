@@ -2569,14 +2569,13 @@ fn a_multi_batch_stream_restating_earlier_sources_counts_as_one_refused_file() {
     ]);
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    // Each conflicting batch is still named individually…
-    assert_eq!(
-        stderr
-            .matches("is already stated by an earlier file")
-            .count(),
-        3,
-        "{stderr}"
+    // Each conflicting batch is still named individually, and each
+    // names the earlier file it lost to (#863)…
+    let earlier = format!(
+        "is already stated by an earlier file, {}",
+        dir.join("first.jsonl").display()
     );
+    assert_eq!(stderr.matches(earlier.as_str()).count(), 3, "{stderr}");
     // …but only one of the two files actually failed — never 3 of 2.
     assert!(
         stderr.contains("1 of 2 file(s) refused during validation"),
@@ -4069,6 +4068,16 @@ fn import_refuses_the_whole_group_set_but_keeps_batches_landed() {
         &[("TAGURU_DATA_DIR", &data_dir.display().to_string())],
     );
     assert_eq!(refused.status.code(), Some(1), "{refused:?}");
+    // The stderr line names the file that carried the refused group
+    // (#863), ahead of the refusal's own words.
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains(&format!(
+            "taguru: import: {}: group 'kura' names member context 'ghost'",
+            group.display()
+        )),
+        "{stderr}"
+    );
     let report: serde_json::Value =
         serde_json::from_slice(&refused.stdout).expect("--json must answer one document");
     assert!(
@@ -4236,4 +4245,106 @@ fn inspect_attempts_flags_are_validated_and_a_non_log_is_named() {
     assert!(String::from_utf8_lossy(&output.stdout).contains("--paragraph N"));
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A schema record and a group record restated by a later file are
+/// refused naming the EARLIER file that already stated them (#863) —
+/// the same "one file owns one truth" line the batch case gets, with
+/// the owner's path in it. Offline dry run: the ownership pass runs
+/// before anything boots.
+#[test]
+fn restated_schema_and_group_records_name_the_earlier_file() {
+    let dir = common::scratch_dir("cli-import-restated-records");
+    std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
+    let first = dir.join("first.jsonl");
+    let records = "{\"taguru_schema\": 1, \"context\": \"sake\", \"mode\": \"warn\", \
+                   \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n\
+                   {\"taguru_group\": 1, \"name\": \"kura\", \"contexts\": [\"sake\"]}\n";
+    std::fs::write(&first, records).expect("fixture must be writable");
+    let second = dir.join("second.jsonl");
+    std::fs::write(&second, records).expect("fixture must be writable");
+
+    let output = run(&[
+        "import",
+        "--dry-run",
+        &first.display().to_string(),
+        &second.display().to_string(),
+    ]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(&format!(
+            "taguru: import: {}: context 'sake' schema is already stated by an earlier \
+             file, {} — one record owns one context's schema",
+            second.display(),
+            first.display()
+        )),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(&format!(
+            "taguru: import: {}: group 'kura' is already stated by an earlier file, {} — \
+             one record owns one group's truth",
+            second.display(),
+            first.display()
+        )),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("1 of 2 file(s) refused during validation"),
+        "{stderr}"
+    );
+}
+
+/// A whole-set group refusal is prefixed with the file that carried
+/// the group the refusal names — THAT file, not a sibling file whose
+/// record was valid (#863).
+#[test]
+fn a_group_set_refusal_names_the_file_that_carried_the_refused_group() {
+    let dir = common::scratch_dir("cli-group-set-refusal-file");
+    std::fs::create_dir_all(&dir).expect("scratch dir must be creatable");
+    let batch = dir.join("a.jsonl");
+    std::fs::write(
+        &batch,
+        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \
+          \"create\": {\"description\": \"酒\"}}\n\
+         {\"subject\": \"青嶺\", \"label\": \"銘柄\", \"object\": \"酒\", \"weight\": 1.0}\n",
+    )
+    .expect("fixture must be writable");
+    let valid = dir.join("valid.jsonl");
+    std::fs::write(
+        &valid,
+        "{\"taguru_group\": 1, \"name\": \"valid\", \"contexts\": [\"sake\"]}\n",
+    )
+    .expect("fixture must be writable");
+    let ghost = dir.join("ghost.jsonl");
+    std::fs::write(
+        &ghost,
+        "{\"taguru_group\": 1, \"name\": \"kura\", \"contexts\": [\"sake\", \"ghost\"]}\n",
+    )
+    .expect("fixture must be writable");
+    let data_dir = dir.join("data");
+
+    let refused = run_with_env(
+        &[
+            "import",
+            &batch.display().to_string(),
+            &valid.display().to_string(),
+            &ghost.display().to_string(),
+        ],
+        &[("TAGURU_DATA_DIR", &data_dir.display().to_string())],
+    );
+    assert_eq!(refused.status.code(), Some(1), "{refused:?}");
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains(&format!(
+            "taguru: import: {}: group 'kura' names member context 'ghost'",
+            ghost.display()
+        )),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains(&format!("{}: group 'kura'", valid.display())),
+        "the valid sibling's file must not be blamed: {stderr}"
+    );
 }

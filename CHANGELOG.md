@@ -35,6 +35,25 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Changed
 
+- `import`: refusals now name the file, line, and item they are about
+  (#863, the `import` share of ADR 0037's survey). `--url`: a refused
+  chunk says what it carried (its one unit, or first and last, as
+  `<file>: context '…' source '…'`), the server's `issues[]` are printed
+  re-addressed from `batches[N].…` to that unit's file, context, and
+  source with the in-batch remainder kept, a capped list ends with how
+  many more the server did not list, each "never sent" tally names the
+  first unit of its kind, and a lost connection names the last unit
+  the server confirmed and what the unconfirmed chunk carried. A
+  duplicate source, schema, or group across files names the earlier
+  file (within one stream, the earlier line); a group-restore refusal
+  is prefixed with the file that carried the group; the "N question /
+  section / locator line(s) but no passage line" refusals and the
+  association-names-a-paragraph refusal name the first such line and
+  the batch header's line. Offline, a strict schema refusal lists
+  every issue instead of the wire's first 20 — the wire keeps its cap,
+  and its `issues_total` now carries the true count where it used to
+  equal the capped length. No response-shape or on-disk format change.
+
 - `extract`: the mechanical pass now removes an association whose
   label, subject, or object — or an alias whose spelling — uses an
   ideograph outside JIS X 0208's repertoire that the document never

@@ -20,9 +20,12 @@ pub(super) fn run_local(files: &[PathBuf], dry_run: bool, no_embed: bool, as_jso
     let mut schemas: Vec<(&PathBuf, String, schema::InstalledSchema)> = Vec::new();
     let mut groups: Vec<(&PathBuf, String, GroupRecord)> = Vec::new();
     let mut broken = 0;
-    let mut owners: HashSet<(String, String)> = HashSet::new();
-    let mut schema_owners: HashSet<String> = HashSet::new();
-    let mut group_owners: HashSet<String> = HashSet::new();
+    // Keyed claims → the file that made them (#863): a later file's
+    // duplicate is refused naming the earlier file, not just "an
+    // earlier file".
+    let mut owners: HashMap<(String, String), PathBuf> = HashMap::new();
+    let mut schema_owners: HashMap<String, PathBuf> = HashMap::new();
+    let mut group_owners: HashMap<String, PathBuf> = HashMap::new();
     for path in files {
         let parsed = fs::File::open(path)
             .map_err(|error| error.to_string())
@@ -35,39 +38,44 @@ pub(super) fn run_local(files: &[PathBuf], dry_run: bool, no_embed: bool, as_jso
         match parsed {
             Ok(stream) => {
                 for batch in stream.batches {
-                    if !owners.insert((batch.context.clone(), batch.source.clone())) {
+                    if let Some(earlier) =
+                        owners.get(&(batch.context.clone(), batch.source.clone()))
+                    {
                         eprintln!(
                             "taguru: import: {}: {}",
                             path.display(),
-                            duplicate_source_message(&batch.context, &batch.source)
+                            duplicate_source_message(&batch.context, &batch.source, earlier)
                         );
                         file_broken = true;
                         continue;
                     }
+                    owners.insert((batch.context.clone(), batch.source.clone()), path.clone());
                     batches.push((path, batch));
                 }
                 for (context, installed) in stream.schemas {
-                    if !schema_owners.insert(context.clone()) {
+                    if let Some(earlier) = schema_owners.get(&context) {
                         eprintln!(
                             "taguru: import: {}: {}",
                             path.display(),
-                            duplicate_schema_message(&context)
+                            duplicate_schema_message(&context, earlier)
                         );
                         file_broken = true;
                         continue;
                     }
+                    schema_owners.insert(context.clone(), path.clone());
                     schemas.push((path, context, installed));
                 }
                 for (name, record) in stream.groups {
-                    if !group_owners.insert(name.clone()) {
+                    if let Some(earlier) = group_owners.get(&name) {
                         eprintln!(
                             "taguru: import: {}: {}",
                             path.display(),
-                            duplicate_group_message(&name)
+                            duplicate_group_message(&name, earlier)
                         );
                         file_broken = true;
                         continue;
                     }
+                    group_owners.insert(name.clone(), path.clone());
                     groups.push((path, name, record));
                 }
             }
@@ -312,7 +320,19 @@ pub(super) fn run_local(files: &[PathBuf], dry_run: bool, no_embed: bool, as_jso
             }
             Err(refusal) => {
                 restored = refusal.applied();
-                eprintln!("taguru: import: {}", refusal.text());
+                // The refusal names its group; the file that carried
+                // that record is this run's to name (#863) — a refusal
+                // that names no group (an empty name, the budget) stays
+                // run-level.
+                match refusal
+                    .group()
+                    .and_then(|name| groups.iter().find(|(_, held, _)| held == name))
+                {
+                    Some((path, _, _)) => {
+                        eprintln!("taguru: import: {}: {}", path.display(), refusal.text());
+                    }
+                    None => eprintln!("taguru: import: {}", refusal.text()),
+                }
                 group_failures = groups.len() - restored;
                 if as_json {
                     group_restore_error = Some(refusal.text());
@@ -521,25 +541,28 @@ fn describe_group(name: &str, record: &GroupRecord) -> String {
 /// The cross-file "already claimed" refusal — shared by the local and
 /// remote import passes' duplicate-source checks so the wording can
 /// never drift between the two entrances.
-pub(super) fn duplicate_source_message(context: &str, source: &str) -> String {
+pub(super) fn duplicate_source_message(context: &str, source: &str, earlier: &Path) -> String {
     format!(
-        "source '{source}' in context '{context}' is already stated by an earlier file \
-         — one file owns one source's truth"
+        "source '{source}' in context '{context}' is already stated by an earlier file, {} \
+         — one file owns one source's truth",
+        earlier.display()
     )
 }
 
 /// [`duplicate_source_message`]'s schema-record twin.
-pub(super) fn duplicate_schema_message(context: &str) -> String {
+pub(super) fn duplicate_schema_message(context: &str, earlier: &Path) -> String {
     format!(
-        "context '{context}' schema is already stated by an earlier file — one record \
-         owns one context's schema"
+        "context '{context}' schema is already stated by an earlier file, {} — one record \
+         owns one context's schema",
+        earlier.display()
     )
 }
 
 /// [`duplicate_source_message`]'s group-record twin.
-pub(super) fn duplicate_group_message(name: &str) -> String {
+pub(super) fn duplicate_group_message(name: &str, earlier: &Path) -> String {
     format!(
-        "group '{name}' is already stated by an earlier file — one record owns one \
-         group's truth"
+        "group '{name}' is already stated by an earlier file, {} — one record owns one \
+         group's truth",
+        earlier.display()
     )
 }

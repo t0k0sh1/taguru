@@ -237,7 +237,8 @@ taguru import --json batch/           <span class="c"># {dry_run, batches: [...]
     <p>
       <code>paragraph</code> / <code>question</code>: a retrieval question attached to one
       paragraph of this file's passage. <code>paragraph</code> is a 0-based position in the
-      server's blank-line split (a question line in a file with no passage line is refused).
+      server's blank-line split (a question line in a file with no passage line is refused,
+      naming the first such line and the line of the batch's header — #863).
       One question per line; several may target the same paragraph (up to the cap). A question's
       terms index into its paragraph's BM25 postings on every server, and a server with
       <code>TAGURU_EMBED_PASSAGES</code> also embeds it next to the paragraph — either way,
@@ -312,7 +313,9 @@ taguru import --json batch/           <span class="c"># {dry_run, batches: [...]
       record, one context): unlike group records, which validate as one whole set before any of
       them applies, the first schema record that fails to install refuses the request right there
       — every batch before it stays durable, and later schema records or group records in the same
-      stream are simply never reached. Restating one context's schema twice in a run is refused —
+      stream are simply never reached. Restating one context's schema twice in a run is refused,
+      naming the earlier file (or, within one stream, the earlier line) that already stated it
+      (#863) — as is restating a source or a group —
       one record owns one context's schema. The response's <code>SchemaImportOutcome</code> carries
       no outcome verb (unlike a group's <code>"created"</code>/<code>"replaced"</code>/
       <code>"unchanged"</code>): installing a schema cannot itself tell an install apart from a
@@ -509,10 +512,22 @@ taguru import --url "$TAGURU_URL" --dry-run backups/   <span class="c"># preview
         format — nothing is sent. A schema-free stream never triggers this check.
       </li>
       <li>
+        A refused chunk is reported by what it carried, not just by number (#863): the line
+        after the refusal names the chunk's one unit, or its first and last, as
+        <code>&lt;file&gt;: context '…' source '…'</code>; the server's own <code>issues[]</code>
+        follow, each re-addressed from the request-relative <code>batches[N].…</code> to that
+        unit's file, context, and source with the in-batch remainder kept
+        (<code>b.jsonl: context 'a' source 'b.md': associations[1].subject: expected a Brewery,
+        got Person</code>), and when the server capped its list a final line says how many more
+        it did not list. Each "never sent" tally names the first unit of its kind by file and
+        source — the resume point.
+      </li>
+      <li>
         A lost connection reports which chunk landed and points at <code>--dry-run</code> to
         confirm what remains before resuming — nothing past that point is retried automatically.
-        Import's retract-then-apply contract makes any resend exact, so this is a "where," never a
-        "was it safe," question.
+        It also names the last unit the server confirmed and what the unconfirmed chunk carried,
+        by file and source (#863). Import's retract-then-apply contract makes any resend exact,
+        so this is a "where," never a "was it safe," question.
       </li>
       <li>
         Auth rides <code>TAGURU_API_TOKEN</code> (or the first <code>name:token</code> entry of

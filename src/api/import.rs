@@ -17,8 +17,8 @@ use crate::registry::{AccessError, AppState};
 use super::groups::{scope_refusal, scoped_member_contexts};
 use super::{
     AppBytes, AppPath, AppQuery, ErrorCode, Issue, RefusalDetail, access_error, access_error_noted,
-    deadline_exceeded, error, group_not_found, key_name, nesting_error_code, ok,
-    ok_with_issues_total, validation_error,
+    collected_validation_message, deadline_exceeded, error, group_not_found, key_name,
+    nesting_error_code, ok, ok_with_issues_total, truncate_issues, validation_error,
 };
 
 /// `POST /import`'s query string.
@@ -352,14 +352,22 @@ pub(super) fn import_refusal(
             } else {
                 ErrorCode::InvalidArgument
             };
-            let message = format!("{note}{}", rejection.text());
-            let issues = schema_issues_in_batch(batch_index, rejection.issues);
+            // The rejection's list is complete (#863); the wire gets
+            // MAX_LISTED_ISSUES of it with the true total beside them,
+            // in the prose and in `issues_total` alike.
+            let what = rejection.what();
+            let (listed, total) = truncate_issues(rejection.issues);
+            let message = format!(
+                "{note}{}",
+                collected_validation_message(what, &listed, total)
+            );
+            let issues = schema_issues_in_batch(batch_index, listed);
             validation_error(
                 code,
                 message,
                 RefusalDetail {
                     issues,
-                    issues_total: None,
+                    issues_total: Some(total),
                     integrity: Some(integrity),
                     durable_batches,
                     retryable_after_correction: Some(true),
