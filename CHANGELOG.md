@@ -35,6 +35,21 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Changed
 
+- `anchoring`: every association the rates count against is now
+  named (#864, the `anchoring` share of ADR 0037's survey). After the
+  table, each document lists its associations that are not strictly
+  anchored or cite a paragraph holding neither name — batch line,
+  subject, label, object, cited paragraph, reason (`unanchored`,
+  `alias-only`, `invalid locator`) — the first `--list N` per document
+  (default 3, `0` for none) on stdout and every one under a new
+  `unanchored` array per document in `--json`, with `strict`,
+  `with_aliases`, and `locator_valid` as booleans. A batch file that
+  cannot be read or parsed no longer stops the run: it is named on
+  stderr, listed under a new `failed` map in `--json`, the rest is
+  judged, and the exit code is 1. Additive `--json` fields only —
+  `scripts/extract_metrics.py --anchoring` reads the same counts as
+  before.
+
 - `import`: refusals now name the file, line, and item they are about
   (#863, the `import` share of ADR 0037's survey). `--url`: a refused
   chunk says what it carried (its one unit, or first and last, as

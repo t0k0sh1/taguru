@@ -39,8 +39,16 @@
 //! 0.9.3 output unchanged. `scripts/extract_metrics.py --anchoring`
 //! rolls the JSON report up by context and group.
 //!
-//! Exit codes: 0 = report produced · 1 = nothing to report (no
-//! readable batch with a passage) · 2 = usage error.
+//! The rates alone cannot point at a fabricated name, which is what
+//! the command exists to find (#864), so every association that is
+//! not strictly anchored, or cites a paragraph that holds neither
+//! name, is also NAMED: its batch line, subject, label, object, and
+//! cited paragraph — the first `--list N` per document on stdout,
+//! every one in `--json`.
+//!
+//! Exit codes: 0 = report produced · 1 = a batch file could not be
+//! read or parsed (the report covers the rest), or nothing to report
+//! (no readable batch with a passage) · 2 = usage error.
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::BufReader;
@@ -65,6 +73,17 @@ output; directories expand to their *.jsonl files):
   locator validity  cited associations whose paragraph actually holds
                     the subject or the object (alias group included)
 
+After the table, each document's associations that are NOT strictly
+anchored — or that cite a paragraph holding neither name — are named
+by batch line, subject, label, object, and cited paragraph, with the
+reason (`unanchored`, `alias-only`, `invalid locator`): the first
+--list N per document on stdout, every one under `unanchored` in the
+--json report. A batch file that cannot be read or parsed is reported,
+counted under `failed`, and skipped; the report covers the rest and
+the exit code is 1.
+
+  --list N            how many named associations to print per document
+                      (default 3; 0 prints none — the JSON still holds all)
   --vocabulary PATH   batch stream file(s) (a file, or a directory's
                       *.jsonl — the `taguru export` shape; an extract
                       --out works too) whose concept aliases
@@ -90,6 +109,7 @@ pub(crate) fn run(args: &[String]) -> i32 {
     let mut inputs: Vec<PathBuf> = Vec::new();
     let mut vocabulary: Option<PathBuf> = None;
     let mut json_out: Option<PathBuf> = None;
+    let mut list = DEFAULT_LIST;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -97,6 +117,11 @@ pub(crate) fn run(args: &[String]) -> i32 {
                 print!("{USAGE}");
                 return 0;
             }
+            "--list" => match iter.next().map(|value| value.parse::<usize>()) {
+                Some(Ok(value)) => list = value,
+                Some(Err(_)) => return usage_error("--list needs a non-negative integer"),
+                None => return usage_error("--list needs a count"),
+            },
             "--vocabulary" => match iter.next() {
                 Some(value) => vocabulary = Some(PathBuf::from(value)),
                 None => return usage_error("--vocabulary needs a path"),
@@ -131,6 +156,9 @@ pub(crate) fn run(args: &[String]) -> i32 {
 
     let mut documents: BTreeMap<String, DocumentReport> = BTreeMap::new();
     let mut skipped = 0usize;
+    // A file that cannot be read or parsed no longer stops the run
+    // (#864): it is named, counted, and the other files are judged.
+    let mut failed: BTreeMap<String, String> = BTreeMap::new();
     for file in &files {
         let batch = match std::fs::File::open(file)
             .map_err(|error| error.to_string())
@@ -138,8 +166,9 @@ pub(crate) fn run(args: &[String]) -> i32 {
         {
             Ok(batch) => batch,
             Err(message) => {
-                eprintln!("taguru: anchoring: {}: {message}", file.display());
-                return 1;
+                eprintln!("taguru: anchoring: {}: {message} — skipped", file.display());
+                failed.insert(file.display().to_string(), message);
+                continue;
             }
         };
         let Some(passage) = batch.passage() else {
@@ -150,12 +179,35 @@ pub(crate) fn run(args: &[String]) -> i32 {
             skipped += 1;
             continue;
         };
-        let report = judge(
+        let judged = judge(
             passage,
             batch.associations(),
             batch.concept_aliases(),
             &context_aliases,
         );
+        // The batch's association lines, for naming (#864): the parser
+        // keeps associations in file order and classifies a line by
+        // its `subject` key, so the i-th association is the i-th such
+        // line. Read after the parse succeeded, so it cannot fail.
+        let lines = association_lines(file);
+        let unanchored = judged
+            .verdicts
+            .iter()
+            .filter(|verdict| verdict.is_flagged())
+            .map(|verdict| {
+                let association = &batch.associations()[verdict.index];
+                Unanchored {
+                    line: lines.get(verdict.index).copied(),
+                    subject: association.subject.clone(),
+                    label: association.label.clone(),
+                    object: association.object.clone(),
+                    paragraph: association.paragraph,
+                    strict: verdict.strict,
+                    with_aliases: verdict.with_aliases,
+                    locator_valid: verdict.locator_valid,
+                }
+            })
+            .collect();
         // Two inputs can hold the same source (the same document
         // extracted into two out-dirs); totals count both, so the
         // table must list both — disambiguate by the batch file's
@@ -180,7 +232,8 @@ pub(crate) fn run(args: &[String]) -> i32 {
             key,
             DocumentReport {
                 context: batch.context.clone(),
-                counts: report,
+                counts: judged.counts,
+                unanchored,
             },
         );
     }
@@ -194,11 +247,23 @@ pub(crate) fn run(args: &[String]) -> i32 {
         totals.add(&document.counts);
     }
     print_table(&documents, &totals, skipped);
+    for (source, document) in &documents {
+        for line in listing_lines(source, document, list) {
+            println!("{line}");
+        }
+    }
+    if !failed.is_empty() {
+        println!(
+            "({} batch file(s) could not be read or parsed — named on stderr)",
+            failed.len()
+        );
+    }
     if let Some(path) = json_out {
         let report = Report {
             documents: &documents,
             totals: &totals,
             skipped_no_passage: skipped,
+            failed: &failed,
         };
         let body = serde_json::to_string_pretty(&report).expect("plain fields always serialize");
         if let Err(error) = std::fs::write(&path, body + "\n") {
@@ -206,7 +271,80 @@ pub(crate) fn run(args: &[String]) -> i32 {
             return 1;
         }
     }
-    0
+    if failed.is_empty() { 0 } else { 1 }
+}
+
+/// How many named associations stdout lists per document by default —
+/// `evaluate`'s "first three, then a count" precedent; `--json` is
+/// never capped.
+const DEFAULT_LIST: usize = 3;
+
+/// The 1-based line of every association line in a batch file, in
+/// order — a line is an association exactly when it is a JSON object
+/// with a `subject` key, the same classification the batch parser
+/// makes (`ingest::model::parse_op`), so index i names the i-th
+/// parsed association. A line that does not parse as JSON is skipped
+/// (the parse already succeeded, so none should).
+fn association_lines(path: &Path) -> Vec<usize> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    text.lines()
+        .enumerate()
+        .filter(|(_, line)| {
+            serde_json::from_str::<serde_json::Value>(line)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .as_object()
+                        .map(|object| object.contains_key("subject"))
+                })
+                .unwrap_or(false)
+        })
+        .map(|(index, _)| index + 1)
+        .collect()
+}
+
+/// One document's named associations for stdout: a header line with
+/// the counts by reason, then the first `cap` associations as
+/// `  line N: subject —[label]→ object (paragraph P): reason`, then
+/// `  … and M more` when the cap cut the list. Nothing for a document
+/// with nothing to name, or when `cap` is 0.
+fn listing_lines(source: &str, document: &DocumentReport, cap: usize) -> Vec<String> {
+    if cap == 0 || document.unanchored.is_empty() {
+        return Vec::new();
+    }
+    let items = &document.unanchored;
+    let unanchored = items.iter().filter(|item| !item.with_aliases).count();
+    let alias_only = items
+        .iter()
+        .filter(|item| !item.strict && item.with_aliases)
+        .count();
+    let invalid = items
+        .iter()
+        .filter(|item| item.locator_valid == Some(false))
+        .count();
+    let mut parts = Vec::new();
+    if unanchored > 0 {
+        parts.push(format!("{unanchored} unanchored"));
+    }
+    if alias_only > 0 {
+        parts.push(format!("{alias_only} alias-only"));
+    }
+    if invalid > 0 {
+        parts.push(format!("{invalid} invalid locator(s)"));
+    }
+    let mut lines = vec![format!("{source}: {}", parts.join(", "))];
+    for item in items.iter().take(cap) {
+        lines.push(format!("  {}", item.describe()));
+    }
+    if items.len() > cap {
+        lines.push(format!(
+            "  … and {} more (every one is in --json)",
+            items.len() - cap
+        ));
+    }
+    lines
 }
 
 fn usage_error(message: &str) -> i32 {
@@ -333,6 +471,90 @@ struct DocumentReport {
     context: String,
     #[serde(flatten)]
     counts: Counts,
+    /// Every association that is not strictly anchored, or cites a
+    /// paragraph holding neither name (#864), in batch order — the
+    /// list the rates summarize. Empty when every association is
+    /// strictly anchored with a valid locator.
+    unanchored: Vec<Unanchored>,
+}
+
+/// One named association (#864): where it is in the batch file
+/// (`line`, 1-based; absent only if the file vanished between the
+/// parse and the read-back), what it says, and the three judgments
+/// the rates count — so a reader filters for the fabrications
+/// (`with_aliases: false`), the alias-dependent ones (`strict: false,
+/// with_aliases: true`), or the wrong citations (`locator_valid:
+/// false`) without re-running `judge`.
+#[derive(Serialize)]
+#[cfg_attr(test, derive(Debug, PartialEq))]
+struct Unanchored {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    line: Option<usize>,
+    subject: String,
+    label: String,
+    object: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    paragraph: Option<u32>,
+    strict: bool,
+    with_aliases: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    locator_valid: Option<bool>,
+}
+
+impl Unanchored {
+    /// The stdout form: `line N: subject —[label]→ object (paragraph
+    /// P): reason[; invalid locator]`.
+    fn describe(&self) -> String {
+        let mut text = match self.line {
+            Some(line) => format!("line {line}: "),
+            None => String::new(),
+        };
+        text.push_str(&format!(
+            "{} —[{}]→ {}",
+            self.subject, self.label, self.object
+        ));
+        if let Some(paragraph) = self.paragraph {
+            text.push_str(&format!(" (paragraph {paragraph})"));
+        }
+        let mut reasons: Vec<&str> = Vec::new();
+        if !self.with_aliases {
+            reasons.push("unanchored");
+        } else if !self.strict {
+            reasons.push("alias-only");
+        }
+        if self.locator_valid == Some(false) {
+            reasons.push("invalid locator");
+        }
+        text.push_str(": ");
+        text.push_str(&reasons.join("; "));
+        text
+    }
+}
+
+/// One association's three judgments, by its index in the batch.
+#[cfg_attr(test, derive(Debug, PartialEq))]
+struct Verdict {
+    index: usize,
+    strict: bool,
+    with_aliases: bool,
+    /// `Some(valid)` when the association cites a paragraph, `None`
+    /// when it does not (nothing to validate).
+    locator_valid: Option<bool>,
+}
+
+impl Verdict {
+    /// Worth naming: not strictly anchored, or a citation that holds
+    /// neither name.
+    fn is_flagged(&self) -> bool {
+        !self.strict || self.locator_valid == Some(false)
+    }
+}
+
+/// What [`judge`] returns: the counts the rates are made of, and the
+/// per-association verdicts the counts summarize.
+struct Judged {
+    counts: Counts,
+    verdicts: Vec<Verdict>,
 }
 
 #[derive(Serialize)]
@@ -340,6 +562,10 @@ struct Report<'a> {
     documents: &'a BTreeMap<String, DocumentReport>,
     totals: &'a Counts,
     skipped_no_passage: usize,
+    /// Batch files that could not be read or parsed, by path (#864) —
+    /// empty when every input was judged or skipped for a missing
+    /// passage.
+    failed: &'a BTreeMap<String, String>,
 }
 
 /// Alias groups as a union-find over normalized names: an alias
@@ -418,7 +644,7 @@ fn judge(
     associations: &[crate::registry::AssocOp],
     own_aliases: &BTreeMap<String, String>,
     context_aliases: &[(String, String)],
-) -> Counts {
+) -> Judged {
     let groups = AliasGroups::build(
         own_aliases
             .iter()
@@ -433,7 +659,8 @@ fn judge(
     let whole = normalize_entry(passage);
 
     let mut counts = Counts::default();
-    for association in associations {
+    let mut verdicts = Vec::with_capacity(associations.len());
+    for (index, association) in associations.iter().enumerate() {
         counts.associations += 1;
         let cited = association
             .paragraph
@@ -456,17 +683,26 @@ fn judge(
         if subject_hit && object_hit {
             counts.anchored_with_aliases += 1;
         }
+        let mut locator_valid = None;
         if association.paragraph.is_some() {
             counts.cited += 1;
             // An out-of-range citation has no paragraph to hold
             // anything: invalid by construction.
-            if cited.is_some() && (subject_hit || object_hit) {
+            let valid = cited.is_some() && (subject_hit || object_hit);
+            if valid {
                 counts.locator_valid += 1;
             }
+            locator_valid = Some(valid);
         }
+        verdicts.push(Verdict {
+            index,
+            strict,
+            with_aliases: subject_hit && object_hit,
+            locator_valid,
+        });
     }
     counts.refresh();
-    counts
+    Judged { counts, verdicts }
 }
 
 fn print_table(documents: &BTreeMap<String, DocumentReport>, totals: &Counts, skipped: usize) {
@@ -567,7 +803,7 @@ mod tests {
             assoc("けーき", "別腹", Some(1)),    // strict via kana folding
             assoc("ごはん", "存在しない", None), // object nowhere
         ];
-        let counts = judge(passage, &associations, &own, &context);
+        let counts = judge(passage, &associations, &own, &context).counts;
         assert_eq!(counts.associations, 4);
         assert_eq!(counts.anchored_strict, 2);
         assert_eq!(counts.anchored_with_aliases, 3);
@@ -585,17 +821,17 @@ mod tests {
         let passage = "alphaの話。\n\nbetaの話。";
         let none = BTreeMap::new();
         let cited_wrong = [assoc("alpha", "beta", Some(0))];
-        let counts = judge(passage, &cited_wrong, &none, &[]);
+        let counts = judge(passage, &cited_wrong, &none, &[]).counts;
         assert_eq!(counts.anchored_strict, 0, "beta is not in paragraph 0");
         assert_eq!(counts.locator_valid, 1, "alpha IS in paragraph 0");
 
         let uncited = [assoc("alpha", "beta", None)];
-        let counts = judge(passage, &uncited, &none, &[]);
+        let counts = judge(passage, &uncited, &none, &[]).counts;
         assert_eq!(counts.anchored_strict, 1, "the whole passage holds both");
         assert_eq!(counts.cited, 0);
 
         let out_of_range = [assoc("alpha", "beta", Some(9))];
-        let counts = judge(passage, &out_of_range, &none, &[]);
+        let counts = judge(passage, &out_of_range, &none, &[]).counts;
         assert_eq!(counts.anchored_strict, 1, "falls back to the passage");
         assert_eq!(counts.cited, 1);
         assert_eq!(counts.locator_valid, 0, "paragraph 9 does not exist");
@@ -621,5 +857,201 @@ mod tests {
         group.sort_unstable();
         assert_eq!(group, ["d", "e"]);
         assert_eq!(groups.group("z"), ["z"], "an untouched name stands alone");
+    }
+
+    /// #864: `judge` names every association it counts — the verdicts
+    /// carry the three judgments per index, and `is_flagged` picks
+    /// exactly the ones worth naming: not strictly anchored, or a
+    /// citation holding neither name.
+    #[test]
+    fn verdicts_name_the_unanchored_and_the_invalid_citations() {
+        let passage = "ご飯は美味しい。\n\nケーキは別腹。";
+        let own: BTreeMap<String, String> = [("あおみね".to_string(), "ご飯".to_string())]
+            .into_iter()
+            .collect();
+        let associations = [
+            assoc("ご飯", "美味しい", Some(0)),     // strict, valid
+            assoc("あおみね", "美味しい", Some(0)), // alias-only, valid
+            assoc("ラーメン", "美味しい", Some(0)), // unanchored (object holds), valid
+            assoc("ご飯", "美味しい", Some(1)),     // strict? no: paragraph 1 lacks both → invalid
+            assoc("ケーキ", "別腹", None),          // strict, uncited
+        ];
+        let judged = judge(passage, &associations, &own, &[]);
+        assert_eq!(
+            judged.verdicts,
+            vec![
+                Verdict {
+                    index: 0,
+                    strict: true,
+                    with_aliases: true,
+                    locator_valid: Some(true)
+                },
+                Verdict {
+                    index: 1,
+                    strict: false,
+                    with_aliases: true,
+                    locator_valid: Some(true)
+                },
+                Verdict {
+                    index: 2,
+                    strict: false,
+                    with_aliases: false,
+                    locator_valid: Some(true)
+                },
+                Verdict {
+                    index: 3,
+                    strict: false,
+                    with_aliases: false,
+                    locator_valid: Some(false)
+                },
+                Verdict {
+                    index: 4,
+                    strict: true,
+                    with_aliases: true,
+                    locator_valid: None
+                },
+            ]
+        );
+        let flagged: Vec<usize> = judged
+            .verdicts
+            .iter()
+            .filter(|verdict| verdict.is_flagged())
+            .map(|verdict| verdict.index)
+            .collect();
+        assert_eq!(flagged, vec![1, 2, 3]);
+        assert_eq!(judged.counts.anchored_strict, 2);
+        assert_eq!(judged.counts.locator_valid, 3);
+    }
+
+    /// A strictly anchored association whose citation is wrong is
+    /// flagged for the locator alone.
+    #[test]
+    fn a_strict_association_with_a_wrong_citation_is_flagged_for_the_locator() {
+        let verdict = Verdict {
+            index: 0,
+            strict: true,
+            with_aliases: true,
+            locator_valid: Some(false),
+        };
+        assert!(verdict.is_flagged());
+        let clean = Verdict {
+            index: 0,
+            strict: true,
+            with_aliases: true,
+            locator_valid: Some(true),
+        };
+        assert!(!clean.is_flagged());
+    }
+
+    fn named(
+        line: Option<usize>,
+        strict: bool,
+        with_aliases: bool,
+        locator: Option<bool>,
+    ) -> Unanchored {
+        Unanchored {
+            line,
+            subject: "青嶺酒造".to_string(),
+            label: "杜氏".to_string(),
+            object: "あおみね".to_string(),
+            paragraph: locator.map(|_| 2),
+            strict,
+            with_aliases,
+            locator_valid: locator,
+        }
+    }
+
+    /// The stdout line: batch line first, the triple, the cited
+    /// paragraph when there is one, and the reasons in a fixed order.
+    #[test]
+    fn describe_names_line_triple_paragraph_and_reasons() {
+        assert_eq!(
+            named(Some(12), false, false, Some(false)).describe(),
+            "line 12: 青嶺酒造 —[杜氏]→ あおみね (paragraph 2): unanchored; invalid locator"
+        );
+        assert_eq!(
+            named(Some(3), false, true, Some(true)).describe(),
+            "line 3: 青嶺酒造 —[杜氏]→ あおみね (paragraph 2): alias-only"
+        );
+        assert_eq!(
+            named(None, false, false, None).describe(),
+            "青嶺酒造 —[杜氏]→ あおみね: unanchored"
+        );
+        assert_eq!(
+            named(Some(7), true, true, Some(false)).describe(),
+            "line 7: 青嶺酒造 —[杜氏]→ あおみね (paragraph 2): invalid locator"
+        );
+    }
+
+    /// The per-document block: a header counting each reason, the
+    /// first `cap` items, and the remainder line only past the cap;
+    /// nothing at all for a clean document or a cap of 0.
+    #[test]
+    fn listing_lines_cap_and_count_by_reason() {
+        let document = DocumentReport {
+            context: "c".to_string(),
+            counts: Counts::default(),
+            unanchored: vec![
+                named(Some(2), false, false, Some(true)),
+                named(Some(3), false, true, Some(true)),
+                named(Some(4), true, true, Some(false)),
+                named(Some(5), false, false, None),
+            ],
+        };
+        let lines = listing_lines("a.md", &document, 2);
+        assert_eq!(
+            lines,
+            vec![
+                "a.md: 2 unanchored, 1 alias-only, 1 invalid locator(s)".to_string(),
+                "  line 2: 青嶺酒造 —[杜氏]→ あおみね (paragraph 2): unanchored".to_string(),
+                "  line 3: 青嶺酒造 —[杜氏]→ あおみね (paragraph 2): alias-only".to_string(),
+                "  … and 2 more (every one is in --json)".to_string(),
+            ]
+        );
+        assert_eq!(
+            listing_lines("a.md", &document, 4).len(),
+            5,
+            "exactly at the cap: no remainder"
+        );
+        assert!(listing_lines("a.md", &document, 0).is_empty());
+        let clean = DocumentReport {
+            context: "c".to_string(),
+            counts: Counts::default(),
+            unanchored: Vec::new(),
+        };
+        assert!(listing_lines("a.md", &clean, 3).is_empty());
+    }
+
+    /// Association lines are the JSON objects with a `subject` key, in
+    /// file order, 1-based — header, passage, alias, and blank or
+    /// unparseable lines are not counted.
+    #[test]
+    fn association_lines_are_the_subject_bearing_lines() {
+        let dir =
+            std::env::temp_dir().join(format!("taguru-anchoring-lines-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("b.jsonl");
+        std::fs::write(
+            &file,
+            "{\"taguru_batch\":1,\"context\":\"c\",\"source\":\"b.md\"}\n\
+             {\"passage\":\"本文\"}\n\
+             {\"subject\":\"a\",\"label\":\"l\",\"object\":\"o\",\"weight\":1.0}\n\
+             {\"alias\":\"x\",\"canonical\":\"a\",\"kind\":\"concept\"}\n\
+             \n\
+             {\"subject\":\"b\",\"label\":\"l\",\"object\":\"o\",\"weight\":1.0}\n",
+        )
+        .unwrap();
+        assert_eq!(association_lines(&file), vec![3, 6]);
+        assert!(association_lines(&dir.join("missing.jsonl")).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `--list` takes a non-negative integer; anything else is a usage
+    /// error (exit 2), like the other flags' missing values.
+    #[test]
+    fn list_flag_needs_a_count() {
+        assert_eq!(run(&["--list".to_string()]), 2);
+        assert_eq!(run(&["--list".to_string(), "many".to_string()]), 2);
+        assert_eq!(run(&["--list".to_string(), "-1".to_string()]), 2);
     }
 }
