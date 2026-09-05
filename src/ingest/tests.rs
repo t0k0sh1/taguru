@@ -1587,3 +1587,268 @@ fn a_leading_bom_is_stripped_before_split_batches_runs() {
     assert!(first.starts_with("{\"taguru_batch\""), "{first}");
     assert!(!first.as_bytes().starts_with(&[0xEF, 0xBB, 0xBF]));
 }
+
+// ---- #863: refusals that name their file, line, and item ----
+
+fn labeled(label: &str, kind: UnitKind) -> Unit {
+    Unit {
+        text: String::new(),
+        label: label.to_string(),
+        kind,
+    }
+}
+
+/// The server's `issues[]` come back request-relative; the CLI
+/// re-addresses `batches[N]` to the N-th BATCH unit's label (schema and
+/// group units do not count), keeps the in-batch remainder, passes an
+/// unprefixed path through as sent, and names the remainder the
+/// server capped off.
+#[test]
+fn refusal_issue_lines_readdress_batch_paths_to_unit_labels() {
+    let units = [
+        labeled("a.jsonl: context 'a' source 'a.md'", UnitKind::Batch),
+        labeled("a.jsonl: context 'a' schema", UnitKind::Schema),
+        labeled("b.jsonl: context 'a' source 'b.md'", UnitKind::Batch),
+        labeled("b.jsonl: group 'g'", UnitKind::Group),
+    ];
+    let body = serde_json::json!({
+        "error": "refused",
+        "issues": [
+            {"path": "batches[1].associations[7].subject", "kind": "value",
+             "expected": "a Brewery", "actual": "Person"},
+            {"path": "batches[0]", "kind": "missing", "expected": "a passage", "actual": "absent"},
+            {"path": "batches[5].passage", "kind": "size", "expected": "≤ 1 MiB", "actual": "2 MiB"},
+            {"path": "schemas[0].types", "kind": "type", "expected": "an object", "actual": "array"},
+        ],
+        "issues_total": 6
+    });
+    assert_eq!(
+        refusal_issue_lines(&body, &units),
+        vec![
+            "b.jsonl: context 'a' source 'b.md': associations[7].subject: expected a Brewery, got Person"
+                .to_string(),
+            "a.jsonl: context 'a' source 'a.md': expected a passage, got absent".to_string(),
+            "batches[5].passage: expected ≤ 1 MiB, got 2 MiB".to_string(),
+            "schemas[0].types: expected an object, got array".to_string(),
+            "… and 2 more issue(s) the server did not list — fix the listed ones and resend; \
+             the rest are named on the next refusal"
+                .to_string(),
+        ]
+    );
+}
+
+/// No `issues[]` (a 404, a 401) → no lines; a list the server did not
+/// cap → no remainder line; a missing `issues_total` reads as "all
+/// listed".
+#[test]
+fn refusal_issue_lines_are_empty_without_issues_and_add_no_remainder_when_complete() {
+    let units = [labeled(
+        "a.jsonl: context 'a' source 'a.md'",
+        UnitKind::Batch,
+    )];
+    assert!(
+        refusal_issue_lines(&serde_json::json!({"error": "no such context"}), &units).is_empty()
+    );
+    let complete = serde_json::json!({
+        "issues": [{"path": "batches[0].passage", "kind": "size", "expected": "x", "actual": "y"}],
+        "issues_total": 1
+    });
+    assert_eq!(
+        refusal_issue_lines(&complete, &units),
+        vec!["a.jsonl: context 'a' source 'a.md': passage: expected x, got y".to_string()]
+    );
+    let uncounted = serde_json::json!({
+        "issues": [{"path": "batches[0].passage", "kind": "size", "expected": "x", "actual": "y"}]
+    });
+    assert_eq!(refusal_issue_lines(&uncounted, &units).len(), 1);
+}
+
+/// A chunk names what it carries by its first and last unit, or the
+/// one unit, so a refused or unconfirmed chunk maps to files.
+#[test]
+fn chunk_carried_names_the_one_unit_or_the_first_and_last() {
+    let one = Chunk {
+        units: vec![labeled(
+            "a.jsonl: context 'a' source 'a.md'",
+            UnitKind::Batch,
+        )],
+    };
+    assert_eq!(one.carried(), "1 unit: a.jsonl: context 'a' source 'a.md'");
+    let three = Chunk {
+        units: vec![
+            labeled("a.jsonl: context 'a' source 'a.md'", UnitKind::Batch),
+            labeled("a.jsonl: context 'a' source 'b.md'", UnitKind::Batch),
+            labeled("c.jsonl: group 'g'", UnitKind::Group),
+        ],
+    };
+    assert_eq!(
+        three.carried(),
+        "3 units, from a.jsonl: context 'a' source 'a.md' through c.jsonl: group 'g'"
+    );
+    assert_eq!(Chunk { units: Vec::new() }.carried(), "no unit");
+}
+
+/// Every "needs a passage" refusal names the first offending line and
+/// the header's line (#863) — the number a person opens the file at,
+/// not a count.
+#[test]
+fn no_passage_refusals_name_the_first_line_and_the_batch_header_line() {
+    let question = parse(&format!(
+        "{HEADER}\n{{\"paragraph\": 1, \"question\": \"一つ目?\"}}\n\
+         {{\"paragraph\": 1, \"question\": \"二つ目?\"}}\n"
+    ))
+    .unwrap_err();
+    assert_eq!(
+        question,
+        "line 2: 2 question line(s) but no passage line — questions attach to the passage \
+         of the batch headed at line 1"
+    );
+    let section = parse(&format!(
+        "{HEADER}\n{{\"subject\": \"a\", \"label\": \"l\", \"object\": \"o\", \"weight\": 1.0}}\n\
+         {{\"paragraph\": 0, \"section\": \"序\"}}\n"
+    ))
+    .unwrap_err();
+    assert_eq!(
+        section,
+        "line 3: 1 section line(s) but no passage line — sections attach to the passage of \
+         the batch headed at line 1"
+    );
+    let locator = parse(&format!(
+        "{HEADER}\n{{\"paragraph\": 0, \"locator\": {{\"kind\": \"page\", \"value\": \"3\"}}}}\n"
+    ))
+    .unwrap_err();
+    assert_eq!(
+        locator,
+        "line 2: 1 locator line(s) but no passage line — locators attach to the passage of \
+         the batch headed at line 1"
+    );
+    let paragraph = parse(&format!(
+        "{HEADER}\n{{\"subject\": \"a\", \"label\": \"l\", \"object\": \"o\", \"weight\": 1.0}}\n\
+         {{\"subject\": \"a\", \"label\": \"l\", \"object\": \"p\", \"weight\": 1.0, \
+         \"paragraph\": 2}}\n"
+    ))
+    .unwrap_err();
+    assert_eq!(
+        paragraph,
+        "line 3: an association names paragraph 2 but the batch headed at line 1 has no \
+         passage line — a paragraph locator attaches to that passage"
+    );
+}
+
+/// An in-stream duplicate names the line of the earlier claim, for
+/// batches, schema records, and group records alike.
+#[test]
+fn in_stream_duplicates_name_the_earlier_line() {
+    let batches = parse_stream(
+        format!("{HEADER}\n{{\"passage\": \"本文。\"}}\n{HEADER}\n{{\"passage\": \"本文。\"}}\n")
+            .as_bytes(),
+    )
+    .unwrap_err();
+    assert!(
+        batches.starts_with(
+            "line 3: source 'doc-1' in context 'sake' is already stated by an \
+                             earlier batch of this stream, at line 1"
+        ),
+        "{batches}"
+    );
+    let schema = "{\"taguru_schema\": 1, \"context\": \"sake\", \"mode\": \"warn\", \
+                  \"closed_labels\": false, \"types\": {}, \"relations\": {}}";
+    let schemas = parse_stream(format!("{schema}\n{schema}\n").as_bytes()).unwrap_err();
+    assert!(
+        schemas.starts_with(
+            "line 2: context 'sake' schema is already stated by an earlier \
+                             record of this stream, at line 1"
+        ),
+        "{schemas}"
+    );
+    let group = "{\"taguru_group\": 1, \"name\": \"g\", \"contexts\": [\"sake\"]}";
+    let groups = parse_stream(format!("{group}\n{group}\n").as_bytes()).unwrap_err();
+    assert!(
+        groups.starts_with(
+            "line 2: group 'g' is already stated by an earlier record of this \
+                            stream, at line 1"
+        ),
+        "{groups}"
+    );
+}
+
+/// The offline entrance lists every schema issue (#863): the rejection
+/// carries the complete set and its text cuts nothing, so a batch with
+/// more violations than the wire cap still names each one — the wire
+/// cap is the HTTP entrance's own (`src/api/import.rs`).
+#[test]
+fn a_schema_rejection_lists_every_issue_offline() {
+    let count = crate::api::MAX_LISTED_ISSUES + 5;
+    let issues: Vec<crate::api::Issue> = (0..count)
+        .map(|index| crate::api::Issue::empty(format!("associations[{index}].subject")))
+        .collect();
+    let rejection = super::rejection::SchemaRejection {
+        total: issues.len(),
+        issues,
+        reserved: false,
+    };
+    let text = rejection.text();
+    assert!(text.starts_with(&format!(
+        "this batch's associations refused {count} issue(s):"
+    )));
+    for index in 0..count {
+        assert!(
+            text.contains(&format!("\n- associations[{index}].subject: ")),
+            "{text}"
+        );
+    }
+    assert!(!text.contains("more issue(s)"), "{text}");
+    assert_eq!(
+        super::rejection::SchemaRejection {
+            issues: Vec::new(),
+            total: 0,
+            reserved: true,
+        }
+        .what(),
+        "this batch's label aliases"
+    );
+}
+
+/// `RestoreGroupsError::group` names the group for every arm that is
+/// about one and none for the two that are not — the CLI prefixes the
+/// file path exactly when it can.
+#[test]
+fn restore_groups_error_names_its_group_when_it_has_one() {
+    use crate::registry::RestoreGroupsError as E;
+    assert_eq!(E::Duplicate("g".to_string()).group(), Some("g"));
+    assert_eq!(
+        E::NoSuchContext {
+            group: "g".to_string(),
+            context: "c".to_string()
+        }
+        .group(),
+        Some("g")
+    );
+    assert_eq!(
+        E::NoSuchChild {
+            group: "g".to_string(),
+            child: "h".to_string()
+        }
+        .group(),
+        Some("g")
+    );
+    assert_eq!(
+        E::OverCap {
+            group: "g".to_string(),
+            field: "contexts"
+        }
+        .group(),
+        Some("g")
+    );
+    assert_eq!(
+        E::Io {
+            group: "g".to_string(),
+            applied: 0,
+            error: std::io::Error::other("disk")
+        }
+        .group(),
+        Some("g")
+    );
+    assert_eq!(E::InvalidName.group(), None);
+    assert_eq!(E::Timeout { applied: 1 }.group(), None);
+}

@@ -413,13 +413,22 @@ pub(crate) struct SchemaRejection {
 }
 
 impl SchemaRejection {
-    pub(crate) fn text(&self) -> String {
-        let what = if self.reserved {
+    /// What the issues are about, for the refusal's prose.
+    pub(crate) fn what(&self) -> &'static str {
+        if self.reserved {
             "this batch's label aliases"
         } else {
             "this batch's associations"
-        };
-        crate::api::collected_validation_message(what, &self.issues, self.total)
+        }
+    }
+
+    /// Every issue, listed — `issues` is the complete set here (#863):
+    /// the offline CLI prints this and has no other channel for the
+    /// remainder, so nothing is cut; the HTTP entrance truncates for
+    /// the wire itself (`src/api/import.rs`), where `issues_total`
+    /// carries the count.
+    pub(crate) fn text(&self) -> String {
+        crate::api::collected_validation_message(self.what(), &self.issues, self.total)
     }
 }
 
@@ -509,16 +518,21 @@ fn predicted_schema_rejection(
         state.note_schema_check(&batch.context, check.outcome(mode), check.violations.len());
     }
 
+    // Complete lists, never truncated here (#863): the offline CLI
+    // prints every issue, and the HTTP entrance cuts to
+    // MAX_LISTED_ISSUES with the true total beside it at the point it
+    // builds the response.
     if !check.reserved.is_empty() {
-        let (issues, total) = crate::api::truncate_issues(check.reserved);
+        let total = check.reserved.len();
         return Err(ApplyRefusal::Schema(SchemaRejection {
-            issues,
+            issues: check.reserved,
             total,
             reserved: true,
         }));
     }
 
-    let (issues, total) = crate::api::truncate_issues(check.violations);
+    let issues = check.violations;
+    let total = issues.len();
     if mode == crate::schema::SchemaMode::Strict && total > 0 {
         return Err(ApplyRefusal::Schema(SchemaRejection {
             issues,

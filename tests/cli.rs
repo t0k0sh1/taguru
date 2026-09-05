@@ -2569,14 +2569,13 @@ fn a_multi_batch_stream_restating_earlier_sources_counts_as_one_refused_file() {
     ]);
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    // Each conflicting batch is still named individually…
-    assert_eq!(
-        stderr
-            .matches("is already stated by an earlier file")
-            .count(),
-        3,
-        "{stderr}"
+    // Each conflicting batch is still named individually, and each
+    // names the earlier file it lost to (#863)…
+    let earlier = format!(
+        "is already stated by an earlier file, {}",
+        dir.join("first.jsonl").display()
     );
+    assert_eq!(stderr.matches(earlier.as_str()).count(), 3, "{stderr}");
     // …but only one of the two files actually failed — never 3 of 2.
     assert!(
         stderr.contains("1 of 2 file(s) refused during validation"),
@@ -4069,6 +4068,16 @@ fn import_refuses_the_whole_group_set_but_keeps_batches_landed() {
         &[("TAGURU_DATA_DIR", &data_dir.display().to_string())],
     );
     assert_eq!(refused.status.code(), Some(1), "{refused:?}");
+    // The stderr line names the file that carried the refused group
+    // (#863), ahead of the refusal's own words.
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains(&format!(
+            "taguru: import: {}: group 'kura' names member context 'ghost'",
+            group.display()
+        )),
+        "{stderr}"
+    );
     let report: serde_json::Value =
         serde_json::from_slice(&refused.stdout).expect("--json must answer one document");
     assert!(

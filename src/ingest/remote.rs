@@ -38,6 +38,71 @@ impl Unit {
     }
 }
 
+/// The server's `issues[]` on a refusal, each re-addressed to the unit
+/// it names (#863): the server's path is request-relative
+/// (`batches[3].associations[7].subject`, `src/api/import.rs`), and
+/// `batches[3]` is the chunk's fourth BATCH unit — whose label names the
+/// file, context, and source — so the operator reads a file and a
+/// line-addressable item, not a request index. A path without a
+/// `batches[N]` prefix (a schema record's, say) is printed as sent.
+/// `issues_total` past the listed ones (the server caps the list) ends
+/// the lines with the remainder, so the count the server knew is never
+/// lost between the two sides.
+pub(super) fn refusal_issue_lines(body: &Value, units: &[Unit]) -> Vec<String> {
+    let issues = body.get("issues").and_then(Value::as_array);
+    let Some(issues) = issues else {
+        return Vec::new();
+    };
+    let batch_labels: Vec<&str> = units
+        .iter()
+        .filter(|unit| unit.kind == UnitKind::Batch)
+        .map(|unit| unit.label.as_str())
+        .collect();
+    let mut lines: Vec<String> = issues
+        .iter()
+        .map(|issue| {
+            let path = issue.get("path").and_then(Value::as_str).unwrap_or("?");
+            let expected = issue.get("expected").and_then(Value::as_str).unwrap_or("?");
+            let actual = issue.get("actual").and_then(Value::as_str).unwrap_or("?");
+            let addressed = batch_index_prefix(path)
+                .and_then(|(index, rest)| {
+                    batch_labels.get(index).map(|label| {
+                        if rest.is_empty() {
+                            (*label).to_string()
+                        } else {
+                            format!("{label}: {rest}")
+                        }
+                    })
+                })
+                .unwrap_or_else(|| path.to_string());
+            format!("{addressed}: expected {expected}, got {actual}")
+        })
+        .collect();
+    let total = body
+        .get("issues_total")
+        .and_then(Value::as_u64)
+        .map(|total| total as usize)
+        .unwrap_or(issues.len());
+    let remainder = total.saturating_sub(issues.len());
+    if remainder > 0 {
+        lines.push(format!(
+            "… and {remainder} more issue(s) the server did not list — fix the listed ones \
+             and resend; the rest are named on the next refusal"
+        ));
+    }
+    lines
+}
+
+/// `batches[N]` and what follows its closing bracket (a leading `.`
+/// dropped), or `None` for any other path shape.
+fn batch_index_prefix(path: &str) -> Option<(usize, &str)> {
+    let inner = path.strip_prefix("batches[")?;
+    let close = inner.find(']')?;
+    let index: usize = inner[..close].parse().ok()?;
+    let rest = inner[close + 1..].trim_start_matches('.');
+    Some((index, rest))
+}
+
 /// One `POST /import` request's worth of units, in stream order — a
 /// prefix of whole batch units followed (only in the last chunk that
 /// carries any) by whole group units, since groups restore after
@@ -47,6 +112,23 @@ pub(super) struct Chunk {
 }
 
 impl Chunk {
+    /// What this chunk carries, for a refusal or a lost connection to
+    /// name (#863): a chunk is the packer's unit, not the operator's,
+    /// so the line says which files' batches it holds — the one unit,
+    /// or the first and the last with the count between.
+    pub(super) fn carried(&self) -> String {
+        match self.units.as_slice() {
+            [] => "no unit".to_string(),
+            [only] => format!("1 unit: {}", only.label),
+            [first, .., last] => format!(
+                "{} units, from {} through {}",
+                self.units.len(),
+                first.label,
+                last.label
+            ),
+        }
+    }
+
     pub(super) fn size(&self) -> usize {
         self.units.iter().map(Unit::len).sum()
     }
@@ -236,9 +318,12 @@ pub(super) fn run_remote(base: &str, files: &[PathBuf], dry_run: bool, as_json: 
     let mut schema_count = 0usize;
     let mut group_count = 0usize;
     let mut broken = 0usize;
-    let mut owners: HashSet<(String, String)> = HashSet::new();
-    let mut schema_owners: HashSet<String> = HashSet::new();
-    let mut group_owners: HashSet<String> = HashSet::new();
+    // Keyed claims → the file that made them (#863): a later file's
+    // duplicate is refused naming the earlier file, not just "an
+    // earlier file".
+    let mut owners: HashMap<(String, String), PathBuf> = HashMap::new();
+    let mut schema_owners: HashMap<String, PathBuf> = HashMap::new();
+    let mut group_owners: HashMap<String, PathBuf> = HashMap::new();
     for path in files {
         let mut bytes = match fs::read(path) {
             Ok(bytes) => bytes,
@@ -285,15 +370,18 @@ pub(super) fn run_remote(base: &str, files: &[PathBuf], dry_run: bool, as_json: 
                     continue;
                 }
                 for (batch, range) in stream.batches.iter().zip(ranges) {
-                    if !owners.insert((batch.context.clone(), batch.source.clone())) {
+                    if let Some(earlier) =
+                        owners.get(&(batch.context.clone(), batch.source.clone()))
+                    {
                         eprintln!(
                             "taguru: import: {}: {}",
                             path.display(),
-                            duplicate_source_message(&batch.context, &batch.source)
+                            duplicate_source_message(&batch.context, &batch.source, earlier)
                         );
                         file_broken = true;
                         continue;
                     }
+                    owners.insert((batch.context.clone(), batch.source.clone()), path.clone());
                     let text = String::from_utf8(bytes[range].to_vec())
                         .expect("parse_stream already proved this range is UTF-8");
                     units.push(Unit {
@@ -309,15 +397,16 @@ pub(super) fn run_remote(base: &str, files: &[PathBuf], dry_run: bool, as_json: 
                     batch_count += 1;
                 }
                 for (context, installed) in &stream.schemas {
-                    if !schema_owners.insert(context.clone()) {
+                    if let Some(earlier) = schema_owners.get(context) {
                         eprintln!(
                             "taguru: import: {}: {}",
                             path.display(),
-                            duplicate_schema_message(context)
+                            duplicate_schema_message(context, earlier)
                         );
                         file_broken = true;
                         continue;
                     }
+                    schema_owners.insert(context.clone(), path.clone());
                     schema_units.push(Unit {
                         text: crate::export::render_schema(context, installed.document()),
                         label: format!("{}: context '{context}' schema", path.display()),
@@ -326,15 +415,16 @@ pub(super) fn run_remote(base: &str, files: &[PathBuf], dry_run: bool, as_json: 
                     schema_count += 1;
                 }
                 for (name, record) in &stream.groups {
-                    if !group_owners.insert(name.clone()) {
+                    if let Some(earlier) = group_owners.get(name) {
                         eprintln!(
                             "taguru: import: {}: {}",
                             path.display(),
-                            duplicate_group_message(name)
+                            duplicate_group_message(name, earlier)
                         );
                         file_broken = true;
                         continue;
                     }
+                    group_owners.insert(name.clone(), path.clone());
                     group_units.push(Unit {
                         text: crate::export::render_group(name, record),
                         label: format!("{}: group '{name}'", path.display()),
@@ -425,6 +515,9 @@ pub(super) fn run_remote(base: &str, files: &[PathBuf], dry_run: bool, as_json: 
     let mut json_batches: Vec<Value> = Vec::new();
     let mut json_schemas: Vec<Value> = Vec::new();
     let mut json_groups: Vec<Value> = Vec::new();
+    // The last unit the server confirmed (#863): a lost connection
+    // names where the confirmed prefix ends, not just its chunk count.
+    let mut last_confirmed: Option<String> = None;
 
     while let Some(chunk) = queue.pop_front() {
         if chunk.size() > budget && chunk.units.len() > 1 {
@@ -437,6 +530,7 @@ pub(super) fn run_remote(base: &str, files: &[PathBuf], dry_run: bool, as_json: 
         match api.import_chunk(&chunk.body(), dry_run) {
             Ok(result) => {
                 landed_chunks += 1;
+                last_confirmed = chunk.units.last().map(|unit| unit.label.clone());
                 let outcomes = result
                     .get("batches")
                     .and_then(Value::as_array)
@@ -561,6 +655,16 @@ pub(super) fn run_remote(base: &str, files: &[PathBuf], dry_run: bool, as_json: 
                          — re-run `--dry-run` to confirm what would change, then resume"
                     );
                 }
+                // Where the confirmed prefix ends and what the unconfirmed
+                // chunk carried, by file and source (#863) — a chunk
+                // number alone maps to nothing the operator holds.
+                if let Some(confirmed) = &last_confirmed {
+                    eprintln!("taguru: import: last confirmed: {confirmed}");
+                }
+                eprintln!(
+                    "taguru: import: not confirmed — this chunk carried {}",
+                    chunk.carried()
+                );
                 if as_json {
                     print_import_json_values(
                         dry_run,
@@ -590,6 +694,14 @@ pub(super) fn run_remote(base: &str, files: &[PathBuf], dry_run: bool, as_json: 
                 if let Some(integrity) = body.get("integrity").and_then(Value::as_str) {
                     eprintln!("taguru: import: integrity: {integrity}");
                 }
+                // The refused chunk by file and source, then the server's
+                // own `issues[]` re-addressed to those units (#863) — the
+                // server names `batches[3].associations[7].subject`; the
+                // operator holds files.
+                eprintln!("taguru: import: this chunk carried {}", chunk.carried());
+                for line in refusal_issue_lines(&body, &chunk.units) {
+                    eprintln!("taguru: import: {line}");
+                }
                 // All three record kinds a chunk can carry, group
                 // records included: a refusal mid-stream leaves the
                 // queued groups exactly as unsent as the batches and
@@ -599,14 +711,18 @@ pub(super) fn run_remote(base: &str, files: &[PathBuf], dry_run: bool, as_json: 
                     (UnitKind::Schema, "schema record(s)"),
                     (UnitKind::Group, "group record(s)"),
                 ] {
-                    let unsent = queue
+                    let mut unsent = queue
                         .iter()
                         .flat_map(|chunk| &chunk.units)
-                        .filter(|unit| unit.kind == kind)
-                        .count();
-                    if unsent > 0 {
+                        .filter(|unit| unit.kind == kind);
+                    if let Some(first) = unsent.next() {
+                        // The first never-sent unit of each kind names the
+                        // resume point by file and source (#863).
+                        let count = 1 + unsent.count();
                         eprintln!(
-                            "taguru: import: {unsent} {what} after this chunk were never sent"
+                            "taguru: import: {count} {what} after this chunk were never sent, \
+                             from {}",
+                            first.label
                         );
                     }
                 }

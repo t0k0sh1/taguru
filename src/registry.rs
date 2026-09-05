@@ -1132,6 +1132,22 @@ pub enum RestoreGroupsError {
 }
 
 impl RestoreGroupsError {
+    /// The group the refusal is about, when it is about one (#863):
+    /// every validation arm and the persistence arm name theirs; an
+    /// empty name and the budget running out name none.
+    pub fn group(&self) -> Option<&str> {
+        match self {
+            Self::Duplicate(group)
+            | Self::NoSuchContext { group, .. }
+            | Self::NoSuchChild { group, .. }
+            | Self::OverCap { group, .. }
+            | Self::Nesting(groups::NestingViolation::Cycle(group))
+            | Self::Nesting(groups::NestingViolation::TooDeep(group))
+            | Self::Io { group, .. } => Some(group),
+            Self::InvalidName | Self::Timeout { .. } => None,
+        }
+    }
+
     /// How many records durably landed despite the refusal — zero for
     /// every validation arm, the write count for [`Self::Io`] and
     /// [`Self::Timeout`].

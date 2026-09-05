@@ -55,6 +55,15 @@ pub(crate) struct Batch {
     pub(super) associations: Vec<AssocOp>,
     pub(super) concepts: BTreeMap<String, String>,
     pub(super) labels: BTreeMap<String, String>,
+    /// The header's line in its file, and the first line of each kind
+    /// of item that needs a passage to attach to (#863): the
+    /// end-of-batch refusals name a line the operator can open, not
+    /// just a count.
+    pub(super) header_line: usize,
+    pub(super) first_question_line: Option<usize>,
+    pub(super) first_section_line: Option<usize>,
+    pub(super) first_locator_line: Option<usize>,
+    pub(super) first_paragraph_line: Option<usize>,
 }
 
 impl Batch {
@@ -446,9 +455,11 @@ pub(crate) fn parse_stream(mut reader: impl BufRead) -> Result<Stream, String> {
     let mut schemas: Vec<(String, schema::InstalledSchema)> = Vec::new();
     let mut groups: Vec<(String, GroupRecord)> = Vec::new();
     let mut current: Option<Batch> = None;
-    let mut owners: HashSet<(String, String)> = HashSet::new();
-    let mut schema_owners: HashSet<String> = HashSet::new();
-    let mut group_owners: HashSet<String> = HashSet::new();
+    // Each claim → the line that made it (#863): a duplicate names the
+    // earlier line, not just "an earlier batch".
+    let mut owners: HashMap<(String, String), usize> = HashMap::new();
+    let mut schema_owners: HashMap<String, usize> = HashMap::new();
+    let mut group_owners: HashMap<String, usize> = HashMap::new();
     // Per-paragraph question tally, carried as we parse so the per-line
     // cap check is a map lookup instead of a rescan of every question
     // seen so far — a batch piling questions on one paragraph would
@@ -520,31 +531,36 @@ pub(crate) fn parse_stream(mut reader: impl BufRead) -> Result<Stream, String> {
         }
         if is_header {
             let batch = parse_header(value, number)?;
-            if !owners.insert((batch.context.clone(), batch.source.clone())) {
+            if let Some(earlier) = owners.get(&(batch.context.clone(), batch.source.clone())) {
                 return Err(format!(
                     "line {number}: source '{}' in context '{}' is already stated by \
-                     an earlier batch of this stream — one batch owns one source's truth",
+                     an earlier batch of this stream, at line {earlier} — one batch owns \
+                     one source's truth",
                     batch.source, batch.context
                 ));
             }
+            owners.insert((batch.context.clone(), batch.source.clone()), number);
             current = Some(batch);
         } else if is_schema {
             let (context, installed) = parse_schema(value, number)?;
-            if !schema_owners.insert(context.clone()) {
+            if let Some(earlier) = schema_owners.get(&context) {
                 return Err(format!(
                     "line {number}: context '{context}' schema is already stated by an \
-                     earlier record of this stream — one record owns one context's schema"
+                     earlier record of this stream, at line {earlier} — one record owns one \
+                     context's schema"
                 ));
             }
+            schema_owners.insert(context.clone(), number);
             schemas.push((context, installed));
         } else if is_group {
             let (name, record) = parse_group(value, number)?;
-            if !group_owners.insert(name.clone()) {
+            if let Some(earlier) = group_owners.get(&name) {
                 return Err(format!(
                     "line {number}: group '{name}' is already stated by an earlier record \
-                     of this stream — one record owns one group's truth"
+                     of this stream, at line {earlier} — one record owns one group's truth"
                 ));
             }
+            group_owners.insert(name.clone(), number);
             groups.push((name, record));
         } else {
             match &mut current {
@@ -641,10 +657,12 @@ fn finish_batch(batch: Batch) -> Result<Batch, String> {
     // passage line there is no text for them to name (apply retracts
     // the source first, so "the previously stored text" does not exist
     // either).
+    let header = batch.header_line;
     if !batch.questions.is_empty() && batch.passage.is_none() {
         return Err(format!(
-            "{} question line(s) but no passage line — questions attach to this \
-             file's passage",
+            "line {}: {} question line(s) but no passage line — questions attach to the \
+             passage of the batch headed at line {header}",
+            batch.first_question_line.unwrap_or(header),
             batch.questions.len()
         ));
     }
@@ -652,8 +670,9 @@ fn finish_batch(batch: Batch) -> Result<Batch, String> {
     // the same passage-to-attach-to guard.
     if !batch.sections.is_empty() && batch.passage.is_none() {
         return Err(format!(
-            "{} section line(s) but no passage line — sections attach to this \
-             file's passage",
+            "line {}: {} section line(s) but no passage line — sections attach to the \
+             passage of the batch headed at line {header}",
+            batch.first_section_line.unwrap_or(header),
             batch.sections.len()
         ));
     }
@@ -661,8 +680,9 @@ fn finish_batch(batch: Batch) -> Result<Batch, String> {
     // the same passage-to-attach-to guard.
     if !batch.locators.is_empty() && batch.passage.is_none() {
         return Err(format!(
-            "{} locator line(s) but no passage line — locators attach to this \
-             file's passage",
+            "line {}: {} locator line(s) but no passage line — locators attach to the \
+             passage of the batch headed at line {header}",
+            batch.first_locator_line.unwrap_or(header),
             batch.locators.len()
         ));
     }
@@ -677,8 +697,9 @@ fn finish_batch(batch: Batch) -> Result<Batch, String> {
         && let Some(paragraph) = batch.associations.iter().find_map(|op| op.paragraph)
     {
         return Err(format!(
-            "an association names paragraph {paragraph} but the batch has no passage \
-             line — a paragraph locator attaches to this file's passage"
+            "line {}: an association names paragraph {paragraph} but the batch headed at \
+             line {header} has no passage line — a paragraph locator attaches to that passage",
+            batch.first_paragraph_line.unwrap_or(header)
         ));
     }
     Ok(batch)
@@ -725,6 +746,11 @@ fn parse_header(value: serde_json::Value, number: usize) -> Result<Batch, String
         associations: Vec::new(),
         concepts: BTreeMap::new(),
         labels: BTreeMap::new(),
+        header_line: number,
+        first_question_line: None,
+        first_section_line: None,
+        first_locator_line: None,
+        first_paragraph_line: None,
     })
 }
 
@@ -758,6 +784,9 @@ fn parse_op(
         ] {
             check_size(number, field, text, MAX_NAME_BYTES)?;
             check_nonempty(number, field, text)?;
+        }
+        if op.paragraph.is_some() {
+            batch.first_paragraph_line.get_or_insert(number);
         }
         batch.associations.push(AssocOp {
             subject: op.subject,
@@ -842,6 +871,7 @@ fn parse_op(
                 ));
             }
             *siblings += 1;
+            batch.first_question_line.get_or_insert(number);
             batch.questions.push((op.paragraph, op.question));
         }
     } else if object.contains_key("section") {
@@ -854,6 +884,7 @@ fn parse_op(
             crate::api::MAX_SECTION_BYTES,
         )?;
         check_nonempty(number, "section", &op.section)?;
+        batch.first_section_line.get_or_insert(number);
         batch.sections.push((op.paragraph, op.section));
     } else if object.contains_key("locator") {
         let op: LocatorLine = serde_json::from_value(value)
@@ -872,6 +903,7 @@ fn parse_op(
             crate::api::MAX_LOCATOR_VALUE_BYTES,
         )?;
         check_nonempty(number, "locator.value", &op.locator.value)?;
+        batch.first_locator_line.get_or_insert(number);
         batch.locators.push((op.paragraph, op.locator));
     } else {
         return Err(format!(

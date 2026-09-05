@@ -407,12 +407,20 @@ fn a_mid_stream_refusal_reports_the_prefix_and_what_was_never_sent() {
     // schema record, one group record sat behind the refusal, so each
     // line must carry ITS OWN count of exactly one, never another
     // kind's (issue #728: groups used to be missing from this tally).
+    // …and each names the first never-sent unit of its kind by file
+    // and source, and the refused chunk says what it carried (#863).
+    let path = file.display();
     for line in [
-        "1 batch(es) after this chunk were never sent",
-        "1 schema record(s) after this chunk were never sent",
-        "1 group record(s) after this chunk were never sent",
+        format!(
+            "1 batch(es) after this chunk were never sent, from {path}: context 'c' source 'c.md'"
+        ),
+        format!(
+            "1 schema record(s) after this chunk were never sent, from {path}: context 'a' schema"
+        ),
+        format!("1 group record(s) after this chunk were never sent, from {path}: group 'g'"),
+        format!("this chunk carried 1 unit: {path}: context 'missing' source 'bad.md'"),
     ] {
-        assert!(stderr.contains(line), "missing {line:?} in: {stderr}");
+        assert!(stderr.contains(&line), "missing {line:?} in: {stderr}");
     }
 
     let (status, _) = server.call("GET", "/contexts/a", None);
@@ -757,6 +765,75 @@ fn a_413_halves_at_the_batch_boundary_and_a_lost_connection_names_the_resume() {
         "{stderr}"
     );
     assert!(stderr.contains("--dry-run"), "{stderr}");
+    // The confirmed prefix ends at a named unit and the unconfirmed
+    // chunk says what it carried (#863) — by file and source, since a
+    // chunk number maps to nothing the operator holds.
+    let path = file.display();
+    assert!(
+        stderr.contains(&format!(
+            "last confirmed: {path}: context 'a' source 'a.md'"
+        )),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(&format!(
+            "not confirmed — this chunk carried 1 unit: {path}: context 'b' source 'b.md'"
+        )),
+        "{stderr}"
+    );
 
     let _ = std::fs::remove_dir_all(&batches);
+}
+
+/// A refusal that carries `issues[]` (a strict schema's domain
+/// violation, predicted before any write) names each issue on stderr
+/// re-addressed to the file, context, and source of the batch unit it
+/// is about (#863) — `batches[0].associations[1].subject` on the wire
+/// reads as `<file>: context 'a' source 'b.md': associations[1].subject`
+/// for the operator, with the server's expected/actual beside it.
+#[test]
+fn a_refusal_with_issues_names_the_file_and_item_of_each() {
+    let batches = batch_dir("remote-import-issues");
+    let seed = batches.join("seed.jsonl");
+    std::fs::write(
+        &seed,
+        "{\"taguru_batch\": 1, \"context\": \"a\", \"source\": \"a.md\", \
+         \"create\": {\"description\": \"d\"}}\n\
+         {\"subject\": \"青嶺酒造\", \"label\": \"schema:type\", \"object\": \"Brewery\", \"weight\": 1.0}\n\
+         {\"taguru_schema\": 1, \"context\": \"a\", \"mode\": \"strict\", \"closed_labels\": false, \
+         \"types\": {\"Brewery\": {\"is_a\": []}, \"Person\": {\"is_a\": []}}, \
+         \"relations\": {\"杜氏\": {\"domain\": [\"Brewery\"], \"range\": [\"Person\"]}}}\n",
+    )
+    .expect("fixture must be writable");
+    let violating = batches.join("violating.jsonl");
+    std::fs::write(
+        &violating,
+        "{\"taguru_batch\": 1, \"context\": \"a\", \"source\": \"b.md\"}\n\
+         {\"subject\": \"高瀬\", \"label\": \"schema:type\", \"object\": \"Person\", \"weight\": 1.0}\n\
+         {\"subject\": \"高瀬\", \"label\": \"杜氏\", \"object\": \"個人A\", \"weight\": 1.0}\n",
+    )
+    .expect("fixture must be writable");
+
+    let server = Server::start("remote-import-issues");
+    let (code, stdout, stderr) = run_cli(
+        &["import", "--url", &server.base, seed.to_str().unwrap()],
+        &[],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+
+    let (code, stdout, stderr) = run_cli(
+        &["import", "--url", &server.base, violating.to_str().unwrap()],
+        &[],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stderr.contains("chunk 1/1 refused"), "{stderr}");
+    let addressed = format!(
+        "taguru: import: {}: context 'a' source 'b.md': associations[1].subject: expected ",
+        violating.display()
+    );
+    assert!(stderr.contains(&addressed), "{stderr}");
+    assert!(
+        !stderr.contains("the server did not list"),
+        "one issue, fully listed — no remainder line: {stderr}"
+    );
 }
