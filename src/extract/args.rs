@@ -55,6 +55,11 @@ pub(super) struct Args {
     /// when given; `None` defers to TAGURU_EXTRACT_REDACT, and then to
     /// off — resolved in [`run`], same pattern as `candidates`.
     pub(super) redact: Option<crate::sensitive::Groups>,
+    /// `--redact-rules FILE` (ADR 0038 §3.1, #884): a user's rules
+    /// file, applied after the built-ins; `None` defers to
+    /// TAGURU_EXTRACT_REDACT_RULES. Needs `--redact` on — resolved in
+    /// [`run`].
+    pub(super) redact_rules: Option<PathBuf>,
     /// `None` defers to TAGURU_EXTRACT_VOCABULARY, and then to no
     /// vocabulary at all — resolved in [`run`], same pattern as
     /// `schema`. ADR 0015 (#496 S3).
@@ -120,6 +125,7 @@ impl Args {
         let mut lossy: Option<bool> = None;
         let mut candidates: Option<bool> = None;
         let mut redact: Option<crate::sensitive::Groups> = None;
+        let mut redact_rules: Option<PathBuf> = None;
         let mut vocabulary: Option<PathBuf> = None;
         let mut coverage: Option<bool> = None;
         let mut diagnostics_out: Option<PathBuf> = None;
@@ -168,6 +174,23 @@ impl Args {
                     })?);
                 }
                 "--coverage" => coverage = Some(true),
+                "--redact-rules" => match rest.next() {
+                    Some(path) if redact_rules.is_none() => {
+                        redact_rules = Some(PathBuf::from(path));
+                    }
+                    Some(_) => {
+                        return Err(crate::config::subcommand_usage_error(
+                            "extract",
+                            "--redact-rules given twice",
+                        ));
+                    }
+                    None => {
+                        return Err(crate::config::subcommand_usage_error(
+                            "extract",
+                            "--redact-rules needs a file path",
+                        ));
+                    }
+                },
                 "--vocabulary" => match rest.next() {
                     Some(path) if vocabulary.is_none() => vocabulary = Some(PathBuf::from(path)),
                     Some(_) => {
@@ -648,6 +671,7 @@ impl Args {
             lossy,
             candidates,
             redact,
+            redact_rules,
             vocabulary,
             coverage,
             diagnostics_out,

@@ -327,6 +327,86 @@ fn an_offline_import_exits_one_for_each_failure_kind_alone() {
     let _ = std::fs::remove_dir_all(&batches);
 }
 
+/// #884: `--redact-rules` joins the built-ins for the import gate; it
+/// needs `--refuse-sensitive`, and a bad file is a usage error.
+#[test]
+fn an_offline_import_refuses_by_a_user_rule_and_needs_the_gate_for_it() {
+    let batches = batch_dir("import-refuse-user-rule");
+    let file = batches.join("ids.jsonl");
+    std::fs::write(
+        &file,
+        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"ids.md\", \"create\": {\"description\": \"酒蔵\"}}\n\
+         {\"subject\": \"高瀬\", \"label\": \"社員番号\", \"object\": \"EMP-123456\", \"weight\": 1.0}\n",
+    )
+    .unwrap();
+    let rules = batches.join("rules.tsv");
+    std::fs::write(&rules, "emp_id\t\\bEMP-\\d{6}\\b\n").unwrap();
+    let data_dir = common::scratch_dir("http-import-refuse-user-rule");
+
+    let (code, stdout, stderr) = run_import(
+        &data_dir,
+        &[
+            "--refuse-sensitive",
+            "--redact-rules",
+            rules.to_str().unwrap(),
+            file.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("batches[0].associations[0].object: sensitive: emp_id"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("EMP-123456"), "{stderr}");
+    // The built-ins alone let it through.
+    let (code, stdout, stderr) =
+        run_import(&data_dir, &["--refuse-sensitive", file.to_str().unwrap()]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    // Usage errors: the file without the gate, and a bad file.
+    let (code, _, stderr) = run_import(
+        &data_dir,
+        &[
+            "--redact-rules",
+            rules.to_str().unwrap(),
+            file.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains("--redact-rules needs --refuse-sensitive"),
+        "{stderr}"
+    );
+    let (code, _, stderr) = run_import(
+        &data_dir,
+        &[
+            "--refuse-sensitive",
+            "--redact-rules",
+            rules.to_str().unwrap(),
+            "--redact-rules",
+            rules.to_str().unwrap(),
+            file.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("--redact-rules given twice"), "{stderr}");
+    std::fs::write(&rules, "email\t.+\n").unwrap();
+    let (code, _, stderr) = run_import(
+        &data_dir,
+        &[
+            "--refuse-sensitive",
+            "--redact-rules",
+            rules.to_str().unwrap(),
+            file.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains("line 1: 'email' is a built-in rule's name"),
+        "{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&batches);
+}
+
 /// `import --json` (issue #371) must answer the same shape `POST
 /// /import` does for the identical batch against an equally-empty
 /// starting state — one schema, not two that could drift.

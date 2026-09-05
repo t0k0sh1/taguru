@@ -9,6 +9,17 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Added
 
+- `--redact-rules FILE` for `extract --redact` and `import
+  --refuse-sensitive` (ADR 0038 §3.1/§3.5, #884): your own rules on top
+  of the built-ins — one `name<TAB>regex` per line, `#` lines ignored,
+  applied after the built-ins in file order; a name is `[a-z0-9_]+` and
+  may not repeat a built-in's; a bad line (no tab, bad name, duplicate,
+  empty or invalid pattern) is a usage error naming the line. The
+  file's full SHA-256 joins the redaction version
+  (`redact1+<64 hex>`, `redact1:pii+…`), so editing the file
+  re-extracts. `TAGURU_EXTRACT_REDACT_RULES` is extract's default. The
+  file needs `--redact` (extract) / `--refuse-sensitive` (import) on.
+
 - `import --refuse-sensitive` (ADR 0038 §3.4, #883): the same rules
   `extract --redact` masks with (every built-in of both groups) run over
   each batch's passage, association subject/label/object, alias

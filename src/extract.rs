@@ -271,7 +271,7 @@ usage: taguru extract [--dry-run] [--force] [--no-passage] [--questions N]
                       [--structured-output MODE] [--max-output-tokens N]
                       [--chunk-bytes N] [--chunk-context MODE]
                       [--lossy] [--candidates] [--redact [secrets|pii]]
-                      [--vocabulary PATH] [--coverage]
+                      [--redact-rules FILE] [--vocabulary PATH] [--coverage]
                       [--diagnostics-out FILE] [--schema FILE]
                       [--replay MODE] [--replay-from DIR] [--resume-from STEP]
                       [--source-id ID] [--date WHEN] [--tag TAG]...
@@ -307,6 +307,7 @@ chat endpoint:
   TAGURU_EXTRACT_CANDIDATES  default for --candidates (0/false)
   TAGURU_EXTRACT_REDACT  default for --redact: 1/true (both groups),
                       secrets, pii, or 0/false (off)
+  TAGURU_EXTRACT_REDACT_RULES  default for --redact-rules (unset)
   TAGURU_EXTRACT_VOCABULARY  default for --vocabulary (unset, off)
   TAGURU_EXTRACT_COVERAGE  default for --coverage (0/false)
   TAGURU_EXTRACT_DIAGNOSTICS  default for --diagnostics-out (unset, off)
@@ -396,6 +397,13 @@ chat endpoint:
                       computation input (toggling re-extracts). Names,
                       addresses, IPs, and high-entropy strings are not
                       judged — see docs/extract.html
+  --redact-rules FILE your own rules on top of the built-ins, applied after
+                      them: one `name<TAB>regex` per line, `#` lines and
+                      blank lines ignored; a name is [a-z0-9_]+ (it is
+                      written into the placeholder) and may not repeat a
+                      built-in's; a bad line is a usage error naming it.
+                      The file's SHA-256 joins the redaction version, so
+                      editing it re-extracts. Needs --redact
   --vocabulary PATH   steer spellings toward a target context's existing
                       vocabulary: PATH is an exported batch stream (or a
                       directory of them, e.g. taguru export --out DIR);
@@ -966,6 +974,33 @@ pub fn run(args: &[String]) -> i32 {
             "taguru: extract: note: --redact is off; document text is sent to {host} as written"
         );
     }
+    // ADR 0038 §3.1 (#884): the user's rules file joins the built-ins
+    // — read, parsed, and refused with a line number BEFORE any
+    // document is read, and only ever with redaction on (a rules file
+    // that runs nothing is text that reaches the model).
+    let redact_rules_path = args.redact_rules.or_else(|| {
+        std::env::var("TAGURU_EXTRACT_REDACT_RULES")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    });
+    let redaction = match (redaction, redact_rules_path) {
+        (None, Some(_)) => {
+            return crate::config::subcommand_usage_error(
+                "extract",
+                "--redact-rules needs --redact (or TAGURU_EXTRACT_REDACT) — a rules file with \
+                 redaction off would run nothing",
+            );
+        }
+        (None, None) => None,
+        (Some(groups), None) => Some((groups, crate::sensitive::RuleSet::builtin(groups))),
+        (Some(groups), Some(path)) => {
+            match crate::sensitive::RuleSet::builtin_with_file(groups, &path) {
+                Ok(rules) => Some((groups, rules)),
+                Err(message) => return crate::config::subcommand_usage_error("extract", &message),
+            }
+        }
+    };
     // Same resolution and validation strength as --candidates above.
     // ADR 0016 (#496 S4): report-only, so unlike --candidates this is
     // NOT a computation input — no fingerprint carries it.
@@ -1193,7 +1228,7 @@ pub fn run(args: &[String]) -> i32 {
         parallel,
         lossy,
         candidates: candidates_on,
-        redaction: redaction.map(|groups| (groups, crate::sensitive::RuleSet::builtin(groups))),
+        redaction,
         coverage: coverage_on,
         vocabulary_names: context_vocabulary
             .as_ref()

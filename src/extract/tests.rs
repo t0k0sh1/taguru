@@ -2292,6 +2292,27 @@ fn redact_env_value_reads_every_spelling() {
     }
 }
 
+/// `--redact-rules` takes one path: a second is a usage error, a bare
+/// one too.
+#[test]
+fn redact_rules_flag_parses_once_and_rejects_a_duplicate() {
+    fn parse(words: &[&str]) -> Result<Args, i32> {
+        Args::parse(&words.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+    let base = ["--context", "c", "--out", "o", "doc.md"];
+    let with = |tail: &[&str]| parse(&[&base[..], tail].concat());
+    assert_eq!(
+        with(&["--redact-rules", "rules.tsv"]).unwrap().redact_rules,
+        Some(std::path::PathBuf::from("rules.tsv"))
+    );
+    assert_eq!(with(&[]).unwrap().redact_rules, None);
+    assert!(matches!(
+        with(&["--redact-rules", "a.tsv", "--redact-rules", "b.tsv"]),
+        Err(2)
+    ));
+    assert!(matches!(with(&["--redact-rules"]), Err(2)));
+}
+
 /// ADR 0038 §3.7's notice names the endpoint's host only when it is
 /// not this machine.
 #[test]

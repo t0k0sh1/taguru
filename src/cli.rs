@@ -368,6 +368,7 @@ ENVIRONMENT (every knob; unset = the shown default):
   TAGURU_EXTRACT_LOSSY         default for --lossy (0/false)
   TAGURU_EXTRACT_CANDIDATES    default for --candidates (0/false)
   TAGURU_EXTRACT_REDACT        default for --redact (0/false; 1, secrets, pii)
+  TAGURU_EXTRACT_REDACT_RULES  default for --redact-rules (unset)
   TAGURU_EXTRACT_VOCABULARY    default for --vocabulary (unset, off)
   TAGURU_EXTRACT_COVERAGE      default for --coverage (0/false)
   TAGURU_EXTRACT_DIAGNOSTICS   default for --diagnostics-out (unset, off)

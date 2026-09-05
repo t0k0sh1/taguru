@@ -235,6 +235,10 @@ const BUILTINS: &[Builtin] = &[
 /// groups, in order, then the user's rules in file order (#884).
 pub(crate) struct RuleSet {
     rules: Vec<Rule>,
+    /// The full SHA-256 of the `--redact-rules` file's bytes when one
+    /// was given — joined to the version (§3.5) so an edited file
+    /// re-extracts exactly as a changed built-in would.
+    user_digest: Option<String>,
 }
 
 impl RuleSet {
@@ -253,13 +257,100 @@ impl RuleSet {
                 validate: builtin.validate,
             })
             .collect();
-        RuleSet { rules }
+        RuleSet {
+            rules,
+            user_digest: None,
+        }
+    }
+
+    /// Extends the set with a user's rules file (ADR 0038 §3.1, #884):
+    /// one `name<TAB>regex` per line, `#` lines and blank lines
+    /// ignored, applied after the built-ins in file order. A name is
+    /// `[a-z0-9_]+` (it is written into the placeholder) and may not
+    /// repeat a built-in's or an earlier line's; a pattern must
+    /// compile and may not be empty. Anything else is refused with
+    /// its line number — never silently skipped: a rule that does not
+    /// run is text that reaches the model.
+    pub(crate) fn with_user_rules(mut self, text: &str) -> Result<RuleSet, String> {
+        let mut seen: Vec<(String, usize)> = Vec::new();
+        for (index, raw) in text.lines().enumerate() {
+            let line_number = index + 1;
+            let line = raw.trim_end_matches('\r');
+            if line.trim().is_empty() || line.trim_start().starts_with('#') {
+                continue;
+            }
+            let Some((name, pattern)) = line.split_once('\t') else {
+                return Err(format!(
+                    "line {line_number}: expected `name<TAB>regex`, found no tab"
+                ));
+            };
+            if name.is_empty()
+                || !name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+            {
+                return Err(format!(
+                    "line {line_number}: rule name '{name}' is not [a-z0-9_]+"
+                ));
+            }
+            if RuleSet::is_builtin_name(name) {
+                return Err(format!(
+                    "line {line_number}: '{name}' is a built-in rule's name"
+                ));
+            }
+            if let Some((_, first)) = seen.iter().find(|(held, _)| held == name) {
+                return Err(format!(
+                    "line {line_number}: rule '{name}' given twice (first at line {first})"
+                ));
+            }
+            if pattern.is_empty() {
+                return Err(format!(
+                    "line {line_number}: rule '{name}' has an empty pattern"
+                ));
+            }
+            let regex = Regex::new(pattern)
+                .map_err(|error| format!("line {line_number}: rule '{name}': {error}"))?;
+            seen.push((name.to_string(), line_number));
+            self.rules.push(Rule {
+                name: name.to_string(),
+                regex,
+                value_group: None,
+                validate: None,
+            });
+        }
+        self.user_digest = Some(crate::sha256::sha256_hex(text.as_bytes()));
+        Ok(self)
+    }
+
+    /// The built-ins of `groups` plus the rules file at `path` (#884),
+    /// for both `extract --redact-rules` and `import --redact-rules`:
+    /// the usage-error text names the flag, the file, and the line.
+    pub(crate) fn builtin_with_file(
+        groups: Groups,
+        path: &std::path::Path,
+    ) -> Result<RuleSet, String> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|error| format!("--redact-rules: {}: {error}", path.display()))?;
+        RuleSet::builtin(groups)
+            .with_user_rules(&text)
+            .map_err(|message| format!("--redact-rules: {}: {message}", path.display()))
+    }
+
+    /// The manifest/checkpoint value of this set under `groups` (§3.5):
+    /// `redact1`, the group suffix, and `+<sha256>` of the user file
+    /// when there is one — the whole digest, so two files never share
+    /// a version by a truncated prefix.
+    pub(crate) fn version(&self, groups: Groups) -> String {
+        let mut version = format!("{RULESET_VERSION}{}", groups.version_suffix());
+        if let Some(digest) = &self.user_digest {
+            version.push('+');
+            version.push_str(digest);
+        }
+        version
     }
 
     /// Whether `name` is a built-in's (a user rule may not repeat one,
     /// §3.1) — judged against every built-in, whichever groups are on.
-    /// The consumer is `--redact-rules` (#884).
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn is_builtin_name(name: &str) -> bool {
         BUILTINS.iter().any(|builtin| builtin.name == name)
     }
@@ -1016,5 +1107,67 @@ mod tests {
         let (redacted, redactions) = mask(text, DOC, &rules);
         assert_eq!(redacted, text);
         assert!(redactions.is_empty());
+    }
+
+    /// #884: a rules file extends the set after the built-ins; its
+    /// digest joins the version; every malformed line is refused
+    /// with its number, never skipped.
+    #[test]
+    fn user_rules_extend_the_built_ins_and_every_bad_line_is_refused() {
+        let file = "# employee ids\nemp_id\t\\bEMP-\\d{6}\\b\n\nticket\t\\bTCK-[0-9]{4}\\b\n";
+        let rules = RuleSet::builtin(Groups::BOTH)
+            .with_user_rules(file)
+            .unwrap();
+        assert_eq!(rules.names().len(), 16);
+        assert_eq!(&rules.names()[14..], ["emp_id", "ticket"]);
+        let text = "EMP-123456 の連絡先は me@example.com、TCK-0042 参照。";
+        let found = scan(text, &rules);
+        assert_eq!(names_of(&found), vec!["emp_id", "email", "ticket"]);
+        let (masked, redactions) = mask(text, "d", &rules);
+        assert!(masked.starts_with("«redacted emp_id "), "{masked}");
+        assert!(
+            !masked.contains("EMP-123456") && !masked.contains("TCK-0042"),
+            "{masked}"
+        );
+        assert_eq!(redactions[0].rule, "emp_id");
+        // The version carries the file's whole digest after the group.
+        let digest = crate::sha256::sha256_hex(file.as_bytes());
+        assert_eq!(rules.version(Groups::BOTH), format!("redact1+{digest}"));
+        assert_eq!(
+            rules.version(Groups::parse(Some("pii")).unwrap()),
+            format!("redact1:pii+{digest}")
+        );
+        assert_eq!(
+            RuleSet::builtin(Groups::BOTH).version(Groups::BOTH),
+            "redact1"
+        );
+        // A user rule cannot outrank a built-in on the same span: the
+        // built-in comes first in rule order.
+        let same = RuleSet::builtin(Groups::BOTH)
+            .with_user_rules("mail\t[a-z]+@example\\.com\n")
+            .unwrap();
+        assert_eq!(names_of(&scan("me@example.com", &same)), vec!["email"]);
+        // Refusals, each naming its line.
+        for (file, needle) in [
+            ("emp_id \\d+\n", "line 1: expected `name<TAB>regex`"),
+            (
+                "Emp-Id\t\\d+\n",
+                "line 1: rule name 'Emp-Id' is not [a-z0-9_]+",
+            ),
+            ("\t\\d+\n", "line 1: rule name '' is not [a-z0-9_]+"),
+            ("email\t\\d+\n", "line 1: 'email' is a built-in rule's name"),
+            (
+                "a\t\\d+\n\n# x\na\t\\w+\n",
+                "line 4: rule 'a' given twice (first at line 1)",
+            ),
+            ("a\t\n", "line 1: rule 'a' has an empty pattern"),
+            ("a\t(\n", "line 1: rule 'a': "),
+        ] {
+            let error = RuleSet::builtin(Groups::BOTH)
+                .with_user_rules(file)
+                .err()
+                .unwrap_or_else(|| panic!("{file:?} must be refused"));
+            assert!(error.contains(needle), "{file:?}: {error}");
+        }
     }
 }

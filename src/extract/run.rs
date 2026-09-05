@@ -446,15 +446,12 @@ impl Run {
     /// The manifest/checkpoint value of the redaction control (ADR
     /// 0038 §3.5): `""` when off, so pre-ADR entries keep matching a
     /// default run; `redact1`, `redact1:secrets`, or `redact1:pii`
-    /// when on.
+    /// when on, `+<sha256 of the rules file>` appended under
+    /// `--redact-rules` (#884).
     pub(super) fn redaction_manifest_value(&self) -> String {
         match &self.redaction {
             None => String::new(),
-            Some((groups, _)) => format!(
-                "{}{}",
-                crate::sensitive::RULESET_VERSION,
-                groups.version_suffix()
-            ),
+            Some((groups, rules)) => rules.version(*groups),
         }
     }
 

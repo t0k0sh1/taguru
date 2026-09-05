@@ -341,6 +341,7 @@ fn scrub_extract_env(command: &mut Command) -> &mut Command {
         .env_remove("TAGURU_EXTRACT_LOSSY")
         .env_remove("TAGURU_EXTRACT_CANDIDATES")
         .env_remove("TAGURU_EXTRACT_REDACT")
+        .env_remove("TAGURU_EXTRACT_REDACT_RULES")
         .env_remove("TAGURU_EXTRACT_VOCABULARY")
         .env_remove("TAGURU_EXTRACT_COVERAGE")
         .env_remove("TAGURU_EXTRACT_DIAGNOSTICS")
@@ -3025,6 +3026,150 @@ fn extract_redact_env_var_dry_run_note_and_endpoint_notice() {
     );
     assert_eq!(code, 0, "{stderr}");
     assert!(!stderr.contains("--redact is off"), "{stderr}");
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// ADR 0038 §3.1/§3.5 (#884): a rules file's rules mask after the
+/// built-ins under their own names; the file's digest is part of the
+/// redaction version (same file skips, an edited file re-extracts); a
+/// bad line and a file without `--redact` are usage errors naming the
+/// cause; the env var is the flag's default.
+#[test]
+fn extract_redact_rules_file_extends_the_built_ins_and_joins_the_version() {
+    let docs = batch_dir("extract-redact-rules-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(
+        &doc,
+        "担当は EMP-123456、連絡先は takase@example.com。\n\n杜氏は高瀬。青嶺酒造の杜氏である。",
+    )
+    .unwrap();
+    let rules = docs.join("rules.tsv");
+    std::fs::write(&rules, "# ids\nemp_id\t\\bEMP-\\d{6}\\b\n").unwrap();
+    let out = batch_dir("extract-redact-rules-out");
+    let reply = json!({"associations": [
+        {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬"}
+    ]})
+    .to_string();
+
+    let (url, requests) = stub_chat_server(vec![reply.clone()]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--redact",
+            "--redact-rules",
+            rules.to_str().unwrap(),
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let requests = requests.join().unwrap();
+    assert!(!requests[0].contains("EMP-123456"), "{}", requests[0]);
+    assert!(requests[0].contains("«redacted emp_id "), "{}", requests[0]);
+    assert!(requests[0].contains("«redacted email "), "{}", requests[0]);
+    assert!(
+        stderr.contains("redacted 2 match(es): email ×1 (paragraph 0), emp_id ×1 (paragraph 0)"),
+        "{stderr}"
+    );
+    assert!(stdout.contains(", 2 redacted"), "{stdout}");
+    let (_, records) = read_trace(&out);
+    let rules_named: Vec<&str> = records
+        .iter()
+        .filter(|record| record["kind"] == "redaction")
+        .map(|record| record["rule"].as_str().unwrap())
+        .collect();
+    // Text order: the employee id comes before the address.
+    assert_eq!(rules_named, ["emp_id", "email"]);
+
+    // The same file: the manifest matches.
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", "http://127.0.0.1:9"),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+            ("TAGURU_EXTRACT_REDACT", "1"),
+            ("TAGURU_EXTRACT_REDACT_RULES", rules.to_str().unwrap()),
+        ],
+        &["--context", "c", doc.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("unchanged, skipped"), "{stdout}");
+    // An edited file: a new version, re-extracted.
+    std::fs::write(&rules, "# ids\nemp_id\t\\bEMP-\\d{6}\\b\nbrewer\t高瀬\n").unwrap();
+    // A never-joined acceptor here: a run that exits before it
+    // connects must fail the assertions below, not hang on a join.
+    // The answer puts the brewer's name where the occurrence check
+    // does not look — the label — so the output scan is what must
+    // catch it, under the user's rule.
+    let leaking = json!({"associations": [
+        {"subject": "青嶺酒造", "label": "高瀬", "object": "杜氏"}
+    ]})
+    .to_string();
+    let (url, captured) = stub_chat_server_concurrent(move |_index, _attempt| chat_ok(&leaking));
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--redact",
+            "--redact-rules",
+            rules.to_str().unwrap(),
+            doc.to_str().unwrap(),
+        ],
+    );
+    // Re-extracted, not skipped: the edited file is a new version.
+    assert!(!stdout.contains("unchanged, skipped"), "{stdout}");
+    let requests = captured.lock().unwrap().clone();
+    assert_eq!(requests.len(), 1, "{stdout}\n{stderr}");
+    assert!(requests[0].contains("«redacted brewer "), "{}", requests[0]);
+    assert!(stderr.contains("brewer ×"), "code {code}: {stderr}");
+    // And the output scan judges the answer by the user's rule too:
+    // the label carries the masked name, the document fails on it.
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("the answer carries sensitive content the redacted document never showed")
+            && stderr.contains(": brewer"),
+        "{stderr}"
+    );
+
+    // Usage errors: a bad line, and a file with redaction off.
+    std::fs::write(&rules, "emp_id\t(\n").unwrap();
+    let (code, _, stderr) = run_extract(
+        &out,
+        &[("TAGURU_EXTRACT_URL", "http://127.0.0.1:9")],
+        &[
+            "--dry-run",
+            "--context",
+            "c",
+            "--redact",
+            "--redact-rules",
+            rules.to_str().unwrap(),
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains("--redact-rules: ") && stderr.contains("line 1: rule 'emp_id': "),
+        "{stderr}"
+    );
+    let (code, _, stderr) = run_extract(
+        &out,
+        &[("TAGURU_EXTRACT_REDACT_RULES", rules.to_str().unwrap())],
+        &["--dry-run", "--context", "c", doc.to_str().unwrap()],
+    );
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("--redact-rules needs --redact"), "{stderr}");
 
     let _ = std::fs::remove_dir_all(&docs);
     let _ = std::fs::remove_dir_all(&out);
