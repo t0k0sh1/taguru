@@ -1447,6 +1447,12 @@ fn foreign_ideographs_lists_each_offending_character_once_in_order() {
         foreign_ideographs("辭任のカナ abc 適用", &haystack),
         Vec::<char>::new()
     );
+    // An Extension H ideograph the document never writes is removed
+    // like a simplified form.
+    assert_eq!(
+        foreign_ideographs("処\u{31350}分", &haystack),
+        vec!['\u{31350}']
+    );
     assert_eq!(
         foreign_ideographs("处罚", &normalize_for_occurrence("处罚を科す")),
         Vec::<char>::new()
@@ -1489,6 +1495,22 @@ fn jis_x0208_table_edges() {
         is_ideograph('\u{20000}') && !in_jis_x0208('\u{20000}'),
         "Extension B"
     );
+    // The supplementary run reaches past Extension G: the compatibility
+    // supplement, Extension I, Extension H, and Extension J are all
+    // ideographs, and every one is outside JIS X 0208 (CodeRabbit on
+    // #887 found the range stopping at Extension G).
+    for (c, block) in [
+        ('\u{2F800}', "compatibility supplement"),
+        ('\u{2EBF0}', "Extension I"),
+        ('\u{3134F}', "Extension G's last"),
+        ('\u{31350}', "Extension H"),
+        ('\u{323B0}', "Extension J"),
+        ('\u{3347F}', "Extension J's last"),
+    ] {
+        assert!(is_ideograph(c) && !in_jis_x0208(c), "{block}");
+    }
+    assert!(!is_ideograph('\u{33480}'), "past the last ideograph block");
+    assert!(!is_ideograph('\u{1FFFF}'), "before the supplementary run");
     assert!(!is_ideograph('あ') && !in_jis_x0208('あ'));
     assert!(!is_ideograph('A') && !in_jis_x0208('A'));
     // The whole repertoire, as scripts/gen_jis_x0208.py counted it.
