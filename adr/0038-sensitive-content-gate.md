@@ -153,7 +153,15 @@ digits of `SHA-256(document_sha256 ‖ matched bytes)`. The tag lets two
 occurrences of the same key read as the same thing and two different
 keys as different things, and is deterministic per document without
 being a global fingerprint of the secret (the document hash salts it;
-sixteen bits identify nothing). The guillemets are outside every
+sixteen bits identify nothing). Four digits are the *minimum*: when
+two distinct matched byte strings under the same rule in the same
+document share their first four digits, every placeholder of that
+rule in that document is written with the shortest prefix length that
+tells all of the rule's distinct matches apart (five digits, six, …
+up to the full digest) — chosen from the document's complete match
+set, so the length is deterministic for the document, the same secret
+still reads as the same placeholder everywhere, and two secrets never
+share one. The guillemets are outside every
 script the segmenter (ADR 0014) treats as word characters and outside
 the prompt's own `[N]` paragraph labels, so a placeholder is never a
 candidate name and never looks like a label. The replacement holds no
