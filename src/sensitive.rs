@@ -357,7 +357,13 @@ pub(crate) fn scan(text: &str, rules: &RuleSet) -> Vec<Match> {
         }
         // A value-only rule owns its whole match: another rule's
         // candidate inside it is shadowed (a pre-existing placeholder
-        // never is — what is already masked stays as it is).
+        // never is — what is already masked stays as it is). An owner
+        // is never shadowed by another owner: two owned spans that
+        // overlap (`token: https://user:secret@host` — the assignment's
+        // value is the URL, the URL's owned span holds the password)
+        // would otherwise remove each other's candidate and leave the
+        // secret in plain text; between owners the ordering below and
+        // the greedy accept decide, and the earlier, longer value wins.
         let owned: Vec<(String, usize, usize)> = candidates
             .iter()
             .filter_map(|candidate| {
@@ -368,6 +374,7 @@ pub(crate) fn scan(text: &str, rules: &RuleSet) -> Vec<Match> {
             .collect();
         candidates.retain(|candidate| {
             candidate.preexisting
+                || candidate.owns.is_some()
                 || !owned.iter().any(|(rule, from, to)| {
                     *rule != candidate.rule && candidate.start < *to && candidate.end > *from
                 })
@@ -806,6 +813,28 @@ mod tests {
         // Paragraph numbering: a match in the third paragraph says so.
         let text = "one\n\ntwo\n\nmail me@example.com";
         assert_eq!(scan(text, &rules)[0].paragraph, 2);
+    }
+
+    /// Two value-only rules whose owned spans overlap do not shadow
+    /// each other into nothing: the earlier, longer value is masked,
+    /// and it holds the other's secret.
+    #[test]
+    fn value_only_rules_never_shadow_each_other_away() {
+        let rules = RuleSet::builtin(Groups::parse(Some("secrets")).unwrap());
+        // The assignment's value is the whole URL; the URL's userinfo
+        // owns a span inside it.
+        let text = "token: https://user:s3cr3t@host";
+        let found = scan(text, &rules);
+        assert_eq!(names_of(&found), vec!["credential_assignment"]);
+        assert_eq!(matched(text, &found[0]), "https://user:s3cr3t@host");
+        // The header's value is an assignment.
+        let text = "Authorization: Bearer api_key=xxx";
+        let found = scan(text, &rules);
+        assert_eq!(names_of(&found), vec!["authorization_header"]);
+        assert_eq!(matched(text, &found[0]), "api_key=xxx");
+        // Masked, neither secret survives.
+        let (masked, _) = mask("token: https://user:s3cr3t@host", "d", &rules);
+        assert!(!masked.contains("s3cr3t"), "{masked}");
     }
 
     /// A value-only rule's whole match shadows what lies INSIDE it and
