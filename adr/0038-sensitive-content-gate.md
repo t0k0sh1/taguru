@@ -272,10 +272,10 @@ model has been told exactly once where the text goes.
 
 | Issue | Title | Implements |
 |---|---|---|
-| A | `sensitive` module: the `redact1` rule set, placeholder, scan and mask as pure functions | §3.1, §3.2 |
-| B | `extract --redact [secrets\|pii]`: mask at read, placeholder removal and output scan, manifest/checkpoint input, redaction records, endpoint notice | §3.3, §3.5, §3.6, §3.7 |
-| C | `import --refuse-sensitive`: batch-level refusal with paths, local and `--url` | §3.4 |
-| D | `--redact-rules FILE`: user rules, version folding, docs | §3.1 (user file), §3.5 |
+| #881 | `sensitive` module: the `redact1` rule set, placeholder, scan and mask as pure functions | §3.1, §3.2 |
+| #882 | `extract --redact [secrets\|pii]`: mask at read, placeholder removal and output scan, manifest/checkpoint input, redaction records, endpoint notice | §3.3, §3.5, §3.6, §3.7 |
+| #883 | `import --refuse-sensitive`: batch-level refusal with paths, local and `--url` | §3.4 |
+| #884 | `--redact-rules FILE`: user rules, version folding, docs | §3.1 (user file), §3.5 |
 
 Deferred, named here so they are not forgotten: server-side refusal
 on `POST /import` (own ADR); SDK producer parity (Python / TypeScript
