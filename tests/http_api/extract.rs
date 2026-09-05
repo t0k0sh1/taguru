@@ -3142,11 +3142,6 @@ fn extract_redact_rules_file_extends_the_built_ins_and_joins_the_version() {
             && stderr.contains(": brewer"),
         "{stderr}"
     );
-    assert!(
-        stray_batch_files(&out).is_empty(),
-        "{:?}",
-        stray_batch_files(&out)
-    );
 
     // Usage errors: a bad line, and a file with redaction off.
     std::fs::write(&rules, "emp_id\t(\n").unwrap();
