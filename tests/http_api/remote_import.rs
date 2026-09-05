@@ -386,6 +386,9 @@ fn a_mid_stream_refusal_reports_the_prefix_and_what_was_never_sent() {
          {\"taguru_batch\": 1, \"context\": \"c\", \"source\": \"c.md\", \
          \"create\": {\"description\": \"d\"}}\n\
          {\"subject\": \"s3\", \"label\": \"l3\", \"object\": \"o3\", \"weight\": 1.0}\n\
+         {\"taguru_batch\": 1, \"context\": \"e\", \"source\": \"e.md\", \
+         \"create\": {\"description\": \"d\"}}\n\
+         {\"subject\": \"s4\", \"label\": \"l4\", \"object\": \"o4\", \"weight\": 1.0}\n\
          {\"taguru_schema\": 1, \"context\": \"a\", \"mode\": \"warn\", \
          \"closed_labels\": false, \"types\": {}, \"relations\": {}}\n\
          {\"taguru_group\": 1, \"name\": \"g\", \"contexts\": [\"a\"]}\n",
@@ -403,16 +406,16 @@ fn a_mid_stream_refusal_reports_the_prefix_and_what_was_never_sent() {
     assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
     assert!(stderr.contains("refused"), "{stderr}");
     assert!(stderr.contains("landed durably"), "{stderr}");
-    // Each unsent KIND is tallied separately — one batch (c), one
+    // Each unsent KIND is tallied separately — two batches (c, e), one
     // schema record, one group record sat behind the refusal, so each
-    // line must carry ITS OWN count of exactly one, never another
-    // kind's (issue #728: groups used to be missing from this tally).
+    // line must carry ITS OWN count, never another kind's (issue #728:
+    // groups used to be missing from this tally).
     // …and each names the first never-sent unit of its kind by file
     // and source, and the refused chunk says what it carried (#863).
     let path = file.display();
     for line in [
         format!(
-            "1 batch(es) after this chunk were never sent, from {path}: context 'c' source 'c.md'"
+            "2 batch(es) after this chunk were never sent, from {path}: context 'c' source 'c.md'"
         ),
         format!(
             "1 schema record(s) after this chunk were never sent, from {path}: context 'a' schema"
