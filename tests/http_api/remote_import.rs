@@ -36,6 +36,190 @@ fn dir_contents(dir: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
 /// content to importing the same file locally — proven by exporting
 /// both afterward and comparing the files, the same round-trip
 /// `remote_export.rs`'s own full-export test uses.
+/// ADR 0038 §3.4 (#883): with `--url`, a refused batch is never
+/// packed — the server ends up with the clean source and nothing of
+/// the leaky one — and the refusal is named the same way as offline.
+#[test]
+fn a_remote_import_never_sends_a_batch_the_sensitive_gate_refused() {
+    let batches = batch_dir("remote-import-refuse-sensitive");
+    let file = batches.join("mixed.jsonl");
+    let mail = "takase@example.com";
+    std::fs::write(
+        &file,
+        format!(
+            "{{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"clean.md\", \"create\": {{\"description\": \"酒蔵\"}}}}\n\
+             {{\"subject\": \"青嶺酒造\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}}\n\
+             {{\"passage\": \"青嶺酒造の杜氏は高瀬。\"}}\n\
+             {{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"leaky.md\"}}\n\
+             {{\"subject\": \"高瀬\", \"label\": \"連絡先\", \"object\": \"{mail}\", \"weight\": 1.0}}\n\
+             {{\"passage\": \"高瀬の連絡先は {mail}。\"}}\n"
+        ),
+    )
+    .expect("fixture must be writable");
+
+    let server = Server::start("remote-import-refuse-sensitive");
+    let (code, stdout, stderr) = run_cli(
+        &[
+            "import",
+            "--url",
+            &server.base,
+            "--refuse-sensitive",
+            file.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains("import: 1 batch(es) applied across 1 context(s)"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("import: 1 batch(es) refused (sensitive)"),
+        "{stdout}"
+    );
+    assert!(
+        stderr.contains("batches[1].associations[0].object: sensitive: email"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("batches[1].passage: sensitive: email (paragraph 0)"),
+        "{stderr}"
+    );
+    assert!(
+        !stdout.contains(mail) && !stderr.contains(mail),
+        "{stdout}\n{stderr}"
+    );
+    let passages = server.ok(
+        "POST",
+        "/contexts/sake/sources/lookup",
+        Some(serde_json::json!({"sources": ["clean.md", "leaky.md"]})),
+    );
+    assert_eq!(
+        passages["passages"]["clean.md"],
+        serde_json::json!("青嶺酒造の杜氏は高瀬。")
+    );
+    assert!(passages["passages"]["leaky.md"].is_null(), "{passages}");
+
+    // A dry run judges the same and exits 1; without the gate the same
+    // dry run says nothing about refusals and exits 0.
+    let (code, stdout, stderr) = run_cli(
+        &[
+            "import",
+            "--url",
+            &server.base,
+            "--dry-run",
+            "--refuse-sensitive",
+            file.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains("dry run: 1 batch(es) valid, nothing applied"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("import: 1 batch(es) refused (sensitive)"),
+        "{stdout}"
+    );
+    let (code, stdout, stderr) = run_cli(
+        &[
+            "import",
+            "--url",
+            &server.base,
+            "--dry-run",
+            file.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        !stdout.contains("refused") && !stderr.contains("sensitive"),
+        "{stdout}\n{stderr}"
+    );
+    // Applied without the gate: both batches land, no refusal line.
+    let (code, stdout, _) = run_cli(
+        &["import", "--url", &server.base, file.to_str().unwrap()],
+        &[],
+    );
+    assert_eq!(code, 0, "{stdout}");
+    assert!(
+        stdout.contains("import: 2 batch(es) applied across 1 context(s)"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("refused"), "{stdout}");
+
+    // `--json` over the wire: the same failed_batches key as offline.
+    let (code, stdout, _) = run_cli(
+        &[
+            "import",
+            "--url",
+            &server.base,
+            "--json",
+            "--refuse-sensitive",
+            file.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(code, 1);
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(report["batches"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        report["failed_batches"][0]["source"],
+        serde_json::json!("leaky.md")
+    );
+    assert!(
+        report["failed_batches"][0]["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("sensitive: batches[1]."),
+        "{report}"
+    );
+    assert!(
+        !stdout.contains(mail) && !stderr.contains(mail),
+        "{stdout}\n{stderr}"
+    );
+
+    // A refused batch and a file that fails validation: nothing is
+    // sent, and the --json document still names the refusal.
+    let broken = batches.join("broken.jsonl");
+    std::fs::write(
+        &broken,
+        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"b.md\"}\nnot json\n",
+    )
+    .expect("fixture must be writable");
+    let (code, stdout, stderr) = run_cli(
+        &[
+            "import",
+            "--url",
+            &server.base,
+            "--json",
+            "--refuse-sensitive",
+            file.to_str().unwrap(),
+            broken.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(
+        report["error"]
+            .as_str()
+            .unwrap()
+            .contains("refused during validation"),
+        "{report}"
+    );
+    assert_eq!(
+        report["failed_batches"][0]["source"],
+        serde_json::json!("leaky.md")
+    );
+    assert!(
+        !stdout.contains(mail) && !stderr.contains(mail),
+        "{stdout}\n{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&batches);
+}
+
 #[test]
 fn a_full_remote_import_matches_the_local_import_of_the_same_stream() {
     let batches = batch_dir("remote-import-full");

@@ -48,6 +48,285 @@ fn an_offline_import_lands_facts_passage_and_aliases_the_server_serves() {
     let _ = std::fs::remove_dir_all(&batches);
 }
 
+/// ADR 0038 §3.4 (#883): `--refuse-sensitive` refuses the batch that
+/// carries a secret — by path and rule, never by content — and the
+/// rest of the file still applies; `--json` names it under
+/// `failed_batches`; a dry run judges the same; without the flag the
+/// same file applies whole.
+#[test]
+fn an_offline_import_refuses_a_sensitive_batch_by_path_and_applies_the_rest() {
+    let batches = batch_dir("import-refuse-sensitive");
+    let file = batches.join("mixed.jsonl");
+    let key = "AKIAIOSFODNN7EXAMPLE";
+    std::fs::write(
+        &file,
+        format!(
+            "{{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"clean.md\", \"create\": {{\"description\": \"酒蔵\"}}}}\n\
+             {{\"subject\": \"青嶺酒造\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}}\n\
+             {{\"passage\": \"青嶺酒造の杜氏は高瀬。\"}}\n\
+             {{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"leaky.md\"}}\n\
+             {{\"subject\": \"高瀬\", \"label\": \"鍵\", \"object\": \"{key}\", \"weight\": 1.0}}\n\
+             {{\"passage\": \"高瀬の鍵。\\n\\n鍵は {key} である。\"}}\n"
+        ),
+    )
+    .unwrap();
+    let data_dir = common::scratch_dir("http-import-refuse-sensitive");
+
+    // Dry run: judged, nothing applied, exit 1.
+    let (code, stdout, stderr) = run_import(
+        &data_dir,
+        &["--dry-run", "--refuse-sensitive", file.to_str().unwrap()],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains("dry run: 1 batch(es) valid, nothing applied"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("import: 1 batch(es) refused (sensitive)"),
+        "{stdout}"
+    );
+    assert!(
+        stderr.contains("batches[1].associations[0].object: sensitive: aws_access_key"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("batches[1].passage: sensitive: aws_access_key (paragraph 1)"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("source 'leaky.md') refused: sensitive content"),
+        "{stderr}"
+    );
+    assert!(
+        !stdout.contains(key) && !stderr.contains(key),
+        "{stdout}\n{stderr}"
+    );
+
+    // The real run: the clean batch lands, the leaky one does not.
+    let (code, stdout, stderr) =
+        run_import(&data_dir, &["--refuse-sensitive", file.to_str().unwrap()]);
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("source 'clean.md'"), "{stdout}");
+    assert!(
+        stdout.contains("import: 1 of 1 batch(es) applied across 1 context(s)"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("import: 1 batch(es) refused (sensitive)"),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains(key) && !stderr.contains(key),
+        "{stdout}\n{stderr}"
+    );
+
+    // `--json`: the refusal under failed_batches, path-first, no content.
+    let (code, stdout, _) = run_import(
+        &data_dir,
+        &["--json", "--refuse-sensitive", file.to_str().unwrap()],
+    );
+    assert_eq!(code, 1);
+    let report: Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(report["batches"].as_array().unwrap().len(), 1);
+    assert_eq!(report["failed_batches"][0]["source"], json!("leaky.md"));
+    let error = report["failed_batches"][0]["error"].as_str().unwrap();
+    assert!(error.starts_with("sensitive: batches[1]."), "{error}");
+    assert!(!error.contains(key), "{error}");
+
+    let server = Server::start_on("import-refuse-sensitive", data_dir.clone());
+    let passages = server.ok(
+        "POST",
+        "/contexts/sake/sources/lookup",
+        Some(json!({"sources": ["clean.md", "leaky.md"]})),
+    );
+    assert_eq!(
+        passages["passages"]["clean.md"],
+        json!("青嶺酒造の杜氏は高瀬。")
+    );
+    assert!(passages["passages"]["leaky.md"].is_null(), "{passages}");
+    // Nothing of the refused batch — not its association either.
+    let leaky = server.ok(
+        "POST",
+        "/contexts/sake/query",
+        Some(json!({"subject": "高瀬", "label": "鍵"})),
+    );
+    assert_eq!(
+        leaky["matches"].as_array().map(Vec::len),
+        Some(0),
+        "{leaky}"
+    );
+    drop(server);
+
+    // A refused batch and a file that fails validation, under --json:
+    // the run ends early, the document still names both.
+    let broken = batches.join("broken.jsonl");
+    std::fs::write(
+        &broken,
+        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"b.md\"}\nnot json\n",
+    )
+    .unwrap();
+    let (code, stdout, _) = run_import(
+        &data_dir,
+        &[
+            "--json",
+            "--refuse-sensitive",
+            file.to_str().unwrap(),
+            broken.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 1);
+    let report: Value = serde_json::from_str(&stdout).unwrap();
+    assert!(
+        report["error"]
+            .as_str()
+            .unwrap()
+            .contains("refused during validation"),
+        "{report}"
+    );
+    assert_eq!(report["failed_batches"][0]["source"], json!("leaky.md"));
+    assert!(!stdout.contains(key), "{stdout}");
+
+    // Without the flag, the same file applies whole — import judges
+    // nothing it was not asked to — and the leaky batch is served.
+    let data_dir = common::scratch_dir("http-import-refuse-sensitive-off");
+    let (code, stdout, stderr) = run_import(&data_dir, &[file.to_str().unwrap()]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains("import: 2 of 2 batch(es) applied"),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("refused") && !stderr.contains("sensitive"),
+        "{stdout}\n{stderr}"
+    );
+    let (code, stdout, _) = run_import(&data_dir, &["--dry-run", file.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stdout}");
+    assert!(!stdout.contains("refused"), "{stdout}");
+    let server = Server::start_on("import-refuse-sensitive-off", data_dir);
+    let passages = server.ok(
+        "POST",
+        "/contexts/sake/sources/lookup",
+        Some(json!({"sources": ["leaky.md"]})),
+    );
+    assert!(
+        passages["passages"]["leaky.md"]
+            .as_str()
+            .unwrap()
+            .contains(key),
+        "{passages}"
+    );
+    let leaky = server.ok(
+        "POST",
+        "/contexts/sake/query",
+        Some(json!({"subject": "高瀬", "label": "鍵"})),
+    );
+    assert_eq!(leaky["matches"][0]["object"], json!(key), "{leaky}");
+    drop(server);
+    let _ = std::fs::remove_dir_all(&batches);
+}
+
+/// The offline exit code is 1 for EACH failure kind on its own — a
+/// schema record for a context that does not exist, a group naming a
+/// member that does not exist, an embedding refresh that cannot reach
+/// its provider — with the batches themselves applied and reported.
+#[test]
+fn an_offline_import_exits_one_for_each_failure_kind_alone() {
+    let batches = batch_dir("import-exit-code-per-failure");
+    let batch = "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"a.md\", \"create\": {\"description\": \"酒蔵\"}}\n\
+                 {\"subject\": \"青嶺酒造\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}\n";
+    // A schema record for a context no batch creates.
+    let schema = batches.join("schema.jsonl");
+    std::fs::write(
+        &schema,
+        format!(
+            "{batch}{{\"taguru_schema\": 1, \"context\": \"nowhere\", \"mode\": \"warn\", \
+             \"closed_labels\": false, \"types\": {{}}, \"relations\": {{}}}}\n"
+        ),
+    )
+    .unwrap();
+    let data_dir = common::scratch_dir("http-import-exit-schema");
+    let (code, stdout, stderr) = run_import(&data_dir, &[schema.to_str().unwrap()]);
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains("import: 1 of 1 batch(es) applied"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("import: 0 of 1 schema record(s) installed"),
+        "{stdout}"
+    );
+    assert!(stderr.contains("context 'nowhere'"), "{stderr}");
+
+    // A group naming a member that does not exist.
+    let group = batches.join("group.jsonl");
+    std::fs::write(
+        &group,
+        format!("{batch}{{\"taguru_group\": 1, \"name\": \"g\", \"contexts\": [\"nowhere\"]}}\n"),
+    )
+    .unwrap();
+    let data_dir = common::scratch_dir("http-import-exit-group");
+    let (code, stdout, stderr) = run_import(&data_dir, &[group.to_str().unwrap()]);
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains("import: 1 of 1 batch(es) applied"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("import: 0 of 1 group record(s) restored"),
+        "{stdout}"
+    );
+
+    // A batch refused at the apply stage — the second re-points an
+    // alias the first registered — with the first applied: exit 1.
+    let conflict = batches.join("conflict.jsonl");
+    std::fs::write(
+        &conflict,
+        "{\"taguru_batch\": 1, \"context\": \"c\", \"source\": \"s1\", \"create\": {}}\n\
+         {\"subject\": \"X\", \"label\": \"l\", \"object\": \"Z\", \"weight\": 1.0}\n\
+         {\"alias\": \"A\", \"canonical\": \"X\", \"kind\": \"concept\"}\n\
+         {\"taguru_batch\": 1, \"context\": \"c\", \"source\": \"s2\"}\n\
+         {\"subject\": \"Y\", \"label\": \"l\", \"object\": \"Z\", \"weight\": 1.0}\n\
+         {\"alias\": \"A\", \"canonical\": \"Y\", \"kind\": \"concept\"}\n",
+    )
+    .unwrap();
+    let data_dir = common::scratch_dir("http-import-exit-apply");
+    let (code, stdout, stderr) = run_import(&data_dir, &[conflict.to_str().unwrap()]);
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains("import: 1 of 2 batch(es) applied"),
+        "{stdout}"
+    );
+    assert!(stderr.contains("alias 'A'"), "{stderr}");
+
+    // An embedding provider nothing listens on, with a passage to
+    // embed: the graph and the passage land, the refresh fails, and
+    // that alone is exit 1.
+    let plain = batches.join("plain.jsonl");
+    std::fs::write(
+        &plain,
+        format!("{batch}{{\"passage\": \"青嶺酒造の杜氏は高瀬。\"}}\n"),
+    )
+    .unwrap();
+    let data_dir = common::scratch_dir("http-import-exit-embed");
+    let (code, stdout, stderr) = run_cli(
+        &["import", plain.to_str().unwrap()],
+        &[
+            ("TAGURU_DATA_DIR", &data_dir.to_string_lossy()),
+            ("TAGURU_EMBED_URL", "http://127.0.0.1:9/v1/embeddings"),
+            ("TAGURU_EMBED_MODEL", "dead-mock"),
+            ("TAGURU_EMBED_PASSAGES", "1"),
+        ],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains("import: 1 of 1 batch(es) applied"),
+        "{stdout}"
+    );
+    assert!(stderr.contains("embedding refresh failed"), "{stderr}");
+    let _ = std::fs::remove_dir_all(&batches);
+}
+
 /// `import --json` (issue #371) must answer the same shape `POST
 /// /import` does for the identical batch against an equally-empty
 /// starting state — one schema, not two that could drift.

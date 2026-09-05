@@ -10,7 +10,13 @@ use super::*;
 /// from `TAGURU_WAL_MAX_BYTES` (past which writes are refused).
 const FLUSH_EVERY_OPS: usize = 100_000;
 
-pub(super) fn run_local(files: &[PathBuf], dry_run: bool, no_embed: bool, as_json: bool) -> i32 {
+pub(super) fn run_local(
+    files: &[PathBuf],
+    dry_run: bool,
+    no_embed: bool,
+    as_json: bool,
+    sensitive_rules: Option<&crate::sensitive::RuleSet>,
+) -> i32 {
     // Pass 1 — every file parses, or nothing applies. Apply-stage
     // refusals can strand a half-written source; a malformed line is
     // knowable up front, so it must never cost a write. A file may
@@ -20,6 +26,10 @@ pub(super) fn run_local(files: &[PathBuf], dry_run: bool, no_embed: bool, as_jso
     let mut schemas: Vec<(&PathBuf, String, schema::InstalledSchema)> = Vec::new();
     let mut groups: Vec<(&PathBuf, String, GroupRecord)> = Vec::new();
     let mut broken = 0;
+    // ADR 0038 §3.4: batches the gate refused — named on stderr as
+    // they are met, skipped (the rest of their file still applies),
+    // and reported under `failed_batches` with the exit code.
+    let mut refused: Vec<FailedBatch> = Vec::new();
     // Keyed claims → the file that made them (#863): a later file's
     // duplicate is refused naming the earlier file, not just "an
     // earlier file".
@@ -37,7 +47,7 @@ pub(super) fn run_local(files: &[PathBuf], dry_run: bool, no_embed: bool, as_jso
         let mut file_broken = false;
         match parsed {
             Ok(stream) => {
-                for batch in stream.batches {
+                for (index, batch) in stream.batches.into_iter().enumerate() {
                     if let Some(earlier) =
                         owners.get(&(batch.context.clone(), batch.source.clone()))
                     {
@@ -50,6 +60,25 @@ pub(super) fn run_local(files: &[PathBuf], dry_run: bool, no_embed: bool, as_jso
                         continue;
                     }
                     owners.insert((batch.context.clone(), batch.source.clone()), path.clone());
+                    if let Some(rules) = sensitive_rules {
+                        let hits = sensitive_hits(&batch, index, rules);
+                        if !hits.is_empty() {
+                            for hit in &hits {
+                                eprintln!("taguru: import: {}: {}", path.display(), hit.text());
+                            }
+                            eprintln!(
+                                "taguru: import: {}: {}",
+                                path.display(),
+                                refused_batch_message(index, &batch)
+                            );
+                            refused.push(FailedBatch {
+                                context: batch.context.clone(),
+                                source: batch.source.clone(),
+                                error: refused_batch_error(&hits),
+                            });
+                            continue;
+                        }
+                    }
                     batches.push((path, batch));
                 }
                 for (context, installed) in stream.schemas {
@@ -95,12 +124,15 @@ pub(super) fn run_local(files: &[PathBuf], dry_run: bool, no_embed: bool, as_jso
         );
         eprintln!("taguru: import: {message}");
         if as_json {
+            // The gate's refusals were judged before this failure and
+            // stay in the document — a run that ends early still says
+            // everything it learned (never silence).
             print_import_json(
                 dry_run,
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
-                Vec::new(),
+                refused,
                 Some(message),
             );
         }
@@ -122,8 +154,9 @@ pub(super) fn run_local(files: &[PathBuf], dry_run: bool, no_embed: bool, as_jso
                 .iter()
                 .map(|(_, batch)| dry_run_outcome_of(batch))
                 .collect();
-            print_import_json(true, batches, Vec::new(), Vec::new(), Vec::new(), None);
-            return 0;
+            let exit = if refused.is_empty() { 0 } else { 1 };
+            print_import_json(true, batches, Vec::new(), Vec::new(), refused, None);
+            return exit;
         }
         for (path, batch) in &batches {
             println!("{}: {}", path.display(), batch.describe());
@@ -151,7 +184,11 @@ pub(super) fn run_local(files: &[PathBuf], dry_run: bool, no_embed: bool, as_jso
         }
         summary.push_str(" valid, nothing applied");
         println!("{summary}");
-        return 0;
+        if refused.is_empty() {
+            return 0;
+        }
+        println!("import: {} batch(es) refused (sensitive)", refused.len());
+        return 1;
     }
 
     // Registry warnings (WAL replay notes, load errors) must reach the
@@ -188,7 +225,7 @@ pub(super) fn run_local(files: &[PathBuf], dry_run: bool, no_embed: bool, as_jso
                     Vec::new(),
                     Vec::new(),
                     Vec::new(),
-                    Vec::new(),
+                    refused,
                     Some(error.to_string()),
                 );
             }
@@ -201,7 +238,8 @@ pub(super) fn run_local(files: &[PathBuf], dry_run: bool, no_embed: bool, as_jso
     let mut touched: BTreeSet<String> = BTreeSet::new();
     let mut ops_since_flush = 0usize;
     let mut json_batches: Vec<crate::api::ImportOutcome> = Vec::new();
-    let mut failed_batches: Vec<FailedBatch> = Vec::new();
+    let refused_count = refused.len();
+    let mut failed_batches: Vec<FailedBatch> = refused;
     for (path, batch) in &batches {
         // Unbounded on purpose: the offline CLI runs one command to
         // completion with no HTTP budget to honor.
@@ -405,6 +443,9 @@ pub(super) fn run_local(files: &[PathBuf], dry_run: bool, no_embed: bool, as_jso
             batches.len(),
             touched.len()
         );
+        if refused_count > 0 {
+            println!("import: {refused_count} batch(es) refused (sensitive)");
+        }
         if !schemas.is_empty() {
             println!(
                 "import: {} of {} schema record(s) installed",
@@ -419,7 +460,12 @@ pub(super) fn run_local(files: &[PathBuf], dry_run: bool, no_embed: bool, as_jso
             );
         }
     }
-    if failures > 0 || embed_failures > 0 || schema_failures > 0 || group_failures > 0 {
+    if failures > 0
+        || embed_failures > 0
+        || schema_failures > 0
+        || group_failures > 0
+        || refused_count > 0
+    {
         1
     } else {
         0
@@ -459,11 +505,13 @@ fn dry_run_outcome_of(batch: &Batch) -> crate::api::ImportOutcome {
 
 /// One local batch [`apply_batch`] refused — `--json`'s only view of a
 /// per-batch failure, since there is no `Applied` to build an
-/// [`crate::api::ImportOutcome`] from. Local-only: a remote refusal
-/// fails its whole chunk (the server's own contract, `src/api/
-/// import.rs`), not one batch at a time, so `run_remote` has no
-/// per-batch failure to name this way — only the whole-chunk `error`
-/// text `print_import_json_values` carries.
+/// [`crate::api::ImportOutcome`] from. A remote refusal fails its
+/// whole chunk (the server's own contract, `src/api/import.rs`), not
+/// one batch at a time, so `run_remote` names no apply failure this
+/// way — only the whole-chunk `error` text `print_import_json_values`
+/// carries; the one per-batch failure both paths share is
+/// `--refuse-sensitive`'s (ADR 0038 §3.4), judged before anything is
+/// applied or sent.
 #[derive(serde::Serialize)]
 struct FailedBatch {
     context: String,

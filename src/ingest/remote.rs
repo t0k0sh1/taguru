@@ -228,25 +228,24 @@ pub(super) fn pack_chunks(units: Vec<Unit>, budget: usize) -> VecDeque<Chunk> {
 /// The hard failure for a single batch (or group record) that alone
 /// exceeds the byte budget — reported and refused before the network
 /// is ever touched, naming the two real fixes (ADR 0002 §9).
-fn oversized_unit_error(label: &str, size: usize, budget: usize) -> i32 {
-    eprintln!(
-        "taguru: import: {label} alone is {size} byte(s), over the {budget}-byte chunk \
+pub(super) fn oversized_unit_message(label: &str, size: usize, budget: usize) -> String {
+    format!(
+        "{label} alone is {size} byte(s), over the {budget}-byte chunk \
          budget — splitting a batch's own record set client-side would break the \
          retract-then-apply contract's atomicity boundary, so this cannot be packed \
          automatically; reduce what this source's batch carries (split the source \
          upstream of import) — raising the server's TAGURU_MAX_BODY_BYTES alone will \
          not help, since this budget is fixed client-side regardless of the server's cap"
-    );
-    1
+    )
 }
 
 /// The hard failure for a single batch (or group record) that already
 /// fit under this client's own packing budget — it passed the pre-send
-/// check [`oversized_unit_error`] guards — but the SERVER still
+/// check [`oversized_unit_message`] guards — but the SERVER still
 /// answered 413 for it. Unlike that client-side refusal, this one IS
 /// the server's own body-size cap, so raising `TAGURU_MAX_BODY_BYTES`
 /// server-side is a real fix here, not the dead end
-/// [`oversized_unit_error`]'s wording correctly rules out for its own
+/// [`oversized_unit_message`]'s wording correctly rules out for its own
 /// (client-fixed-budget) case.
 fn server_refused_single_unit_error(label: &str, size: usize) -> i32 {
     eprintln!(
@@ -315,7 +314,13 @@ fn summarize_chunk_outcomes(outcomes: &[Value]) -> String {
 /// and resending — never splitting a batch's own record set, never
 /// crossing into the next batch (ADR 0002 §9). `--dry-run` sends every
 /// chunk as `?dry_run=true` instead of touching anything.
-pub(super) fn run_remote(base: &str, files: &[PathBuf], dry_run: bool, as_json: bool) -> i32 {
+pub(super) fn run_remote(
+    base: &str,
+    files: &[PathBuf],
+    dry_run: bool,
+    as_json: bool,
+    sensitive_rules: Option<&crate::sensitive::RuleSet>,
+) -> i32 {
     // ADR 0002 §7: caught before any request leaves the process.
     if let Err(message) = crate::remote::reject_userinfo(base) {
         return crate::config::subcommand_usage_error("import", &message);
@@ -346,6 +351,10 @@ pub(super) fn run_remote(base: &str, files: &[PathBuf], dry_run: bool, as_json: 
     let mut schema_count = 0usize;
     let mut group_count = 0usize;
     let mut broken = 0usize;
+    // ADR 0038 §3.4: batches the gate refused — named on stderr as
+    // they are met and never packed, so nothing of them leaves the
+    // process; reported under `failed_batches` with the exit code.
+    let mut refused: Vec<Value> = Vec::new();
     // Keyed claims → the file that made them (#863): a later file's
     // duplicate is refused naming the earlier file, not just "an
     // earlier file".
@@ -397,7 +406,7 @@ pub(super) fn run_remote(base: &str, files: &[PathBuf], dry_run: bool, as_json: 
                     broken += 1;
                     continue;
                 }
-                for (batch, range) in stream.batches.iter().zip(ranges) {
+                for (index, (batch, range)) in stream.batches.iter().zip(ranges).enumerate() {
                     if let Some(earlier) =
                         owners.get(&(batch.context.clone(), batch.source.clone()))
                     {
@@ -410,6 +419,25 @@ pub(super) fn run_remote(base: &str, files: &[PathBuf], dry_run: bool, as_json: 
                         continue;
                     }
                     owners.insert((batch.context.clone(), batch.source.clone()), path.clone());
+                    if let Some(rules) = sensitive_rules {
+                        let hits = sensitive_hits(batch, index, rules);
+                        if !hits.is_empty() {
+                            for hit in &hits {
+                                eprintln!("taguru: import: {}: {}", path.display(), hit.text());
+                            }
+                            eprintln!(
+                                "taguru: import: {}: {}",
+                                path.display(),
+                                refused_batch_message(index, batch)
+                            );
+                            refused.push(serde_json::json!({
+                                "context": batch.context,
+                                "source": batch.source,
+                                "error": refused_batch_error(&hits),
+                            }));
+                            continue;
+                        }
+                    }
                     let text = String::from_utf8(bytes[range].to_vec())
                         .expect("parse_stream already proved this range is UTF-8");
                     units.push(Unit {
@@ -477,7 +505,16 @@ pub(super) fn run_remote(base: &str, files: &[PathBuf], dry_run: bool, as_json: 
         );
         eprintln!("taguru: import: {message}");
         if as_json {
-            print_import_json_values(dry_run, Vec::new(), Vec::new(), Vec::new(), Some(message));
+            // The gate's refusals were judged before this failure and
+            // stay in the document (never silence).
+            print_import_json_values(
+                dry_run,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                refused,
+                Some(message),
+            );
         }
         return 1;
     }
@@ -498,11 +535,23 @@ pub(super) fn run_remote(base: &str, files: &[PathBuf], dry_run: bool, as_json: 
         .iter()
         .find(|unit| unit.len() > REMOTE_IMPORT_BUDGET_BYTES)
     {
-        return oversized_unit_error(
+        let message = oversized_unit_message(
             &oversized.label,
             oversized.len(),
             REMOTE_IMPORT_BUDGET_BYTES,
         );
+        eprintln!("taguru: import: {message}");
+        if as_json {
+            print_import_json_values(
+                dry_run,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                refused,
+                Some(message),
+            );
+        }
+        return 1;
     }
 
     let api = Api::new(base.to_string());
@@ -519,7 +568,14 @@ pub(super) fn run_remote(base: &str, files: &[PathBuf], dry_run: bool, as_json: 
     {
         eprintln!("{message}");
         if as_json {
-            print_import_json_values(dry_run, Vec::new(), Vec::new(), Vec::new(), Some(message));
+            print_import_json_values(
+                dry_run,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                refused,
+                Some(message),
+            );
         }
         return 1;
     }
@@ -641,6 +697,7 @@ pub(super) fn run_remote(base: &str, files: &[PathBuf], dry_run: bool, as_json: 
                             json_batches,
                             json_schemas,
                             json_groups,
+                            refused.clone(),
                             Some(message),
                         );
                     }
@@ -704,6 +761,7 @@ pub(super) fn run_remote(base: &str, files: &[PathBuf], dry_run: bool, as_json: 
                         json_batches,
                         json_schemas,
                         json_groups,
+                        refused.clone(),
                         Some(message),
                     );
                 }
@@ -756,6 +814,7 @@ pub(super) fn run_remote(base: &str, files: &[PathBuf], dry_run: bool, as_json: 
                         json_batches,
                         json_schemas,
                         json_groups,
+                        refused.clone(),
                         Some(message),
                     );
                 }
@@ -764,8 +823,16 @@ pub(super) fn run_remote(base: &str, files: &[PathBuf], dry_run: bool, as_json: 
         }
     }
 
+    let refused_count = refused.len();
     if as_json {
-        print_import_json_values(dry_run, json_batches, json_schemas, json_groups, None);
+        print_import_json_values(
+            dry_run,
+            json_batches,
+            json_schemas,
+            json_groups,
+            refused,
+            None,
+        );
     } else if dry_run {
         let mut summary = format!("dry run: {batch_count} batch(es)");
         if schema_count > 0 {
@@ -776,6 +843,9 @@ pub(super) fn run_remote(base: &str, files: &[PathBuf], dry_run: bool, as_json: 
         }
         summary.push_str(" valid, nothing applied");
         println!("{summary}");
+        if refused_count > 0 {
+            println!("import: {refused_count} batch(es) refused (sensitive)");
+        }
     } else {
         println!(
             "import: {batches_landed} batch(es) applied across {} context(s) in {total} \
@@ -790,8 +860,11 @@ pub(super) fn run_remote(base: &str, files: &[PathBuf], dry_run: bool, as_json: 
         if group_count > 0 {
             println!("import: {group_records_landed} of {group_count} group record(s) restored");
         }
+        if refused_count > 0 {
+            println!("import: {refused_count} batch(es) refused (sensitive)");
+        }
     }
-    0
+    if refused_count > 0 { 1 } else { 0 }
 }
 
 /// [`super::local`]'s `print_import_json` remote twin: the server
@@ -812,12 +885,19 @@ fn print_import_json_values(
     batches: Vec<Value>,
     schemas: Vec<Value>,
     groups: Vec<Value>,
+    failed_batches: Vec<Value>,
     error: Option<String>,
 ) {
     let mut report = serde_json::Map::new();
     report.insert("dry_run".to_string(), Value::Bool(dry_run));
     if let Some(message) = error {
         report.insert("error".to_string(), Value::String(message));
+    }
+    // `--refuse-sensitive`'s refusals (ADR 0038 §3.4), the one
+    // per-batch failure the remote path has — the same key and shape
+    // the local path's `FailedBatch` prints, omitted when empty.
+    if !failed_batches.is_empty() {
+        report.insert("failed_batches".to_string(), Value::Array(failed_batches));
     }
     report.insert("batches".to_string(), Value::Array(batches));
     // Matches ImportStreamOutcome's own `skip_serializing_if` on
