@@ -487,7 +487,14 @@ Contract and discipline: docs/extract.html.
 /// `pub(crate)` so `benchmark`'s manifest can record the same prompt
 /// version a cell actually ran under (ADR 0003 §9.1) without
 /// re-declaring it.
-pub(crate) const PROMPT_VERSION: u32 = 4;
+/// 5 (#812): the citation rule names the paragraph to cite — the one
+/// whose sentences state the fact, never a heading-only paragraph.
+/// Under 4's wording a model represented a section by its heading's
+/// number (53% of citations in the paper corpus pointed at
+/// `## Abstract` with the fact one paragraph down), so locators made
+/// under it are one paragraph off and must not be silently reused.
+///
+pub(crate) const PROMPT_VERSION: u32 = 5;
 
 /// Document bytes per model call. Chunks split at paragraph
 /// boundaries; facts spanning a boundary can be missed, so the cap
