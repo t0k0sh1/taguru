@@ -21,9 +21,12 @@
 //! The strict rate is a within-type comparison, not a cross-type
 //! one (#806): a document whose subject appears only in its title
 //! while every fact sits in a table row (a specsheet) cannot satisfy
-//! "subject AND object in the cited paragraph" for any association,
-//! however faithful — the cited row never repeats the title's name.
-//! Prose measured strict 0.68 where the same model and run measured
+//! "subject AND object in the cited paragraph" for an association
+//! that cites its row, however faithful — the row never repeats the
+//! title's name. (An association that cites nothing, or cites an
+//! out-of-range paragraph, is judged against the whole passage and
+//! passes; the specsheet extractions cited their rows.) Prose
+//! measured strict 0.68 where the same model and run measured
 //! 0.00–0.06 on specsheets with locator validity 1.0. A near-zero
 //! strict rate on a table-shaped document is the structure showing
 //! through; the USAGE text and docs/extract.html say so.
@@ -76,10 +79,11 @@ reported as skipped.
 Read `strict` within one document type, not across types: a document
 whose subject appears only in the title while its facts sit in table
 rows (a specsheet) cannot satisfy \"subject AND object in the cited
-paragraph\" however faithful the extraction, so a near-zero strict
-rate there reflects the document's shape, not hallucination. Compare
-runs of the same type; let locator validity and `with_aliases` carry
-the cross-type view.
+paragraph\" for an association that cites its row, however faithful
+the extraction (only an uncited association falls back to the whole
+passage), so a near-zero strict rate there reflects the document's
+shape, not hallucination. Compare runs of the same type; let locator
+validity and `with_aliases` carry the cross-type view.
 ";
 
 pub(crate) fn run(args: &[String]) -> i32 {

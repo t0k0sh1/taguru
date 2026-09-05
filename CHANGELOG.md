@@ -39,8 +39,8 @@ Entries that change an on-disk format or a response shape say so.
   read the strict rate (#806) — within one document type, never
   across types. A document whose subject appears only in the title
   while its facts sit in table rows (a specsheet) cannot satisfy
-  "subject AND object in the cited paragraph" for any association,
-  however faithful, so its near-zero strict rate is the document's
+  "subject AND object in the cited paragraph" for an association that
+  cites its row, however faithful, so its near-zero strict rate is the document's
   shape showing through, not a hallucination floor; locator validity
   and `with_aliases` carry the cross-type comparison. No output or
   format change.

@@ -1193,8 +1193,10 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       paragraph (else the whole passage)" — exactly what the implementation checks. A document
       whose subject lives only in the title and whose facts live in table rows (a product
       specsheet: the product name heads the document, every row cites itself) cannot satisfy
-      that definition for any association, however faithful, because the cited row never
-      repeats the product name; the same model in the same run measured strict 0.68 on prose
+      that definition for any association that cites its row, however faithful, because the
+      row never repeats the product name — only an association that cites no paragraph (or an
+      out-of-range one) is judged against the whole passage, where both names occur; the same
+      model in the same run measured strict 0.68 on prose
       news and 0.00–0.06 on such specsheets with locator validity at 1.0 and coverage at 0.96.
       A low strict rate on a table-shaped document is that structure showing through, not a
       hallucination floor — compare runs of the same document type against each other, and
