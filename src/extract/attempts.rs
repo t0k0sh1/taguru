@@ -158,6 +158,12 @@ impl AttemptLog {
         });
     }
 
+    /// Where this document's log lives — the failure line's pointer
+    /// (ADR 0037 §3.2).
+    pub(super) fn path(&self) -> &Path {
+        &self.path
+    }
+
     pub(super) fn write_record(&self, record: &impl serde::Serialize) {
         let mut line = match serde_json::to_string(record) {
             Ok(line) => line,

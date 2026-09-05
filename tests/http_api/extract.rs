@@ -10164,7 +10164,8 @@ fn inspect_reads_a_failed_documents_attempts_log_down_to_the_piece_text() {
     let docs = batch_dir("inspect-attempts-docs");
     let doc = docs.join("a.md");
     std::fs::write(&doc, "alpha relates to beta.\n\ngamma relates to delta.").unwrap();
-    let out = batch_dir("inspect-attempts-out");
+    // A space in --out: the pasted command must still open the log.
+    let out = batch_dir("inspect attempts out");
 
     let (url, requests) = stub_chat_server(vec!["not json at all".to_string()]);
     let (code, stdout, stderr) = run_extract(
@@ -10186,6 +10187,31 @@ fn inspect_reads_a_failed_documents_attempts_log_down_to_the_piece_text() {
         .find(|path| path.to_string_lossy().ends_with(".attempts.jsonl"))
         .expect("the failed document keeps its attempts log");
     let log_arg = log.to_str().unwrap();
+
+    // ADR 0037 §3.1/3.2: the failure line names the piece — id,
+    // paragraphs, bytes — after the chunk clause, and ends by pointing
+    // at the attempts log with the `inspect` command that opens it.
+    let failure = stderr
+        .lines()
+        .find(|line| line.contains("the model would not produce the JSON object"))
+        .expect("the document failure line");
+    assert!(failure.contains("chunk 1/1: piece "), "{failure}");
+    assert!(
+        failure.contains(" (paragraphs 0–1, 55 B): the model would not produce"),
+        "{failure}"
+    );
+    let named = failure
+        .split_once("piece ")
+        .and_then(|(_, rest)| rest.split_once(' '))
+        .map(|(id, _)| id.to_string())
+        .unwrap();
+    assert_eq!(named.len(), 12, "{failure}");
+    assert!(
+        failure.ends_with(&format!(
+            " — records: {log_arg} (taguru inspect '{log_arg}' --piece {named})"
+        )),
+        "{failure}"
+    );
 
     // The unfiltered view: one row, located by chunk, piece, and the
     // paragraphs the piece spans, and a pointer at the piece to open.
@@ -10209,6 +10235,14 @@ fn inspect_reads_a_failed_documents_attempts_log_down_to_the_piece_text() {
         .map(|(_, id)| id.to_string())
         .expect("the footer names the piece to open");
     assert_eq!(pointer.len(), 12, "{text}");
+    assert!(
+        text.ends_with(&format!("taguru inspect '{log_arg}' --piece {pointer}\n")),
+        "{text}"
+    );
+    assert_eq!(
+        pointer, named,
+        "the failure line and the footer name the same piece"
+    );
     assert!(!text.contains("--- piece text"), "{text}");
 
     // By paragraph: the piece text as the model saw it (labels and
@@ -10258,6 +10292,129 @@ fn inspect_reads_a_failed_documents_attempts_log_down_to_the_piece_text() {
     let report: Value = serde_json::from_str(&json).unwrap();
     assert_eq!(report["attempts"][0]["answer"], "not json at all");
     assert_eq!(report["matched"], 1);
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// ADR 0037 §3.4: a checkpoint file that cannot be read, or one
+/// written under other settings, used to fall silently through to
+/// "nothing cached" — a whole document re-billed with no word. Each
+/// now earns its own stderr line; a missing file (the first run)
+/// stays quiet.
+#[test]
+fn extract_says_when_a_checkpoint_is_unreadable_or_from_other_settings() {
+    let docs = batch_dir("extract-ckpt-said-docs");
+    let doc = docs.join("a.md");
+    // Two paragraphs, each past the 512-byte chunk floor, so the
+    // document is two chunks.
+    let paragraph = "alpha relates to beta and this sentence pads the paragraph out well \
+                     past the chunk cap so the two split. "
+        .repeat(6);
+    std::fs::write(
+        &doc,
+        format!("{paragraph}\n\n{paragraph}gamma relates to delta."),
+    )
+    .unwrap();
+    let out = batch_dir("extract-ckpt-said-out");
+    let good = json!({"associations": [
+        {"subject": "alpha", "label": "relates to", "object": "beta", "weight": 1.0}
+    ]})
+    .to_string();
+    let env = |url: &str| -> Vec<(String, String)> {
+        vec![
+            ("TAGURU_EXTRACT_URL".to_string(), url.to_string()),
+            ("TAGURU_EXTRACT_MODEL".to_string(), "stub-model".to_string()),
+            ("TAGURU_EXTRACT_MAX_ATTEMPTS".to_string(), "1".to_string()),
+        ]
+    };
+    let run = |url: &str| {
+        let env = env(url);
+        let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        run_extract(
+            &out,
+            &env,
+            &[
+                "--context",
+                "c",
+                "--chunk-bytes",
+                "512",
+                doc.to_str().unwrap(),
+            ],
+        )
+    };
+
+    // Chunk 1 lands (and is checkpointed); chunk 2 fails the document.
+    let (url, requests) = stub_chat_server(vec![good.clone(), "not json".to_string()]);
+    let (code, stdout, stderr) = run(&url);
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert_eq!(requests.join().unwrap().len(), 2);
+    assert!(
+        stderr.contains("chunk 2/") && stderr.contains(": piece "),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("(1 extracted unit(s) are checkpointed"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("checkpoint at"),
+        "a first run says nothing: {stderr}"
+    );
+    let checkpoint = checkpoint_file_path(&out, doc.to_str().unwrap());
+    assert!(checkpoint.is_file(), "{}", checkpoint.display());
+
+    // Damaged: said, and every unit re-asked (both chunks again).
+    std::fs::write(&checkpoint, "{not json").unwrap();
+    let (url, requests) = stub_chat_server(vec![good.clone(), "not json".to_string()]);
+    let (code, _, stderr) = run(&url);
+    assert_eq!(code, 1, "{stderr}");
+    assert_eq!(requests.join().unwrap().len(), 2, "{stderr}");
+    assert!(
+        stderr.contains(&format!(
+            "taguru: extract: ignoring an unreadable checkpoint at {}: ",
+            checkpoint.display()
+        )) && stderr.contains("— every unit of this document re-extracts"),
+        "{stderr}"
+    );
+
+    // Unreadable for a reason other than "not JSON" — a directory in
+    // the file's place, the one refusal every platform makes the same
+    // way — is said the same way, and never a first-run silence.
+    let saved = std::fs::read(&checkpoint).unwrap();
+    std::fs::remove_file(&checkpoint).unwrap();
+    std::fs::create_dir(&checkpoint).unwrap();
+    let (url, requests) = stub_chat_server(vec![good.clone(), "not json".to_string()]);
+    let (code, _, stderr) = run(&url);
+    assert_eq!(code, 1, "{stderr}");
+    assert_eq!(requests.join().unwrap().len(), 2, "{stderr}");
+    assert!(
+        stderr.contains(&format!(
+            "taguru: extract: ignoring an unreadable checkpoint at {}: ",
+            checkpoint.display()
+        )),
+        "{stderr}"
+    );
+    std::fs::remove_dir_all(&checkpoint).unwrap();
+    std::fs::write(&checkpoint, saved).unwrap();
+
+    // Other settings: said with the unit count, and re-asked.
+    let mut state: Value =
+        serde_json::from_str(&std::fs::read_to_string(&checkpoint).unwrap()).unwrap();
+    assert_eq!(state["units"].as_object().unwrap().len(), 1, "{state}");
+    state["fingerprint"]["model"] = json!("some-other-model");
+    std::fs::write(&checkpoint, state.to_string()).unwrap();
+    let (url, requests) = stub_chat_server(vec![good, "not json".to_string()]);
+    let (code, _, stderr) = run(&url);
+    assert_eq!(code, 1, "{stderr}");
+    assert_eq!(requests.join().unwrap().len(), 2, "{stderr}");
+    assert!(
+        stderr.contains(&format!(
+            "taguru: extract: checkpoint at {} was written under different settings — 1 unit(s) re-extract",
+            checkpoint.display()
+        )),
+        "{stderr}"
+    );
 
     let _ = std::fs::remove_dir_all(&docs);
     let _ = std::fs::remove_dir_all(&out);
