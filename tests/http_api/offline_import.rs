@@ -145,10 +145,50 @@ fn an_offline_import_refuses_a_sensitive_batch_by_path_and_applies_the_rest() {
         json!("青嶺酒造の杜氏は高瀬。")
     );
     assert!(passages["passages"]["leaky.md"].is_null(), "{passages}");
+    // Nothing of the refused batch — not its association either.
+    let leaky = server.ok(
+        "POST",
+        "/contexts/sake/query",
+        Some(json!({"subject": "高瀬", "label": "鍵"})),
+    );
+    assert_eq!(
+        leaky["matches"].as_array().map(Vec::len),
+        Some(0),
+        "{leaky}"
+    );
     drop(server);
 
+    // A refused batch and a file that fails validation, under --json:
+    // the run ends early, the document still names both.
+    let broken = batches.join("broken.jsonl");
+    std::fs::write(
+        &broken,
+        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"b.md\"}\nnot json\n",
+    )
+    .unwrap();
+    let (code, stdout, _) = run_import(
+        &data_dir,
+        &[
+            "--json",
+            "--refuse-sensitive",
+            file.to_str().unwrap(),
+            broken.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 1);
+    let report: Value = serde_json::from_str(&stdout).unwrap();
+    assert!(
+        report["error"]
+            .as_str()
+            .unwrap()
+            .contains("refused during validation"),
+        "{report}"
+    );
+    assert_eq!(report["failed_batches"][0]["source"], json!("leaky.md"));
+    assert!(!stdout.contains(key), "{stdout}");
+
     // Without the flag, the same file applies whole — import judges
-    // nothing it was not asked to.
+    // nothing it was not asked to — and the leaky batch is served.
     let data_dir = common::scratch_dir("http-import-refuse-sensitive-off");
     let (code, stdout, stderr) = run_import(&data_dir, &[file.to_str().unwrap()]);
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
@@ -163,6 +203,26 @@ fn an_offline_import_refuses_a_sensitive_batch_by_path_and_applies_the_rest() {
     let (code, stdout, _) = run_import(&data_dir, &["--dry-run", file.to_str().unwrap()]);
     assert_eq!(code, 0, "{stdout}");
     assert!(!stdout.contains("refused"), "{stdout}");
+    let server = Server::start_on("import-refuse-sensitive-off", data_dir);
+    let passages = server.ok(
+        "POST",
+        "/contexts/sake/sources/lookup",
+        Some(json!({"sources": ["leaky.md"]})),
+    );
+    assert!(
+        passages["passages"]["leaky.md"]
+            .as_str()
+            .unwrap()
+            .contains(key),
+        "{passages}"
+    );
+    let leaky = server.ok(
+        "POST",
+        "/contexts/sake/query",
+        Some(json!({"subject": "高瀬", "label": "鍵"})),
+    );
+    assert_eq!(leaky["matches"][0]["object"], json!(key), "{leaky}");
+    drop(server);
     let _ = std::fs::remove_dir_all(&batches);
 }
 

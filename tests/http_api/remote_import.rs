@@ -175,6 +175,48 @@ fn a_remote_import_never_sends_a_batch_the_sensitive_gate_refused() {
             .starts_with("sensitive: batches[1]."),
         "{report}"
     );
+    assert!(
+        !stdout.contains(mail) && !stderr.contains(mail),
+        "{stdout}\n{stderr}"
+    );
+
+    // A refused batch and a file that fails validation: nothing is
+    // sent, and the --json document still names the refusal.
+    let broken = batches.join("broken.jsonl");
+    std::fs::write(
+        &broken,
+        "{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"b.md\"}\nnot json\n",
+    )
+    .expect("fixture must be writable");
+    let (code, stdout, stderr) = run_cli(
+        &[
+            "import",
+            "--url",
+            &server.base,
+            "--json",
+            "--refuse-sensitive",
+            file.to_str().unwrap(),
+            broken.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(
+        report["error"]
+            .as_str()
+            .unwrap()
+            .contains("refused during validation"),
+        "{report}"
+    );
+    assert_eq!(
+        report["failed_batches"][0]["source"],
+        serde_json::json!("leaky.md")
+    );
+    assert!(
+        !stdout.contains(mail) && !stderr.contains(mail),
+        "{stdout}\n{stderr}"
+    );
     let _ = std::fs::remove_dir_all(&batches);
 }
 

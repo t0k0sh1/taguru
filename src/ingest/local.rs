@@ -124,12 +124,15 @@ pub(super) fn run_local(
         );
         eprintln!("taguru: import: {message}");
         if as_json {
+            // The gate's refusals were judged before this failure and
+            // stay in the document — a run that ends early still says
+            // everything it learned (never silence).
             print_import_json(
                 dry_run,
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
-                Vec::new(),
+                refused,
                 Some(message),
             );
         }
@@ -222,7 +225,7 @@ pub(super) fn run_local(
                     Vec::new(),
                     Vec::new(),
                     Vec::new(),
-                    Vec::new(),
+                    refused,
                     Some(error.to_string()),
                 );
             }

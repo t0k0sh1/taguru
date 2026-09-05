@@ -228,25 +228,24 @@ pub(super) fn pack_chunks(units: Vec<Unit>, budget: usize) -> VecDeque<Chunk> {
 /// The hard failure for a single batch (or group record) that alone
 /// exceeds the byte budget — reported and refused before the network
 /// is ever touched, naming the two real fixes (ADR 0002 §9).
-fn oversized_unit_error(label: &str, size: usize, budget: usize) -> i32 {
-    eprintln!(
-        "taguru: import: {label} alone is {size} byte(s), over the {budget}-byte chunk \
+fn oversized_unit_message(label: &str, size: usize, budget: usize) -> String {
+    format!(
+        "{label} alone is {size} byte(s), over the {budget}-byte chunk \
          budget — splitting a batch's own record set client-side would break the \
          retract-then-apply contract's atomicity boundary, so this cannot be packed \
          automatically; reduce what this source's batch carries (split the source \
          upstream of import) — raising the server's TAGURU_MAX_BODY_BYTES alone will \
          not help, since this budget is fixed client-side regardless of the server's cap"
-    );
-    1
+    )
 }
 
 /// The hard failure for a single batch (or group record) that already
 /// fit under this client's own packing budget — it passed the pre-send
-/// check [`oversized_unit_error`] guards — but the SERVER still
+/// check [`oversized_unit_message`] guards — but the SERVER still
 /// answered 413 for it. Unlike that client-side refusal, this one IS
 /// the server's own body-size cap, so raising `TAGURU_MAX_BODY_BYTES`
 /// server-side is a real fix here, not the dead end
-/// [`oversized_unit_error`]'s wording correctly rules out for its own
+/// [`oversized_unit_message`]'s wording correctly rules out for its own
 /// (client-fixed-budget) case.
 fn server_refused_single_unit_error(label: &str, size: usize) -> i32 {
     eprintln!(
@@ -506,12 +505,14 @@ pub(super) fn run_remote(
         );
         eprintln!("taguru: import: {message}");
         if as_json {
+            // The gate's refusals were judged before this failure and
+            // stay in the document (never silence).
             print_import_json_values(
                 dry_run,
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
-                Vec::new(),
+                refused,
                 Some(message),
             );
         }
@@ -534,11 +535,23 @@ pub(super) fn run_remote(
         .iter()
         .find(|unit| unit.len() > REMOTE_IMPORT_BUDGET_BYTES)
     {
-        return oversized_unit_error(
+        let message = oversized_unit_message(
             &oversized.label,
             oversized.len(),
             REMOTE_IMPORT_BUDGET_BYTES,
         );
+        eprintln!("taguru: import: {message}");
+        if as_json {
+            print_import_json_values(
+                dry_run,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                refused,
+                Some(message),
+            );
+        }
+        return 1;
     }
 
     let api = Api::new(base.to_string());
@@ -560,7 +573,7 @@ pub(super) fn run_remote(
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
-                Vec::new(),
+                refused,
                 Some(message),
             );
         }
