@@ -930,6 +930,7 @@ fn base_case(case_id: &str) -> EvalCase {
         expected_labels: Vec::new(),
         expected_associations: Vec::new(),
         expected_citations: Vec::new(),
+        line: 0,
     }
 }
 
@@ -1785,4 +1786,157 @@ fn lane_cross_tab_counts_each_combination_and_skips_undeclared_cases() {
         None,
         "no declaring case, no line"
     );
+}
+
+// ========================= #865: failed cases are named =========================
+
+fn failed_case(case_id: &str) -> CaseBlock {
+    let mut case = searched_case(None, None, None);
+    case.case_id = case_id.to_string();
+    case
+}
+
+/// Every failing lane of every case is named by `case_id` with the
+/// recorded message, in lane order, capped per lane with a remainder
+/// line — the summary's counts made addressable.
+#[test]
+fn failed_case_lines_name_each_lane_by_case_id_and_cap_per_lane() {
+    let mut passage_failed = failed_case("p1");
+    passage_failed.passage = PassageOutcome::Failed {
+        message: "search: 503".to_string(),
+        latency_ms: 1,
+    };
+    let mut probe_errored = failed_case("s1");
+    probe_errored.structural = Some(StructuralBlock {
+        cues: Vec::new(),
+        associations: vec![
+            association_probe(None),
+            association_probe(Some(QueryProbe::Errored {
+                message: "query: timeout".to_string(),
+                latency_ms: 1,
+            })),
+        ],
+    });
+    let mut citation_unresolved = failed_case("c1");
+    let checks = vec![
+        citation_check(
+            "a.md",
+            3,
+            false,
+            CitationOutcome::Unresolved {
+                code: Some("no_paragraph".to_string()),
+                message: "paragraph 3 is past the end".to_string(),
+            },
+        ),
+        citation_check(
+            "b.md",
+            0,
+            false,
+            CitationOutcome::Unresolved {
+                code: None,
+                message: "connection reset".to_string(),
+            },
+        ),
+    ];
+    citation_unresolved.citations = Some(CitationsBlock {
+        recall: score_citation_recall(&checks),
+        validity: score_citation_validity(&checks),
+        checks,
+    });
+    let mut evidence_failed = failed_case("e1");
+    evidence_failed.evidence = Some(EvidenceOutcome::Failed {
+        message: "evidence: 500".to_string(),
+        latency_ms: 1,
+    });
+    let clean = failed_case("ok");
+    let cases = vec![
+        passage_failed,
+        probe_errored,
+        citation_unresolved,
+        evidence_failed,
+        clean,
+    ];
+    assert_eq!(
+        failed_case_lines(&cases, 3),
+        vec![
+            "    passage failed — case 'p1': search: 503".to_string(),
+            "    structural query failed — case 's1': associations[1]: query: timeout".to_string(),
+            "    citation failed — case 'c1': a.md paragraph 3: no_paragraph: paragraph 3 is past the end"
+                .to_string(),
+            "    citation failed — case 'c1': b.md paragraph 0: no code: connection reset"
+                .to_string(),
+            "    evidence failed — case 'e1': evidence: 500".to_string(),
+        ]
+    );
+    // The cap is per lane, with the remainder counted per lane.
+    assert_eq!(
+        failed_case_lines(&cases, 1),
+        vec![
+            "    passage failed — case 'p1': search: 503".to_string(),
+            "    structural query failed — case 's1': associations[1]: query: timeout".to_string(),
+            "    citation failed — case 'c1': a.md paragraph 3: no_paragraph: paragraph 3 is past the end"
+                .to_string(),
+            "    ... and 1 more citation failure(s) (every one is in evaluation.json)".to_string(),
+            "    evidence failed — case 'e1': evidence: 500".to_string(),
+        ]
+    );
+    assert!(failed_case_lines(&[failed_case("ok")], 3).is_empty());
+    assert_eq!(FAILED_CASES_LISTED, 3);
+    assert_eq!(FAILURE_FIELDS.len(), 4);
+    assert_eq!(
+        FAILURE_FIELDS[0],
+        "cases[].passage.message (outcome: failed)"
+    );
+}
+
+/// The limit refusal names the case's line the way the evalset
+/// loader's own errors do (#865), so the caller's `<file>: ` prefix
+/// completes the same address.
+#[test]
+fn validate_limits_names_the_line_of_the_offending_case() {
+    let mut case = base_case("big");
+    case.line = 7;
+    case.options.limit = Some(MAX_SEARCH_LIMIT + 1);
+    let message = validate_limits(&[base_case("fine"), case]).unwrap_err();
+    assert_eq!(
+        message,
+        format!(
+            "line 7: case 'big': options.limit: must be 1..={MAX_SEARCH_LIMIT}, got {}",
+            MAX_SEARCH_LIMIT + 1
+        )
+    );
+    let mut zero = base_case("zero");
+    zero.line = 2;
+    zero.options.limit = Some(0);
+    assert!(
+        validate_limits(&[zero])
+            .unwrap_err()
+            .starts_with("line 2: case 'zero'")
+    );
+    assert!(validate_limits(&[base_case("unset")]).is_ok());
+}
+
+/// The loader records each case's line — the header line the case
+/// object sits on — so a check made after loading can name it.
+#[test]
+fn loaded_cases_carry_their_line() {
+    let dir = std::env::temp_dir().join(format!("taguru-evaluate-lines-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("eval.jsonl");
+    std::fs::write(
+        &path,
+        "{\"taguru_eval\": 1, \"name\": \"n\"}\n\
+         {\"case_id\": \"a\", \"query\": \"q\", \"expected_sources\": []}\n\
+         \n\
+         {\"case_id\": \"b\", \"query\": \"q\", \"expected_sources\": []}\n",
+    )
+    .unwrap();
+    let loaded = evalset::load_eval_file(&path, evalset::Extensions::Interpret).unwrap();
+    let lines: Vec<(String, usize)> = loaded
+        .cases
+        .iter()
+        .map(|case| (case.case_id.clone(), case.line))
+        .collect();
+    assert_eq!(lines, vec![("a".to_string(), 2), ("b".to_string(), 4)]);
+    let _ = std::fs::remove_dir_all(&dir);
 }

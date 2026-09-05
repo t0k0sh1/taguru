@@ -230,6 +230,10 @@ pub(crate) struct EvalCase {
     // `evaluate`'s citation lane (#275) reads this for its per-entry
     // POST /contexts/{name}/citations checks.
     pub(crate) expected_citations: Vec<ExpectedCitation>,
+    /// The case's 1-based line in its `eval.jsonl` (#865): a check made
+    /// after loading (`evaluate`'s limit validation) can still name the
+    /// line the loader's own errors name.
+    pub(crate) line: usize,
 }
 
 impl EvalCase {
@@ -480,6 +484,7 @@ pub(crate) fn load_eval_file(path: &Path, mode: Extensions) -> Result<LoadedEval
                 expected_labels: Vec::new(),
                 expected_associations: Vec::new(),
                 expected_citations: Vec::new(),
+                line: number,
             },
             Extensions::Interpret => {
                 let case_id = wire.case_id.clone();
@@ -498,6 +503,7 @@ pub(crate) fn load_eval_file(path: &Path, mode: Extensions) -> Result<LoadedEval
                     expected_labels: interpreted.expected_labels,
                     expected_associations: interpreted.expected_associations,
                     expected_citations: interpreted.expected_citations,
+                    line: number,
                 }
             }
         };

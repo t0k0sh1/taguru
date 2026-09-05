@@ -439,6 +439,16 @@ fn evaluate_exits_0_and_records_a_passing_thresholds_block_when_every_bound_is_s
     // or fails.
     assert!(!stderr.contains("report-only"), "{stderr}");
     assert!(stdout.contains("PASS"), "{stdout}");
+    // #865: the `wrote` line says where per-case failure detail lives
+    // in the file, and a clean run names no failed case.
+    assert!(
+        stdout.contains(&format!(
+            "  wrote {} — per-case failures under cases[].passage.message (outcome: failed)",
+            out_path.display()
+        )),
+        "{stdout}"
+    );
+    assert!(!stdout.contains(" failed — case '"), "{stdout}");
 
     let evaluation: Value =
         serde_json::from_str(&std::fs::read_to_string(&out_path).unwrap()).unwrap();

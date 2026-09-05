@@ -153,7 +153,16 @@
       (<code>2</code>) — three different remediations, one exit code apiece. Without
       <code>--thresholds</code>, a completed run is always <code>0</code> regardless of what the
       metrics say; <code>evaluate</code> prints one stderr line noting the run is report-only so
-      that omission is never silent.
+      that omission is never silent. A run's failed cases are also <b>named</b> under the summary
+      line (#865): one line per failing lane and case — <code>passage failed — case 'c1':
+      …</code>, a structural probe whose query errored, a citation check the server did not
+      resolve (with its error code), an evidence assembly that failed — the first three per lane
+      and a count of the rest; the <code>wrote</code> line ends with the
+      <code>evaluation.json</code> fields that hold every one
+      (<code>cases[].passage.message</code> and its siblings, each beside an
+      <code>outcome</code> tag). A case whose <code>options.limit</code> is out of range is refused
+      as <code>&lt;file&gt;: line N: case 'x': options.limit: …</code>, the evalset loader's own
+      address shape.
     </p>
   </section>
 

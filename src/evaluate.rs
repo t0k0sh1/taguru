@@ -184,7 +184,10 @@ fn run_evaluate(args: &[String]) -> i32 {
         eprintln!("taguru: evaluate: {warning}");
     }
     if let Err(message) = validate_limits(&loaded.cases) {
-        eprintln!("taguru: evaluate: {message}");
+        // The evalset loader's own shape — `<file>: line N: case 'x':
+        // <field>: …` — so a limit refused after loading is as
+        // addressable as one refused during it (#865).
+        eprintln!("taguru: evaluate: {}: {message}", eval_args.eval.display());
         return 2;
     }
 
@@ -656,8 +659,8 @@ fn validate_limits(cases: &[EvalCase]) -> Result<(), String> {
             && !(1..=MAX_SEARCH_LIMIT).contains(&limit)
         {
             return Err(format!(
-                "case '{}': options.limit must be 1..={MAX_SEARCH_LIMIT}, got {limit}",
-                case.case_id
+                "line {}: case '{}': options.limit: must be 1..={MAX_SEARCH_LIMIT}, got {limit}",
+                case.line, case.case_id
             ));
         }
     }
@@ -1359,6 +1362,9 @@ fn print_summary(evaluation: &EvaluationFile, masked_url: &str, context: &str) {
          {structural_cases} case(s) ({ambiguous} ambiguous, {not_found} not-found position(s))",
         total - passage_failed
     );
+    for line in failed_case_lines(&evaluation.cases, FAILED_CASES_LISTED) {
+        println!("{line}");
+    }
     if !recalls.is_empty() {
         let mean = |pick: fn(&&RecallBlock) -> f64| {
             recalls.iter().map(pick).sum::<f64>() / recalls.len() as f64
@@ -1417,7 +1423,86 @@ fn print_summary(evaluation: &EvaluationFile, masked_url: &str, context: &str) {
              mid-run (corpus.revision_before != corpus.revision_after)"
         );
     }
-    println!("  wrote {}", evaluation.inputs.out);
+    println!(
+        "  wrote {} — per-case failures under {}",
+        evaluation.inputs.out,
+        FAILURE_FIELDS.join(", ")
+    );
+}
+
+/// How many failed cases of each kind the summary names before
+/// counting the rest — `invalid locator`'s own "first three" precedent
+/// a few lines above.
+const FAILED_CASES_LISTED: usize = 3;
+
+/// Where `evaluation.json` keeps the per-case failure detail the
+/// summary can only count: named on the `wrote` line so a reader knows
+/// which field to open (#865). Each is `cases[]`-relative; the
+/// `outcome` tag beside it says which variant the object is.
+const FAILURE_FIELDS: [&str; 4] = [
+    "cases[].passage.message (outcome: failed)",
+    "cases[].structural.associations[].query.message (outcome: errored)",
+    "cases[].citations.checks[].message (outcome: unresolved)",
+    "cases[].evidence.message (outcome: failed)",
+];
+
+/// The failed cases by `case_id`, one line each with the lane and the
+/// recorded message, at most `cap` per lane before a "… and N more"
+/// line (#865): the summary's `{n} failed` counts are these lines'
+/// lengths, so a failure is always findable by id without opening the
+/// JSON. Lanes: the passage search that failed, a structural probe
+/// whose query errored, a citation check the server did not resolve
+/// (its `code` when it sent one), and an evidence assembly that
+/// failed. A run with no failure adds nothing.
+fn failed_case_lines(cases: &[CaseBlock], cap: usize) -> Vec<String> {
+    let mut lanes: Vec<(&str, Vec<String>)> = vec![
+        ("passage", Vec::new()),
+        ("structural query", Vec::new()),
+        ("citation", Vec::new()),
+        ("evidence", Vec::new()),
+    ];
+    for case in cases {
+        let id = &case.case_id;
+        if let PassageOutcome::Failed { message, .. } = &case.passage {
+            lanes[0].1.push(format!("case '{id}': {message}"));
+        }
+        if let Some(structural) = &case.structural {
+            for (index, probe) in structural.associations.iter().enumerate() {
+                if let Some(QueryProbe::Errored { message, .. }) = &probe.query {
+                    lanes[1]
+                        .1
+                        .push(format!("case '{id}': associations[{index}]: {message}"));
+                }
+            }
+        }
+        if let Some(citations) = &case.citations {
+            for check in &citations.checks {
+                if let CitationOutcome::Unresolved { code, message } = &check.outcome {
+                    let code = code.as_deref().unwrap_or("no code");
+                    lanes[2].1.push(format!(
+                        "case '{id}': {} paragraph {}: {code}: {message}",
+                        check.source, check.paragraph
+                    ));
+                }
+            }
+        }
+        if let Some(EvidenceOutcome::Failed { message, .. }) = &case.evidence {
+            lanes[3].1.push(format!("case '{id}': {message}"));
+        }
+    }
+    let mut lines = Vec::new();
+    for (lane, entries) in lanes {
+        for entry in entries.iter().take(cap) {
+            lines.push(format!("    {lane} failed — {entry}"));
+        }
+        if entries.len() > cap {
+            lines.push(format!(
+                "    ... and {} more {lane} failure(s) (every one is in evaluation.json)",
+                entries.len() - cap
+            ));
+        }
+    }
+    lines
 }
 
 /// The human-readable failure summary #276's completion condition
