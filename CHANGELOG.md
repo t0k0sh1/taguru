@@ -51,8 +51,12 @@ Entries that change an on-disk format or a response shape say so.
   take at most 6 of the 100 slots and push nothing out; on
   Latin-script prose the cap fills within the first 1–2 KB with
   ordinary English words, so the list is the document's first hundred
-  distinct words. No segmentation change — a short-token filter was
-  measured and moved the cap by ~150 bytes while dropping real names.
+  distinct words. Docs and code comments only: the segmentation, the
+  candidate block, the manifest value, the on-disk formats, and the
+  response shapes are unchanged. The short-token and lowercase-token
+  filters the issue proposed were measured (each moved the cap by
+  ~150 bytes while dropping real names such as `OS` and `rg`) and
+  not adopted.
 
 - `extract`: a failed document's stderr line now names the piece that
   failed and points at its records (ADR 0037, #850). After the `chunk
