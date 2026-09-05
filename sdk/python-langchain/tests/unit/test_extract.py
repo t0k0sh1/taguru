@@ -16,6 +16,7 @@ from taguru_langchain._extract import (
     MAX_LISTED_ISSUES,
     MAX_NAME_BYTES,
     MODEL_OUTPUT_JSON_SCHEMA,
+    PROMPT_VERSION,
     SCHEMA_TYPE_LABEL,
     InvalidFault,
     ItemRules,
@@ -385,6 +386,21 @@ def test_render_batch_drops_sections_and_locators_without_a_passage() -> None:
     assert len(lines) == 1  # header only
     assert "section" not in body
     assert "locator" not in body
+
+
+def test_the_prompt_version_and_wording_track_extract_rs() -> None:
+    """The producer parity contract: PROMPT_VERSION equals src/extract.rs's
+    (5: #812's citation rule; 4: #852's ground rules), and the wording that
+    earned each bump is in the prompt — ports of extract.rs
+    the_system_prompt_tells_the_model_to_cite_the_stating_paragraph_not_a_heading
+    and the_system_prompt_grounds_extraction_in_the_text_and_allows_an_empty_answer."""
+    assert PROMPT_VERSION == 5
+    prompt = system_prompt([], 0, 0)
+    assert "the paragraph whose sentences state it, never a heading-only paragraph" in prompt
+    assert '"[3] ## Abstract"' in prompt
+    assert "the document's text alone" in prompt
+    assert "Never build a subject or object out of words the document does not contain" in prompt
+    assert 'empty "associations" array is the correct answer' in prompt
 
 
 def test_the_system_prompt_omits_the_fact_budget_clause_by_default() -> None:

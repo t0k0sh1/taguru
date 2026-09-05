@@ -456,7 +456,11 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       label. The document is presented with every paragraph numbered (blank-line boundaries
       counted across the <b>whole document</b>, not per chunk — the same numbering
       <code>--questions</code> uses), and each association is asked to tag its paragraph of
-      origin. That tag rides into memory with the fact; nothing downstream persists it yet.
+      origin — the paragraph whose sentences state the fact, never a heading-only paragraph
+      such as <code>[3] ## Abstract</code> (#812: under the earlier wording a model represented
+      a section by its heading's number, one paragraph above the fact, in half the paper
+      corpus's citations; the rule cut that to one document in ten). That tag rides into memory
+      with the fact; nothing downstream persists it yet.
       Relation labels converge <b>across the run</b>: each document's labels are offered to every
       later document's prompt (the offline stand-in for check-before-mint), so one run doesn't
       mint synonyms per file but converges on one vocabulary — ranked by how many associations

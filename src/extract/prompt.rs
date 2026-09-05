@@ -64,7 +64,10 @@ pub(super) fn system_prompt(
          with outside knowledge or invented variations.\n\
          - One association per fact the document states. Keep names SHORT \
          (headings, not sentences); keep the document's language; never translate names. \
-         Tag it with the bracketed paragraph number, shown in the text, that states the fact.\n\
+         Tag it with the bracketed paragraph number, shown in the text, that states the fact \
+         — the paragraph whose sentences state it, never a heading-only paragraph such as \
+         \"[3] ## Abstract\": a heading names a section, the paragraph after it states \
+         the facts.\n\
          - weight 1.0 for a plain assertion, up to 2.0 when the document itself \
          emphasizes, NEGATIVE for negation (\"does not X\" → label X, weight -1.0). \
          Weight is evidence mass, never effect size — sizes and figures go in the object.\n\

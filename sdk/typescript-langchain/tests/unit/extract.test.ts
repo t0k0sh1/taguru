@@ -34,6 +34,7 @@ import {
   splitParagraphs,
   SyntaxFault,
   systemPrompt,
+  PROMPT_VERSION,
   labelVocabulary,
   type Extraction,
   type ItemRules,
@@ -260,6 +261,24 @@ describe("chunking and paragraph split", () => {
     expect(
       chunks.flatMap((piece) => piece.split("\n\n")).every((block) => block.startsWith("[0] ")),
     ).toBe(true);
+  });
+});
+
+describe("the producer parity contract", () => {
+  // PROMPT_VERSION equals src/extract.rs's (5: #812's citation rule; 4:
+  // #852's ground rules) and the wording that earned each bump is present.
+  it("tracks extract.rs's PROMPT_VERSION and the wording behind it", () => {
+    expect(PROMPT_VERSION).toBe(5);
+    const prompt = systemPrompt([], 0);
+    expect(prompt).toContain(
+      "the paragraph whose sentences state it, never a heading-only paragraph",
+    );
+    expect(prompt).toContain('"[3] ## Abstract"');
+    expect(prompt).toContain("the document's text alone");
+    expect(prompt).toContain(
+      "Never build a subject or object out of words the document does not contain",
+    );
+    expect(prompt).toContain('empty "associations" array is the correct answer');
   });
 });
 

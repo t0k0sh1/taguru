@@ -23,12 +23,15 @@
 import type { LocatorSpec, SchemaDocument, SectionSpec, TypeDef } from "taguru";
 
 // Kept equal to src/extract.rs's PROMPT_VERSION. 3 (ADR 0009 §11.1):
-// systemPrompt() gained the schema block. A schema DOCUMENT's own content
+// systemPrompt() gained the schema block. 4 (#852): the discipline gained
+// the text-alone and empty-answer ground rules. 5 (#812): the citation
+// rule names the paragraph to cite — the one whose sentences state the
+// fact, never a heading-only paragraph. A schema DOCUMENT's own content
 // changing without a prompt revision is instead covered by the
 // checkpoint's schema digest (checkpoints.ts) — the same division
 // fact_budget (a computation input) and PROMPT_VERSION (the prompt's
 // wording) already draw.
-export const PROMPT_VERSION = 3;
+export const PROMPT_VERSION = 5;
 export const CHUNK_BYTES = 24 * 1024;
 export const VOCABULARY_CAP = 200;
 export const MAX_NAME_BYTES = 1024;
@@ -482,9 +485,19 @@ export function systemPrompt(
     '"aliases": [{"alias": "…", "canonical": "…", "kind": "concept"}]}\n' +
     "\n" +
     "The discipline:\n" +
+    "- Extract from the document's text alone: a fact is something THIS " +
+    "document states, not something you know. Never build a subject or " +
+    "object out of words the document does not contain — reuse the " +
+    "document's own spellings, or ones this prompt offers below.\n" +
+    "- A document can state nothing extractable. Then an empty " +
+    '"associations" array is the correct answer — never fill the space ' +
+    "with outside knowledge or invented variations.\n" +
     "- One association per fact the document states. Keep names SHORT " +
     "(headings, not sentences); keep the document's language; never translate names. " +
-    "Tag it with the bracketed paragraph number, shown in the text, that states the fact.\n" +
+    "Tag it with the bracketed paragraph number, shown in the text, that states the fact " +
+    "— the paragraph whose sentences state it, never a heading-only paragraph such as " +
+    '"[3] ## Abstract": a heading names a section, the paragraph after it states ' +
+    "the facts.\n" +
     "- weight 1.0 for a plain assertion, up to 2.0 when the document itself " +
     'emphasizes, NEGATIVE for negation ("does not X" → label X, weight -1.0). ' +
     "Weight is evidence mass, never effect size — sizes and figures go in the object.\n" +

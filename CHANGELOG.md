@@ -35,6 +35,25 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Changed
 
+- `extract`: the system prompt's citation rule now names the paragraph
+  to cite — the one whose sentences state the fact, never a
+  heading-only paragraph such as `[3] ## Abstract` (#812). Under the
+  old wording a model represented a section by its heading's number:
+  in the #780 baseline 53% of the paper corpus's citations pointed at
+  `## Abstract` with the fact one paragraph down, which lowered
+  `taguru anchoring`'s locator validity and made the trace's cited
+  text a heading. Re-extracting the ten-paper corpus under the new
+  wording: 9 of 10 documents cite no heading at all, 12% overall
+  (one document still cites its heading deterministically).
+  `PROMPT_VERSION` 4 → 5, so already-extracted documents re-extract
+  under the new wording instead of being reused. No response-shape or
+  on-disk format change — the manifest and the attempts log's
+  `settings` record carry the new number. Both LangChain producers
+  (`sdk/python-langchain`, `sdk/typescript-langchain`) now mirror the
+  Rust prompt at 5 — they had stayed at 3, so they also gain #852's
+  text-alone and empty-answer rules — and their checkpoints re-extract
+  likewise.
+
 - `anchoring`: the `--help` text and docs/extract.html now say how to
   read the strict rate (#806) — within one document type, never
   across types. A document whose subject appears only in the title

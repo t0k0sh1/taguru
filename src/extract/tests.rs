@@ -3482,6 +3482,20 @@ fn split_labeled_piece_halves_blocks_with_their_labels_repeated() {
 }
 
 #[test]
+fn the_system_prompt_tells_the_model_to_cite_the_stating_paragraph_not_a_heading() {
+    // #812: unconditional, like the ground rules — the citation rule
+    // must name the paragraph whose sentences state the fact and rule
+    // out heading-only paragraphs by example, or a model keeps
+    // representing a section by its heading's number.
+    let prompt = system_prompt(&BTreeMap::new(), 0, 0, None, &[], &[]);
+    assert!(
+        prompt.contains("the paragraph whose sentences state it, never a heading-only paragraph"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("\"[3] ## Abstract\""), "{prompt}");
+}
+
+#[test]
 fn the_system_prompt_grounds_extraction_in_the_text_and_allows_an_empty_answer() {
     // #852: both ground rules are unconditional — a piece with nothing
     // extractable must be answerable with an empty array, and a fact
