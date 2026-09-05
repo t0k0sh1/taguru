@@ -249,7 +249,16 @@ pub fn run(args: &[String]) -> i32 {
             "--json" => as_json = true,
             "--refuse-sensitive" => refuse_sensitive = true,
             "--redact-rules" => match rest.next() {
-                Some(path) => redact_rules = Some(PathBuf::from(path)),
+                Some(path) if redact_rules.is_none() => redact_rules = Some(PathBuf::from(path)),
+                // A second file would silently replace the first —
+                // a weaker gate than the operator wrote, refused like
+                // extract refuses it.
+                Some(_) => {
+                    return crate::config::subcommand_usage_error(
+                        "import",
+                        "--redact-rules given twice",
+                    );
+                }
                 None => {
                     return crate::config::subcommand_usage_error(
                         "import",

@@ -376,6 +376,19 @@ fn an_offline_import_refuses_by_a_user_rule_and_needs_the_gate_for_it() {
         stderr.contains("--redact-rules needs --refuse-sensitive"),
         "{stderr}"
     );
+    let (code, _, stderr) = run_import(
+        &data_dir,
+        &[
+            "--refuse-sensitive",
+            "--redact-rules",
+            rules.to_str().unwrap(),
+            "--redact-rules",
+            rules.to_str().unwrap(),
+            file.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("--redact-rules given twice"), "{stderr}");
     std::fs::write(&rules, "email\t.+\n").unwrap();
     let (code, _, stderr) = run_import(
         &data_dir,

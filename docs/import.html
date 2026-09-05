@@ -127,10 +127,20 @@ taguru import --refuse-sensitive --redact-rules rules.tsv batch/   <span class="
       the batch. Off by default; the server's own <code>POST /import</code> does not judge this
       (a later ADR's). <code>--redact-rules FILE</code> adds your own rules on top of the
       built-ins — the same file <a href="extract.html#redact-rules"><code>extract
-      --redact-rules</code></a> takes, read and refused the same way — and needs
-      <code>--refuse-sensitive</code>: a rules file that judges nothing is a usage error, not a
-      no-op.
+      --redact-rules</code></a> takes, read and refused the same way: one
+      <code>name&lt;TAB&gt;regex</code> per line, blank lines and lines starting with
+      <code>#</code> ignored, applied after the built-ins in file order; a name is
+      <code>[a-z0-9_]+</code> and may not repeat a built-in's or an earlier line's, the pattern
+      is a Rust <code>regex</code> matched within one paragraph, and a bad line is a usage error
+      naming it — never a skipped rule. It needs <code>--refuse-sensitive</code>: a rules file
+      that judges nothing is a usage error, not a no-op.
     </p>
+    <pre><code><span class="c"># rules.tsv — one rule per line, name TAB regex</span>
+emp_id	\bEMP-\d{6}\b
+ticket	\bTCK-[0-9]{4,}\b
+
+taguru import --refuse-sensitive --redact-rules rules.tsv batch/
+<span class="c">#   batch/ids.jsonl: batches[0].associations[0].object: sensitive: emp_id</span></code></pre>
     <p>
       <code>--json</code> answers the same <code>{batches, schemas, groups}</code> fields
       <code>POST /import</code>'s own <code>result</code> object carries — one

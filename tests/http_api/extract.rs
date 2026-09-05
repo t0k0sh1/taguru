@@ -3105,7 +3105,14 @@ fn extract_redact_rules_file_extends_the_built_ins_and_joins_the_version() {
     std::fs::write(&rules, "# ids\nemp_id\t\\bEMP-\\d{6}\\b\nbrewer\t高瀬\n").unwrap();
     // A never-joined acceptor here: a run that exits before it
     // connects must fail the assertions below, not hang on a join.
-    let (url, captured) = stub_chat_server_concurrent(move |_index, _attempt| chat_ok(&reply));
+    // The answer puts the brewer's name where the occurrence check
+    // does not look — the label — so the output scan is what must
+    // catch it, under the user's rule.
+    let leaking = json!({"associations": [
+        {"subject": "青嶺酒造", "label": "高瀬", "object": "杜氏"}
+    ]})
+    .to_string();
+    let (url, captured) = stub_chat_server_concurrent(move |_index, _attempt| chat_ok(&leaking));
     let (code, stdout, stderr) = run_extract(
         &out,
         &[
@@ -3121,14 +3128,25 @@ fn extract_redact_rules_file_extends_the_built_ins_and_joins_the_version() {
             doc.to_str().unwrap(),
         ],
     );
-    // The added rule masks the brewer's name, so the answer's object
-    // no longer occurs in the text — the document fails, which is
-    // exactly the point: the run re-extracted instead of skipping.
+    // Re-extracted, not skipped: the edited file is a new version.
     assert!(!stdout.contains("unchanged, skipped"), "{stdout}");
     let requests = captured.lock().unwrap().clone();
     assert_eq!(requests.len(), 1, "{stdout}\n{stderr}");
     assert!(requests[0].contains("«redacted brewer "), "{}", requests[0]);
     assert!(stderr.contains("brewer ×"), "code {code}: {stderr}");
+    // And the output scan judges the answer by the user's rule too:
+    // the label carries the masked name, the document fails on it.
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("the answer carries sensitive content the redacted document never showed")
+            && stderr.contains(": brewer"),
+        "{stderr}"
+    );
+    assert!(
+        stray_batch_files(&out).is_empty(),
+        "{:?}",
+        stray_batch_files(&out)
+    );
 
     // Usage errors: a bad line, and a file with redaction off.
     std::fs::write(&rules, "emp_id\t(\n").unwrap();
