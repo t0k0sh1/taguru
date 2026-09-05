@@ -48,6 +48,117 @@ fn an_offline_import_lands_facts_passage_and_aliases_the_server_serves() {
     let _ = std::fs::remove_dir_all(&batches);
 }
 
+/// ADR 0038 §3.4 (#883): `--refuse-sensitive` refuses the batch that
+/// carries a secret — by path and rule, never by content — and the
+/// rest of the file still applies; `--json` names it under
+/// `failed_batches`; a dry run judges the same; without the flag the
+/// same file applies whole.
+#[test]
+fn an_offline_import_refuses_a_sensitive_batch_by_path_and_applies_the_rest() {
+    let batches = batch_dir("import-refuse-sensitive");
+    let file = batches.join("mixed.jsonl");
+    let key = "AKIAIOSFODNN7EXAMPLE";
+    std::fs::write(
+        &file,
+        format!(
+            "{{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"clean.md\", \"create\": {{\"description\": \"酒蔵\"}}}}\n\
+             {{\"subject\": \"青嶺酒造\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}}\n\
+             {{\"passage\": \"青嶺酒造の杜氏は高瀬。\"}}\n\
+             {{\"taguru_batch\": 1, \"context\": \"sake\", \"source\": \"leaky.md\"}}\n\
+             {{\"subject\": \"高瀬\", \"label\": \"鍵\", \"object\": \"{key}\", \"weight\": 1.0}}\n\
+             {{\"passage\": \"高瀬の鍵。\\n\\n鍵は {key} である。\"}}\n"
+        ),
+    )
+    .unwrap();
+    let data_dir = common::scratch_dir("http-import-refuse-sensitive");
+
+    // Dry run: judged, nothing applied, exit 1.
+    let (code, stdout, stderr) = run_import(
+        &data_dir,
+        &["--dry-run", "--refuse-sensitive", file.to_str().unwrap()],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains("dry run: 1 batch(es) valid, nothing applied"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("import: 1 batch(es) refused (sensitive)"),
+        "{stdout}"
+    );
+    assert!(
+        stderr.contains("batches[1].associations[0].object: sensitive: aws_access_key"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("batches[1].passage: sensitive: aws_access_key (paragraph 1)"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("source 'leaky.md') refused: sensitive content"),
+        "{stderr}"
+    );
+    assert!(
+        !stdout.contains(key) && !stderr.contains(key),
+        "{stdout}\n{stderr}"
+    );
+
+    // The real run: the clean batch lands, the leaky one does not.
+    let (code, stdout, stderr) =
+        run_import(&data_dir, &["--refuse-sensitive", file.to_str().unwrap()]);
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("source 'clean.md'"), "{stdout}");
+    assert!(
+        stdout.contains("import: 1 of 1 batch(es) applied across 1 context(s)"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("import: 1 batch(es) refused (sensitive)"),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains(key) && !stderr.contains(key),
+        "{stdout}\n{stderr}"
+    );
+
+    // `--json`: the refusal under failed_batches, path-first, no content.
+    let (code, stdout, _) = run_import(
+        &data_dir,
+        &["--json", "--refuse-sensitive", file.to_str().unwrap()],
+    );
+    assert_eq!(code, 1);
+    let report: Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(report["batches"].as_array().unwrap().len(), 1);
+    assert_eq!(report["failed_batches"][0]["source"], json!("leaky.md"));
+    let error = report["failed_batches"][0]["error"].as_str().unwrap();
+    assert!(error.starts_with("sensitive: batches[1]."), "{error}");
+    assert!(!error.contains(key), "{error}");
+
+    let server = Server::start_on("import-refuse-sensitive", data_dir.clone());
+    let passages = server.ok(
+        "POST",
+        "/contexts/sake/sources/lookup",
+        Some(json!({"sources": ["clean.md", "leaky.md"]})),
+    );
+    assert_eq!(
+        passages["passages"]["clean.md"],
+        json!("青嶺酒造の杜氏は高瀬。")
+    );
+    assert!(passages["passages"]["leaky.md"].is_null(), "{passages}");
+    drop(server);
+
+    // Without the flag, the same file applies whole — import judges
+    // nothing it was not asked to.
+    let data_dir = common::scratch_dir("http-import-refuse-sensitive-off");
+    let (code, stdout, stderr) = run_import(&data_dir, &[file.to_str().unwrap()]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains("import: 2 of 2 batch(es) applied"),
+        "{stdout}"
+    );
+    let _ = std::fs::remove_dir_all(&batches);
+}
+
 /// `import --json` (issue #371) must answer the same shape `POST
 /// /import` does for the identical batch against an equally-empty
 /// starting state — one schema, not two that could drift.

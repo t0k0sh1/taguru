@@ -83,6 +83,8 @@ mod remote;
 mod replica;
 #[path = "../schema.rs"]
 mod schema;
+#[path = "../sensitive.rs"]
+mod sensitive;
 #[path = "../sha256.rs"]
 mod sha256;
 #[path = "../ship.rs"]

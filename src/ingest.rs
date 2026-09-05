@@ -89,6 +89,8 @@ mod remote;
 mod report;
 #[path = "ingest/schema_apply.rs"]
 mod schema_apply;
+#[path = "ingest/sensitive_gate.rs"]
+mod sensitive_gate;
 #[path = "ingest/tests.rs"]
 #[cfg(test)]
 mod tests;
@@ -100,6 +102,7 @@ use remote::{expand, run_remote};
 #[cfg(test)]
 use remote::{never_sent_lines, refusal_issue_lines};
 use report::report;
+use sensitive_gate::{refused_batch_error, refused_batch_message, sensitive_hits};
 
 pub(crate) use model::{Batch, parse_batch, parse_stream, split_batches};
 pub(crate) use rejection::{
@@ -119,10 +122,12 @@ use model::MAX_LINE_BYTES;
 use rejection::AliasNamespace;
 #[cfg(test)]
 use remote::{Chunk, Unit, UnitKind, pack_chunks};
+#[cfg(test)]
+use sensitive_gate::SensitiveHit;
 
 const USAGE: &str = "\
 usage: taguru import [--dry-run] [--no-embed] [--json] [--config FILE]
-                      [--url URL] FILE|DIR...
+                      [--refuse-sensitive] [--url URL] FILE|DIR...
 
 Applies JSONL batch files to TAGURU_DATA_DIR offline (the server must
 not be running — the directory lock enforces it), or to a RUNNING
@@ -146,6 +151,18 @@ sorted by name. Format: docs/import.html.
                error, since the server's own configuration decides
                once the request lands there)
   --config F   read KEY=VALUE environment from F (same dialect as serve)
+  --refuse-sensitive
+               refuse any batch whose passage, association subject/
+               label/object, alias spelling, or question text matches
+               the sensitive-content rules `extract --redact` masks
+               with (ADR 0038; every rule of both groups). The batch is
+               named by path (batches[3].passage, batches[3]
+               .associations[7].object) and rule — never by the matched
+               text — and skipped; the rest of the file still applies,
+               offline and with --url alike (nothing of a refused batch
+               is sent). Import never rewrites content: the fix is to
+               re-extract with --redact, or to edit the batch. Exit 1
+               when any batch was refused
 
   --url URL    import into a RUNNING server instead of TAGURU_DATA_DIR
                directly: POST /import, one request per chunk. The
@@ -207,6 +224,7 @@ pub fn run(args: &[String]) -> i32 {
     let mut dry_run = false;
     let mut no_embed = false;
     let mut as_json = false;
+    let mut refuse_sensitive = false;
     let mut config: Option<PathBuf> = None;
     let mut url: Option<String> = None;
     let mut paths: Vec<String> = Vec::new();
@@ -220,6 +238,7 @@ pub fn run(args: &[String]) -> i32 {
             "--dry-run" => dry_run = true,
             "--no-embed" => no_embed = true,
             "--json" => as_json = true,
+            "--refuse-sensitive" => refuse_sensitive = true,
             "--config" => match rest.next() {
                 Some(path) => config = Some(PathBuf::from(path)),
                 None => {
@@ -284,13 +303,18 @@ pub fn run(args: &[String]) -> i32 {
         Err(message) => return crate::config::subcommand_usage_error("import", &message),
     };
 
+    // ADR 0038 §3.4: the gate's rules, built once — the built-ins of
+    // both groups, the same set `extract --redact` (no group) masks
+    // with.
+    let sensitive_rules = refuse_sensitive
+        .then(|| crate::sensitive::RuleSet::builtin(crate::sensitive::Groups::BOTH));
     match url {
         // ADR 0002 §5/§6: `--url` is the only way `import` goes
         // remote — no positional URL argument, no TAGURU_URL or
         // default_base_url() fallback the way `health`/`calibrate`/
         // `communities` have one. Absent, this is exactly the local
         // path that ran before this flag existed.
-        Some(base) => run_remote(&base, &files, dry_run, as_json),
-        None => run_local(&files, dry_run, no_embed, as_json),
+        Some(base) => run_remote(&base, &files, dry_run, as_json, sensitive_rules.as_ref()),
+        None => run_local(&files, dry_run, no_embed, as_json, sensitive_rules.as_ref()),
     }
 }

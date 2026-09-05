@@ -1890,3 +1890,83 @@ fn never_sent_lines_count_each_kind_across_the_queue_and_name_the_first() {
     );
     assert!(never_sent_lines(&VecDeque::new()).is_empty());
 }
+
+/// ADR 0038 §3.4: the gate names path, rule, and (for a passage) the
+/// paragraph — never the matched text — over every field it reads;
+/// a placeholder a redacted extract left is not a hit.
+#[test]
+fn sensitive_hits_name_path_rule_and_paragraph_never_content() {
+    let rules = crate::sensitive::RuleSet::builtin(crate::sensitive::Groups::BOTH);
+    let key = "AKIAIOSFODNN7EXAMPLE";
+    let mail = "takase@example.com";
+    let text = format!(
+        "{HEADER}\n\
+         {{\"subject\": \"青嶺酒造\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}}\n\
+         {{\"subject\": \"高瀬\", \"label\": \"鍵\", \"object\": \"{key}\", \"weight\": 1.0}}\n\
+         {{\"alias\": \"{mail}\", \"canonical\": \"高瀬\", \"kind\": \"concept\"}}\n\
+         {{\"alias\": \"Aomine\", \"canonical\": \"青嶺酒造\", \"kind\": \"concept\"}}\n\
+         {{\"passage\": \"青嶺酒造の紹介。\\n\\n連絡先は {mail}、鍵は «redacted aws_access_key 9f3a»。\"}}\n\
+         {{\"paragraph\": 1, \"question\": \"担当の電話番号 03-1234-5678 は?\"}}\n"
+    );
+    let batch = parse(&text).unwrap();
+    let hits = sensitive_hits(&batch, 3, &rules);
+    let addressed: Vec<(String, String, Option<u32>)> = hits
+        .iter()
+        .map(|hit| (hit.path.clone(), hit.rule.clone(), hit.paragraph))
+        .collect();
+    assert_eq!(
+        addressed,
+        vec![
+            (
+                "batches[3].passage".to_string(),
+                "email".to_string(),
+                Some(1)
+            ),
+            (
+                "batches[3].associations[1].object".to_string(),
+                "aws_access_key".to_string(),
+                None
+            ),
+            (
+                "batches[3].aliases[1]".to_string(),
+                "email".to_string(),
+                None
+            ),
+            (
+                "batches[3].questions[0]".to_string(),
+                "phone".to_string(),
+                None
+            ),
+        ],
+        "{hits:?}"
+    );
+    for line in hits
+        .iter()
+        .map(SensitiveHit::text)
+        .chain([refused_batch_error(&hits), refused_batch_message(3, &batch)])
+    {
+        assert!(
+            !line.contains(key) && !line.contains(mail) && !line.contains("1234"),
+            "{line}"
+        );
+    }
+    assert_eq!(
+        hits[0].text(),
+        "batches[3].passage: sensitive: email (paragraph 1)"
+    );
+    assert_eq!(
+        hits[1].text(),
+        "batches[3].associations[1].object: sensitive: aws_access_key"
+    );
+    assert!(
+        refused_batch_error(&hits)
+            .starts_with("sensitive: batches[3].passage: sensitive: email (paragraph 1); ")
+    );
+    assert!(refused_batch_message(3, &batch).contains("--redact"));
+    // Clean, and placeholder-only: nothing.
+    let clean = parse(&format!(
+        "{HEADER}\n{{\"passage\": \"鍵は «redacted aws_access_key 9f3a»。\"}}\n"
+    ))
+    .unwrap();
+    assert!(sensitive_hits(&clean, 0, &rules).is_empty());
+}

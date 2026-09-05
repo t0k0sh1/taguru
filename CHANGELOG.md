@@ -9,6 +9,17 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Added
 
+- `import --refuse-sensitive` (ADR 0038 §3.4, #883): the same rules
+  `extract --redact` masks with (every built-in of both groups) run over
+  each batch's passage, association subject/label/object, alias
+  spellings, and questions before it is applied offline or packed for
+  `--url`. A hit refuses the batch by path and rule — `batches[3].passage:
+  sensitive: email (paragraph 2)` — never by the matched text; the rest
+  of the file still applies, the summary counts the refusals, `--json`
+  lists them under `failed_batches` (now on both paths), and the exit
+  code is 1. Import never rewrites content: the fix is to re-extract
+  with `--redact`, or edit the batch. Off by default.
+
 - `extract --redact [secrets|pii]` (ADR 0038, #882): masks secrets (AWS,
   GitHub, OpenAI, Slack, Google keys; PEM private-key blocks; JWTs;
   credential assignments; `Authorization:` headers; URL userinfo) and

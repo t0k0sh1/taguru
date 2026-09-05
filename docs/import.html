@@ -94,12 +94,37 @@
 taguru import --dry-run batch/        <span class="c"># validate and report; touches nothing</span>
 taguru import --config prod.env a.jsonl b.jsonl
 taguru import --url http://127.0.0.1:8248 batch/   <span class="c"># send to a running server instead</span>
-taguru import --json batch/           <span class="c"># {dry_run, batches: [...], schemas: [...], groups: [...]} instead of text</span></code></pre>
+taguru import --json batch/           <span class="c"># {dry_run, batches: [...], schemas: [...], groups: [...]} instead of text</span>
+taguru import --refuse-sensitive batch/   <span class="c"># refuse a batch carrying a secret or personal data, by path and rule (ADR 0038)</span></code></pre>
     <p>Exit codes: <code>0</code> everything applied · <code>1</code> something was refused or failed (details on stderr) · <code>2</code> usage error.</p>
     <p>
       <code>--no-embed</code> is offline-only — combined with <code>--url</code> it is a usage
       error, since the server's own <code>TAGURU_EMBED_URL</code> configuration decides once the
       request lands there.
+    </p>
+    <p id="refuse-sensitive">
+      <code>--refuse-sensitive</code> is the import half of the sensitive-content gate
+      (<a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0038-sensitive-content-gate.md">ADR
+      0038</a>; the extract half is <a href="extract.html#redact"><code>extract --redact</code></a>).
+      The same rules — every built-in of both groups: API keys and tokens, key blocks, JWTs,
+      credential assignments, <code>Authorization:</code> headers, URL userinfo, e-mail, phone
+      numbers, 個人番号, payment cards — run over each batch's <code>passage</code>, every
+      association's <code>subject</code>/<code>label</code>/<code>object</code>, every alias
+      spelling, and every question before the batch is applied (offline) or packed
+      (<code>--url</code> — nothing of a refused batch is sent). A hit refuses the
+      <b>batch</b>, the unit import already refuses on: it is named on stderr by path in
+      <code>schema/check</code>'s shape and by rule — <code>batches[3].passage: sensitive: email
+      (paragraph 2)</code>, <code>batches[3].associations[7].object: sensitive:
+      aws_access_key</code> (<code>aliases[k]</code> counts concept aliases in spelling order, then
+      label aliases; <code>questions[q]</code> in file order) — never by the matched text. The
+      rest of the file still applies; the summary counts the refusals
+      (<code>import: 1 batch(es) refused (sensitive)</code>), <code>--json</code> lists them
+      under <code>failed_batches</code> with an <code>error</code> starting
+      <code>sensitive: </code>, and the exit code is 1. A placeholder a redacted extract left
+      (<code>«redacted …»</code>) is not a hit. Import never rewrites content — it validates or
+      refuses — so the fix is to re-extract the document with <code>--redact</code>, or to edit
+      the batch. Off by default; the server's own <code>POST /import</code> does not judge this
+      (a later ADR's).
     </p>
     <p>
       <code>--json</code> answers the same <code>{batches, schemas, groups}</code> fields
@@ -136,7 +161,8 @@ taguru import --json batch/           <span class="c"># {dry_run, batches: [...]
       failure that landed zero batches, zero schemas, and zero groups still answers
       <code>{"dry_run": ..., "error": "...", "batches": []}</code>, no <code>schemas</code> or
       <code>groups</code> key at all. A local batch refused mid-run (offline only — a remote
-      refusal fails its whole chunk, never one batch within it) is named under a
+      refusal fails its whole chunk, never one batch within it), and on either path a batch
+      <a href="#refuse-sensitive"><code>--refuse-sensitive</code></a> refused, is named under a
       <code>failed_batches</code> array instead of appearing in <code>batches</code>, since there
       is no <code>ImportOutcome</code> to build for a batch that was never applied; the
       human-readable stderr line for the same failure is unchanged.
@@ -384,7 +410,7 @@ taguru import --json batch/           <span class="c"># {dry_run, batches: [...]
   <section id="validate">
     <h2>Validate, then apply</h2>
     <ul>
-      <li>Every file parses, and no two files claim the same (context, source) — only once that is established does anything apply. One malformed line refuses the entire run with its line number, and nothing is written (<code>--dry-run</code> stops there by design).</li>
+      <li>Every file parses, and no two files claim the same (context, source) — only once that is established does anything apply. One malformed line refuses the entire run with its line number, and nothing is written (<code>--dry-run</code> stops there by design). Under <a href="#refuse-sensitive"><code>--refuse-sensitive</code></a> the same pass judges each batch's content against the sensitive-content rules; a hit refuses that batch alone, and the rest still applies.</li>
       <li>Failures only discoverable at the apply stage (capacity, disk) are reported per file, and the remaining files continue: files are structurally independent (one file, one source), and a partially applied file heals on re-import.</li>
       <li>A batch that stops between its four durable steps (retract &rarr; passage &rarr; associations &rarr; aliases) is <b>detected</b>, not just repairable: a per-source batch-open marker is written before the first step and removed only after the last, so the server's next boot and <code>taguru inspect</code> name any source whose import never completed. An alias step predicted to conflict is refused before this marker ever opens &mdash; canonical/alias resolution is simulated read-only against the batch's own fresh names and the context's current state &mdash; so a content-driven refusal leaves nothing to detect; the marker's presence now narrows to a capacity or disk fault reaching mid-batch. Either documented repair clears it &mdash; re-import the file, or retract the source. Cross-store atomicity is deliberately not attempted; retract-then-apply already makes the repair exact.</li>
       <li>Writes go through the same registry the server uses — staged on the WAL and fsynced, budgets enforced, one flush at the end. So <code>taguru inspect</code> and the next boot see exactly the state a live ingest would have produced. Imports count as writes in each context's usage stats.</li>
