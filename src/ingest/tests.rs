@@ -1903,6 +1903,8 @@ fn sensitive_hits_name_path_rule_and_paragraph_never_content() {
         "{HEADER}\n\
          {{\"subject\": \"青嶺酒造\", \"label\": \"杜氏\", \"object\": \"高瀬\", \"weight\": 1.0}}\n\
          {{\"subject\": \"高瀬\", \"label\": \"鍵\", \"object\": \"{key}\", \"weight\": 1.0}}\n\
+         {{\"subject\": \"高瀬\", \"label\": \"旧鍵\", \"object\": \"«redacted aws_access_key 9f3a»\", \"weight\": 1.0}}\n\
+         {{\"subject\": \"高瀬\", \"label\": \"連絡先\", \"object\": \"{mail} / a.b@example.org\", \"weight\": 1.0}}\n\
          {{\"alias\": \"{mail}\", \"canonical\": \"高瀬\", \"kind\": \"concept\"}}\n\
          {{\"alias\": \"Aomine\", \"canonical\": \"青嶺酒造\", \"kind\": \"concept\"}}\n\
          {{\"passage\": \"青嶺酒造の紹介。\\n\\n連絡先は {mail}、鍵は «redacted aws_access_key 9f3a»。\"}}\n\
@@ -1925,6 +1927,13 @@ fn sensitive_hits_name_path_rule_and_paragraph_never_content() {
             (
                 "batches[3].associations[1].object".to_string(),
                 "aws_access_key".to_string(),
+                None
+            ),
+            // associations[2] holds a placeholder: not a hit. Two
+            // addresses in associations[3]: one hit for the rule.
+            (
+                "batches[3].associations[3].object".to_string(),
+                "email".to_string(),
                 None
             ),
             (

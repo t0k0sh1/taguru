@@ -100,6 +100,55 @@ fn a_remote_import_never_sends_a_batch_the_sensitive_gate_refused() {
     );
     assert!(passages["passages"]["leaky.md"].is_null(), "{passages}");
 
+    // A dry run judges the same and exits 1; without the gate the same
+    // dry run says nothing about refusals and exits 0.
+    let (code, stdout, stderr) = run_cli(
+        &[
+            "import",
+            "--url",
+            &server.base,
+            "--dry-run",
+            "--refuse-sensitive",
+            file.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains("dry run: 1 batch(es) valid, nothing applied"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("import: 1 batch(es) refused (sensitive)"),
+        "{stdout}"
+    );
+    let (code, stdout, stderr) = run_cli(
+        &[
+            "import",
+            "--url",
+            &server.base,
+            "--dry-run",
+            file.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        !stdout.contains("refused") && !stderr.contains("sensitive"),
+        "{stdout}\n{stderr}"
+    );
+    // Applied without the gate: both batches land, no refusal line.
+    let (code, stdout, _) = run_cli(
+        &["import", "--url", &server.base, file.to_str().unwrap()],
+        &[],
+    );
+    assert_eq!(code, 0, "{stdout}");
+    assert!(
+        stdout.contains("import: 2 batch(es) applied across 1 context(s)"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("refused"), "{stdout}");
+
     // `--json` over the wire: the same failed_batches key as offline.
     let (code, stdout, _) = run_cli(
         &[

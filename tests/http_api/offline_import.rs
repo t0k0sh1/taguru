@@ -156,6 +156,13 @@ fn an_offline_import_refuses_a_sensitive_batch_by_path_and_applies_the_rest() {
         stdout.contains("import: 2 of 2 batch(es) applied"),
         "{stdout}"
     );
+    assert!(
+        !stdout.contains("refused") && !stderr.contains("sensitive"),
+        "{stdout}\n{stderr}"
+    );
+    let (code, stdout, _) = run_import(&data_dir, &["--dry-run", file.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stdout}");
+    assert!(!stdout.contains("refused"), "{stdout}");
     let _ = std::fs::remove_dir_all(&batches);
 }
 
