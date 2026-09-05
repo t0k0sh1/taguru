@@ -42,8 +42,12 @@ Entries that change an on-disk format or a response shape say so.
   subject, label, object, cited paragraph, reason (`unanchored`,
   `alias-only`, `invalid locator`) — the first `--list N` per document
   (default 3, `0` for none) on stdout and every one under a new
-  `unanchored` array per document in `--json`, with `strict`,
-  `with_aliases`, and `locator_valid` as booleans. A batch file that
+  `unanchored` array per document in `--json`: `subject`, `label`,
+  `object`, and the booleans `strict` and `with_aliases` are always
+  present; `line` (the association's 1-based line in the batch file)
+  is omitted only if the file could not be re-read, and `paragraph`
+  and the boolean `locator_valid` are omitted together when the
+  association cites no paragraph. A batch file that
   cannot be read or parsed no longer stops the run: it is named on
   stderr, listed under a new `failed` map in `--json`, the rest is
   judged, and the exit code is 1. Additive `--json` fields only —
