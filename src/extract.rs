@@ -516,6 +516,20 @@ Contract and discipline: docs/extract.html.
 ///
 pub(crate) const PROMPT_VERSION: u32 = 5;
 
+/// TAGURU_EXTRACT_REDACT's value: `Some(None)` for the off spellings
+/// (`0`, `false`, `off`, empty), `Some(Some(BOTH))` for `1`, `true`,
+/// `on`, `both`, a group for `secrets`/`pii`; `None` for anything
+/// else (a usage error at the call site). Case-insensitive like the
+/// other on/off variables.
+pub(crate) fn redact_env_value(value: &str) -> Option<Option<crate::sensitive::Groups>> {
+    let lower = value.to_ascii_lowercase();
+    match lower.as_str() {
+        "" | "0" | "false" | "off" => Some(None),
+        "1" | "true" | "on" | "both" => Some(Some(crate::sensitive::Groups::BOTH)),
+        other => crate::sensitive::Groups::parse(Some(other)).ok().map(Some),
+    }
+}
+
 /// The host of `url` when it is not this machine (ADR 0038 §3.7's
 /// notice), `None` for a loopback host or a URL with no host. A
 /// deliberately small reading — scheme, `://`, host up to the first
@@ -929,25 +943,9 @@ pub fn run(args: &[String]) -> i32 {
     let redaction = match args.redact {
         Some(groups) => Some(groups),
         None => match std::env::var("TAGURU_EXTRACT_REDACT") {
-            Ok(value)
-                if value == "0"
-                    || value.eq_ignore_ascii_case("false")
-                    || value.eq_ignore_ascii_case("off")
-                    || value.is_empty() =>
-            {
-                None
-            }
-            Ok(value)
-                if value == "1"
-                    || value.eq_ignore_ascii_case("true")
-                    || value.eq_ignore_ascii_case("on")
-                    || value.eq_ignore_ascii_case("both") =>
-            {
-                Some(crate::sensitive::Groups::BOTH)
-            }
-            Ok(value) => match crate::sensitive::Groups::parse(Some(&value)) {
-                Ok(groups) => Some(groups),
-                Err(_) => {
+            Ok(value) => match redact_env_value(&value) {
+                Some(groups) => groups,
+                None => {
                     return crate::config::subcommand_usage_error(
                         "extract",
                         "TAGURU_EXTRACT_REDACT takes 1/true, 0/false, secrets, or pii",

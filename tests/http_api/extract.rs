@@ -2825,7 +2825,7 @@ fn extract_redact_masks_the_document_before_the_prompt_and_every_record() {
     assert!(stdout.contains("unchanged, skipped"), "{stdout}");
     // `--redact secrets`: a group change re-extracts, and the address
     // is sent as written while the key still is not.
-    let (url, requests) = stub_chat_server(vec![reply]);
+    let (url, requests) = stub_chat_server(vec![reply.clone()]);
     let (code, stdout, stderr) = run_extract(
         &out,
         &[
@@ -2846,6 +2846,21 @@ fn extract_redact_masks_the_document_before_the_prompt_and_every_record() {
     assert!(requests[0].contains(mail), "{}", requests[0]);
     assert!(!requests[0].contains(key), "{}", requests[0]);
     assert!(stdout.contains(", 1 redacted"), "{stdout}");
+    // Redaction off: the report line carries no redaction note at all.
+    let (url, requests) = stub_chat_server(vec![reply]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &["--context", "c", doc.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let requests = requests.join().unwrap();
+    assert!(requests[0].contains(key), "{}", requests[0]);
+    assert!(!stdout.contains("redacted"), "{stdout}");
+    assert!(!stderr.contains("redacted"), "{stderr}");
 
     let _ = std::fs::remove_dir_all(&docs);
     let _ = std::fs::remove_dir_all(&out);

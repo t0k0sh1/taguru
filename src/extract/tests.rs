@@ -2264,6 +2264,34 @@ fn redact_flag_takes_an_optional_group_and_rejects_a_duplicate() {
     assert!(matches!(with(&["--redact", "--redact", "doc.md"]), Err(2)));
 }
 
+/// TAGURU_EXTRACT_REDACT: every off spelling, every on spelling, the
+/// two groups, and the rest a usage error — pinned one by one.
+#[test]
+fn redact_env_value_reads_every_spelling() {
+    use crate::sensitive::Groups;
+    for off in ["", "0", "false", "FALSE", "off", "Off"] {
+        assert_eq!(redact_env_value(off), Some(None), "{off:?}");
+    }
+    for on in ["1", "true", "True", "on", "ON", "both", "Both"] {
+        assert_eq!(redact_env_value(on), Some(Some(Groups::BOTH)), "{on:?}");
+    }
+    assert_eq!(
+        redact_env_value("secrets")
+            .flatten()
+            .map(Groups::version_suffix),
+        Some(":secrets")
+    );
+    assert_eq!(
+        redact_env_value("PII")
+            .flatten()
+            .map(Groups::version_suffix),
+        Some(":pii")
+    );
+    for bad in ["nope", "2", "secret", "yes", "none"] {
+        assert_eq!(redact_env_value(bad), None, "{bad:?}");
+    }
+}
+
 /// ADR 0038 §3.7's notice names the endpoint's host only when it is
 /// not this machine.
 #[test]
@@ -2327,6 +2355,11 @@ fn redaction_accounting_names_rules_and_positions_never_content() {
         )
     );
     assert_eq!(redaction_plan_note(&found), ", 4 redaction(s)");
+    // No pre-existing placeholder: no clause about them.
+    assert_eq!(
+        redaction_stderr_line(&found[..1]).as_deref(),
+        Some("redacted 1 match(es): email ×1 (paragraph 3)")
+    );
     // Only pre-existing placeholders: nothing masked, still reported.
     let only = vec![redaction("preexisting", 0, true)];
     assert_eq!(
