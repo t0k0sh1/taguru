@@ -32,3 +32,6 @@ examples/langchain/.venv/
 examples/langchain/**/__pycache__/
 .taguru/
 graphify-out/
+
+# Claude Code session state and local skills (never shared through the repo)
+.claude/
