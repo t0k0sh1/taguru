@@ -1,0 +1,27 @@
+{
+  "rules": {
+    "paragraph_count": 1,
+    "questions_cap": 0
+  },
+  "document": "前二項の罪は、刑法第二条の例に従う。主務大臣は指定調査機関に調査を委任する。",
+  "answer": {
+    "associations": [
+      {
+        "subject": "前二項の罪",
+        "label": "适用法律",
+        "object": "刑法第二条の例"
+      },
+      {
+        "subject": "主務大臣",
+        "label": "委任",
+        "object": "指定調査機関"
+      }
+    ],
+    "aliases": []
+  },
+  "removed": [
+    "associations[0]: label \"适用法律\" uses 适 — an ideograph outside the document's script"
+  ],
+  "surviving_associations": 1,
+  "surviving_aliases": 0
+}

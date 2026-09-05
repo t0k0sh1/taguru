@@ -1297,6 +1297,208 @@ fn mechanical_pass_keeps_a_two_character_label() {
     assert_eq!(evaluation.output.associations.len(), 1);
 }
 
+fn foreign_rules() -> ItemRules {
+    ItemRules {
+        paragraph_count: 1,
+        questions_requested: false,
+    }
+}
+
+/// ADR 0039: a label written with an ideograph from another language's
+/// repertoire that the document never uses (`适用法律` for a document
+/// saying `適用法律`) is removed with accounting — the #780 case, as
+/// the `removed/` fixture also pins — and the item beside it survives.
+#[test]
+fn mechanical_pass_removes_a_label_with_an_ideograph_outside_the_documents_script() {
+    let answer = serde_json::json!({
+        "associations": [
+            {"subject": "前二項の罪", "label": "适用法律", "object": "刑法第二条の例"},
+            {"subject": "前二項の罪", "label": "適用法律", "object": "刑法第二条の例"},
+        ],
+        "aliases": []
+    });
+    let document = "前二項の罪は、刑法第二条の例に従う。";
+    let evaluation = mechanical_interpret(&answer, &foreign_rules(), document, &HashSet::new());
+    assert!(evaluation.issues.is_empty(), "{:?}", evaluation.issues);
+    assert_eq!(evaluation.output.associations.len(), 1);
+    assert_eq!(
+        evaluation.output.associations[0].label.as_deref(),
+        Some("適用法律")
+    );
+    assert_eq!(evaluation.removed.len(), 1);
+    assert_eq!(
+        evaluation.removed[0].to_string(),
+        "associations[0]: label \"适用法律\" uses 适 — an ideograph outside the document's script"
+    );
+}
+
+/// The "not in the document" half: a document that itself writes the
+/// character — a Chinese document, or a Japanese one quoting it —
+/// clears it for every label and name. Nothing about the document's
+/// language is judged.
+#[test]
+fn mechanical_pass_keeps_a_foreign_ideograph_the_document_contains() {
+    let answer = serde_json::json!({
+        "associations": [{"subject": "前二項の罪", "label": "适用法律", "object": "刑法第二条の例"}],
+        "aliases": [{"alias": "适用", "canonical": "刑法第二条の例", "kind": "concept"}]
+    });
+    let document = "前二項の罪には刑法第二条の例を适用する。";
+    let evaluation = mechanical_interpret(&answer, &foreign_rules(), document, &HashSet::new());
+    assert!(evaluation.issues.is_empty(), "{:?}", evaluation.issues);
+    assert!(evaluation.removed.is_empty(), "{:?}", evaluation.removed);
+    assert_eq!(evaluation.output.associations.len(), 1);
+    assert_eq!(evaluation.output.aliases.len(), 1);
+}
+
+/// Subject and object are judged too, and every offending field lands
+/// in ONE record with the plural wording — the occurrence check's
+/// "both positions before anything is recorded" shape. The rule runs
+/// before the occurrence check, so the diagnosis is the script, not
+/// "does not appear in the document text".
+#[test]
+fn mechanical_pass_names_every_foreign_field_of_an_item_in_one_record() {
+    let answer = serde_json::json!({
+        "associations": [{"subject": "主務大臣", "label": "适用法律", "object": "处分の例"}],
+        "aliases": []
+    });
+    let document = "主務大臣は処分の例を適用する。";
+    let evaluation = mechanical_interpret(&answer, &foreign_rules(), document, &HashSet::new());
+    assert!(evaluation.output.associations.is_empty());
+    assert_eq!(evaluation.removed.len(), 1);
+    assert_eq!(
+        evaluation.removed[0].to_string(),
+        "associations[0]: label \"适用法律\" uses 适, object \"处分の例\" uses 处 — ideographs outside the document's script"
+    );
+}
+
+/// ADR 0015's allowlist applies to a subject/object exactly as it does
+/// for the occurrence check — a spelling the target context already
+/// uses is not judged — but never to a label: the reuse vocabulary is
+/// an offer, not a whitelist.
+#[test]
+fn foreign_ideograph_rule_honours_the_name_allowlist_but_not_for_labels() {
+    let allowlisted: HashSet<String> = [normalize_for_occurrence("处分")].into_iter().collect();
+    let document = "主務大臣は処分を適用する。";
+    let names_only = serde_json::json!({
+        "associations": [{"subject": "主務大臣", "label": "適用", "object": "处分"}],
+        "aliases": []
+    });
+    let evaluation = mechanical_interpret(&names_only, &foreign_rules(), document, &allowlisted);
+    assert!(evaluation.removed.is_empty(), "{:?}", evaluation.removed);
+    assert_eq!(evaluation.output.associations.len(), 1);
+
+    let label_too = serde_json::json!({
+        "associations": [{"subject": "主務大臣", "label": "适用", "object": "处分"}],
+        "aliases": []
+    });
+    let evaluation = mechanical_interpret(&label_too, &foreign_rules(), document, &allowlisted);
+    assert_eq!(evaluation.removed.len(), 1);
+    assert_eq!(
+        evaluation.removed[0].to_string(),
+        "associations[0]: label \"适用\" uses 适 — an ideograph outside the document's script",
+        "the allowlisted object is not named, the label is"
+    );
+}
+
+/// An alias spelling is judged like a label — it records a form the
+/// document never uses — and the alias dies alone: its canonical's
+/// association is untouched.
+#[test]
+fn mechanical_pass_removes_an_alias_spelling_outside_the_documents_script() {
+    let answer = serde_json::json!({
+        "associations": [{"subject": "主務大臣", "label": "適用", "object": "処分"}],
+        "aliases": [
+            {"alias": "处分", "canonical": "処分", "kind": "concept"},
+            {"alias": "処分等", "canonical": "処分", "kind": "concept"},
+        ]
+    });
+    let document = "主務大臣は処分を適用する。処分等ともいう。";
+    let evaluation = mechanical_interpret(&answer, &foreign_rules(), document, &HashSet::new());
+    assert!(evaluation.issues.is_empty(), "{:?}", evaluation.issues);
+    assert_eq!(evaluation.output.associations.len(), 1);
+    assert_eq!(evaluation.output.aliases.len(), 1);
+    assert_eq!(
+        evaluation.output.aliases[0].alias.as_deref(),
+        Some("処分等")
+    );
+    assert_eq!(evaluation.removed.len(), 1);
+    assert_eq!(
+        evaluation.removed[0].to_string(),
+        "aliases[0]: alias \"处分\" uses 处 — an ideograph outside the document's script"
+    );
+}
+
+/// `foreign_ideographs` itself: each character once in first-appearance
+/// order, kana and Latin never judged, JIS X 0208's own forms never
+/// judged (`辭` is in the repertoire — ADR 0039 §4's accepted limit),
+/// and the document clearing a character by containing it.
+#[test]
+fn foreign_ideographs_lists_each_offending_character_once_in_order() {
+    let haystack = normalize_for_occurrence("責任と処罰について");
+    assert_eq!(
+        foreign_ideographs("连带责任", &haystack),
+        vec!['连', '带', '责']
+    );
+    assert_eq!(
+        foreign_ideographs("处罚と处分", &haystack),
+        vec!['处', '罚']
+    );
+    assert_eq!(
+        foreign_ideographs("辭任のカナ abc 適用", &haystack),
+        Vec::<char>::new()
+    );
+    assert_eq!(
+        foreign_ideographs("处罚", &normalize_for_occurrence("处罚を科す")),
+        Vec::<char>::new()
+    );
+}
+
+/// The table's edges (ADR 0039 §3.1): the corpus's simplified forms are
+/// outside, their Japanese forms inside, the block's first code point
+/// (`一`) inside and its last unassigned one outside, an Extension A
+/// character and a compatibility ideograph outside the repertoire but
+/// ideographs all the same, and a non-ideograph neither.
+#[test]
+fn jis_x0208_table_edges() {
+    use jis_x0208::{in_jis_x0208, is_ideograph};
+    for c in [
+        '处', '罚', '导', '连', '带', '责', '适', '增', '张', '义', '类',
+    ] {
+        assert!(is_ideograph(c) && !in_jis_x0208(c), "{c} must be outside");
+    }
+    for c in [
+        '処', '罰', '導', '連', '帯', '責', '適', '増', '張', '義', '類', '辭', '一', '々',
+    ] {
+        if c == '々' {
+            assert!(!is_ideograph(c), "iteration mark is not an ideograph");
+        } else {
+            assert!(is_ideograph(c) && in_jis_x0208(c), "{c} must be inside");
+        }
+    }
+    assert!(is_ideograph('\u{4E00}') && in_jis_x0208('\u{4E00}'));
+    assert!(is_ideograph('\u{9FFF}') && !in_jis_x0208('\u{9FFF}'));
+    assert!(
+        is_ideograph('\u{3400}') && !in_jis_x0208('\u{3400}'),
+        "Extension A"
+    );
+    assert!(
+        is_ideograph('\u{FA11}') && !in_jis_x0208('\u{FA11}'),
+        "compatibility 﨑"
+    );
+    assert!(
+        is_ideograph('\u{20000}') && !in_jis_x0208('\u{20000}'),
+        "Extension B"
+    );
+    assert!(!is_ideograph('あ') && !in_jis_x0208('あ'));
+    assert!(!is_ideograph('A') && !in_jis_x0208('A'));
+    // The whole repertoire, as scripts/gen_jis_x0208.py counted it.
+    let population: u32 = jis_x0208::JIS_X0208_IDEOGRAPHS
+        .iter()
+        .map(|word| word.count_ones())
+        .sum();
+    assert_eq!(population, 6356);
+}
+
 /// Shadowing keeps its corrective turn: the prune removes ONLY what
 /// cannot import (a dangling canonical); an alias whose spelling IS
 /// an association name carries real, judgeable content.
