@@ -48,6 +48,7 @@ fn case_with_limit(limit: Option<usize>) -> EvalCase {
         expected_labels: Vec::new(),
         expected_associations: Vec::new(),
         expected_citations: Vec::new(),
+        line: 0,
     }
 }
 

@@ -35,6 +35,20 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Changed
 
+- `evaluate`: failed cases are named, not just counted (#865, the
+  `evaluate` share of ADR 0037's survey). Under the summary line, one
+  line per failing lane and case — `passage failed — case 'c1': …`, a
+  structural probe whose query errored (`associations[i]`), a
+  citation check the server did not resolve (source, paragraph, and
+  its error code), an evidence assembly that failed — the first three
+  per lane, then `... and N more`; the `wrote <out>` line now ends
+  with the `evaluation.json` fields that hold every one
+  (`cases[].passage.message (outcome: failed)` and its three
+  siblings). The `options.limit` refusal reads `<file>: line N: case
+  'x': options.limit: must be …`, the evalset loader's own shape,
+  where it used to drop the file and the line. No `evaluation.json`
+  format change.
+
 - `anchoring`: every association the rates count against is now
   named (#864, the `anchoring` share of ADR 0037's survey). After the
   table, each document lists its associations that are not strictly
