@@ -9,6 +9,24 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Added
 
+- `extract --redact [secrets|pii]` (ADR 0038, #882): masks secrets (AWS,
+  GitHub, OpenAI, Slack, Google keys; PEM private-key blocks; JWTs;
+  credential assignments; `Authorization:` headers; URL userinfo) and
+  pattern-recognisable personal data (e-mail, phone numbers, 個人番号,
+  payment cards) in the document before anything reads it — the
+  prompt, the passage, the checkpoint, the trace, and the attempts log
+  hold `«redacted <rule> <hex>»` and never the text. Accounting names
+  rule and paragraph only (stderr line, `N redacted` on the report
+  line, `redaction` trace records, a dry-run note); the rendered batch
+  is scanned with the same rules before it is written, and a placeholder
+  copied into a subject/object/alias is removed as not an entity.
+  `TAGURU_EXTRACT_REDACT` is the default; the rule-set version is a
+  computation input (manifest/checkpoint/settings field `redaction`,
+  `""` when off, so existing entries keep matching). With redaction off
+  and a non-loopback `TAGURU_EXTRACT_URL`, the run notes once where the
+  text goes. `regex` becomes a direct dependency (already in the tree
+  through jsonschema).
+
 - `inspect`: reads an extract attempts log (ADR 0037, #850). `taguru
   inspect <out>/.extract-trace/<batch stem>.attempts.jsonl` prints one
   line per completion — chunk, piece id, the paragraphs the piece

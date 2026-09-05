@@ -51,6 +51,10 @@ pub(super) struct Args {
     /// (ADR 0014's default-off: the prompt stays byte-for-byte pre-S2)
     /// — resolved in [`run`], same pattern as `lossy`.
     pub(super) candidates: Option<bool>,
+    /// `--redact [secrets|pii]` (ADR 0038 §3.3, #882): `Some(groups)`
+    /// when given; `None` defers to TAGURU_EXTRACT_REDACT, and then to
+    /// off — resolved in [`run`], same pattern as `candidates`.
+    pub(super) redact: Option<crate::sensitive::Groups>,
     /// `None` defers to TAGURU_EXTRACT_VOCABULARY, and then to no
     /// vocabulary at all — resolved in [`run`], same pattern as
     /// `schema`. ADR 0015 (#496 S3).
@@ -115,6 +119,7 @@ impl Args {
         let mut chunk_context: Option<ChunkContextMode> = None;
         let mut lossy: Option<bool> = None;
         let mut candidates: Option<bool> = None;
+        let mut redact: Option<crate::sensitive::Groups> = None;
         let mut vocabulary: Option<PathBuf> = None;
         let mut coverage: Option<bool> = None;
         let mut diagnostics_out: Option<PathBuf> = None;
@@ -141,6 +146,27 @@ impl Args {
                 "--no-passage" => no_passage = true,
                 "--lossy" => lossy = Some(true),
                 "--candidates" => candidates = Some(true),
+                "--redact" => {
+                    if redact.is_some() {
+                        return Err(crate::config::subcommand_usage_error(
+                            "extract",
+                            "--redact given twice",
+                        ));
+                    }
+                    // The group is optional: `--redact` alone means
+                    // both, `--redact secrets` / `--redact pii` one.
+                    // Anything else after it is the next argument.
+                    let group = match rest.clone().next().map(String::as_str) {
+                        Some(value @ ("secrets" | "pii")) => {
+                            rest.next();
+                            Some(value)
+                        }
+                        _ => None,
+                    };
+                    redact = Some(crate::sensitive::Groups::parse(group).map_err(|message| {
+                        crate::config::subcommand_usage_error("extract", &message)
+                    })?);
+                }
                 "--coverage" => coverage = Some(true),
                 "--vocabulary" => match rest.next() {
                     Some(path) if vocabulary.is_none() => vocabulary = Some(PathBuf::from(path)),
@@ -621,6 +647,7 @@ impl Args {
             chunk_context,
             lossy,
             candidates,
+            redact,
             vocabulary,
             coverage,
             diagnostics_out,

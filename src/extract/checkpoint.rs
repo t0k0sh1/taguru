@@ -65,6 +65,11 @@ pub(super) struct CheckpointFingerprint {
     /// a default rerun and only invalidates once `--candidates` engages.
     #[serde(default)]
     pub(super) candidates: String,
+    /// `--redact`'s version (`""` = off) — ADR 0038 §3.5; `default`
+    /// for the same reason as `candidates`: a pre-ADR checkpoint was
+    /// written with redaction off.
+    #[serde(default)]
+    pub(super) redaction: String,
     /// `--vocabulary`'s content digest (`""` = off) — ADR 0015, same
     /// `default` reasoning as `schema_digest`/`candidates`.
     #[serde(default)]

@@ -233,6 +233,8 @@ pub(super) struct SettingsRecord<'a> {
     pub(super) lossy: bool,
     pub(super) schema_digest: &'a str,
     pub(super) candidates: &'a str,
+    /// `--redact`'s version (`""` = off) — ADR 0038 §3.5.
+    pub(super) redaction: &'a str,
     pub(super) vocabulary_digest: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) rung: Option<&'static str>,

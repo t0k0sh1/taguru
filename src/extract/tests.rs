@@ -24,6 +24,7 @@ fn base_inputs<'a>(sha256: &'a str, model: &'a str) -> ComputationInputs<'a> {
         lossy: false,
         schema_digest: "",
         candidates: "",
+        redaction: "",
         vocabulary_digest: "",
         source_id: "",
         date: 0,
@@ -1992,6 +1993,7 @@ fn with_resume_hint_names_the_checkpointed_units_only_when_there_are_any() {
         lossy: false,
         schema_digest: String::new(),
         candidates: String::new(),
+        redaction: String::new(),
         vocabulary_digest: String::new(),
     };
     let store = CheckpointStore::empty(dir.join("unit.json"), fingerprint);
@@ -2187,6 +2189,163 @@ fn manifests_reextract_when_the_candidates_mode_changes() {
             ..base_inputs("hash-2", "model-1")
         }
     ));
+}
+
+/// ADR 0038 §3.5: the redaction version is a computation input like
+/// `candidates` — toggling it, or a group change, re-extracts; entries
+/// written before the control existed default to `""` and keep
+/// matching a default-off run.
+#[test]
+fn manifests_reextract_when_the_redaction_version_changes() {
+    let mut manifest = Manifest::default();
+    manifest.record(
+        "a.md",
+        &ComputationInputs {
+            redaction: "redact1",
+            ..base_inputs("hash-1", "model-1")
+        },
+        "a.md.jsonl",
+    );
+    assert!(manifest.matches(
+        "a.md",
+        &ComputationInputs {
+            redaction: "redact1",
+            ..base_inputs("hash-1", "model-1")
+        }
+    ));
+    assert!(!manifest.matches(
+        "a.md",
+        &ComputationInputs {
+            redaction: "redact1:secrets",
+            ..base_inputs("hash-1", "model-1")
+        }
+    ));
+    assert!(!manifest.matches("a.md", &base_inputs("hash-1", "model-1")));
+    let mut legacy = Manifest::default();
+    legacy.record("b.md", &base_inputs("hash-2", "model-1"), "b.md.jsonl");
+    assert!(legacy.matches("b.md", &base_inputs("hash-2", "model-1")));
+    assert!(!legacy.matches(
+        "b.md",
+        &ComputationInputs {
+            redaction: "redact1",
+            ..base_inputs("hash-2", "model-1")
+        }
+    ));
+    // A checkpoint fingerprint from before the field existed reads as
+    // "" — off.
+    let fingerprint: CheckpointFingerprint = serde_json::from_value(serde_json::json!({
+        "sha256": "h", "model": "m", "prompt_version": 1, "context": "c",
+        "questions_n": 0, "no_passage": false, "description": "", "fact_budget": 0,
+        "structured_output": "", "max_output_tokens": 0, "lossy": false
+    }))
+    .unwrap();
+    assert_eq!(fingerprint.redaction, "");
+}
+
+/// `--redact` takes an optional group: bare means both, `secrets` or
+/// `pii` one; anything else after it is the next argument (a document
+/// path, say), and a second `--redact` is a usage error.
+#[test]
+fn redact_flag_takes_an_optional_group_and_rejects_a_duplicate() {
+    fn parse(words: &[&str]) -> Result<Args, i32> {
+        Args::parse(&words.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+    let base = ["--context", "c", "--out", "o"];
+    let with = |tail: &[&str]| parse(&[&base[..], tail].concat());
+    let parsed = with(&["--redact", "doc.md"]).unwrap();
+    assert_eq!(parsed.redact, Some(crate::sensitive::Groups::BOTH));
+    assert_eq!(parsed.paths, vec!["doc.md".to_string()]);
+    let parsed = with(&["--redact", "secrets", "doc.md"]).unwrap();
+    assert_eq!(parsed.redact.map(|g| g.version_suffix()), Some(":secrets"));
+    assert_eq!(parsed.paths, vec!["doc.md".to_string()]);
+    let parsed = with(&["doc.md", "--redact", "pii"]).unwrap();
+    assert_eq!(parsed.redact.map(|g| g.version_suffix()), Some(":pii"));
+    assert_eq!(with(&["doc.md"]).unwrap().redact, None);
+    assert!(matches!(with(&["--redact", "--redact", "doc.md"]), Err(2)));
+}
+
+/// ADR 0038 §3.7's notice names the endpoint's host only when it is
+/// not this machine.
+#[test]
+fn non_loopback_host_names_only_a_remote_endpoint() {
+    for local in [
+        "http://127.0.0.1:11434/v1",
+        "http://localhost:11434",
+        "http://LOCALHOST/v1",
+        "http://[::1]:8080/v1",
+        "http://127.10.0.3",
+        "not a url",
+        "http:///v1",
+    ] {
+        assert_eq!(non_loopback_host(local), None, "{local}");
+    }
+    assert_eq!(
+        non_loopback_host("https://api.openai.com/v1").as_deref(),
+        Some("api.openai.com")
+    );
+    assert_eq!(
+        non_loopback_host("http://user:pw@model.internal:8080/v1?x=1").as_deref(),
+        Some("model.internal")
+    );
+    assert_eq!(
+        non_loopback_host("http://[2001:db8::1]:8080/v1").as_deref(),
+        Some("2001:db8::1")
+    );
+    assert_eq!(
+        non_loopback_host("http://10.0.0.5").as_deref(),
+        Some("10.0.0.5")
+    );
+}
+
+/// ADR 0038 §3.6: the stderr line, the dry-run note, and the output
+/// scan's hit name rules, paragraphs, and lines — never content.
+#[test]
+fn redaction_accounting_names_rules_and_positions_never_content() {
+    use super::run::{batch_sensitive_hit, redaction_plan_note, redaction_stderr_line};
+    use crate::sensitive::Redaction;
+    let redaction = |rule: &str, paragraph: u32, preexisting: bool| Redaction {
+        rule: rule.to_string(),
+        paragraph,
+        placeholder: format!("«redacted {rule} abcd»"),
+        bytes: 20,
+        preexisting,
+    };
+    assert_eq!(redaction_stderr_line(&[]), None);
+    assert_eq!(redaction_plan_note(&[]), "");
+    let found = vec![
+        redaction("email", 3, false),
+        redaction("aws_access_key", 0, false),
+        redaction("email", 3, false),
+        redaction("email", 1, false),
+        redaction("preexisting", 2, true),
+    ];
+    assert_eq!(
+        redaction_stderr_line(&found).as_deref(),
+        Some(
+            "redacted 4 match(es): aws_access_key ×1 (paragraph 0), email ×3 (paragraphs 1, 3); \
+             1 pre-existing placeholder(s)"
+        )
+    );
+    assert_eq!(redaction_plan_note(&found), ", 4 redaction(s)");
+    // Only pre-existing placeholders: nothing masked, still reported.
+    let only = vec![redaction("preexisting", 0, true)];
+    assert_eq!(
+        redaction_stderr_line(&only).as_deref(),
+        Some("redacted 0 match(es); 1 pre-existing placeholder(s)")
+    );
+    assert_eq!(redaction_plan_note(&only), "");
+    // The output scan: the first hit's 1-based batch line and rule; a
+    // body made only of placeholders is clean.
+    let rules = crate::sensitive::RuleSet::builtin(crate::sensitive::Groups::BOTH);
+    let body = "{\"a\":1}\n{\"label\":\"«redacted email abcd»\"}\n{\"label\":\"x@example.com\"}\n";
+    assert_eq!(
+        batch_sensitive_hit(body, &rules),
+        Some((3, "email".to_string()))
+    );
+    assert_eq!(
+        batch_sensitive_hit(&body[..body.rfind('{').unwrap()], &rules),
+        None
+    );
 }
 
 #[test]
@@ -4899,6 +5058,7 @@ fn drive_ladder_on(
             lossy: true,
             schema_digest: String::new(),
             candidates: String::new(),
+            redaction: String::new(),
             vocabulary_digest: String::new(),
         },
     );
@@ -5947,6 +6107,7 @@ fn render_trace_joins_items_to_pieces_across_a_split_and_a_reuse() {
         "doc.md",
         "d".repeat(64).as_str(),
         Path::new("out/doc.jsonl"),
+        &[],
         &chunks,
         &pieces,
         &[],
@@ -6306,6 +6467,7 @@ fn render_trace_shows_every_loss_in_the_original_text() {
         "doc.md",
         "d".repeat(64).as_str(),
         Path::new("out/doc.jsonl"),
+        &[],
         &chunks,
         &pieces,
         &["alpha text", "beta text", "gamma text"],
@@ -6522,6 +6684,7 @@ fn lossy_parse_drops_are_recorded_as_unparsed_losses() {
         "d".repeat(64).as_str(),
         Path::new("out/doc.jsonl"),
         &[],
+        &[],
         &pieces,
         &["a b"],
         &extraction,
@@ -6678,6 +6841,7 @@ fn render_trace_reports_paragraph_coverage_and_gap_sentences() {
         "doc.md",
         "d".repeat(64).as_str(),
         Path::new("out/doc.jsonl"),
+        &[],
         &chunks,
         &pieces,
         &paragraphs,

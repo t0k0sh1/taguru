@@ -359,6 +359,9 @@ pub(super) struct RecordedSettings {
     pub(super) lossy: bool,
     pub(super) schema_digest: String,
     pub(super) candidates: String,
+    /// ADR 0038; absent in a record written before the control
+    /// existed, read as `""` (off), as `chunk_context` is.
+    pub(super) redaction: String,
     pub(super) vocabulary_digest: String,
 }
 
@@ -375,6 +378,7 @@ pub(super) fn parse_settings_record(value: &serde_json::Value) -> Option<Recorde
         lossy: value["lossy"].as_bool()?,
         schema_digest: value["schema_digest"].as_str()?.to_string(),
         candidates: value["candidates"].as_str()?.to_string(),
+        redaction: value["redaction"].as_str().unwrap_or("").to_string(),
         vocabulary_digest: value["vocabulary_digest"].as_str()?.to_string(),
     })
 }
@@ -411,6 +415,7 @@ pub(super) fn settings_differences(
     diff!(lossy, "lossy");
     diff!(schema_digest, "schema_digest");
     diff!(candidates, "candidates");
+    diff!(redaction, "redaction");
     diff!(vocabulary_digest, "vocabulary_digest");
     differences
 }

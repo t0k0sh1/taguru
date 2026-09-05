@@ -270,7 +270,8 @@ usage: taguru extract [--dry-run] [--force] [--no-passage] [--questions N]
                       [--fact-budget N] [--config FILE] [--parallel N]
                       [--structured-output MODE] [--max-output-tokens N]
                       [--chunk-bytes N] [--chunk-context MODE]
-                      [--lossy] [--candidates] [--vocabulary PATH] [--coverage]
+                      [--lossy] [--candidates] [--redact [secrets|pii]]
+                      [--vocabulary PATH] [--coverage]
                       [--diagnostics-out FILE] [--schema FILE]
                       [--replay MODE] [--replay-from DIR] [--resume-from STEP]
                       [--source-id ID] [--date WHEN] [--tag TAG]...
@@ -304,6 +305,8 @@ chat endpoint:
   TAGURU_EXTRACT_CHUNK_CONTEXT  default for --chunk-context (off)
   TAGURU_EXTRACT_LOSSY  default for --lossy (0/false)
   TAGURU_EXTRACT_CANDIDATES  default for --candidates (0/false)
+  TAGURU_EXTRACT_REDACT  default for --redact: 1/true (both groups),
+                      secrets, pii, or 0/false (off)
   TAGURU_EXTRACT_VOCABULARY  default for --vocabulary (unset, off)
   TAGURU_EXTRACT_COVERAGE  default for --coverage (0/false)
   TAGURU_EXTRACT_DIAGNOSTICS  default for --diagnostics-out (unset, off)
@@ -380,6 +383,19 @@ chat endpoint:
                       preferred subject/object spellings. Non-restrictive:
                       names outside the list stay allowed. Off by default;
                       toggling it re-extracts (a computation input)
+  --redact [GROUP]    mask secrets and pattern-recognisable personal data
+                      in the document BEFORE anything reads it (ADR 0038):
+                      each match becomes «redacted <rule> <hex>» in the
+                      prompt, the passage, the checkpoint, the trace, and
+                      the attempts log alike. GROUP = secrets (API keys,
+                      key blocks, JWTs, credential assignments,
+                      Authorization headers, URL userinfo) or pii (e-mail,
+                      phone numbers, 個人番号, payment cards); no GROUP =
+                      both. Every redaction is named on stderr by rule and
+                      paragraph, never by content. Off by default; a
+                      computation input (toggling re-extracts). Names,
+                      addresses, IPs, and high-entropy strings are not
+                      judged — see docs/extract.html
   --vocabulary PATH   steer spellings toward a target context's existing
                       vocabulary: PATH is an exported batch stream (or a
                       directory of them, e.g. taguru export --out DIR);
@@ -499,6 +515,31 @@ Contract and discipline: docs/extract.html.
 /// under it are one paragraph off and must not be silently reused.
 ///
 pub(crate) const PROMPT_VERSION: u32 = 5;
+
+/// The host of `url` when it is not this machine (ADR 0038 §3.7's
+/// notice), `None` for a loopback host or a URL with no host. A
+/// deliberately small reading — scheme, `://`, host up to the first
+/// `/`, `:`, or end — since the notice is advisory and the client's
+/// own parse decides whether the URL works.
+pub(crate) fn non_loopback_host(url: &str) -> Option<String> {
+    let rest = url.split_once("://").map(|(_, rest)| rest)?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host_port = authority
+        .rsplit_once('@')
+        .map(|(_, hp)| hp)
+        .unwrap_or(authority);
+    let host = if let Some(bracketed) = host_port.strip_prefix('[') {
+        bracketed.split(']').next().unwrap_or("")
+    } else {
+        host_port.split(':').next().unwrap_or("")
+    };
+    if host.is_empty() {
+        return None;
+    }
+    let loopback =
+        host.eq_ignore_ascii_case("localhost") || host == "::1" || host.starts_with("127.");
+    (!loopback).then(|| host.to_string())
+}
 
 /// Document bytes per model call. Chunks split at paragraph
 /// boundaries; facts spanning a boundary can be missed, so the cap
@@ -883,6 +924,50 @@ pub fn run(args: &[String]) -> i32 {
             Err(_) => false,
         },
     };
+    // ADR 0038 §3.7: off by default; the env value names the groups
+    // the same way the flag does, plus on/off spellings.
+    let redaction = match args.redact {
+        Some(groups) => Some(groups),
+        None => match std::env::var("TAGURU_EXTRACT_REDACT") {
+            Ok(value)
+                if value == "0"
+                    || value.eq_ignore_ascii_case("false")
+                    || value.eq_ignore_ascii_case("off")
+                    || value.is_empty() =>
+            {
+                None
+            }
+            Ok(value)
+                if value == "1"
+                    || value.eq_ignore_ascii_case("true")
+                    || value.eq_ignore_ascii_case("on")
+                    || value.eq_ignore_ascii_case("both") =>
+            {
+                Some(crate::sensitive::Groups::BOTH)
+            }
+            Ok(value) => match crate::sensitive::Groups::parse(Some(&value)) {
+                Ok(groups) => Some(groups),
+                Err(_) => {
+                    return crate::config::subcommand_usage_error(
+                        "extract",
+                        "TAGURU_EXTRACT_REDACT takes 1/true, 0/false, secrets, or pii",
+                    );
+                }
+            },
+            Err(_) => None,
+        },
+    };
+    // ADR 0038 §3.7: with redaction off and a model endpoint that is
+    // not this machine, say once where the text goes — before any
+    // document is read, so a dry run says it too.
+    if redaction.is_none()
+        && let Ok(url) = std::env::var("TAGURU_EXTRACT_URL")
+        && let Some(host) = non_loopback_host(&url)
+    {
+        eprintln!(
+            "taguru: extract: note: --redact is off; document text is sent to {host} as written"
+        );
+    }
     // Same resolution and validation strength as --candidates above.
     // ADR 0016 (#496 S4): report-only, so unlike --candidates this is
     // NOT a computation input — no fingerprint carries it.
@@ -1110,6 +1195,7 @@ pub fn run(args: &[String]) -> i32 {
         parallel,
         lossy,
         candidates: candidates_on,
+        redaction: redaction.map(|groups| (groups, crate::sensitive::RuleSet::builtin(groups))),
         coverage: coverage_on,
         vocabulary_names: context_vocabulary
             .as_ref()

@@ -340,6 +340,7 @@ fn scrub_extract_env(command: &mut Command) -> &mut Command {
         .env_remove("TAGURU_EXTRACT_CHUNK_BYTES")
         .env_remove("TAGURU_EXTRACT_LOSSY")
         .env_remove("TAGURU_EXTRACT_CANDIDATES")
+        .env_remove("TAGURU_EXTRACT_REDACT")
         .env_remove("TAGURU_EXTRACT_VOCABULARY")
         .env_remove("TAGURU_EXTRACT_COVERAGE")
         .env_remove("TAGURU_EXTRACT_DIAGNOSTICS")
@@ -2696,6 +2697,319 @@ fn extract_prunes_an_alias_that_would_rewire_an_earlier_documents_concept() {
         d.display()
     );
     assert!(stderr.contains(&expected), "{stderr}");
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// ADR 0038 (#882): `--redact` masks the document before anything
+/// reads it — the prompt, the attempts log, the checkpoint, the trace,
+/// and the batch hold the placeholder and never the matched text; the
+/// accounting on stderr names rule and paragraph; a pre-existing
+/// placeholder is counted apart; the redaction version is a
+/// computation input (same flag skips, a group change re-extracts).
+#[test]
+fn extract_redact_masks_the_document_before_the_prompt_and_every_record() {
+    let docs = batch_dir("extract-redact-docs");
+    let doc = docs.join("a.md");
+    let key = "AKIAIOSFODNN7EXAMPLE";
+    let mail = "takase@example.com";
+    std::fs::write(
+        &doc,
+        format!(
+            "青嶺酒造の連絡先は {mail}、鍵は {key} である。\n\n杜氏は高瀬。前回の «redacted email 9f3a» も高瀬宛。"
+        ),
+    )
+    .unwrap();
+    let out = batch_dir("extract-redact-out");
+    let reply = json!({"associations": [
+        {"subject": "青嶺酒造", "label": "杜氏", "object": "高瀬"}
+    ]})
+    .to_string();
+
+    let (url, requests) = stub_chat_server(vec![reply.clone()]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &["--context", "c", "--redact", doc.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let requests = requests.join().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(!requests[0].contains(key), "{}", requests[0]);
+    assert!(!requests[0].contains(mail), "{}", requests[0]);
+    assert!(
+        requests[0].contains("«redacted aws_access_key "),
+        "{}",
+        requests[0]
+    );
+    assert!(requests[0].contains("«redacted email "), "{}", requests[0]);
+    assert!(
+        requests[0].contains("«redacted email 9f3a»"),
+        "{}",
+        requests[0]
+    );
+    assert!(
+        stderr.contains(
+            "redacted 2 match(es): aws_access_key ×1 (paragraph 0), email ×1 (paragraph 0); \
+             1 pre-existing placeholder(s)"
+        ),
+        "{stderr}"
+    );
+    assert!(!stderr.contains(key) && !stderr.contains(mail), "{stderr}");
+    assert!(stdout.contains(", 2 redacted"), "{stdout}");
+
+    // Every file under --out: no raw match anywhere.
+    fn walk(dir: &std::path::Path, into: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, into);
+            } else {
+                into.push(path);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(&out, &mut files);
+    assert!(files.len() >= 4, "{files:?}");
+    for path in &files {
+        let text = std::fs::read_to_string(path).unwrap();
+        assert!(!text.contains(key), "{} carries the key", path.display());
+        assert!(
+            !text.contains(mail),
+            "{} carries the address",
+            path.display()
+        );
+    }
+    // The trace: three `redaction` records right after `document`, the
+    // pre-existing one flagged, none with the text.
+    let (_, records) = read_trace(&out);
+    assert_eq!(records[0]["kind"], "document");
+    let redactions: Vec<&Value> = records
+        .iter()
+        .filter(|record| record["kind"] == "redaction")
+        .collect();
+    assert_eq!(redactions.len(), 3, "{records:?}");
+    assert_eq!(records[1]["kind"], "redaction");
+    assert_eq!(records[3]["kind"], "redaction");
+    assert_eq!(records[4]["kind"], "steering");
+    assert_eq!(redactions[0]["rule"], "email");
+    assert_eq!(redactions[0]["paragraph"], 0);
+    assert!(
+        redactions[0]["placeholder"]
+            .as_str()
+            .unwrap()
+            .starts_with("«redacted email ")
+    );
+    assert_eq!(redactions[0]["bytes"], mail.len());
+    assert!(redactions[0].get("raw").is_none());
+    assert_eq!(redactions[1]["rule"], "aws_access_key");
+    assert_eq!(redactions[2]["rule"], "preexisting");
+    assert_eq!(redactions[2]["preexisting"], true);
+    assert_eq!(redactions[2]["paragraph"], 1);
+
+    // The same flag again: the manifest matches, nothing is sent.
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", "http://127.0.0.1:9"),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &["--context", "c", "--redact", doc.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("unchanged, skipped"), "{stdout}");
+    // `--redact secrets`: a group change re-extracts, and the address
+    // is sent as written while the key still is not.
+    let (url, requests) = stub_chat_server(vec![reply]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &[
+            "--context",
+            "c",
+            "--redact",
+            "secrets",
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(!stdout.contains("unchanged, skipped"), "{stdout}");
+    let requests = requests.join().unwrap();
+    assert!(requests[0].contains(mail), "{}", requests[0]);
+    assert!(!requests[0].contains(key), "{}", requests[0]);
+    assert!(stdout.contains(", 1 redacted"), "{stdout}");
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// ADR 0038 §3.3, the output side: a batch that carries what the
+/// redacted document never showed fails the document with the batch
+/// line and the rule and writes nothing; a placeholder copied into a
+/// subject or object is not an entity and is removed with accounting.
+#[test]
+fn extract_redact_refuses_a_batch_carrying_sensitive_content_and_drops_placeholder_entities() {
+    let docs = batch_dir("extract-redact-output-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(&doc, "杜氏は高瀬。連絡先は takase@example.com。").unwrap();
+    let out = batch_dir("extract-redact-output-out");
+
+    // A label is not occurrence-checked, so the model can put the
+    // address there — the scan catches it before the write.
+    let reply = json!({"associations": [
+        {"subject": "杜氏", "label": "takase@example.com", "object": "高瀬"}
+    ]})
+    .to_string();
+    let (url, _requests) = stub_chat_server(vec![reply]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &["--context", "c", "--redact", doc.to_str().unwrap()],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("sensitive content the redacted document never showed"),
+        "{stderr}"
+    );
+    // Line 3: the batch's context and source lines come first.
+    assert!(stderr.contains("batch line 3: email"), "{stderr}");
+    assert!(stderr.contains("nothing was written"), "{stderr}");
+    // The refused answer is not checkpointed for a rerun to resume
+    // from — the next run below asks the model again.
+    assert!(
+        stderr.contains("checkpointed answers were discarded"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("resumes from them"), "{stderr}");
+    assert!(
+        stray_batch_files(&out).is_empty(),
+        "{:?}",
+        stray_batch_files(&out)
+    );
+
+    // A placeholder as an object: removed, named on stderr, the rest
+    // of the batch lands.
+    let reply = json!({"associations": [
+        {"subject": "杜氏", "label": "名前", "object": "高瀬"},
+        {"subject": "高瀬", "label": "連絡先", "object": "«redacted email 1234»"}
+    ]})
+    .to_string();
+    let (url, _requests) = stub_chat_server(vec![reply]);
+    let (code, stdout, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", url.as_str()),
+            ("TAGURU_EXTRACT_MODEL", "stub-model"),
+        ],
+        &["--context", "c", "--redact", doc.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("removed: ")
+            && stderr.contains("is a redaction placeholder — not an entity"),
+        "{stderr}"
+    );
+    assert!(stdout.contains("1 item(s) removed"), "{stdout}");
+    assert_eq!(stray_batch_files(&out).len(), 1);
+
+    let _ = std::fs::remove_dir_all(&docs);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// TAGURU_EXTRACT_REDACT is the flag's default (a group name, or
+/// on/off), a bad value is a usage error, a dry run counts what would
+/// be masked, and ADR 0038 §3.7's notice names a non-loopback endpoint
+/// once when redaction is off — and only then.
+#[test]
+fn extract_redact_env_var_dry_run_note_and_endpoint_notice() {
+    let docs = batch_dir("extract-redact-env-docs");
+    let doc = docs.join("a.md");
+    std::fs::write(
+        &doc,
+        "鍵は AKIAIOSFODNN7EXAMPLE、連絡先は takase@example.com。",
+    )
+    .unwrap();
+    let out = batch_dir("extract-redact-env-out");
+    let args = ["--dry-run", "--context", "c", doc.to_str().unwrap()];
+
+    // `pii` from the environment: one of the two would be masked.
+    let (code, stdout, stderr) = run_extract(&out, &[("TAGURU_EXTRACT_REDACT", "pii")], &args);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("1 chunk(s), 1 redaction(s))"), "{stdout}");
+    assert!(
+        stderr.contains("redacted 1 match(es): email ×1 (paragraph 0)"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("takase@example.com"), "{stderr}");
+    // `1`: both.
+    let (code, stdout, _) = run_extract(&out, &[("TAGURU_EXTRACT_REDACT", "1")], &args);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("2 redaction(s))"), "{stdout}");
+    // `0`: off, no note in the plan line.
+    let (code, stdout, _) = run_extract(&out, &[("TAGURU_EXTRACT_REDACT", "0")], &args);
+    assert_eq!(code, 0);
+    assert!(!stdout.contains("redaction(s)"), "{stdout}");
+    // The flag's own group wins over the environment's.
+    let (code, stdout, _) = run_extract(
+        &out,
+        &[("TAGURU_EXTRACT_REDACT", "pii")],
+        &[
+            "--redact",
+            "secrets",
+            "--dry-run",
+            "--context",
+            "c",
+            doc.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0);
+    assert!(stdout.contains("1 redaction(s))"), "{stdout}");
+    // A bad value is a usage error.
+    let (code, _, stderr) = run_extract(&out, &[("TAGURU_EXTRACT_REDACT", "nope")], &args);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains("TAGURU_EXTRACT_REDACT takes 1/true, 0/false, secrets, or pii"),
+        "{stderr}"
+    );
+
+    // The notice: a remote endpoint with redaction off, once per run;
+    // a loopback endpoint or redaction on says nothing.
+    let notice = "note: --redact is off; document text is sent to model.example.com as written";
+    let (code, _, stderr) = run_extract(
+        &out,
+        &[("TAGURU_EXTRACT_URL", "https://model.example.com/v1")],
+        &args,
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stderr.matches(notice).count(), 1, "{stderr}");
+    let (code, _, stderr) = run_extract(
+        &out,
+        &[("TAGURU_EXTRACT_URL", "http://127.0.0.1:11434/v1")],
+        &args,
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!stderr.contains("--redact is off"), "{stderr}");
+    let (code, _, stderr) = run_extract(
+        &out,
+        &[
+            ("TAGURU_EXTRACT_URL", "https://model.example.com/v1"),
+            ("TAGURU_EXTRACT_REDACT", "secrets"),
+        ],
+        &args,
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!stderr.contains("--redact is off"), "{stderr}");
 
     let _ = std::fs::remove_dir_all(&docs);
     let _ = std::fs::remove_dir_all(&out);

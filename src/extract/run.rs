@@ -114,6 +114,10 @@ pub(super) struct Run {
     /// (ADR 0014, #496 S2) and stamps `candidates_manifest_value` into
     /// the manifest/checkpoint fingerprints.
     pub(super) candidates: bool,
+    /// `--redact`/TAGURU_EXTRACT_REDACT, resolved: the groups and the
+    /// compiled rule set when on, `None` when off (ADR 0038 §3.3). The
+    /// redacted text is the document from `read_document` onward.
+    pub(super) redaction: Option<(crate::sensitive::Groups, crate::sensitive::RuleSet)>,
     /// Resolved from `--coverage`/TAGURU_EXTRACT_COVERAGE (`false`,
     /// the default). `true` reports every sentence holding a candidate
     /// pair that no accepted association covers (ADR 0016, #496 S4) —
@@ -434,7 +438,23 @@ impl Run {
             lossy: self.lossy,
             schema_digest: self.schema_digest.clone(),
             candidates: candidates_manifest_value(self.candidates).to_string(),
+            redaction: self.redaction_manifest_value(),
             vocabulary_digest: self.vocabulary_digest.clone(),
+        }
+    }
+
+    /// The manifest/checkpoint value of the redaction control (ADR
+    /// 0038 §3.5): `""` when off, so pre-ADR entries keep matching a
+    /// default run; `redact1`, `redact1:secrets`, or `redact1:pii`
+    /// when on.
+    pub(super) fn redaction_manifest_value(&self) -> String {
+        match &self.redaction {
+            None => String::new(),
+            Some((groups, _)) => format!(
+                "{}{}",
+                crate::sensitive::RULESET_VERSION,
+                groups.version_suffix()
+            ),
         }
     }
 
@@ -505,7 +525,25 @@ impl Run {
             .insert(written_source.clone(), source.to_string());
 
         let text = read_document(path)?;
+        // The manifest's hash is the FILE's (did it change); the
+        // redaction version below is the reading's (ADR 0038 §3.3).
         let hash = sha256_hex(text.as_bytes());
+        // ADR 0038 §3.3: with `--redact` on, the redacted text IS the
+        // document from here on — prompt, chunks, candidates, passage,
+        // checkpoint, trace, attempts log, coverage all read it.
+        let (text, redactions) = match &self.redaction {
+            Some((_, rules)) => crate::sensitive::mask(&text, &hash, rules),
+            None => (text, Vec::new()),
+        };
+        let redaction_value = self.redaction_manifest_value();
+        // ADR 0038 §3.6: one line per document, rule and paragraph,
+        // never content — a pre-existing placeholder counted apart.
+        // Said here, before the plan and before any completion, so a
+        // dry run and a document that later fails both account for
+        // what the read masked.
+        if let Some(line) = redaction_stderr_line(&redactions) {
+            eprintln!("taguru: extract: {source}: {line}");
+        }
         // The fingerprint's source-id value is the EFFECTIVE written
         // source, but only under the flag — "" when off, so pre-S1
         // manifest entries (no field) keep matching default runs.
@@ -545,6 +583,7 @@ impl Run {
             lossy: self.lossy,
             schema_digest: &self.schema_digest,
             candidates: candidates_manifest_value(self.candidates),
+            redaction: &redaction_value,
             vocabulary_digest: &self.vocabulary_digest,
             source_id: source_id_value,
             date: self.date.unwrap_or(0),
@@ -620,17 +659,18 @@ impl Run {
                 .iter()
                 .filter(|descriptor| checkpoints.lookup(&descriptor.sha256).is_some())
                 .count();
+            let redacted_note = redaction_plan_note(&redactions);
             if reusable > 0 {
                 println!(
                     "{source}: would extract ({} bytes, {} chunk(s), {reusable} reusable from \
-                     checkpoint) → {}",
+                     checkpoint{redacted_note}) → {}",
                     text.len(),
                     plan.len(),
                     out_path.display()
                 );
             } else {
                 println!(
-                    "{source}: would extract ({} bytes, {} chunk(s)) → {}",
+                    "{source}: would extract ({} bytes, {} chunk(s){redacted_note}) → {}",
                     text.len(),
                     plan.len(),
                     out_path.display()
@@ -689,6 +729,7 @@ impl Run {
                 lossy: self.lossy,
                 schema_digest: &self.schema_digest,
                 candidates: candidates_manifest_value(self.candidates),
+                redaction: &redaction_value,
                 vocabulary_digest: &self.vocabulary_digest,
                 rung: self.ladder.as_ref().map(|ladder| ladder.rung().name()),
             });
@@ -719,6 +760,7 @@ impl Run {
                 lossy: self.lossy,
                 schema_digest: self.schema_digest.clone(),
                 candidates: candidates_manifest_value(self.candidates).to_string(),
+                redaction: redaction_value.clone(),
                 vocabulary_digest: self.vocabulary_digest.clone(),
             };
             let differences = settings_differences(recorded, &current);
@@ -912,6 +954,30 @@ impl Run {
                 ),
             ));
         }
+        // ADR 0038 §3.3: the batch is scanned with the same rule set
+        // before it is written — a label or question carrying what the
+        // masked text never showed (labels are not occurrence-checked)
+        // fails the document with the batch line and the rule, the
+        // "extract cannot produce a file import would reject" invariant
+        // extended to this gate.
+        // The answer is what was wrong, so its checkpoint goes with it:
+        // kept, a rerun would resume from the same units and refuse the
+        // same batch forever; discarded, the rerun asks the model again.
+        if let Some((_, rules)) = &self.redaction
+            && let Some(hit) = batch_sensitive_hit(&body, rules)
+        {
+            checkpoints.clear();
+            return Err(with_records_hint(
+                attempt_log.as_ref(),
+                self.diagnostics.as_ref(),
+                format!(
+                    "the answer carries sensitive content the redacted document never showed \
+                     — batch line {}: {} — nothing was written, and the checkpointed answers \
+                     were discarded (a rerun asks the model again)",
+                    hit.0, hit.1
+                ),
+            ));
+        }
         if let Err(error) = crate::storage::write_atomic(&out_path, body.as_bytes()) {
             return Err(document_failure(
                 &checkpoints,
@@ -952,6 +1018,7 @@ impl Run {
                 source,
                 &hash,
                 &out_path,
+                &redactions,
                 &plan,
                 &pieces,
                 &paragraph_spans
@@ -1021,6 +1088,7 @@ impl Run {
             &extraction,
             removed.len(),
             uncovered.len(),
+            redactions.iter().filter(|r| !r.preexisting).count(),
             &out_path,
         );
         if let Some(sink) = self.diagnostics.as_ref() {
@@ -1728,11 +1796,17 @@ impl Run {
         extraction: &Extraction,
         removed: usize,
         uncovered: usize,
+        redacted: usize,
         out_path: &Path,
     ) {
         let mut notes = String::new();
         if extraction.duplicates > 0 {
             notes.push_str(&format!(", {} duplicate(s) folded", extraction.duplicates));
+        }
+        if redacted > 0 {
+            // ADR 0038 §3.6: the count beside `removed`; the rules and
+            // paragraphs are on stderr, the content nowhere.
+            notes.push_str(&format!(", {redacted} redacted"));
         }
         if removed > 0 {
             // ADR 0013: mechanically removed, each named on stderr —
@@ -2125,4 +2199,82 @@ pub(super) enum OverviewOutcome {
     Answered(OverviewAnswer),
     LengthLimited,
     Failed(String),
+}
+
+/// The dry run's note: `, N redaction(s)` when the read masked
+/// anything (pre-existing placeholders excluded), nothing otherwise.
+pub(super) fn redaction_plan_note(redactions: &[crate::sensitive::Redaction]) -> String {
+    let masked = redactions.iter().filter(|r| !r.preexisting).count();
+    if masked == 0 {
+        String::new()
+    } else {
+        format!(", {masked} redaction(s)")
+    }
+}
+
+/// ADR 0038 §3.6's stderr line: `redacted N match(es): rule ×k
+/// (paragraphs a, b), …` with `; M pre-existing placeholder(s)` when
+/// the input already carried some — rule and paragraph only, never
+/// content. `None` when there is nothing to say.
+pub(super) fn redaction_stderr_line(redactions: &[crate::sensitive::Redaction]) -> Option<String> {
+    use std::collections::BTreeMap;
+    let mut by_rule: BTreeMap<&str, Vec<u32>> = BTreeMap::new();
+    let mut preexisting = 0usize;
+    for redaction in redactions {
+        if redaction.preexisting {
+            preexisting += 1;
+            continue;
+        }
+        by_rule
+            .entry(redaction.rule.as_str())
+            .or_default()
+            .push(redaction.paragraph);
+    }
+    if by_rule.is_empty() && preexisting == 0 {
+        return None;
+    }
+    let masked: usize = by_rule.values().map(Vec::len).sum();
+    let mut parts: Vec<String> = Vec::new();
+    for (rule, paragraphs) in &by_rule {
+        let mut listed: Vec<u32> = paragraphs.clone();
+        listed.sort_unstable();
+        listed.dedup();
+        let shown: Vec<String> = listed.iter().map(u32::to_string).collect();
+        parts.push(format!(
+            "{rule} ×{} ({} {})",
+            paragraphs.len(),
+            if listed.len() == 1 {
+                "paragraph"
+            } else {
+                "paragraphs"
+            },
+            shown.join(", ")
+        ));
+    }
+    let mut line = format!("redacted {masked} match(es)");
+    if !parts.is_empty() {
+        line.push_str(": ");
+        line.push_str(&parts.join(", "));
+    }
+    if preexisting > 0 {
+        line.push_str(&format!("; {preexisting} pre-existing placeholder(s)"));
+    }
+    Some(line)
+}
+
+/// The first sensitive match in a rendered batch body under `rules`,
+/// as (1-based batch line, rule) — `None` when the body is clean or
+/// carries only pre-existing placeholders (the masked passage is
+/// made of them). ADR 0038 §3.3's output scan.
+pub(super) fn batch_sensitive_hit(
+    body: &str,
+    rules: &crate::sensitive::RuleSet,
+) -> Option<(usize, String)> {
+    crate::sensitive::scan(body, rules)
+        .into_iter()
+        .find(|found| !found.preexisting)
+        .map(|found| {
+            let line = body[..found.start].matches('\n').count() + 1;
+            (line, found.rule)
+        })
 }

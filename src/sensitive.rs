@@ -32,11 +32,6 @@
 //! postal addresses, dates of birth, account numbers without a check
 //! digit, IP addresses, and hostnames.
 
-// The consumers land with #882 (`extract --redact`) and #883 (`import
-// --refuse-sensitive`); until then the module is exercised by its
-// tests alone.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
@@ -263,11 +258,14 @@ impl RuleSet {
 
     /// Whether `name` is a built-in's (a user rule may not repeat one,
     /// §3.1) — judged against every built-in, whichever groups are on.
+    /// The consumer is `--redact-rules` (#884).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn is_builtin_name(name: &str) -> bool {
         BUILTINS.iter().any(|builtin| builtin.name == name)
     }
 
     /// The names of the rules in this set, in order.
+    #[cfg(test)]
     pub(crate) fn names(&self) -> Vec<&str> {
         self.rules.iter().map(|rule| rule.name.as_str()).collect()
     }
@@ -296,6 +294,12 @@ struct Candidate {
     rule: String,
     preexisting: bool,
     owns: Option<(usize, usize)>,
+}
+
+/// Whether `text` carries a placeholder anywhere — the mechanical
+/// pass's "a placeholder is not an entity" rule (ADR 0038 §3.3).
+pub(crate) fn is_placeholder_bearing(text: &str) -> bool {
+    placeholder_regex().is_match(text)
 }
 
 /// The placeholder form, matched to recognise a pre-existing one.

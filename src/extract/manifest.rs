@@ -119,6 +119,12 @@ pub(super) struct ManifestEntry {
     /// the control (or revising the segmentation algorithm) re-extracts.
     #[serde(default)]
     pub(super) candidates: String,
+    /// `--redact`'s version (`""` = off; `redact1`, `redact1:secrets`,
+    /// `redact1:pii`) — ADR 0038 §3.5. Entries written before the
+    /// control existed default to `""` and keep matching default runs;
+    /// the first `--redact` run over the document re-extracts.
+    #[serde(default)]
+    pub(super) redaction: String,
     /// `--vocabulary`'s content digest (`""` = off) — ADR 0015: the
     /// offered name set changes what the prompt asks for and what the
     /// occurrence check admits, so it re-extracts like any other
@@ -189,6 +195,7 @@ impl Manifest {
                 && entry.lossy == inputs.lossy
                 && entry.schema_digest == inputs.schema_digest
                 && entry.candidates == inputs.candidates
+                && entry.redaction == inputs.redaction
                 && entry.vocabulary_digest == inputs.vocabulary_digest
                 && entry.source_id == inputs.source_id
                 && entry.date == inputs.date
@@ -228,6 +235,7 @@ impl Manifest {
                 lossy: inputs.lossy,
                 schema_digest: inputs.schema_digest.to_string(),
                 candidates: inputs.candidates.to_string(),
+                redaction: inputs.redaction.to_string(),
                 vocabulary_digest: inputs.vocabulary_digest.to_string(),
                 source_id: inputs.source_id.to_string(),
                 date: inputs.date,
@@ -267,6 +275,7 @@ pub(super) struct ComputationInputs<'a> {
     pub(super) lossy: bool,
     pub(super) schema_digest: &'a str,
     pub(super) candidates: &'a str,
+    pub(super) redaction: &'a str,
     pub(super) vocabulary_digest: &'a str,
     pub(super) source_id: &'a str,
     pub(super) date: u64,
