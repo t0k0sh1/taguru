@@ -1187,7 +1187,18 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       <code>taguru anchoring OUT_DIR --json report.json</code> judges the written batches
       against their own passage text — the anchoring rate (strict and alias-group) and locator
       validity, hallucination's mechanical floor; batch files are all it needs, so pre-0.9.5
-      output qualifies (<code>taguru anchoring --help</code>).
+      output qualifies (<code>taguru anchoring --help</code>). <b>Read the strict rate within
+      a document type, never across types.</b> Strict is defined as "the subject <i>and</i> the
+      object both occur, under the same folding the server resolves names with, in the cited
+      paragraph (else the whole passage)" — exactly what the implementation checks. A document
+      whose subject lives only in the title and whose facts live in table rows (a product
+      specsheet: the product name heads the document, every row cites itself) cannot satisfy
+      that definition for any association, however faithful, because the cited row never
+      repeats the product name; the same model in the same run measured strict 0.68 on prose
+      news and 0.00–0.06 on such specsheets with locator validity at 1.0 and coverage at 0.96.
+      A low strict rate on a table-shaped document is that structure showing through, not a
+      hallucination floor — compare runs of the same document type against each other, and
+      let locator validity and the with-aliases rate carry the cross-type comparison.
       <code>scripts/extract_metrics.py</code> (python3, standard library only) folds these
       records — and the attempts log below — into the #784 metric tables per document, context,
       group, and run (loss rates by reason, paragraph coverage, correction success, attempt-state

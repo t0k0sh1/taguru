@@ -35,6 +35,16 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Changed
 
+- `anchoring`: the `--help` text and docs/extract.html now say how to
+  read the strict rate (#806) — within one document type, never
+  across types. A document whose subject appears only in the title
+  while its facts sit in table rows (a specsheet) cannot satisfy
+  "subject AND object in the cited paragraph" for any association,
+  however faithful, so its near-zero strict rate is the document's
+  shape showing through, not a hallucination floor; locator validity
+  and `with_aliases` carry the cross-type comparison. No output or
+  format change.
+
 - `extract`: a failed document's stderr line now names the piece that
   failed and points at its records (ADR 0037, #850). After the `chunk
   K/N:` clause comes `piece <12 hex> (paragraphs a–b, N B):` — the
