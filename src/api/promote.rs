@@ -505,7 +505,7 @@ fn render_refusal(message: String, deadline: Deadline, started_at: Instant) -> R
 /// the deep-write-path interceptor in the apply loop, which reaches
 /// the same condition mid-apply, after `quota_refusal`'s own pre-check
 /// window has passed. `import.rs`'s own `QUOTA_NEXT_STEP` says
-/// "`context`"/"re-POSTing the remaining stream"; this says
+/// "context"/"re-POSTing the remaining stream"; this says
 /// "destination"/"re-calling promote" — the two never merge into one
 /// shared constant since promote's target is never the source stream's
 /// own `context`.

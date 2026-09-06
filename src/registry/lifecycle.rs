@@ -3204,7 +3204,7 @@ mod tests {
     /// must report [`DeleteError::MidRename`] distinctly from
     /// [`DeleteError::Io`] (the API layer maps the two very
     /// differently: a 409 with no audit line, versus a 500 with one —
-    /// see `api::`contexts`::delete_context`).
+    /// see `api::contexts::delete_context`).
     #[test]
     fn a_mid_rename_delete_reports_mid_rename_not_io() {
         let dir = scratch_dir("delete-mid-rename");

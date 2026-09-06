@@ -136,7 +136,7 @@ impl AppState {
     /// (ADR 0011 §4 steps 1–2): every source name whose metadata the
     /// filter admits, read from the passage store — the one place
     /// `SourceMeta` lives — for a handler to resolve into a
-    /// [`taguru::`context`::SourceWindow`] inside its `read_context`
+    /// [`taguru::context::SourceWindow`] inside its `read_context`
     /// closure. Runs BEFORE `read_context`, like `hidden_label`: the
     /// store takes its own locks, and this keeps the join out of the
     /// entry's read path. `None` when the `context` does not exist.

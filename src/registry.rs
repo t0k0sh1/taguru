@@ -1288,7 +1288,7 @@ pub struct MaintenanceCompactionEntry {
 /// producing a skip. Named so the sweep's response can say WHICH
 /// `contexts` it gave up on and why, rather than only how many landed:
 /// before #586 a sweep that failed on every single candidate still
-/// answered `200 {"`contexts`": [], "deadline_exceeded": false}`,
+/// answered `200 {"contexts": [], "deadline_exceeded": false}`,
 /// indistinguishable from a fleet with nothing left to compact.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MaintenanceCompactionSkip {

@@ -432,7 +432,7 @@ pub struct GaugeSnapshot {
     /// removed aliases.
     pub arena_slack_total: u64,
     /// Sum, across every `context`, of edges carrying weight no named
-    /// source explains — see [`taguru::`context`::Context::unsourced_summary`].
+    /// source explains — see [`taguru::context::Context::unsourced_summary`].
     pub unsourced_edges_total: u64,
     /// Sum, across every `context`, of unsourced weight (absolute value).
     pub unsourced_weight_total: f64,

@@ -122,8 +122,8 @@ pub(crate) fn schema_path(dir: &Path, stem: &str) -> PathBuf {
 }
 
 /// Where a schema file's bytes are set aside when they read but do not
-/// parse — evidence for hand recovery, [`crate::`groups`::scan_groups`]'s
-/// `{stem}.`group`.corrupt` convention applied to schema (see
+/// parse — evidence for hand recovery, [`crate::groups::scan_groups`]'s
+/// `{stem}.group.corrupt` convention applied to schema (see
 /// `crate::schema`'s module doc for why the parallel stops there: a
 /// schema, unlike a `group`, never falls back to an empty record after
 /// setting the bytes aside).
@@ -268,8 +268,8 @@ pub(super) fn write_rename_marker(path: &Path, from: &str, to: &str) -> io::Resu
 /// both). `scan_data_dir` (`.renaming`, a ten-file `context` family) and
 /// `groups::scan_groups` (`.grouprenaming`, one file) share this exact
 /// shape and differ only in what "moving the files" means for their
-/// entity — `entity` names it for the log lines (`"`context`"` /
-/// `"`group`"`).
+/// entity — `entity` names it for the log lines (`"context"` /
+/// `"group"`).
 ///
 /// `destination_landed(to_stem)` answers "is the destination's pivot
 /// file now in place?" — checked whether or not `move_files` returned

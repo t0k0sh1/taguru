@@ -89,7 +89,7 @@ impl AppState {
     /// `(associations_touched, passage_removed)` the real call would
     /// report, with nothing written — no import marker, no WAL op, no
     /// graph mutation, no passage removal. The graph count is
-    /// [`crate::`context`::Context::count_source_edges`], the exact
+    /// [`crate::context::Context::count_source_edges`], the exact
     /// preview `/import?dry_run=true` already trusts; the passage half
     /// is a presence check. Advisory in the way every preview is: a
     /// write landing between this and the real retraction can change
