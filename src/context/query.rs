@@ -10,8 +10,8 @@ use super::{
 
 impl Context {
     /// Every edge in the `context`, dead ones included, in edge-id order —
-    /// the same population `query_any(&[], &[], &[])`'s degenerate arm
-    /// returns, but deadline-checked like `unsourced_edges`/
+    /// unlike `query_any(&[], &[], &[])`'s degenerate arm, which returns
+    /// only live edges — deadline-checked like `unsourced_edges`/
     /// `dead_canonical_aliases` for a caller (ADR 0009 §10's schema
     /// audit) that means to walk every one of them rather than stumbling
     /// into the full scan by accident. `query_any` itself stays

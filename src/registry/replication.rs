@@ -373,7 +373,7 @@ mod tests {
     }
 
     /// A replica IS a replica, and its `group` reload actually reads the
-    /// manifest-delivered .`group` files into the served map.
+    /// manifest-delivered `.group` files into the served map.
     #[test]
     fn a_replica_reload_serves_the_group_files_on_disk() {
         let dir = scratch_dir("replica-group-reload");

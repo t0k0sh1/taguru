@@ -1579,7 +1579,7 @@ mod tests {
     /// (`floor.clamp(0.0, 1.0)`) have no test: every call site in the
     /// suite already passes an in-range value, so the clamp never
     /// actually clamps anything. It is also the ONLY guard on the PATCH
-    /// path — `api/`contexts`.rs`'s create handler clamps up front, but
+    /// path — `api/contexts.rs`'s create handler clamps up front, but
     /// its PATCH handler forwards `dice_floor`/`semantic_floor` raw.
     #[test]
     fn update_meta_clamps_out_of_range_floors_into_zero_to_one() {

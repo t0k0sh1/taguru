@@ -247,7 +247,7 @@ mod tests {
     /// Issue #732: every advertised tool's `inputSchema.required`
     /// list is cross-checked against `route_tool`'s own gates in both
     /// directions — with every schema-required property supplied (plus
-    /// the first branch of each anyOf constraint `group`), routing must
+    /// the first branch of each anyOf constraint group), routing must
     /// never claim a required argument is missing; and omitting any
     /// one schema-required property must refuse. This is the
     /// mechanical version of the per-tool spot checks around it, so a
@@ -279,7 +279,7 @@ mod tests {
                 _ => json!("x"),
             }
         }
-        /// The first alternative of every anyOf constraint `group` on
+        /// The first alternative of every anyOf constraint group on
         /// this schema (bare `anyOf`, or several under `allOf`).
         fn first_branches(schema: &Value) -> Vec<Vec<String>> {
             let groups: Vec<&Value> = match schema.get("allOf").and_then(Value::as_array) {

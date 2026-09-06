@@ -754,7 +754,7 @@ RESULTS_DIR            a directory `taguru benchmark extract` wrote</code></pre>
       with graded-relevance nDCG and citation metrics on top, and — unlike this reference — turns
       the result into a pass/fail gate.
     </p>
-    <p class="section-sub">Why not POST /<code>contexts</code>/{name}/recall</p>
+    <p class="section-sub">Why not <code>POST /contexts/{name}/recall</code></p>
     <p>
       <code>expected_concepts</code> is checked against hit text, not driven through the graph's own
       <code>recall</code> endpoint, on purpose: <code>Context::recall(cue)</code> requires

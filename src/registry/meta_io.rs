@@ -56,7 +56,7 @@ impl MetaFile {
     /// restored from is the very sidecar that just failed to read — so
     /// a time-based seed is the only way to guarantee this boot's value
     /// never collides with one a fingerprint consumer (`group_fingerprint`,
-    /// `src/api/`groups`.rs`) saw served under the same counter before the
+    /// `src/api/groups.rs`) saw served under the same counter before the
     /// corruption. Monotonic re-seeds elsewhere (`replica_refresh`'s
     /// `max()`) only ever pull a replica's counter forward from this
     /// value, never back down to a primary's smaller one, so the skew

@@ -3061,7 +3061,7 @@ mod tests {
 
         /// Recomputes the CRC-32C footer after a mutation tampers with
         /// an S4 snapshot's body — same discipline as `Context`'s
-        /// `resealed` test helper (`context`.rs), and for the same
+        /// `resealed` test helper (`context.rs`), and for the same
         /// reason: without resealing, every mutation stops at the
         /// checksum and the structural parser underneath goes
         /// unexercised.

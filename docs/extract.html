@@ -253,7 +253,7 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       each match is replaced by a placeholder, so the prompt, the passage the batch quotes,
       the checkpoint, the trace, and the attempts log all hold the placeholder and none holds
       the text (<a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0038-sensitive-content-gate.md">ADR
-      0038</a>). Two <code>groups</code>, both on when no <code>group</code> is named:
+      0038</a>). Two groups, both on when no group is named:
     </p>
     <ul>
       <li>
@@ -285,7 +285,7 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
       high-entropy strings without a known shape, and anything only context can tell apart.
       Those need a model or a dictionary, and a gate that sends the document to a model to
       decide what not to send is no gate. The rule set is versioned (<code>redact1</code>)
-      and is a computation input: turning the flag on, off, or to another <code>group</code> re-extracts
+      and is a computation input: turning the flag on, off, or to another group re-extracts
       the document; the manifest's <code>sha256</code> stays the file's own, so "did the
       file change" is unaffected.
     </p>
@@ -1301,7 +1301,7 @@ taguru extract --context ops --out batches/ --redact --redact-rules redact-rules
     </p>
     <p>
       <code>taguru anchoring OUT_DIR --json report.json</code> judges the written batches
-      against their own passage text — the anchoring rate (strict and alias-<code>group</code>) and locator
+      against their own passage text — the anchoring rate (strict and alias-group) and locator
       validity, hallucination's mechanical floor; batch files are all it needs, so pre-0.9.5
       output qualifies (<code>taguru anchoring --help</code>). The rates alone cannot point at a
       fabricated name, so after the table every association that is not strictly anchored — or

@@ -250,7 +250,7 @@ docker run -d --restart unless-stopped -p 8248:8248 \
         only</b>. Nothing else reaches the server — a bearer token is the whole credential, and
         the token never travels unencrypted because TLS terminates at the ALB (ACM issues and
         renews the certificate).</li>
-      <li><b>Target <code>group</code> health check: <code>GET /health</code></b> — and understand what the
+      <li><b>Target group health check: <code>GET /health</code></b> — and understand what the
         ALB can and cannot do about a failure:
         <div class="tbl" style="margin-top:0.6rem">
           <table>

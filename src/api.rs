@@ -263,7 +263,7 @@ pub(crate) enum ErrorCode {
     UnknownPath,
     MethodNotAllowed,
     Timeout,
-    /// `PUT` on a resource — `context` or group — that already exists.
+    /// `PUT` on a resource — `context` or `group` — that already exists.
     AlreadyExists,
     /// Every other 409: alias conflicts, non-capacity partial writes,
     /// a real source colliding with a reserved export id.
@@ -1012,9 +1012,9 @@ fn nesting_refusal(violation: NestingViolation, started_at: Instant) -> Response
     error(code, message, started_at)
 }
 
-/// A group write whose RESULT would bundle more than
+/// A `group` write whose RESULT would bundle more than
 /// [`MAX_GROUP_MEMBERS`] names in one set — `field` says which
-/// ("member `contexts`" / "child groups"). The delta caps already bound
+/// ("member `contexts`" / "child `groups`"). The delta caps already bound
 /// each request; this bounds what the deltas accumulate to.
 fn over_cap_refusal(field: &'static str, started_at: Instant) -> Response {
     error(
