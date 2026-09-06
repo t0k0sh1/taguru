@@ -1,4 +1,4 @@
-//! Per-context write-ahead log: the acknowledged-write half of the
+//! Per-`context` write-ahead log: the acknowledged-write half of the
 //! durability story. Every graph mutation the HTTP API accepts is
 //! appended here (JSON Lines, one fsync per batch) BEFORE it touches
 //! memory, so a crash between two image flushes loses nothing.
@@ -66,10 +66,10 @@ pub enum WalOp {
 }
 
 impl WalOp {
-    /// Whether applying this op grows the context's content — the
+    /// Whether applying this op grows the `context`'s content — the
     /// storage-quota gate fires only for batches that carry at least
     /// one of these. The shrink ops (unalias, retract) stay allowed at
-    /// the ceiling: they are how a tenant gets back under it, the same
+    /// the ceiling: they are how a `context` gets back under it, the same
     /// line the passage store draws for its own cap ("retractions are
     /// how an operator shrinks the store").
     pub fn grows(&self) -> bool {
@@ -483,7 +483,7 @@ fn append_missing_newline(path: &Path) -> io::Result<()> {
 /// Returns the bytes appended, so the caller can track log growth.
 /// On `Err` nothing may be assumed durable; the caller must not have
 /// applied anything yet (write-ahead: log, sync, THEN apply). Callers
-/// serialize appends per log (the context's entry lock), so only
+/// serialize appends per log (the `context`'s entry lock), so only
 /// crashes race this function, never other appenders.
 pub fn append_batch<Op: Serialize>(path: &Path, first_seq: u64, ops: &[Op]) -> io::Result<u64> {
     // Nothing to append is nothing to sync: an empty batch would otherwise
@@ -617,8 +617,8 @@ pub fn append_batch<Op: Serialize>(path: &Path, first_seq: u64, ops: &[Op]) -> i
 /// instead (removing it would lose an acknowledged write). Unlike the
 /// old best-effort truncate, a heal failure here is now fatal: returning
 /// `Ok` with the tail still un-healed would silently hand the caller a
-/// context one append away from bricking on fused corruption. The
-/// caller (`ensure_hot`) already quarantines a context on `Err` rather
+/// `context` one append away from bricking on fused corruption. The
+/// caller (`ensure_hot`) already quarantines a `context` on `Err` rather
 /// than crash the server, so refusing to heal is the safe failure mode.
 ///
 /// Records above the watermark are keyed by `seq`, and a repeated seq
@@ -954,7 +954,7 @@ pub(crate) fn shippable_records(bytes: &[u8]) -> io::Result<Vec<ShippableRecord<
 /// running it, so a partial apply leaves the tail describing ops that
 /// were never actually tried. Left on disk, that tail is
 /// indistinguishable from an applied record, and replay would try it
-/// independently next time this context goes cold.
+/// independently next time this `context` goes cold.
 ///
 /// Refuses `len` greater than the file's actual current length: every
 /// caller passes a byte count it tracked itself (never a fresh `stat`),

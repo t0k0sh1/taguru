@@ -1,9 +1,9 @@
-//! Group records and their file I/O: one group is one `{stem}.group`
+//! Group records and their file I/O: one `group` is one `{stem}.group`
 //! file in the data directory, holding a routing description, the
-//! member context names, and the child group names (nesting). Same
-//! philosophy as contexts — file existence
+//! member `context` names, and the child `group` names (nesting). Same
+//! philosophy as `contexts` — file existence
 //! IS entity existence, no central manifest, discovered by the boot
-//! scan — and the same name→stem percent-encoding, so any group name a
+//! scan — and the same name→stem percent-encoding, so any `group` name a
 //! URL can carry stays inside the data directory.
 //!
 //! The extension is a SINGLE dot segment on purpose: the stem encoding
@@ -26,51 +26,51 @@ use serde::{Deserialize, Serialize};
 use crate::registry::{ResumedRenames, resume_rename_markers, scanned_stem_and_name};
 use crate::storage::{commit_staged, remove_persisted_file, write_atomic};
 
-/// The nesting ceiling: a chain of nested groups may stack at most
-/// this many groups (a root, a child, a grandchild). Deep taxonomies
+/// The nesting ceiling: a chain of nested `groups` may stack at most
+/// this many `groups` (a root, a child, a grandchild). Deep taxonomies
 /// are filing, not addressing — retrieval wants short paths — and the
 /// cap keeps every nesting walk in the codebase trivially bounded.
 /// One constant to raise if that judgement changes.
 pub(crate) const MAX_GROUP_DEPTH: usize = 3;
 
-/// Ceiling on one group's DIRECT membership — member contexts and
-/// child groups each. The per-request delta lists already cap at the
+/// Ceiling on one `group`'s DIRECT membership — member `contexts` and
+/// child `groups` each. The per-request delta lists already cap at the
 /// same figure, but deltas accumulate: without a cap on the RESULT, a
-/// group could be grown without bound patch by patch, and every row
-/// serves its full membership (the group directory does not page
+/// `group` could be grown without bound patch by patch, and every row
+/// serves its full membership (the `group` directory does not page
 /// within a row). Matches the request-list cap, so anything a single
-/// create can say is exactly what a group can hold; past it, split
-/// into nested child groups.
+/// create can say is exactly what a `group` can hold; past it, split
+/// into nested child `groups`.
 pub(crate) const MAX_GROUP_MEMBERS: usize = 1000;
 
-/// One group: the prose half of the grouping (same routing role as a
-/// context's description) plus the member context names and the child
-/// group names. Sorted sets so membership is deduplicated and every
+/// One `group`: the prose half of the grouping (same routing role as a
+/// `context`'s description) plus the member `context` names and the child
+/// `group` names. Sorted sets so membership is deduplicated and every
 /// listing is deterministic.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GroupRecord {
     pub description: String,
     pub contexts: BTreeSet<String>,
-    /// Child group names — nesting, at most [`MAX_GROUP_DEPTH`] groups
+    /// Child `group` names — nesting, at most [`MAX_GROUP_DEPTH`] `groups`
     /// tall and never cyclic ([`validate_nesting`] guards both). A
-    /// child may sit under several parents, exactly as a context may:
+    /// child may sit under several parents, exactly as a `context` may:
     /// the shape is a shallow DAG, not a tree. The struct-level
-    /// `serde(default)` keeps every pre-nesting group file loading
+    /// `serde(default)` keeps every pre-nesting `group` file loading
     /// unchanged.
     pub groups: BTreeSet<String>,
 }
 
-/// Why a proposed nesting cannot stand. Carries a group name pinpointing
+/// Why a proposed nesting cannot stand. Carries a `group` name pinpointing
 /// the violation — deterministic, because the map and each child set
-/// iterate in name order. Which group, per variant, is documented below.
+/// iterate in name order. Which `group`, per variant, is documented below.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum NestingViolation {
-    /// The named group reaches itself through its children — a group on
+    /// The named `group` reaches itself through its children — a `group` on
     /// the cycle, the one the walk was at when it closed the loop.
     Cycle(String),
-    /// A chain of more than [`MAX_GROUP_DEPTH`] groups; the name is the
-    /// TOP of that chain (the walk's outermost group), reported the
+    /// A chain of more than [`MAX_GROUP_DEPTH`] `groups`; the name is the
+    /// TOP of that chain (the walk's outermost `group`), reported the
     /// same whether the cap is hit descending or on the way back up. A
     /// cycle longer than the cap also lands here — its chains are over
     /// the cap either way, and the walk refuses before following a path
@@ -79,9 +79,9 @@ pub(crate) enum NestingViolation {
 }
 
 /// Checks the whole collection for the two nesting invariants — no
-/// cycles, no chain of more than [`MAX_GROUP_DEPTH`] groups — in one
+/// cycles, no chain of more than [`MAX_GROUP_DEPTH`] `groups` — in one
 /// memoized walk, O(groups + edges). Callers hand it the PROSPECTIVE
-/// map (under the groups write lock, before anything persists) or, at
+/// map (under the `groups` write lock, before anything persists) or, at
 /// boot, whatever the files claim. A child name with no record counts
 /// as depth zero: dangling references are referential integrity's
 /// business, healed elsewhere.
@@ -92,7 +92,7 @@ pub(crate) fn validate_nesting(
 }
 
 /// [`validate_nesting`]'s walk with its memo handed back: every
-/// group's chain depth (leaves are 1). The group restore writes
+/// `group`'s chain depth (leaves are 1). The `group` restore writes
 /// children before the parents that name them, and this map is that
 /// order — computable only on a collection the validator accepts,
 /// which the `Result` enforces.
@@ -107,12 +107,12 @@ pub(crate) fn nesting_depths(
     Ok(settled)
 }
 
-/// The number of groups on the longest chain hanging from `name`,
+/// The number of `groups` on the longest chain hanging from `name`,
 /// itself included — depth-first, with a visiting stack for cycle
 /// detection and a settled map so shared children are walked once.
 /// Recursion is bounded by the cap, not the input: a path already
-/// [`MAX_GROUP_DEPTH`] groups long refuses before descending further,
-/// so even a hand-written thousand-group chain cannot blow the stack.
+/// [`MAX_GROUP_DEPTH`] `groups` long refuses before descending further,
+/// so even a hand-written thousand-`group` chain cannot blow the stack.
 fn chain_depth<'a>(
     groups: &'a BTreeMap<String, GroupRecord>,
     name: &'a str,
@@ -197,7 +197,7 @@ pub(crate) fn repair_nesting(groups: &mut BTreeMap<String, GroupRecord>) {
 }
 
 /// Trims every record's direct membership back under `cap` names per
-/// set — member contexts and child groups each — keeping the FIRST
+/// set — member `contexts` and child `groups` each — keeping the FIRST
 /// `cap` in name order, so the repair is deterministic. Nothing
 /// running can persist an over-cap set (the write paths refuse
 /// first); this is boot's counterpart for a hand-edited file, handed
@@ -225,10 +225,10 @@ pub(crate) fn trim_membership(groups: &mut BTreeMap<String, GroupRecord>, cap: u
     }
 }
 
-/// Every context reachable from the named roots — direct members plus
+/// Every `context` reachable from the named roots — direct members plus
 /// everything nested children bundle, transitively. The scoped write
-/// gate judges a group by this closure: a grant must cover what the
-/// group ADDRESSES, not just what it lists directly. Names without a
+/// gate judges a `group` by this closure: a grant must cover what the
+/// `group` ADDRESSES, not just what it lists directly. Names without a
 /// record contribute nothing; the seen set keeps even a (transient,
 /// mid-repair) cycle from looping the walk.
 pub(crate) fn context_closure<'map, 'roots: 'map>(
@@ -262,26 +262,26 @@ pub(crate) fn group_path(dir: &Path, stem: &str) -> PathBuf {
     dir.join(format!("{stem}.group"))
 }
 
-/// The durable-rename marker for a group, `.grouprenaming` rather than
-/// context rename's `.renaming` so a context and a group sharing a
+/// The durable-rename marker for a `group`, `.grouprenaming` rather than
+/// `context` rename's `.renaming` so a `context` and a `group` sharing a
 /// name never collide on the same marker file. Same contract as
 /// `registry::renaming_marker_path`: while it exists, boot resumes
-/// the file move AND the group-membership rewrite (other records'
+/// the file move AND the `group`-membership rewrite (other records'
 /// `groups` entries naming `from`) before `reconcile_groups` runs.
 pub(crate) fn group_renaming_marker_path(dir: &Path, stem: &str) -> PathBuf {
     dir.join(format!("{stem}.grouprenaming"))
 }
 
-/// Persists one group via the registry's staged write (fsync + rename +
+/// Persists one `group` via the registry's staged write (fsync + rename +
 /// parent fsync): a crash mid-write leaves the previous version intact.
 /// The staging name is `{stem}.tmp{n}`, which the boot scan's leftover
-/// sweep already removes — nothing group-specific to clean up.
+/// sweep already removes — nothing `group`-specific to clean up.
 pub(crate) fn write_group(dir: &Path, stem: &str, record: &GroupRecord) -> io::Result<()> {
     write_atomic(&group_path(dir, stem), &serde_json::to_vec_pretty(record)?)
 }
 
-/// Unlinks one group file. A file already gone counts as success — the
-/// caller's intent (this group does not exist on disk) is satisfied.
+/// Unlinks one `group` file. A file already gone counts as success — the
+/// caller's intent (this `group` does not exist on disk) is satisfied.
 pub(crate) fn remove_group_file(dir: &Path, stem: &str) -> io::Result<()> {
     match remove_persisted_file(group_path(dir, stem)) {
         Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
@@ -289,15 +289,15 @@ pub(crate) fn remove_group_file(dir: &Path, stem: &str) -> io::Result<()> {
     }
 }
 
-/// One boot-time pass for groups, run after the context scan (which
+/// One boot-time pass for `groups`, run after the `context` scan (which
 /// also sweeps staging leftovers). Failures are loud on purpose — the
 /// directory scan just listed the file, so trouble reading it is
-/// always news (contrast a context's sidecar read, which treats
+/// always news (contrast a `context`'s sidecar read, which treats
 /// absence as the normal never-written case):
 ///
-/// - An UNREADABLE file refuses the boot. The group's real membership
+/// - An UNREADABLE file refuses the boot. The `group`'s real membership
 ///   is out of reach, and registering the name over an empty record
-///   would hand the next write to that group a license to overwrite
+///   would hand the next write to that `group` a license to overwrite
 ///   whatever the file still holds — a transient permission hiccup
 ///   must not turn into silent membership loss.
 /// - A file that reads but does not PARSE keeps its name and loses
@@ -317,7 +317,7 @@ pub(crate) fn remove_group_file(dir: &Path, stem: &str) -> io::Result<()> {
 /// from under the name already registered, leaving `from` stranded in
 /// memory under a name no file on disk answers to any more.
 ///
-/// The second return value is every `(from, to)` pair resumed — group
+/// The second return value is every `(from, to)` pair resumed — `group`
 /// membership referencing `from` in the returned map still needs the
 /// rewrite `boot_with` applies before `reconcile_groups` runs.
 pub(crate) fn scan_groups(
@@ -608,7 +608,7 @@ mod tests {
         assert_eq!(under["g"].contexts.len(), 2);
     }
 
-    /// Issue #753: a group file already gone counts as removed;
+    /// Issue #753: a `group` file already gone counts as removed;
     /// anything else — a directory squatting on the name, which
     /// `remove_file` refuses even for root — surfaces as the error it
     /// is instead of being swallowed as "already satisfied".

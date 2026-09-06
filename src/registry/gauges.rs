@@ -18,13 +18,13 @@ impl AppState {
     }
 
     /// Counts one successful retrieval twice over: the aggregate
-    /// searches family (by operation) and the context's own usage row.
+    /// searches family (by operation) and the `context`'s own usage row.
     pub fn note_search(&self, op: crate::metrics::SearchOp, name: &str, empty: bool) {
         self.0.metrics.record_search(op, empty);
         self.note_read(name, empty);
     }
 
-    /// Bumps a context's read counters — relaxed atomics only, so a
+    /// Bumps a `context`'s read counters — relaxed atomics only, so a
     /// read is counted without ever waiting on the entry lock. Unknown
     /// names (a delete racing the response) are silently skipped.
     pub fn note_read(&self, name: &str, empty: bool) {
@@ -44,7 +44,7 @@ impl AppState {
 
     /// Counts one schema pre-write check: the aggregate
     /// `taguru_schema_checks_total{outcome}` family, plus — only when
-    /// it found something — the context's own `schema_violations` row
+    /// it found something — the `context`'s own `schema_violations` row
     /// (#388, S10 of #218's ADR 0009 split §15). `violations` is
     /// `check.violations.len()`, never `check.reserved`'s count: a
     /// reserved-label conflict is a namespace collision, not a schema
@@ -54,7 +54,7 @@ impl AppState {
     /// dry-run or the audit/validate diagnostics, so `outcome` here
     /// can never disagree with what actually happened to the write.
     /// Unknown names (a delete racing the response) drop the
-    /// per-context half silently, same as `note_read`.
+    /// per-`context` half silently, same as `note_read`.
     ///
     /// No `violations > 0` guard: at `violations == 0` the fetch-add
     /// below is a no-op regardless of whether it runs (`fetch_add(0,
@@ -75,7 +75,7 @@ impl AppState {
         }
     }
 
-    /// Bumps a context's write counter, same contract as
+    /// Bumps a `context`'s write counter, same contract as
     /// [`AppState::note_read`].
     pub fn note_write(&self, name: &str) {
         let Some(entry) = self.lookup(name) else {
@@ -91,7 +91,7 @@ impl AppState {
 
     /// Persists every usage snapshot the sidecars have not seen — the
     /// graceful-shutdown sweep behind the crash-loss contract on
-    /// [`ContextUsage`]. Purely-read contexts never flush, so without
+    /// [`ContextUsage`]. Purely-read `contexts` never flush, so without
     /// this their counters would evaporate on every restart. Runs
     /// after the final [`AppState::flush_dirty`], so the stats written
     /// beside the counters are current.
@@ -125,15 +125,15 @@ impl AppState {
         }
     }
 
-    /// Re-stats every context's non-WAL files into its entry's disk
-    /// cache — the flush-time half of the per-context gauges (issue
+    /// Re-stats every `context`'s non-WAL files into its entry's disk
+    /// cache — the flush-time half of the per-`context` gauges (issue
     /// #137). Free while `TAGURU_METRICS_PER_CONTEXT` is off; otherwise
     /// it runs from boot, the flusher's tick, and `POST /flush` (all
     /// via [`AppState::flush_dirty`]) — never from a scrape, which
     /// must not walk the data directory. The WAL lanes are absent on
     /// purpose: their live bookkeeping ([`EntryInner::wal_bytes`],
     /// `passages_wal_bytes`) already serves the scrape, so the
-    /// per-context `wal` series sum exactly to the global gauges.
+    /// per-`context` `wal` series sum exactly to the global gauges.
     ///
     /// Lag is the contract, not a bug: a size lands on the scrape up
     /// to one flush interval after it lands on disk, the trade that
@@ -204,19 +204,19 @@ impl AppState {
     }
 
     /// Point-in-time gauges for a scrape, computed from the registry
-    /// so they cannot drift: how many contexts exist, how many are
+    /// so they cannot drift: how many `contexts` exist, how many are
     /// resident, and the resident-bytes estimate — the actual measured
     /// footprint of every loaded graph plus its four cached stores
-    /// (vectors, passages, BM25, passage vectors), pinned contexts
+    /// (vectors, passages, BM25, passage vectors), pinned `contexts`
     /// included. This deliberately does NOT match `enforce_budget`'s
     /// own accounting (issue #562 item 5): the budget sweep skips
-    /// pinned contexts entirely (`engine.rs`) and `recount_entry`
+    /// pinned `contexts` entirely (`engine.rs`) and `recount_entry`
     /// counts a pinned entry's contribution as zero
     /// (`AppState::recount_entry`) — pinned residency is exactly the
     /// gap between this gauge and `resident_estimate`/the budget's
     /// notion of "what counts against the ceiling". A pinned-heavy
     /// fleet can show a large `taguru_resident_bytes` while the budget
-    /// sees near-zero pressure; cross-referencing the per-context
+    /// sees near-zero pressure; cross-referencing the per-`context`
     /// `taguru_context_resident_bytes` against `taguru_context_pinned`
     /// is what separates the two if that gap needs explaining.
     pub fn gauge_snapshot(&self) -> GaugeSnapshot {
@@ -425,7 +425,7 @@ mod tests {
     }
 
     /// `violations == 0` (the ordinary "OK" write) must bump only the
-    /// aggregate `taguru_schema_checks_total` family — the per-context
+    /// aggregate `taguru_schema_checks_total` family — the per-`context`
     /// `schema_violations` row stays untouched, since it exists to
     /// track failures, not every check.
     #[test]
@@ -454,7 +454,7 @@ mod tests {
     /// A delete racing the response leaves `name` unknown to `lookup` —
     /// the same silent-skip contract `note_read`/`note_write` have. The
     /// aggregate counter (recorded first, unconditionally) must still
-    /// land even though the per-context half has nothing to update.
+    /// land even though the per-`context` half has nothing to update.
     #[test]
     fn note_schema_check_on_an_unknown_context_still_bumps_the_aggregate() {
         let dir = scratch_dir("schema-check-unknown-context");
@@ -564,8 +564,8 @@ mod tests {
     }
 
     /// `refresh_disk_usage`'s early return (`gauges.rs:147-149`) fires
-    /// only when NEITHER a per-context metrics collection NOR a
-    /// declared storage quota needs the numbers — with per-context
+    /// only when NEITHER a per-`context` metrics collection NOR a
+    /// declared storage quota needs the numbers — with per-`context`
     /// metrics off and no quota, the sweep must not touch the disk at
     /// all, leaving the entry's cached usage at its zero default.
     #[test]
@@ -615,7 +615,7 @@ mod tests {
     }
 
     /// The flip side of the test above: a declared storage quota keeps
-    /// the sweep alive even with per-context metrics off, because a
+    /// the sweep alive even with per-`context` metrics off, because a
     /// growth-write's quota gate reads these same disk numbers
     /// (`gauges.rs:138-142`'s claim).
     #[test]
@@ -672,7 +672,7 @@ mod tests {
     }
 
     /// `gauge_snapshot`'s doc (`gauges.rs:202-217`) documents a
-    /// deliberate divergence: a pinned context's bytes count toward the
+    /// deliberate divergence: a pinned `context`'s bytes count toward the
     /// fleet-wide `taguru_resident_bytes` gauge, but `recount_entry`
     /// (`registry.rs:2671`) zeroes a pinned entry's contribution to the
     /// budget it never competes for. Pin down both halves of that gap
@@ -799,8 +799,8 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    /// The per-context rows (#137) measure disk at flush time — never
-    /// at scrape time — carry live counts for hot contexts and saved
+    /// The per-`context` rows (#137) measure disk at flush time — never
+    /// at scrape time — carry live counts for hot `contexts` and saved
     /// ones for cold, and `Top(n)` cuts by total disk bytes.
     #[test]
     fn per_context_gauges_measure_at_flush_and_cut_top_n_by_disk() {
@@ -1088,7 +1088,7 @@ mod tests {
     /// #562 item 3: a schema document's bytes must count toward a
     /// declared storage quota's `used`, not just the disk gauge —
     /// before the fix, `refresh_disk_usage` never stated the file, so
-    /// a tenant could grow past a ceiling that on-disk bytes alone
+    /// a `context` could grow past a ceiling that on-disk bytes alone
     /// would have crossed, as long as a schema file accounted for the
     /// difference.
     #[test]
@@ -1289,8 +1289,8 @@ mod tests {
     /// End-to-end wiring for issue #563 item 4's three signals, through
     /// the real refresh path rather than the semaphore in isolation
     /// (`concurrency.rs`'s own tests cover the mechanism). `embed_parallel:
-    /// 1` leaves exactly one slot: context "a" occupies it for the
-    /// whole of `SlowEmbeddings`'s 150ms, so context "b" — starting
+    /// 1` leaves exactly one slot: `context` "a" occupies it for the
+    /// whole of `SlowEmbeddings`'s 150ms, so `context` "b" — starting
     /// 30ms in, on its own thread with only a 100ms budget — is
     /// provably queued (`_waits_total`, and the live `embed_slot_waiters`
     /// gauge sampled while "b" is still blocked) and provably still
@@ -1388,7 +1388,7 @@ mod tests {
     }
 
     /// The scrape's residency numbers are exact sums — the fleet
-    /// total and the per-context row both equal hot graph plus the
+    /// total and the per-`context` row both equal hot graph plus the
     /// four cached stores, and the unsourced-weight total equals the
     /// weight actually carried.
     #[test]

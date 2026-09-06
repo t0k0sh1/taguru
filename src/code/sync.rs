@@ -21,10 +21,10 @@ use crate::code::grammars;
 use crate::code::repo_walk::{Change, RepoWalk};
 use crate::code::{facts, grammar::Grammar};
 
-/// Context every sync writes into unless `--context` says otherwise.
+/// `context` every sync writes into unless `--context` says otherwise.
 pub(crate) const DEFAULT_CONTEXT: &str = "code";
 
-/// Description stamped when the context is first created.
+/// Description stamped when the `context` is first created.
 const CREATE_DESCRIPTION: &str =
     "Codebase map maintained by taguru-code: symbol locations and structure, synced from git";
 

@@ -399,8 +399,8 @@ struct GroupOutcomeWire {
 /// under-report exactly the way `schema_import_refusal`'s own fix
 /// avoids for a single instance. `issues`/`retryable_after_correction`
 /// ARE copied verbatim — they describe the failing shard's own
-/// refusal (which context, which cap), a claim the cross-shard
-/// context does not change.
+/// refusal (which `context`, which cap), a claim the cross-shard
+/// `context` does not change.
 fn rewrap_import_refusal(
     answer: ShardAnswer,
     batches_landed: usize,

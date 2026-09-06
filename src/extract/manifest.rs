@@ -6,10 +6,10 @@ use super::*;
 /// What each batch file was computed from. Extraction is the
 /// expensive step, so unchanged documents skip; any input to the
 /// computation changing — document bytes, model, prompt, target
-/// context — re-extracts. The context matters even though the model
+/// `context` — re-extracts. The `context` matters even though the model
 /// never sees its name: it is baked into the emitted header, and a
 /// skip that kept a stale header would send the batch to the wrong
-/// context on import.
+/// `context` on import.
 #[derive(Default, serde::Serialize, Deserialize)]
 pub(super) struct Manifest {
     #[serde(default)]

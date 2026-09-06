@@ -14,12 +14,12 @@ impl AppState {
     }
 
     /// Opens (creating if needed) the data directory and registers every
-    /// context image found in it — cold, described by their sidecar
-    /// snapshots. Pinned contexts are loaded eagerly; a pinned image
+    /// `context` image found in it — cold, described by their sidecar
+    /// snapshots. Pinned `contexts` are loaded eagerly; a pinned image
     /// that fails to load is left cold with a warning rather than
     /// taking the server down. `wal_enabled: false` restores the
     /// flush-interval durability window (`TAGURU_WAL=0`);
-    /// `wal_max_bytes` is the per-context log ceiling (0 = unlimited);
+    /// `wal_max_bytes` is the per-`context` log ceiling (0 = unlimited);
     /// `default_semantic_floor` recalibrates the semantic entry floor
     /// for the configured embedding model (`TAGURU_SEMANTIC_FLOOR`,
     /// `None` = the text-embedding-3-large calibration).
@@ -242,7 +242,7 @@ impl AppState {
         Ok(state)
     }
 
-    /// Loads every pinned context now — in parallel, because this runs
+    /// Loads every pinned `context` now — in parallel, because this runs
     /// before the listener binds and its wall-clock IS the downtime a
     /// single-writer deploy pays (stop-then-start; see the README's
     /// rollout note), and chatty on purpose: a boot that spends
@@ -324,7 +324,7 @@ fn passage_vector_limit_leaves_ann_dormant(
 
 /// One boot-time pass over the data directory: crash leftovers of
 /// staged writes are deleted (never published, and nothing may linger
-/// as unbounded disk litter), and every context image found is
+/// as unbounded disk litter), and every `context` image found is
 /// registered cold, described by its sidecar snapshot.
 fn scan_data_dir(
     data_dir: &Path,
@@ -580,11 +580,11 @@ fn scan_data_dir(
     Ok((registry, resumed_renames))
 }
 
-/// Boot-time counterpart of the delete-path sweeps: drops every group
-/// member that is not a registered context, every child that is not a
-/// scanned group, every name past the [`groups::MAX_GROUP_MEMBERS`]
+/// Boot-time counterpart of the delete-path sweeps: drops every `group`
+/// member that is not a registered `context`, every child that is not a
+/// scanned `group`, every name past the [`groups::MAX_GROUP_MEMBERS`]
 /// per-set cap, and every nesting edge that would close a cycle or
-/// stack more than [`groups::MAX_GROUP_DEPTH`] groups (hand-edits
+/// stack more than [`groups::MAX_GROUP_DEPTH`] `groups` (hand-edits
 /// only — nothing running can persist such a shape). Each fix is
 /// written back to disk immediately — disk is the source of truth, and
 /// a fix that only lived in memory would leave the file lying to
@@ -770,10 +770,10 @@ mod tests {
     }
 
     /// Regression: the destination-targeting scan above must compare
-    /// against the DECODED context name, not the file stem —
+    /// against the DECODED `context` name, not the file stem —
     /// `RenameMarker.to` is written from the name `rename_context` was
     /// called with, before `file_stem`'s percent-encoding. A deleted
-    /// context whose name needed encoding (anything outside
+    /// `context` whose name needed encoding (anything outside
     /// `[A-Za-z0-9_-]`) previously never matched here, leaving its
     /// stale targeting marker behind for the next boot's resume to
     /// move a family onto a name that no longer exists.
@@ -814,9 +814,9 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// Boot's marker pass: a surviving marker whose context exists is
+    /// Boot's marker pass: a surviving marker whose `context` exists is
     /// the torn-import report (and stays on disk for the next boot to
-    /// repeat, until re-import or retraction); one whose context is
+    /// repeat, until re-import or retraction); one whose `context` is
     /// gone is moot and is removed — it completes delete()'s own
     /// best-effort sweep.
     #[test]
@@ -853,10 +853,10 @@ mod tests {
     /// neither exercises the interleaving between the two resume loops
     /// in `boot_with` (`resumed_context_renames` runs before
     /// `resumed_group_renames`, both before `reconcile_groups`). Here a
-    /// group is itself mid-rename AND names, as a member, a context
+    /// `group` is itself mid-rename AND names, as a member, a `context`
     /// that is also mid-rename in the same crash — both must land in
-    /// one boot, with the group's `contexts` set carrying the
-    /// context's NEW name, not the stale one and not dropped as
+    /// one boot, with the `group`'s `contexts` set carrying the
+    /// `context`'s NEW name, not the stale one and not dropped as
     /// dangling.
     #[test]
     fn a_context_rename_and_its_containing_group_s_rename_both_resume_in_one_boot() {
@@ -920,11 +920,11 @@ mod tests {
 
     /// `reconcile_groups`'s `write_group` failure arm (warn-only: the
     /// in-memory fix is correct, only the on-disk file stays stale
-    /// until the next successful group write) has no test — the two
+    /// until the next successful `group` write) has no test — the two
     /// existing boot-time faults (`a_resumed_renames_membership_rewrite_that_cannot_persist_keeps_the_marker`
-    /// and its group twin) each arm a SINGLE-shot injector on their own
+    /// and its `group` twin) each arm a SINGLE-shot injector on their own
     /// membership rewrite earlier in the same boot, which consumes the
-    /// fault before `reconcile_groups` ever runs. Here the group needs
+    /// fault before `reconcile_groups` ever runs. Here the `group` needs
     /// no rename at all — a plain dangling reference reconcile itself
     /// must drop and persist — so the injector can be aimed squarely at
     /// `reconcile_groups`'s own `write_group` call.
@@ -980,7 +980,7 @@ mod tests {
     /// `preload_pinned`'s worker-pool path (`workers =
     /// available_parallelism().min(pinned.len())`) is only exercised at
     /// `workers == 1` by every other pinned test in the suite (each
-    /// boots with a single pinned context). Two pinned contexts push
+    /// boots with a single pinned `context`). Two pinned `contexts` push
     /// `workers` to at least 2 whenever more than one core is
     /// available, and a corrupt image on one of them exercises the
     /// `Err` warn arm (`boot.rs:285-287`) alongside a healthy load on
@@ -1100,7 +1100,7 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    /// A context with no `{stem}.schema.json` and no recorded digest
+    /// A `context` with no `{stem}.schema.json` and no recorded digest
     /// boots exactly as it did before #379 — the acceptance criterion
     /// ADR 0009 §7.1 states by construction.
     #[test]
@@ -1133,7 +1133,7 @@ mod tests {
     }
 
     /// ADR 0009 §5.1: a schema file that reads but does not parse
-    /// refuses the WHOLE boot (not just this one context) and sets the
+    /// refuses the WHOLE boot (not just this one `context`) and sets the
     /// mangled bytes aside — never a fresh-empty-record fallback, since
     /// that is indistinguishable from `mode: off` and would silently
     /// disable `strict`.

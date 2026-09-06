@@ -35,7 +35,7 @@
     </div>
     <div class="side-group">
       <div class="side-group-label">Reference</div>
-      <a href="schema.html">Context schema</a>
+      <a href="schema.html"><code>context</code> schema</a>
       <a href="import.html" aria-current="page">Batch import</a>
       <a href="extract.html">Document extraction</a>
       <a href="taguru-code.html">Code map (taguru-code)</a>
@@ -162,7 +162,7 @@ taguru import --refuse-sensitive --redact-rules rules.tsv batch/
       <code>*_dropped</code> count the way a real apply can. Those fields read
       <code>0</code>/<code>false</code> rather than a guess, and <code>schemas</code>/
       <code>groups</code> are always absent for the same reason the HTTP endpoint's own
-      <code>?dry_run=true</code> omits them: neither installing a schema nor restoring a group has
+      <code>?dry_run=true</code> omits them: neither installing a schema nor restoring a <code>group</code> has
       a read-only twin to preview through.
     </p>
     <p>
@@ -173,7 +173,7 @@ taguru import --refuse-sensitive --redact-rules rules.tsv batch/
       <code>groups</code>, unchanged from the success case's own rule: <code>batches</code> is
       always an array (<code>[]</code> when nothing landed before the failure),
       <code>schemas</code>/<code>groups</code> are each omitted whenever they would be empty — a
-      failure that landed zero batches, zero schemas, and zero groups still answers
+      failure that landed zero batches, zero schemas, and zero <code>groups</code> still answers
       <code>{"dry_run": ..., "error": "...", "batches": []}</code>, no <code>schemas</code> or
       <code>groups</code> key at all. A local batch refused mid-run (offline only — a remote
       refusal fails its whole chunk, never one batch within it), and on either path a batch
@@ -207,8 +207,8 @@ taguru import --refuse-sensitive --redact-rules rules.tsv batch/
       <i>persistently</i> (capacity is the realistic case), that source stays empty until a
       re-import succeeds (old facts retracted, new facts refused).
       Also, retraction releases a source's attributions but does not un-register vocabulary: once
-      minted, a concept or label keeps its id for the lifetime of the context. A pipeline that
-      keeps re-importing revision files whose names keep rotating grows the context monotonically.
+      minted, a concept or label keeps its id for the lifetime of the <code>context</code>. A pipeline that
+      keeps re-importing revision files whose names keep rotating grows the <code>context</code> monotonically.
       Watch the counts with <code>taguru inspect</code> and the headroom with
       <code>taguru estimate</code>; accumulated dead weight is reclaimed by
       <code>taguru compact</code> (offline) or <code>POST /contexts/{name}/compact</code>
@@ -236,7 +236,7 @@ taguru import --refuse-sensitive --redact-rules rules.tsv batch/
       <code>context</code> and <code>source</code> are required. <code>create</code> is optional
       and carries the same fields as <code>PUT /contexts/{name}</code> (<code>description</code>,
       <code>pinned</code>, <code>dice_floor</code>, <code>semantic_floor</code>) — used only when
-      the context <b>does not exist yet</b>. Importing into an absent context without a create
+      the <code>context</code> <b>does not exist yet</b>. Importing into an absent <code>context</code> without a create
       block is refused.
     </p>
 
@@ -250,7 +250,7 @@ taguru import --refuse-sensitive --redact-rules rules.tsv batch/
     <h3>Alias lines</h3>
     <p>
       <code>alias</code> / <code>canonical</code> / <code>kind</code> (<code>"concept"</code> or
-      <code>"label"</code>). Aliases are <b>context-level</b>, not source-scoped: re-import
+      <code>"label"</code>). Aliases are <b><code>context</code>-level</b>, not source-scoped: re-import
       re-registers (an unchanged pair is a no-op), and retraction does not remove aliases.
       The canonical may be a name first introduced by this file's associations — associations
       apply first. Re-pointing an existing alias at a <b>different</b> canonical is a conflict and
@@ -333,32 +333,32 @@ taguru import --refuse-sensitive --redact-rules rules.tsv batch/
     <p class="note">
       This is the record's on-the-wire shape only. For what the document means, the three modes,
       the reserved <code>schema:type</code> label, and the write-time enforcement it turns on, see
-      <a href="schema.html">The context schema</a>.
+      <a href="schema.html">The <code>context</code> schema</a>.
     </p>
     <p>
       <code>{"taguru_schema": 1, "context": "…", "mode": "off"|"warn"|"strict", "closed_labels": …, "types": {…}, "relations": {…}}</code>
-      — one line states one <b>context's</b> whole schema document (ADR 0009 §13), the same shape
-      <code>PUT /contexts/{name}/schema</code> installs. Unlike a group record, every field is
+      — one line states one <b><code>context</code>'s</b> whole schema document (ADR 0009 §13), the same shape
+      <code>PUT /contexts/{name}/schema</code> installs. Unlike a <code>group</code> record, every field is
       required — there is no default for an absent one, matching the document's own at-rest
       shape: a missing field is a parse refusal, never a silently-defaulted one. A schema record
-      stands alone between batches (it closes the batch before it, the same as a group record —
+      stands alone between batches (it closes the batch before it, the same as a <code>group</code> record —
       operation lines after one need a fresh header), and <code>taguru export</code> emits one as
-      the <b>first</b> line of a context's own stream whenever that context has a schema installed
+      the <b>first</b> line of a <code>context</code>'s own stream whenever that <code>context</code> has a schema installed
       and its <code>mode</code> is not <code>"off"</code> — a schema left in <code>off</code> while
       its types are drafted is not carried across export/restore.
     </p>
     <p>
-      Schema records install <b>after every batch of the run, before any group record</b> — so a
-      schema can name a context a batch of the <b>same</b> stream just created, and a group record
+      Schema records install <b>after every batch of the run, before any <code>group</code> record</b> — so a
+      schema can name a <code>context</code> a batch of the <b>same</b> stream just created, and a <code>group</code> record
       can in turn rely on that schema having already landed. Each record is independent (one
-      record, one context): unlike group records, which validate as one whole set before any of
+      record, one <code>context</code>): unlike <code>group</code> records, which validate as one whole set before any of
       them applies, the first schema record that fails to install refuses the request right there
-      — every batch before it stays durable, and later schema records or group records in the same
-      stream are simply never reached. Restating one context's schema twice in a run is refused,
+      — every batch before it stays durable, and later schema records or <code>group</code> records in the same
+      stream are simply never reached. Restating one <code>context</code>'s schema twice in a run is refused,
       naming the earlier file (or, within one stream, the earlier line) that already stated it
-      (#863) — as is restating a source or a group —
-      one record owns one context's schema. The response's <code>SchemaImportOutcome</code> carries
-      no outcome verb (unlike a group's <code>"created"</code>/<code>"replaced"</code>/
+      (#863) — as is restating a source or a <code>group</code> —
+      one record owns one <code>context</code>'s schema. The response's <code>SchemaImportOutcome</code> carries
+      no outcome verb (unlike a <code>group</code>'s <code>"created"</code>/<code>"replaced"</code>/
       <code>"unchanged"</code>): installing a schema cannot itself tell an install apart from a
       no-op re-install of the identical document, and a guessed verb would be worse than none.
     </p>
@@ -370,25 +370,25 @@ taguru import --refuse-sensitive --redact-rules rules.tsv batch/
       preflight existed.
     </p>
 
-    <h3>Group records</h3>
+    <h3><code>group</code> records</h3>
     <p>
       <code>{"taguru_group": 1, "name": "…", "description": "…", "contexts": […], "groups": […]}</code>
-      — one line states one <b>group's</b> complete truth, the way a batch states a source's:
+      — one line states one <b><code>group</code>'s</b> complete truth, the way a batch states a source's:
       applying it is a create-or-replace of the whole record, never a delta, so re-importing
-      stays idempotent. Only <code>name</code> is required; absent fields read as empty. A group
+      stays idempotent. Only <code>name</code> is required; absent fields read as empty. A <code>group</code>
       record stands alone between batches (it closes the batch before it — operation lines after
-      one need a fresh header), and <code>taguru export</code> writes each group as its own
-      <code>{group}.group.jsonl</code> beside the context streams.
+      one need a fresh header), and <code>taguru export</code> writes each <code>group</code> as its own
+      <code>{group}.group.jsonl</code> beside the <code>context</code> streams.
     </p>
     <p>
-      Groups apply <b>after every batch and every schema record of the run</b> — one CLI
-      invocation, one <code>POST /import</code> body — wherever the records sat, so a group and
-      the member contexts it names can travel together in any order. Referential integrity holds
-      at that point exactly as over the API: every member context must exist, every child group
-      must exist or ride the same run, the nesting must stay at most 3 groups tall and acyclic,
-      and a violation refuses <b>all</b> group records (the batches and schemas are already
-      durably applied; fixing the stream and re-importing it whole is exact). Restating one group
-      twice in a run is refused — one record owns one group's truth.
+      <code>groups</code> apply <b>after every batch and every schema record of the run</b> — one CLI
+      invocation, one <code>POST /import</code> body — wherever the records sat, so a <code>group</code> and
+      the member <code>contexts</code> it names can travel together in any order. Referential integrity holds
+      at that point exactly as over the API: every member <code>context</code> must exist, every child <code>group</code>
+      must exist or ride the same run, the nesting must stay at most 3 <code>groups</code> tall and acyclic,
+      and a violation refuses <b>all</b> <code>group</code> records (the batches and schemas are already
+      durably applied; fixing the stream and re-importing it whole is exact). Restating one <code>group</code>
+      twice in a run is refused — one record owns one <code>group</code>'s truth.
     </p>
 
     <p class="note">Unknown fields and unrecognizable line shapes are refused, with the line number.</p>
@@ -400,9 +400,9 @@ taguru import --refuse-sensitive --redact-rules rules.tsv batch/
       <table>
         <thead><tr><th>Subject</th><th>Cap</th></tr></thead>
         <tbody>
-          <tr><td>context name · group name (members included)</td><td>64 bytes</td></tr>
+          <tr><td><code>context</code> name · <code>group</code> name (members included)</td><td>64 bytes</td></tr>
           <tr><td>source id · subject/label/object · alias/canonical</td><td>1,024 bytes</td></tr>
-          <tr><td>group membership (member contexts / child groups, each)</td><td>1,000 names</td></tr>
+          <tr><td><code>group</code> membership (member <code>contexts</code> / child <code>groups</code>, each)</td><td>1,000 names</td></tr>
           <tr><td>create.description</td><td>4,096 bytes</td></tr>
           <tr><td>weight</td><td>finite, |w| ≤ 1e6</td></tr>
           <tr><td>passage</td><td>8 MiB (the default HTTP body cap)</td></tr>
@@ -417,7 +417,7 @@ taguru import --refuse-sensitive --redact-rules rules.tsv batch/
     </div>
     <p>
       There is no cap on operations per file. Apply is internally chunked at the API batch size
-      (10,000) and long runs flush periodically, so no context's WAL ever approaches
+      (10,000) and long runs flush periodically, so no <code>context</code>'s WAL ever approaches
       <code>TAGURU_WAL_MAX_BYTES</code>.
     </p>
   </section>
@@ -425,11 +425,11 @@ taguru import --refuse-sensitive --redact-rules rules.tsv batch/
   <section id="validate">
     <h2>Validate, then apply</h2>
     <ul>
-      <li>Every file parses, and no two files claim the same (context, source) — only once that is established does anything apply. One malformed line refuses the entire run with its line number, and nothing is written (<code>--dry-run</code> stops there by design). Under <a href="#refuse-sensitive"><code>--refuse-sensitive</code></a> the same pass judges each batch's content against the sensitive-content rules; a hit refuses that batch alone, and the rest still applies.</li>
+      <li>Every file parses, and no two files claim the same (<code>context</code>, source) — only once that is established does anything apply. One malformed line refuses the entire run with its line number, and nothing is written (<code>--dry-run</code> stops there by design). Under <a href="#refuse-sensitive"><code>--refuse-sensitive</code></a> the same pass judges each batch's content against the sensitive-content rules; a hit refuses that batch alone, and the rest still applies.</li>
       <li>Failures only discoverable at the apply stage (capacity, disk) are reported per file, and the remaining files continue: files are structurally independent (one file, one source), and a partially applied file heals on re-import.</li>
-      <li>A batch that stops between its four durable steps (retract &rarr; passage &rarr; associations &rarr; aliases) is <b>detected</b>, not just repairable: a per-source batch-open marker is written before the first step and removed only after the last, so the server's next boot and <code>taguru inspect</code> name any source whose import never completed. An alias step predicted to conflict is refused before this marker ever opens &mdash; canonical/alias resolution is simulated read-only against the batch's own fresh names and the context's current state &mdash; so a content-driven refusal leaves nothing to detect; the marker's presence now narrows to a capacity or disk fault reaching mid-batch. Either documented repair clears it &mdash; re-import the file, or retract the source. Cross-store atomicity is deliberately not attempted; retract-then-apply already makes the repair exact.</li>
-      <li>Writes go through the same registry the server uses — staged on the WAL and fsynced, budgets enforced, one flush at the end. So <code>taguru inspect</code> and the next boot see exactly the state a live ingest would have produced. Imports count as writes in each context's usage stats.</li>
-      <li>If the target context has an installed <a href="schema.html">schema</a>, every batch is
+      <li>A batch that stops between its four durable steps (retract &rarr; passage &rarr; associations &rarr; aliases) is <b>detected</b>, not just repairable: a per-source batch-open marker is written before the first step and removed only after the last, so the server's next boot and <code>taguru inspect</code> name any source whose import never completed. An alias step predicted to conflict is refused before this marker ever opens &mdash; canonical/alias resolution is simulated read-only against the batch's own fresh names and the <code>context</code>'s current state &mdash; so a content-driven refusal leaves nothing to detect; the marker's presence now narrows to a capacity or disk fault reaching mid-batch. Either documented repair clears it &mdash; re-import the file, or retract the source. Cross-store atomicity is deliberately not attempted; retract-then-apply already makes the repair exact.</li>
+      <li>Writes go through the same registry the server uses — staged on the WAL and fsynced, budgets enforced, one flush at the end. So <code>taguru inspect</code> and the next boot see exactly the state a live ingest would have produced. Imports count as writes in each <code>context</code>'s usage stats.</li>
+      <li>If the target <code>context</code> has an installed <a href="schema.html">schema</a>, every batch is
         also judged against it: <code>strict</code> refuses the whole batch alongside the checks
         above (before anything mutates), <code>warn</code> applies it and reports the violations
         in the response's <code>issues</code>. <code>?dry_run=true</code> runs the identical
@@ -453,7 +453,7 @@ taguru import --refuse-sensitive --redact-rules rules.tsv batch/
     <h2>Embeddings</h2>
     <p>
       If <code>TAGURU_EMBED_URL</code>/<code>TAGURU_EMBED_MODEL</code> are set (also via
-      <code>--config</code>), every touched context re-embeds its changed glosses at the end of
+      <code>--config</code>), every touched <code>context</code> re-embeds its changed glosses at the end of
       the run — the same idempotent refresh as the server's <code>TAGURU_EMBED_AUTO</code>.
       <code>--no-embed</code> skips it. A refresh failure rolls back nothing: the graph is
       imported and durable, and the run exits 1 naming the recovery step
@@ -477,7 +477,7 @@ curl -X POST localhost:8248/import \
     <ul>
       <li>Validation first (a malformed line is a 400 with its line number, and nothing applies), then retract-then-apply — re-POSTing the same batch replaces the source exactly, just like re-running the CLI. The response carries the same numbers the CLI prints.</li>
       <li>It obeys everything every endpoint obeys: Bearer auth, the body cap (<code>TAGURU_MAX_BODY_BYTES</code>, default 8 MiB — larger batches go through the offline CLI or a raised cap), the request timeout, per-key rate limits.</li>
-      <li>Statuses follow the API's dialect: <code>400</code> malformed batch (with line number) · <code>404</code> absent context and no create block · <code>409</code>/<code>507</code> partial write (conflict / capacity; the message names what landed, and the retraction makes the corrected retry exact) · <code>500</code> a write the WAL or disk refused.</li>
+      <li>Statuses follow the API's dialect: <code>400</code> malformed batch (with line number) · <code>404</code> absent <code>context</code> and no create block · <code>409</code>/<code>507</code> partial write (conflict / capacity; the message names what landed, and the retraction makes the corrected retry exact) · <code>500</code> a write the WAL or disk refused.</li>
       <li>A mid-stream refusal also says what landed <b>machine-readably</b>: the error body
         carries <code>integrity</code> (<code>"nothing_written"</code>, or
         <code>"durable_prefix"</code> with <code>durable_batches</code> naming exactly how many
@@ -493,7 +493,7 @@ curl -X POST localhost:8248/import \
     </ul>
     <p class="note warn">
       Two batches for <b>different</b> sources may be POSTed concurrently — each write inside a
-      batch is serialized on the context. Never race two imports of the <b>same</b> source: one
+      batch is serialized on the <code>context</code>. Never race two imports of the <b>same</b> source: one
       side's apply can interleave with the other's retract, and the <b>union</b> of both batches
       can survive. One source, one writer at a time.
     </p>
@@ -542,8 +542,8 @@ taguru import --url "$TAGURU_URL" --dry-run backups/   <span class="c"># preview
       <li>
         <code>taguru_schema</code> records ride after every batch chunk, and
         <code>taguru_group</code> records after every schema chunk in turn — the same order the
-        local path already applies them in, so a schema naming a context an earlier chunk's batch
-        creates, or a group naming a context an earlier chunk's schema installs onto, always
+        local path already applies them in, so a schema naming a <code>context</code> an earlier chunk's batch
+        creates, or a <code>group</code> naming a <code>context</code> an earlier chunk's schema installs onto, always
         arrives after it.
       </li>
       <li>
@@ -557,7 +557,7 @@ taguru import --url "$TAGURU_URL" --dry-run backups/   <span class="c"># preview
         after the refusal names the chunk's one unit, or its first and last, as
         <code>&lt;file&gt;: context '…' source '…'</code>; the server's own <code>issues[]</code>
         follow, each re-addressed from the request-relative <code>batches[N].…</code> to that
-        unit's file, context, and source with the in-batch remainder kept
+        unit's file, <code>context</code>, and source with the in-batch remainder kept
         (<code>b.jsonl: context 'a' source 'b.md': associations[1].subject: expected a Brewery,
         got Person</code>), and when the server capped its list a final line says how many more
         it did not list. Each "never sent" tally names the first unit of its kind by file and
@@ -583,20 +583,20 @@ taguru import --url "$TAGURU_URL" --dry-run backups/   <span class="c"># preview
     <p class="section-sub">
       One file (one request body) may carry one batch <b>or several concatenated ones</b> — each
       <code>taguru_batch</code> header line closes the previous batch and opens the next.
-      Per-batch validation, retract-then-apply, and (context, source) uniqueness are identical to
+      Per-batch validation, retract-then-apply, and (<code>context</code>, source) uniqueness are identical to
       the single-file case.
     </p>
     <p>
       That stream is what <code>taguru export --out DIR [CONTEXT...]</code> writes (offline, under
       the directory lock), and what a running server serves at
       <code>GET /contexts/{name}/export</code> (the body is the JSON Lines stream itself).
-      One context = one stream: one batch per source id, in order, with a <code>create</code>
+      One <code>context</code> = one stream: one batch per source id, in order, with a <code>create</code>
       block (description, pinning, floors) on the first batch and the alias table riding the last.
-      A context whose schema is installed and not in <code>off</code> mode carries one more line —
+      A <code>context</code> whose schema is installed and not in <code>off</code> mode carries one more line —
       a <code>taguru_schema</code> record, first in the stream (ADR 0009 §13) — so its constraints
       travel with the data rather than being a separate, easy-to-forget backup step; a schema left
       in <code>off</code> while its types are drafted is not exported. Restore is a normal import —
-      per-source replacement makes it idempotent; to match a snapshot exactly, delete the context
+      per-source replacement makes it idempotent; to match a snapshot exactly, delete the <code>context</code>
       first, then stream it in.
     </p>
     <p>
@@ -607,8 +607,8 @@ taguru import --url "$TAGURU_URL" --dry-run backups/   <span class="c"># preview
       files a local export would. Auth rides <code>TAGURU_API_TOKEN</code> (or
       the first <code>name:token</code> entry of <code>TAGURU_API_TOKENS</code>), the same variables
       the server reads; a URL carrying <code>user:password@</code> is refused. This is <b>not</b> a
-      point-in-time snapshot across contexts — each context's own stream is internally consistent,
-      but contexts are fetched one request at a time, so two contexts fetched seconds apart may not
+      point-in-time snapshot across <code>contexts</code> — each <code>context</code>'s own stream is internally consistent,
+      but <code>contexts</code> are fetched one request at a time, so two <code>contexts</code> fetched seconds apart may not
       reflect the same instant. An operator who needs a true point-in-time snapshot across the whole
       server already has one: the replication bucket (<code>TAGURU_REPLICATE_URL</code>) plus
       <code>taguru restore</code>.

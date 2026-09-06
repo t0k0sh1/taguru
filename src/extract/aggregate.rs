@@ -87,7 +87,7 @@ impl Extraction {
     /// (a bare particle, a one-off paraphrase) not worth reinforcing.
     /// ADR 0009 §6.3 exclusion 2: `schema:type` never enters this
     /// vocabulary — `extract` has no notion of whether the target
-    /// context even has a schema, so unlike the server-side exclusions
+    /// `context` even has a schema, so unlike the server-side exclusions
     /// (gated on "a schema document exists") this one is unconditional,
     /// the same way a producer never needs to know a server-side
     /// reserved id exists to simply never coin one. Filtering here,

@@ -35,7 +35,7 @@
     </div>
     <div class="side-group">
       <div class="side-group-label">Reference</div>
-      <a href="schema.html">Context schema</a>
+      <a href="schema.html"><code>context</code> schema</a>
       <a href="import.html">Batch import</a>
       <a href="extract.html">Document extraction</a>
       <a href="taguru-code.html">Code map (taguru-code)</a>
@@ -111,7 +111,7 @@
       </p>
       <p>
         Everything that needs language understanding — decomposing documents into facts, choosing
-        a context, recomposing results into prose — is the client's (the LLM's) job. The server
+        a <code>context</code>, recomposing results into prose — is the client's (the LLM's) job. The server
         only stores and walks structure, and it distributes the playbook for doing so itself:
         <code>GET /protocol</code>.
       </p>
@@ -128,19 +128,19 @@
       </a>
       <a class="nav-card" href="concepts.html">
         <span class="nc-title">Concepts</span>
-        <p>The association model and contexts, groups and cross-context search, the retrieval loop, how the two lanes divide the work, ingest discipline, patterns for procedures, causality, and code.</p>
+        <p>The association model and <code>contexts</code>, <code>groups</code> and cross-<code>context</code> search, the retrieval loop, how the two lanes divide the work, ingest discipline, patterns for procedures, causality, and code.</p>
       </a>
       <a class="nav-card" href="modeling.html">
-        <span class="nc-title">Context &amp; group modeling</span>
-        <p>A corpus is not a context. Mapping papers, contracts, and codebases onto contexts, groups, and sources — one worked example, and the anti-patterns.</p>
+        <span class="nc-title"><code>context</code> &amp; <code>group</code> modeling</span>
+        <p>A corpus is not a <code>context</code>. Mapping papers, contracts, and codebases onto <code>contexts</code>, <code>groups</code>, and sources — one worked example, and the anti-patterns.</p>
       </a>
       <a class="nav-card" href="troubleshooting.html">
         <span class="nc-title">Troubleshooting</span>
         <p>Slow, stuck, or the wrong shape: a symptom → layer → diagnostic → remedy table for version skew, stale Docker images, Taguru latency vs. LLM generation, and embedding 404s and lexical degrade.</p>
       </a>
       <a class="nav-card" href="schema.html">
-        <span class="nc-title">The context schema (schema)</span>
-        <p>An optional per-context type and relation ontology. The document shape, off/warn/strict modes, the reserved <code>schema:type</code> label, write-time enforcement, the HTTP/MCP surface, type-aware reads, and the metrics.</p>
+        <span class="nc-title">The <code>context</code> schema (schema)</span>
+        <p>An optional per-<code>context</code> type and relation ontology. The document shape, off/warn/strict modes, the reserved <code>schema:type</code> label, write-time enforcement, the HTTP/MCP surface, type-aware reads, and the metrics.</p>
       </a>
       <a class="nav-card" href="import.html">
         <span class="nc-title">The batch contract (import)</span>
@@ -164,7 +164,7 @@
       </a>
       <a class="nav-card" href="evaluate.html">
         <span class="nc-title">Retrieval &amp; citation quality gate (evaluate)</span>
-        <p>Measure one populated context's search and citation quality against a labeled eval.jsonl and turn it into a CI pass/fail gate. Lane execution, the metric catalog, evaluation.json/changes.jsonl, thresholds, and how this differs from calibrate, explain_*, and benchmark.</p>
+        <p>Measure one populated <code>context</code>'s search and citation quality against a labeled eval.jsonl and turn it into a CI pass/fail gate. Lane execution, the metric catalog, evaluation.json/changes.jsonl, thresholds, and how this differs from calibrate, explain_*, and benchmark.</p>
       </a>
       <a class="nav-card" href="evidence.html">
         <span class="nc-title">Budgeted evidence assembly (evidence)</span>
@@ -212,14 +212,14 @@
       </a>
       <a class="nav-card" href="local-rag-walkthrough.html">
         <span class="nc-title">Local RAG walkthrough</span>
-        <p>Multiple PDFs into a fixed, fully local corpus — Ollama for extract, embed, and answer; a LangChain retriever across paper groups; citations traced back to page and paragraph.</p>
+        <p>Multiple PDFs into a fixed, fully local corpus — Ollama for extract, embed, and answer; a LangChain retriever across paper <code>groups</code>; citations traced back to page and paragraph.</p>
       </a>
     </div>
   </section>
 
   <section id="quickstart">
     <h2>Try it in 30 seconds</h2>
-    <p class="section-sub">Start the server, create a context, store one fact, and pull it back out.</p>
+    <p class="section-sub">Start the server, create a <code>context</code>, store one fact, and pull it back out.</p>
     <pre><code><span class="c"># install (brings the server `taguru` and the MCP bridge `taguru-mcp`)</span>
 cargo install taguru
 taguru   <span class="c"># listens on 127.0.0.1:8248 (data in ./data)</span>
@@ -256,7 +256,7 @@ curl -X POST localhost:8248/contexts/sake/activate -H 'Content-Type: application
         <span class="mark">二</span>
         <div>
           <h3>The client is an LLM</h3>
-          <p>Decomposing documents, assembling answers, and choosing a context are language-understanding work, so they belong to the LLM. The server hands out its own playbook (<code>/protocol</code>) and tool definitions, so a connected LLM knows the correct order of calls from the first turn.</p>
+          <p>Decomposing documents, assembling answers, and choosing a <code>context</code> are language-understanding work, so they belong to the LLM. The server hands out its own playbook (<code>/protocol</code>) and tool definitions, so a connected LLM knows the correct order of calls from the first turn.</p>
         </div>
       </div>
       <div class="principle">
@@ -270,7 +270,7 @@ curl -X POST localhost:8248/contexts/sake/activate -H 'Content-Type: application
         <span class="mark">四</span>
         <div>
           <h3>A write acknowledged with 200 is never lost</h3>
-          <p>An accepted write is fsynced to the WAL before it applies. After a crash, replay on the next boot brings it back. Disk is the source of truth; memory is only a per-context cache.</p>
+          <p>An accepted write is fsynced to the WAL before it applies. After a crash, replay on the next boot brings it back. Disk is the source of truth; memory is only a per-<code>context</code> cache.</p>
         </div>
       </div>
     </div>

@@ -35,7 +35,7 @@
     </div>
     <div class="side-group">
       <div class="side-group-label">Reference</div>
-      <a href="schema.html">Context schema</a>
+      <a href="schema.html"><code>context</code> schema</a>
       <a href="import.html">Batch import</a>
       <a href="extract.html">Document extraction</a>
       <a href="taguru-code.html" aria-current="page">Code map (taguru-code)</a>
@@ -178,11 +178,11 @@ taguru-code watch                   <span class="c"># keep syncing as the tree c
   <section id="data">
     <h2>Where the map lives</h2>
     <p>
-      <code>$REPO/.taguru</code> is a <b>normal taguru data directory</b> holding a context
+      <code>$REPO/.taguru</code> is a <b>normal taguru data directory</b> holding a <code>context</code>
       named <code>code</code>: the same image, WAL, and passage-log formats the server uses,
       written through the same batch/import contract a client could have sent. Nothing about it
       is bespoke — point <code>taguru serve</code> at it and the map is queryable over HTTP and
-      MCP like any other context; delete it and the next <code>sync</code> rebuilds it whole.
+      MCP like any other <code>context</code>; delete it and the next <code>sync</code> rebuilds it whole.
     </p>
   </section>
 

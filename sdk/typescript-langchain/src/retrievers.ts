@@ -5,10 +5,10 @@
  * default, RRF merge, graph-only facts as Documents).
  *
  * The retriever addresses one `context`, several `contexts`, or `groups`
- * (each group reaches every member context, nested children included).
- * Across several contexts the graph lane runs per context and interleaves by
- * per-context rank — the posture the server itself takes for passage scores —
- * and the text lane rides the server's own cross-context search.
+ * (each `group` reaches every member `context`, nested children included).
+ * Across several `contexts` the graph lane runs per `context` and interleaves by
+ * per-`context` rank — the posture the server itself takes for passage scores —
+ * and the text lane rides the server's own cross-`context` search.
  */
 
 import type { CallbackManagerForRetrieverRun } from "@langchain/core/callbacks/manager";
@@ -28,11 +28,11 @@ const RRF_K = 60;
 const rrf = (rank: number): number => 1.0 / (RRF_K + rank);
 
 export interface TaguruRetrieverFields extends BaseRetrieverInput {
-  /** One target context; name at least one of context/contexts/groups. */
+  /** One target `context`; name at least one of context/contexts/groups. */
   context?: string;
-  /** Several target contexts (full names). */
+  /** Several target `contexts` (full names). */
   contexts?: string[];
-  /** Group names — each searches every context it reaches, nested children included. */
+  /** `group` names — each searches every `context` it reaches, nested children included. */
   groups?: string[];
   client?: Taguru;
   base_url?: string;
@@ -57,7 +57,7 @@ export interface TaguruRetrieverFields extends BaseRetrieverInput {
 }
 
 /**
- * Retrieve Documents from Taguru contexts, graph lane + text lane.
+ * Retrieve Documents from Taguru `contexts`, graph lane + text lane.
  *
  * Passage-backed hits carry `page_content` = the verbatim paragraph and
  * metadata `{context, source, paragraph, section, lane, associations?,
@@ -119,13 +119,13 @@ export class TaguruRetriever extends BaseRetriever {
     this.semantic_floor = fields.semantic_floor;
   }
 
-  /** Whether retrieval spans several contexts (or a group's worth). */
+  /** Whether retrieval spans several `contexts` (or a `group`'s worth). */
   private isCross(): boolean {
     return (this.contexts?.length ?? 0) > 0 || (this.groups?.length ?? 0) > 0;
   }
 
   /**
-   * Direct contexts lead in declaration order; group-resolved members follow
+   * Direct `contexts` lead in declaration order; `group`-resolved members follow
    * in name order, overlaps deduped — the server's own cross-search tie
    * order.
    */
@@ -409,9 +409,9 @@ function graphDocuments(
 }
 
 /**
- * Per-context rank interleaving — activation strengths are ordinal within
- * one call only, so ranks are the currency across contexts (the posture the
- * server's own cross-context passage merge takes).
+ * Per-`context` rank interleaving — activation strengths are ordinal within
+ * one call only, so ranks are the currency across `contexts` (the posture the
+ * server's own cross-`context` passage merge takes).
  */
 export function interleave(perTarget: Document[][]): Document[] {
   const indexed: Array<[number, number, Document]> = [];
@@ -425,7 +425,7 @@ export function interleave(perTarget: Document[][]): Document[] {
 }
 
 /**
- * A cross-context hit names its context; a per-context hit inherits the
+ * A cross-`context` hit names its `context`; a per-`context` hit inherits the
  * retriever's own target.
  */
 function hitContext(hit: PassageHit, fallback: string | undefined): string | undefined {

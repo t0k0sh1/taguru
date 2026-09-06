@@ -1,4 +1,4 @@
-//! Installing a parsed `taguru_schema` record onto a context — the
+//! Installing a parsed `taguru_schema` record onto a `context` — the
 //! offline CLI's own leg of the two entrances that share
 //! [`apply_schema_record`] (the other is `POST /import`'s apply stage,
 //! `src/api/import.rs`).
@@ -12,7 +12,7 @@ use super::*;
 /// without matching on the registry error directly.
 #[derive(Debug)]
 pub(crate) enum SchemaApplyError {
-    /// The record's context does not exist — not yet created by an
+    /// The record's `context` does not exist — not yet created by an
     /// earlier batch of the same stream, nor previously.
     NoContext,
     ReservedAlias(String),

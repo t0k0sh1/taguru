@@ -68,10 +68,10 @@ pub(crate) struct Applied {
 /// variant onto a status and sends the same words.
 #[cfg_attr(test, derive(Debug))]
 pub(crate) enum ApplyRefusal {
-    /// The context does not exist and the batch brought no create
+    /// The `context` does not exist and the batch brought no create
     /// block (404 over HTTP).
     NoContext(String),
-    /// Filesystem trouble creating the context or persisting the
+    /// Filesystem trouble creating the `context` or persisting the
     /// passage (500).
     Io(String),
     /// The registry refused access (mapped like every other write).
@@ -87,7 +87,7 @@ pub(crate) enum ApplyRefusal {
     /// Predicted before anything mutated: this batch's own alias
     /// operations would resolve to `AliasError::UnknownCanonical` or
     /// `Conflict` once actually applied, so the whole batch is
-    /// refused up front (409) — no context created, no marker opened,
+    /// refused up front (409) — no `context` created, no marker opened,
     /// no retraction, nothing. Distinct from `Partial { applied: 0,
     /// .. }`, which can only follow the retraction (itself a write)
     /// already landing. Structured (issue #182) rather than a bare
@@ -96,7 +96,7 @@ pub(crate) enum ApplyRefusal {
     Rejected(AliasRejection),
     /// Predicted before anything mutated, same position as `Rejected`
     /// (checked right after it): this batch's own associations would
-    /// violate a `strict` context's schema, or its own `labels`
+    /// violate a `strict` `context`'s schema, or its own `labels`
     /// declares the reserved `schema:type` alias (ADR 0009 §6.3 guard
     /// 2, §7.2 step 7). Structured for the same reason `Rejected` is —
     /// path-addressed `Issue`s an MCP host corrects and resends.
@@ -152,14 +152,14 @@ impl ApplyRefusal {
     /// Whether the batch may have durably written anything before the
     /// refusal. Only [`ApplyRefusal::NoContext`], [`ApplyRefusal::Rejected`],
     /// and [`ApplyRefusal::Schema`] provably precede the first write —
-    /// all three are predicted before the context is even created.
+    /// all three are predicted before the `context` is even created.
     /// Everything past that point starts with the source retraction,
     /// itself a durable write, so a later refusal (a passage that
     /// would not persist, a partial prefix of associations or aliases)
     /// leaves real changes behind. `Io` from a failed create or a
     /// failed batch-marker write is the over-approximation (both
     /// precede the first graph write); the refresh pass answers an
-    /// absent context with its no-op `None` arm anyway.
+    /// absent `context` with its no-op `None` arm anyway.
     pub(crate) fn wrote_anything(&self) -> bool {
         !matches!(
             self,
@@ -257,10 +257,10 @@ fn corrected_associations(batch: &Batch, paragraph_count: Option<usize>) -> (Vec
 /// `add_aliases` actually writes in, so a predicted message names the
 /// same operation that would be the first to fail for real.
 ///
-/// A context that does not exist yet has no aliases and no
+/// A `context` that does not exist yet has no aliases and no
 /// associations to seed fresh names with, so a batch with a `create`
 /// block is checked against an empty [`Context::default`] — exactly
-/// the value `AppState::create` seeds a new context with. A context
+/// the value `AppState::create` seeds a new `context` with. A `context`
 /// that does not exist and brings no `create` block is left to the
 /// ordinary `NoContext` refusal that follows this check.
 fn predicted_alias_rejection(
@@ -328,7 +328,7 @@ fn predicted_alias_rejection(
 /// What earlier batches of the SAME previewed stream would intern —
 /// the dry run's stand-in for the batch-by-batch interning a real
 /// apply performs, kept PER CONTEXT because a stream can interleave
-/// contexts and interning is per context. Export puts every alias on
+/// `contexts` and interning is per `context`. Export puts every alias on
 /// the LAST batch while the canonicals are interned by earlier ones,
 /// so without this a dry run of a stream the real import applies
 /// cleanly refuses with a spurious `UnknownCanonical` — breaking "a
@@ -338,8 +338,8 @@ fn predicted_alias_rejection(
 /// would refuse, the same advisory direction as the capacity caps.
 #[derive(Default)]
 pub(crate) struct PreviewSeeds {
-    /// Context → what this stream's earlier batches intern there. A
-    /// context's PRESENCE also stands in for its creation: a
+    /// `context` → what this stream's earlier batches intern there. A
+    /// `context`'s PRESENCE also stands in for its creation: a
     /// restore's create block rides only the FIRST batch, so without
     /// it every later batch of a fresh-name restore previews a
     /// spurious `NoContext` the real import (whose first batch
@@ -347,7 +347,7 @@ pub(crate) struct PreviewSeeds {
     contexts: BTreeMap<String, ContextSeeds>,
 }
 
-/// One context's share of a [`PreviewSeeds`]: the names its earlier
+/// One `context`'s share of a [`PreviewSeeds`]: the names its earlier
 /// batches would intern.
 #[derive(Default)]
 pub(crate) struct ContextSeeds {
@@ -371,7 +371,7 @@ impl PreviewSeeds {
     }
 
     /// What this stream's earlier batches intern in `context` — and
-    /// ONLY there; a sibling context's names never vouch here.
+    /// ONLY there; a sibling `context`'s names never vouch here.
     fn interned_in(&self, context: &str) -> Option<&ContextSeeds> {
         self.contexts.get(context)
     }
@@ -379,7 +379,7 @@ impl PreviewSeeds {
 
 /// `warn`-mode schema violations this batch's own associations raised
 /// (ADR 0009 §8.3), capped like every other collect-all pass — empty
-/// whenever the batch is clean, the context has no schema, or the
+/// whenever the batch is clean, the `context` has no schema, or the
 /// schema's mode is `off`.
 #[cfg_attr(test, derive(Debug))]
 pub(crate) struct SchemaWarnings {
@@ -397,7 +397,7 @@ impl SchemaWarnings {
 }
 
 /// A predicted schema rejection (ADR 0009 §7.2, §6.3): this batch's own
-/// associations would violate a `strict` context's domain/range
+/// associations would violate a `strict` `context`'s domain/range
 /// constraints, or this batch's own `labels` declares the reserved
 /// `schema:type` alias — named precisely enough to build path-addressed
 /// `Issue`s from, exactly like [`AliasRejection`] beside it. `reserved`
@@ -445,7 +445,7 @@ enum CheckPurpose {
 }
 
 /// Predicts, without writing anything, whether this batch's own
-/// associations would violate a `strict` context's schema, or its own
+/// associations would violate a `strict` `context`'s schema, or its own
 /// `labels` declares the reserved `schema:type` alias (ADR 0009 §6.3
 /// guard 2's batch-local bullet, checked regardless of mode) — the
 /// schema twin of [`predicted_alias_rejection`], run right after it: an
@@ -463,10 +463,10 @@ enum CheckPurpose {
 /// either entrance): passing it in lets `apply_batch` build the list
 /// once for prediction and apply alike, so the two can never drift.
 ///
-/// No schema installed for this context — including one that does not
+/// No schema installed for this `context` — including one that does not
 /// exist yet — returns `Ok` before a single lock is taken
 /// (`AppState::schema_of`'s own fast path for `schema_digest.is_none()`):
-/// the zero-cost path every schema-free context takes, ADR 0009 §7.2
+/// the zero-cost path every schema-free `context` takes, ADR 0009 §7.2
 /// step 1. A schema recorded but currently unreadable is never treated
 /// as schema-free — `src/schema.rs`'s own module doc fixes that as a
 /// hard refusal, never a silent fallback — so this maps such a read
@@ -547,13 +547,13 @@ fn predicted_schema_rejection(
     Ok(SchemaWarnings { issues, total })
 }
 
-/// Applies one validated batch: ensure the context, retract the
+/// Applies one validated batch: ensure the `context`, retract the
 /// source, then land passage → associations → aliases. Aliases go
 /// last on purpose — an alias needs its canonical interned, and the
 /// associations just before are what intern it. Before any of that,
 /// [`predicted_alias_rejection`] checks whether this batch's own alias
 /// operations would resolve to a conflict, then [`predicted_schema_rejection`]
-/// checks whether they would violate the context's schema; either
+/// checks whether they would violate the `context`'s schema; either
 /// predicted rejection refuses the whole batch ([`ApplyRefusal::Rejected`]
 /// / [`ApplyRefusal::Schema`]) up front, so a bad alias or a schema
 /// violation no longer surfaces only after the associations (or the
@@ -787,7 +787,7 @@ pub(crate) fn apply_batch(
 
 /// The read-only twin of [`apply_batch`], for `POST
 /// /import?dry_run=true`: reports what a batch WOULD do without
-/// writing anything — no context created, no marker opened, no source
+/// writing anything — no `context` created, no marker opened, no source
 /// retracted. Runs the same [`predicted_alias_rejection`] and
 /// [`predicted_schema_rejection`] checks first, in the same order
 /// `apply_batch` does, so a batch whose aliases would conflict or whose

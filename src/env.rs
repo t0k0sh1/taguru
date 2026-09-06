@@ -52,12 +52,12 @@ pub(crate) fn env_floor(key: &str) -> Option<f32> {
 }
 
 /// `TAGURU_METRICS_PER_CONTEXT`: 0/false (and unset) = off, 1/true/all
-/// = every context, an integer ≥ 2 = the top-N contexts by total disk
+/// = every `context`, an integer ≥ 2 = the top-N `contexts` by total disk
 /// bytes. `1` deliberately reads as the boolean "on = all", not top-1:
 /// an operator typing `=1` almost certainly means the flag convention
 /// every other TAGURU_ boolean uses, and silently truncating the fleet
-/// to its single biggest context would be the misconfiguration this
-/// module exists to prevent — while "exactly my biggest context" is
+/// to its single biggest `context` would be the misconfiguration this
+/// module exists to prevent — while "exactly my biggest `context`" is
 /// what `GET /contexts` answers already. Anything else warns and stays
 /// off, per the file's contract.
 pub(crate) fn env_per_context_metrics(key: &str) -> crate::metrics::PerContextMetrics {
@@ -90,7 +90,7 @@ pub(crate) fn env_per_context_metrics(key: &str) -> crate::metrics::PerContextMe
 
 /// `TAGURU_AUTO_COMPACT` / `TAGURU_AUTO_COMPACT_RATIO` folded into one
 /// value: `None` = ratio-triggered auto-compaction off, `Some(ratio)`
-/// = the flusher compacts a context once its dead ratio strictly
+/// = the flusher compacts a `context` once its dead ratio strictly
 /// exceeds `ratio`. On by default — the passages store already runs
 /// the same policy on itself, unasked — with the ratio defaulting to
 /// [`crate::registry::DEFAULT_AUTO_COMPACT_RATIO`]. An unparseable or
@@ -112,7 +112,7 @@ pub(crate) fn env_auto_compact(flag_key: &str, ratio_key: &str) -> Option<f64> {
 /// `tokio::time::interval` panics on a zero period — with
 /// `TAGURU_FLUSH_SECS=0` that panic fires inside the spawned flusher
 /// task, not the main thread, so the server keeps listening and
-/// answering requests while dirty contexts silently stop persisting
+/// answering requests while dirty `contexts` silently stop persisting
 /// forever. Floor to 1 instead, loudly, the same "never silent" rule
 /// `env_number` already applies to unparseable input.
 pub(crate) fn resolve_flush_secs(requested: usize) -> usize {
@@ -125,7 +125,7 @@ pub(crate) fn resolve_flush_secs(requested: usize) -> usize {
 }
 
 /// `TAGURU_EMBED_PARALLEL=0` would zero-size both the outer
-/// per-context worker pool AND `embed_provider_slots`
+/// per-`context` worker pool AND `embed_provider_slots`
 /// ([`crate::registry::concurrency::Semaphore`]) — the refresh loop
 /// spins up no workers, and any earlier `Semaphore::new` construction
 /// would have needed to `.max(1)` its own way out of a permanently
@@ -233,7 +233,7 @@ const MCP_MAX_RESULT_BYTES_WARN_FLOOR: usize = 64 * 1024;
 /// The same "0 = unbounded is a trap" reasoning as
 /// [`resolve_body_bytes`]: an uncapped `POST /mcp` tool result hands
 /// an allocation lever to whoever can reach a tool that returns a lot
-/// of data (`export_context` on a large context, chiefly), so 0
+/// of data (`export_context` on a large `context`, chiefly), so 0
 /// floors to the default instead of disabling the cap. Anything
 /// nonzero but under 64 KiB is small enough to likely be a mistake —
 /// obeyed regardless, just logged.

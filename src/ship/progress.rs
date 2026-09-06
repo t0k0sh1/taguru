@@ -46,7 +46,7 @@ pub(super) const DEFAULT_DEFER_CAP_BYTES: u64 = 64 * 1024 * 1024;
 
 impl ShipProgress {
     /// `wal_max_bytes` is `TAGURU_WAL_MAX_BYTES` (0 = unlimited): the
-    /// per-context ceiling `logged_write`'s backstop refuses writes
+    /// per-`context` ceiling `logged_write`'s backstop refuses writes
     /// past (`engine.rs`'s `wal_max_bytes` check). Below the default
     /// deferral budget, deferring by the full [`DEFAULT_DEFER_CAP_BYTES`]
     /// would let this reset's own wait grow a log past THAT ceiling
@@ -75,8 +75,8 @@ impl ShipProgress {
         self.lanes.lock().insert(log.to_path_buf(), seq);
     }
 
-    /// Forgets a lane whose local file vanished (context deleted); a
-    /// re-created context must not inherit the old lane's high-water
+    /// Forgets a lane whose local file vanished (`context` deleted); a
+    /// re-created `context` must not inherit the old lane's high-water
     /// mark or its first flush would defer forever waiting for seqs
     /// the new lane will never reach — the new lane restarts at 1.
     pub(super) fn forget(&self, log: &FsPath) {

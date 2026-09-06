@@ -1,5 +1,5 @@
 //! `taguru evaluate` (issue #215, ADR 0004): a quality gate over one
-//! already-populated context, driven entirely over HTTP like `taguru
+//! already-populated `context`, driven entirely over HTTP like `taguru
 //! benchmark search` (ADR 0003 §11) — no in-process retrieval, no
 //! answer-generation LLM anywhere on this path. Per case, two
 //! independent lanes run in a fixed order with no fusion between them

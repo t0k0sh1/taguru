@@ -15,7 +15,7 @@ pub(crate) struct Shipper {
     progress: Arc<ShipProgress>,
     state: AppState,
     /// Present when this boot hydrated lazily from the bucket: the
-    /// manifest (`complete`) must not be written while contexts are
+    /// manifest (`complete`) must not be written while `contexts` are
     /// still only in the PREDECESSOR generation — a `complete` written
     /// early would crown a generation missing every un-hydrated
     /// family, and a restore would pick it. Until the hydrator drains,
@@ -333,7 +333,7 @@ impl Shipper {
     }
 
     /// Removes a vanished file's remote counterpart — and, for a log
-    /// lane, its whole segment prefix, so a re-created context of the
+    /// lane, its whole segment prefix, so a re-created `context` of the
     /// same name can never interleave with the old incarnation's
     /// records on restore.
     async fn retire_file(&mut self, name: &str) -> Result<(), ShipError> {

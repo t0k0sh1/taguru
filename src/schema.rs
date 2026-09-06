@@ -1,4 +1,4 @@
-//! The per-context schema document and its file: one optional
+//! The per-`context` schema document and its file: one optional
 //! `{stem}.schema.json`, holding entity types (an `is_a` hierarchy) and
 //! relation `domain`/`range` constraints (ADR 0009). This module owns
 //! the document's shape, its on-disk round trip, and the `is_a`
@@ -10,13 +10,13 @@
 //! Structurally this follows [`crate::groups::GroupRecord`]'s pattern —
 //! atomic write-then-rename, a rename marker the registry already
 //! provides, `BTreeMap`/`BTreeSet` for deterministic output — with one
-//! deliberate divergence a group does not need: **a schema file that is
+//! deliberate divergence a `group` does not need: **a schema file that is
 //! present but cannot be trusted refuses the boot, it is never replaced
 //! with a fresh empty record.** A `GroupRecord` may safely reset to
 //! empty on a parse failure (the consequence is "no nesting," a
 //! routing-only concern); the schema's empty shape is indistinguishable
 //! from `mode: off`, and silently landing there would silently disable
-//! `strict` enforcement for a context whose operator explicitly turned
+//! `strict` enforcement for a `context` whose operator explicitly turned
 //! it on. So every trouble case here — unreadable, does not parse, does
 //! not validate, or its digest disagrees with what `ContextMeta`
 //! recorded — is a hard refusal, never a fallback.
@@ -71,7 +71,7 @@ pub(crate) const SCHEMA_VERSION: u64 = 1;
 /// `schema_issues`' `SchemaCheck::reserved` refuse `add_label_alias`
 /// and a batch's own inline `batch.labels` respectively (guard 2's
 /// other two halves, guard 1 is what happens in their absence — this
-/// label is inert in a schema-free context).
+/// label is inert in a schema-free `context`).
 pub(crate) const SCHEMA_TYPE_LABEL: &str = "schema:type";
 
 /// Every alias in `aliases` that resolves to [`SCHEMA_TYPE_LABEL`] —
@@ -81,7 +81,7 @@ pub(crate) const SCHEMA_TYPE_LABEL: &str = "schema:type";
 /// `AppState::reserved_alias_conflict` and
 /// [`crate::schema::check::schema_issues`] scan a caller-supplied map
 /// of DECLARED labels instead (a batch's own inline aliases, not yet
-/// applied to any context). Lazy and borrowing so a caller that only
+/// applied to any `context`). Lazy and borrowing so a caller that only
 /// needs the first hit (`.next()`) does not pay to filter the rest,
 /// and so no caller has to pick an owning collection shape just to
 /// hand it to this function.
@@ -113,12 +113,12 @@ pub(crate) const MAX_RELATION_TYPES: usize = 64;
 /// justified there by "deep taxonomies are filing, not addressing,"
 /// which does not hold for entity types: `Brewery ⊂ Manufacturer ⊂
 /// Company ⊂ Organization ⊂ Agent` is a legitimate five-deep chain, so
-/// this cap sits well above the group one.
+/// this cap sits well above the `group` one.
 pub(crate) const MAX_TYPE_DEPTH: usize = 8;
 
 /// off | warn | strict — storage only; nothing here enforces it. `Off`
-/// is the default, meaning "no file was ever written for this context,"
-/// which is also what a schema-free context's absent file already
+/// is the default, meaning "no file was ever written for this `context`,"
+/// which is also what a schema-free `context`'s absent file already
 /// means — the two are the same state on purpose (see the module doc).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -474,12 +474,12 @@ fn write_schema(dir: &Path, stem: &str, document: &SchemaDocument) -> io::Result
 /// §5.2 requires so a crash between `write_meta`'s revision bump and
 /// this file's own `write_atomic` (a window §5.2 cannot close by
 /// ordering alone, since the two are separate durable writes) is always
-/// detectable rather than serving a `strict` context whose enforced
+/// detectable rather than serving a `strict` `context` whose enforced
 /// rules do not match what its own revision claims to be enforcing.
 ///
 /// `Ok(None)` is the one non-refusal outcome: no file and no recorded
-/// digest, i.e. a context that never had a schema — `off`, byte-
-/// identical to every context before this file family existed. Every
+/// digest, i.e. a `context` that never had a schema — `off`, byte-
+/// identical to every `context` before this file family existed. Every
 /// other outcome is `Err`, with a message naming what is wrong and how
 /// to recover, mirroring [`crate::groups::scan_groups`]'s tone:
 ///

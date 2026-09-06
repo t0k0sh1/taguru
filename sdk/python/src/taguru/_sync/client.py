@@ -328,7 +328,7 @@ class Taguru:
         return response.text
 
     def flush(self) -> list[str]:
-        """Persist every dirty context now; returns their names (admin role)."""
+        """Persist every dirty ``context`` now; returns their names (admin role)."""
         result = self._request_json("POST", "/flush")
         return [str(name) for name in result]
 
@@ -378,7 +378,7 @@ class Taguru:
             time.sleep(interval)
 
     def context(self, name: str) -> Context:
-        """A handle bound to one context (no network call)."""
+        """A handle bound to one ``context`` (no network call)."""
         return Context(self, name)
 
     # -- cross-context search ------------------------------------------------
@@ -392,13 +392,13 @@ class Taguru:
         limit: int | None = None,
         after: CrossMatchCursor | None = None,
     ) -> CrossMatchPage:
-        """Recall across several contexts at once, every match tagged.
+        """Recall across several ``contexts`` at once, every match tagged.
 
         ``contexts`` takes full names; each ``groups`` entry searches every
-        context the group reaches (nested children included), overlaps
+        ``context`` the ``group`` reaches (nested children included), overlaps
         deduped. At least one of the two must name something. Weights share
         one scale, so past the limit the strongest |weight| survives exactly
-        as within one context. ``after`` resumes past the previous page's
+        as within one ``context``. ``after`` resumes past the previous page's
         last match; ``total`` stays constant across pages.
         """
         body = drop_none(
@@ -426,7 +426,7 @@ class Taguru:
         limit: int | None = None,
         after: CrossMatchCursor | None = None,
     ) -> CrossMatchPage:
-        """Exact-position query across several contexts at once, matches
+        """Exact-position query across several ``contexts`` at once, matches
         tagged; the same target contract as :meth:`recall`. ``subject_types``/
         ``object_types`` further narrow by declared entity type (``is_a``-
         expanded) when a target has an installed schema; a schema-free
@@ -459,18 +459,18 @@ class Taguru:
         since: int | None = None,
         until: int | None = None,
     ) -> CrossPassagePage:
-        """Paragraph search across several contexts at once, hits tagged.
+        """Paragraph search across several ``contexts`` at once, hits tagged.
 
-        Passage scores do NOT share a scale across contexts (BM25 statistics
+        Passage scores do NOT share a scale across ``contexts`` (BM25 statistics
         are corpus-local), so the merged order is rank interleaving — every
-        context's best hit first; ``score`` compares within one context only.
+        ``context``'s best hit first; ``score`` compares within one ``context`` only.
         ``semantic_floor`` overrides every target's vector-lane cosine floor
         for this call (it floors only that lane; BM25-only hits still return).
         ``tags`` (any-of) and the half-open ``[since, until)`` epoch-second
         window over each source's ``date ?? stored_at`` pre-filter which
         sources may answer, before the lanes run and identically on every
         target; a source without the respective metadata never matches.
-        The page's ``plan`` names every context actually searched and each
+        The page's ``plan`` names every ``context`` actually searched and each
         lane's verdict there — see :class:`SearchPlan`.
         """
         body = drop_none(
@@ -500,7 +500,7 @@ class Taguru:
 
 
 class Contexts:
-    """The context directory: collection-level CRUD."""
+    """The ``context`` directory: directory-level CRUD."""
 
     def __init__(self, client: Taguru) -> None:
         self._client = client
@@ -559,7 +559,7 @@ class Contexts:
         dice_floor: float | None = None,
         semantic_floor: float | None = None,
     ) -> bool:
-        """Create a context (409 ``ConflictError`` if it already exists)."""
+        """Create a ``context`` (409 ``ConflictError`` if it already exists)."""
         body = drop_none(
             {
                 "description": description,
@@ -600,7 +600,7 @@ class Contexts:
         return decode(ContextMeta, result)  # type: ignore[no-any-return]
 
     def delete(self, name: str) -> bool:
-        """Delete a context, files included (admin role)."""
+        """Delete a ``context``, files included (admin role)."""
         result = self._client._request_json(
             "DELETE",
             f"/contexts/{encode_name(name)}",
@@ -612,8 +612,8 @@ class Contexts:
         return bool(result)
 
     def rename(self, name: str, to: str) -> bool:
-        """Rename a context (admin role): the whole file family moves to
-        ``to``, and every group naming it is rewritten to match."""
+        """Rename a ``context`` (admin role): the whole file family moves to
+        ``to``, and every ``group`` naming it is rewritten to match."""
         result = self._client._request_json(
             "POST",
             f"/contexts/{encode_name(name)}/rename",
@@ -624,9 +624,9 @@ class Contexts:
 
 
 class Groups:
-    """The group directory: flat context bundles (many-to-many) that may nest
-    child groups — a shallow DAG, at most 3 storeys, never cyclic — as the
-    addressing unit cross-context search builds on."""
+    """The ``group`` directory: flat ``context`` bundles (many-to-many) that may nest
+    child ``groups`` — a shallow DAG, at most 3 storeys, never cyclic — as the
+    addressing unit cross-``context`` search builds on."""
 
     def __init__(self, client: Taguru) -> None:
         self._client = client
@@ -670,10 +670,10 @@ class Groups:
         contexts: Sequence[str] | None = None,
         groups: Sequence[str] | None = None,
     ) -> bool:
-        """Create a group (409 ``ConflictError`` if it already exists).
+        """Create a ``group`` (409 ``ConflictError`` if it already exists).
 
-        Every listed member — context or child group — must already exist;
-        contexts and groups are separate namespaces.
+        Every listed member — ``context`` or child ``group`` — must already exist;
+        a ``group`` and a ``context`` may share the same name without conflict.
         """
         body = drop_none(
             {
@@ -703,8 +703,8 @@ class Groups:
         """Delta membership update (removals first); returns the updated row.
 
         Removing a non-member is an idempotent no-op; only additions demand
-        the member exists. The result holds at most 1,000 member contexts and
-        1,000 child groups — past that, split into nested child groups.
+        the member exists. The result holds at most 1,000 member ``contexts`` and
+        1,000 child ``groups`` — past that, split into nested child ``groups``.
         """
         body = drop_none(
             {
@@ -719,7 +719,7 @@ class Groups:
         return decode(GroupEntry, result)  # type: ignore[no-any-return]
 
     def delete(self, name: str) -> bool:
-        """Delete the bundling only — member contexts and child groups stay."""
+        """Delete the bundling only — member ``contexts`` and child ``groups`` stay."""
         result = self._client._request_json(
             "DELETE",
             f"/groups/{encode_name(name)}",
@@ -731,8 +731,8 @@ class Groups:
         return bool(result)
 
     def rename(self, name: str, to: str) -> bool:
-        """Rename a group (admin role): the group's file moves to ``to``,
-        and every OTHER group naming it as a child is rewritten to match."""
+        """Rename a ``group`` (admin role): the ``group``'s file moves to ``to``,
+        and every OTHER ``group`` naming it as a child is rewritten to match."""
         result = self._client._request_json(
             "POST",
             f"/groups/{encode_name(name)}/rename",
@@ -742,14 +742,14 @@ class Groups:
         return bool(result)
 
     def export(self, name: str) -> str:
-        """The group as one import-stream record (a ``taguru_group`` JSON
+        """The ``group`` as one import-stream record (a ``taguru_group`` JSON
         line); ``import_batches`` restores it as a whole-record replace."""
         response = self._client._send("GET", f"/groups/{encode_name(name)}/export")
         return response.text
 
 
 class Context:
-    """Operations bound to one context, named after the server's own vocabulary.
+    """Operations bound to one ``context``, named after the server's own vocabulary.
 
     Method names mirror ``GET /protocol`` and the MCP tool names, so knowledge
     of one surface transfers to the others.
@@ -913,8 +913,8 @@ class Context:
     ) -> MatchPage:
         """Exact-position query; each position takes one name or an OR-set.
         ``subject_types``/``object_types`` further narrow by declared
-        entity type (``is_a``-expanded) when this context has an
-        installed schema; a schema-free context answers empty for a
+        entity type (``is_a``-expanded) when this ``context`` has an
+        installed schema; a schema-free ``context`` answers empty for a
         non-empty filter.
 
         ``since``/``until`` (epoch seconds, half-open ``[since, until)``)
@@ -1106,14 +1106,14 @@ class Context:
             after = page.labels[-1]
 
     def get_schema(self) -> SchemaDocument:
-        """The context's schema document (ADR 0009 §5) — the entity
+        """The ``context``'s schema document (ADR 0009 §5) — the entity
         types and relation domain/range constraints
         `POST /contexts/{name}/schema/audit`, `taguru extract
         --schema`, and both LangChain ingesters read.
 
         Raises ``NotFoundError`` with ``code == "no_schema"`` when the
-        context exists but has no schema installed, or ``code ==
-        "no_context"`` when the context itself does not exist — inspect
+        ``context`` exists but has no schema installed, or ``code ==
+        "no_context"`` when the ``context`` itself does not exist — inspect
         the error's ``code`` to tell the two apart without a second
         request.
         """
@@ -1121,7 +1121,7 @@ class Context:
         return decode(SchemaDocument, result)  # type: ignore[no-any-return]
 
     def put_schema(self, document: SchemaDocument | Mapping[str, Any]) -> SchemaDocument:
-        """Install (or replace) the context's schema document; returns it
+        """Install (or replace) the ``context``'s schema document; returns it
         as installed (ADR 0009 §5).
 
         Refuses (400) a document whose ``relations`` declare the reserved
@@ -1145,7 +1145,7 @@ class Context:
 
         ``after`` resumes past the previous page's last violation;
         ``total`` stays constant across pages. Raises ``NotFoundError``
-        when the context has no schema installed (404 ``no_schema``).
+        when the ``context`` has no schema installed (404 ``no_schema``).
         """
         body = drop_none({"limit": limit, "after": after})
         result = self._post("/schema/audit", body)
@@ -1161,7 +1161,7 @@ class Context:
         """The same judgment as ``audit_schema``, but over a PROPOSED
         document that is never persisted — the pre-flight to run before a
         ``strict`` flip (ADR 0009 §10). Works identically whether the
-        context already has a schema or none at all.
+        ``context`` already has a schema or none at all.
         """
         doc = asdict(document) if isinstance(document, SchemaDocument) else dict(document)
         body = drop_none({"document": doc, "limit": limit, "after": after})
@@ -1173,10 +1173,10 @@ class Context:
     def add_associations(self, associations: Sequence[AssocOp]) -> AddAssociationsResult:
         """Assert a batch of associations.
 
-        Returns the applied count plus, for a context whose schema runs in
+        Returns the applied count plus, for a ``context`` whose schema runs in
         ``warn`` mode, the schema violations the write raised anyway
         (ADR 0009 §8.3) — check ``result.issues`` where a ``strict``
-        context would have raised. Weight ACCUMULATES on re-assertion, so
+        ``context`` would have raised. Weight ACCUMULATES on re-assertion, so
         this call is never blindly retried after an ambiguous transport
         failure. Server cap: 10,000 per request (use
         ``add_associations_batched`` to auto-chunk).
@@ -1294,7 +1294,7 @@ class Context:
         Phrase the query as an answer, not a question — a plausible
         declarative sentence lands nearer the text you hope to find.
         ``semantic_floor`` overrides the vector lane's cosine floor for this
-        call — over the context setting, over the server default (it floors
+        call — over the ``context`` setting, over the server default (it floors
         only that lane; BM25-only hits still return). ``tags`` (any-of) and
         the half-open ``[since, until)`` epoch-second window over each
         source's ``date ?? stored_at`` pre-filter which sources may answer,
@@ -1325,13 +1325,13 @@ class Context:
         semantic_floor: float | None = None,
         derived: str | None = None,
     ) -> CommunityPage:
-        """Global search over this context's community-summary artifact
+        """Global search over this ``context``'s community-summary artifact
         (built offline by ``taguru communities``) — corpus-overview
         questions passage search answers poorly. Hits are ranked LLM
         summaries of densely connected concept clusters, each with its
         hierarchy level, member concepts, and sizes; the page's ``stale``
         flag means the source graph moved since derivation. ``derived``
-        names the artifact context when it was built with ``--into``
+        names the artifact ``context`` when it was built with ``--into``
         (default ``{name}::communities``). A missing artifact raises with
         the build command in the message — it is not an empty result.
         """
@@ -1617,14 +1617,14 @@ class Context:
         dry_run: bool = False,
     ) -> PromoteOutcome:
         """Move named scratch sources whole into the established
-        context ``into`` (ADR 0018) — the export/import round trip in
+        ``context`` ``into`` (ADR 0018) — the export/import round trip in
         one call, without re-extraction.
 
         Each source moves whole (passage, date, tags, only its own
         share of every edge's weight); source ids survive, and
         applying is per-source retract-then-apply — re-promoting is
         idempotent. ``into`` must already exist (never created here).
-        A named source missing from this (scratch) context refuses the
+        A named source missing from this (scratch) ``context`` refuses the
         WHOLE request. ``audit`` omitted means ``True``: after a real
         apply, the destination gets the default consolidation audit
         (all three checks) riding back as candidates, never applied.
@@ -1642,7 +1642,7 @@ class Context:
     # -- export ------------------------------------------------------------------------
 
     def export(self) -> str:
-        """The context as an import batch stream (NDJSON text)."""
+        """The ``context`` as an import batch stream (NDJSON text)."""
         response = self._client._send("GET", self._path + "/export")
         return response.text
 

@@ -10,12 +10,12 @@
 //!
 //! # What a replica promises
 //!
-//! Consistency is per context, at that context's applied watermark:
-//! one context's reads are some exact prefix of the writer's
-//! acknowledged history (a shipped-cycle boundary), but two contexts
-//! may sit at different cycles — cross-context skew is possible — and
+//! Consistency is per `context`, at that `context`'s applied watermark:
+//! one `context`'s reads are some exact prefix of the writer's
+//! acknowledged history (a shipped-cycle boundary), but two `contexts`
+//! may sit at different cycles — cross-`context` skew is possible — and
 //! staleness is bounded by the writer's shipping lag plus this
-//! replica's poll interval. `/metrics` shows the per-context
+//! replica's poll interval. `/metrics` shows the per-`context`
 //! arithmetic (`taguru_replica_*`): applied vs newest-shipped seq per
 //! lane, and how long a lane has been behind. Reads never block on
 //! the bucket: an unreachable bucket freezes the replica at its last
@@ -28,7 +28,7 @@
 //! every locally-derived persistence path (usage counters, BM25
 //! flushes, eviction's passage compaction) is suppressed under the
 //! replica role. BOOT is the one deliberate exception: `boot_with`'s
-//! scan may finish a shipped mid-rename and reconcile group records
+//! scan may finish a shipped mid-rename and reconcile `group` records
 //! exactly as any boot does. Those one-shot writes cannot loop — the
 //! tailer's first diff detects any byte that diverged from the
 //! manifest and refetches it, converging the cache — and keeping the
@@ -818,7 +818,7 @@ mod tests {
         format!("file://taguru-replica-test-{tag}")
     }
 
-    /// A bucket holding one context whose graph lane spans TWO shipped
+    /// A bucket holding one `context` whose graph lane spans TWO shipped
     /// segments — the shape the torn-segment fault needs.
     async fn two_segment_bucket(tag: &str) -> (PathBuf, PathBuf) {
         let bucket = scratch(&format!("{tag}-bucket"));
@@ -1298,7 +1298,7 @@ mod tests {
     /// place, not blank them — `reset_replica_lanes` used to run right
     /// after `retarget()`, well before `hydrate_shared`'s `?` could
     /// abort the poll, so a failure there left `/metrics` reporting no
-    /// lag rows at all for every context until some later poll
+    /// lag rows at all for every `context` until some later poll
     /// succeeded all the way through.
     #[tokio::test]
     async fn a_failed_switch_leaves_the_previous_lineages_lag_rows_intact() {

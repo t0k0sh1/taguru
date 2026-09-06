@@ -6,7 +6,7 @@
 use super::*;
 
 /// Ops applied between mid-run flushes. Import batches can dwarf any
-/// live traffic; flushing every so often keeps each context's WAL far
+/// live traffic; flushing every so often keeps each `context`'s WAL far
 /// from `TAGURU_WAL_MAX_BYTES` (past which writes are refused).
 const FLUSH_EVERY_OPS: usize = 100_000;
 
@@ -523,7 +523,7 @@ struct FailedBatch {
 /// entrance: `{dry_run, error, failed_batches, batches, schemas,
 /// groups}` — the last three the same shape [`crate::api::
 /// ImportStreamOutcome`] answers with. `error` is a whole-run failure
-/// (validation refused every file, the registry wouldn't boot, group
+/// (validation refused every file, the registry wouldn't boot, `group`
 /// restoration refused); `failed_batches` is the per-batch failures
 /// the run continued past. Every `--json` exit path calls this —
 /// including failure ones — so stdout is always exactly one
@@ -576,7 +576,7 @@ fn describe_schema(context: &str, installed: &schema::InstalledSchema) -> String
     )
 }
 
-/// The dry-run and report line for one group record — what the batch's
+/// The dry-run and report line for one `group` record — what the batch's
 /// `describe` is to a batch.
 fn describe_group(name: &str, record: &GroupRecord) -> String {
     format!(
@@ -606,7 +606,7 @@ pub(super) fn duplicate_schema_message(context: &str, earlier: &Path) -> String 
     )
 }
 
-/// [`duplicate_source_message`]'s group-record twin.
+/// [`duplicate_source_message`]'s `group`-record twin.
 pub(super) fn duplicate_group_message(name: &str, earlier: &Path) -> String {
     format!(
         "group '{name}' is already stated by an earlier file, {} — one record owns one \

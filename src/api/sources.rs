@@ -375,7 +375,7 @@ pub struct SearchPassagesRequest {
     /// Omitted means 5.
     pub limit: Option<usize>,
     /// One-call override of the vector lane's cosine floor — beats the
-    /// context setting, which beats the server default. Clamped to
+    /// `context` setting, which beats the server default. Clamped to
     /// [0, 1]. Floors only the semantic lane: cosine is the one scale
     /// with absolute meaning here (the fused score is rank arithmetic,
     /// and raw BM25 is corpus-local).
@@ -635,8 +635,8 @@ impl From<crate::registry::PassageSearchHit> for PassageHit {
 }
 
 /// The response-level execution plan of one passage search (#151): one
-/// entry per context actually searched, in effective order — for the
-/// cross variant, the resolved target list (groups expanded, grants
+/// entry per `context` actually searched, in effective order — for the
+/// cross variant, the resolved target list (`groups` expanded, grants
 /// applied), the same order the merge breaks ties by and the retrieval
 /// cache keys on. What the per-hit `lanes` evidence cannot say — "the
 /// semantic lane never ran here, and this is why" — lives here, so a
@@ -650,10 +650,10 @@ pub struct SearchPlan {
     pub contexts: Vec<SearchContextPlan>,
 }
 
-/// One searched context's account, mirroring the per-hit `lanes` shape.
+/// One searched `context`'s account, mirroring the per-hit `lanes` shape.
 /// `filter` is present exactly when the request carried a source
 /// filter (#167): how many sources were eligible to answer, out of how
-/// many the context stores — so an empty page under a narrow filter is
+/// many the `context` stores — so an empty page under a narrow filter is
 /// diagnosable from the response alone.
 #[derive(Serialize, Deserialize)]
 pub struct SearchContextPlan {
@@ -663,7 +663,7 @@ pub struct SearchContextPlan {
     pub filter: Option<FilterPlan>,
 }
 
-/// The source filter's account for one searched context (#167).
+/// The source filter's account for one searched `context` (#167).
 #[derive(Serialize, Deserialize)]
 pub struct FilterPlan {
     pub eligible_sources: usize,
@@ -687,7 +687,7 @@ pub struct SearchLanesPlan {
 
 /// One lane's verdict for the whole call: it ran (the vector lane also
 /// names the effective cosine `floor` it swept under — the resolved
-/// override → context setting → server default chain), or it did not
+/// override → `context` setting → server default chain), or it did not
 /// and `reason` says why, in the same prose the explain endpoint uses.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LanePlan {
@@ -725,7 +725,7 @@ pub(crate) const NO_QUERY_TERMS_REASON: &str = "the query yields no searchable t
 pub(crate) const ZERO_LIMIT_REASON: &str = "the requested limit is 0";
 
 impl SearchContextPlan {
-    /// One context's plan entry from the registry's account of its
+    /// One `context`'s plan entry from the registry's account of its
     /// search — the vector arm maps through the same reason strings
     /// explain emits, so the two surfaces cannot drift apart in prose.
     /// Shared with `search_communities`, whose ranking IS this search
@@ -785,7 +785,7 @@ pub struct PassagePage {
     pub hits: Vec<PassageHit>,
 }
 
-/// [`cross_search_passages`]' result — the same wrap, context-tagged
+/// [`cross_search_passages`]' result — the same wrap, `context`-tagged
 /// hits. The router mode re-merges this shape across shards.
 #[derive(Serialize, Deserialize)]
 pub struct CrossPassagePage {
@@ -915,7 +915,7 @@ fn passage_search_cache_probe(
 /// client (issue #621): the metric and its Prometheus counter
 /// (`taguru_passage_lane_contributions_total`) are documented as
 /// counting served hits, not everything a lane found before
-/// truncation or a cross-context merge. `communities.rs`'s
+/// truncation or a cross-`context` merge. `communities.rs`'s
 /// `community_hits` truncates its own ranked list before tallying for
 /// the same reason; this helper exists so `search_passages` and
 /// `cross_search_passages` don't each reimplement the three-way lane
@@ -1598,10 +1598,10 @@ pub async fn explain_search_passages(
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CrossSearchPassagesRequest {
-    /// Full context names — no patterns.
+    /// Full `context` names — no patterns.
     #[serde(default)]
     pub contexts: Vec<String>,
-    /// Group names, resolved and deduped as in
+    /// `group` names, resolved and deduped as in
     /// [`super::CrossRecallRequest`].
     #[serde(default)]
     pub groups: Vec<String>,
@@ -1609,13 +1609,13 @@ pub struct CrossSearchPassagesRequest {
     /// Omitted means 5.
     pub limit: Option<usize>,
     /// One-call override of every target's vector-lane cosine floor —
-    /// beats each context's own setting, which beats the server
+    /// beats each `context`'s own setting, which beats the server
     /// default. Clamped to [0, 1]. One value for all targets: cosine
-    /// shares a scale across contexts (unlike BM25 and the fused
+    /// shares a scale across `contexts` (unlike BM25 and the fused
     /// number, which is why the merge interleaves by rank).
     pub semantic_floor: Option<f32>,
     /// Pre-lane source filter (#167), one value for all targets —
-    /// same shape and semantics as the single-context search's.
+    /// same shape and semantics as the single-`context` search's.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1624,14 +1624,14 @@ pub struct CrossSearchPassagesRequest {
     pub until: Option<u64>,
 }
 
-/// [`search_passages`] across several named contexts at once, every
-/// hit tagged with its context. Unlike the graph lanes' weights,
-/// passage scores do NOT share a scale across contexts (BM25
+/// [`search_passages`] across several named `contexts` at once, every
+/// hit tagged with its `context`. Unlike the graph lanes' weights,
+/// passage scores do NOT share a scale across `contexts` (BM25
 /// statistics are corpus-local; fusion numbers are rank arithmetic),
-/// so the merged order is rank interleaving — every context's best
+/// so the merged order is rank interleaving — every `context`'s best
 /// hit, then every second hit, ties broken by target-list order: the
 /// same rank-fusion posture the endpoint already takes across its two
-/// lanes. `score` stays what it was, per-context evidence. Every
+/// lanes. `score` stays what it was, per-`context` evidence. Every
 /// target's search runs concurrently, bounded by
 /// [`cross_search_concurrency`] — with the retrieval cache enabled (the
 /// default), a probe warms the cue cache before the fan-out starts, so
@@ -2635,9 +2635,9 @@ mod tests {
     /// Forces `context`'s NEXT passage read to fail with a genuine
     /// `io::Error` (issue #620): writes bytes `PassageStore::load`
     /// cannot parse as a snapshot to the exact path it reads on a
-    /// context's first passage touch. Deterministic and needs no prior
+    /// `context`'s first passage touch. Deterministic and needs no prior
     /// successful load to "then corrupt" — the snapshot file does not
-    /// exist yet for a context that has never stored a passage, so
+    /// exist yet for a `context` that has never stored a passage, so
     /// this is simply that file's first-ever write.
     fn corrupt_passages_snapshot(dir: &std::path::Path, context: &str) {
         let stem = crate::registry::file_stem(context);
@@ -2825,7 +2825,7 @@ mod tests {
 
     /// issue #620 (所見3, 所見1's non-panicking twin): `cross_search_passages`
     /// must reclassify a target's genuine io::Error as a timeout once
-    /// the budget is spent, same rule as the single-context handler.
+    /// the budget is spent, same rule as the single-`context` handler.
     #[tokio::test(flavor = "multi_thread")]
     async fn cross_search_passages_reclassifies_an_io_error_as_timeout_once_the_budget_is_spent() {
         let (state, dir) = scratch_state("cross-search-io-error-timeout");

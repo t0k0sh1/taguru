@@ -171,7 +171,7 @@ impl Metrics {
         self.flush_skipped.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Whether every context's most recent image flush succeeded (true
+    /// Whether every `context`'s most recent image flush succeeded (true
     /// when none has run yet — an idle server is a healthy server), AND
     /// the flusher loop itself is still making it to a tick's end rather
     /// than panicking out from under `/health`'s only signal.
@@ -233,7 +233,7 @@ impl Metrics {
         self.storage_quota_refusals.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Count one per-context disk-usage stat that failed for a reason
+    /// Count one per-`context` disk-usage stat that failed for a reason
     /// other than the file being absent (issue #562 item 4).
     pub fn record_disk_stat_failure(&self) {
         self.disk_stat_failures.fetch_add(1, Ordering::Relaxed);
@@ -403,7 +403,7 @@ impl Metrics {
         self.replication_fenced.store(true, Ordering::Relaxed);
     }
 
-    /// Refreshes one lane's lag series, keyed (context, lane).
+    /// Refreshes one lane's lag series, keyed (`context`, lane).
     pub fn note_replication_lane(
         &self,
         context: &str,
@@ -420,7 +420,7 @@ impl Metrics {
         );
     }
 
-    /// Drops a deleted context's lane series so the scrape does not
+    /// Drops a deleted `context`'s lane series so the scrape does not
     /// carry ghost labels forever.
     pub fn forget_replication_lane(&self, context: &str, lane: &'static str) {
         self.replication_lag
@@ -513,7 +513,7 @@ impl Metrics {
         };
     }
 
-    /// Drops a vanished context's replica lag rows (both lanes).
+    /// Drops a vanished `context`'s replica lag rows (both lanes).
     pub fn forget_replica_context(&self, context: &str) {
         let mut lag = self.replica_lag.lock();
         lag.remove(&(context.to_string(), "graph"));

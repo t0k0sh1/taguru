@@ -41,7 +41,7 @@ fn split_batches_slices_exactly_the_bytes_between_stream_level_records() {
 
 /// [`split_batches_slices_exactly_the_bytes_between_stream_level_records`]'s
 /// `taguru_schema` case: a schema record between two batches
-/// belongs to neither, the same as a group record.
+/// belongs to neither, the same as a `group` record.
 #[test]
 fn split_batches_excludes_a_schema_record_from_either_adjacent_batch() {
     let body = format!(
@@ -237,7 +237,7 @@ fn empty_question_and_section_text_is_refused() {
     }
 }
 
-/// An empty context name would `file_stem` to a bare `.ctx` the
+/// An empty `context` name would `file_stem` to a bare `.ctx` the
 /// server's directory scan never rediscovers; an empty source name
 /// has no identity to retract a re-import against. Both are refused
 /// at the header, each naming its own field.
@@ -348,7 +348,7 @@ fn group_records_validate_their_shape_with_line_numbers() {
 }
 
 /// The single-batch entrance (`taguru extract` re-validating its
-/// own output) never carries group records.
+/// own output) never carries `group` records.
 #[test]
 fn parse_batch_refuses_group_records() {
     let error = parse(
@@ -408,7 +408,7 @@ fn schema_records_ride_a_stream_and_stand_alone() {
 }
 
 /// The version-refusal wording, `deny_unknown_fields`, a missing
-/// field, an empty context, a cross-record duplicate, and a
+/// field, an empty `context`, a cross-record duplicate, and a
 /// `schema::install`-level violation — the schema twin of
 /// [`group_records_validate_their_shape_with_line_numbers`].
 #[test]
@@ -490,7 +490,7 @@ fn parse_batch_refuses_schema_records() {
 }
 
 /// [`apply_schema_record`]'s own failure path, not just
-/// `parse_schema`'s validation: a schema record naming a context
+/// `parse_schema`'s validation: a schema record naming a `context`
 /// neither an earlier batch of the same stream nor a previous
 /// request ever created returns [`SchemaApplyError::NoContext`] —
 /// the CLI-specific arm `run_local`'s Pass 2 counts into
@@ -718,7 +718,7 @@ fn more_than_the_per_paragraph_question_cap_in_one_file_is_refused() {
 /// A doc2query generator repeating itself, or a batch author pasting
 /// the same line twice, must not burn two of the paragraph's capped
 /// slots on text that says nothing new — it folds into one entry,
-/// matching the group-list dedup elsewhere in this file.
+/// matching the `group`-list dedup elsewhere in this file.
 #[test]
 fn a_repeated_question_on_the_same_paragraph_folds_into_one_entry() {
     let batch = parse(&format!(
@@ -1027,7 +1027,7 @@ fn empty_subject_label_or_object_is_refused() {
 
 /// `strip_create` is what lets promote guarantee "never mints the
 /// destination" (ADR 0018): the stripped batch must refuse a missing
-/// context outright where the unstripped one would create it.
+/// `context` outright where the unstripped one would create it.
 #[test]
 fn a_stripped_create_block_downgrades_creation_to_a_no_context_refusal() {
     let dir = std::env::temp_dir().join(format!("taguru-ingest-strip-{}", std::process::id()));
@@ -1290,11 +1290,11 @@ fn apply_and_preview_agree_that_a_replaced_passage_is_not_dropped() {
 }
 
 /// A batch that pairs a valid association with a conflicting
-/// alias, aimed at a context that does not exist yet, is refused
+/// alias, aimed at a `context` that does not exist yet, is refused
 /// before the association ever lands: predicting the alias step's
 /// outcome up front means a batch that would otherwise write the
 /// association and only then fail on its alias no longer gets to
-/// write anything at all — not even the context it would have
+/// write anything at all — not even the `context` it would have
 /// created.
 #[test]
 fn a_predicted_alias_rejection_creates_nothing_and_applies_nothing() {
@@ -1600,7 +1600,7 @@ fn labeled(label: &str, kind: UnitKind) -> Unit {
 
 /// The server's `issues[]` come back request-relative; the CLI
 /// re-addresses `batches[N]` to the N-th BATCH unit's label (schema and
-/// group units do not count), keeps the in-batch remainder, passes an
+/// `group` units do not count), keeps the in-batch remainder, passes an
 /// unprefixed path through as sent, and names the remainder the
 /// server capped off.
 #[test]
@@ -1736,7 +1736,7 @@ fn no_passage_refusals_name_the_first_line_and_the_batch_header_line() {
 }
 
 /// An in-stream duplicate names the line of the earlier claim, for
-/// batches, schema records, and group records alike.
+/// batches, schema records, and `group` records alike.
 #[test]
 fn in_stream_duplicates_name_the_earlier_line() {
     let batches = parse_stream(
@@ -1809,7 +1809,7 @@ fn a_schema_rejection_lists_every_issue_offline() {
     );
 }
 
-/// `RestoreGroupsError::group` names the group for every arm that is
+/// `RestoreGroupsError::group` names the `group` for every arm that is
 /// about one and none for the two that are not — the CLI prefixes the
 /// file path exactly when it can.
 #[test]

@@ -1,5 +1,5 @@
 //! Filesystem primitives shared by every on-disk format in the crate
-//! (context images, meta sidecars, groups, the OAuth grant store, WAL
+//! (`context` images, meta sidecars, `groups`, the OAuth grant store, WAL
 //! segments, passage snapshots): atomic stage-then-rename writes,
 //! fsync choke points, the data-directory lock, and the blocking-work
 //! offload used by every cold load. Callers pick a durability shape
@@ -34,7 +34,7 @@ pub(crate) fn write_atomic_private(path: &Path, bytes: &[u8]) -> io::Result<()> 
 ///
 /// The calling thread fails exactly one persistence operation after
 /// `successes` stage, commit (a publish rename OR a same-directory
-/// move — the registry's whole-family context rename included, since
+/// move — the registry's whole-family `context` rename included, since
 /// it routes every one of its ten renames through
 /// [`rename_persisted_file`] like every other rename in the crate),
 /// unlink, WAL append, or WAL truncate operations have run normally.
@@ -121,7 +121,7 @@ fn take_forced_staging_collision() -> bool {
     false
 }
 
-/// The unlink choke point shared by registry and group persistence.
+/// The unlink choke point shared by registry and `group` persistence.
 pub(crate) fn remove_persisted_file(path: impl AsRef<Path>) -> io::Result<()> {
     if let Some(error) = injected_persistence_failure("unlink") {
         return Err(error);
@@ -466,7 +466,7 @@ mod tests {
     }
 
     /// `NotFound` (the routine "never written yet" cold-start case
-    /// every sidecar `load` sees on a fresh context) must stay quiet;
+    /// every sidecar `load` sees on a fresh `context`) must stay quiet;
     /// anything else — permission, I/O — is the standing-problem case
     /// #603 found silent: a permanently unreadable sidecar paid a full
     /// rebuild every residency with nothing in the logs.

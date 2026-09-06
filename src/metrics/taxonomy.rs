@@ -1,6 +1,6 @@
 //! The label vocabulary catalog: every fixed enum/type this metrics
 //! surface renders as Prometheus labels or gauge rows, plus the two
-//! lag types the replication and replica families key by (context,
+//! lag types the replication and replica families key by (`context`,
 //! lane).
 
 /// One log lane's shipping lag as the dashboard sees it: records not
@@ -92,7 +92,7 @@ impl SearchOp {
 
 /// The retrieval surfaces the exact-match cache fronts — the label
 /// vocabulary of `taguru_retrieval_cache_total`, and the cache key's
-/// op discriminant (`op_lanes` groups these into two revision-lane
+/// op discriminant (`op_lanes` `groups` these into two revision-lane
 /// pairs, `Recall`/`Query` sharing one and `SearchPassages`/
 /// `SearchCommunities` the other — issue #605 corrected this from
 /// claiming all four read distinct pairs — but the discriminant itself
@@ -285,9 +285,9 @@ impl ResolveTier {
 /// split §15) — the label vocabulary of `taguru_schema_checks_total`.
 /// Counted only at the entrances that actually gate a write
 /// (`POST /contexts/{name}/associations`, `POST /import`/`taguru
-/// import`) for a context that has an installed schema document
+/// import`) for a `context` that has an installed schema document
 /// (ADR 0009 §6.3's single condition, not `mode`); a schema-free
-/// context never touches this family. `?dry_run=true`/`preview_batch`
+/// `context` never touches this family. `?dry_run=true`/`preview_batch`
 /// and `POST /schema/validate`/`/schema/audit` are diagnostics, not
 /// write gates, and are deliberately excluded — otherwise a
 /// validate-then-apply workflow would double-count the same refusal.
@@ -298,7 +298,7 @@ impl ResolveTier {
 pub(crate) enum SchemaOutcome {
     /// No reserved-label conflict and no domain/range/closed-label
     /// violation (including every check against a schema-free
-    /// context, and any check while `mode == off`).
+    /// `context`, and any check while `mode == off`).
     Ok,
     /// `mode == warn` and the write proceeded with violations recorded
     /// in the response instead of refusing.
@@ -324,26 +324,26 @@ impl SchemaOutcome {
     }
 }
 
-/// How much per-context detail the scrape carries
+/// How much per-`context` detail the scrape carries
 /// (`TAGURU_METRICS_PER_CONTEXT`, issue #137). Off by default on
-/// purpose: per-context labels × many contexts is exactly the
+/// purpose: per-`context` labels × many `contexts` is exactly the
 /// cardinality blow-up the route-template rule at the top of this
 /// file exists to prevent, so an operator opts in — and can bound a
 /// large fleet's series count with `Top`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PerContextMetrics {
-    /// No per-context families on the scrape (the default).
+    /// No per-`context` families on the scrape (the default).
     #[default]
     Off,
-    /// Every context gets its rows.
+    /// Every `context` gets its rows.
     All,
-    /// Only the N largest contexts by total on-disk bytes get rows —
+    /// Only the N largest `contexts` by total on-disk bytes get rows —
     /// membership shifts as sizes shift, which Prometheus handles as
     /// series going stale, not as an error.
     Top(usize),
 }
 
-/// One context's row behind the `taguru_context_*` families — collected
+/// One `context`'s row behind the `taguru_context_*` families — collected
 /// by `gauge_snapshot` only while [`PerContextMetrics`] asks for it.
 /// Disk sizes come from flush-time bookkeeping, everything else from
 /// registry state already in memory: a scrape never walks the data
@@ -363,7 +363,7 @@ pub struct ContextGaugeRow {
     /// schema, summed.
     pub disk_sidecar_bytes: u64,
     /// Declared ceilings (`TAGURU_CONTEXT_QUOTAS`, issue #136), when
-    /// this context has them — `None` renders no series at all, so an
+    /// this `context` has them — `None` renders no series at all, so an
     /// uncapped fleet's scrape is byte-identical to before quotas
     /// existed.
     pub quota_storage_bytes: Option<u64>,
@@ -377,7 +377,7 @@ pub struct ContextGaugeRow {
     /// counter, not a live count of currently-outstanding violations
     /// (those are never swept; ADR 0009 §7.2's write-time check is the
     /// only judge, and it never sweeps the graph either). Zero for
-    /// every context that has never failed a schema check, including
+    /// every `context` that has never failed a schema check, including
     /// every schema-free one.
     pub schema_violations: u64,
 }
@@ -406,35 +406,35 @@ pub struct GaugeSnapshot {
     pub groups_registered: u64,
     pub contexts_resident: u64,
     pub resident_bytes: u64,
-    /// Total bytes across every context's write-ahead log. A healthy
+    /// Total bytes across every `context`'s write-ahead log. A healthy
     /// server truncates each log every flush interval; sustained
     /// growth here means images are failing to save.
     pub wal_bytes: u64,
-    /// Total bytes across every context's PASSAGE log. This one grows
-    /// legitimately up to about each context's snapshot size before its
+    /// Total bytes across every `context`'s PASSAGE log. This one grows
+    /// legitimately up to about each `context`'s snapshot size before its
     /// ratio-triggered compaction; growth far past the snapshots means
     /// compactions are failing.
     pub passages_wal_bytes: u64,
-    /// Sum, across every context, of edges with `count == 0` — dead
+    /// Sum, across every `context`, of edges with `count == 0` — dead
     /// weight `compact` would shed right now. Deliberately NOT broken
-    /// down per context here: unlike route templates, a context name is
+    /// down per `context` here: unlike route templates, a `context` name is
     /// unbounded, user-chosen data, and this metrics surface only ever
     /// mints fixed-cardinality series (see `http`'s route-template
-    /// comment). Per-context detail lives at `GET /contexts` and
+    /// comment). Per-`context` detail lives at `GET /contexts` and
     /// `taguru inspect` — or, opted into and bounded via
     /// `TAGURU_METRICS_PER_CONTEXT` (#137), in the `taguru_context_*`
     /// families below.
     pub dead_edges_total: u64,
-    /// Sum, across every context, of attribution records unlinked from
+    /// Sum, across every `context`, of attribution records unlinked from
     /// every chain but not yet reclaimed by compaction.
     pub dead_attributions_total: u64,
-    /// Sum, across every context, of the lower-bound arena bytes behind
+    /// Sum, across every `context`, of the lower-bound arena bytes behind
     /// removed aliases.
     pub arena_slack_total: u64,
-    /// Sum, across every context, of edges carrying weight no named
+    /// Sum, across every `context`, of edges carrying weight no named
     /// source explains — see [`taguru::context::Context::unsourced_summary`].
     pub unsourced_edges_total: u64,
-    /// Sum, across every context, of unsourced weight (absolute value).
+    /// Sum, across every `context`, of unsourced weight (absolute value).
     pub unsourced_weight_total: f64,
     /// The embedding provider's circuit breaker, present exactly when a
     /// provider with one is configured — the family is absent from a
@@ -458,9 +458,9 @@ pub struct GaugeSnapshot {
     /// the wait/timeout counters in [`crate::metrics::Metrics`], which
     /// accumulate across scrapes.
     pub embed_slot_waiters: u64,
-    /// Per-context rows, empty unless `TAGURU_METRICS_PER_CONTEXT`
+    /// Per-`context` rows, empty unless `TAGURU_METRICS_PER_CONTEXT`
     /// asked for them — the one other sanctioned exception (after the
-    /// replication lag maps) to this file's no-context-labels rule,
+    /// replication lag maps) to this file's no-`context`-labels rule,
     /// and gated the same way the replica family is: an opted-out
     /// scrape stays byte-identical to what it was.
     pub per_context: Vec<ContextGaugeRow>,

@@ -1,8 +1,8 @@
 //! ADR 0033 (#782): chunk context — what a chunk is told about where
 //! it sits in its document and what came before it, so the model
 //! reads `同法`, `前条`, `この製品`, or a bare `## Borrowing` section
-//! knowing what they refer to. "Context" here is 文脈, never a Taguru
-//! context (the namespace `--context NAME` targets); everything
+//! knowing what they refer to. "Context" here is 文脈, never the
+//! `context` that `--context NAME` targets; everything
 //! user-facing says *chunk context* and every identifier carries
 //! `chunk_context`.
 //!
@@ -38,7 +38,7 @@ pub(super) enum ChunkContextMode {
     /// list, from one overview pass over the document (ADR 0033
     /// §3.5) — one model call per chunk before extraction.
     Overview,
-    /// `Overview` plus what the target context already holds about
+    /// `Overview` plus what the target `context` already holds about
     /// the cast (and the document's candidate names): their
     /// associations from the `--vocabulary` export (ADR 0033 §3.2's
     /// ingested lane). No further model call; needs `--vocabulary`.

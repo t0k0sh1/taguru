@@ -12,7 +12,7 @@
 //!
 //! - **Published files** — every file that appears via
 //!   stage-then-rename (`storage::write_atomic`): images, meta,
-//!   sources, passage snapshots, the derived sidecars, group records,
+//!   sources, passage snapshots, the derived sidecars, `group` records,
 //!   the OAuth grant store, and the crash markers. Immutable once
 //!   visible, so each is uploaded whole when its signature (inode,
 //!   length, mtime) changes, and deleted remotely when it disappears

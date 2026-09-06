@@ -24,16 +24,16 @@ pub struct ListContextsQuery {
     /// Page size; omitted means the ceiling (1000) — the directory is
     /// the routing surface, and a sane deployment fits one page.
     pub limit: Option<usize>,
-    /// Only contexts whose name sorts strictly after this one.
+    /// Only `contexts` whose name sorts strictly after this one.
     pub after: Option<String>,
-    /// Only contexts with this pinned state. Defines the population of
+    /// Only `contexts` with this pinned state. Defines the population of
     /// interest rather than a cursor, so — unlike `after`/`limit` — it
     /// is applied before `total` is counted.
     pub pinned: Option<bool>,
 }
 
 /// A bounded directory page. `total` names the whole directory's
-/// count, deliberately cursor-independent — "how many contexts exist",
+/// count, deliberately cursor-independent — "how many `contexts` exist",
 /// not "how many remain past `after`" — so a truncated view is visible
 /// and the figure is stable across pages. (The search endpoints' `total`
 /// counts post-filter matches instead: there the query itself defines
@@ -45,9 +45,9 @@ pub struct ContextPage {
 }
 
 /// The routing directory, skills-style: name, prose description, and
-/// stats for every context, so an LLM client can decide where to search
+/// stats for every `context`, so an LLM client can decide where to search
 /// (and where to ingest) without the server owning that judgement.
-/// Paged like every other listing — thousands of contexts must not
+/// Paged like every other listing — thousands of `contexts` must not
 /// mean a megabytes-large response on every routing decision.
 pub async fn list_contexts(
     State(state): State<AppState>,
@@ -103,13 +103,13 @@ pub async fn list_contexts(
     ok(ContextPage { total, contexts }, started_at)
 }
 
-/// POST /flush: persist every dirty context NOW and answer with the
+/// POST /flush: persist every dirty `context` NOW and answer with the
 /// names that flushed — the quiescing move before a file-level backup,
 /// instead of "stop the server or wait out the flush interval".
 ///
 /// Flush is inherently whole-of-server — that IS its job — so it has
-/// no `{name}` for the middleware's per-context grant to key on, and
-/// its response NAMES every flushed context. A context-scoped key must
+/// no `{name}` for the middleware's per-`context` grant to key on, and
+/// its response NAMES every flushed `context`. A `context`-scoped key must
 /// therefore be refused outright rather than handed the full list
 /// (which `GET /contexts` would hide from it): filtering flush would
 /// silently defeat its one purpose, quiescing everything before a
@@ -137,7 +137,7 @@ pub async fn flush_all(
     ok(flushed, started_at)
 }
 
-/// Optional tuning knob for [`maintenance_compact`]: only contexts whose
+/// Optional tuning knob for [`maintenance_compact`]: only `contexts` whose
 /// live dead ratio strictly exceeds this qualify. Omitted (and `0.0`)
 /// means "any dead weight at all".
 #[derive(Debug, Default, Deserialize)]
@@ -147,14 +147,14 @@ pub struct MaintenanceCompactQuery {
 }
 
 /// `POST /maintenance/compact` — closes the server to ordinary traffic
-/// just long enough to rebuild every context whose dead ratio clears
+/// just long enough to rebuild every `context` whose dead ratio clears
 /// `min_dead_ratio` (`GET /contexts/{name}` and `/metrics` show the
 /// live ratios that inform the choice), worst ratio first, then reopens.
 /// `/health` answers 503 `maintenance` and `enforce_concurrency` sheds
 /// new work early for the duration, but the one real guarantee against
 /// two sweeps overlapping is the CAS in [`AppState::try_enter_maintenance`]
 /// taken here: a second call while one is running answers 409, not a
-/// queued wait. Server-wide like `flush`, so a context-scoped key is
+/// queued wait. Server-wide like `flush`, so a `context`-scoped key is
 /// refused outright rather than silently filtered.
 pub async fn maintenance_compact(
     State(state): State<AppState>,
@@ -293,10 +293,10 @@ pub fn protocol_trailer(embed_model: Option<&str>, auto_embed: bool) -> String {
 pub struct CreateContextRequest {
     pub description: String,
     pub pinned: bool,
-    /// Per-context fuzzy-entry floor for resolve; omitted means the
+    /// Per-`context` fuzzy-entry floor for resolve; omitted means the
     /// default (0.3).
     pub dice_floor: Option<f64>,
-    /// Per-context semantic floor; omitted means the default (0.35).
+    /// Per-`context` semantic floor; omitted means the default (0.35).
     pub semantic_floor: Option<f32>,
 }
 
@@ -476,14 +476,14 @@ pub struct RenameRequest {
 }
 
 /// `POST /contexts/{name}/rename` — the whole file family moves to
-/// `to` and every group naming `name` is rewritten to match. Admin
+/// `to` and every `group` naming `name` is rewritten to match. Admin
 /// role (unclassified in [`crate::auth::required_role`], so it fails
-/// closed there); `{name}` is a context name like every other
+/// closed there); `{name}` is a `context` name like every other
 /// `/contexts/{name}...` route, so the authorization middleware's own
-/// per-context grant check already covers the SOURCE. The
+/// per-`context` grant check already covers the SOURCE. The
 /// DESTINATION lives in the body, out of that middleware's reach —
 /// same discipline as `import_batch` — so this handler gates it with
-/// [`scope_refusal`] before renaming: otherwise a context-scoped key
+/// [`scope_refusal`] before renaming: otherwise a `context`-scoped key
 /// could move its data to an unscoped name.
 pub async fn rename_context(
     State(state): State<AppState>,

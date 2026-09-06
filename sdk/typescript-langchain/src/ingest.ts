@@ -1,5 +1,5 @@
 /**
- * TaguruIngester: LLM-driven document decomposition into a Taguru context.
+ * TaguruIngester: LLM-driven document decomposition into a Taguru `context`.
  * The mechanical mirror of the Python `taguru_langchain.TaguruIngester` —
  * see that module for the full design rationale (import-based per-source
  * replace, no source-id fallback, live vocabulary seeding, dry_run).
@@ -509,7 +509,7 @@ interface ChunkRecord {
 }
 
 /**
- * Decompose LangChain Documents into one Taguru context via a chat model.
+ * Decompose LangChain Documents into one Taguru `context` via a chat model.
  * See the Python twin's docstring for parameter semantics — identical here,
  * modulo TS being async-only (no separate `a`-prefixed variants).
  */
@@ -1095,8 +1095,8 @@ export class TaguruIngester {
   }
 
   /**
-   * The context's live relation vocabulary — an advantage the offline
-   * extractor structurally lacks. Best-effort: an absent context is fine.
+   * The `context`'s live relation vocabulary — an advantage the offline
+   * extractor structurally lacks. Best-effort: an absent `context` is fine.
    */
   private async fetchVocabulary(): Promise<string[]> {
     try {
@@ -1113,9 +1113,9 @@ export class TaguruIngester {
   }
 
   /**
-   * The context's schema document (ADR 0009 §11.4), same best-effort
+   * The `context`'s schema document (ADR 0009 §11.4), same best-effort
    * posture as `fetchVocabulary`: a schema-unaware server or a schema-free
-   * context is fine, and this ingester works unchanged either way.
+   * `context` is fine, and this ingester works unchanged either way.
    */
   private async fetchSchema(): Promise<SchemaDocument | null> {
     try {

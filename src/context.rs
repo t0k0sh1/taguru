@@ -58,7 +58,7 @@ const NIL: u32 = u32::MAX;
 /// Hands out the next dense id in a table. Writes that would not fit are
 /// turned into [`ContextFull`] errors by `ensure_room` before anything
 /// mutates, so this panicking backstop only fires on an accounting bug,
-/// never on a merely full context.
+/// never on a merely full `context`.
 fn claim_id(len: usize, table: &str) -> u32 {
     match u32::try_from(len) {
         Ok(id) if id != NIL => id,
@@ -87,7 +87,7 @@ fn arena_fits(len: usize, growth: usize) -> bool {
 /// sum would sort as the maximum under `total_cmp` forever and make
 /// `from_bytes` refuse the next image as corrupt. Saturation keeps the
 /// invariant the load-time check depends on without turning a pair of
-/// individually-valid library calls into a poisoned context.
+/// individually-valid library calls into a poisoned `context`.
 fn accumulate_saturating(sum: &mut f64, weight: f64) {
     *sum += weight;
     if !sum.is_finite() {
@@ -107,10 +107,10 @@ pub fn dead_ratio_of(dead_edges: usize, total_edges: usize) -> f64 {
 }
 
 /// Error returned by [`Context::associate`] and [`Context::associate_from`]
-/// when a write would need a record or name bytes beyond the context's u32
+/// when a write would need a record or name bytes beyond the `context`'s u32
 /// id/offset space (~4.29 billion records per table, 4 GiB of interned
-/// text). The failed write is not applied — an `Err` leaves the context
-/// exactly as it was — and the context stays usable: reads are unaffected,
+/// text). The failed write is not applied — an `Err` leaves the `context`
+/// exactly as it was — and the `context` stays usable: reads are unaffected,
 /// and writes that still fit (e.g. accumulating weight into an existing
 /// edge) keep succeeding. Knowledge that no longer fits belongs in a new
 /// `Context`.
@@ -136,10 +136,10 @@ pub enum AliasError {
     /// so an alias can never shadow an existing name or alias. In
     /// particular, two spellings that BOTH already exist as concepts
     /// cannot be aliased together: that is a merge, which does not
-    /// exist; rebuild the context instead.
+    /// exist; rebuild the `context` instead.
     Conflict,
     /// The alias table or the string arena is out of space; the alias
-    /// was not added and the context is unchanged.
+    /// was not added and the `context` is unchanged.
     Full(ContextFull),
 }
 
@@ -154,12 +154,12 @@ pub struct CompactionStats {
 }
 
 /// Why [`Context::compacted`] did not finish. Either way the source
-/// context is untouched — the rebuild only ever writes into a fresh
+/// `context` is untouched — the rebuild only ever writes into a fresh
 /// `Context` and is swapped in by the caller on full success.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompactionError {
     /// Structurally unreachable — the rebuild holds a subset of what
-    /// the source context already held — but the write API this
+    /// the source `context` already held — but the write API this
     /// delegates to says it, so this signature does too.
     Full(ContextFull),
     /// The deadline elapsed partway through the rebuild.
@@ -419,12 +419,12 @@ pub struct ConceptDescription {
     /// every live `schema:type` object on this concept's outgoing edges,
     /// asserted only, never `is_a`-expanded (an expanded set is a
     /// schema-authoring accident, not information a caller reading the
-    /// outline needs). Empty for a context with no installed schema
+    /// outline needs). Empty for a `context` with no installed schema
     /// document (§6.3 guard 1) or a concept with no type assertion —
     /// the two are indistinguishable here on purpose, same as an
     /// undeclared type never being a violation (§6.1).
     ///
-    /// `skip_serializing_if` on top of that: a schema-free context's
+    /// `skip_serializing_if` on top of that: a schema-free `context`'s
     /// `describe` response must stay byte-identical to its pre-#387
     /// shape (no `types` key at all), not merely an empty array — the
     /// same additive-field discipline every other optional field on
@@ -711,7 +711,7 @@ pub struct Context {
     /// Tuning override for the fuzzy-entry floor; `None` means
     /// [`DICE_FLOOR`]. This is config, not knowledge, so it is NOT part
     /// of the persistent image — whoever loads an image re-applies it
-    /// (the server keeps it in the context's sidecar).
+    /// (the server keeps it in the `context`'s sidecar).
     dice_floor: Option<f64>,
     /// An opaque durability watermark, persisted in the image header
     /// and meaningful only to the caller that set it: the sequence

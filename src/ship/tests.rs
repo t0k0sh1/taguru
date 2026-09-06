@@ -787,7 +787,7 @@ async fn a_failed_lane_retire_delete_is_retried_not_orphaned() {
 /// A `put_manifest` that fails on its own — every file/lane upload
 /// in the cycle already succeeded — must not go unretried. Before
 /// the fix, the retry condition was `shipped` (this cycle's own
-/// upload activity), which a context deletion clears from
+/// upload activity), which a `context` deletion clears from
 /// `self.files`/`self.lanes` before the next cycle even looks —
 /// so a manifest describing already-deleted objects would stand
 /// forever once the server went idle.

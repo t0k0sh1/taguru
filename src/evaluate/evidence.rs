@@ -218,7 +218,7 @@ fn envelope_for(context: &str, hit: PassageHit, rank: usize) -> EvidenceItem {
 /// first one that doesn't fit (ADR 0006 §3 D/§9's "skip, don't stop"
 /// rule, applied here so a baseline run's own budget floor never
 /// looks artificially exhausted by one large early hit that a smaller
-/// later one would have fit around). `context` is the searched context
+/// later one would have fit around). `context` is the searched `context`
 /// name — needed only to build each hit's [`envelope_for`] `candidate_id`
 /// with the identical string a real assembled package would carry.
 pub(super) fn truncate_to_budget(

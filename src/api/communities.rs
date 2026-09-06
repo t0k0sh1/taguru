@@ -12,7 +12,7 @@
 //! - `POST /contexts/{name}/communities/search` — the global-search
 //!   surface over a previously derived artifact: ranked community
 //!   summaries with membership, and an honest staleness verdict. The
-//!   artifact is an ordinary context (default `{name}::communities`),
+//!   artifact is an ordinary `context` (default `{name}::communities`),
 //!   so the ranking IS `search_passages` against it — both lanes,
 //!   floors, plan and all — and the response rides the retrieval
 //!   cache under its own op.
@@ -44,7 +44,7 @@ use super::{
     deadline_exceeded, error, not_found, ok, replay_cached_search, search_log_enabled,
 };
 
-/// The derived context a source context's artifact lives in by
+/// The derived `context` a source `context`'s artifact lives in by
 /// default. `search` accepts an override for artifacts built with
 /// `taguru communities --into`.
 pub(crate) fn derived_context_name(source: &str) -> String {
@@ -52,17 +52,17 @@ pub(crate) fn derived_context_name(source: &str) -> String {
 }
 
 /// The reserved source id carrying the derivation record inside a
-/// derived context.
+/// derived `context`.
 pub(crate) const MANIFEST_SOURCE: &str = "communities:manifest";
 
 /// Every community's summary is stored under `community:{id}`.
 pub(crate) const COMMUNITY_SOURCE_PREFIX: &str = "community:";
 
-/// Membership edges in a derived context: `community:{id} —contains→
+/// Membership edges in a derived `context`: `community:{id} —contains→
 /// member concept`, weighted by the member's intra-community strength.
 pub(crate) const CONTAINS_LABEL: &str = "contains";
 
-/// Hierarchy edges in a derived context: `community:{parent}
+/// Hierarchy edges in a derived `context`: `community:{parent}
 /// —includes→ community:{child}`.
 pub(crate) const INCLUDES_LABEL: &str = "includes";
 
@@ -79,10 +79,10 @@ const MEMBERS_PER_HIT: usize = 12;
 pub(crate) struct CommunitiesManifest {
     pub taguru_communities: u64,
     pub algorithm: String,
-    /// The context the artifact was derived from — `search` refuses a
-    /// `derived` override pointing at another context's artifact.
+    /// The `context` the artifact was derived from — `search` refuses a
+    /// `derived` override pointing at another `context`'s artifact.
     pub source_context: String,
-    /// The source context's revision at derivation time (snapshotted
+    /// The source `context`'s revision at derivation time (snapshotted
     /// BEFORE the analysis — see the module doc for why that order).
     pub revision: ContextRevision,
     pub levels: usize,
@@ -196,7 +196,7 @@ pub struct SearchCommunitiesRequest {
     /// One-call override of the artifact's semantic-lane floor — the
     /// same knob `search_passages` takes, applied to the same search.
     pub semantic_floor: Option<f32>,
-    /// The artifact context to search; omitted means
+    /// The artifact `context` to search; omitted means
     /// `{name}::communities`. For artifacts built with `--into`.
     pub derived: Option<String>,
 }
@@ -205,12 +205,12 @@ pub struct SearchCommunitiesRequest {
 /// ranked summaries it qualifies.
 #[derive(Serialize, Deserialize)]
 pub struct CommunityPage {
-    /// The artifact context that answered.
+    /// The artifact `context` that answered.
     pub derived: String,
     /// The algorithm that built it — comparable against the analysis
     /// verb's current one.
     pub algorithm: String,
-    /// True when the source context's graph moved since derivation —
+    /// True when the source `context`'s graph moved since derivation —
     /// the summaries describe an older graph; re-run
     /// `taguru communities` to refresh them.
     pub stale: bool,
@@ -296,9 +296,9 @@ pub(crate) struct CommunityLaneFound {
 }
 
 /// [`community_hits`]'s result: either [`CommunityLaneFound`], or "no
-/// artifact" — the manifest context, or its manifest record, does not
+/// artifact" — the manifest `context`, or its manifest record, does not
 /// exist. Every OTHER failure (a malformed manifest, an artifact
-/// derived from a different source context, a read error, or the
+/// derived from a different source `context`, a read error, or the
 /// deadline running out) is returned as a ready-to-serve `Response`
 /// instead, identical to what this function's own callers built
 /// before this extraction — `search_communities` returns it unchanged;
@@ -317,7 +317,7 @@ pub(crate) enum CommunityLaneOutcome {
 /// so the guard can be `#[mutants::skip]`ped: unlike
 /// `search_passages`/`explain_search_passages`/`cross_search_passages`
 /// (whose tests force a genuine io::Error by writing straight to a
-/// context's passages snapshot before its first touch), this read is
+/// `context`'s passages snapshot before its first touch), this read is
 /// the SECOND passage-store touch of one `community_hits` call — the
 /// manifest lookup just above it already cached the store, so forcing
 /// THAT read to succeed while THIS one fails needs an eviction
@@ -342,9 +342,9 @@ fn community_search_io_failure(
 /// everything between a cache miss and a response shape, which
 /// [`search_communities`] and #305's `assemble_evidence` both need.
 /// Caching, `note_search`, and structured logging stay in each caller,
-/// since the two observe this lane differently (one context vs. two,
+/// since the two observe this lane differently (one `context` vs. two,
 /// and `assemble_evidence` has no retrieval cache of its own for this
-/// feature — ADR 0006 §5.4). `current_graph` is the source context's
+/// feature — ADR 0006 §5.4). `current_graph` is the source `context`'s
 /// revision the caller already read (`state.context_revision`), passed
 /// in rather than re-read here so both callers snapshot it exactly
 /// once, before this function's own work begins.
@@ -524,12 +524,12 @@ pub(crate) fn community_hits(
     }))
 }
 
-/// The auth middleware checked the PATH context; `derived` is a second
-/// read target (a communities artifact) and gets the same per-context
-/// grant check — otherwise a scoped key could read any context by
+/// The auth middleware checked the PATH `context`; `derived` is a second
+/// read target (a communities artifact) and gets the same per-`context`
+/// grant check — otherwise a scoped key could read any `context` by
 /// naming it here. Shared by `search_communities` and #305's
 /// `assemble_evidence` communities lane, the two callers that ever
-/// name a second, derived context this way.
+/// name a second, derived `context` this way.
 pub(crate) fn check_derived_scope(
     scope: &Option<axum::Extension<crate::auth::KeyScope>>,
     name: &str,

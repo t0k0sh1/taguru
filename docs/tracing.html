@@ -35,7 +35,7 @@
     </div>
     <div class="side-group">
       <div class="side-group-label">Reference</div>
-      <a href="schema.html">Context schema</a>
+      <a href="schema.html"><code>context</code> schema</a>
       <a href="import.html">Batch import</a>
       <a href="extract.html">Document extraction</a>
       <a href="taguru-code.html">Code map (taguru-code)</a>
@@ -114,11 +114,11 @@
     <p>
       <code>taguru.passage_search</code> is also the whole answer for a cache hit: one childless
       span, <code>taguru.cache.result=hit</code>, no lanes underneath — the absence of children
-      <i>is</i> the signal, not a separate flag to check. A cross-context search
+      <i>is</i> the signal, not a separate flag to check. A cross-<code>context</code> search
       (<code>POST /sources/search</code>) emits the same <code>taguru.passage_search</code> span
       once for the whole fan-out (<code>taguru.context.count</code> marks it), with one
       <code>taguru.passage_search.target</code> child per target — indexed by
-      <code>taguru.target.index</code>, never the context name — each parenting that target's own
+      <code>taguru.target.index</code>, never the <code>context</code> name — each parenting that target's own
       lane spans.
     </p>
     <p>
@@ -135,7 +135,7 @@
     <ul>
       <li><code>taguru.shard_call</code> (client, <code>otel.name</code> overridden to
         <code>"{method} -&gt; shard {n}"</code>) — the router's dispatch to a shard, fan-out and
-        transparent per-context proxy hops alike (#696), parenting that
+        transparent per-<code>context</code> proxy hops alike (#696), parenting that
         shard's own <code>{method} {route}</code> span. A router deployment gets end-to-end traces
         across every shard, not just its own hop.</li>
       <li><code>taguru.tool_call</code> (server) — the stdio bridge's (<code>taguru-mcp</code>)
@@ -266,15 +266,15 @@
       Per-item data follows one rule: <b>default to aggregate, never one span or event per item</b>
       — not one event per citation miss (one <code>taguru.skip</code> event whose
       <code>taguru.citation.missing</code> attribute carries the count),
-      not one span per resolved cue, not a context <i>name</i> anywhere (only counts — consistent
-      with <code>taguru_searches_total</code> not carrying a context label either). The one
+      not one span per resolved cue, not a <code>context</code> <i>name</i> anywhere (only counts — consistent
+      with <code>taguru_searches_total</code> not carrying a <code>context</code> label either). The one
       exception is a router's shard list: shard identifiers are operator-controlled configuration,
       not caller-shaped data, so <code>taguru.shard_call</code> is one span per shard.
     </p>
   </section>
 
   <section id="propagation">
-    <h2>Context propagation</h2>
+    <h2>context propagation</h2>
     <p class="section-sub">Every hop both extracts an inbound parent and injects its own current span outbound — this was previously extract-only.</p>
     <ul>
       <li><b>HTTP</b>: inbound W3C <code>traceparent</code> / <code>tracestate</code> (and AWS
@@ -368,7 +368,7 @@ OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf \
     <div class="next-links">
       <a class="nav-card" href="architecture.html#observability" style="flex:1 1 16rem">
         <span class="nc-title">Internal architecture — observability</span>
-        <p>Metrics, per-context capacity gauges, and where tracing sits alongside them.</p>
+        <p>Metrics, per-<code>context</code> capacity gauges, and where tracing sits alongside them.</p>
       </a>
       <a class="nav-card" href="troubleshooting.html#observability" style="flex:1 1 16rem">
         <span class="nc-title">Troubleshooting — seeing the split</span>

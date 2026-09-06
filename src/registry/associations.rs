@@ -14,7 +14,7 @@ use super::{
 };
 
 impl AppState {
-    /// Withdraws one association from a context outright — the surgical
+    /// Withdraws one association from a `context` outright — the surgical
     /// correction for a single fact that should never have been
     /// asserted, where [`AppState::retract_source`] would discard the
     /// whole document's contribution. Returns how many attributions
@@ -45,10 +45,10 @@ impl AppState {
         self.read_context(name, |context| context.count_source_edges(source))
     }
 
-    /// Withdraws one source from a context — its graph contributions and
+    /// Withdraws one source from a `context` — its graph contributions and
     /// its registered passage — the per-document differential-sync move:
     /// retract the old version of a changed document, then re-ingest the
-    /// new one, instead of rebuilding the whole context. Returns how
+    /// new one, instead of rebuilding the whole `context`. Returns how
     /// many associations were touched and whether a passage was removed.
     ///
     /// Brackets [`Self::retract_source_unmarked`]'s two independently
@@ -295,7 +295,7 @@ impl AppState {
     /// this checks the resident passage store instead.
     ///
     /// Best-effort like [`AppState::resolve_markers`]: an unknown
-    /// context, a deleted entry, a source with no stored passage, or a
+    /// `context`, a deleted entry, a source with no stored passage, or a
     /// store load failure all leave `paragraph` as given rather than
     /// fail the write — an unresolved locator is still meaningful
     /// (just without a section label), so this only removes locators
@@ -587,7 +587,7 @@ mod tests {
 
     /// CodeRabbit review on PR #681 (issue #676): a source the graph
     /// side never saw (`Context::retract_source` returns `None` for a
-    /// source this context never associated anything from, per its own
+    /// source this `context` never associated anything from, per its own
     /// doc — a genuine graph-side no-op, distinct from a `Some(0)` for
     /// a source that WAS seen but now carries zero live edges) but
     /// whose passage removal genuinely fails must not advance
@@ -777,7 +777,7 @@ mod tests {
     }
 
     /// #678: the graph half of the preview is load-bearing (its own
-    /// `read_context` call fails outright on a bad context), but a
+    /// `read_context` call fails outright on a bad `context`), but a
     /// passage-store load failure degrades to "no passage" rather than
     /// failing the whole preview — the doc comment's own contract.
     /// The `read_unless_deleted` early return between those two is a
@@ -877,7 +877,7 @@ mod tests {
     }
 
     /// #678: every early return in `clamp_out_of_range_paragraphs` is
-    /// best-effort per its own doc — an unknown context, a deleted
+    /// best-effort per its own doc — an unknown `context`, a deleted
     /// entry, and a passage-store load failure all leave `paragraph`
     /// as given rather than fail the write. Only a paragraph this
     /// function can positively prove out of range against a resident,

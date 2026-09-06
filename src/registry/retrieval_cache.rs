@@ -7,7 +7,7 @@
 //! question.
 //!
 //! Invalidation is the key, not a mechanism: every key carries, per
-//! target, the context's identity nonce and the pair of revision lanes
+//! target, the `context`'s identity nonce and the pair of revision lanes
 //! the operation's response can depend on ([`op_lanes`]). A write
 //! bumps a lane, future lookups compute a different key, and the stale
 //! entry is unreachable until the LRU evicts it — no invalidation
@@ -73,7 +73,7 @@ pub(crate) fn budget_seats_nothing(budget: usize) -> bool {
     budget != 0 && budget / 4 <= TYPICAL_RETRIEVAL_PAYLOAD_BYTES
 }
 
-/// One target's contribution to a cache key: which context, which
+/// One target's contribution to a cache key: which `context`, which
 /// incarnation of it, and the values of the two revision lanes this
 /// operation's response can depend on.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]

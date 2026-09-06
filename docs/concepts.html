@@ -35,7 +35,7 @@
     </div>
     <div class="side-group">
       <div class="side-group-label">Reference</div>
-      <a href="schema.html">Context schema</a>
+      <a href="schema.html"><code>context</code> schema</a>
       <a href="import.html">Batch import</a>
       <a href="extract.html">Document extraction</a>
       <a href="taguru-code.html">Code map (taguru-code)</a>
@@ -73,7 +73,7 @@
 
   <header class="hero">
     <div class="eyebrow">concepts</div>
-    <h1>Concepts — associations, contexts, two lanes</h1>
+    <h1>Concepts — associations, <code>contexts</code>, two lanes</h1>
     <p class="lede">
       What Taguru keeps, how it searches, and what it deliberately does not write on the graph.
       Knowing this design makes it obvious why the quality of an ingest becomes the quality of
@@ -110,53 +110,53 @@
   </section>
 
   <section id="contexts">
-    <h2>A context is a 文脈 — one frame of meaning</h2>
-    <p class="section-sub">Within one context, one spelling means one referent.</p>
+    <h2>A <code>context</code> is a 文脈 — one frame of meaning</h2>
+    <p class="section-sub">Within one <code>context</code>, one spelling means one referent.</p>
     <p>
-      Apple the fruit and Apple the company belong to different contexts. This
+      Apple the fruit and Apple the company belong to different <code>contexts</code>. This
       one-spelling-one-referent convention keeps the graph a simple <b>place to put knowledge</b>
-      rather than a disambiguation machine. Choosing which context to ask is language
+      rather than a disambiguation machine. Choosing which <code>context</code> to ask is language
       understanding — the LLM's job. For that, <code>GET /contexts</code> returns, on one row per
-      context: the human-written description, machine-computed stats (association count, top
+      <code>context</code>: the human-written description, machine-computed stats (association count, top
       concepts, label samples), and usage stats (reads, misses, writes, last access).
-      "A context nobody ever picks" and "a context that gets picked but never answers"
+      "A <code>context</code> nobody ever picks" and "a <code>context</code> that gets picked but never answers"
       can both be spotted there.
     </p>
     <p>
       <b>Splitting is a precision lever, not only disambiguation.</b> A search or query is
-      scoped to the contexts it names, and a context is the finest unit that scoping can
-      reach. Folding two unrelated frames into one context does not just mix noise into
+      scoped to the <code>contexts</code> it names, and a <code>context</code> is the finest unit that scoping can
+      reach. Folding two unrelated frames into one <code>context</code> does not just mix noise into
       every read — it removes the ability to exclude the irrelevant frame at all, because
-      nothing smaller than the context can be left out from within it. Split frames apart
-      at write time; <a href="#groups">groups</a> (below) bring them back together at
+      nothing smaller than the <code>context</code> can be left out from within it. Split frames apart
+      at write time; <a href="#groups"><code>groups</code></a> (below) bring them back together at
       read time only when a cue should legitimately reach across.
     </p>
   </section>
 
   <section id="groups">
-    <h2>Groups bundle contexts — and searches cross them</h2>
-    <p class="section-sub">A group is an organizational label over contexts, not context content.</p>
+    <h2><code>groups</code> bundle <code>contexts</code> — and searches cross them</h2>
+    <p class="section-sub">A <code>group</code> is an organizational label over <code>contexts</code>, not <code>context</code> content.</p>
     <p>
-      <code>/groups</code> bundles contexts many-to-many (a context may sit in several groups) and
-      may nest child groups — a shallow DAG, at most 3 groups tall, never cyclic. Membership
+      <code>/groups</code> bundles <code>contexts</code> many-to-many (a <code>context</code> may sit in several <code>groups</code>) and
+      may nest child <code>groups</code> — a shallow DAG, at most 3 <code>groups</code> tall, never cyclic. Membership
       updates are deltas (<code>add_contexts</code> / <code>remove_contexts</code>,
       <code>add_groups</code> / <code>remove_groups</code>), referential integrity is strict
-      (members must exist; deleting a context or group drops it from every group), and each
-      group persists as one <code>{name}.group</code> file beside the context files.
+      (members must exist; deleting a <code>context</code> or <code>group</code> drops it from every <code>group</code>), and each
+      <code>group</code> persists as one <code>{name}.group</code> file beside the <code>context</code> files.
     </p>
     <p>
-      Groups are the addressing unit of <b>cross-context search</b>: <code>POST /recall</code>,
+      <code>groups</code> are the addressing unit of <b>cross-<code>context</code> search</b>: <code>POST /recall</code>,
       <code>POST /query</code>, and <code>POST /sources/search</code> take
       <code>contexts</code> and/or <code>groups</code> lists and run one search across every
-      context reached — nested children included, overlaps deduped, every match tagged with the
+      <code>context</code> reached — nested children included, overlaps deduped, every match tagged with the
       <code>context</code> it came from. Graph matches merge on |weight| (weights share one
-      scale — evidence mass); passage hits interleave by per-context rank, because passage
+      scale — evidence mass); passage hits interleave by per-<code>context</code> rank, because passage
       scores are corpus-local. Deep dives (<code>activate</code>, <code>explore</code>,
-      <code>paths</code>, <code>resolve</code>) stay per-context by design: search across, then
-      pull the thread inside the context that answered.
+      <code>paths</code>, <code>resolve</code>) stay per-<code>context</code> by design: search across, then
+      pull the thread inside the <code>context</code> that answered.
     </p>
     <p class="note">
-      Worked mappings — a paper split into section contexts and chapter groups, parts as
+      Worked mappings — a paper split into section <code>contexts</code> and chapter <code>groups</code>, parts as
       sources, cross-paper search, and the pseudo-hierarchy trap — are in
       <a href="modeling.html">Modeling</a>.
     </p>
@@ -184,7 +184,7 @@
     <h2>The retrieval loop</h2>
     <p class="section-sub">The discipline a connected LLM receives from <code>/protocol</code>. Tracing it by hand with curl takes the same shape.</p>
     <div class="loop">
-      <div class="loop-step"><span class="n">01</span><span class="t">Select</span><span class="d">pick the context with list_contexts</span></div>
+      <div class="loop-step"><span class="n">01</span><span class="t">Select</span><span class="d">pick the <code>context</code> with list_contexts</span></div>
       <div class="loop-step"><span class="n">02</span><span class="t">Resolve</span><span class="d">resolve / resolve_label turn the cue into canonical names</span></div>
       <div class="loop-step"><span class="n">03</span><span class="t">Survey</span><span class="d">describe → query to narrow down</span></div>
       <div class="loop-step"><span class="n">04</span><span class="t">Expand</span><span class="d">activate / explore gather related knowledge; paths threads two concepts together</span></div>
@@ -240,11 +240,11 @@
       Every hit carries <code>lanes</code>, always declaring which lane ranked it where — a
       vector-only hit means a paraphrase connected; a BM25-only hit means the surface forms
       matched. Either is evidence, not a verdict. Read the text. The vector lane admits only
-      matches above a cosine floor — the context's <code>semantic_floor</code> or the server
+      matches above a cosine floor — the <code>context</code>'s <code>semantic_floor</code> or the server
       default, overridable per call with <code>semantic_floor</code> in the search request;
       it floors that lane alone, so BM25-only hits still return. And the response itself says
-      what the search chose to do: its <code>plan</code> names every context searched and, per
-      context, whether each lane ran — with the reason when one was skipped and the effective
+      what the search chose to do: its <code>plan</code> names every <code>context</code> searched and, per
+      <code>context</code>, whether each lane ran — with the reason when one was skipped and the effective
       floor when the vector lane swept — so an empty result under a skipped semantic lane
       never masquerades as "nothing matched".
     </p>
@@ -256,13 +256,13 @@
       <code>date ?? stored_at</code>, and resolves them to an <b>eligibility set before either
       lane runs</b> — a filter narrows which sources may answer; it never re-weights BM25's
       corpus-global statistics or the vector lane's scoring, and a source with no matching
-      metadata never matches a filter. The plan's per-context <code>filter</code> block reports
-      how many of the context's sources were eligible, so a narrow filter and "nothing matched"
+      metadata never matches a filter. The plan's per-<code>context</code> <code>filter</code> block reports
+      how many of the <code>context</code>'s sources were eligible, so a narrow filter and "nothing matched"
       stay distinguishable.
     </p>
     <p>
       At scale, the vector lane turns <b>approximate</b>: at 10,000 paragraph vectors and up in one
-      context, an IVF index trades the exact sweep for a probe over a handful of clusters, widening
+      <code>context</code>, an IVF index trades the exact sweep for a probe over a handful of clusters, widening
       until it has gathered a comfortable oversample before ranking. The response shape, the floor,
       and every explain verdict stay exactly as they are below the threshold — but the probe can
       trade a little recall for that speed, so the result set itself is not guaranteed bit-for-bit
@@ -340,7 +340,7 @@
     <div class="next-links">
       <a class="nav-card" href="modeling.html" style="flex:1 1 16rem">
         <span class="nc-title">Next: Modeling</span>
-        <p>Mapping real documents — papers, contracts, codebases — onto these contexts and groups.</p>
+        <p>Mapping real documents — papers, contracts, codebases — onto these <code>contexts</code> and <code>groups</code>.</p>
       </a>
       <a class="nav-card" href="architecture.html" style="flex:1 1 16rem">
         <span class="nc-title">Internal architecture</span>

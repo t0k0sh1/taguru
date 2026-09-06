@@ -1,5 +1,5 @@
 //! `taguru communities`: derives a community-summaries artifact from a
-//! RUNNING server's context (issue #166) — the orchestration half of
+//! RUNNING server's `context` (issue #166) — the orchestration half of
 //! the community verbs.
 //!
 //! The flow is deliberately client-side and HTTP-only, calibrate's
@@ -10,7 +10,7 @@
 //! wire raw); this command diffs the result against the previous
 //! artifact, asks the LLM for summaries of what actually changed, and
 //! writes the artifact back through `POST /import` as an ordinary
-//! context.
+//! `context`.
 //!
 //! Incremental by fingerprint, not by wish: a community whose
 //! fingerprint matches the previous manifest reuses its stored summary
@@ -237,7 +237,7 @@ pub fn run(args: &[String]) -> i32 {
     if failed { 1 } else { 0 }
 }
 
-/// One context's derivation, start to finish.
+/// One `context`'s derivation, start to finish.
 fn derive(api: &Api, name: &str, derived: &str, dry_run: bool) -> Result<Report, String> {
     // The analysis stream carries the revision snapshot the server cut
     // it at — that, not a separately-read revision, is what the
@@ -546,7 +546,7 @@ fn render_batches(
     Ok(batches)
 }
 
-/// The previous artifact's manifest: `None` when the artifact context
+/// The previous artifact's manifest: `None` when the artifact `context`
 /// or its manifest record does not exist yet (a first run), an error
 /// only for a manifest that exists but does not parse — that needs a
 /// human, not a silent full rebuild.
@@ -568,7 +568,7 @@ fn read_manifest(api: &Api, derived: &str) -> Result<Option<CommunitiesManifest>
     })
 }
 
-/// A group's transitive member contexts, child groups included —
+/// A `group`'s transitive member `contexts`, child `groups` included —
 /// depth is server-capped, and cycles are refused at write time, so a
 /// plain recursion cannot run away.
 fn group_members(api: &Api, group: &str) -> Result<Vec<String>, String> {

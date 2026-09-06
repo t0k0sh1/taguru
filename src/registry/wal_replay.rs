@@ -138,7 +138,7 @@ pub(super) fn replay_panic_line(payload: &(dyn Any + Send), stage: ReplayStage) 
 /// original write already reported to its client — replay reruns the
 /// op on the exact state the original saw) versus a capacity refusal,
 /// where an ALREADY-ACKNOWLEDGED write is being permanently lost
-/// because the context is full on replay. Returns whether this was
+/// because the `context` is full on replay. Returns whether this was
 /// the capacity case, alongside the line to log it at the matching
 /// severity.
 pub(super) fn replay_rejection_line(op: &WalOp, message: &str, full: bool) -> (bool, String) {
@@ -191,7 +191,7 @@ pub(super) fn replay_op(context: &mut Context, op: &WalOp) -> bool {
 /// rejection is not this, `replay_op` already turns those into a log
 /// line) must become the same `Err` shape a corrupt image or
 /// unreadable WAL produces. Without this, a poisoned log would panic
-/// `ensure_hot` itself on every subsequent access — this context can
+/// `ensure_hot` itself on every subsequent access — this `context` can
 /// never come back Hot, so every caller touching it crash-loops
 /// forever instead of hitting the existing quarantine-and-retry path
 /// ([`LOAD_FAILURE_RETRY`]). Returns the WAL's top seq on success, so

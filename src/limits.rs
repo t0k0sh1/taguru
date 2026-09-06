@@ -103,7 +103,7 @@ pub(crate) fn shed(
     response
 }
 
-/// A shared, non-queuing permit pool for the whole-context CPU/disk
+/// A shared, non-queuing permit pool for the whole-`context` CPU/disk
 /// sweeps exposed by the API. Unlike the global in-flight ceiling this
 /// gate is applied only to `audit_vocabulary`, `compact_context`,
 /// `audit_schema`, `validate_schema` (ADR 0009 §10 — both unconditionally

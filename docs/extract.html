@@ -35,7 +35,7 @@
     </div>
     <div class="side-group">
       <div class="side-group-label">Reference</div>
-      <a href="schema.html">Context schema</a>
+      <a href="schema.html"><code>context</code> schema</a>
       <a href="import.html">Batch import</a>
       <a href="extract.html" aria-current="page">Document extraction</a>
       <a href="taguru-code.html">Code map (taguru-code)</a>
@@ -236,7 +236,7 @@ TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES  attach the model's raw answer text to
     <p>Exit codes: <code>0</code> every document extracted or skipped · <code>1</code> some documents failed (details on stderr; the rest completed) · <code>2</code> usage error.</p>
     <p class="note">
       <code>--schema</code> is <b>this</b> pipeline's own copy of a
-      <a href="schema.html">context schema document</a> — not to be confused with
+      <a href="schema.html"><code>context</code> schema document</a> — not to be confused with
       <code>--structured-output json-schema</code> below, which is an unrelated OpenAI wire
       format for the model's answer shape. Extract is offline and has no running server to fetch
       one from, so unlike the LangChain SDK ingesters (which pull it live), the operator hands it
@@ -418,7 +418,7 @@ taguru extract --context ops --out batches/ --redact --redact-rules redact-rules
         <tr>
           <td><code>steer</code></td><td>per document</td><td>—</td>
           <td>what taguru puts into the prompt on its own: candidates, the label vocabulary,
-            context names, the schema block</td>
+            <code>context</code> names, the schema block</td>
           <td><a href="#prompt">What the model is asked</a>, <a href="#trace">Trace</a>
             (<code>steering</code>)</td>
         </tr>
@@ -545,7 +545,7 @@ taguru extract --context ops --out batches/ --redact --redact-rules redact-rules
       cannot <code>resolve</code> live: extraction from the document's text alone — never the
       model's own knowledge, never a subject/object built from words the document does not
       contain (spellings the prompt itself offers stay fair game — a
-      <code>--vocabulary</code> context name, a schema type, a candidate — for entities the
+      <code>--vocabulary</code> <code>context</code> name, a schema type, a candidate — for entities the
       document does mention), and an
       empty answer is the correct one for a piece that states nothing extractable (#852) — one
       fact per association, short names in the document's
@@ -573,7 +573,7 @@ taguru extract --context ops --out batches/ --redact --redact-rules redact-rules
       entity type names, one <code>label: domain → range</code> line per constrained relation
       (budget-capped like the vocabulary block, live-vocabulary relations first), and an
       instruction to assert types on the reserved <code>schema:type</code> label — see
-      <a href="schema.html">the context schema reference</a> for what that label means. It is
+      <a href="schema.html">the <code>context</code> schema reference</a> for what that label means. It is
       deliberately never rendered as a JSON Schema <code>enum</code>, so a schema-constrained
       model can still propose a genuinely new relation rather than being forced to misuse an
       existing one. A domain/range violation or a <code>closed_labels</code> refusal in the
@@ -586,7 +586,7 @@ taguru extract --context ops --out batches/ --redact --redact-rules redact-rules
     <p>Model output is treated as untrusted input, and the contract is enforced on this side of the wire:</p>
     <ul>
       <li>Exact duplicate triples fold into one line (the in-document paraphrase rule, applied mechanically).</li>
-      <li>Items that could never import as answered are <b>removed mechanically</b>, before any corrective turn (ADR 0013): an association or alias with a required field missing or empty, an alias that maps a spelling to itself, an alias whose spelling an <i>earlier</i> document of the same run (or the <code>--vocabulary</code> context) already settled on as a different concept or label — import would refuse that rewire and stop the stream, so it never gets written — a relation label that is a single character (most often a bare particle picked up as the whole relation; two or more characters survives — same anchor-nothing judgment as a single-character candidate name), a label, subject, object, or alias spelling written with an ideograph outside JIS X 0208's repertoire that the document never writes (<code>适用法律</code> for a document that says <code>適用法律</code> — a multilingual model's simplified-Chinese rendering of a Japanese term, which <code>query</code>, <code>resolve</code>, and the reuse vocabulary would all treat as a second label; a document that itself uses the character, a Chinese or Korean one or a Japanese one quoting either, clears it, and nothing about the document's language is judged — <a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0039-foreign-ideograph-removal.md">ADR 0039</a>), and a subject/object that never appears in the document text (a whitespace- and case-blind check, so a normalized compound like <code>プール最大接続数</code> for a document that says <code>プールの最大接続数</code> still passes; a name written entirely in a Latin-style script is covered by its whole words and word stems, never by shared letter pairs, so an English object built from words the input never uses is removed even when the chunk or its context block is English — ADR 0036). Every removal is named path-first on stderr, counted on the report line as <code>removed (mechanical validation)</code>, and listed in the <a href="#diagnostics">diagnostics sidecar</a> — never a silent drop. Two removal classes are the exception to "before any corrective turn", both judged per document after the Stage 2 corrective turns so the corrective messages' item indices still match the replayed answers: an alias whose canonical names nothing any of the document's associations contain is pruned then (ADR 0013 Stage 2), and an alias whose in-document shadowing or conflict the one Stage 2 corrective turn leaves standing is removed <i>after</i> that turn (ADR 0022), with the same accounting — a correction the provider cut off at the output limit counts as leaving its issues standing (ADR 0032; see the ladder under <a href="#structured-output">structured output</a> for the one escalated resend it gets first).</li>
+      <li>Items that could never import as answered are <b>removed mechanically</b>, before any corrective turn (ADR 0013): an association or alias with a required field missing or empty, an alias that maps a spelling to itself, an alias whose spelling an <i>earlier</i> document of the same run (or the <code>--vocabulary</code> <code>context</code>) already settled on as a different concept or label — import would refuse that rewire and stop the stream, so it never gets written — a relation label that is a single character (most often a bare particle picked up as the whole relation; two or more characters survives — same anchor-nothing judgment as a single-character candidate name), a label, subject, object, or alias spelling written with an ideograph outside JIS X 0208's repertoire that the document never writes (<code>适用法律</code> for a document that says <code>適用法律</code> — a multilingual model's simplified-Chinese rendering of a Japanese term, which <code>query</code>, <code>resolve</code>, and the reuse vocabulary would all treat as a second label; a document that itself uses the character, a Chinese or Korean one or a Japanese one quoting either, clears it, and nothing about the document's language is judged — <a href="https://github.com/t0k0sh1/taguru/blob/main/adr/0039-foreign-ideograph-removal.md">ADR 0039</a>), and a subject/object that never appears in the document text (a whitespace- and case-blind check, so a normalized compound like <code>プール最大接続数</code> for a document that says <code>プールの最大接続数</code> still passes; a name written entirely in a Latin-style script is covered by its whole words and word stems, never by shared letter pairs, so an English object built from words the input never uses is removed even when the chunk or its <code>context</code> block is English — ADR 0036). Every removal is named path-first on stderr, counted on the report line as <code>removed (mechanical validation)</code>, and listed in the <a href="#diagnostics">diagnostics sidecar</a> — never a silent drop. Two removal classes are the exception to "before any corrective turn", both judged per document after the Stage 2 corrective turns so the corrective messages' item indices still match the replayed answers: an alias whose canonical names nothing any of the document's associations contain is pruned then (ADR 0013 Stage 2), and an alias whose in-document shadowing or conflict the one Stage 2 corrective turn leaves standing is removed <i>after</i> that turn (ADR 0022), with the same accounting — a correction the provider cut off at the output limit counts as leaving its issues standing (ADR 0032; see the ladder under <a href="#structured-output">structured output</a> for the one escalated resend it gets first).</li>
       <li>Invalid items removal cannot judge — wrong-typed or oversized fields, zero/non-finite/over-cap weights, unknown alias kinds, shadowing or conflicting aliases, out-of-range questions — earn a <b>path-addressed corrective turn</b> by default (see below): a present-but-wrong value is content the model can actually fix.</li>
       <li>A missing or out-of-range paragraph tag loses <b>only the tag</b>, never the fact — the association keeps the model's subject/label/object/weight judgment as-is.</li>
       <li>An alias is adopted only when its canonical is a name this file's associations register, and never when the alias spelling is itself such a name (either would fail the batch at apply time).</li>
@@ -623,24 +623,24 @@ taguru extract --context ops --out batches/ --redact --redact-rules redact-rules
     </p>
     <p>
       <code>--vocabulary</code> (ADR 0015, #496 S3) is the cross-document half of the same
-      idea: point it at an exported batch stream of the target context (<code>taguru export
+      idea: point it at an exported batch stream of the target <code>context</code> (<code>taguru export
       --out DIR</code>, or <code>GET /contexts/{name}/export</code> saved to disk — a file, or
       a directory read by the same rule as <code>taguru import DIR</code>: its
       <code>*.jsonl</code> files, sorted, non-recursive, so a previous extract's
       <code>--out</code> directory serves too, its <code>.extract-manifest.json</code> and
-      <code>.extract-trace/</code> left alone) and the context's own concept names and relation labels are
-      offered as preferred spellings, with one extra instruction: use the context's exact
+      <code>.extract-trace/</code> left alone) and the <code>context</code>'s own concept names and relation labels are
+      offered as preferred spellings, with one extra instruction: use the <code>context</code>'s exact
       spelling <i>even when the document spells the same entity differently</i>. That is the
       <code>cargo-nextest</code>/<code>nextest</code> twin being prevented at answer time
       instead of detected by the <a href="promotion.html">consolidation audit</a> after
       import. Alias spellings are never offered (they are the variants a canonical exists to
       fold), harvested labels seed the "relation labels already in use" block from the first
-      document, and a context spelling never fails the mechanical occurrence check — the
+      document, and a <code>context</code> spelling never fails the mechanical occurrence check — the
       steering and the validation agree by construction. The harvested name set is
       content-digested into the manifest, so refreshing the export re-extracts exactly when
       the names actually changed. Prompt-side the concept list caps at 200 names
       (alphabetical, deterministic); relevance-ranked selection is ADR 0015 §4's measured
-      upgrade path. Re-export the context periodically — a stale vocabulary still steers
+      upgrade path. Re-export the <code>context</code> periodically — a stale vocabulary still steers
       correctly toward every name it knows and simply misses newer ones.
     </p>
     <p>
@@ -742,9 +742,9 @@ taguru extract --context ops --out batches/ --redact --redact-rules redact-rules
     <p class="note warn">
       <b>Not to be confused with <code>--schema</code> above.</b> Everything in this section is
       about <code>response_format</code> on the OpenAI-compatible wire — how the <i>model's
-      answer</i> is shaped. <code>--schema</code> is Taguru's own <a href="schema.html">context
+      answer</i> is shaped. <code>--schema</code> is Taguru's own <a href="schema.html"><code>context</code>
       schema document</a> — what <i>types and relations are allowed to mean</i> in the target
-      context. The two names collide; the concepts do not.
+      <code>context</code>. The two names collide; the concepts do not.
     </p>
     <p>
       By default nothing above changes: the request stays the plain
@@ -842,8 +842,8 @@ taguru extract --context ops --out batches/ --redact --redact-rules redact-rules
       These are the <a href="#pipeline"><code>structure</code></a> and
       <a href="#pipeline"><code>annotate</code></a> steps (<a
       href="https://github.com/t0k0sh1/taguru/blob/main/adr/0033-chunk-context.md">ADR 0033</a>,
-      #782). "Context" here is what a reader needs in mind to read a chunk — never a Taguru
-      context, the namespace <code>--context NAME</code> targets. By default (<code>--chunk-context
+      #782). "Context" here is what a reader needs in mind to read a chunk — never the
+      <code>context</code> that <code>--context NAME</code> targets. By default (<code>--chunk-context
       off</code>, or <code>TAGURU_EXTRACT_CHUNK_CONTEXT</code>) a chunk is sent alone: part K of
       N, and the labeled text. It does not know the chapter it sits in, the definitions an
       earlier article gave, or which act <code>同法</code> names three chunks back — the gap the
@@ -916,8 +916,8 @@ taguru extract --context ops --out batches/ --redact --redact-rules redact-rules
     </p>
     <p>
       <code>--chunk-context ingested</code> adds the second source ADR 0033 §3.2 names: what the
-      target context <i>already holds</i>. It needs <a href="#prompt"><code>--vocabulary</code></a>
-      — the same export of the target context — and reads, beside the names, every association
+      target <code>context</code> <i>already holds</i>. It needs <a href="#prompt"><code>--vocabulary</code></a>
+      — the same export of the target <code>context</code> — and reads, beside the names, every association
       the export carries, keeping for each concept its strongest few (at most five by
       <code>|weight|</code>, export order among equals). A chunk's block then carries, right
       after <code>Cast:</code>, a <code>Known:</code> line: for each cast name — and then each
@@ -997,7 +997,7 @@ taguru extract --context ops --out batches/ --redact --redact-rules redact-rules
       whether a document runs at all, not a step within it.
       Extraction being the expensive stage, <code>--out</code> carries an
       <code>.extract-manifest.json</code>: per document, the "content hash × model × prompt
-      version × target context" its batch file was computed from. Documents whose compute inputs
+      version × target <code>context</code>" its batch file was computed from. Documents whose compute inputs
       are unchanged are skipped, <code>--force</code> overrides, and a missing or corrupt manifest
       degrades <b>to re-extraction</b> — never to a false "unchanged". Keep the out directory
       between runs and a nightly extract-and-import pays model calls only for changed documents;
@@ -1011,14 +1011,14 @@ taguru extract --context ops --out batches/ --redact --redact-rules redact-rules
       even in use.
     </p>
     <p>
-      The context being a compute input is deliberate: it is baked into every header written, so
+      The <code>context</code> being a compute input is deliberate: it is baked into every header written, so
       re-running the same out directory with a different <code>--context</code> re-extracts
       instead of leaving files aimed at the old destination. Still, <b>use one out directory per
-      context</b> — the manifest has one entry per document, so alternating two contexts in one
-      directory re-extracts everything on every switch and the later context's files overwrite the
+      <code>context</code></b> — the manifest has one entry per document, so alternating two <code>contexts</code> in one
+      directory re-extracts everything on every switch and the later <code>context</code>'s files overwrite the
       earlier's. Batches from several out directories can be applied together in one import
-      (<code>taguru import sake/ code/</code>) — every file's header names its own context, so
-      "extract once per context, import everything at once" is the intended shape.
+      (<code>taguru import sake/ code/</code>) — every file's header names its own <code>context</code>, so
+      "extract once per <code>context</code>, import everything at once" is the intended shape.
     </p>
   </section>
 
@@ -1054,7 +1054,7 @@ taguru extract --context ops --out batches/ --redact --redact-rules redact-rules
     </p>
     <p>
       A checkpoint file also carries the same compute-input fingerprint the manifest checks
-      (content hash, model, prompt version, context, <code>--questions</code>,
+      (content hash, model, prompt version, <code>context</code>, <code>--questions</code>,
       <code>--fact-budget</code>, <code>--structured-output</code>, and so on). Any mismatch — the
       source edited, a setting changed — invalidates the whole file, the same "unreadable or
       incompatible degrades to re-extraction, never to a false reuse" posture the manifest takes.
@@ -1326,8 +1326,8 @@ taguru extract --context ops --out batches/ --redact --redact-rules redact-rules
       hallucination floor — compare runs of the same document type against each other, and
       let locator validity and the with-aliases rate carry the cross-type comparison.
       <code>scripts/extract_metrics.py</code> (python3, standard library only) folds these
-      records — and the attempts log below — into the #784 metric tables per document, context,
-      group, and run (loss rates by reason, paragraph coverage, correction success, attempt-state
+      records — and the attempts log below — into the #784 metric tables per document, <code>context</code>,
+      <code>group</code>, and run (loss rates by reason, paragraph coverage, correction success, attempt-state
       and ladder-move counts, label concentration, graph shape, and time/token/money cost,
       with <code>--compare</code> for run-to-run deltas); <code>--help</code> documents the
       ledger and price inputs. A document that failed leaves an attempts log and no trace
@@ -1787,7 +1787,7 @@ jq -r 'select(.kind=="system") | .content' "$l"   # the system turn, by hash</co
 jq -c 'select(.kind=="uncovered") | {paragraph, sentence}' "$t"</code></pre>
     <p>
       What taguru itself contributed to the prompt is the trace's single
-      <code>steering</code> record (candidates, reuse vocabulary with counts, context names,
+      <code>steering</code> record (candidates, reuse vocabulary with counts, <code>context</code> names,
       schema block); what the retry machinery did on its own is the attempts log's
       <code>move</code> records. For the aggregate view of all of this — loss rates,
       coverage, correction success, attempt states, moves, label concentration, cost — run
@@ -1912,7 +1912,7 @@ jq -c 'select(.kind=="uncovered") | {paragraph, sentence}' "$t"</code></pre>
       not specific to Taguru. The mitigation is structural: every fact is attributed to its
       source, so <code>sources/retract</code> (or re-importing a corrected batch) withdraws a bad
       document's contribution wholesale; and a batch file is inspectable text — review before
-      loading into a trusted context.
+      loading into a trusted <code>context</code>.
     </p>
   </section>
 

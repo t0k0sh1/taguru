@@ -35,7 +35,7 @@
     </div>
     <div class="side-group">
       <div class="side-group-label">Reference</div>
-      <a href="schema.html">Context schema</a>
+      <a href="schema.html"><code>context</code> schema</a>
       <a href="import.html">Batch import</a>
       <a href="extract.html">Document extraction</a>
       <a href="taguru-code.html">Code map (taguru-code)</a>
@@ -73,9 +73,9 @@
 
   <header class="hero">
     <div class="eyebrow">modeling</div>
-    <h1>Modeling — mapping real documents onto contexts and groups</h1>
+    <h1>Modeling — mapping real documents onto <code>contexts</code> and <code>groups</code></h1>
     <p class="lede">
-      A corpus is not a context. Where the boundary of a 文脈 falls in real material — a paper, a
+      A corpus is not a <code>context</code>. Where the boundary of a 文脈 falls in real material — a paper, a
       contract, a codebase — is a decision made at ingest time, and it decides retrieval quality
       before a single search runs. This guide works one document type end to end, then names the
       shapes that break.
@@ -90,20 +90,20 @@
         <thead><tr><th>Term</th><th>What it is</th><th>What it scopes</th><th>Where it comes from</th></tr></thead>
         <tbody>
           <tr>
-            <td>context</td>
+            <td><code>context</code></td>
             <td>one 文脈 — one frame in which one spelling means one referent</td>
             <td>the label/concept vocabulary and its aliases; the finest unit a search can include or exclude</td>
             <td><code>PUT /contexts/{name}</code></td>
           </tr>
           <tr>
-            <td>group</td>
-            <td>an organizational bundle of contexts and child groups — a shallow DAG, at most 3 groups tall</td>
-            <td>cross-context search targets: <code>recall</code> / <code>query</code> / <code>sources/search</code> expand a group to every context it reaches, nested children included</td>
+            <td><code>group</code></td>
+            <td>an organizational bundle of <code>contexts</code> and child <code>groups</code> — a shallow DAG, at most 3 <code>groups</code> tall</td>
+            <td>cross-<code>context</code> search targets: <code>recall</code> / <code>query</code> / <code>sources/search</code> expand a <code>group</code> to every <code>context</code> it reaches, nested children included</td>
             <td><code>PUT /groups/{name}</code></td>
           </tr>
           <tr>
             <td>source</td>
-            <td>an opaque provenance id inside one context, chosen by the caller</td>
+            <td>an opaque provenance id inside one <code>context</code>, chosen by the caller</td>
             <td>idempotent replacement — retracting and re-importing swaps exactly this document's contribution, nothing else</td>
             <td>your ingest, at write time</td>
           </tr>
@@ -127,40 +127,40 @@
       only inside <code>taguru extract</code>, the offline producer that turns documents into
       batch files, as a bound on how much text one model call can see. Once ingest happens, the
       unit that exists on the server is the passage (a source's full text) split into paragraphs.
-      A chunk boundary that survives into the graph as a context boundary is an accident of the
+      A chunk boundary that survives into the graph as a <code>context</code> boundary is an accident of the
       pipeline, not a decision about meaning.
     </p>
   </section>
 
   <section id="boundaries">
-    <h2>Where the context boundary falls</h2>
-    <p class="section-sub">Three questions, in order, when a context's edge is not obvious.</p>
+    <h2>Where the <code>context</code> boundary falls</h2>
+    <p class="section-sub">Three questions, in order, when a <code>context</code>'s edge is not obvious.</p>
     <div class="model-card">
       <p>
         <b>Does one spelling stay one referent inside it?</b> "Fine-tuning" means one thing within
         a single paper's method section. Fold ten papers together and it can mean ten things —
-        the context has quietly become a corpus, and the one-spelling-one-referent contract
+        the <code>context</code> has quietly become a corpus, and the one-spelling-one-referent contract
         (<a href="concepts.html#contexts">Concepts</a>) is already broken before anyone notices.
       </p>
       <p>
-        <b>Is it the smallest thing a search should be able to leave out?</b> A context is the
+        <b>Is it the smallest thing a search should be able to leave out?</b> A <code>context</code> is the
         finest unit that scoping reaches — nothing smaller than it can be excluded from within
         it. If two frames are ever likely to need excluding from each other, they belong in
-        different contexts now, not split apart later.
+        different <code>contexts</code> now, not split apart later.
       </p>
       <p>
         <b>When still unsure, cut narrow.</b> Splitting costs nothing at read time — <a
-        href="#cross-search">groups bring split contexts back together</a> for any search that
-        should legitimately reach across. Merging two contexts that turn out to share a frame
+        href="#cross-search"><code>groups</code> bring split <code>contexts</code> back together</a> for any search that
+        should legitimately reach across. Merging two <code>contexts</code> that turn out to share a frame
         does not exist as an operation; the fix is rebuilding one of them. The asymmetry means
-        the safe default is the smaller context.
+        the safe default is the smaller <code>context</code>.
       </p>
     </div>
   </section>
 
   <section id="worked-example">
     <h2>A worked example: one paper</h2>
-    <p class="section-sub">A paper's own structure — sections, chapters, front matter — maps onto contexts and groups directly, once each unit's job is named.</p>
+    <p class="section-sub">A paper's own structure — sections, chapters, front matter — maps onto <code>contexts</code> and <code>groups</code> directly, once each unit's job is named.</p>
     <pre><code>group: paper/bert                      <span class="c"># the paper — a group</span>
 ├── context: section/bert/abstract     <span class="c"># front matter: no chapter owns it</span>
 ├── group: chapter/bert/2              <span class="c"># a chapter — a group of its sections</span>
@@ -170,38 +170,38 @@
 └── group: chapter/bert/3
     └── …</code></pre>
 
-    <h3>Why the section is the context</h3>
+    <h3>Why the section is the <code>context</code></h3>
     <p>
       A section is a coherent frame: its vocabulary stays stable within it, which is exactly the
-      one-spelling-one-referent contract a context exists to hold. A chapter carries no text of
-      its own — it only bundles the sections beneath it — so it is a <b>group</b>, not a context.
-      The paper is the same shape one level up: a group whose members are chapter groups, plus
+      one-spelling-one-referent contract a <code>context</code> exists to hold. A chapter carries no text of
+      its own — it only bundles the sections beneath it — so it is a <b><code>group</code></b>, not a <code>context</code>.
+      The paper is the same shape one level up: a <code>group</code> whose members are chapter <code>groups</code>, plus
       whatever front matter (the abstract) never belonged to a chapter in the first place. Nesting
-      here is two groups deep (paper → chapter), one below the 3-group ceiling, leaving room for a
+      here is two <code>groups</code> deep (paper → chapter), one below the 3-<code>group</code> ceiling, leaving room for a
       collection above the paper if one is ever needed.
     </p>
 
     <h3>Front matter, and sections too long to ingest at once</h3>
     <p>
-      The abstract belongs to the paper but to no chapter, so it sits as a context directly under
-      the <code>paper/bert</code> group, alongside the chapter groups — a group's members are
-      contexts <em>and</em> child groups at once, not a choice between them.
+      The abstract belongs to the paper but to no chapter, so it sits as a <code>context</code> directly under
+      the <code>paper/bert</code> <code>group</code>, alongside the chapter <code>groups</code> — a <code>group</code>'s members are
+      <code>contexts</code> <em>and</em> child <code>groups</code> at once, not a choice between them.
     </p>
     <p>
-      A section too long for one ingest pass does <b>not</b> become two contexts. It stays one
-      context — the frame of meaning has not changed — and gains a second <b>source</b>:
+      A section too long for one ingest pass does <b>not</b> become two <code>contexts</code>. It stays one
+      <code>context</code> — the frame of meaning has not changed — and gains a second <b>source</b>:
       <code>bert/2.2/part-1</code>, <code>bert/2.2/part-2</code>, both inside
       <code>section/bert/2.2</code>. Each part retracts and re-imports on its own; the section's
       vocabulary and aliases stay shared across both, which is the entire reason splitting by
-      source rather than by context is the correct move here.
+      source rather than by <code>context</code> is the correct move here.
     </p>
 
     <h3>Building it with one import stream</h3>
     <p>
       A run of <code>taguru import</code> (or one <code>POST /import</code> body) can carry
-      several batches and any number of <code>taguru_group</code> records together — group
-      records apply after every batch in the run, so a group and the contexts it names can travel
-      in any order. One file for the two parts of §2.1, closing with the chapter and paper groups:
+      several batches and any number of <code>taguru_group</code> records together — <code>group</code>
+      records apply after every batch in the run, so a <code>group</code> and the <code>contexts</code> it names can travel
+      in any order. One file for the two parts of §2.1, closing with the chapter and paper <code>groups</code>:
     </p>
     <pre><code>{<span class="k">"taguru_batch"</span>: <span class="nu">1</span>, <span class="k">"context"</span>: <span class="s">"section/bert/2.1"</span>, <span class="k">"source"</span>: <span class="s">"bert/2.1/part-1"</span>, <span class="k">"create"</span>: {<span class="k">"description"</span>: <span class="s">"BERT §2.1 — Pre-training BERT"</span>}}
 {<span class="k">"passage"</span>: <span class="s">"We pre-train BERT using two unsupervised tasks…"</span>}
@@ -212,45 +212,45 @@
 {<span class="k">"taguru_group"</span>: <span class="nu">1</span>, <span class="k">"name"</span>: <span class="s">"chapter/bert/2"</span>, <span class="k">"contexts"</span>: [<span class="s">"section/bert/2"</span>, <span class="s">"section/bert/2.1"</span>, <span class="s">"section/bert/2.2"</span>]}
 {<span class="k">"taguru_group"</span>: <span class="nu">1</span>, <span class="k">"name"</span>: <span class="s">"paper/bert"</span>, <span class="k">"contexts"</span>: [<span class="s">"section/bert/abstract"</span>], <span class="k">"groups"</span>: [<span class="s">"chapter/bert/2"</span>, <span class="s">"chapter/bert/3"</span>]}</code></pre>
     <p class="note">
-      The second batch's <code>create</code> block is left out on purpose — the context already
-      exists from the first batch, and importing into an absent context without a create block is
-      refused, so this is also how the parser confirms both parts land in the same context rather
+      The second batch's <code>create</code> block is left out on purpose — the <code>context</code> already
+      exists from the first batch, and importing into an absent <code>context</code> without a create block is
+      refused, so this is also how the parser confirms both parts land in the same <code>context</code> rather
       than silently minting two. Full field-by-field contract: <a href="import.html">The batch
       contract</a>.
     </p>
   </section>
 
   <section id="cross-search">
-    <h2>Searching across papers names groups, not a super-context</h2>
-    <p class="section-sub">A question that spans several papers names the papers' groups at search time — it never needs a context that contains them all.</p>
+    <h2>Searching across papers names <code>groups</code>, not a super-<code>context</code></h2>
+    <p class="section-sub">A question that spans several papers names the papers' <code>groups</code> at search time — it never needs a <code>context</code> that contains them all.</p>
     <p>
       <code>POST /recall</code>, <code>POST /query</code>, and <code>POST /sources/search</code>
       take <code>contexts</code> and <code>groups</code> lists together and run one search across
-      every context reached, nested children included, every match tagged with the context it
+      every <code>context</code> reached, nested children included, every match tagged with the <code>context</code> it
       came from:
     </p>
     <pre><code>curl -X POST localhost:8248/recall -H <span class="s">'Content-Type: application/json'</span> \
   -d <span class="s">'{"groups": ["paper/bert", "paper/gpt"], "cue": "fine-tuning"}'</span></code></pre>
     <p>
-      The response's <code>plan</code> names exactly which contexts the two groups expanded to, so
+      The response's <code>plan</code> names exactly which <code>contexts</code> the two <code>groups</code> expanded to, so
       "which paper answered" is never a guess. Deep dives — <code>activate</code>,
       <code>explore</code>, <code>paths</code>, <code>resolve</code>, and the composite
       <code>retrieve</code> tool —
-      stay <b>per-context by design</b> (see <a href="concepts.html#groups">Concepts</a>): search
-      across with a cross call, then pull the thread inside whichever context answered. Reaching
-      for <code>retrieve</code> against one context after deliberately splitting a corpus into
+      stay <b>per-<code>context</code> by design</b> (see <a href="concepts.html#groups">Concepts</a>): search
+      across with a cross call, then pull the thread inside whichever <code>context</code> answered. Reaching
+      for <code>retrieve</code> against one <code>context</code> after deliberately splitting a corpus into
       several undoes the split; a LangChain retriever crossing the same set is
-      <code>TaguruRetriever(groups=["paper/bert", "paper/gpt"])</code>, not a loop of per-context
-      retrievers. Run end to end against real PDFs — extraction, this cross-group retriever, and
+      <code>TaguruRetriever(groups=["paper/bert", "paper/gpt"])</code>, not a loop of per-<code>context</code>
+      retrievers. Run end to end against real PDFs — extraction, this cross-<code>group</code> retriever, and
       a local answer model — in the <a href="local-rag-walkthrough.html">local RAG
       walkthrough</a>.
     </p>
     <p>
-      None of this needs a group that exists only to be searched. An ad-hoc cross-paper question
-      names the papers' groups directly in the request; a group is worth creating only for a
-      collection reused across many searches (a reading list, a chapter's sections). A root group
-      built solely so "search everything" has one name to type adds a namespace with no boundary
-      behind it.
+      None of this needs a <code>group</code> that exists only to be searched. An ad-hoc cross-paper question
+      names the papers' <code>groups</code> directly in the request; a <code>group</code> is worth creating only when the same
+      set of <code>contexts</code> gets searched together repeatedly (a reading list, a chapter's sections). A root <code>group</code>
+      built solely so "search everything" has one name to type adds a <code>group</code> with no
+      boundary behind it.
     </p>
   </section>
 
@@ -259,15 +259,15 @@
     <p class="section-sub">Membership is the only hierarchy the server acts on.</p>
     <p>
       <code>paper/bert</code> and <code>section/bert/2.1</code> are opaque strings, capped at 64
-      bytes, from a namespace the server never parses. Contexts and groups are separate
-      namespaces from each other, too. The <code>/</code> reads as a path to a person; to the
+      bytes, that the server never parses. A <code>context</code> and a <code>group</code> may share the same name without
+      conflict, too. The <code>/</code> reads as a path to a person; to the
       server it is one more byte. Writing <code>paper/chapter/section</code> into a
       <b>source</b> id is the same mistake one level down — a source is a provenance id scoped to
-      one context, not an address, and the server never decomposes it into a location.
+      one <code>context</code>, not an address, and the server never decomposes it into a location.
     </p>
     <p class="note warn">
       <b>Membership is the only hierarchy.</b> A name that looks like a path is a naming
-      convention for humans reading a list. A group whose <code>contexts</code> or
+      convention for humans reading a list. A <code>group</code> whose <code>contexts</code> or
       <code>groups</code> field names something is a fact the server enforces — referential
       integrity, nesting depth, cycle checks all apply to it. Only the second kind of statement is
       structure.
@@ -282,27 +282,27 @@
   </section>
 
   <section id="oversized">
-    <h2>The failure mode: a context grown into a corpus</h2>
-    <p class="section-sub">What actually breaks when several papers share one context, in the order it breaks.</p>
+    <h2>The failure mode: a <code>context</code> grown into a corpus</h2>
+    <p class="section-sub">What actually breaks when several papers share one <code>context</code>, in the order it breaks.</p>
     <ul>
       <li>
-        <b>Alias collisions.</b> Aliases live in the context's own vocabulary
+        <b>Alias collisions.</b> Aliases live in the <code>context</code>'s own vocabulary
         (<a href="concepts.html#contexts">Concepts</a>), and one spelling can never shadow an
         existing name or alias. Two papers that each abbreviate a different term the same way — or
         that need the same spelling to mean two different things — hit
         <code>AliasError::Conflict</code> the moment the second registration is attempted. There
         is no merge operation to paper over it: separating the papers afterward means rebuilding
-        the context from an export, not a small fix.
+        the <code>context</code> from an export, not a small fix.
       </li>
       <li>
         <b>Silent meaning drift.</b> "Attention" or "fine-tuning" carries a different sense per
-        paper, but inside one context it is one concept — <code>resolve</code>'s gloss and every
+        paper, but inside one <code>context</code> it is one concept — <code>resolve</code>'s gloss and every
         graph read blend facts from every paper that used the spelling. Nothing errors; the
         answers are just quietly wrong.
       </li>
       <li>
         <b>Lost exclusion.</b> Once merged, "answer from this paper only" cannot be expressed —
-        a context is the finest unit a search can leave out, and nothing smaller exists inside
+        a <code>context</code> is the finest unit a search can leave out, and nothing smaller exists inside
         it to leave out instead (<a href="concepts.html#contexts">Concepts</a>). The fix is not a
         smarter query; it is not having merged the papers in the first place.
       </li>
@@ -311,18 +311,18 @@
 
   <section id="other-shapes">
     <h2>Other corpora draw other boundaries</h2>
-    <p class="section-sub">The table in §1 generalizes. The paper's section-as-context, chapter-as-group mapping does not.</p>
+    <p class="section-sub">The table in §1 generalizes. The paper's section-as-<code>context</code>, chapter-as-<code>group</code> mapping does not.</p>
     <ul>
-      <li><b>Contracts:</b> one contract is usually one context — its clauses share a vocabulary,
+      <li><b>Contracts:</b> one contract is usually one <code>context</code> — its clauses share a vocabulary,
         and it is <i>between</i> contracts that the same term ("Term", "Party") most often needs
-        to mean something different. A chapter-style group per contract is rarely worth it; a
-        group over a contract family (a master agreement and its statements of work) is.</li>
-      <li><b>Codebases:</b> a module or crate is usually the context — identifiers are the
+        to mean something different. A chapter-style <code>group</code> per contract is rarely worth it; a
+        <code>group</code> over a contract family (a master agreement and its statements of work) is.</li>
+      <li><b>Codebases:</b> a module or crate is usually the <code>context</code> — identifiers are the
         vocabulary, and they are meant to mean one thing within it (see <a
-        href="concepts.html#patterns">Concepts: source code</a>); the repository is the group.</li>
-      <li><b>Product manuals:</b> a product version is usually the context, because the same
+        href="concepts.html#patterns">Concepts: source code</a>); the repository is the <code>group</code>.</li>
+      <li><b>Product manuals:</b> a product version is usually the <code>context</code>, because the same
         feature name can mean something different across versions; the product line is the
-        group that reaches across them.</li>
+        <code>group</code> that reaches across them.</li>
     </ul>
   </section>
 
@@ -330,21 +330,21 @@
     <h2>Anti-patterns</h2>
     <p class="section-sub">No new machinery here either — every one of these is the responsibilities in §1, assigned to the wrong unit.</p>
     <ul>
-      <li><b>Treating <code>context</code> as <code>corpus</code> by default</b>: folding everything ingested in one sitting into one context. See <a href="#oversized">the failure mode</a> above.</li>
-      <li><b>Writing a path into a source id and expecting a hierarchy</b>: <code>"paper/chapter/section"</code> as a source id does not create groups, chapters, or sections — see <a href="#names-are-not-paths">the slash is typography</a>.</li>
-      <li><b>Promoting a token-limit chunk to a context boundary</b>: a chunk is a pipeline transport unit with no server meaning — see the <a href="#responsibilities">responsibilities table</a>'s last row.</li>
-      <li><b>Building an artificial root group only to search everything</b>: an ad-hoc cross-context question names its groups directly in the request; see <a href="#cross-search">cross-search</a>.</li>
-      <li><b>Reaching for a single-context retriever after splitting a corpus into contexts</b>: the split only pays off if searches actually cross it with <code>contexts</code>/<code>groups</code> — see <a href="#cross-search">cross-search</a>.</li>
+      <li><b>Treating <code>context</code> as <code>corpus</code> by default</b>: folding everything ingested in one sitting into one <code>context</code>. See <a href="#oversized">the failure mode</a> above.</li>
+      <li><b>Writing a path into a source id and expecting a hierarchy</b>: <code>"paper/chapter/section"</code> as a source id does not create <code>groups</code>, chapters, or sections — see <a href="#names-are-not-paths">the slash is typography</a>.</li>
+      <li><b>Promoting a token-limit chunk to a <code>context</code> boundary</b>: a chunk is a pipeline transport unit with no server meaning — see the <a href="#responsibilities">responsibilities table</a>'s last row.</li>
+      <li><b>Building an artificial root <code>group</code> only to search everything</b>: an ad-hoc cross-<code>context</code> question names its <code>groups</code> directly in the request; see <a href="#cross-search">cross-search</a>.</li>
+      <li><b>Reaching for a single-<code>context</code> retriever after splitting a corpus into <code>contexts</code></b>: the split only pays off if searches actually cross it with <code>contexts</code>/<code>groups</code> — see <a href="#cross-search">cross-search</a>.</li>
     </ul>
 
     <div class="next-links">
       <a class="nav-card" href="import.html" style="flex:1 1 16rem">
         <span class="nc-title">Next: Batch import</span>
-        <p>The complete file format — headers, passages, group records, caps, and the concurrency rules.</p>
+        <p>The complete file format — headers, passages, <code>group</code> records, caps, and the concurrency rules.</p>
       </a>
       <a class="nav-card" href="concepts.html" style="flex:1 1 16rem">
         <span class="nc-title">Concepts</span>
-        <p>The association model, contexts, groups, and the retrieval loop this guide builds on.</p>
+        <p>The association model, <code>contexts</code>, <code>groups</code>, and the retrieval loop this guide builds on.</p>
       </a>
     </div>
   </section>

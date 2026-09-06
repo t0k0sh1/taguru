@@ -507,7 +507,7 @@
     </div>
     <div class="side-group">
       <div class="side-group-label">Reference</div>
-      <a href="schema.html">Context schema</a>
+      <a href="schema.html"><code>context</code> schema</a>
       <a href="import.html">Batch import</a>
       <a href="extract.html">Document extraction</a>
       <a href="taguru-code.html">Code map (taguru-code)</a>
@@ -588,7 +588,7 @@
 
     <div class="tool-groups">
       <div class="tool-group">
-        <div class="tool-group-label">Contexts</div>
+        <div class="tool-group-label"><code>contexts</code></div>
         <div class="chips">
           <span class="chip used">list_contexts</span>
           <span class="chip">create_context</span>
@@ -597,7 +597,7 @@
         </div>
       </div>
       <div class="tool-group">
-        <div class="tool-group-label">Groups</div>
+        <div class="tool-group-label"><code>groups</code></div>
         <div class="chips">
           <span class="chip">list_groups</span>
           <span class="chip">create_group</span>
@@ -651,10 +651,10 @@
         </div>
       </div>
     </div>
-    <p class="note">The server advertises 55 tools; the groups above show the retrieval-loop subset this walkthrough draws from. The six highlighted (<span class="chip used" style="padding:0.1em 0.4em;">indigo</span> = graph lane, <span class="chip used-text" style="padding:0.1em 0.4em;">vermilion</span> = text lane) are the ones actually called in the two scenarios below. The search tools (<code>recall</code>, <code>query</code>, <code>search_passages</code>) also take <code>contexts</code> / <code>groups</code> lists to search several contexts at once, every match tagged with the context it came from.</p>
+    <p class="note">The server advertises 55 tools; the groups above show the retrieval-loop subset this walkthrough draws from. The six highlighted (<span class="chip used" style="padding:0.1em 0.4em;">indigo</span> = graph lane, <span class="chip used-text" style="padding:0.1em 0.4em;">vermilion</span> = text lane) are the ones actually called in the two scenarios below. The search tools (<code>recall</code>, <code>query</code>, <code>search_passages</code>) also take <code>contexts</code> / <code>groups</code> lists to search several <code>contexts</code> at once, every match tagged with the <code>context</code> it came from.</p>
 
     <div class="loop">
-      <div class="loop-step"><span class="n">01</span><span class="t">Select</span><span class="d">pick the context with list_contexts</span></div>
+      <div class="loop-step"><span class="n">01</span><span class="t">Select</span><span class="d">pick the <code>context</code> with list_contexts</span></div>
       <div class="loop-step"><span class="n">02</span><span class="t">Resolve</span><span class="d">resolve / resolve_label turn the cue into canonical names</span></div>
       <div class="loop-step"><span class="n">03</span><span class="t">Survey</span><span class="d">describe → query to narrow down</span></div>
       <div class="loop-step"><span class="n">04</span><span class="t">Expand</span><span class="d">activate / explore gather related knowledge</span></div>
@@ -687,7 +687,7 @@
             <span class="step-route">GET /contexts</span>
           </div>
           <div class="step-body">
-            <p class="step-why">First, pick from the list which context — which knowledge base of meaning — to search.</p>
+            <p class="step-why">First, pick from the list which <code>context</code> to search.</p>
             <div class="io">
               <div class="io-block">
                 <h4>Request</h4>
@@ -713,7 +713,7 @@
 }</code></pre>
               </div>
             </div>
-            <p class="step-note"><b>A human-written description</b> and <b>machine-computed stats</b> sit on the same row. From this list alone, the LLM can decide the sake context is the one to ask.</p>
+            <p class="step-note"><b>A human-written description</b> and <b>machine-computed stats</b> sit on the same row. From this list alone, the LLM can decide the sake <code>context</code> is the one to ask.</p>
           </div>
         </div>
       </div>
@@ -970,7 +970,7 @@
 }</code></pre>
               </div>
             </div>
-            <p class="step-note"><code>lanes</code> shows only <code>bm25</code> because this server runs with no embeddings configured — lexical lane only (set <code>TAGURU_EMBED_URL</code> and a <code>vector</code> lane runs alongside, robust to paraphrase too). The response-level <code>plan</code> says so outright — <code>vector: {ran: false}</code> with the reason — so the caller can tell a lexical-only answer from a fused one without a diagnostic call. Here the very words — 浸漬, 40分, 90分 — appear in the original text, so BM25 alone lands it in one shot. This request also could have carried <code>tags</code> (any-of) and a half-open <code>since</code>/<code>until</code> window to narrow the search to a source eligibility set before either lane ran — the plan would then carry a <code>filter: {eligible_sources, total_sources}</code> block alongside each context's <code>lanes</code>, naming how many sources passed.</p>
+            <p class="step-note"><code>lanes</code> shows only <code>bm25</code> because this server runs with no embeddings configured — lexical lane only (set <code>TAGURU_EMBED_URL</code> and a <code>vector</code> lane runs alongside, robust to paraphrase too). The response-level <code>plan</code> says so outright — <code>vector: {ran: false}</code> with the reason — so the caller can tell a lexical-only answer from a fused one without a diagnostic call. Here the very words — 浸漬, 40分, 90分 — appear in the original text, so BM25 alone lands it in one shot. This request also could have carried <code>tags</code> (any-of) and a half-open <code>since</code>/<code>until</code> window to narrow the search to a source eligibility set before either lane ran — the plan would then carry a <code>filter: {eligible_sources, total_sources}</code> block alongside each <code>context</code>'s <code>lanes</code>, naming how many sources passed.</p>
           </div>
         </div>
       </div>
@@ -1027,7 +1027,7 @@
   </section>
 
   <footer class="colophon">
-    Captured from real POST /mcp calls against taguru serve (local, no embeddings configured) / context: sake (fictional data)
+    Captured from real POST /mcp calls against taguru serve (local, no embeddings configured) / <code>context</code>: sake (fictional data)
     <br>The same corpus design driven from application code instead of an LLM agent — <a href="local-rag-walkthrough.html">the local RAG walkthrough</a>.
   </footer>
 

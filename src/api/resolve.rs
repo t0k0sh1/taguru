@@ -20,7 +20,7 @@ use super::{
 pub struct ResolveRequest {
     pub cue: String,
     /// One-call override of the fuzzy-entry floor — the loosen-and-retry
-    /// move after a miss. Omitted means the context's setting.
+    /// move after a miss. Omitted means the `context`'s setting.
     pub dice_floor: Option<f64>,
     /// One-call override of the semantic-tier floor, same story.
     pub semantic_floor: Option<f32>,
@@ -149,7 +149,7 @@ const GLOSSED_CANDIDATES: usize = 8;
 /// when `type_label` names an installed schema's reserved label (ADR
 /// 0009 §12, gated by §6.3 guard 1), its declared types. One shared
 /// read after the tiers settle, covering lexical and semantic
-/// candidates alike; if the context vanished in between, the
+/// candidates alike; if the `context` vanished in between, the
 /// candidates simply keep gloss/types = None (the entry answer itself
 /// already succeeded, and a decoration must not turn it into an
 /// error). `type_label` is always `None` for `labels == true` —
@@ -210,7 +210,7 @@ struct ResolvedTiers {
 /// lexical tiers first; the semantic tier joins whenever they came
 /// back empty OR merely fragment-weak (best score under
 /// [`LEXICAL_CONFIDENCE`]). `Err` is a response to serve immediately:
-/// unknown context, or a provider failure with nothing lexical to
+/// unknown `context`, or a provider failure with nothing lexical to
 /// degrade to.
 #[allow(clippy::result_large_err)] // the Err IS the response served next
 fn resolve_tiers(

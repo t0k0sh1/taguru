@@ -29,7 +29,7 @@ impl AppState {
 
     /// The embedding identity in one read: the provider this server is
     /// configured to call beside what each vector sidecar actually
-    /// holds. `None` when the context does not exist. Backs
+    /// holds. `None` when the `context` does not exist. Backs
     /// `GET /contexts/{name}/embeddings` — the identity a calibration
     /// report stamps its floor with (#131).
     pub fn embeddings_status(&self, name: &str) -> Option<EmbeddingsStatus> {
@@ -202,13 +202,13 @@ impl AppState {
     /// Embeds the GLOSS of every canonical concept and label — the name
     /// plus its heaviest facts — and persists the vector sidecar. Bare
     /// names carry too little signal for sentence-trained embedding
-    /// models; the graph supplies the context itself. Each vector
+    /// models; the graph supplies the `context` itself. Each vector
     /// remembers the hash of the gloss it was computed from, so a
     /// refresh re-embeds exactly the names that are new or whose graph
-    /// context changed. Explicit rather than automatic — an agent or
+    /// `context` changed. Explicit rather than automatic — an agent or
     /// operator calls this after ingesting, so embedding spend stays
     /// intentional. Returns (newly embedded, total vectors), or `None`
-    /// for an unknown context.
+    /// for an unknown `context`.
     ///
     /// Always pays for its own width probe when one is needed — see
     /// [`AppState::auto_refresh_embeddings`] for the throttled variant
@@ -226,10 +226,10 @@ impl AppState {
 
     /// The auto-embed ticker's variant of [`AppState::refresh_embeddings`]
     /// (issue #677 item 2): identical, except its width probe is
-    /// skipped when a recent embed from ANY context already confirmed
+    /// skipped when a recent embed from ANY `context` already confirmed
     /// the provider's current width (`provider_width_recently_confirmed`
-    /// — the width is the provider's property, not this context's). A
-    /// busy, gloss-stable context would otherwise pay one provider
+    /// — the width is the provider's property, not this `context`'s). A
+    /// busy, gloss-stable `context` would otherwise pay one provider
     /// round trip per flush tick forever; an explicit caller still gets
     /// the unthrottled [`AppState::refresh_embeddings`] instead, so a
     /// deliberate refresh always heals a width change in one call.
@@ -640,7 +640,7 @@ impl AppState {
     /// The worker-pool size (`TAGURU_EMBED_PARALLEL`) each refresh
     /// dispatches its stale chunks under — see the field's own doc for
     /// why this is sized to the provider's rate limit, not the
-    /// machine's core count. A caller fanning out ACROSS contexts, not
+    /// machine's core count. A caller fanning out ACROSS `contexts`, not
     /// just within one, sizes its pool by this same number too: with
     /// `embed_provider_slots` as the actual global ceiling, threads
     /// beyond it in either pool just queue for a permit rather than
@@ -1096,7 +1096,7 @@ impl AppState {
     /// apart), or exactly where it stood when the sweep could run:
     /// its own gloss cosine against the floor in effect, and its rank
     /// in the very ordering `semantic_resolve` truncates. `None` when
-    /// the context does not exist.
+    /// the `context` does not exist.
     pub fn explain_semantic_resolve(
         &self,
         name: &str,

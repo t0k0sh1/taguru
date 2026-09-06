@@ -26,7 +26,7 @@ use super::{
 #[serde(default)]
 pub struct ImportQuery {
     /// Report what the stream would do without writing anything — no
-    /// context created, no source retracted, nothing stored. See
+    /// `context` created, no source retracted, nothing stored. See
     /// [`crate::ingest::preview_batch`] for which counts are exact and
     /// which are advisory.
     pub dry_run: bool,
@@ -77,7 +77,7 @@ pub struct ImportStreamOutcome {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub schemas: Vec<SchemaImportOutcome>,
     /// One entry per `taguru_group` record, stream order — absent
-    /// entirely for a stream that carried none, keeping the pre-group
+    /// entirely for a stream that carried none, keeping the pre-`group`
     /// response byte-identical.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<GroupImportOutcome>,
@@ -113,7 +113,7 @@ pub(crate) fn schema_import_outcome(
     }
 }
 
-/// What restoring one group record accomplished. A restore is a
+/// What restoring one `group` record accomplished. A restore is a
 /// replace of the whole record; the label says what it replaced.
 #[derive(Serialize)]
 pub struct GroupImportOutcome {
@@ -378,10 +378,10 @@ pub(super) fn import_refusal(
     }
 }
 
-/// Maps a refused group restore onto the response — the group half of
-/// [`import_refusal`]. Groups apply after every batch, so the note
+/// Maps a refused `group` restore onto the response — the `group` half of
+/// [`import_refusal`]. `groups` apply after every batch, so the note
 /// says what already landed; re-POSTing the corrected stream is exact
-/// (batches replace their sources, records their groups).
+/// (batches replace their sources, records their `groups`).
 pub(super) fn restore_refusal(
     state: &AppState,
     refusal: crate::registry::RestoreGroupsError,
@@ -461,7 +461,7 @@ pub(super) fn restore_refusal(
 /// one record landed" question a batch's own refusal has to answer).
 /// Every batch of the stream already landed durably by the time a
 /// schema record is even reached; nothing past this record (later
-/// schemas, every group) applies.
+/// schemas, every `group`) applies.
 pub(super) fn schema_import_refusal(
     state: &AppState,
     context: &str,
@@ -604,7 +604,7 @@ fn injected_schema_loop_expiry() -> bool {
 /// second phase of the stream, which previously had no deadline check
 /// at all: a stream carrying many `taguru_schema` records could run
 /// past `TAGURU_REQUEST_TIMEOUT_SECS` entirely, since each record's
-/// `put_schema` (context hydration plus two fsyncs) is not free.
+/// `put_schema` (`context` hydration plus two fsyncs) is not free.
 /// Accounting mirrors [`schema_import_refusal`]'s own: `durable_batches`
 /// names only the batch count (a schema is not a batch), `integrity`
 /// folds in `applied_schemas` too, since an earlier schema record of
@@ -720,7 +720,7 @@ pub(super) fn stream_refusal(
 }
 
 /// The advisory `stream_refusal`'s two halves take when a batch was
-/// refused for being over its context's storage quota (issue #623
+/// refused for being over its `context`'s storage quota (issue #623
 /// finding 6) — shared between the pre-check below and
 /// [`quota_refusal_from_apply`], which reaches the same condition mid-
 /// apply, after the pre-check's own window has passed. Never
@@ -782,24 +782,24 @@ pub(super) fn quota_refusal_from_apply(
 /// (`TAGURU_EMBED_AUTO`) exactly as live writes do.
 ///
 /// `taguru_schema` records (ADR 0009 §13) ride the same stream and
-/// install AFTER every batch, BEFORE any group — a schema record's
-/// context may exist only because a batch of this same body just
-/// created it, and a schema landing before groups restore lets a
-/// group's own member-existence check see the context as its final
-/// self. Each schema record is independent (one context each), so the
+/// install AFTER every batch, BEFORE any `group` — a schema record's
+/// `context` may exist only because a batch of this same body just
+/// created it, and a schema landing before `groups` restore lets a
+/// `group`'s own member-existence check see the `context` as its final
+/// self. Each schema record is independent (one `context` each), so the
 /// first one that fails refuses the request right there; unlike
-/// groups' whole-set validation, later schema records and every group
+/// `groups`' whole-set validation, later schema records and every `group`
 /// are simply never reached.
 ///
 /// `taguru_group` records ride the same stream and apply LAST — after
-/// every batch, wherever they sat — so a group and the member
-/// contexts it names can travel in one body in any order. Restoring a
-/// record replaces the whole group; the set is validated whole and a
-/// refusal applies no group, with every batch already durable.
+/// every batch, wherever they sat — so a `group` and the member
+/// `contexts` it names can travel in one body in any order. Restoring a
+/// record replaces the whole `group`; the set is validated whole and a
+/// refusal applies no `group`, with every batch already durable.
 ///
 /// The response is `{batches: [...]}` in stream order — a single-batch
 /// body answers the same shape with one entry, a stream that carried
-/// schema records adds `schemas: [...]`, and one that carried group
+/// schema records adds `schemas: [...]`, and one that carried `group`
 /// records adds `groups: [...]`. A refusal partway through a stream
 /// stops there — the batches before it landed durably, and because
 /// every batch is retract-then-apply, re-POSTing the whole corrected
@@ -1189,8 +1189,8 @@ pub async fn import_batch(
 /// the graph compacted in memory, so the call still answers 200; see
 /// `image_persisted` on the response for whether the rebuild actually
 /// reached disk. An admin verb (the role table's fail-closed default);
-/// the context's own requests wait out the rebuild, every other
-/// context is untouched. Content is preserved — the response says
+/// the `context`'s own requests wait out the rebuild, every other
+/// `context` is untouched. Content is preserved — the response says
 /// what was shed and what the footprint became.
 pub async fn compact_context(
     State(state): State<AppState>,
@@ -1223,7 +1223,7 @@ pub async fn compact_context(
     }
 }
 
-/// `GET /contexts/{name}/export` — the context back out as the import
+/// `GET /contexts/{name}/export` — the `context` back out as the import
 /// batch stream (docs/import.html): one batch per source in source-id
 /// order, the create block on the first, the alias table on the last,
 /// sourceless weight in a reserved `export:unsourced` batch. The
@@ -1300,12 +1300,12 @@ pub(super) fn export_response(
     }
 }
 
-/// `GET /groups/{name}/export` — the group back out as its import
+/// `GET /groups/{name}/export` — the `group` back out as its import
 /// record: one `taguru_group` line (JSON Lines body, not the JSON
 /// envelope), [`export_context`]'s twin one storey up. `POST /import`
 /// (or `taguru import`) restores it by replacing the whole record, so
 /// re-importing is idempotent; the members must exist at import time,
-/// and batches of the same stream apply first. For a context-scoped
+/// and batches of the same stream apply first. For a `context`-scoped
 /// key the members are the grant's slice, exactly as
 /// `GET /groups/{name}` serves them — the export IS that key's view,
 /// and restoring it elsewhere carries only what the key could see.
@@ -1368,9 +1368,9 @@ mod tests {
     }
 
     /// `true` once `context` has an installed schema, `false` for a
-    /// schema-free (or nonexistent) context — never distinguishes the
+    /// schema-free (or nonexistent) `context` — never distinguishes the
     /// two, since every scenario these tests build already knows which
-    /// contexts exist.
+    /// `contexts` exist.
     fn has_installed_schema(state: &AppState, context: &str) -> bool {
         matches!(state.schema_of(context), Some(Ok(Some(_))))
     }
@@ -1380,7 +1380,7 @@ mod tests {
     /// accounting `import_budget_refusal` uses for the batch loop —
     /// pins `schema_import_budget_refusal`'s arithmetic and field
     /// wiring for the "no batch of THIS stream landed" shape (a
-    /// schema-only stream against pre-existing contexts).
+    /// schema-only stream against pre-existing `contexts`).
     #[tokio::test(flavor = "multi_thread")]
     async fn schema_loop_reports_a_resumable_prefix_when_the_budget_dies_on_the_second_record() {
         let state = scratch_state("schema-loop-budget-no-batches");

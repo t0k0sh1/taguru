@@ -167,7 +167,7 @@ pub(super) struct TraceSteering<'a> {
     /// #759's reuse list, in prompt order with the prompted counts
     /// (empty: first document of a run with no `--vocabulary`).
     pub(super) vocabulary: Vec<VocabularyEntry<'a>>,
-    /// ADR 0015's target-context concept names, as prompted.
+    /// ADR 0015's target-`context` concept names, as prompted.
     pub(super) context_names: &'a [String],
     /// ADR 0009 §11.1's schema block lists; `null` when no schema
     /// block was prompted.

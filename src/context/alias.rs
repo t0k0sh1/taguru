@@ -75,7 +75,7 @@ fn add_alias(
 }
 
 /// A predicted alias-resolution target during pre-flight conflict
-/// checking: either a name already interned in the context, or the
+/// checking: either a name already interned in the `context`, or the
 /// Nth distinct name this same batch's own associations would freshly
 /// intern once applied. The two variants can never compare equal to
 /// each other regardless of payload, so a placeholder index can never
@@ -150,7 +150,7 @@ impl Context {
     /// registry's write path applies them) once `fresh` — names this
     /// same batch's own associations have not yet interned — are
     /// accounted for. Lets an import batch be refused before any of
-    /// its steps mutate the context, instead of discovering the same
+    /// its steps mutate the `context`, instead of discovering the same
     /// rejection after earlier steps already landed. See
     /// [`check_aliases`] for the prediction rules.
     pub fn check_concept_aliases<'a>(
@@ -192,7 +192,7 @@ impl Context {
     /// to a different record (aliasing two existing concepts together
     /// would be a merge, which does not exist — rebuild instead);
     /// [`AliasError::Full`] when the alias table or arena is out of
-    /// space. The context is unchanged on every error.
+    /// space. The `context` is unchanged on every error.
     pub fn add_concept_alias(
         &mut self,
         alias: impl Into<String>,

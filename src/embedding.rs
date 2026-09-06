@@ -7,7 +7,7 @@
 //! OpenAI-compatible `/embeddings` endpoint; absent config disables the
 //! tier and resolve stays purely lexical.
 //!
-//! Vectors are a derived cache of (model × name), kept per context in a
+//! Vectors are a derived cache of (model × name), kept per `context` in a
 //! `{name}.vectors.bin` sidecar — refreshed explicitly (POST
 //! /contexts/{name}/embeddings/refresh), loaded on demand by the
 //! semantic fallback, and discarded wholesale when the model changes —
@@ -114,7 +114,7 @@ pub struct HttpEmbeddings {
 
 /// Transient provider failures retry this many times past the first
 /// attempt, sleeping [`RETRY_INITIAL_BACKOFF`] then five times that.
-/// Small on purpose: the refresh paths hold per-context refresh locks
+/// Small on purpose: the refresh paths hold per-`context` refresh locks
 /// across the round trip, and resolve's caller is an interactive
 /// request — a provider that is down stays down; the retries are for
 /// the blip, not the outage.
@@ -958,7 +958,7 @@ pub fn similarity(a: &[f32], b: &[f32]) -> f32 {
 /// whose graph context changed.
 pub type VectorTable = HashMap<String, (u64, Vec<f32>)>;
 
-/// One context's name vectors: a derived cache keyed by the model that
+/// One `context`'s name vectors: a derived cache keyed by the model that
 /// produced it. Wholesale discarded on model change — vectors from two
 /// models must never be compared.
 #[derive(Debug, Default, Clone)]
@@ -1008,10 +1008,10 @@ impl VectorStore {
 
     /// Like [`VectorStore::load`], but reports a genuine read failure
     /// as `Err(())` instead of folding it into the same empty default
-    /// a cold, never-embedded context also returns — the distinction
+    /// a cold, never-embedded `context` also returns — the distinction
     /// [`AppState::entry_vectors`](crate::registry::AppState) needs to
     /// quarantine a disk hiccup (issue #677 item 3) instead of caching
-    /// its empty answer as if the context were genuinely bare.
+    /// its empty answer as if the `context` were genuinely bare.
     pub fn load_checked(path: &Path) -> Result<Self, ()> {
         match crate::storage::read_sidecar_checked(path, "vector store")? {
             Some(bytes) => Ok(Self::from_bytes(&bytes).unwrap_or_else(|| {
@@ -1139,7 +1139,7 @@ pub const PASSAGE_ANN_THRESHOLD: usize = 10_000;
 /// `SHUTDOWN_POLL` wait on its engine lock.
 const ANN_LOCK_POLL: Duration = Duration::from_millis(50);
 
-/// Paragraph vectors for one context, `{stem}.pvectors.bin`. Unlike
+/// Paragraph vectors for one `context`, `{stem}.pvectors.bin`. Unlike
 /// the gloss [`VectorStore`] this is a FLAT table — one contiguous
 /// `Vec<f32>` of unit rows — because every query scans all of it (a
 /// nearest-neighbor sweep has no point lookups), and at 10⁴–10⁵ rows
@@ -1401,11 +1401,11 @@ impl PassageVectorStore {
 
     /// Like [`PassageVectorStore::load`], but reports a genuine read
     /// failure as `Err(())` instead of folding it into the same empty
-    /// default a cold, never-embedded context also returns — the
+    /// default a cold, never-embedded `context` also returns — the
     /// distinction
     /// [`AppState::entry_passage_vectors`](crate::registry::AppState)
     /// needs to quarantine a disk hiccup (issue #677 item 3) instead of
-    /// caching its empty answer as if the context genuinely had no
+    /// caching its empty answer as if the `context` genuinely had no
     /// passages embedded.
     pub fn load_checked(path: &Path) -> Result<Self, ()> {
         match crate::storage::read_sidecar_checked(path, "passage vector store")? {

@@ -1,4 +1,4 @@
-//! Shared generated context operations for the library and registry tests.
+//! Shared generated `context` operations for the library and registry tests.
 
 use proptest::prelude::*;
 

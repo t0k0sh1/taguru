@@ -34,7 +34,7 @@ MAX_CHUNK_BYTES = 8 * 1024 * 1024
 
 
 def encode_name(name: str) -> str:
-    """Percent-encode one path segment (context names may be any UTF-8)."""
+    """Percent-encode one path segment (``context`` names may be any UTF-8)."""
     from urllib.parse import quote
 
     return quote(name, safe="")
@@ -124,7 +124,7 @@ def unwrap_envelope_full(response: httpx.Response) -> tuple[Any, list[Issue], in
 
     Returns ``(result, issues, schema_violations)`` — the latter two are
     ADR 0009 §8.3's fields, riding *beside* ``result`` on a ``warn``-mode
-    write whose associations violated the context's schema. Both are
+    write whose associations violated the ``context``'s schema. Both are
     empty/zero on every other response (and on servers predating the
     fields), so result-only callers go through ``unwrap_envelope``.
     """

@@ -1,22 +1,22 @@
-//! Disk-backed context registry: the server-side lifecycle around the
-//! library's `Context`. Disk is the source of truth — every context is
+//! Disk-backed `context` registry: the server-side lifecycle around the
+//! library's `Context`. Disk is the source of truth — every `context` is
 //! one image file (`{name}.ctx`, the bytes of `Context::to_bytes`) plus
 //! a sidecar `{name}.meta.json` holding the routing description, the
 //! cache policy flag, and a stats snapshot. The sidecar stays outside
 //! the image on purpose: the image format remains a pure dump of the
 //! network, and server metadata can evolve without bumping it.
 //!
-//! Memory is a cache over that truth, managed at whole-context
+//! Memory is a cache over that truth, managed at whole-`context`
 //! granularity — access locality is per 文脈 (a session works one
-//! context for many queries), and a whole image loads in low
+//! `context` for many queries), and a whole image loads in low
 //! milliseconds. Contexts are registered cold at boot and loaded on
-//! first touch; when the resident estimate of unpinned hot contexts
+//! first touch; when the resident estimate of unpinned hot `contexts`
 //! exceeds the cache budget, the least recently used are flushed and
-//! dropped. Pinned contexts (glossaries and other always-hot 文脈)
+//! dropped. Pinned `contexts` (glossaries and other always-hot 文脈)
 //! load at boot, never count against the budget, and are never evicted.
 //!
 //! Durability: every acknowledged graph write is staged in the
-//! context's write-ahead log (fsynced, before it touches memory), so
+//! `context`'s write-ahead log (fsynced, before it touches memory), so
 //! a crash loses nothing — loading replays whatever the log holds
 //! above the image's watermark. The periodic flusher, eviction, and
 //! graceful shutdown still persist the image; the flush interval is
@@ -27,11 +27,11 @@
 //!
 //! Locking contract: the registry lock guards only the name → entry map
 //! and is held just long enough to look up, insert, or remove; every
-//! context sits behind its own entry lock. A caller clones the entry's
+//! `context` sits behind its own entry lock. A caller clones the entry's
 //! `Arc` and releases the registry immediately, so a slow operation on
-//! one context never blocks the others. Locks here are parking_lot, not
+//! one `context` never blocks the others. Locks here are parking_lot, not
 //! std::sync: a panic while one is held unwinds without poisoning it, so
-//! neither that context nor a sibling nor the registry itself bricks for
+//! neither that `context` nor a sibling nor the registry itself bricks for
 //! the rest of the process. Safety across the panic comes from the
 //! write-ahead log, not the lock — a write is durable once it's staged
 //! and fsynced there, before it ever touches memory, so a panic mid-write
@@ -135,34 +135,34 @@ use wal_replay::{applied_count, apply_in_order, replay_wal_guarded};
 #[cfg(test)]
 use wal_replay::{apply_op, replay_op};
 
-/// Server-side metadata for one context: the prose half of the routing
+/// Server-side metadata for one `context`: the prose half of the routing
 /// directory plus the cache policy flag. `PartialEq` backs
 /// [`AppState::update_meta`]'s changed-check: only a PATCH that
 /// actually changed something bumps the config revision.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ContextMeta {
-    /// What this 文脈 covers, written by whoever creates the context
+    /// What this 文脈 covers, written by whoever creates the `context`
     /// (typically the ingesting LLM). Routing quality depends on it, so
     /// the directory serves it next to stats that cannot go stale.
     pub description: String,
-    /// Pinned contexts stay resident regardless of cache pressure — for
-    /// small, always-hot contexts like glossaries.
+    /// Pinned `contexts` stay resident regardless of cache pressure — for
+    /// small, always-hot `contexts` like glossaries.
     pub pinned: bool,
-    /// Per-context fuzzy-entry floor for resolve; `None` means the
+    /// Per-`context` fuzzy-entry floor for resolve; `None` means the
     /// library default (0.3). Lower admits more distant near-miss
-    /// spellings, higher keeps entry strict. Re-applied to the context
+    /// spellings, higher keeps entry strict. Re-applied to the `context`
     /// on every load, since the image itself carries no config.
     pub dice_floor: Option<f64>,
-    /// Per-context floor for the semantic entry tier (cosine over
+    /// Per-`context` floor for the semantic entry tier (cosine over
     /// glosses); `None` means the calibrated default (0.35). Same
     /// tuning story as `dice_floor`: config lives in the sidecar, never
     /// in the image.
     pub semantic_floor: Option<f32>,
 }
 
-/// Mechanically derived "what is this context about" numbers. Served by
-/// the routing directory so an LLM can pick a context without anything
+/// Mechanically derived "what is this `context` about" numbers. Served by
+/// the routing directory so an LLM can pick a `context` without anything
 /// being loaded or scanned per request; unlike the prose description,
 /// these are recomputed from the network itself and cannot drift.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -226,14 +226,14 @@ where
 }
 
 impl ContextStats {
-    /// How many concepts the mechanical "what is this context about"
+    /// How many concepts the mechanical "what is this `context` about"
     /// summary carries into the routing directory and the
-    /// `.meta.json` sidecar. Enough to characterise a context at a
+    /// `.meta.json` sidecar. Enough to characterise a `context` at a
     /// glance without turning the directory response into a second
     /// graph dump — the directory is a routing aid, not a query
     /// surface. NOT freely retunable: this value rides the PERSISTED
     /// sidecar (`top_concepts`, above), so raising it leaves every
-    /// context written before the change reporting the old count
+    /// `context` written before the change reporting the old count
     /// until its next flush, and lowering it silently truncates on
     /// the next save. A change here is a sidecar-format change, not a
     /// tuning knob.
@@ -278,7 +278,7 @@ impl ContextStats {
     }
 
     /// Fraction of associations that are currently dead weight — the
-    /// same formula [`Context::dead_ratio`] uses, so a hot context
+    /// same formula [`Context::dead_ratio`] uses, so a hot `context`
     /// (recomputed live) and a cold one (this cached snapshot) can
     /// never disagree about it.
     pub fn dead_ratio(&self) -> f64 {
@@ -286,17 +286,17 @@ impl ContextStats {
     }
 }
 
-/// Cumulative usage counters for one context — the "is this context
+/// Cumulative usage counters for one `context` — the "is this `context`
 /// earning its keep" numbers the directory serves. `reads` counts the
 /// retrieval operations (resolve, describe, query, activate, recall,
 /// explore, passage search/lookup), `empty_reads` the subset that
 /// matched nothing, `writes` the data mutations. The two failure modes
-/// of a memory read differently: a context nobody reads was never
+/// of a memory read differently: a `context` nobody reads was never
 /// CHOSEN (description/routing problem), while a high empty share
 /// means it gets chosen but cannot ANSWER (coverage problem).
 ///
 /// Advisory data, deliberately outside the WAL guarantee: counters
-/// live in memory and reach the sidecar when the context flushes for
+/// live in memory and reach the sidecar when the `context` flushes for
 /// other reasons, plus one sweep at graceful shutdown — a crash loses
 /// the increments since then, and reads never cause disk writes.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -310,7 +310,7 @@ pub struct ContextUsage {
     pub last_write_epoch: u64,
 }
 
-/// Change counters for one context — the "has anything changed since I
+/// Change counters for one `context` — the "has anything changed since I
 /// last looked" token a retrieval cache keys on. Three counters rather
 /// than one because the lanes invalidate independently: passage-search
 /// results do not change on graph writes and graph reads do not change
@@ -328,7 +328,7 @@ pub struct ContextUsage {
 ///
 /// Guarantees: within one process every read is live and strictly
 /// monotonic across changes; across a clean shutdown the persisted
-/// values are exact. Across a crash a cold context can briefly serve a
+/// values are exact. Across a crash a cold `context` can briefly serve a
 /// lagging value until its first load catches the graph counter up to
 /// the WAL replay — the same posture as the cold stats snapshot — and
 /// a cache that outlives the process must treat a server restart (and
@@ -385,9 +385,9 @@ fn unix_now() -> u64 {
 }
 
 /// One row of `GET /contexts` — the routing directory an LLM client
-/// reads to decide which context to search, skills-style: a name, the
+/// reads to decide which `context` to search, skills-style: a name, the
 /// prose description, and the mechanical stats that keep it honest.
-/// Stats are live for loaded contexts and the last saved snapshot for
+/// Stats are live for loaded `contexts` and the last saved snapshot for
 /// cold ones.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirectoryEntry {
@@ -395,9 +395,9 @@ pub struct DirectoryEntry {
     pub description: String,
     pub pinned: bool,
     pub loaded: bool,
-    /// Per-context fuzzy-entry floor; null means the default (0.3).
+    /// Per-`context` fuzzy-entry floor; null means the default (0.3).
     pub dice_floor: Option<f64>,
-    /// Per-context semantic floor; null means the default (0.35).
+    /// Per-`context` semantic floor; null means the default (0.35).
     pub semantic_floor: Option<f32>,
     pub stats: ContextStats,
     pub usage: ContextUsage,
@@ -409,7 +409,7 @@ pub struct DirectoryEntry {
     pub revision: ContextRevision,
     /// `off`/`warn`/`strict`, echoed read-only from the installed
     /// schema's own `mode` field (ADR 0009 §7.1) so a client can route
-    /// without a second `GET /schema` call — `null` for a context that
+    /// without a second `GET /schema` call — `null` for a `context` that
     /// never installed one, exactly like `GET /schema`'s own 404
     /// distinguishes the two states (never a bare `"off"` standing in
     /// for "no document"). Also `null`, transiently, for a schema
@@ -421,14 +421,14 @@ pub struct DirectoryEntry {
     pub schema_mode: Option<String>,
 }
 
-/// Whether a context's network is resident. Cold entries keep only
+/// Whether a `context`'s network is resident. Cold entries keep only
 /// their metadata and stats snapshot in memory. Deleted is the
 /// tombstone [`AppState::delete`] leaves for anyone who cloned the
 /// entry's `Arc` out of the registry before the removal — the
 /// flusher's and evictor's snapshots, a looked-up handle racing the
-/// delete. Whoever takes the entry lock next must treat the context
+/// delete. Whoever takes the entry lock next must treat the `context`
 /// as gone: a stale flush that still saw `Hot` here used to recreate
-/// the files of a deleted context, resurrecting it on the next boot.
+/// the files of a deleted `context`, resurrecting it on the next boot.
 enum Slot {
     Hot(Box<Context>),
     Cold,
@@ -537,7 +537,7 @@ pub struct Entry {
     passage_refresh: Mutex<()>,
     /// Usage counters (see [`ContextUsage`]). `usage_dirty` marks
     /// increments the sidecar has not seen yet, so the shutdown sweep
-    /// skips the contexts nobody touched.
+    /// skips the `contexts` nobody touched.
     usage: UsageCounters,
     usage_dirty: AtomicBool,
     /// The passage store's last failed load, while it is being
@@ -565,17 +565,17 @@ pub struct Entry {
     /// `fetch_max` — store batches finish out of order, and a stale
     /// watermark read must never overwrite a newer one.
     passage_revision: AtomicU64,
-    /// Flush-time snapshot of this context's non-WAL on-disk bytes —
+    /// Flush-time snapshot of this `context`'s non-WAL on-disk bytes —
     /// written by [`AppState::refresh_disk_usage`], read by
     /// `gauge_snapshot` (so a scrape never stats the data directory)
     /// and by the storage-quota gates (so a growth write never does
     /// either). Zeros until the first sweep — boot runs one when the
-    /// per-context gauges are on or any storage ceiling is declared;
+    /// per-`context` gauges are on or any storage ceiling is declared;
     /// with neither reader, they stay zeros, unread.
     disk: Mutex<ContextDiskUsage>,
-    /// Schema violations this context's writes have hit since this
+    /// Schema violations this `context`'s writes have hit since this
     /// entry was created (#388, S10 of #218's ADR 0009 split §15) —
-    /// `AppState::note_schema_check`'s per-context half of
+    /// `AppState::note_schema_check`'s per-`context` half of
     /// `taguru_schema_checks_total`, read into `ContextGaugeRow` only
     /// under `TAGURU_METRICS_PER_CONTEXT`. Deliberately not
     /// `ContextUsage`: that struct rides the sidecar and `GET
@@ -815,7 +815,7 @@ impl Entry {
     /// and the paragraph vectors. Always these four together:
     /// [`AppState::enforce_budget`]'s eviction sweep and
     /// `AppState::gauge_snapshot`'s residency gauge must agree on what
-    /// "cached bytes" means, or a context can read over budget to one
+    /// "cached bytes" means, or a `context` can read over budget to one
     /// and under to the other. The graph footprint is deliberately NOT
     /// folded in here — the two callers hold it differently (summed
     /// into the sweep's threshold, reported as its own series by the
@@ -847,7 +847,7 @@ struct EntryInner {
     meta: ContextMeta,
     stats: ContextStats,
     slot: Slot,
-    /// The next WAL sequence number this context hands out. Sequences
+    /// The next WAL sequence number this `context` hands out. Sequences
     /// start at 1 — watermark 0 means "nothing logged is reflected".
     /// Plain u64, not atomic: every touch happens under this entry's
     /// write lock (append and flush both hold it). Meaningful while
@@ -868,7 +868,7 @@ struct EntryInner {
     /// This incarnation's process-unique nonce — the retrieval cache's
     /// answer to delete-and-recreate, which restarts the revision
     /// counters at zero and could otherwise collide a recreated
-    /// context's key with a cached entry of the old incarnation.
+    /// `context`'s key with a cached entry of the old incarnation.
     /// Minted at construction ([`next_cache_identity`]) and re-minted
     /// by `replica_refresh`: a tailed refresh deliberately `max`es the
     /// revision counters (they must never walk backward), which pins
@@ -877,13 +877,13 @@ struct EntryInner {
     /// exactly what a fresh nonce makes unreachable. Never persisted:
     /// the cache it guards dies with the process.
     cache_identity: u64,
-    /// Size of this context's log on disk — the growth signal behind
+    /// Size of this `context`'s log on disk — the growth signal behind
     /// the `taguru_wal_bytes` gauge and the `TAGURU_WAL_MAX_BYTES`
     /// backstop. Advanced on append, re-stat'ed on load, zeroed on
     /// truncation; a log only shrinks after a successful image save,
     /// so sustained growth here means flushes are failing.
     wal_bytes: u64,
-    /// Size of this context's passage log on disk while cold — the same
+    /// Size of this `context`'s passage log on disk while cold — the same
     /// role as `wal_bytes` but for `PassageStore`, which only knows its
     /// own pending bytes while resident. Seeded at scan, refreshed the
     /// moment `evict_entry` drops the store back to cold; `gauge_snapshot`
@@ -900,7 +900,7 @@ struct EntryInner {
     /// it failed and the refusal it produced. While fresh
     /// ([`LOAD_FAILURE_RETRY`]), `ensure_hot` answers the cached
     /// refusal without touching the disk — a permanently corrupt
-    /// context must not cost a full read + parse per request under
+    /// `context` must not cost a full read + parse per request under
     /// client retries. Cleared by the next successful load; never
     /// persisted.
     load_failure: Option<(std::time::Instant, String)>,
@@ -924,7 +924,7 @@ struct EntryInner {
     /// the same durability story `config_revision` already has.
     schema_digest: Option<String>,
     /// The resident, validated schema this digest describes — `None`
-    /// either for a schema-free context (`schema_digest` is also `None`)
+    /// either for a schema-free `context` (`schema_digest` is also `None`)
     /// or for one whose schema is recorded but not yet resolved locally
     /// (a family mid-hydration on a replica, or a rename's freshly
     /// registered entry): [`AppState::schema_of`] tells the two apart
@@ -961,11 +961,11 @@ fn next_cache_identity() -> u64 {
 #[derive(Debug)]
 pub enum CreateError {
     AlreadyExists,
-    /// The name is not usable as a context — currently only the empty
+    /// The name is not usable as a `context` — currently only the empty
     /// string, which would `file_stem` to `""` and land as a bare
     /// `.ctx` file that `scan_data_dir` (keying on the `ctx` extension,
     /// which a leading-dot name has none of) never rediscovers: a
-    /// context that vanishes on the next restart.
+    /// `context` that vanishes on the next restart.
     InvalidName,
     Io(io::Error),
 }
@@ -973,7 +973,7 @@ pub enum CreateError {
 /// Why [`AppState::delete`] refused or could not fully complete —
 /// mirrors [`RenameContextError`]'s shape so the API layer can treat
 /// the two consistently. `MidRename` is a refusal, not a failure: the
-/// context still exists (an in-flight rename's marker still claims
+/// `context` still exists (an in-flight rename's marker still claims
 /// it), so the caller must not treat this the same as the disk trouble
 /// `Io` reports, nor log it as a completed deletion.
 #[derive(Debug)]
@@ -989,21 +989,21 @@ pub enum CreateGroupError {
     /// persist as a bare `.group` file the boot scan (keying on the
     /// extension) never rediscovers.
     InvalidName,
-    /// A listed member is not a registered context — carried by name so
+    /// A listed member is not a registered `context` — carried by name so
     /// the client hears WHICH one. Strict on purpose: an add must never
     /// mint a dangling reference.
     NoSuchContext(String),
-    /// A listed child is not a registered group — the same strictness,
+    /// A listed child is not a registered `group` — the same strictness,
     /// one namespace over. A create can never trip the cycle check
-    /// through this gate: a child naming the group being created is
+    /// through this gate: a child naming the `group` being created is
     /// not registered yet, so it refuses here first.
     NoSuchGroup(String),
     /// The children exist but the shape is not allowed: a cycle, or a
-    /// chain of more than [`groups::MAX_GROUP_DEPTH`] groups.
+    /// chain of more than [`groups::MAX_GROUP_DEPTH`] `groups`.
     Nesting(groups::NestingViolation),
     /// One of the two membership sets would hold more than
     /// [`groups::MAX_GROUP_MEMBERS`] names; carries which one
-    /// ("member contexts" / "child groups"). Judged before existence,
+    /// ("member `contexts`" / "child `groups`"). Judged before existence,
     /// like the request-list caps: a count needs no lookups.
     OverCap(&'static str),
     Io(io::Error),
@@ -1019,7 +1019,7 @@ pub enum UpdateGroupError {
     /// [`CreateGroupError::NoSuchGroup`]'s twin, for `add_groups`.
     NoSuchGroup(String),
     /// [`CreateGroupError::Nesting`]'s twin — and here the cycle arm is
-    /// reachable: the group being updated IS registered, so adding it
+    /// reachable: the `group` being updated IS registered, so adding it
     /// (or an ancestor) as its own child passes the existence gate and
     /// lands in the validator's lap.
     Nesting(groups::NestingViolation),
@@ -1064,7 +1064,7 @@ pub enum PutSchemaError {
     /// `EMPTY_SOURCE`'s own collision wording in [`crate::export::render`]'s
     /// reserved-source-id refusals.
     ReservedAlias(String),
-    /// Loading the context to inspect its live label-alias table
+    /// Loading the `context` to inspect its live label-alias table
     /// failed — mirrors `update_meta`'s own `ensure_hot` failure arm.
     Load(String),
     /// A sidecar or schema-file write failed. The in-memory state has
@@ -1098,23 +1098,23 @@ pub enum RestoreGroupsError {
     /// refuse it first, but the invariant is the registry's.
     InvalidName,
     /// The same record name twice in one set: the set claims two
-    /// truths for one group, and "last wins" would silently discard
+    /// truths for one `group`, and "last wins" would silently discard
     /// the other. The stream and file layers refuse duplicates with
     /// their line and path; this is the registry's own backstop.
     Duplicate(String),
-    /// A member of the named group is not a registered context. As
+    /// A member of the named `group` is not a registered `context`. As
     /// strict as [`CreateGroupError::NoSuchContext`] — batches of the
-    /// same run applied first, so "import contexts and groups
+    /// same run applied first, so "import `contexts` and `groups`
     /// together" satisfies it, and anything else deserves the refusal.
     NoSuchContext { group: String, context: String },
-    /// A child of the named group is neither registered nor in the
+    /// A child of the named `group` is neither registered nor in the
     /// restore set itself (records in one set may reference each other
     /// in any order — the set lands children-first).
     NoSuchChild { group: String, child: String },
     /// [`CreateGroupError::OverCap`]'s twin, judged per record.
     OverCap { group: String, field: &'static str },
-    /// The set's records plus the standing groups would close a cycle
-    /// or stack more than [`groups::MAX_GROUP_DEPTH`] groups.
+    /// The set's records plus the standing `groups` would close a cycle
+    /// or stack more than [`groups::MAX_GROUP_DEPTH`] `groups`.
     Nesting(groups::NestingViolation),
     /// A record would not persist; the `applied` records before it did
     /// (children-first order, so what landed never dangles on what did
@@ -1132,7 +1132,7 @@ pub enum RestoreGroupsError {
 }
 
 impl RestoreGroupsError {
-    /// The group the refusal is about, when it is about one (#863):
+    /// The `group` the refusal is about, when it is about one (#863):
     /// every validation arm and the persistence arm name theirs; an
     /// empty name and the budget running out name none.
     pub fn group(&self) -> Option<&str> {
@@ -1206,7 +1206,7 @@ impl RestoreGroupsError {
     }
 }
 
-/// What restoring one group record amounted to, for the import report:
+/// What restoring one `group` record amounted to, for the import report:
 /// the record now stands either way, and the label says what it
 /// replaced.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1243,7 +1243,7 @@ pub struct CompactOutcome {
     /// Whether the passage log was rewritten too (#437) — dropping
     /// retracted sources' text bytes, which otherwise linger behind
     /// tombstones until the log's own size-triggered compaction.
-    /// `false` when the context has no passage history to rewrite or
+    /// `false` when the `context` has no passage history to rewrite or
     /// the rewrite failed (warned, never fatal — the graph compaction
     /// above it already succeeded). `#[serde(default)]` so `compact
     /// --url` still reads an older server's response.
@@ -1272,9 +1272,9 @@ fn default_image_persisted() -> bool {
     true
 }
 
-/// One context's [`CompactOutcome`] inside a
+/// One `context`'s [`CompactOutcome`] inside a
 /// [`AppState::run_maintenance_compaction`] sweep, named so the sweep's
-/// response can say which contexts it touched.
+/// response can say which `contexts` it touched.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MaintenanceCompactionEntry {
     pub name: String,
@@ -1286,7 +1286,7 @@ pub struct MaintenanceCompactionEntry {
 /// could not compact at all — [`AccessError`] other than
 /// [`AccessError::DeadlineExceeded`], which ends the sweep instead of
 /// producing a skip. Named so the sweep's response can say WHICH
-/// contexts it gave up on and why, rather than only how many landed:
+/// `contexts` it gave up on and why, rather than only how many landed:
 /// before #586 a sweep that failed on every single candidate still
 /// answered `200 {"contexts": [], "deadline_exceeded": false}`,
 /// indistinguishable from a fleet with nothing left to compact.
@@ -1296,7 +1296,7 @@ pub struct MaintenanceCompactionSkip {
     pub error: String,
 }
 
-/// What a `POST /maintenance/compact` sweep accomplished: every context
+/// What a `POST /maintenance/compact` sweep accomplished: every `context`
 /// it compacted, worst dead ratio first, and whether the deadline cut
 /// the sweep short of the full candidate list.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1312,11 +1312,11 @@ pub struct MaintenanceCompactionOutcome {
     pub skipped: Vec<MaintenanceCompactionSkip>,
 }
 
-/// Why an operation on a named context could not run.
+/// Why an operation on a named `context` could not run.
 #[derive(Debug)]
 pub enum AccessError {
     NotFound,
-    /// The context exists but its image could not be loaded from disk.
+    /// The `context` exists but its image could not be loaded from disk.
     Load(String),
     /// The write-ahead log could not durably record the operation;
     /// NOTHING was applied — the client must never hold a 200 the
@@ -1326,12 +1326,12 @@ pub enum AccessError {
     /// `block_in_place` section. Never produced by the CLI binaries —
     /// they pass `Deadline::unbounded()` — only by HTTP handlers.
     DeadlineExceeded,
-    /// The context is at or over its declared storage ceiling
+    /// The `context` is at or over its declared storage ceiling
     /// (`TAGURU_CONTEXT_QUOTAS`), so a growth write was refused —
     /// 507 `storage_full`, the same client contract as the library's
     /// own capacity cap. Deliberately distinct from [`Self::Unpersisted`]:
     /// that 500 means the SERVER is failing to persist (an operator
-    /// problem); this means the TENANT's allotment is spent (retract,
+    /// problem); this means the `context`'s allotment is spent (retract,
     /// compact, or raise the quota).
     QuotaExceeded(String),
 }
@@ -1376,24 +1376,24 @@ pub struct PartialWrite {
     pub full: bool,
 }
 
-/// Default per-context WAL ceiling (`TAGURU_WAL_MAX_BYTES`): a healthy
+/// Default per-`context` WAL ceiling (`TAGURU_WAL_MAX_BYTES`): a healthy
 /// server truncates the log every flush interval, so a log this large
 /// means the image has been failing to save for a long time — refuse
 /// new writes rather than grow without bound.
 pub const DEFAULT_WAL_MAX_BYTES: usize = 256 * 1024 * 1024;
 
-/// Default ceiling for a context's PASSAGE log
+/// Default ceiling for a `context`'s PASSAGE log
 /// (`TAGURU_PASSAGES_WAL_MAX_BYTES`). Larger than the graph's: the
 /// ratio-triggered compaction legitimately lets the log grow to about
 /// the snapshot's own size before compacting, so this is sized as a
 /// backstop for a compaction that is failing outright, not as a bound
-/// any healthy context ever nears (the refusal additionally requires
+/// any healthy `context` ever nears (the refusal additionally requires
 /// the log to have outgrown 2× the last snapshot — see
 /// `PassageStore::store`).
 pub const DEFAULT_PASSAGES_WAL_MAX_BYTES: usize = 1024 * 1024 * 1024;
 
 /// Default trigger for ratio-triggered auto-compaction (issue #135):
-/// compact once a context's dead ratio strictly exceeds this — dead
+/// compact once a `context`'s dead ratio strictly exceeds this — dead
 /// weight outgrowing live content, the graph-side restatement of the
 /// passages store's own `COMPACT_RATIO = 1` (pending log outgrows the
 /// snapshot). Edges, not bytes, because the graph's dead weight has an
@@ -1403,19 +1403,19 @@ pub const DEFAULT_PASSAGES_WAL_MAX_BYTES: usize = 1024 * 1024 * 1024;
 pub const DEFAULT_AUTO_COMPACT_RATIO: f64 = 0.5;
 
 /// Default resident cache budget (`TAGURU_CACHE_BYTES`) — the ceiling
-/// [`AppState::enforce_budget`] evicts unpinned contexts down to.
+/// [`AppState::enforce_budget`] evicts unpinned `contexts` down to.
 /// Sized so an ordinary single-node deploy never touches the eviction
-/// path at all: the sweep's cost (an O(contexts) snapshot plus five
+/// path at all: the sweep's cost (an O(`contexts`) snapshot plus five
 /// lock acquisitions per candidate) is only paid by a fleet that
 /// genuinely outgrows it, while 512 MiB still fits comfortably beside
 /// the process's other allocations on the smallest container shape
-/// the README's rollout note assumes. Pinned contexts live OUTSIDE
+/// the README's rollout note assumes. Pinned `contexts` live OUTSIDE
 /// this budget (they are never eviction candidates), so a deployment
 /// that pins everything is not bounded by it and should size the host
 /// by the sum of its pinned footprints instead.
 pub const DEFAULT_CACHE_BYTES: usize = 512 * 1024 * 1024;
 
-/// One context's declared ceilings (issue #136), parsed from the
+/// One `context`'s declared ceilings (issue #136), parsed from the
 /// `TAGURU_CONTEXT_QUOTAS` JSON env. Both fields optional — a
 /// declaration may cap disk, cache share, or both — but never neither
 /// (the parser refuses an empty quota). `deny_unknown_fields` because a
@@ -1423,30 +1423,30 @@ pub const DEFAULT_CACHE_BYTES: usize = 512 * 1024 * 1024;
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContextQuota {
-    /// On-disk ceiling across the context's whole file family — the
+    /// On-disk ceiling across the `context`'s whole file family — the
     /// same sum `taguru_context_disk_bytes` serves. At or over it,
     /// growth writes are refused with 507 `storage_full`; shrink paths
     /// (retract, unalias, compact, delete) stay open — they are how a
-    /// tenant gets back under.
+    /// `context` gets back under.
     #[serde(default)]
     pub storage_bytes: Option<u64>,
     /// Maximum resident share within the global `TAGURU_CACHE_BYTES`:
     /// not a reservation — slack stays usable by anyone — but under
-    /// pressure a context past this is evicted before any compliant
-    /// one, so the eviction damage one saturating context can inflict
+    /// pressure a `context` past this is evicted before any compliant
+    /// one, so the eviction damage one saturating `context` can inflict
     /// on the rest is bounded by its ceiling. Pinning wins over this:
-    /// a pinned context never enters the sweep at all.
+    /// a pinned `context` never enters the sweep at all.
     #[serde(default)]
     pub cache_bytes: Option<u64>,
 }
 
-/// Parses `TAGURU_CONTEXT_QUOTAS` — one JSON object mapping context
+/// Parses `TAGURU_CONTEXT_QUOTAS` — one JSON object mapping `context`
 /// names to [`ContextQuota`]s, the same declarative-policy shape as
 /// `TAGURU_KEY_SCOPES`. And the same failure posture: a deployment that
 /// DECLARED quotas must not run without them, so any parse or
 /// validation error refuses boot (the caller exits) instead of the
-/// env module's usual warn-and-default. Naming a context that does not
-/// exist yet is fine — contexts are created at runtime, and the
+/// env module's usual warn-and-default. Naming a `context` that does not
+/// exist yet is fine — `contexts` are created at runtime, and the
 /// declaration simply waits for the name.
 pub fn parse_context_quotas(json: Option<&str>) -> Result<HashMap<String, ContextQuota>, String> {
     let Some(json) = json else {
@@ -1505,7 +1505,7 @@ pub struct BootConfig {
     pub semantic_floor: Option<f32>,
     pub per_context_metrics: PerContextMetrics,
     pub auto_compact: Option<f64>,
-    /// Per-context ceilings (issue #136). Empty from
+    /// Per-`context` ceilings (issue #136). Empty from
     /// [`BootConfig::from_env`]: the declaration is policy for the
     /// HTTP surface, so only `serve` parses `TAGURU_CONTEXT_QUOTAS`
     /// (refusing boot on a broken one) and assigns it here — the
@@ -1513,7 +1513,7 @@ pub struct BootConfig {
     pub context_quotas: HashMap<String, ContextQuota>,
 }
 
-/// Default ceiling on how many rows per context get a vector
+/// Default ceiling on how many rows per `context` get a vector
 /// (`TAGURU_PASSAGE_VECTOR_LIMIT`; a row is a paragraph text or one of
 /// its doc2query questions). The vector lane's footprint is
 /// rows × dimensions × 4 bytes — 20 000 rows of a 1536-dim model
@@ -1558,7 +1558,7 @@ pub struct PassageSearch {
 }
 
 /// What one search's source filter (#167) selected: how many sources
-/// were eligible to answer, out of how many the context stores — the
+/// were eligible to answer, out of how many the `context` stores — the
 /// numbers the response plan reports so an empty page under a narrow
 /// filter is diagnosable without a second call.
 #[derive(Debug, Clone, Copy)]
@@ -1653,7 +1653,7 @@ pub(crate) enum VectorLaneStatus {
     /// discards and re-embeds them, exactly like a model change.
     WidthChanged { stored: usize, current: usize },
     /// The sweep ran, dropping matches below `floor` — the effective
-    /// value after the override → context setting → server default
+    /// value after the override → `context` setting → server default
     /// chain, the one threshold a caller cannot reconstruct alone.
     Ran { floor: f32 },
 }
@@ -1676,7 +1676,7 @@ impl VectorLaneStatus {
 
 /// The outcome of resolving one `(source, paragraph index)` citation:
 /// found, or which half of the lookup missed. Kept distinct from the
-/// outer `Option<io::Result<_>>` (context-absent / I/O failure), which
+/// outer `Option<io::Result<_>>` (`context`-absent / I/O failure), which
 /// stays reserved for the store itself being unreachable.
 #[derive(Debug)]
 pub(crate) enum CitationLookup {
@@ -1711,7 +1711,7 @@ struct FusedHit {
 /// The outcome of locating a search-explain target, in
 /// [`CitationLookup`]'s shape: the non-`Explained` arms end the
 /// explanation before any scoring runs, and the outer
-/// `Option<io::Result<_>>` stays reserved for context-absent /
+/// `Option<io::Result<_>>` stays reserved for `context`-absent /
 /// store-unreachable.
 #[cfg_attr(test, derive(Debug))]
 pub(crate) enum PassageExplainLookup {
@@ -1934,7 +1934,7 @@ pub(crate) enum GlossLaneReport {
     /// the next refresh discards and re-embeds them.
     WidthChanged { stored: usize, current: usize },
     /// The namespace holds no gloss vectors yet — no refresh has run
-    /// (or none since this context gained its vocabulary).
+    /// (or none since this `context` gained its vocabulary).
     EmptyTable,
     /// The provider refused the cue.
     QueryEmbeddingFailed(String),
@@ -1952,7 +1952,7 @@ pub(crate) enum GlossLaneReport {
 }
 
 /// What one passage embedding refresh accomplished: rows newly
-/// embedded, rows now in the sidecar, and rows the per-context limit
+/// embedded, rows now in the sidecar, and rows the per-`context` limit
 /// cut off. Text rows and doc2query question rows count alike in all
 /// three — the limit itself is row-denominated, so `skipped_over_limit`
 /// is exactly how far it fell short, not a paragraph count.
@@ -2019,20 +2019,20 @@ pub struct BootOptions {
     pub passage_vector_limit: usize,
     pub embed_parallel: usize,
     pub default_semantic_floor: Option<f32>,
-    /// Whether (and how much of) the per-context gauge families the
+    /// Whether (and how much of) the per-`context` gauge families the
     /// scrape carries — see [`PerContextMetrics`]. Off skips the
     /// flush-time disk sweeps entirely, not just the render.
     pub per_context_metrics: PerContextMetrics,
     /// Ratio-triggered auto-compaction (issue #135): `Some(ratio)`
-    /// makes each flusher tick compact the worst context whose dead
+    /// makes each flusher tick compact the worst `context` whose dead
     /// ratio strictly exceeds `ratio` (at most one per tick, behind
     /// the heavy-ops permit its caller takes); `None` restores the
     /// manual-only posture. Defaults on at
     /// [`DEFAULT_AUTO_COMPACT_RATIO`], matching the passages store's
     /// own unasked self-compaction.
     pub auto_compact: Option<f64>,
-    /// Per-context storage/cache ceilings (issue #136), keyed by
-    /// context name. Empty means no context is capped — the default,
+    /// Per-`context` storage/cache ceilings (issue #136), keyed by
+    /// `context` name. Empty means no `context` is capped — the default,
     /// and the only shape the offline commands ever pass.
     pub context_quotas: HashMap<String, ContextQuota>,
     /// Present when replication is on: the shipper's progress map,
@@ -2043,7 +2043,7 @@ pub struct BootOptions {
     /// deliberately does not consult it.
     pub(crate) ship_progress: Option<Arc<crate::ship::ShipProgress>>,
     /// Present when this boot hydrates lazily from the bucket (issue
-    /// #128): boot registers the manifest's contexts alongside the
+    /// #128): boot registers the manifest's `contexts` alongside the
     /// scanned ones, and every load materializes its family through
     /// [`crate::hydrate::Hydrator::ensure_context`] first.
     pub(crate) hydrator: Option<Arc<crate::hydrate::Hydrator>>,
@@ -2188,19 +2188,19 @@ impl BootConfig {
 /// sweeps: `StateInner::resident_estimate` (vector/passage/BM25
 /// residency drifts between per-entry recounts, which only keep the
 /// GRAPH term exact) and `StateInner::budget_saturated`. 64 buys back
-/// the O(contexts) sweep — a snapshot plus five lock acquisitions per
-/// context — that ran on EVERY request before the gate existed, while
+/// the O(`contexts`) sweep — a snapshot plus five lock acquisitions per
+/// `context` — that ran on EVERY request before the gate existed, while
 /// keeping the worst-case unbudgeted cache overshoot to one sweep
 /// period of growth. It is wrong in either direction if the workload's
-/// shape changes: a deployment whose contexts each hold hundreds of
+/// shape changes: a deployment whose `contexts` each hold hundreds of
 /// MiB of untracked vector bytes wants it smaller (64 ops of drift can
 /// itself exceed the whole budget), and one with tens of thousands of
-/// registered contexts wants it larger (the sweep itself becomes the
+/// registered `contexts` wants it larger (the sweep itself becomes the
 /// cost being amortized).
 const BUDGET_SWEEP_PERIOD: u64 = 64;
 
 /// Shared server state: the data directory, the cache budget, and the
-/// context registry.
+/// `context` registry.
 #[derive(Clone)]
 pub struct AppState(Arc<StateInner>);
 
@@ -2217,9 +2217,9 @@ impl Drop for MaintenanceGuard {
 }
 
 /// Floor for the semantic entry tier when neither the call, the
-/// context, nor the server (`TAGURU_SEMANTIC_FLOOR`) sets one.
+/// `context`, nor the server (`TAGURU_SEMANTIC_FLOOR`) sets one.
 /// Calibrated against text-embedding-3-large with GLOSSED names
-/// (name + graph context): true matches land at ~0.44–0.58 — jargon
+/// (name + graph `context`): true matches land at ~0.44–0.58 — jargon
 /// paraphrases included (醸造責任者×杜氏 0.53, 質問形「酒造りの責任者は誰」
 /// 0.58, アップル×りんご 0.45) — while the noise band drops to ~0.17
 /// (自動車×杜氏グロス 0.09, 自動車×りんごグロス 0.17), far better
@@ -2227,7 +2227,7 @@ impl Drop for MaintenanceGuard {
 /// matches with ~2× margin over noise.
 ///
 /// The right floor is a property of the EMBEDDING MODEL, not of any
-/// context: amazon.titan-embed-text-v2 (512d), for one, puts Japanese
+/// `context`: amazon.titan-embed-text-v2 (512d), for one, puts Japanese
 /// true matches at ~0.2–0.3 over a ~0.15 noise band, so 0.35 silently
 /// discards its correct answers — that deployment wants
 /// `TAGURU_SEMANTIC_FLOOR≈0.2` next to its `TAGURU_EMBED_MODEL`.
@@ -2259,12 +2259,12 @@ struct PendingNames {
     /// then (unlocked) clears leftovers and fsyncs the fresh file
     /// family; without this set the registry lock would have to stay
     /// held across that disk work, stalling every operation on every
-    /// context behind one create's fsyncs. Entered under the registry
+    /// `context` behind one create's fsyncs. Entered under the registry
     /// guard, left in the critical section that registers the entry.
     creates: HashSet<String>,
     /// Both the `from` and `to` names of an in-flight rename — reserved
     /// before the marker is written, released only once the rename's
-    /// last step (the group membership rewrite) lands. `create` and
+    /// last step (the `group` membership rewrite) lands. `create` and
     /// `delete` both refuse a name reserved here: a create under `to`
     /// would collide with the files about to land there, and a delete
     /// of either name would race the move or strand the marker.
@@ -2278,26 +2278,26 @@ struct StateInner {
     /// life of the state, released by the OS when the last clone
     /// drops or the process dies. See [`lock_data_dir`].
     _dir_lock: fs::File,
-    /// Resident-bytes budget for unpinned hot contexts, enforced after
-    /// every operation by evicting least-recently-used contexts. The
-    /// most recently used context is never evicted, so one context
+    /// Resident-bytes budget for unpinned hot `contexts`, enforced after
+    /// every operation by evicting least-recently-used `contexts`. The
+    /// most recently used `context` is never evicted, so one `context`
     /// larger than the whole budget still works — it just stays alone.
     cache_bytes: usize,
     /// BTreeMap keeps the directory listing (and `directory_page`'s
     /// keyset seek) in name order for free — the same reason `groups`
     /// below does.
     registry: RwLock<BTreeMap<String, Arc<Entry>>>,
-    /// Groups: bundles of context names and child-group names (a
-    /// shallow DAG, at most [`groups::MAX_GROUP_DEPTH`] groups tall and
+    /// Groups: bundles of `context` names and child-`group` names (a
+    /// shallow DAG, at most [`groups::MAX_GROUP_DEPTH`] `groups` tall and
     /// never cyclic, each set at most [`groups::MAX_GROUP_MEMBERS`]
     /// names), each persisted as one `{stem}.group` file. Small enough
     /// to stay resident in full, so one lock over the whole map
     /// suffices — and it is held across the record's own fsync on
-    /// writes. That fsync therefore stalls group READS too (the
-    /// directory, and any search that names a group) — briefly, and
-    /// only when a group write is in flight — but never a context
-    /// operation: a request that names no group never touches this
-    /// lock (the cross-context searches skip group resolution for an
+    /// writes. That fsync therefore stalls `group` READS too (the
+    /// directory, and any search that names a `group`) — briefly, and
+    /// only when a `group` write is in flight — but never a `context`
+    /// operation: a request that names no `group` never touches this
+    /// lock (the cross-`context` searches skip `group` resolution for an
     /// empty list). BTreeMap keeps the directory listing in name order
     /// for free.
     groups: RwLock<BTreeMap<String, GroupRecord>>,
@@ -2321,7 +2321,7 @@ struct StateInner {
     /// shared-clone shape — one instance the provider consults and the
     /// registry reads for `taguru_rerank_breaker_*` on /metrics.
     rerank_breaker: Option<crate::breaker::ProviderBreaker>,
-    /// Fallback semantic floor when neither the call nor the context
+    /// Fallback semantic floor when neither the call nor the `context`
     /// sets one — the server default ([`DEFAULT_SEMANTIC_FLOOR`] unless
     /// `TAGURU_SEMANTIC_FLOOR` recalibrates it for the configured
     /// embedding model).
@@ -2332,8 +2332,8 @@ struct StateInner {
     /// (and so the model) is fixed at boot.
     cue_cache: Mutex<CueCache>,
     /// The output width the provider most recently produced, and when
-    /// — shared across every context because the width is a property
-    /// of the PROVIDER, not of any one context's data. Lets a refresh
+    /// — shared across every `context` because the width is a property
+    /// of the PROVIDER, not of any one `context`'s data. Lets a refresh
     /// skip its width probe (`embeddings.rs`) when a recent-enough
     /// observation already agrees with what is carried, instead of
     /// paying a provider round trip on every no-op pass. See
@@ -2355,7 +2355,7 @@ struct StateInner {
     /// handlers, middleware, the flusher task — increments the same
     /// counters.
     metrics: Metrics,
-    /// Whether acknowledged graph writes are staged in the per-context
+    /// Whether acknowledged graph writes are staged in the per-`context`
     /// WAL before they apply. Off restores the pre-WAL posture:
     /// durability bounded by the flush interval. Replay always runs
     /// regardless — a log left behind by an earlier WAL-enabled run
@@ -2368,19 +2368,19 @@ struct StateInner {
     /// completed batch still heals a stale marker a marker-enabled run
     /// left behind.
     import_markers_enabled: bool,
-    /// Per-context ceiling on the log (`TAGURU_WAL_MAX_BYTES`, 0 =
+    /// Per-`context` ceiling on the log (`TAGURU_WAL_MAX_BYTES`, 0 =
     /// unlimited). The log only truncates after a successful image
     /// save, so a persistently failing flush would otherwise grow it
     /// without bound; past the cap new writes are refused
     /// ([`AccessError::Unpersisted`]) instead.
     wal_max_bytes: usize,
-    /// Same backstop for each context's passage log
+    /// Same backstop for each `context`'s passage log
     /// (`TAGURU_PASSAGES_WAL_MAX_BYTES`, 0 = unlimited), handed to the
     /// store on load; it refuses stores only when compaction is
     /// demonstrably stuck.
     passages_wal_max_bytes: usize,
     /// Whether paragraphs get embedded (`TAGURU_EMBED_PASSAGES`) and
-    /// how many per context at most (`TAGURU_PASSAGE_VECTOR_LIMIT`).
+    /// how many per `context` at most (`TAGURU_PASSAGE_VECTOR_LIMIT`).
     embed_passages: bool,
     passage_vector_limit: usize,
     /// Worker threads dispatching each 128-item embedding chunk to the
@@ -2388,7 +2388,7 @@ struct StateInner {
     /// old strictly-sequential behavior). Raise to match the provider's
     /// rate limit, not the machine's core count — ureq's calls are
     /// synchronous, so this is the only lever for provider-side
-    /// concurrency. Sizes both the outer per-context worker pool (the
+    /// concurrency. Sizes both the outer per-`context` worker pool (the
     /// flush tick's `parallel_map`) and the inner per-chunk one
     /// (`dispatch_chunks_concurrently`); `embed_provider_slots` below is
     /// what keeps those two from multiplying past it.
@@ -2396,7 +2396,7 @@ struct StateInner {
     /// The actual global ceiling on concurrent provider calls from a
     /// refresh — sized to `embed_parallel`, acquired around every
     /// `timed_embed_for_refresh` call. Refresh dispatch is nested (the
-    /// flush tick's per-context pool fans out into each context's own
+    /// flush tick's per-`context` pool fans out into each `context`'s own
     /// per-chunk pool), so without this a busy tick could reach
     /// `embed_parallel²` concurrent calls; this permit is what makes
     /// `embed_parallel` the true process-wide bound the field above
@@ -2405,7 +2405,7 @@ struct StateInner {
     /// never part of the multiplication this bounds, and gating it here
     /// would queue interactive searches behind bulk refresh work.
     embed_provider_slots: Semaphore,
-    /// Whether (and how much of) the per-context gauge families the
+    /// Whether (and how much of) the per-`context` gauge families the
     /// scrape carries (`TAGURU_METRICS_PER_CONTEXT`, issue #137). Read
     /// twice: [`AppState::refresh_disk_usage`] skips its stat sweep on
     /// `Off` — unless a declared storage quota needs it — and
@@ -2417,13 +2417,13 @@ struct StateInner {
     /// which the flusher tick calls; a replica never consults it
     /// because a replica runs no flusher at all.
     auto_compact: Option<f64>,
-    /// Declared per-context ceilings (`TAGURU_CONTEXT_QUOTAS`, issue
+    /// Declared per-`context` ceilings (`TAGURU_CONTEXT_QUOTAS`, issue
     /// #136). Storage ceilings gate the three growth entrances
     /// ([`AppState::logged_write`], [`AppState::store_passages`], the
     /// import loop's per-batch pre-check) and widen
     /// [`AppState::refresh_disk_usage`]'s sweep condition; cache
     /// ceilings reorder [`AppState::enforce_budget`]'s eviction. Both
-    /// surface on the per-context gauge rows. Empty on every offline
+    /// surface on the per-`context` gauge rows. Empty on every offline
     /// command and on a replica's storage side (writes are refused
     /// there before any gate) — though a replica's eviction ordering
     /// honors cache ceilings like anyone else's.
@@ -2474,7 +2474,7 @@ struct StateInner {
     budget_ops: AtomicU64,
     /// Set when the last full sweep ran out of unpinned, non-`except`
     /// candidates before `total` fit under `cache_bytes` — an
-    /// over-budget context too big to evict alongside `except` (or one
+    /// over-budget `context` too big to evict alongside `except` (or one
     /// whose save keeps failing), not measurement drift. Paired with
     /// `budget_saturated_except`: the cheap gate only treats this as a
     /// reason to skip a later off-beat sweep when that later call's
@@ -2482,8 +2482,8 @@ struct StateInner {
     /// DIFFERENT `except` gets its own full sweep immediately, because
     /// excluding a different candidate can trivially resolve what
     /// excluding this one could not (an ordinary "just wrote to a
-    /// context bigger than the whole budget" write followed by a read
-    /// of any OTHER context must still evict promptly). Left set for
+    /// `context` bigger than the whole budget" write followed by a read
+    /// of any OTHER `context` must still evict promptly). Left set for
     /// the same `except` indefinitely, this would pin the cheap gate
     /// open forever for that one caller: [`BUDGET_SWEEP_PERIOD`]'s
     /// forced sweep re-evaluates it exactly like `resident_estimate`,
@@ -2795,7 +2795,7 @@ impl AppState {
     }
 
     /// Whether a refresh may skip its own width probe: the provider's
-    /// most recently observed output width, from ANY context's embed
+    /// most recently observed output width, from ANY `context`'s embed
     /// call, is both fresh (`WIDTH_OBSERVATION_TRUST`) and equal to
     /// `carried` — the width this refresh's own sidecar already holds.
     /// Deliberately one-sided: a stale-or-absent observation, or one
@@ -2949,7 +2949,7 @@ impl AppState {
         }
     }
 
-    /// Advances a context's config revision after an embedding refresh
+    /// Advances a `context`'s config revision after an embedding refresh
     /// published vectors that differ from what was served before — and
     /// persists the sidecar so the bump survives a restart. Called
     /// AFTER the publish (never under the refresh's shared fence — this
@@ -2984,14 +2984,14 @@ impl AppState {
         }
     }
 
-    /// Runs a read-only operation on one context, loading it first if
-    /// cold. A hot context is served under the SHARED lock, so
-    /// concurrent reads of one context run in parallel — a long explore
-    /// no longer makes every recall on the same context queue behind
+    /// Runs a read-only operation on one `context`, loading it first if
+    /// cold. A hot `context` is served under the SHARED lock, so
+    /// concurrent reads of one `context` run in parallel — a long explore
+    /// no longer makes every recall on the same `context` queue behind
     /// it. Only a cold load (and every write) takes the exclusive path;
     /// the cold load is real disk IO plus full-image validation, so it
     /// steps off the async runtime (see [`offload`]) — a post-restart
-    /// burst of reads against distinct cold contexts must not consume
+    /// burst of reads against distinct cold `contexts` must not consume
     /// the worker pool on synchronous loads.
     pub fn read_context<T>(
         &self,
@@ -3064,7 +3064,7 @@ impl AppState {
         }
     }
 
-    /// Runs a mutating operation on one context, loading it first if
+    /// Runs a mutating operation on one `context`, loading it first if
     /// cold, and marks it dirty — the raw primitive under the tests.
     /// HTTP-reachable mutations go through [`AppState::logged_write`]
     /// instead so the WAL sees them; a test mutation was never
@@ -3146,7 +3146,7 @@ impl AppState {
 /// pass) — on every call rather than reading the cached `inner.stats`
 /// [`Slot::Cold`] uses, and that recompute is not just an unclosed
 /// optimization: `ContextStats::dead_ratio`'s own doc promises a hot
-/// context (recomputed live) and a cold one (this cached snapshot)
+/// `context` (recomputed live) and a cold one (this cached snapshot)
 /// never disagree, and `compact --dry-run`'s doc names the same
 /// "live-for-hot, snapshot-for-cold" contract as what `GET /contexts`
 /// serves — reading `inner.stats` for a Hot entry here would break
@@ -3185,7 +3185,7 @@ fn describe_entry(name: String, entry: &Entry) -> Option<DirectoryEntry> {
     })
 }
 
-/// The scan-side decode shared by the context and group sweeps: a
+/// The scan-side decode shared by the `context` and `group` sweeps: a
 /// discovered file's stem and the entity name it encodes, or `None`
 /// (logged) when the name does not decode — one function, so the two
 /// scans cannot drift on what "undecodable" means.
@@ -3202,9 +3202,9 @@ pub(crate) fn scanned_stem_and_name(path: &Path) -> Option<(String, String)> {
 
 /// `sweep_membership`'s replace-not-remove twin: renames `from` to
 /// `to` wherever it appears in the chosen set field, persisting each
-/// touched record. Used both live (a context or group rename's last
+/// touched record. Used both live (a `context` or `group` rename's last
 /// step) and at boot (resuming a rename whose marker survived a
-/// crash) — in both cases the caller already holds the groups write
+/// crash) — in both cases the caller already holds the `groups` write
 /// lock and must call this BEFORE `reconcile_groups`, which would
 /// otherwise see `from` as a dangling reference (nothing registered
 /// under that name any more) and drop it instead of carrying it
@@ -3247,8 +3247,8 @@ fn rename_in_membership(
 /// Retires a rename's durable marker once its membership rewrite is
 /// known to be settled, one way or the other — the single policy every
 /// [`rename_in_membership`] caller must apply, shared here so it is
-/// not reimplemented at each of the four call sites (a live context
-/// rename, a live group rename, and boot's own resume of each):
+/// not reimplemented at each of the four call sites (a live `context`
+/// rename, a live `group` rename, and boot's own resume of each):
 /// `persisted` removes the marker (through the same
 /// [`remove_persisted_file`] choke point every other unlink in the
 /// registry goes through, so a test's fault injector sees it); not
@@ -3269,8 +3269,8 @@ fn retire_rename_marker(marker: &Path, persisted: bool, from: &str, to: &str, wh
 
 /// How long a failed load's refusal is answered from memory before the
 /// disk is tried again. Long enough that a client retry storm against
-/// one broken context cannot grind the disk; short enough that
-/// restoring the files heals the context without a restart.
+/// one broken `context` cannot grind the disk; short enough that
+/// restoring the files heals the `context` without a restart.
 const LOAD_FAILURE_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Whether a remembered load failure (graph or passages) is still
@@ -3290,10 +3290,10 @@ fn still_quarantined(failed_at: &std::time::Instant) -> bool {
 
 /// How long a provider's most recently observed output width is
 /// trusted for skipping a refresh's own width probe (issue #677 item
-/// 2). Long enough that a busy, gloss-stable context stops paying a
+/// 2). Long enough that a busy, gloss-stable `context` stops paying a
 /// provider round trip on every 5s flush tick; short enough that a
 /// genuine backend swap is still caught well within a minute even for
-/// a context whose own writes never trigger a real embed.
+/// a `context` whose own writes never trigger a real embed.
 const WIDTH_OBSERVATION_TRUST: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Whether a remembered width observation is still within its trust
@@ -3315,9 +3315,9 @@ fn width_observation_fresh(observed_at: &std::time::Instant) -> bool {
 ///
 /// A failed load is remembered: for the next [`LOAD_FAILURE_RETRY`]
 /// this answers the same refusal without re-reading anything, so a
-/// permanently corrupt context costs one read per interval instead of
+/// permanently corrupt `context` costs one read per interval instead of
 /// one per request. The heal paths stay what they were — restore the
-/// files and the next retry loads, or DELETE the context.
+/// files and the next retry loads, or DELETE the `context`.
 fn ensure_hot(
     data_dir: &Path,
     name: &str,

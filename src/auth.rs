@@ -6,10 +6,10 @@
 //! new key, move callers, drop the old).
 //!
 //! Authorization rides on top: `TAGURU_KEY_SCOPES` grants each key a
-//! ROLE (read ⊂ write ⊂ admin) and optionally a context list, and
+//! ROLE (read ⊂ write ⊂ admin) and optionally a `context` list, and
 //! [`enforce_authorization`] holds every request — the in-process MCP
 //! dispatch included — to that grant. A key the variable does not
-//! name keeps the historical full grant (admin over every context),
+//! name keeps the historical full grant (admin over every `context`),
 //! so existing deployments change nothing by upgrading.
 //!
 //! The whole table hot-reloads ([`reload_keyring`], driven by SIGHUP
@@ -36,7 +36,7 @@ use crate::api;
 /// Paths that answer without credentials. `/live` (liveness) and
 /// `/health` (readiness — 503 while the write path is degraded) are
 /// the orchestrator probes and must be reachable unconfigured.
-/// `/metrics` carries only aggregates and route templates (no context
+/// `/metrics` carries only aggregates and route templates (no `context`
 /// names, no content), and exempting it keeps scrape configs trivial.
 /// `/version` (ADR 0005 §6) must answer before an SDK's compatibility
 /// preflight has any credential to send, and carries nothing more
@@ -98,9 +98,9 @@ pub struct AuthKey(pub Arc<str>);
 
 /// What a key may do, ordered by inclusion: `Admin` ⊃ `Write` ⊃
 /// `Read`. Read is the retrieval loop; Write adds the ingest loop
-/// (create contexts, assert, store passages, heal aliases, retract
+/// (create `contexts`, assert, store passages, heal aliases, retract
 /// and re-sync its sources, refresh embeddings); Admin adds the
-/// operator verbs (delete contexts, bulk import, flush).
+/// operator verbs (delete `contexts`, bulk import, flush).
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Role {
     Read,
@@ -118,8 +118,8 @@ impl Role {
     }
 }
 
-/// One key's grant: its role, and the contexts it may touch (`None` =
-/// every context). The default — and the grant of any key
+/// One key's grant: its role, and the `contexts` it may touch (`None` =
+/// every `context`). The default — and the grant of any key
 /// `TAGURU_KEY_SCOPES` does not name — is exactly what every key
 /// could do before scopes existed: admin, everywhere.
 #[derive(Clone, Debug, PartialEq)]
@@ -247,8 +247,8 @@ impl Keyring {
     /// grants: `{"ci": "read", "bot": {"role": "write", "contexts":
     /// ["sake"]}}`. Refusals are boot refusals, keyring-style: a scope
     /// naming no configured key is a typo that would silently guard
-    /// nobody, and an empty contexts list would grant nothing at all —
-    /// omitting the field is how "every context" is said.
+    /// nobody, and an empty `contexts` list would grant nothing at all —
+    /// omitting the field is how "every `context`" is said.
     pub fn apply_scopes(&mut self, json: Option<&str>) -> Result<(), String> {
         let Some(json) = json else {
             return Ok(());
@@ -855,10 +855,10 @@ pub(crate) fn required_role(method: &Method, route: &str) -> Role {
 /// keyring of its own, so a hot reload landing mid-request can never
 /// re-grade the request against a table its key was never checked
 /// into. The extension then stays on the request for the handlers
-/// that FILTER rather than refuse (`GET /contexts`, the group
-/// listings) and for those judging context names that live in the
-/// body or the stored record (`/import`, the group writes, the
-/// cross-context searches).
+/// that FILTER rather than refuse (`GET /contexts`, the `group`
+/// listings) and for those judging `context` names that live in the
+/// body or the stored record (`/import`, the `group` writes, the
+/// cross-`context` searches).
 pub async fn enforce_authorization(
     matched: Option<MatchedPath>,
     request: Request,
@@ -1622,7 +1622,7 @@ mod tests {
     }
 
     /// Scope grants parse strictly: a scope naming no configured key, a
-    /// role typo, an empty contexts list, or non-JSON all refuse the
+    /// role typo, an empty `contexts` list, or non-JSON all refuse the
     /// boot instead of arming a partial authorization table.
     #[test]
     fn scope_grants_parse_strictly_and_resolve_with_the_oauth_fallback() {
@@ -1692,9 +1692,9 @@ mod tests {
         );
     }
 
-    /// ADR 0009 §12.5: `GET /schema` sits beside the other context
+    /// ADR 0009 §12.5: `GET /schema` sits beside the other `context`
     /// GETs; `PUT` is `Write` (an ingest-loop verb an agent performs),
-    /// not `Admin`, the same classification context creation itself
+    /// not `Admin`, the same classification `context` creation itself
     /// already gets.
     #[test]
     fn schema_get_is_read_and_put_is_write() {
@@ -1776,7 +1776,7 @@ mod tests {
         }
     }
 
-    /// The authorization layer end to end: role refusals, context
+    /// The authorization layer end to end: role refusals, `context`
     /// grants, and the untouched full-grant default, all in the
     /// ApiError shape with a 403.
     #[tokio::test]
@@ -1885,7 +1885,7 @@ mod tests {
 
     /// The scope check reads the path param through the same decoding
     /// `AppPath`/`Path` give handlers, not the raw percent-encoded
-    /// segment — a context name split across a percent-encoded byte
+    /// segment — a `context` name split across a percent-encoded byte
     /// must still match the grant it decodes to, not be refused for
     /// comparing unequal to the still-encoded form.
     #[tokio::test]

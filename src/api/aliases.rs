@@ -49,7 +49,7 @@ fn overlong_positions(
 
 /// Refuses a query that pins nothing at all: subject, label, and
 /// object empty together would materialize and rank every edge in the
-/// context (or, cross-context, every edge in every named target)
+/// `context` (or, cross-`context`, every edge in every named target)
 /// before the limit ever trims it — treated as a client bug, not a
 /// deliberate "give me everything", the same stance [`cross_targets`]
 /// takes on an empty `contexts`/`groups` pair.

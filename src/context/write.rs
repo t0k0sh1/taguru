@@ -45,7 +45,7 @@ impl Context {
     /// # Errors
     ///
     /// Returns [`ContextFull`] when the write would need a record or name
-    /// bytes beyond the context's u32 id/offset space; the context is
+    /// bytes beyond the `context`'s u32 id/offset space; the `context` is
     /// left unchanged.
     pub fn associate(
         &mut self,
@@ -217,7 +217,7 @@ impl Context {
     /// that every record and arena byte the write could need still fits
     /// below the u32 id/offset ceilings. Checking everything up front is
     /// what makes a capacity failure all-or-nothing — an `Err` leaves the
-    /// context exactly as it was.
+    /// `context` exactly as it was.
     // Exercising these branches through a Context would require allocating
     // u32::MAX records or 4 GiB of interned text. The pure ceiling helpers
     // and claim_id backstop are tested directly at their exact boundaries.
@@ -351,7 +351,7 @@ impl Context {
     /// assertion (count += 1) and so costs one call per historical
     /// assertion, this sets the edge's `count`/`sum` and each
     /// attribution's `count`/`sum`/locator directly, so rebuilding a
-    /// context is O(distinct edges + distinct attributions), not
+    /// `context` is O(distinct edges + distinct attributions), not
     /// O(total assertions) — a heavily corroborated edge no longer
     /// turns compaction into millions of redundant interning probes.
     ///
@@ -459,7 +459,7 @@ impl Context {
         Ok(())
     }
 
-    /// A fresh context holding exactly this one's LIVE content — the
+    /// A fresh `context` holding exactly this one's LIVE content — the
     /// offline answer to append-only storage: fully retracted edges,
     /// their unlinked attribution records, arena bytes behind removed
     /// aliases and dead names, and index slack all stay behind. Every
@@ -480,7 +480,7 @@ impl Context {
     /// # Errors
     ///
     /// [`ContextFull`] is structurally unreachable — the rebuild holds
-    /// a subset of what this context already held — but the write API
+    /// a subset of what this `context` already held — but the write API
     /// says it, so this signature does too.
     pub fn compacted(
         &self,

@@ -16,7 +16,7 @@ use super::*;
 /// path, and this middleware runs ahead of auth.
 ///
 /// With span export configured this is also where the request span is
-/// born — parented from the inbound trace context, named per HTTP
+/// born — parented from the inbound trace `context`, named per HTTP
 /// semconv, its trace id stamped into the access log so a log line
 /// finds its trace and vice versa. Without it, the disabled branch
 /// leaves the response path and the log shape exactly as before.

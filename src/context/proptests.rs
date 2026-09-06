@@ -11,7 +11,7 @@ use proptest::prelude::*;
 /// Applies a scenario the way a caller would: sourced/unsourced
 /// associations through the real API, then alias registrations
 /// with their `Result` discarded — a `Conflict` from a repeated
-/// alias spelling must leave the context unchanged, and that is
+/// alias spelling must leave the `context` unchanged, and that is
 /// exactly what the round trip below is checking for, not just
 /// the happy path.
 fn build_context(
@@ -71,7 +71,7 @@ fn within_reaccumulation_error(left: f64, right: f64, terms: u64) -> bool {
 }
 
 /// Checks the semantic compaction contract independently of the
-/// rebuilt context's record layout or allocation sizes.
+/// rebuilt `context`'s record layout or allocation sizes.
 fn assert_live_content_is_exact(source: &Context, compacted: &Context) {
     let all_before = source.query_any(&[], &[], &[]);
     let live_before: Vec<_> = all_before

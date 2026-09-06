@@ -79,7 +79,7 @@ fn parse_args(verb: &str, args: &[String]) -> Result<QueryArgs, String> {
     Ok(parsed)
 }
 
-/// The lockless read handle: one context image plus its passage store,
+/// The lockless read handle: one `context` image plus its passage store,
 /// loaded straight from disk the way `inspect` reads — no registry, no
 /// directory lock, so any number of finds can run beside a `watch`
 /// sync or each other. Writes land via atomic renames and both loads
@@ -91,7 +91,7 @@ pub(crate) struct CodeMap {
 }
 
 impl CodeMap {
-    /// Loads the named context read-only from `data_dir`. Every
+    /// Loads the named `context` read-only from `data_dir`. Every
     /// failure maps to one stable sentence — the raw load errors
     /// carry paths and format internals that belong in server logs,
     /// not in a CLI answer an agent may echo (same posture the

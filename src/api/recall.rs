@@ -161,21 +161,21 @@ pub async fn recall(
     }
 }
 
-/// Vets a cross-context search's target list — the directly named
-/// contexts plus every context the named groups reach, nested children
+/// Vets a cross-`context` search's target list — the directly named
+/// `contexts` plus every `context` the named `groups` reach, nested children
 /// included — and returns it deduped: direct names lead in
-/// first-appearance order, group-resolved members follow in name
+/// first-appearance order, `group`-resolved members follow in name
 /// order (the tie order the passage merge documents). Refused, in
 /// order: naming nothing at all (a search of nothing is a client bug,
-/// not an empty result — and emphatically not "every context"); either
+/// not an empty result — and emphatically not "every `context`"); either
 /// list over the input-items cap; a direct name beyond the key's grant
 /// ([`scope_refusal`] — whole-request, and before existence, so grants
 /// cannot probe names); the first direct name that does not exist
-/// (`no_context`, before any context is searched); and the first group
-/// name that is not a group (`no_group` — group rows are visible to
-/// every key, so that refusal probes nothing). Group-RESOLVED members
+/// (`no_context`, before any `context` is searched); and the first `group`
+/// name that is not a `group` (`no_group` — `group` rows are visible to
+/// every key, so that refusal probes nothing). `group`-RESOLVED members
 /// beyond the grant are dropped, not refused: a scoped key searches
-/// its slice of a group exactly as `GET /groups` shows it that slice
+/// its slice of a `group` exactly as `GET /groups` shows it that slice
 /// ([`group_entry`]) — refusing would name out-of-grant members and
 /// leak what the listing hides. The slice can come up empty; a legal
 /// request that resolves to nothing is an empty result, not an error.
@@ -183,7 +183,7 @@ pub async fn recall(
 /// The `no_context` check above is a SNAPSHOT (issue #620): a target
 /// can still vanish between this call and the per-target fetch
 /// `cross_matches` runs afterward. That later fetch, not this one, is
-/// the authoritative answer to "does this context still exist" —
+/// the authoritative answer to "does this `context` still exist" —
 /// `resolve_cross_type_schemas` (below) documents the same window for
 /// its own per-target lookup, and `cross_matches`'s own doc names what
 /// happens when a target loses the race.
@@ -239,15 +239,15 @@ pub(super) fn cross_targets(
     Ok(targets.into())
 }
 
-/// One cross-context result page: the pre-cut total, the surviving
+/// One cross-`context` result page: the pre-cut total, the surviving
 /// `(context, association)` pairs in page order, and — aligned with
 /// the target list — whether each target's own search came back empty
 /// (what the retrieval cache replays through `note_search` on a hit).
 type CrossPage = (usize, Vec<(String, Association)>, Vec<bool>);
 
-/// [`MatchCursor`], cross-context: `(subject, label, object)` only
-/// identifies an edge *within* one context's `edge_ids` map, so two
-/// different target contexts can each hold an edge with the identical
+/// [`MatchCursor`], cross-`context`: `(subject, label, object)` only
+/// identifies an edge *within* one `context`'s `edge_ids` map, so two
+/// different target `contexts` can each hold an edge with the identical
 /// triple — `context` joins the key as a fifth field to keep the
 /// merged pool's order total. Every wire match already carries
 /// `context` ([`CrossMatch`]'s flattened shape), so a client builds
@@ -278,7 +278,7 @@ fn cross_key<'a>(
     )
 }
 
-/// [`rank`], cross-context: the same strongest-|weight|-first order
+/// [`rank`], cross-`context`: the same strongest-|weight|-first order
 /// with `context` spliced in ahead of the `(subject, label, object)`
 /// tiebreak. A separate small function rather than one generalized
 /// N-tuple comparator — the two key shapes are concretely different
@@ -296,7 +296,7 @@ pub(crate) fn cross_rank(
         .then_with(|| a.4.cmp(b.4))
 }
 
-/// [`page_by`], cross-context: same cursor-then-sort-then-cut contract,
+/// [`page_by`], cross-`context`: same cursor-then-sort-then-cut contract,
 /// ranked by [`cross_rank`] instead of [`rank`]. Not generic over the
 /// pooled shape the way `page_by` is — `targets` is taken directly
 /// rather than folded into a `key` closure, since a closure generic
@@ -341,10 +341,10 @@ pub(super) fn cross_page_by(
     (total, matches)
 }
 
-/// The shared middle of the cross-context graph searches: gather every
+/// The shared middle of the cross-`context` graph searches: gather every
 /// target's search concurrently ([`bounded_parallel_map`], bounded by
 /// [`cross_search_concurrency`]), pool the matches, cut past the
-/// limit, and only then tag the survivors with their context names —
+/// limit, and only then tag the survivors with their `context` names —
 /// naming every match up front would allocate thousands of strings
 /// just to throw them away. [`cross_page_by`] makes every cut, so
 /// there is exactly one comparator.
@@ -366,7 +366,7 @@ pub(super) fn cross_page_by(
 /// survivors exclude, every superset's does too.
 ///
 /// Every target's fetch now lands concurrently rather than in list
-/// order, so "the first per-context failure aborts the whole response"
+/// order, so "the first per-`context` failure aborts the whole response"
 /// means the first failure in target-list order once every fetch has
 /// landed, not the first one hit in real time — the response is
 /// identical either way, since a read has nothing to half-apply and
@@ -443,12 +443,12 @@ async fn cross_matches(
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CrossRecallRequest {
-    /// Full context names — no patterns.
+    /// Full `context` names — no patterns.
     #[serde(default)]
     pub contexts: Vec<String>,
-    /// Group names — each adds every context it reaches, nested
-    /// children included. Overlaps, with `contexts` or between groups,
-    /// dedupe silently: a context is searched once however many ways
+    /// `group` names — each adds every `context` it reaches, nested
+    /// children included. Overlaps, with `contexts` or between `groups`,
+    /// dedupe silently: a `context` is searched once however many ways
     /// it was named.
     #[serde(default)]
     pub groups: Vec<String>,
@@ -459,7 +459,7 @@ pub struct CrossRecallRequest {
     /// [`CrossMatchCursor`].
     pub after: Option<CrossMatchCursor>,
     /// Declared but refused (ADR 0011 §8 scopes the assertion-time
-    /// window to the single-context lanes): named here so a windowed
+    /// window to the single-`context` lanes): named here so a windowed
     /// cross call fails loudly instead of running silently unwindowed
     /// — request bodies ignore unknown fields, which would otherwise
     /// turn a typo'd expectation into wrong results.
@@ -467,9 +467,9 @@ pub struct CrossRecallRequest {
     pub until: Option<u64>,
 }
 
-/// Refuses a cross-context search that asked for an assertion-time
+/// Refuses a cross-`context` search that asked for an assertion-time
 /// window — see the field doc on [`CrossRecallRequest::since`]; the
-/// single-context lanes are the windowed surface (ADR 0011 §8).
+/// single-`context` lanes are the windowed surface (ADR 0011 §8).
 fn refuse_cross_window(
     since: Option<u64>,
     until: Option<u64>,
@@ -489,14 +489,14 @@ fn refuse_cross_window(
 /// resolution: every target's installed schema (absent entries mean no
 /// schema, ADR 0009 §6.3 guard 1), resolved for ALL targets up front —
 /// each `schema_of` slow path takes that target's own write lock, so
-/// like every other per-context lookup this handler needs, it cannot
+/// like every other per-`context` lookup this handler needs, it cannot
 /// run from inside `cross_matches`'s `read_context` closures. A target
 /// that vanished between `cross_targets`'s existence check and here is
 /// left absent rather than refused here: the real per-target fetch
-/// inside `cross_matches` answers "does this context still exist" on
+/// inside `cross_matches` answers "does this `context` still exist" on
 /// its own, and repeating that refusal here would only race it. A load
 /// failure aborts the whole response, mirroring `cross_matches`'s own
-/// "first per-context failure aborts" contract.
+/// "first per-`context` failure aborts" contract.
 ///
 /// Deliberately sequential, not `bounded_parallel_map`'d like
 /// `cross_matches`'s own fan-out (issue #620): `schema_of`'s common
@@ -540,13 +540,13 @@ fn resolve_cross_type_schemas(
     Ok(schemas)
 }
 
-/// [`recall`] across several named contexts at once, every match
-/// tagged with the context it came from. `total` sums the per-context
+/// [`recall`] across several named `contexts` at once, every match
+/// tagged with the `context` it came from. `total` sums the per-`context`
 /// match counts, and past the limit the strongest |weight| survives
-/// exactly as within one context — weights share one scale (evidence
-/// mass), so the cut means the same thing across contexts. Contexts
+/// exactly as within one `context` — weights share one scale (evidence
+/// mass), so the cut means the same thing across `contexts`. `contexts`
 /// are searched concurrently (bounded by [`cross_search_concurrency`]);
-/// the first per-context failure aborts the whole response (a read has
+/// the first per-`context` failure aborts the whole response (a read has
 /// nothing to half-apply).
 pub async fn cross_recall(
     State(state): State<AppState>,
@@ -668,7 +668,7 @@ pub struct QueryRequest {
     /// substitute for one — `subject`/`label`/`object` still pin the
     /// query, this only narrows what comes back. Gated by §6.3's single
     /// condition (an installed schema document), not by `mode`; a
-    /// schema-free context answers empty for any non-empty filter,
+    /// schema-free `context` answers empty for any non-empty filter,
     /// exactly as it has no types to filter on.
     pub subject_types: Option<OneOrMany>,
     /// The same filter, applied to the OBJECT side.
@@ -713,9 +713,9 @@ fn overlong_type_filters(
 /// ADR 0009 §12's `query` type filter, applied to `query_any`'s output
 /// before paging — so `total` reflects the filtered count, exactly as
 /// every other `query`/`recall` cut already does. `schema` is `None`
-/// for a context with no installed schema document (§6.3 guard 1),
+/// for a `context` with no installed schema document (§6.3 guard 1),
 /// under which a non-empty filter can only ever match nothing: no
-/// concept in that context has ever been typed. Scoped to exactly the
+/// concept in that `context` has ever been typed. Scoped to exactly the
 /// concepts these matches mention, on whichever side(s) a filter was
 /// asked for — the same narrowest-read discipline
 /// `schema::expanded_type_sets` documents.
@@ -922,19 +922,19 @@ pub async fn query(
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CrossQueryRequest {
-    /// Full context names — no patterns.
+    /// Full `context` names — no patterns.
     #[serde(default)]
     pub contexts: Vec<String>,
-    /// Group names, resolved and deduped as in [`CrossRecallRequest`].
+    /// `group` names, resolved and deduped as in [`CrossRecallRequest`].
     #[serde(default)]
     pub groups: Vec<String>,
     pub subject: Option<OneOrMany>,
     pub label: Option<OneOrMany>,
     pub object: Option<OneOrMany>,
-    /// [`QueryRequest::subject_types`], cross-context — evaluated
+    /// [`QueryRequest::subject_types`], cross-`context` — evaluated
     /// per-target against that target's own installed schema (or none).
     pub subject_types: Option<OneOrMany>,
-    /// [`QueryRequest::object_types`], cross-context.
+    /// [`QueryRequest::object_types`], cross-`context`.
     pub object_types: Option<OneOrMany>,
     /// Omitted means 100.
     pub limit: Option<usize>,
@@ -946,9 +946,9 @@ pub struct CrossQueryRequest {
     pub until: Option<u64>,
 }
 
-/// [`query`] across several named contexts at once — the same
-/// cross-context contract as [`cross_recall`]: tagged matches, summed
-/// `total`, strongest |weight| past the limit, first per-context
+/// [`query`] across several named `contexts` at once — the same
+/// cross-`context` contract as [`cross_recall`]: tagged matches, summed
+/// `total`, strongest |weight| past the limit, first per-`context`
 /// failure aborts.
 pub async fn cross_query(
     State(state): State<AppState>,
@@ -1136,7 +1136,7 @@ mod tests {
 
     /// Regression for issue #620 (所見8): `cross_recall` must refuse a
     /// spent budget before `cross_targets` does any work, symmetric
-    /// with `recall`'s own front-of-handler gate. Naming a context
+    /// with `recall`'s own front-of-handler gate. Naming a `context`
     /// that does not exist makes the ordering observable without a
     /// fault-injection hook: if the deadline gate ran only AFTER
     /// `cross_targets` (the pre-fix order), this would answer 404

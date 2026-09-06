@@ -1,7 +1,7 @@
 //! `GET /contexts/{name}/changes` (#422): the polling change feed —
 //! one page of recent content-change events after an opaque cursor,
 //! served from the bounded in-memory ring `crate::registry::changes`
-//! keeps per context. A lost position (restart, recreate, ring
+//! keeps per `context`. A lost position (restart, recreate, ring
 //! overflow) answers `stale_cursor` (410) rather than a silently
 //! incomplete page; the client's move is a full resync, then tailing
 //! again from a fresh cursor (a call without `since`).

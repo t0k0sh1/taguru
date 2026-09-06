@@ -1,6 +1,6 @@
 //! `taguru import`: offline batch ingestion — the bulk/initial-load
 //! path that the REST API is the wrong tool for. A batch file is JSON
-//! Lines: one header naming the context and the source, then
+//! Lines: one header naming the `context` and the source, then
 //! association / alias / passage lines (the same shapes the HTTP
 //! endpoints accept, minus per-line sources — the header's source is
 //! stamped on every line, see below).
@@ -36,15 +36,15 @@
 //! drifting apart.
 //!
 //! Beside batches, a stream may carry GROUP records: one
-//! `taguru_group` line states one group's complete truth (name,
-//! description, member contexts, child groups) the way one batch
+//! `taguru_group` line states one `group`'s complete truth (name,
+//! description, member `contexts`, child `groups`) the way one batch
 //! states one source's. Applying one is a create-or-replace of the
 //! whole record — never a delta — so re-importing stays idempotent.
-//! Groups apply AFTER every batch of the run (one CLI invocation, one
+//! `groups` apply AFTER every batch of the run (one CLI invocation, one
 //! `POST /import` body), whatever file or position carried them, so a
-//! group and the member contexts it names can travel together in any
+//! `group` and the member `contexts` it names can travel together in any
 //! order; a member that still does not exist at that point refuses
-//! the whole group set, with every batch already durably landed.
+//! the whole `group` set, with every batch already durably landed.
 //!
 //! Split into submodules by concern: `local` runs the offline
 //! (non-`--url`) apply path, `remote` runs `import --url`'s chunked

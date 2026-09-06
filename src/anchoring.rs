@@ -12,7 +12,7 @@
 //! - **strict**: the name's own spelling only. The hallucination
 //!   floor — a name that is nowhere in the text under any folding.
 //! - **with aliases**: any spelling in the name's alias group counts
-//!   (the batch's own concept aliases, plus `--vocabulary`'s context
+//!   (the batch's own concept aliases, plus `--vocabulary`'s `context`
 //!   aliases). Aliases are model output too, so a mis-identification
 //!   (#758's shape) inflates this rate — the strict/with-aliases GAP
 //!   is the "anchored only through an alias" share, reported on
@@ -37,7 +37,7 @@
 //!
 //! Needs only batch files — no server, no trace — so it applies to
 //! 0.9.3 output unchanged. `scripts/extract_metrics.py --anchoring`
-//! rolls the JSON report up by context and group.
+//! rolls the JSON report up by `context` and `group`.
 //!
 //! The rates alone cannot point at a fabricated name, which is what
 //! the command exists to find (#864), so every association that is
@@ -571,7 +571,7 @@ struct Report<'a> {
 /// Alias groups as a union-find over normalized names: an alias
 /// (spelling → canonical) joins the two, and a name's group is every
 /// normalized spelling reachable through such joins — the batch's own
-/// aliases and the context's alike, exactly the "ごはん/ご飯" folding
+/// aliases and the `context`'s alike, exactly the "ごはん/ご飯" folding
 /// the issue defines. Keys and members are all `normalize_entry`
 /// output.
 struct AliasGroups {
@@ -838,7 +838,7 @@ mod tests {
     }
 
     /// Alias groups are transitive across the batch's own aliases and
-    /// the context's: A→B (own) and B→C (context) put A, B, C in one
+    /// the `context`'s: A→B (own) and B→C (`context`) put A, B, C in one
     /// group, whichever direction the pairs point.
     #[test]
     fn alias_groups_are_transitive_across_both_sources() {

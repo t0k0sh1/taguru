@@ -610,7 +610,7 @@ pub(super) fn quote_for_issue(text: &str) -> String {
 ///   time; this schema only enforces the universal `>= 0` half.
 /// - Cross-item rules: deduplication, and an alias's `canonical` naming a
 ///   subject/object/label the associations actually contain.
-/// - A concept's entity type set (ADR 0009 §6.1): known only per-context,
+/// - A concept's entity type set (ADR 0009 §6.1): known only per-`context`,
 ///   at validation time — the same argument the paragraph-count entry
 ///   above already makes, just for a schema document instead of a
 ///   document's own paragraph count.
@@ -621,7 +621,7 @@ pub(super) fn quote_for_issue(text: &str) -> String {
 /// - Allowed relation labels are deliberately never rendered as an `enum`:
 ///   a structurally-constrained model could then never propose a new
 ///   relation, which ADR 0009 (and #218 before it) requires stays
-///   possible even in a context with a schema — constraining the
+///   possible even in a `context` with a schema — constraining the
 ///   model's *shape* is not the same as constraining its *content*.
 ///
 /// `title` is required content, not decoration: LangChain's Python

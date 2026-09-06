@@ -388,7 +388,7 @@ export class Taguru {
     return (await this.send("GET", "/protocol")).text;
   }
 
-  /** Persist every dirty context now; returns their names (admin role). */
+  /** Persist every dirty `context` now; returns their names (admin role). */
   async flush(): Promise<string[]> {
     const result = await this.requestJson("POST", "/flush");
     return (result as unknown[]).map(String);
@@ -450,19 +450,19 @@ export class Taguru {
     }
   }
 
-  /** A handle bound to one context (no network call). */
+  /** A handle bound to one `context` (no network call). */
   context(name: string): Context {
     return new Context(this, name);
   }
 
-  // -- cross-context search ------------------------------------------------
+  // -- cross-`context` search ------------------------------------------------
 
   /**
-   * Recall across several contexts at once, every match tagged. `contexts`
-   * takes full names; each `groups` entry searches every context the group
+   * Recall across several `contexts` at once, every match tagged. `contexts`
+   * takes full names; each `groups` entry searches every `context` the `group`
    * reaches (nested children included), overlaps deduped. At least one of
    * the two must name something. Weights share one scale, so past the limit
-   * the strongest |weight| survives exactly as within one context. `after`
+   * the strongest |weight| survives exactly as within one `context`. `after`
    * resumes past the previous page's last match; `total` stays constant
    * across pages.
    */
@@ -488,7 +488,7 @@ export class Taguru {
   }
 
   /**
-   * Exact-position query across several contexts at once, matches tagged;
+   * Exact-position query across several `contexts` at once, matches tagged;
    * the same target contract as `recall`. `subject_types`/`object_types`
    * further narrow by declared entity type (`is_a`-expanded) when a
    * target has an installed schema; a schema-free target answers empty
@@ -524,13 +524,13 @@ export class Taguru {
   }
 
   /**
-   * Paragraph search across several contexts at once, hits tagged. Passage
-   * scores do NOT share a scale across contexts (BM25 statistics are
+   * Paragraph search across several `contexts` at once, hits tagged. Passage
+   * scores do NOT share a scale across `contexts` (BM25 statistics are
    * corpus-local), so the merged order is rank interleaving — every
-   * context's best hit first; `score` compares within one context only.
+   * `context`'s best hit first; `score` compares within one `context` only.
    * `semantic_floor` overrides every target's vector-lane cosine floor for
    * this call (it floors only that lane; BM25-only hits still return). The
-   * page's `plan` names every context actually searched and each lane's
+   * page's `plan` names every `context` actually searched and each lane's
    * verdict there — see `SearchPlan`.
    */
   async searchPassages(
@@ -569,7 +569,7 @@ export class Taguru {
   }
 }
 
-/** The context directory: collection-level CRUD. */
+/** The `context` directory: directory-level CRUD. */
 export class Contexts {
   constructor(private readonly client: Taguru) {}
 
@@ -622,7 +622,7 @@ export class Contexts {
     return true;
   }
 
-  /** Create a context (409 ConflictError if it already exists). */
+  /** Create a `context` (409 ConflictError if it already exists). */
   async create(
     name: string,
     options: {
@@ -665,7 +665,7 @@ export class Contexts {
     return result as ContextMeta;
   }
 
-  /** Delete a context, files included (admin role). */
+  /** Delete a `context`, files included (admin role). */
   async delete(name: string): Promise<boolean> {
     const result = await this.client.requestJson("DELETE", `/contexts/${encodeName(name)}`, {
       // A repeat delete 404s, so a phantom retry after an ambiguous
@@ -677,8 +677,8 @@ export class Contexts {
   }
 
   /**
-   * Rename a context (admin role): the whole file family moves to `to`,
-   * and every group naming it is rewritten to match.
+   * Rename a `context` (admin role): the whole file family moves to `to`,
+   * and every `group` naming it is rewritten to match.
    */
   async rename(name: string, to: string): Promise<boolean> {
     const result = await this.client.requestJson("POST", `/contexts/${encodeName(name)}/rename`, {
@@ -690,9 +690,9 @@ export class Contexts {
 }
 
 /**
- * The group directory: flat context bundles (many-to-many) that may nest
- * child groups — a shallow DAG, at most 3 storeys, never cyclic — as the
- * addressing unit cross-context search builds on.
+ * The `group` directory: flat `context` bundles (many-to-many) that may nest
+ * child `groups` — a shallow DAG, at most 3 storeys, never cyclic — as the
+ * addressing unit cross-`context` search builds on.
  */
 export class Groups {
   constructor(private readonly client: Taguru) {}
@@ -738,9 +738,9 @@ export class Groups {
   }
 
   /**
-   * Create a group (409 ConflictError if it already exists). Every listed
-   * member — context or child group — must already exist; contexts and
-   * groups are separate namespaces.
+   * Create a `group` (409 ConflictError if it already exists). Every listed
+   * member — `context` or child `group` — must already exist; a `group` and a
+   * `context` may share the same name without conflict.
    */
   async create(
     name: string,
@@ -760,8 +760,8 @@ export class Groups {
   /**
    * Delta membership update (removals first); returns the updated row.
    * Removing a non-member is an idempotent no-op; only additions demand the
-   * member exists. The result holds at most 1,000 member contexts and 1,000
-   * child groups — past that, split into nested child groups.
+   * member exists. The result holds at most 1,000 member `contexts` and 1,000
+   * child `groups` — past that, split into nested child `groups`.
    */
   async update(
     name: string,
@@ -785,7 +785,7 @@ export class Groups {
     return result as GroupEntry;
   }
 
-  /** Delete the bundling only — member contexts and child groups stay. */
+  /** Delete the bundling only — member `contexts` and child `groups` stay. */
   async delete(name: string): Promise<boolean> {
     const result = await this.client.requestJson("DELETE", `/groups/${encodeName(name)}`, {
       // A repeat delete 404s, so a phantom retry after an ambiguous
@@ -797,8 +797,8 @@ export class Groups {
   }
 
   /**
-   * Rename a group (admin role): the group's file moves to `to`, and
-   * every OTHER group naming it as a child is rewritten to match.
+   * Rename a `group` (admin role): the `group`'s file moves to `to`, and
+   * every OTHER `group` naming it as a child is rewritten to match.
    */
   async rename(name: string, to: string): Promise<boolean> {
     const result = await this.client.requestJson("POST", `/groups/${encodeName(name)}/rename`, {
@@ -809,7 +809,7 @@ export class Groups {
   }
 
   /**
-   * The group as one import-stream record (a `taguru_group` JSON line);
+   * The `group` as one import-stream record (a `taguru_group` JSON line);
    * `importBatches` restores it as a whole-record replace.
    */
   async export(name: string): Promise<string> {
@@ -818,7 +818,7 @@ export class Groups {
 }
 
 /**
- * Operations bound to one context, named after the server's own vocabulary.
+ * Operations bound to one `context`, named after the server's own vocabulary.
  * Method names mirror `GET /protocol` and the MCP tool names, so knowledge of
  * one surface transfers to the others.
  */
@@ -960,8 +960,8 @@ export class Context {
   /**
    * Exact-position query; each position takes one name or an OR-set.
    * `subject_types`/`object_types` further narrow by declared entity type
-   * (`is_a`-expanded) when this context has an installed schema; a
-   * schema-free context answers empty for a non-empty filter.
+   * (`is_a`-expanded) when this `context` has an installed schema; a
+   * schema-free `context` answers empty for a non-empty filter.
    *
    * `since`/`until` (epoch seconds, half-open `[since, until)`) window
    * the graph by assertion time: only facts an in-window-dated source
@@ -1154,12 +1154,12 @@ export class Context {
   }
 
   /**
-   * The context's schema document (ADR 0009 §5) — the entity types
+   * The `context`'s schema document (ADR 0009 §5) — the entity types
    * and relation domain/range constraints `POST
    * /contexts/{name}/schema/audit`, `taguru extract --schema`, and
    * both LangChain ingesters read.
    *
-   * Rejects with `NotFoundError` when the context has no schema
+   * Rejects with `NotFoundError` when the `context` has no schema
    * installed (or does not exist) — the same 404 `listLabels`/friends
    * already give.
    */
@@ -1169,7 +1169,7 @@ export class Context {
   }
 
   /**
-   * Install (or replace) the context's schema document; returns it as
+   * Install (or replace) the `context`'s schema document; returns it as
    * installed (ADR 0009 §5). Refuses (400) a document whose `relations`
    * declare the reserved `schema:type` label, and refuses to install over
    * a persisted label alias resolving to it — rename the alias first
@@ -1189,7 +1189,7 @@ export class Context {
    * own, since a write entrance only judges a write as it happens.
    * Candidates for review, not verdicts; nothing is auto-fixed. `after`
    * resumes past the previous page's last violation; `total` stays
-   * constant across pages. Throws NotFoundError when the context has no
+   * constant across pages. Throws NotFoundError when the `context` has no
    * schema installed (404 `no_schema`).
    */
   async auditSchema(
@@ -1205,7 +1205,7 @@ export class Context {
   /**
    * The same judgment as `auditSchema`, but over a PROPOSED document that
    * is never persisted — the pre-flight to run before a `strict` flip
-   * (ADR 0009 §10). Works identically whether the context already has a
+   * (ADR 0009 §10). Works identically whether the `context` already has a
    * schema or none at all.
    */
   async validateSchema(
@@ -1224,9 +1224,9 @@ export class Context {
   /**
    * Assert a batch of associations.
    *
-   * Returns the applied count plus, for a context whose schema runs in
+   * Returns the applied count plus, for a `context` whose schema runs in
    * `warn` mode, the schema violations the write raised anyway (ADR 0009
-   * §8.3) — check `result.issues` where a `strict` context would have
+   * §8.3) — check `result.issues` where a `strict` `context` would have
    * thrown. Weight ACCUMULATES on re-assertion, so this call is never
    * blindly retried after an ambiguous transport failure. Server cap:
    * 10,000 per request (use `addAssociationsBatched` to auto-chunk).
@@ -1335,7 +1335,7 @@ export class Context {
    * Paragraph search (BM25 fused with embeddings where configured). Phrase
    * the query as an answer, not a question — a plausible declarative sentence
    * lands nearer the text you hope to find. `semantic_floor` overrides the
-   * vector lane's cosine floor for this call — over the context setting,
+   * vector lane's cosine floor for this call — over the `context` setting,
    * over the server default (it floors only that lane; BM25-only hits still
    * return). `tags` (any-of) and the half-open `[since, until)` epoch-second
    * window over each source's `date ?? stored_at` pre-filter which sources
@@ -1369,12 +1369,12 @@ export class Context {
   }
 
   /**
-   * Global search over this context's community-summary artifact (built
+   * Global search over this `context`'s community-summary artifact (built
    * offline by `taguru communities`) — corpus-overview questions passage
    * search answers poorly. Hits are ranked LLM summaries of densely
    * connected concept clusters, each with its hierarchy level, member
    * concepts, and sizes; the page's `stale` flag means the source graph
-   * moved since derivation. `derived` names the artifact context when it
+   * moved since derivation. `derived` names the artifact `context` when it
    * was built with `--into` (default `{name}::communities`). A missing
    * artifact throws with the build command in the message — it is not an
    * empty result.
@@ -1673,7 +1673,7 @@ export class Context {
   // -- promotion -----------------------------------------------------------------
 
   /**
-   * Move named scratch sources whole into the established context
+   * Move named scratch sources whole into the established `context`
    * `into` (ADR 0018) — the export/import round trip in one call,
    * without re-extraction.
    *
@@ -1681,7 +1681,7 @@ export class Context {
    * of every edge's weight); source ids survive, and applying is
    * per-source retract-then-apply — re-promoting is idempotent. `into`
    * must already exist (never created here). A named source missing
-   * from this (scratch) context refuses the WHOLE request.
+   * from this (scratch) `context` refuses the WHOLE request.
    * `options.audit` omitted means `true`: after a real apply, the
    * destination gets the default consolidation audit (all three
    * checks) riding back as candidates, never applied.
@@ -1702,7 +1702,7 @@ export class Context {
 
   // -- export ------------------------------------------------------------------------
 
-  /** The context as an import batch stream (NDJSON text). */
+  /** The `context` as an import batch stream (NDJSON text). */
   async export(): Promise<string> {
     return (await this.client.send("GET", `${this.path}/export`)).text;
   }

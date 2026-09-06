@@ -39,7 +39,7 @@ impl AppState {
     ///
     /// `floor_override` is the one-call override of the vector lane's
     /// cosine floor — the same chain resolve's `semantic_floor` walks:
-    /// override beats context setting beats server default. It floors
+    /// override beats `context` setting beats server default. It floors
     /// the only lane with an absolute scale; the fused score is rank
     /// arithmetic (raw BM25 in lexical-only deployments) and carries
     /// no floorable meaning.
@@ -810,7 +810,7 @@ impl AppState {
 
     /// The floor the semantic lane drops cosine matches below — the
     /// same chain `semantic_resolve` walks: the caller's one-call
-    /// override beats the context setting beats the server default.
+    /// override beats the `context` setting beats the server default.
     fn effective_semantic_floor(&self, floor_override: Option<f32>, meta: &ContextMeta) -> f32 {
         floor_override
             .or(meta.semantic_floor)
