@@ -87,6 +87,12 @@ impl Server {
         }
     }
 
+    /// The OS process id, for tests that inspect the running child
+    /// directly (e.g. its thread count) rather than through its API.
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     /// Sends `signal` (e.g. "-HUP") to the running server without
     /// stopping it — the keyring-reload trigger.
     #[cfg(unix)]

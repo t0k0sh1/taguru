@@ -37,6 +37,39 @@ fn eventually(budget: Duration, what: &str, mut check: impl FnMut() -> bool) {
     panic!("timed out waiting for {what}");
 }
 
+/// How many OS threads `pid` currently owns — for asserting that a
+/// stalled watch read does not pile up one blocked thread per tick
+/// (issue #900). Linux reads `/proc`'s own count directly; elsewhere
+/// (this harness also runs on macOS in local dev) `ps -M` lists one
+/// row per thread, so a row count minus its header is the same
+/// number.
+#[cfg(unix)]
+fn thread_count(pid: u32) -> usize {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string(format!("/proc/{pid}/status"))
+            .ok()
+            .and_then(|status| {
+                status
+                    .lines()
+                    .find_map(|line| line.strip_prefix("Threads:"))
+                    .map(|n| n.trim().parse().unwrap())
+            })
+            .expect("/proc/<pid>/status must report a thread count")
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let output = std::process::Command::new("ps")
+            .args(["-M", "-p", &pid.to_string()])
+            .output()
+            .expect("ps must run");
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .count()
+            .saturating_sub(1)
+    }
+}
+
 /// One counter's value out of a /metrics render.
 fn counter(metrics_text: &str, name: &str) -> u64 {
     metrics_text
@@ -179,8 +212,18 @@ fn a_graceful_stop_completes_even_when_the_config_watch_read_is_stuck() {
         .unwrap();
     assert!(status.success(), "mkfifo failed");
     // The watch ticks every `CONFIG_WATCH_INTERVAL` (5s); give it time
-    // to reach the stuck `open()` before stopping the server.
-    std::thread::sleep(Duration::from_secs(7));
+    // to reach the stuck `open()` before measuring.
+    std::thread::sleep(Duration::from_secs(6));
+    let after_one_tick = thread_count(server.pid());
+    // Two more intervals: without the shared in-flight guard, each one
+    // would pile another thread blocked on the same stuck `open()`.
+    std::thread::sleep(Duration::from_secs(11));
+    let after_three_ticks = thread_count(server.pid());
+    assert_eq!(
+        after_one_tick, after_three_ticks,
+        "thread count grew ({after_one_tick} -> {after_three_ticks}) across two more stalled \
+         ticks — read_off_worker must not start a new thread while one is already stuck"
+    );
     let started = Instant::now();
     let _ = server.stop_gracefully();
     assert!(
@@ -210,7 +253,20 @@ fn a_router_graceful_stop_completes_even_when_the_map_watch_read_is_stuck() {
         .status()
         .unwrap();
     assert!(status.success(), "mkfifo failed");
-    std::thread::sleep(Duration::from_secs(7));
+    std::thread::sleep(Duration::from_secs(6));
+    let after_one_tick = thread_count(router.pid());
+    // A SIGHUP mid-stall reads the same path as the tick — without the
+    // shared in-flight guard this alone would add a second stuck
+    // thread, on top of whatever two more ticks would pile up.
+    router.signal("-HUP");
+    std::thread::sleep(Duration::from_secs(11));
+    let after_three_ticks_and_a_sighup = thread_count(router.pid());
+    assert_eq!(
+        after_one_tick, after_three_ticks_and_a_sighup,
+        "thread count grew ({after_one_tick} -> {after_three_ticks_and_a_sighup}) across two \
+         more stalled ticks and a SIGHUP — read_off_worker must not start a new thread while \
+         one is already stuck on this path"
+    );
     let started = Instant::now();
     let _ = router.stop_gracefully();
     assert!(
