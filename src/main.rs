@@ -438,6 +438,9 @@ async fn serve(serve_args: cli::ServeArgs, auth_source: auth::AuthSource) {
         }
     };
 
+    // Every periodic task spawned below, stopped in order before the
+    // final flush (see `stop_background_tasks`).
+    let mut background: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     if replica_mode {
         // No flusher: a replica never has dirty state to persist, and
         // its disk belongs to the tailer. (This is also why a replica
@@ -446,12 +449,12 @@ async fn serve(serve_args: cli::ServeArgs, auth_source: auth::AuthSource) {
         // process's lifetime.
         state.metrics().set_replica_mode();
     } else {
-        spawn_flusher(
+        background.push(spawn_flusher(
             state.clone(),
             flush_secs,
             auto_embed,
             heavy_ops_limiter.clone(),
-        );
+        ));
     }
 
     // AFTER boot, so the pinned preload's eager hydration went first —
@@ -467,7 +470,11 @@ async fn serve(serve_args: cli::ServeArgs, auth_source: auth::AuthSource) {
     // config-file watch swap the auth table at runtime. Replicas
     // included — they enforce the same credentials on their read
     // surface and rotate on the same schedule as the writer.
-    spawn_keyring_reload_tasks(keyring.clone(), auth_source, state.clone());
+    background.extend(spawn_keyring_reload_tasks(
+        keyring.clone(),
+        auth_source,
+        state.clone(),
+    ));
 
     let shipper = match &replicate {
         Some((replicate, store, root)) if !replica_mode => {
@@ -729,6 +736,9 @@ async fn serve(serve_args: cli::ServeArgs, auth_source: auth::AuthSource) {
     .await
     .unwrap();
 
+    // The periodic tasks first: none may tick into the final flush
+    // below or outlive the runtime (#898).
+    stop_background_tasks(background).await;
     // Nothing dirty may outlive the process: one final flush.
     tokio::task::block_in_place(|| state.flush_dirty());
     // Usage counters skip the WAL by design; the graceful stop is
@@ -992,7 +1002,8 @@ fn spawn_keyring_reload_tasks(
     keyring: auth::SharedKeyring,
     source: auth::AuthSource,
     state: AppState,
-) {
+) -> Vec<tokio::task::JoinHandle<()>> {
+    let mut tasks = Vec::new();
     let source = Arc::new(source);
     #[cfg(unix)]
     {
@@ -1011,18 +1022,18 @@ fn spawn_keyring_reload_tasks(
             }
         };
         if let Some(mut hangup) = hangup {
-            tokio::spawn(async move {
+            tasks.push(tokio::spawn(async move {
                 while hangup.recv().await.is_some() {
                     let outcome = auth::reload_keyring(&keyring, &source, "sighup");
                     state
                         .metrics()
                         .record_keyring_reload(outcome != auth::ReloadOutcome::Refused);
                 }
-            });
+            }));
         }
     }
     let Some(path) = source.config_path().map(std::path::Path::to_path_buf) else {
-        return;
+        return tasks;
     };
     // Off the async workers: the config file can live on a network
     // mount (a Kubernetes secret volume is the documented case), and a
@@ -1035,7 +1046,7 @@ fn spawn_keyring_reload_tasks(
             .ok()
             .flatten()
     }
-    tokio::spawn(async move {
+    tasks.push(tokio::spawn(async move {
         // A content digest, not `(mtime, len)`: a same-length rotation
         // that lands on an unchanged mtime — a fixed-width token swap,
         // a metadata-preserving copy, or an atomic symlink swap inside
@@ -1088,7 +1099,29 @@ fn spawn_keyring_reload_tasks(
                     .record_keyring_reload(outcome != auth::ReloadOutcome::Refused);
             }
         }
-    });
+    }));
+    tasks
+}
+
+/// Stops the periodic tasks a server spawned — the flusher, the
+/// keyring watch and its SIGHUP listener, a router's map watch — and
+/// waits for each to finish. Called between axum's drain and the
+/// final flush (#898): a flusher tick that outlived the drain would
+/// race the final flush, and a task still polling its interval while
+/// the runtime is dropped trips tokio's own shutdown assert on a
+/// worker thread (`A Tokio 1.x context was found, but it is being
+/// shutdown`) — the runtime closes its time driver without waiting
+/// for the workers' current polls. Abort cancels at the task's next
+/// await; the join waits for a tick already inside its synchronous
+/// work to finish it, so nothing here is left mid-write.
+pub(crate) async fn stop_background_tasks(tasks: Vec<tokio::task::JoinHandle<()>>) {
+    for task in tasks {
+        task.abort();
+        // A cancelled task's join is `Err(Cancelled)`; a finished
+        // one's is `Ok` — both mean "not running", which is all this
+        // waits for.
+        let _ = task.await;
+    }
 }
 
 /// The periodic flusher: every `flush_secs`, persist what is dirty —
@@ -1103,7 +1136,7 @@ fn spawn_flusher(
     flush_secs: usize,
     auto_embed: bool,
     heavy_ops: limits::HeavyOpsLimiter,
-) {
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(flush_secs as u64));
         ticker.tick().await; // the first tick fires immediately; skip it
@@ -1145,7 +1178,7 @@ fn spawn_flusher(
                 );
             }
         }
-    });
+    })
 }
 
 /// Ceiling on one auto-compaction inside the flusher tick. A rebuild
@@ -1509,6 +1542,31 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(5), signal)
             .await
             .expect("the SIGTERM sent before the first poll completes the future");
+    }
+
+    /// #898: every task handed to `stop_background_tasks` has finished
+    /// when it returns — an interval loop included, which is exactly
+    /// the task shape that tripped tokio's shutdown assert.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stop_background_tasks_finishes_every_task_before_returning() {
+        let tasks: Vec<tokio::task::JoinHandle<()>> = (0..3)
+            .map(|_| {
+                tokio::spawn(async {
+                    let mut ticker = tokio::time::interval(std::time::Duration::from_millis(1));
+                    loop {
+                        ticker.tick().await;
+                    }
+                })
+            })
+            .collect();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let probes: Vec<tokio::task::AbortHandle> = tasks
+            .iter()
+            .map(tokio::task::JoinHandle::abort_handle)
+            .collect();
+        assert!(probes.iter().all(|probe| !probe.is_finished()));
+        super::stop_background_tasks(tasks).await;
+        assert!(probes.iter().all(tokio::task::AbortHandle::is_finished));
     }
 
     /// Whether `handlers` calls axum's `name` method router: the token
