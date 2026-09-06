@@ -50,6 +50,104 @@ fn counter(metrics_text: &str, name: &str) -> u64 {
         .unwrap()
 }
 
+/// #898: a graceful stop with the periodic tasks running — the
+/// flusher and the config watch a `--config` file switches on —
+/// leaves no worker panic in the server's own log, and the final
+/// flush still lands after them. Each round first rotates the token
+/// and waits for the watch to apply it, so the stop lands on a
+/// watcher that has polled, not one still on its first sleep; three
+/// rounds, since the failure was a scheduling race between a tick and
+/// the runtime's drop.
+#[test]
+fn a_graceful_stop_with_the_periodic_tasks_running_leaves_no_worker_panic() {
+    let dir = scratch("stop-clean");
+    let config = dir.join("taguru.env");
+    for round in 0..3 {
+        std::fs::write(&config, format!("TAGURU_API_TOKENS=ci:sekrit-{round}-a\n")).unwrap();
+        let stderr = dir.join(format!("stderr-{round}.log"));
+        let server = Server::start_with_config(
+            &format!("reload-stop-clean-{round}"),
+            &config,
+            &stderr,
+            &[
+                ("TAGURU_AUTH_FAIL_LIMIT_PER_MIN", "0"),
+                ("RUST_LOG", "info"),
+            ],
+        );
+        std::fs::write(&config, format!("TAGURU_API_TOKENS=ci:sekrit-{round}-b\n")).unwrap();
+        let rotated = format!("sekrit-{round}-b");
+        eventually(
+            Duration::from_secs(20),
+            "the watch to apply the rotation",
+            || {
+                server
+                    .call_with_token("GET", "/contexts", None, Some(&rotated))
+                    .0
+                    == 200
+            },
+        );
+        let _ = server.stop_gracefully();
+        let log = std::fs::read_to_string(&stderr).unwrap();
+        assert!(
+            log.contains("trigger=\"config-watch\""),
+            "round {round}: {log}"
+        );
+        assert!(
+            log.contains("flushed dirty contexts on shutdown"),
+            "round {round}: {log}"
+        );
+        assert!(
+            !log.contains("panicked") && !log.contains("being shutdown"),
+            "round {round}: {log}"
+        );
+    }
+}
+
+/// #898, the router's half: its map watch ticks the same way the
+/// server's flusher and config watch do, and its graceful stop must
+/// leave no worker panic in its own log either. Each round rewrites
+/// the map and waits for the watch to apply it before the stop.
+#[test]
+fn a_router_graceful_stop_with_the_map_watch_running_leaves_no_worker_panic() {
+    let dir = scratch("router-stop-clean");
+    for round in 0..3 {
+        let stderr = dir.join(format!("stderr-{round}.log"));
+        let router = Server::start_router_logging_to(
+            &format!("stop-clean-{round}"),
+            "sake = http://127.0.0.1:9\n",
+            &[("RUST_LOG", "info")],
+            &stderr,
+        );
+        std::fs::write(
+            router.data_dir.join("route-map"),
+            "sake = http://127.0.0.1:10\n",
+        )
+        .unwrap();
+        // The reload's own log line is the sync point: the metric's
+        // `applied` series is rendered only once a reload happened.
+        eventually(
+            Duration::from_secs(20),
+            "the map watch to apply the rewrite",
+            || {
+                std::fs::read_to_string(&stderr)
+                    .map(|log| log.contains("trigger=\"map-watch\""))
+                    .unwrap_or(false)
+            },
+        );
+        let _ = router.stop_gracefully();
+        let log = std::fs::read_to_string(&stderr).unwrap();
+        assert!(log.contains("router ready"), "round {round}: {log}");
+        assert!(
+            log.contains("trigger=\"map-watch\""),
+            "round {round}: {log}"
+        );
+        assert!(
+            !log.contains("panicked") && !log.contains("being shutdown"),
+            "round {round}: {log}"
+        );
+    }
+}
+
 /// SIGHUP applies a rewritten config: the rotated key's NEW bytes
 /// authenticate, the removed key and the old bytes die, the reloaded
 /// scope demotes the key live, and the audit line carries names —

@@ -109,7 +109,7 @@ pub(crate) async fn run(config: Option<PathBuf>) {
     // APPLIED — not a fresh read of the file: a rewrite landing in the
     // gap between boot's read and the watch task's first read would
     // otherwise be recorded as already-seen without ever being applied.
-    spawn_route_map_reload_tasks(
+    let background = spawn_route_map_reload_tasks(
         state.clone(),
         map_path,
         crate::sha256::sha256_hex(map_text.as_bytes()),
@@ -216,6 +216,9 @@ pub(crate) async fn run(config: Option<PathBuf>) {
     .await
     .unwrap();
 
+    // The watch tasks first, before the runtime is dropped (#898).
+    crate::stop_background_tasks(background).await;
+
     if let Some(provider) = tracer_provider
         && let Err(error) = tokio::task::block_in_place(|| provider.shutdown())
     {
@@ -276,7 +279,12 @@ pub(super) fn reload_route_map(state: &RouterState, bytes: &[u8], trigger: &str)
 /// `boot_digest` is the sha256 of the bytes boot applied — the
 /// watch's baseline, so an edit racing the task's startup still
 /// registers as a change.
-fn spawn_route_map_reload_tasks(state: RouterState, path: PathBuf, boot_digest: String) {
+fn spawn_route_map_reload_tasks(
+    state: RouterState,
+    path: PathBuf,
+    boot_digest: String,
+) -> Vec<tokio::task::JoinHandle<()>> {
+    let mut tasks = Vec::new();
     // Off the async workers, exactly like the keyring watch: the map
     // can live on a network mount, and a stalled read must not stall
     // the HTTP workers. `None` is "unreadable this tick" either way.
@@ -301,7 +309,7 @@ fn spawn_route_map_reload_tasks(state: RouterState, path: PathBuf, boot_digest: 
             }
         };
         if let Some(mut hangup) = hangup {
-            tokio::spawn(async move {
+            tasks.push(tokio::spawn(async move {
                 while hangup.recv().await.is_some() {
                     match read_off_worker(path.clone()).await {
                         Some(bytes) => {
@@ -313,10 +321,10 @@ fn spawn_route_map_reload_tasks(state: RouterState, path: PathBuf, boot_digest: 
                         ),
                     }
                 }
-            });
+            }));
         }
     }
-    tokio::spawn(async move {
+    tasks.push(tokio::spawn(async move {
         // Each tick's read is THE read the reload uses — its bytes go
         // straight into `reload_route_map`, so change detection and
         // the reload can never disagree about what the file said
@@ -341,7 +349,8 @@ fn spawn_route_map_reload_tasks(state: RouterState, path: PathBuf, boot_digest: 
                 reload_route_map(&state, &bytes, "map-watch");
             }
         }
-    });
+    }));
+    tasks
 }
 
 /// Every route the router answers. The two `/contexts/{name}` entries
