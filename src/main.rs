@@ -975,6 +975,70 @@ fn routes(
 /// knob.
 const CONFIG_WATCH_INTERVAL: Duration = Duration::from_secs(5);
 
+/// How long [`read_off_worker`] waits for a config/route-map read
+/// before treating that tick as unreadable. Comfortably above what
+/// even a slow network mount needs for these small files, and well
+/// under `CONFIG_WATCH_INTERVAL` so a genuinely stalled mount never
+/// piles up unfinished reads across ticks.
+const CONFIG_READ_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Whether a [`read_off_worker`] thread for one watched path is still
+/// running from an earlier call — set the instant that thread starts,
+/// cleared only when its `std::fs::read` actually returns (however
+/// long that takes). Share one of these between every caller that can
+/// read the same path — a periodic tick and, for the route-map watch,
+/// its SIGHUP handler — so a mount that is still stuck from the last
+/// attempt never gets a second thread piled behind the first.
+pub(crate) type ReadInFlight = Arc<std::sync::atomic::AtomicBool>;
+
+/// Reads `path` off a plain OS thread, not tokio's blocking pool, with
+/// a deadline (issue #900). Both the keyring config watch and the
+/// route-map watch share this: the file can live on a network mount
+/// (a Kubernetes secret volume is the documented case), and a stalled
+/// read must neither wedge this watch's own tick loop nor outlive
+/// graceful shutdown.
+///
+/// `tokio::task::spawn_blocking` cannot do this: it has no way to
+/// cancel work already handed to the blocking pool, and
+/// `Runtime::drop` waits for that pool unconditionally — a stalled
+/// read there would keep the process alive past `SIGTERM`'s drain,
+/// task-stop and final flush, all of which can finish while the read
+/// is still stuck. A plain `std::thread` is not part of that pool, so
+/// process exit tears it down like any other unjoined thread instead
+/// of waiting on it.
+///
+/// A timed-out read's thread is still out there, blocked on the same
+/// stuck mount — `in_flight` is what stops the NEXT call (this watch's
+/// next tick, or a SIGHUP landing mid-stall) from starting a second
+/// one behind it: a still-set flag returns `None` with no thread spawn
+/// at all. Left unchecked, a mount stuck for the life of the process
+/// would otherwise accumulate one thread per tick forever.
+///
+/// `None` covers a failed read, a timed-out read, an already-in-flight
+/// read and a thread that panicked — every caller already treats
+/// "unreadable this tick" as one outcome, never poisoning the
+/// change-detection baseline.
+pub(crate) async fn read_off_worker(
+    path: std::path::PathBuf,
+    in_flight: &ReadInFlight,
+) -> Option<Vec<u8>> {
+    if in_flight.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return None;
+    }
+    let flag = Arc::clone(in_flight);
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let bytes = std::fs::read(path).ok();
+        flag.store(false, std::sync::atomic::Ordering::Release);
+        let _ = tx.send(bytes);
+    });
+    tokio::time::timeout(CONFIG_READ_TIMEOUT, rx)
+        .await
+        .ok()?
+        .ok()
+        .flatten()
+}
+
 /// Arms the keyring hot-reload triggers (issue #134); the reload work
 /// itself — source re-read, fail-closed rules, the audit line — is
 /// [`auth::reload_keyring`]. Two triggers, same swap:
@@ -1035,17 +1099,6 @@ fn spawn_keyring_reload_tasks(
     let Some(path) = source.config_path().map(std::path::Path::to_path_buf) else {
         return tasks;
     };
-    // Off the async workers: the config file can live on a network
-    // mount (a Kubernetes secret volume is the documented case), and a
-    // stalled `std::fs::read` on a worker thread would stall whatever
-    // HTTP handlers share it. `None` is "unreadable this tick" either
-    // way — a failed read and a failed spawn degrade identically.
-    async fn read_off_worker(path: std::path::PathBuf) -> Option<Vec<u8>> {
-        tokio::task::spawn_blocking(move || std::fs::read(path).ok())
-            .await
-            .ok()
-            .flatten()
-    }
     tasks.push(tokio::spawn(async move {
         // A content digest, not `(mtime, len)`: a same-length rotation
         // that lands on an unchanged mtime — a fixed-width token swap,
@@ -1070,7 +1123,12 @@ fn spawn_keyring_reload_tasks(
         // second read used to exist here, and a transient miss on it
         // could refuse a reload for content `last` had already
         // recorded as seen, silently dropping it forever.)
-        let mut last: Option<String> = read_off_worker(path.clone())
+        // Only this loop ever reads this path (the SIGHUP handler
+        // above reloads straight from `source`, not through
+        // `read_off_worker`), so the flag only ever needs to answer
+        // this loop's own overlapping ticks.
+        let in_flight: ReadInFlight = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut last: Option<String> = read_off_worker(path.clone(), &in_flight)
             .await
             .map(|bytes| sha256::sha256_hex(&bytes));
         let mut ticker = tokio::time::interval(CONFIG_WATCH_INTERVAL);
@@ -1082,7 +1140,7 @@ fn spawn_keyring_reload_tasks(
             // This same read serves the reload below too — no second
             // read of the file exists to race a concurrent rewrite
             // anymore.
-            let Some(bytes) = read_off_worker(path.clone()).await else {
+            let Some(bytes) = read_off_worker(path.clone(), &in_flight).await else {
                 continue;
             };
             let current = sha256::sha256_hex(&bytes);

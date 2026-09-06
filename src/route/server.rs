@@ -285,19 +285,20 @@ fn spawn_route_map_reload_tasks(
     boot_digest: String,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     let mut tasks = Vec::new();
-    // Off the async workers, exactly like the keyring watch: the map
-    // can live on a network mount, and a stalled read must not stall
-    // the HTTP workers. `None` is "unreadable this tick" either way.
-    async fn read_off_worker(path: PathBuf) -> Option<Vec<u8>> {
-        tokio::task::spawn_blocking(move || std::fs::read(path).ok())
-            .await
-            .ok()
-            .flatten()
-    }
+    // Shared with the keyring watch — see `crate::read_off_worker`
+    // (issue #900): off a plain thread, not tokio's blocking pool, so
+    // a stalled read on a network mount can neither wedge this loop
+    // nor outlive graceful shutdown. SIGHUP and the periodic tick both
+    // read this same path, so they share one `in_flight` flag too —
+    // without it, a SIGHUP landing mid-stall would pile a second
+    // blocked thread behind the tick's.
+    use crate::{ReadInFlight, read_off_worker};
+    let in_flight: ReadInFlight = Arc::new(std::sync::atomic::AtomicBool::new(false));
     #[cfg(unix)]
     {
         let state = state.clone();
         let path = path.clone();
+        let in_flight = Arc::clone(&in_flight);
         // Registered before the task is spawned (#892, the same window
         // `shutdown_signal` closes): a SIGHUP before the task's first
         // poll would terminate the router instead of reloading the map.
@@ -311,7 +312,7 @@ fn spawn_route_map_reload_tasks(
         if let Some(mut hangup) = hangup {
             tasks.push(tokio::spawn(async move {
                 while hangup.recv().await.is_some() {
-                    match read_off_worker(path.clone()).await {
+                    match read_off_worker(path.clone(), &in_flight).await {
                         Some(bytes) => {
                             reload_route_map(&state, &bytes, "sighup");
                         }
@@ -336,7 +337,7 @@ fn spawn_route_map_reload_tasks(
             ticker.tick().await;
             // An unreadable file is NOT a change: transient volume
             // states must neither trigger a reload nor poison `last`.
-            let Some(bytes) = read_off_worker(path.clone()).await else {
+            let Some(bytes) = read_off_worker(path.clone(), &in_flight).await else {
                 continue;
             };
             let current = crate::sha256::sha256_hex(&bytes);

@@ -37,6 +37,39 @@ fn eventually(budget: Duration, what: &str, mut check: impl FnMut() -> bool) {
     panic!("timed out waiting for {what}");
 }
 
+/// How many OS threads `pid` currently owns — for asserting that a
+/// stalled watch read does not pile up one blocked thread per tick
+/// (issue #900). Linux reads `/proc`'s own count directly; elsewhere
+/// (this harness also runs on macOS in local dev) `ps -M` lists one
+/// row per thread, so a row count minus its header is the same
+/// number.
+#[cfg(unix)]
+fn thread_count(pid: u32) -> usize {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string(format!("/proc/{pid}/status"))
+            .ok()
+            .and_then(|status| {
+                status
+                    .lines()
+                    .find_map(|line| line.strip_prefix("Threads:"))
+                    .map(|n| n.trim().parse().unwrap())
+            })
+            .expect("/proc/<pid>/status must report a thread count")
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let output = std::process::Command::new("ps")
+            .args(["-M", "-p", &pid.to_string()])
+            .output()
+            .expect("ps must run");
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .count()
+            .saturating_sub(1)
+    }
+}
+
 /// One counter's value out of a /metrics render.
 fn counter(metrics_text: &str, name: &str) -> u64 {
     metrics_text
@@ -146,6 +179,102 @@ fn a_router_graceful_stop_with_the_map_watch_running_leaves_no_worker_panic() {
             "round {round}: {log}"
         );
     }
+}
+
+/// #900: a stalled config-file read (a network mount that stops
+/// answering `open()`, reproduced here with a FIFO no writer ever
+/// connects to) must not keep the process alive past graceful
+/// shutdown. `read_off_worker` runs the read off a plain thread, not
+/// tokio's blocking pool — the pool is what `Runtime::drop` waits for
+/// unconditionally, and a stuck read there used to wedge the process
+/// well after drain, task-stop and the final flush had all finished.
+#[cfg(unix)]
+#[test]
+fn a_graceful_stop_completes_even_when_the_config_watch_read_is_stuck() {
+    let dir = scratch("stall-config");
+    let config = dir.join("taguru.env");
+    std::fs::write(&config, "TAGURU_API_TOKENS=ci:sekrit\n").unwrap();
+    let stderr = dir.join("stderr.log");
+    let server = Server::start_with_config(
+        "reload-stall-config",
+        &config,
+        &stderr,
+        &[("RUST_LOG", "info")],
+    );
+    // Swap the regular file for a FIFO: the next watch tick's
+    // `std::fs::read` blocks inside `open()` forever, since nothing
+    // ever opens the write end — the network-mount stall this
+    // reproduces.
+    std::fs::remove_file(&config).unwrap();
+    let status = std::process::Command::new("mkfifo")
+        .arg(&config)
+        .status()
+        .unwrap();
+    assert!(status.success(), "mkfifo failed");
+    // The watch ticks every `CONFIG_WATCH_INTERVAL` (5s); give it time
+    // to reach the stuck `open()` before measuring.
+    std::thread::sleep(Duration::from_secs(6));
+    let after_one_tick = thread_count(server.pid());
+    // Two more intervals: without the shared in-flight guard, each one
+    // would pile another thread blocked on the same stuck `open()`.
+    std::thread::sleep(Duration::from_secs(11));
+    let after_three_ticks = thread_count(server.pid());
+    assert_eq!(
+        after_one_tick, after_three_ticks,
+        "thread count grew ({after_one_tick} -> {after_three_ticks}) across two more stalled \
+         ticks — read_off_worker must not start a new thread while one is already stuck"
+    );
+    let started = Instant::now();
+    let _ = server.stop_gracefully();
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "graceful stop took {:?} — a stuck config-watch read should no \
+         longer block it",
+        started.elapsed()
+    );
+}
+
+/// #900's router half: the map-watch read gets the same treatment.
+#[cfg(unix)]
+#[test]
+fn a_router_graceful_stop_completes_even_when_the_map_watch_read_is_stuck() {
+    let dir = scratch("router-stall-map");
+    let stderr = dir.join("stderr.log");
+    let router = Server::start_router_logging_to(
+        "stall-map",
+        "sake = http://127.0.0.1:9\n",
+        &[("RUST_LOG", "info")],
+        &stderr,
+    );
+    let map_path = router.data_dir.join("route-map");
+    std::fs::remove_file(&map_path).unwrap();
+    let status = std::process::Command::new("mkfifo")
+        .arg(&map_path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "mkfifo failed");
+    std::thread::sleep(Duration::from_secs(6));
+    let after_one_tick = thread_count(router.pid());
+    // A SIGHUP mid-stall reads the same path as the tick — without the
+    // shared in-flight guard this alone would add a second stuck
+    // thread, on top of whatever two more ticks would pile up.
+    router.signal("-HUP");
+    std::thread::sleep(Duration::from_secs(11));
+    let after_three_ticks_and_a_sighup = thread_count(router.pid());
+    assert_eq!(
+        after_one_tick, after_three_ticks_and_a_sighup,
+        "thread count grew ({after_one_tick} -> {after_three_ticks_and_a_sighup}) across two \
+         more stalled ticks and a SIGHUP — read_off_worker must not start a new thread while \
+         one is already stuck on this path"
+    );
+    let started = Instant::now();
+    let _ = router.stop_gracefully();
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "graceful stop took {:?} — a stuck map-watch read should no \
+         longer block it",
+        started.elapsed()
+    );
 }
 
 /// SIGHUP applies a rewritten config: the rotated key's NEW bytes
