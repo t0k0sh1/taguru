@@ -116,6 +116,31 @@ impl Server {
         extra_env: &[(&str, &str)],
         subcommand: &str,
     ) -> Self {
+        Self::start_router_with_stderr(tag, map_contents, extra_env, subcommand, Stdio::inherit())
+    }
+
+    /// [`start_router`](Self::start_router) with the router's stderr
+    /// written to `stderr_to` — the router twin of
+    /// [`start_with_config`](Self::start_with_config)'s capture, for
+    /// tests that read the process's own log after a stop.
+    pub fn start_router_logging_to(
+        tag: &str,
+        map_contents: &str,
+        extra_env: &[(&str, &str)],
+        stderr_to: &std::path::Path,
+    ) -> Self {
+        let stderr =
+            std::fs::File::create(stderr_to).expect("stderr capture file must be creatable");
+        Self::start_router_with_stderr(tag, map_contents, extra_env, "router", Stdio::from(stderr))
+    }
+
+    fn start_router_with_stderr(
+        tag: &str,
+        map_contents: &str,
+        extra_env: &[(&str, &str)],
+        subcommand: &str,
+        stderr: Stdio,
+    ) -> Self {
         let dir = common::scratch_dir(&format!("router-{tag}"));
         std::fs::create_dir_all(&dir).expect("router scratch dir must be creatable");
         let map_path = dir.join("route-map");
@@ -131,7 +156,7 @@ impl Server {
         }
         let mut child = command
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(stderr)
             .spawn()
             .expect("router binary must spawn");
         let stdout = child.stdout.take().expect("stdout must be piped");

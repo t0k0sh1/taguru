@@ -81,6 +81,30 @@ fn a_graceful_stop_with_the_periodic_tasks_running_leaves_no_worker_panic() {
     }
 }
 
+/// #898, the router's half: its map watch ticks the same way the
+/// server's flusher and config watch do, and its graceful stop must
+/// leave no worker panic in its own log either — five rounds.
+#[test]
+fn a_router_graceful_stop_with_the_map_watch_running_leaves_no_worker_panic() {
+    let dir = scratch("router-stop-clean");
+    for round in 0..5 {
+        let stderr = dir.join(format!("stderr-{round}.log"));
+        let router = Server::start_router_logging_to(
+            &format!("stop-clean-{round}"),
+            "sake = http://127.0.0.1:9\n",
+            &[("RUST_LOG", "info")],
+            &stderr,
+        );
+        let _ = router.stop_gracefully();
+        let log = std::fs::read_to_string(&stderr).unwrap();
+        assert!(log.contains("router ready"), "round {round}: {log}");
+        assert!(
+            !log.contains("panicked") && !log.contains("being shutdown"),
+            "round {round}: {log}"
+        );
+    }
+}
+
 /// SIGHUP applies a rewritten config: the rotated key's NEW bytes
 /// authenticate, the removed key and the old bytes die, the reloaded
 /// scope demotes the key live, and the audit line carries names —
