@@ -148,6 +148,79 @@ fn a_router_graceful_stop_with_the_map_watch_running_leaves_no_worker_panic() {
     }
 }
 
+/// #900: a stalled config-file read (a network mount that stops
+/// answering `open()`, reproduced here with a FIFO no writer ever
+/// connects to) must not keep the process alive past graceful
+/// shutdown. `read_off_worker` runs the read off a plain thread, not
+/// tokio's blocking pool — the pool is what `Runtime::drop` waits for
+/// unconditionally, and a stuck read there used to wedge the process
+/// well after drain, task-stop and the final flush had all finished.
+#[cfg(unix)]
+#[test]
+fn a_graceful_stop_completes_even_when_the_config_watch_read_is_stuck() {
+    let dir = scratch("stall-config");
+    let config = dir.join("taguru.env");
+    std::fs::write(&config, "TAGURU_API_TOKENS=ci:sekrit\n").unwrap();
+    let stderr = dir.join("stderr.log");
+    let server = Server::start_with_config(
+        "reload-stall-config",
+        &config,
+        &stderr,
+        &[("RUST_LOG", "info")],
+    );
+    // Swap the regular file for a FIFO: the next watch tick's
+    // `std::fs::read` blocks inside `open()` forever, since nothing
+    // ever opens the write end — the network-mount stall this
+    // reproduces.
+    std::fs::remove_file(&config).unwrap();
+    let status = std::process::Command::new("mkfifo")
+        .arg(&config)
+        .status()
+        .unwrap();
+    assert!(status.success(), "mkfifo failed");
+    // The watch ticks every `CONFIG_WATCH_INTERVAL` (5s); give it time
+    // to reach the stuck `open()` before stopping the server.
+    std::thread::sleep(Duration::from_secs(7));
+    let started = Instant::now();
+    let _ = server.stop_gracefully();
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "graceful stop took {:?} — a stuck config-watch read should no \
+         longer block it",
+        started.elapsed()
+    );
+}
+
+/// #900's router half: the map-watch read gets the same treatment.
+#[cfg(unix)]
+#[test]
+fn a_router_graceful_stop_completes_even_when_the_map_watch_read_is_stuck() {
+    let dir = scratch("router-stall-map");
+    let stderr = dir.join("stderr.log");
+    let router = Server::start_router_logging_to(
+        "stall-map",
+        "sake = http://127.0.0.1:9\n",
+        &[("RUST_LOG", "info")],
+        &stderr,
+    );
+    let map_path = router.data_dir.join("route-map");
+    std::fs::remove_file(&map_path).unwrap();
+    let status = std::process::Command::new("mkfifo")
+        .arg(&map_path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "mkfifo failed");
+    std::thread::sleep(Duration::from_secs(7));
+    let started = Instant::now();
+    let _ = router.stop_gracefully();
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "graceful stop took {:?} — a stuck map-watch read should no \
+         longer block it",
+        started.elapsed()
+    );
+}
+
 /// SIGHUP applies a rewritten config: the rotated key's NEW bytes
 /// authenticate, the removed key and the old bytes die, the reloaded
 /// scope demotes the key live, and the audit line carries names —

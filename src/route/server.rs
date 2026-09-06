@@ -285,15 +285,11 @@ fn spawn_route_map_reload_tasks(
     boot_digest: String,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     let mut tasks = Vec::new();
-    // Off the async workers, exactly like the keyring watch: the map
-    // can live on a network mount, and a stalled read must not stall
-    // the HTTP workers. `None` is "unreadable this tick" either way.
-    async fn read_off_worker(path: PathBuf) -> Option<Vec<u8>> {
-        tokio::task::spawn_blocking(move || std::fs::read(path).ok())
-            .await
-            .ok()
-            .flatten()
-    }
+    // Shared with the keyring watch — see `crate::read_off_worker`
+    // (issue #900): off a plain thread, not tokio's blocking pool, so
+    // a stalled read on a network mount can neither wedge this loop
+    // nor outlive graceful shutdown.
+    use crate::read_off_worker;
     #[cfg(unix)]
     {
         let state = state.clone();
