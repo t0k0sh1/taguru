@@ -35,7 +35,7 @@
     </div>
     <div class="side-group">
       <div class="side-group-label">Reference</div>
-      <a href="schema.html">Context schema</a>
+      <a href="schema.html"><code>context</code> schema</a>
       <a href="import.html">Batch import</a>
       <a href="extract.html">Document extraction</a>
       <a href="taguru-code.html">Code map (taguru-code)</a>
@@ -77,7 +77,7 @@
     <p class="lede">
       Two fictional sake-science papers go in as PDFs and come out as a fixed, fully local
       corpus: no cloud API, no cloud LLM, nothing pulled at request time. This page builds the
-      pipeline end to end — PDF → sections → contexts and groups → LLM-decomposed facts — and
+      pipeline end to end — PDF → sections → <code>contexts</code> and <code>groups</code> → LLM-decomposed facts — and
       then serves it with a plain LangChain retriever and answer chain, every claim traceable
       back to its PDF, section, and paragraph.
     </p>
@@ -103,7 +103,7 @@
       <div class="arch-layer">
         <div class="arch-label">taguru server</div>
         <div class="arch-row">
-          <div class="arch-box dim"><b>contexts &amp; groups</b><span>the association graph, one per paper section</span></div>
+          <div class="arch-box dim"><b><code>contexts</code> &amp; <code>groups</code></b><span>the association graph, one per paper section</span></div>
           <div class="arch-box lane-text"><b>embed</b><span>server-side semantic lane, a local embedding model</span></div>
         </div>
       </div>
@@ -238,7 +238,7 @@ print(taguru.__version__, tl.__version__)"</span></code></pre>
       If you would rather stay on the CLI path after this step, write each section out
       as its own <code>.md</code> file and hand the directory to <code>taguru extract</code> +
       <a href="import.html"><code>taguru import</code></a> instead of the SDK path below —
-      everything from <a href="#modeling">context and group modeling</a> onward applies
+      everything from <a href="#modeling"><code>context</code> and <code>group</code> modeling</a> onward applies
       either way.
     </p>
     <pre><code><span class="k">from</span> pypdf <span class="k">import</span> PdfReader
@@ -268,7 +268,7 @@ SECTION_RE = re.<span class="k">compile</span>(<span class="s">r"^(\d+)\.\s+(.+)
   </section>
 
   <section id="modeling">
-    <h2>One section, one context; one paper, one group</h2>
+    <h2>One section, one <code>context</code>; one paper, one <code>group</code></h2>
     <p class="section-sub">The same mapping the <a href="modeling.html#worked-example">modeling guide</a>'s worked example uses for BERT, applied to these two papers.</p>
     <pre><code>group: paper/tanaka2024
 ├── context: section/tanaka2024/1
@@ -280,10 +280,10 @@ group: paper/sato2023
 └── context: section/sato2023/2</code></pre>
     <p>
       A section's vocabulary stays stable within it — exactly the one-spelling-one-referent
-      contract a context exists to hold — so the section is the context, and the paper is the
-      group that bundles its sections back together for cross-paper search
-      (<a href="modeling.html#cross-search">why a group, never a super-context</a>). Group
-      creation has to be idempotent by hand — <code>groups.create</code> 409s if the group
+      contract a <code>context</code> exists to hold — so the section is the <code>context</code>, and the paper is the
+      <code>group</code> that bundles its sections back together for cross-paper search
+      (<a href="modeling.html#cross-search">why a <code>group</code>, never a super-<code>context</code></a>). <code>group</code>
+      creation has to be idempotent by hand — <code>groups.create</code> 409s if the <code>group</code>
       already exists, so a rerun catches that and switches to a delta update instead of failing:
     </p>
     <pre><code><span class="k">from</span> taguru <span class="k">import</span> Taguru, ConflictError
@@ -296,9 +296,9 @@ client = Taguru()
     <span class="k">except</span> ConflictError:
         client.groups.update(name, add_contexts=contexts)</code></pre>
     <p>
-      Context creation gets the same idempotence for free from <code>TaguruIngester</code>
+      <code>context</code> creation gets the same idempotence for free from <code>TaguruIngester</code>
       itself — <code>create_context=True</code> stamps a create block that only takes effect
-      when the context is still absent, so re-running the pipeline over an unchanged PDF
+      when the <code>context</code> is still absent, so re-running the pipeline over an unchanged PDF
       neither fails nor duplicates anything. That call shows up next, where the ingester for
       each section actually runs.
     </p>
@@ -344,8 +344,8 @@ ensure_group(<span class="s">"paper/tanaka2024"</span>, <span class="s">"Tanaka 
   </section>
 
   <section id="retrieve">
-    <h2>One retriever, both papers, named by group</h2>
-    <p class="section-sub">No super-context was ever created — the group names in <code>groups=</code> are the entire cross-paper search target.</p>
+    <h2>One retriever, both papers, named by <code>group</code></h2>
+    <p class="section-sub">No super-<code>context</code> was ever created — the <code>group</code> names in <code>groups=</code> are the entire cross-paper search target.</p>
     <pre><code><span class="k">from</span> taguru_langchain <span class="k">import</span> TaguruRetriever
 
 retriever = TaguruRetriever(
@@ -362,7 +362,7 @@ retriever = TaguruRetriever(
       <code>paragraph</code>, <code>section</code>, and <code>lane</code> — which paper section
       answered is never a guess, whether the hit came from the graph, the text lane, or both.
       Reaching for <code>TaguruRetriever(context=...)</code> per paper in a loop instead would
-      undo the split this pipeline just built; naming both groups in one retriever is the point.
+      undo the split this pipeline just built; naming both <code>groups</code> in one retriever is the point.
     </p>
   </section>
 
@@ -451,8 +451,8 @@ print(citation.text)   <span class="c"># the verbatim paragraph the answer's cla
         <p>This walkthrough as a runnable program — offline with fake models, or against real Ollama models when you point it at them.</p>
       </a>
       <a class="nav-card" href="modeling.html" style="flex:1 1 16rem">
-        <span class="nc-title">Context &amp; group modeling</span>
-        <p>The worked example this page's section/group mapping is drawn from, and the anti-patterns to avoid at larger scale.</p>
+        <span class="nc-title"><code>context</code> &amp; <code>group</code> modeling</span>
+        <p>The worked example this page's section/<code>group</code> mapping is drawn from, and the anti-patterns to avoid at larger scale.</p>
       </a>
       <a class="nav-card" href="mcp-rag-walkthrough.html" style="flex:1 1 16rem">
         <span class="nc-title">MCP walkthrough</span>

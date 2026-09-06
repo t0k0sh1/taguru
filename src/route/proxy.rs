@@ -1,4 +1,4 @@
-//! The streaming proxy for context-scoped verbs: same method, path,
+//! The streaming proxy for `context`-scoped verbs: same method, path,
 //! and body streamed straight to the owning shard, headers minus the
 //! hop-by-hop set — the response is the shard's own bytes.
 

@@ -35,7 +35,7 @@
     </div>
     <div class="side-group">
       <div class="side-group-label">Reference</div>
-      <a href="schema.html">Context schema</a>
+      <a href="schema.html"><code>context</code> schema</a>
       <a href="import.html">Batch import</a>
       <a href="extract.html">Document extraction</a>
       <a href="taguru-code.html">Code map (taguru-code)</a>
@@ -79,7 +79,7 @@
       forever. Taguru already has the destination (the association graph) and the vehicle
       (<code>taguru extract</code>, <code>POST /import</code>); this page fixes the
       <b>conventions and the procedure</b> that make the lifecycle work with <b>no new server
-      machinery</b>: scratch is an ordinary context, promotion is ordinary writes, and
+      machinery</b>: scratch is an ordinary <code>context</code>, promotion is ordinary writes, and
       forgetting is always an explicit operation (issue #423; ADR 0011, ADR 0012).
     </p>
   </header>
@@ -87,7 +87,7 @@
   <section>
     <h2 id="conventions">Scratch conventions</h2>
     <ul>
-      <li><b>Scratch is an ordinary context</b> — <code>scratch-{agent}</code>, or
+      <li><b>Scratch is an ordinary <code>context</code></b> — <code>scratch-{agent}</code>, or
         <code>scratch-{agent}-{topic}</code> when sessions must not mix. There is no TTL and
         none is planned: nothing in this store expires silently.</li>
       <li><b>Source ids name the session, globally uniquely</b>:
@@ -95,7 +95,7 @@
         running note, with <code>/{doc}</code> appended when one session produces several
         documents. Uniqueness is load-bearing: import is retract-then-apply <b>per source
         id</b>, so two agents sharing a bare <code>session:{id}</code> in one permanent
-        context would silently replace each other's assertions. The id survives promotion,
+        <code>context</code> would silently replace each other's assertions. The id survives promotion,
         so a promoted fact's citation still names the session that produced it — provenance
         rides the existing source/citation machinery.</li>
       <li><b>Always declare <code>date</code></b> when storing passages.
@@ -111,11 +111,11 @@
   <section>
     <h2 id="procedure">The promotion procedure</h2>
     <ol>
-      <li><b>Review</b> the scratch context: <code>recall</code>/<code>query</code>, or
+      <li><b>Review</b> the scratch <code>context</code>: <code>recall</code>/<code>query</code>, or
         <code>taguru communities --context scratch-…</code> for a themed overview once the
-        scratch has grown (<code>--into NAME</code> names the derived context —
+        scratch has grown (<code>--into NAME</code> names the derived <code>context</code> —
         default <code>NAME::communities</code>; <code>--group NAME</code> summarizes a whole
-        group instead; <code>--dry-run</code>/<code>--json</code> preview and machine
+        <code>group</code> instead; <code>--dry-run</code>/<code>--json</code> preview and machine
         output).</li>
       <li><b>Graph path — one call when the structure is already right</b> (ADR 0018):
         when the keepers are the scratch's own structured associations (written by the
@@ -136,14 +136,14 @@
         and retirement (step 6). Steps 3–4 below are the <b>text path</b>, needed only
         when the keepers exist as prose that still wants extraction.</li>
       <li><b>Extract the keepers</b> with <code>taguru extract</code> over the session
-        passages (or hand-write the batch), targeting the <b>permanent</b> context — keeping
+        passages (or hand-write the batch), targeting the <b>permanent</b> <code>context</code> — keeping
         the <code>session:{agent}:{id}</code> source ids and the <code>date</code>s:
         <code>--source-id</code>, <code>--date</code>, and <code>--tag</code> bake all three
         conventions into the emitted batch directly (ADR 0017), so no hand-editing of the
-        generated file remains. Resolve spellings against the permanent context rather than
+        generated file remains. Resolve spellings against the permanent <code>context</code> rather than
         forking its vocabulary: export it (<code>taguru export --out DIR</code>) and hand the
         export to <code>--vocabulary</code> (ADR 0015), which steers the extraction toward
-        the context's existing spellings and admits them through validation — the manual
+        the <code>context</code>'s existing spellings and admits them through validation — the manual
         <code>resolve</code>/<code>resolve_label</code> pass remains for hand-written
         batches. <code>--coverage</code> (ADR 0016) reports what the extraction left behind,
         sentence by sentence — the mechanical floor under the review this step owes.</li>
@@ -152,14 +152,14 @@
       <li><b>Audit the landing zone</b>: <code>taguru consolidation --context NAME</code>
         (or the <code>audit_consolidation</code> MCP tool) — <code>--checks LIST</code>
         narrows the sections (comma-separated <code>merge,contradiction,staleness</code>;
-        default all three), <code>--into NAME</code> names the judgment context (default
+        default all three), <code>--into NAME</code> names the judgment <code>context</code> (default
         <code>NAME::consolidation</code>), <code>--dry-run</code> previews. Promotion is exactly when merge
         twins and contradictions appear; judgments are proposals keyed by evidence
         fingerprint (re-runs over an unchanged graph cost zero LLM calls), and applying an
         accepted one is always an ordinary write — an alias, a retraction, a negative-weight
         assertion, or a re-import.</li>
       <li><b>Retire the promoted scratch</b>: <code>retract_source</code> the promoted
-        session sources (or delete the scratch context once everything promoted).
+        session sources (or delete the scratch <code>context</code> once everything promoted).
         Unpromoted scratch stays until someone decides otherwise — that is the posture, not
         a gap.</li>
     </ol>

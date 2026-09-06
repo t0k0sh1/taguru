@@ -25,7 +25,7 @@ use super::{
 };
 
 /// The eligibility view a windowed read carries: window-qualifying
-/// sources, resolved to this context's interned ids once at
+/// sources, resolved to this `context`'s interned ids once at
 /// construction. Names never interned here simply drop out — the same
 /// "unknown names contribute nothing" convention `query_any` fixes —
 /// so an empty view (no eligible source known to this graph) makes

@@ -64,7 +64,7 @@ pub(crate) struct ReplicationRecord {
 /// but unreadable" (`Err`). The distinction is load-bearing: this
 /// record is what marks a directory as a CACHE of the bucket lineage,
 /// so treating a corrupt record as absent would boot a possibly
-/// half-hydrated cache as independent local truth — every context not
+/// half-hydrated cache as independent local truth — every `context` not
 /// yet localized would silently vanish from the registry, and the
 /// claim that follows would fork the lineage. Boot paths refuse the
 /// error; best-effort readers degrade explicitly at their call site.
@@ -240,7 +240,7 @@ pub(crate) fn lane_stem(lane_name: &str) -> &str {
         .unwrap_or(lane_name)
 }
 
-/// The per-lane label pair the lag metric carries: the context's
+/// The per-lane label pair the lag metric carries: the `context`'s
 /// decoded name where the stem decodes (it always should — these files
 /// were written by the server), plus which lane. The replica's lag
 /// rows reuse it so the two vocabularies cannot drift.

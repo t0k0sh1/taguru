@@ -18,7 +18,7 @@
 //! Extraction is the expensive step (model calls per document), so a
 //! manifest in the output directory records what each batch file was
 //! computed from — document hash × model × prompt version × target
-//! context — and unchanged documents are skipped (`--force`
+//! `context` — and unchanged documents are skipped (`--force`
 //! overrides). Import is idempotent, so re-running the whole pipeline
 //! is always safe.
 //!

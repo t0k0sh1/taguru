@@ -102,10 +102,10 @@ impl Context {
     /// is removed from its edge's chain and its weight subtracted from
     /// the edge's total — the differential-sync move when a document
     /// changes (retract the old version, re-ingest the new one), instead
-    /// of rebuilding the whole context.
+    /// of rebuilding the whole `context`.
     ///
     /// Returns how many associations were touched, or `None` for a
-    /// source this context never saw. What retraction deliberately does
+    /// source this `context` never saw. What retraction deliberately does
     /// NOT do: concepts, labels, and edges minted by the document stay
     /// (the storage is append-only; an edge whose weight nets to 0.0
     /// simply stops carrying knowledge — `activate` already skips it),

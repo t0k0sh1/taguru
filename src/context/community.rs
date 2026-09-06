@@ -37,7 +37,7 @@
 //!   and re-runs whole, LLM calls are the expensive part and re-run
 //!   only for changed content.
 //!
-//! A full pass over every edge can run long on a big context, so the
+//! A full pass over every edge can run long on a big `context`, so the
 //! entry point takes a [`Deadline`] and answers `DeadlineExceeded`
 //! mid-flight, the same contract as `unreachable_from` and the audit
 //! sweeps.
@@ -63,7 +63,7 @@ const MAX_LEVELS: usize = 8;
 
 /// Induced associations reported per leaf community, strongest first —
 /// sized for a summary prompt, not for completeness (the full set is
-/// reachable through `query` on the source context).
+/// reachable through `query` on the source `context`).
 const TOP_ASSOCIATIONS_PER_COMMUNITY: usize = 24;
 
 /// How many node visits go between deadline checks inside the moving
@@ -71,7 +71,7 @@ const TOP_ASSOCIATIONS_PER_COMMUNITY: usize = 24;
 /// pass too coarse to honor a deadline on a huge level.
 const DEADLINE_STRIDE: usize = 1024;
 
-/// One detected partition of a context's concept graph: every level's
+/// One detected partition of a `context`'s concept graph: every level's
 /// communities in one flat list, leaves first.
 #[derive(Debug, Serialize)]
 pub struct CommunityAnalysis {
@@ -133,7 +133,7 @@ pub struct CommunityMember {
 
 /// One induced association, without the attribution chain — summary
 /// prompts and analysis payloads want the fact, not its provenance
-/// (the source context still has the full [`super::Association`]).
+/// (the source `context` still has the full [`super::Association`]).
 #[derive(Debug, Serialize)]
 pub struct CommunityAssociation {
     pub subject: String,
@@ -188,7 +188,7 @@ impl Context {
     /// with a component split per level, hierarchical via aggregation.
     /// See the module doc for the algorithm contract; see
     /// [`CommunityAnalysis`] for the result shape. An empty or
-    /// edge-free context answers an empty analysis rather than an
+    /// edge-free `context` answers an empty analysis rather than an
     /// error — no communities is a true statement about it.
     pub fn communities(&self, deadline: Deadline) -> Result<CommunityAnalysis, DeadlineExceeded> {
         let (nodes, leaf_graph) = self.leaf_graph(deadline)?;

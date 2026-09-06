@@ -558,9 +558,9 @@ async fn call_inner(
 }
 
 /// A tool result too big to buffer whole (`export_context` on a large
-/// context is the common case) — names the two uncapped escape
+/// `context` is the common case) — names the two uncapped escape
 /// hatches instead of echoing the percent-encoded tool path (which
-/// may carry a caller-supplied context or concept name) back into the
+/// may carry a caller-supplied `context` or concept name) back into the
 /// error text.
 const RESULT_TOO_BIG: &str = "tool result exceeds the MCP response cap \
     (TAGURU_MCP_MAX_RESULT_BYTES); narrow the call (a smaller `limit` works for most tools), or \
@@ -594,7 +594,7 @@ mod tests {
 
     use super::*;
 
-    /// A context name long enough that its percent-encoded path exceeds
+    /// A `context` name long enough that its percent-encoded path exceeds
     /// `http::Uri`'s length limit must come back as a JSON-RPC tool
     /// error, never panic the task that builds the in-process request.
     #[tokio::test]

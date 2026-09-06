@@ -730,7 +730,7 @@ pub(super) fn prune_unresolvable_aliases(outputs: &mut [ChunkOutput]) -> usize {
 }
 
 /// Issue #758: the names earlier documents of this run — and the
-/// `--vocabulary` context — already settled on, per namespace, each
+/// `--vocabulary` `context` — already settled on, per namespace, each
 /// spelling mapped to the record it resolves to: a subject/object or
 /// alias canonical to itself, an alias spelling to its canonical.
 /// That is exactly the lookup import's `add_alias` consults before
@@ -751,7 +751,7 @@ impl ClaimedNames {
     /// Seeds both namespaces from `--vocabulary`'s harvested name
     /// sets. The export's own alias spellings are not harvested
     /// (ADR 0015: only the spellings the graph settles on are offered),
-    /// so a target-context alias is known here only through its
+    /// so a target-`context` alias is known here only through its
     /// canonical — the import refusal still stands for those; this is
     /// the subset extract can see.
     pub(super) fn seeded(concepts: &BTreeSet<String>, labels: &BTreeSet<String>) -> Self {
@@ -826,7 +826,7 @@ fn claim_aliases(namespace: &mut BTreeMap<String, String>, aliases: &BTreeMap<St
 }
 
 /// Issue #758: an alias whose spelling an EARLIER document of this run
-/// (or the `--vocabulary` context) already interned as a different
+/// (or the `--vocabulary` `context`) already interned as a different
 /// record cannot import — `add_alias` refuses the rewire, and the 409
 /// stops the whole import stream — so it is removed with accounting,
 /// alongside [`prune_unresolvable_aliases`]. Mechanical, not

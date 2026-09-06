@@ -1,6 +1,6 @@
 //! The remote apply path: `taguru import --url` — validates every file
 //! the same way [`super::local::run_local`] does, then packs whole
-//! batches (and, after them, whole group records) into byte-budgeted
+//! batches (and, after them, whole `group` records) into byte-budgeted
 //! chunks POSTed to a running server's `/import` (ADR 0002 §9).
 
 use super::*;
@@ -14,7 +14,7 @@ const REMOTE_IMPORT_BUDGET_BYTES: usize = DEFAULT_MAX_BODY_BYTES / 2;
 
 /// Which record kind a [`Unit`] carries — [`run_remote`]'s
 /// "never sent" tallies on a mid-stream refusal count each kind
-/// separately, group records included.
+/// separately, `group` records included.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum UnitKind {
     Batch,
@@ -22,9 +22,9 @@ pub(super) enum UnitKind {
     Group,
 }
 
-/// One batch's, schema's, or group's rendered bytes, packed into a
+/// One batch's, schema's, or `group`'s rendered bytes, packed into a
 /// [`Chunk`] for `import --url`'s wire chunking (ADR 0002 §9) —
-/// `label` names the source (or context, or group) for the hard-error
+/// `label` names the source (or `context`, or `group`) for the hard-error
 /// and progress messages.
 pub(super) struct Unit {
     pub(super) text: String,
@@ -42,7 +42,7 @@ impl Unit {
 /// it names (#863): the server's path is request-relative
 /// (`batches[3].associations[7].subject`, `src/api/import.rs`), and
 /// `batches[3]` is the chunk's fourth BATCH unit — whose label names the
-/// file, context, and source — so the operator reads a file and a
+/// file, `context`, and source — so the operator reads a file and a
 /// line-addressable item, not a request index. A path without a
 /// `batches[N]` prefix (a schema record's, say) is printed as sent.
 /// `issues_total` past the listed ones (the server caps the list) ends
@@ -96,8 +96,8 @@ pub(super) fn refusal_issue_lines(body: &Value, units: &[Unit]) -> Vec<String> {
 /// The never-sent tally after a mid-stream stop — one line per unit
 /// kind still queued, with the count and the first such unit's label
 /// as the resume point (#863). All three record kinds a chunk can
-/// carry, group records included: a refusal or a lost connection
-/// mid-stream leaves the queued groups exactly as unsent as the
+/// carry, `group` records included: a refusal or a lost connection
+/// mid-stream leaves the queued `groups` exactly as unsent as the
 /// batches and schemas beside them. Empty when nothing is queued.
 pub(super) fn never_sent_lines(queue: &VecDeque<Chunk>) -> Vec<String> {
     let mut lines = Vec::new();
@@ -133,7 +133,7 @@ fn batch_index_prefix(path: &str) -> Option<(usize, &str)> {
 
 /// One `POST /import` request's worth of units, in stream order — a
 /// prefix of whole batch units followed (only in the last chunk that
-/// carries any) by whole group units, since groups restore after
+/// carries any) by whole `group` units, since `groups` restore after
 /// every batch of the run.
 pub(super) struct Chunk {
     pub(super) units: Vec<Unit>,
@@ -225,7 +225,7 @@ pub(super) fn pack_chunks(units: Vec<Unit>, budget: usize) -> VecDeque<Chunk> {
     queue
 }
 
-/// The hard failure for a single batch (or group record) that alone
+/// The hard failure for a single batch (or `group` record) that alone
 /// exceeds the byte budget — reported and refused before the network
 /// is ever touched, naming the two real fixes (ADR 0002 §9).
 pub(super) fn oversized_unit_message(label: &str, size: usize, budget: usize) -> String {
@@ -239,7 +239,7 @@ pub(super) fn oversized_unit_message(label: &str, size: usize, budget: usize) ->
     )
 }
 
-/// The hard failure for a single batch (or group record) that already
+/// The hard failure for a single batch (or `group` record) that already
 /// fit under this client's own packing budget — it passed the pre-send
 /// check [`oversized_unit_message`] guards — but the SERVER still
 /// answered 413 for it. Unlike that client-side refusal, this one IS
@@ -308,7 +308,7 @@ fn summarize_chunk_outcomes(outcomes: &[Value]) -> String {
 }
 
 /// The remote twin of [`super::local::run_local`]: validates every file
-/// the same way, then packs whole batches (and, after them, whole group
+/// the same way, then packs whole batches (and, after them, whole `group`
 /// records) into chunks under a byte budget and POSTs each to a
 /// running server's `/import`, adapting to a 413 by halving the chunk
 /// and resending — never splitting a batch's own record set, never

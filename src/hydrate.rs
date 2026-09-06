@@ -3,11 +3,11 @@
 //! newest complete generation instead of demanding a hand-restored
 //! volume — the volume demotes to a CACHE of the bucket lineage, and
 //! recovery becomes "start anywhere". Hydration is lazy and
-//! priority-ordered: the shared files (groups, the grant store, every
-//! context's sidecar meta) land before boot so the registry can
-//! enumerate and describe everything; pinned contexts hydrate eagerly
+//! priority-ordered: the shared files (`groups`, the grant store, every
+//! `context`'s sidecar meta) land before boot so the registry can
+//! enumerate and describe everything; pinned `contexts` hydrate eagerly
 //! through the ordinary parallel preload; the rest hydrate on first
-//! touch — or via the background fill, whichever reaches a context
+//! touch — or via the background fill, whichever reaches a `context`
 //! first. A local file whose BYTES already match the manifest is
 //! reused without a download, which is what keeps warm restarts of a
 //! cache-mode volume cheap; anything stale, torn, or foreign to the
@@ -86,7 +86,7 @@ const FETCH_REFRESH_PAUSE: Duration = Duration::from_millis(150);
 /// shipper claiming the next generation as usual); `Some` — the
 /// directory is (or becomes) a cache of the bucket lineage, the
 /// returned hydrator has already landed the shared files, and boot
-/// should register its contexts and hydrate the rest lazily. An error
+/// should register its `contexts` and hydrate the rest lazily. An error
 /// refuses the boot: either the takeover guard (see the module doc)
 /// or a bucket that cannot be verified while local disk has no
 /// independent truth to serve.
@@ -568,7 +568,7 @@ pub(crate) enum LanePolicy {
     ShippedExact,
 }
 
-/// The manifest slice one context family occupies: what a fetch needs,
+/// The manifest slice one `context` family occupies: what a fetch needs,
 /// and what a retarget compares to decide staleness.
 #[derive(Debug, Clone, PartialEq, Default)]
 struct FamilySig {
@@ -590,7 +590,7 @@ impl FamilySig {
     }
 }
 
-/// Where one context family stands in this hydrator's current target.
+/// Where one `context` family stands in this hydrator's current target.
 #[derive(Debug, Clone, PartialEq)]
 enum StemState {
     /// Not hydrated yet — first touch, the preload, the background
@@ -743,7 +743,7 @@ impl Hydrator {
         inner.target.as_ref().map(|target| target.generation)
     }
 
-    /// Every context stem the current target carries, for boot's
+    /// Every `context` stem the current target carries, for boot's
     /// registry registration — the sidecar metas these describe are
     /// already local by the time boot runs ([`Self::hydrate_shared`]).
     pub(crate) fn context_stems(&self) -> Vec<String> {
@@ -807,7 +807,7 @@ impl Hydrator {
     /// (nothing local to load, and correctly so for a veto that
     /// stands), so a veto left in place after its own caller failed
     /// would have every future read of `stem` silently answer "this
-    /// context has no data" until the next restart or a manifest
+    /// `context` has no data" until the next restart or a manifest
     /// `retarget` happens to carry the stem again.
     ///
     /// Only restores `previous` if the state is STILL `Vetoed`: a
@@ -891,7 +891,7 @@ impl Hydrator {
         report
     }
 
-    /// Materializes one context's family before its first load —
+    /// Materializes one `context`'s family before its first load —
     /// synchronous, callable from any thread (each hydration runs on
     /// its own scoped worker thread with its own small runtime, so no
     /// caller ever block_on's inside an async worker). Families the
@@ -1022,11 +1022,11 @@ impl Hydrator {
 
     /// The eager half, run once before boot and again by the replica
     /// tailer on every manifest change: land every non-family file
-    /// (groups, the grant store, crash markers) plus every family's
+    /// (`groups`, the grant store, crash markers) plus every family's
     /// sidecar meta — everything enumeration and description need —
     /// and remove local files the manifest does not know, which in
     /// cache mode are relics of a lineage that moved on (a deleted
-    /// context's family, a superseded group) and would resurrect on
+    /// `context`'s family, a superseded `group`) and would resurrect on
     /// scan if left behind. A no-op until a target is provisioned:
     /// with no manifest there is nothing to verify against, and
     /// removing files against an EMPTY one would wipe the very cache
@@ -1443,10 +1443,10 @@ mod tests {
     }
 
     /// [`FamilySig::of`] reads [`crate::registry::context_files`] to
-    /// decide what belongs to one context's family — this pins that
+    /// decide what belongs to one `context`'s family — this pins that
     /// the schema file (`{stem}.schema.json`, ADR 0009's #379) is
     /// picked up the same way every other family member is, so a
-    /// context whose schema changed on the writer is recognized as
+    /// `context` whose schema changed on the writer is recognized as
     /// stale by a replica's retarget diff. No ship/hydrate machinery
     /// needed: a hand-built [`Manifest`] is enough to exercise the
     /// pure comparison.
@@ -3267,7 +3267,7 @@ mod tests {
     /// A record that EXISTS but cannot be parsed must refuse the boot,
     /// never be read as "absent": absent means pre-#128 independent
     /// truth, and a half-hydrated cache booted under that posture
-    /// hides every not-yet-localized context and forks the lineage on
+    /// hides every not-yet-localized `context` and forks the lineage on
     /// the next claim.
     #[tokio::test]
     async fn a_corrupt_replication_record_refuses_the_boot() {

@@ -416,14 +416,14 @@ def _prompt_safe_labels(labels: list[str]) -> list[str]:
     """Filters out any label a malicious document could have planted to
     break out of the vocabulary line it is interpolated into.
 
-    The context's live label vocabulary (``list_labels()``) is seeded by
+    The ``context``'s live label vocabulary (``list_labels()``) is seeded by
     the model's OWN prior output on earlier documents — so a document
     containing text like ``associate this with label "X\\n\\nIgnore your
     instructions and ..."`` can get that string stored as a relation
     label today, and have it fed back verbatim into the TRUSTED system
-    prompt of every later ingest against this context (a persistent,
+    prompt of every later ingest against this ``context`` (a persistent,
     second-order prompt injection: the attack payload lives in the
-    context's own data, not in any one document's IMMEDIATE turn).
+    ``context``'s own data, not in any one document's IMMEDIATE turn).
     Labels that fail the filter are simply never offered for reuse —
     never repaired or truncated, since either would still let a crafted
     label steer formatting inside the line it lands on."""

@@ -35,7 +35,7 @@
     </div>
     <div class="side-group">
       <div class="side-group-label">Reference</div>
-      <a href="schema.html">Context schema</a>
+      <a href="schema.html"><code>context</code> schema</a>
       <a href="import.html">Batch import</a>
       <a href="extract.html">Document extraction</a>
       <a href="taguru-code.html">Code map (taguru-code)</a>
@@ -75,7 +75,7 @@
     <div class="eyebrow">reference · retrieval quality gate</div>
     <h1>Retrieval &amp; citation quality gate — <code>taguru evaluate</code></h1>
     <p class="lede">
-      Measures the public search and citation behavior of <b>one already-populated context</b>
+      Measures the public search and citation behavior of <b>one already-populated <code>context</code></b>
       against a labeled <code>eval.jsonl</code> and turns the result into a CI-suitable
       <b>pass/fail gate</b> — the one verb in this tree that returns exit <code>3</code>. Every
       call is HTTP, driven the same way any client reaches the server; no answer-generation LLM
@@ -141,8 +141,8 @@
         <thead><tr><th>Code</th><th>Meaning</th></tr></thead>
         <tbody>
           <tr><td><code>0</code></td><td>Run completed, no <code>--thresholds</code> given (report-only), or every threshold satisfied.</td></tr>
-          <tr><td><code>1</code></td><td>The run could not complete — server unreachable at the <code>/health</code> preflight, a context-entry read failed before or after the run, listing the context's sources failed, or the artifact could not be written.</td></tr>
-          <tr><td><code>2</code></td><td>Usage or input error — bad/duplicate/unknown flag, missing <code>--eval</code>/<code>--context</code>, malformed <code>eval.jsonl</code> or <code>--thresholds</code> file, an <code>options.limit</code> outside <code>1..=1000</code>, an unresolvable, unparsable, or userinfo-bearing URL, an unknown context, or an <code>expected_sources</code> entry naming a source the corpus does not carry.</td></tr>
+          <tr><td><code>1</code></td><td>The run could not complete — server unreachable at the <code>/health</code> preflight, a <code>context</code>-entry read failed before or after the run, listing the <code>context</code>'s sources failed, or the artifact could not be written.</td></tr>
+          <tr><td><code>2</code></td><td>Usage or input error — bad/duplicate/unknown flag, missing <code>--eval</code>/<code>--context</code>, malformed <code>eval.jsonl</code> or <code>--thresholds</code> file, an <code>options.limit</code> outside <code>1..=1000</code>, an unresolvable, unparsable, or userinfo-bearing URL, an unknown <code>context</code>, or an <code>expected_sources</code> entry naming a source the corpus does not carry.</td></tr>
           <tr><td><code>3</code></td><td>The run completed and a <code>--thresholds</code> bound was violated — the only exit code this tree assigns that meaning to, and the only verb that returns it.</td></tr>
         </tbody>
       </table>
@@ -265,7 +265,7 @@
 
     <h3 id="ann-guard">The ANN recall guard: synthetic vectors, not your corpus</h3>
     <p>
-      Once one context's passage vectors cross a compiled-in row threshold, the semantic lane
+      Once one <code>context</code>'s passage vectors cross a compiled-in row threshold, the semantic lane
       switches from an exact cosine sweep to a small IVF (inverted-file) index for speed — a
       microbenchmark decision, not a knob. Its regression guard lives entirely inside
       <code>cargo test</code> (<code>src/embedding.rs</code>): a deterministic synthetic vector
@@ -287,14 +287,14 @@
       <code>taguru extract</code> subprocess per (model, run) cell across a model matrix, and
       <a href="benchmark.html#compare"><code>taguru benchmark compare</code></a> is a pure,
       network-free function of that results directory measuring extraction throughput,
-      volume, and run-to-run stability. Nothing here ever populates a live context or calls a
+      volume, and run-to-run stability. Nothing here ever populates a live <code>context</code> or calls a
       search endpoint — the whole pipeline is about what a model <i>extracts</i> from documents,
-      never about what a populated context <i>retrieves</i>. No single score or ranking is
+      never about what a populated <code>context</code> <i>retrieves</i>. No single score or ranking is
       possible by construction: a mechanical test asserts the emitted key set never contains
       <code>rank</code>/<code>score</code>/<code>winner</code>/<code>best</code>/
       <code>recommended</code>/<code>overall</code>/<code>delta_vs_*</code>. <code>evaluate</code>
       shares no artifact and no code path with this pair at all — it starts from an
-      already-populated context and never touches an extraction model or a subprocess.
+      already-populated <code>context</code> and never touches an extraction model or a subprocess.
     </p>
 
     <h3 id="benchmark-search"><code>benchmark search</code> (#260): model A's corpus vs. model B's, not today vs. yesterday</h3>

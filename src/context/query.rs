@@ -9,7 +9,7 @@ use super::{
 };
 
 impl Context {
-    /// Every edge in the context, dead ones included, in edge-id order —
+    /// Every edge in the `context`, dead ones included, in edge-id order —
     /// the same population `query_any(&[], &[], &[])`'s degenerate arm
     /// returns, but deadline-checked like `unsourced_edges`/
     /// `dead_canonical_aliases` for a caller (ADR 0009 §10's schema
@@ -227,7 +227,7 @@ impl Context {
     /// set's size is a schema-authoring accident, not information the
     /// caller needs," the same reasoning `schema::check` gives for
     /// `TypeAssertions::asserted`). `type_label` is `None` for a
-    /// schema-free context — plain [`Context::describe`] is exactly this
+    /// schema-free `context` — plain [`Context::describe`] is exactly this
     /// call with it absent — since `Context` stays schema-unaware by
     /// design (ADR 0009 §7.3); the caller resolves ADR 0009 §6.3's single
     /// gate (an installed schema document exists) via
@@ -330,7 +330,7 @@ impl Context {
     /// at `LABEL_SAMPLE`). Stops at `limit` instead of collecting the
     /// whole vocabulary and truncating afterward: `ContextStats::of`
     /// runs on every HOT entry of every `GET /contexts`, where a
-    /// context with a large label vocabulary would otherwise pay a
+    /// `context` with a large label vocabulary would otherwise pay a
     /// full-vocabulary allocation to keep the first 50. Same order and
     /// the same first `limit` elements `labels()` would give.
     pub fn label_sample(&self, limit: usize) -> Vec<&str> {

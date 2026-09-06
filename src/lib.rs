@@ -8,7 +8,7 @@
 //! persistence, auth, and observability, and `taguru-mcp`, an MCP stdio
 //! bridge that lets an agent drive a running server. The library
 //! surface is [`context`]: one [`context::Context`] is one 文脈 (one
-//! context of meaning), a flat-buffer association graph whose whole
+//! `context` of meaning), a flat-buffer association graph whose whole
 //! state round-trips as a single image through `to_bytes` /
 //! `from_bytes`.
 

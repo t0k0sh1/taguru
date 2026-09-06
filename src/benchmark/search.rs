@@ -485,7 +485,7 @@ fn corpus_block(context: &str, outcome: &str, reason: Option<String>) -> CorpusB
 }
 
 /// Builds one model's corpus: an ownership check against whatever
-/// already lives at `context` (never overwrite a context this run
+/// already lives at `context` (never overwrite a `context` this run
 /// didn't create), then one `POST /import` per batch file in the
 /// requested run's cell directory, each with its header's `context`
 /// rewritten and its `create.description` stamped with this run's
@@ -651,7 +651,7 @@ fn list_batch_files(cell_dir: &Path) -> Result<Vec<PathBuf>, String> {
 
 /// Rewrites one batch file's header line — `context` replaced,
 /// `create.description` stamped with this run's ownership marker,
-/// unconditionally (so a first import creates the context under it,
+/// unconditionally (so a first import creates the `context` under it,
 /// and a resumed run's re-import still carries it) — and sends the
 /// result as one `POST /import` request. Every other line rides
 /// through byte-for-byte.
@@ -701,7 +701,7 @@ struct SearchContext<'a> {
     api: &'a Api,
     matching: &'a identity::Matching,
     documents: &'a [DocumentInfo],
-    /// model_id -> (context, available). `available` is false when
+    /// model_id -> (`context`, available). `available` is false when
     /// the model's corpus was never built or rejected — such a model
     /// is recorded as a per-case failure without an HTTP call.
     availability: &'a BTreeMap<String, (String, bool)>,
@@ -822,7 +822,7 @@ fn build_case_block(context: &SearchContext, case: &EvalCase) -> (CaseBlock, Vec
 
 /// One case's search against one model's corpus: the hits (already
 /// deserialized into the real wire type when the server's response
-/// shape allows it) and, when available, that context's own entry
+/// shape allows it) and, when available, that `context`'s own entry
 /// from the response's `plan`.
 fn search_case_model(
     api: &Api,

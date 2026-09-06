@@ -34,7 +34,7 @@
     </div>
     <div class="side-group">
       <div class="side-group-label">Reference</div>
-      <a href="schema.html">Context schema</a>
+      <a href="schema.html"><code>context</code> schema</a>
       <a href="import.html">Batch import</a>
       <a href="extract.html">Document extraction</a>
       <a href="taguru-code.html">Code map (taguru-code)</a>
@@ -97,7 +97,7 @@
           <tr><td>a client chokes on an unexpected <code>{plan, hits}</code> object, or can't find <code>plan</code></td><td>version skew — a 0.3.x client against a 0.4.x server</td><td>same as above</td><td><a href="#compatibility">Compatibility</a></td></tr>
           <tr><td><code>IncompatibleServerError</code> raised before the SDK's first real request</td><td>the SDK and server share no <code>http_contract</code> version — a real, confirmed incompatibility, not a false alarm</td><td>read the error's own message — it names which side to upgrade and the exact command</td><td><a href="#compatibility">Compatibility</a></td></tr>
           <tr><td>behavior doesn't match the docs; a documented field is just missing</td><td>a stale Docker image — <code>latest</code> was never re-pulled</td><td><code>/metrics</code> → <code>taguru_build_info{version="…"}</code></td><td><a href="#stale-image">The image you think you're running</a></td></tr>
-          <tr><td>a long-lived context keeps growing and you're not sure a rebuild would help</td><td>append-only dead weight (retracted edges, unlinked attributions, arena slack) that hasn't been reclaimed yet</td><td><code>taguru compact --dry-run</code> (or <code>--dry-run --json</code>)</td><td><a href="#is-compaction-worth-it">Is compact worth running?</a></td></tr>
+          <tr><td>a long-lived <code>context</code> keeps growing and you're not sure a rebuild would help</td><td>append-only dead weight (retracted edges, unlinked attributions, arena slack) that hasn't been reclaimed yet</td><td><code>taguru compact --dry-run</code> (or <code>--dry-run --json</code>)</td><td><a href="#is-compaction-worth-it">Is compact worth running?</a></td></tr>
           <tr><td>an answer takes minutes, but Taguru's own request logs show milliseconds</td><td>LLM generation, not Taguru</td><td>compare end-to-end time against the <code>latency_ms</code> log field</td><td><a href="#latency">Whose seconds are they?</a>, <a href="#local-llm">The serving layer</a></td></tr>
           <tr><td>everything is slow, including a bare <code>curl</code> search with no LLM involved</td><td>Taguru itself, or its embedding provider</td><td><code>"http"</code> log lines; <code>TAGURU_LOG_SEARCHES=1</code> if needed (logs raw cue text — see caveat)</td><td><a href="#latency">Whose seconds are they?</a>, <a href="#embedding">The semantic lane</a></td></tr>
           <tr><td>search still returns results, but paraphrased queries stopped matching</td><td>the semantic lane silently degraded to lexical-only</td><td><code>plan.contexts[].lanes.vector.ran</code> on the search response</td><td><a href="#embedding">The semantic lane</a></td></tr>
@@ -164,7 +164,7 @@ npm ls langchain-taguru</code></pre>
     <p>
       Before 0.6.0, a minor version bump was allowed to change a response's shape without any
       machine-readable signal, and one already did:
-      <code>POST /contexts/{name}/sources/search</code> (and the cross-context form) went
+      <code>POST /contexts/{name}/sources/search</code> (and the cross-<code>context</code> form) went
       from a bare array of hits to a <code>PassagePage</code> object, <code>{plan, hits}</code>,
       in 0.4.0. A 0.3.x SDK against a 0.4.x server failed with
       <code>expected an object for PassagePage, got list</code>; a 0.4.x SDK against a 0.3.x
@@ -191,7 +191,7 @@ npm ls langchain-taguru</code></pre>
     </div>
     <p>
       The <code>hits</code> themselves were unchanged by the 0.4.0 break; they moved under a
-      <code>hits</code> key, and <code>plan</code> was new — per-context lane execution (which of
+      <code>hits</code> key, and <code>plan</code> was new — per-<code>context</code> lane execution (which of
       BM25/vector ran, why one didn't, the effective cosine floor). The remedy for a genuine
       mismatch is still never to patch around the shape: pin an older SDK to an older server (the
       error message gives the exact <code>pip</code>/<code>npm</code> command), or upgrade every
@@ -236,7 +236,7 @@ docker compose up -d</code></pre>
   </section>
 
   <section id="is-compaction-worth-it">
-    <h2>Is <code>compact</code> worth running on this context?</h2>
+    <h2>Is <code>compact</code> worth running on this <code>context</code>?</h2>
     <p class="section-sub">
       The append-only image format never reclaims space on its own between compactions:
       retraction unlinks attribution records but doesn't erase them, and alias removal leaves
@@ -270,18 +270,18 @@ taguru compact --dry-run --json | jq '.[] | select(.dead_ratio &gt; 0.2)'</code>
       cause does (check disk space first); once it's resolved, either watch the server log for
       the retry to stop warning, or re-run <code>compact</code> once more and confirm
       <code>image_persisted: true</code> in its response. A row with <code>"stats_are_snapshot":
-      true</code> means the context is cold (not
+      true</code> means the <code>context</code> is cold (not
       currently loaded) or came from a remote listing, so its numbers are the last-saved snapshot
       rather than a live recomputation — still accurate as of the last flush, just not
       up-to-the-millisecond.
     </p>
     <p>
-      There's no fixed threshold that's right for every deployment — a context with heavy
+      There's no fixed threshold that's right for every deployment — a <code>context</code> with heavy
       revision traffic and light footprint may not be worth compacting even at a high
       <code>dead_ratio</code>, and <code>TAGURU_AUTO_COMPACT</code> already handles the common
       case (ratio-triggered, from the flusher tick) without any CLI involvement at all. This
       command is for the cases automatic compaction doesn't cover: an opted-out deployment, or
-      deciding by hand whether a specific context is worth the maintenance window before running
+      deciding by hand whether a specific <code>context</code> is worth the maintenance window before running
       <code>taguru compact</code> for real.
     </p>
   </section>

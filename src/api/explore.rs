@@ -29,7 +29,7 @@ pub struct DescribeRequest {
 /// matter. An unknown concept comes back as a null result.
 ///
 /// ADR 0009 §12: also carries the concept's own types, gated by §6.3's
-/// single condition — an installed schema document for this context,
+/// single condition — an installed schema document for this `context`,
 /// never `mode` — resolved before `read_context` for the same deadlock
 /// reason `explore`/`activate` resolve `hidden_label` there (see
 /// `AppState::hidden_label`'s own doc).

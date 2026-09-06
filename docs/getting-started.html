@@ -35,7 +35,7 @@
     </div>
     <div class="side-group">
       <div class="side-group-label">Reference</div>
-      <a href="schema.html">Context schema</a>
+      <a href="schema.html"><code>context</code> schema</a>
       <a href="import.html">Batch import</a>
       <a href="extract.html">Document extraction</a>
       <a href="taguru-code.html">Code map (taguru-code)</a>
@@ -116,37 +116,37 @@ taguru version</code></pre>
         <tbody>
           <tr><td>TAGURU_ADDR</td><td>127.0.0.1:8248</td><td>Bind address</td></tr>
           <tr><td>TAGURU_DATA_DIR</td><td>./data</td><td>Data directory</td></tr>
-          <tr><td>TAGURU_CACHE_BYTES</td><td>512 MiB</td><td>Resident memory budget for unpinned contexts (LRU eviction)</td></tr>
-          <tr><td>TAGURU_RETRIEVAL_CACHE_BYTES</td><td>32 MiB</td><td>Exact-match result cache for recall/query/passage search: an identical request against an unchanged corpus answers from the stored response, invalidated by the per-context revision counters. Hit/miss on <code>/metrics</code> (<code>taguru_retrieval_cache_total</code>); <code>0</code> disables. Below ~16 KiB no response fits, so it becomes pure cost rather than a smaller cache — the server logs a warning at boot under that floor</td></tr>
+          <tr><td>TAGURU_CACHE_BYTES</td><td>512 MiB</td><td>Resident memory budget for unpinned <code>contexts</code> (LRU eviction)</td></tr>
+          <tr><td>TAGURU_RETRIEVAL_CACHE_BYTES</td><td>32 MiB</td><td>Exact-match result cache for recall/query/passage search: an identical request against an unchanged corpus answers from the stored response, invalidated by the per-<code>context</code> revision counters. Hit/miss on <code>/metrics</code> (<code>taguru_retrieval_cache_total</code>); <code>0</code> disables. Below ~16 KiB no response fits, so it becomes pure cost rather than a smaller cache — the server logs a warning at boot under that floor</td></tr>
           <tr><td>TAGURU_SEMANTIC_CACHE_THRESHOLD</td><td>unset (off)</td><td>Semantic tier over the exact cache, passage search only: a paraphrased query serves an equivalent earlier query's cached result when the query-vs-query embedding cosine clears this <code>[0,1]</code> floor (start at <code>0.94</code>) and a negation/number/entity guard finds no mismatch. Requires the exact cache and <code>TAGURU_EMBED_PASSAGES</code>; outcomes on <code>/metrics</code> (<code>taguru_semantic_cache_total</code>)</td></tr>
           <tr><td>TAGURU_FLUSH_SECS</td><td>5</td><td>Image flush interval. With the WAL on, this is freshness cadence, not a loss window</td></tr>
           <tr><td>TAGURU_WAL</td><td>on</td><td>fsync every acknowledged write before applying it (a crash loses nothing). <code>0</code> restores the flush-interval loss window</td></tr>
-          <tr><td>TAGURU_WAL_MAX_BYTES</td><td>256 MiB</td><td>Per-context WAL ceiling. Only approached when flushes keep failing; past it, writes are refused with 500</td></tr>
+          <tr><td>TAGURU_WAL_MAX_BYTES</td><td>256 MiB</td><td>Per-<code>context</code> WAL ceiling. Only approached when flushes keep failing; past it, writes are refused with 500</td></tr>
           <tr><td>TAGURU_PASSAGES_WAL_MAX_BYTES</td><td>1 GiB</td><td>Passage-log backstop, the sibling ceiling for the passage lane — engages only when compaction is stuck; <code>0</code> disables</td></tr>
-          <tr><td>TAGURU_REPLICATE_URL</td><td>—</td><td>Object-storage bucket (<code>s3://</code> / <code>gs://</code> / <code>az://</code> / <code>file://</code>) for continuous replication of the whole data directory, epoch-fenced; credentials via each cloud's default chain. Restore with <code>taguru restore</code> — or start a server on an empty directory with the same URL and it boots straight from the bucket (pinned contexts hydrate before the port opens, the rest on first touch). Unset = off</td></tr>
+          <tr><td>TAGURU_REPLICATE_URL</td><td>—</td><td>Object-storage bucket (<code>s3://</code> / <code>gs://</code> / <code>az://</code> / <code>file://</code>) for continuous replication of the whole data directory, epoch-fenced; credentials via each cloud's default chain. Restore with <code>taguru restore</code> — or start a server on an empty directory with the same URL and it boots straight from the bucket (pinned <code>contexts</code> hydrate before the port opens, the rest on first touch). Unset = off</td></tr>
           <tr><td>TAGURU_REPLICATE_INTERVAL_MS</td><td>1000</td><td>Replication poll cadence — the steady-state RPO knob; per-lane lag is exported at <code>/metrics</code></td></tr>
           <tr><td>TAGURU_TAKEOVER</td><td>off</td><td><code>1</code> (or <code>serve --take-over</code>) acknowledges deposing the bucket's newest writer while it still looks alive (heartbeat within 300s, no clean stop). A cleanly stopped writer never needs it; starting a writer against a bucket IS the promotion act</td></tr>
-          <tr><td>TAGURU_REPLICA</td><td>off</td><td><code>1</code> (or <code>serve --replica</code>) serves the bucket lineage read-only, tailing it at the replication cadence: every retrieval verb works, every write answers 403 <code>read_only_replica</code> naming the writer, and per-context applied-vs-shipped lag — the promotion-time RPO — is on <code>/metrics</code></td></tr>
+          <tr><td>TAGURU_REPLICA</td><td>off</td><td><code>1</code> (or <code>serve --replica</code>) serves the bucket lineage read-only, tailing it at the replication cadence: every retrieval verb works, every write answers 403 <code>read_only_replica</code> naming the writer, and per-<code>context</code> applied-vs-shipped lag — the promotion-time RPO — is on <code>/metrics</code></td></tr>
           <tr><td>TAGURU_WRITER_URL</td><td>—</td><td>Where a replica's write-refusal points clients (the writer's base URL / LB name); unset = the refusal names only the bucket's fence holder</td></tr>
-          <tr><td>TAGURU_ROUTE_MAP</td><td>—</td><td><code>taguru router</code> only: the context→shard map file (<code>context = shard-url</code> per line, <code>#</code> comments, optional <code>* = shard-url</code> fallback). The router is stateless — no data directory, no keys (shards enforce auth); map edits take a router restart</td></tr>
+          <tr><td>TAGURU_ROUTE_MAP</td><td>—</td><td><code>taguru router</code> only: the <code>context</code>→shard map file (<code>context = shard-url</code> per line, <code>#</code> comments, optional <code>* = shard-url</code> fallback). The router is stateless — no data directory, no keys (shards enforce auth); map edits take a router restart</td></tr>
           <tr><td>TAGURU_API_TOKEN</td><td>—</td><td>Bearer token (required on every request except <code>/health</code>, <code>/live</code>, <code>/metrics</code>). Unset = no auth. Always set it before leaving localhost</td></tr>
           <tr><td>TAGURU_API_TOKENS</td><td>—</td><td>Named keys (<code>"ci:tokA,laptop:tokB"</code>). Access logs say which key was used, and a leak costs one revocation. The auth table (both token variables plus TAGURU_KEY_SCOPES) hot-reloads on SIGHUP or a <code>--config</code> file edit (~5s watch) — rotation never costs a restart, and a broken edit fail-closed keeps the previous keys armed</td></tr>
           <tr><td>TAGURU_EMBED_URL / _MODEL / _API_KEY</td><td>—</td><td>Semantic entry tier: an OpenAI-compatible <code>/embeddings</code> endpoint, or <code>local</code> to run the model in-process — <code>local</code> also requires <code>TAGURU_EMBED_MODEL</code> naming one of <code>taguru-code models</code> (e.g. <code>TAGURU_EMBED_URL=local TAGURU_EMBED_MODEL=paraphrase-multilingual-minilm-l12-v2-q</code>; not in the Docker image). Unset keeps the entrance purely lexical</td></tr>
           <tr><td>TAGURU_EMBED_TIMEOUT_SECS</td><td>60</td><td>Per-attempt ceiling for one embedding provider round trip; a request's remaining budget bounds an attempt further. Three consecutive failed attempts open a <a href="architecture.html#search">circuit breaker</a> — fast-fails for 30s, then one probe decides whether to close it</td></tr>
           <tr><td>TAGURU_EMBED_AUTO</td><td>off</td><td>Re-embed only the changes on each flush. Recommended whenever agents drive the ingest (don't count on refresh being called)</td></tr>
-          <tr><td>TAGURU_EMBED_PARALLEL</td><td>1</td><td>Concurrent 128-item chunk dispatch for one context's gloss/passage embedding refresh (<code>1</code> = sequential). Raise to match the provider's rate limit, not the core count; concurrent refreshes across contexts aren't serialized and multiply it</td></tr>
+          <tr><td>TAGURU_EMBED_PARALLEL</td><td>1</td><td>Concurrent 128-item chunk dispatch for one <code>context</code>'s gloss/passage embedding refresh (<code>1</code> = sequential). Raise to match the provider's rate limit, not the core count; concurrent refreshes across <code>contexts</code> aren't serialized and multiply it</td></tr>
           <tr><td>TAGURU_EMBED_PASSAGES</td><td>off</td><td>Also embed paragraphs = the semantic side of the text lane. A corpus is orders of magnitude larger than its glosses, so the spend is opt-in</td></tr>
-          <tr><td>TAGURU_PASSAGE_VECTOR_LIMIT</td><td>20,000</td><td>Ceiling on paragraph vectors held per context. Past it the lexical lane still serves every paragraph; only the semantic side goes partial (the refresh response reports the skips). The default is pinned above the <a href="architecture.html#search">approximate-search threshold</a> (10,000, compiled in) by a compile-time assertion, so default configuration always has headroom to engage the index — a custom value set below the threshold isn't blocked, only logged once at boot</td></tr>
+          <tr><td>TAGURU_PASSAGE_VECTOR_LIMIT</td><td>20,000</td><td>Ceiling on paragraph vectors held per <code>context</code>. Past it the lexical lane still serves every paragraph; only the semantic side goes partial (the refresh response reports the skips). The default is pinned above the <a href="architecture.html#search">approximate-search threshold</a> (10,000, compiled in) by a compile-time assertion, so default configuration always has headroom to engage the index — a custom value set below the threshold isn't blocked, only logged once at boot</td></tr>
           <tr><td>TAGURU_SEMANTIC_FLOOR</td><td>0.35</td><td>Floor for the semantic entry tier. <b>A property of the embedding model</b> (default calibrated for text-embedding-3-large; ~0.2 for <a href="bedrock.html">Bedrock</a>'s Titan V2) — <code>taguru calibrate</code> <a href="bedrock.html#floor">measures the right value</a></td></tr>
           <tr><td>TAGURU_PUBLIC_URL</td><td>—</td><td>Public base URL. Setting it enables OAuth on remote MCP (<code>/mcp</code>), which lets claude.ai custom connectors attach</td></tr>
           <tr><td>TAGURU_RATE_LIMIT_PER_MIN</td><td>0 (off)</td><td>Per-key request budget per minute. Enable it before leaving localhost</td></tr>
           <tr><td>TAGURU_AUTH_FAIL_LIMIT_PER_MIN</td><td>10</td><td>Failed-auth attempts per source IP before 429 — the brute-force brake. <code>0</code> disables; coarse behind a proxy (one IP for everyone)</td></tr>
           <tr><td>TAGURU_REQUEST_TIMEOUT_SECS</td><td>30</td><td>Time budget per request. Raise to 60+ once an embedding provider is configured</td></tr>
           <tr><td>TAGURU_MAX_CONCURRENT_REQUESTS</td><td>256</td><td>Global in-flight ceiling. Excess requests are shed immediately with 503 + <code>Retry-After</code>; <code>0</code> disables</td></tr>
-          <tr><td>TAGURU_MAX_CONCURRENT_HEAVY_OPS</td><td>2</td><td>Shared ceiling for vocabulary audits and context compactions. Excess calls are shed immediately with 503 + <code>Retry-After</code>; <code>0</code> disables</td></tr>
-          <tr><td>TAGURU_CROSS_SEARCH_CONCURRENCY</td><td>4</td><td>Member contexts searched in parallel by a single cross-context (group) recall/query/passage search</td></tr>
-          <tr><td>TAGURU_AUTO_COMPACT</td><td>on</td><td>Ratio-triggered auto-compaction: each flush tick rebuilds at most the one worst context whose dead ratio exceeds <code>TAGURU_AUTO_COMPACT_RATIO</code> (0.5 — dead weight outgrew live content), behind the heavy-ops ceiling above. <code>0</code> keeps compaction manual-only</td></tr>
-          <tr><td>TAGURU_CONTEXT_QUOTAS</td><td>—</td><td>Per-context ceilings as one JSON object, <code>{"sake": {"storage_bytes": …, "cache_bytes": …}}</code> — each field optional, never both absent. <code>storage_bytes</code> refuses growth writes at the ceiling with 507 <code>storage_full</code> (retract, compact, and delete stay open — they are the ways back under); <code>cache_bytes</code> bounds the context's resident share, evicting the over-share context first under cache pressure. Declared quotas surface as <code>taguru_context_quota_bytes</code> next to the per-context usage gauges. A broken declaration refuses boot, like broken credentials</td></tr>
+          <tr><td>TAGURU_MAX_CONCURRENT_HEAVY_OPS</td><td>2</td><td>Shared ceiling for vocabulary audits and <code>context</code> compactions. Excess calls are shed immediately with 503 + <code>Retry-After</code>; <code>0</code> disables</td></tr>
+          <tr><td>TAGURU_CROSS_SEARCH_CONCURRENCY</td><td>4</td><td>Member <code>contexts</code> searched in parallel by a single cross-<code>context</code> (<code>group</code>) recall/query/passage search</td></tr>
+          <tr><td>TAGURU_AUTO_COMPACT</td><td>on</td><td>Ratio-triggered auto-compaction: each flush tick rebuilds at most the one worst <code>context</code> whose dead ratio exceeds <code>TAGURU_AUTO_COMPACT_RATIO</code> (0.5 — dead weight outgrew live content), behind the heavy-ops ceiling above. <code>0</code> keeps compaction manual-only</td></tr>
+          <tr><td>TAGURU_CONTEXT_QUOTAS</td><td>—</td><td>Per-<code>context</code> ceilings as one JSON object, <code>{"sake": {"storage_bytes": …, "cache_bytes": …}}</code> — each field optional, never both absent. <code>storage_bytes</code> refuses growth writes at the ceiling with 507 <code>storage_full</code> (retract, compact, and delete stay open — they are the ways back under); <code>cache_bytes</code> bounds the <code>context</code>'s resident share, evicting the over-share <code>context</code> first under cache pressure. Declared quotas surface as <code>taguru_context_quota_bytes</code> next to the per-<code>context</code> usage gauges. A broken declaration refuses boot, like broken credentials</td></tr>
         </tbody>
       </table>
     </div>
@@ -161,7 +161,7 @@ taguru version</code></pre>
 
   <section id="first">
     <h2>3. The first memory</h2>
-    <p class="section-sub">Create a context, store an association, pull the thread. One round trip over plain HTTP.</p>
+    <p class="section-sub">Create a <code>context</code>, store an association, pull the thread. One round trip over plain HTTP.</p>
     <pre><code>curl -X PUT localhost:8248/contexts/sake -H 'Content-Type: application/json' \
   -d '{"description":"青嶺酒造という架空の酒蔵の知識"}'
 
@@ -179,10 +179,10 @@ curl -X POST localhost:8248/contexts/sake/activate -H 'Content-Type: application
     <p class="note warn">
       The one-fact request above is only the smallest example. In an ingest loop, collect one
       document's facts and send them in one <code>/associations</code> request (up to 10,000
-      associations): every request pays for a durable write and stalls that context's readers
+      associations): every request pays for a durable write and stalls that <code>context</code>'s readers
       while its fsync lands, making single-fact calls roughly two orders of magnitude more
-      expensive per association than batches. More concurrency does not help one context — its
-      writes serialize by design — though different contexts write in parallel. For a corpus or
+      expensive per association than batches. More concurrency does not help one <code>context</code> — its
+      writes serialize by design — though different <code>contexts</code> write in parallel. For a corpus or
       migration, use <code>POST /import</code> on a running server or <code>taguru import</code>
       offline instead.
     </p>
@@ -264,7 +264,7 @@ TAGURU_EXTRACT_MODEL=gpt-4.1 TAGURU_EXTRACT_API_KEY=$KEY \
 taguru extract --context sake --description "酒蔵の知識" --out batches/ docs/
 taguru import batches/</code></pre>
     <ul>
-      <li>The manifest in <code>--out</code> records "content × model × prompt version × context" and skips unchanged documents (<code>--force</code> overrides). A nightly extract→import run pays model calls only for what changed.</li>
+      <li>The manifest in <code>--out</code> records "content × model × prompt version × <code>context</code>" and skips unchanged documents (<code>--force</code> overrides). A nightly extract→import run pays model calls only for what changed.</li>
       <li><code>--questions N</code> is doc2query: up to N retrieval questions per paragraph ride along. Their terms index into the paragraph's BM25 postings on every server, and a server with <code>TAGURU_EMBED_PASSAGES</code> also embeds them next to their paragraphs — either way, question-shaped searches land on answer-shaped text.</li>
       <li>Model output is not trusted; the contract is enforced on this side of the wire — invalid items are dropped and counted, and every file is re-validated with the import parser before it is written. Extract cannot produce a file import would reject.</li>
       <li>Running against a local model (Ollama etc.): <b>thinking mode OFF</b> (reasoning tokens devour the time budget), <b>a real context window</b> (<code>num_ctx 16384</code> — leaving 4k silently truncates and only quality drops), a timeout matched to the hardware via <code>TAGURU_EXTRACT_TIMEOUT_SECS</code>, and <code>--force</code> after re-pointing a serving alias — the manifest trusts the <b>model name</b>.</li>
@@ -289,7 +289,7 @@ taguru import batches/</code></pre>
     <h3>Local (stdio bridge)</h3>
     <pre><code>claude mcp add taguru -e TAGURU_URL=http://127.0.0.1:8248 -- taguru-mcp</code></pre>
     <p>
-      That alone makes "ingest the documents in this folder into the sake context" and
+      That alone makes "ingest the documents in this folder into the sake <code>context</code>" and
       "tell me about 青嶺酒造, with sources" work as the loop of directory pick → resolve →
       describe/query/activate → citation. A real round trip is traced in the
       <a href="mcp-rag-walkthrough.html">walkthrough</a>.
@@ -322,15 +322,15 @@ taguru import batches/</code></pre>
     <h2>7. Operational basics</h2>
     <ul>
       <li><b>Health</b>: <code>GET /health</code> answers <code>200</code> with <code>{"status": "ok", "version": "…"}</code> while healthy, and <code>503</code> when the write path is unhealthy or a maintenance sweep is active. Once the disk recovers, it self-heals within one flush interval.</li>
-      <li><b>Metrics</b>: <code>GET /metrics</code> (Prometheus text). Per-route latency, cache/flush/WAL/embedding outcomes, search hits and misses, a breakdown of 500 causes. Context names are deliberately kept out of the labels (clients mint names, so series would grow without bound) — per-context numbers live in the usage stats of <code>GET /contexts</code>.</li>
-      <li><b>Backups</b>: one context = one file family (<code>.ctx</code> <code>.meta.json</code> <code>.passages.bin</code> <code>.passages.wal.jsonl</code> <code>.bm25.bin</code> <code>.vectors.bin</code> <code>.wal.jsonl</code>; group records ride beside them as <code>{name}.group</code>). <b>Always as a set.</b> The simplest way to have one continuously: set <code>TAGURU_REPLICATE_URL</code> and the server ships every family (both log lanes tailed, published files whole) to object storage with seconds of lag — recover with <code>taguru restore --out DIR</code>, then <code>taguru inspect DIR</code>; or start a server on an <b>empty</b> directory with the same URL and it boots from the bucket directly (while the previous writer still looks alive, that boot asks for <code>--take-over</code> first). For point-in-time copies: every writer is fsync+rename, so filesystem snapshots (ZFS/Btrfs/LVM) are safe at any instant. A naive <code>rsync</code>/<code>cp</code> against a live server does not guarantee cross-file consistency — stop the server, take a real snapshot, or replicate. <code>POST /flush</code> writes out everything dirty right before. Verify with <code>taguru inspect /path/to/data</code> (the same fully-validating load + WAL replay the server does; non-zero exit = corruption of acknowledged data).</li>
+      <li><b>Metrics</b>: <code>GET /metrics</code> (Prometheus text). Per-route latency, cache/flush/WAL/embedding outcomes, search hits and misses, a breakdown of 500 causes. <code>context</code> names are deliberately kept out of the labels (clients mint names, so series would grow without bound) — per-<code>context</code> numbers live in the usage stats of <code>GET /contexts</code>.</li>
+      <li><b>Backups</b>: one <code>context</code> = one file family (<code>.ctx</code> <code>.meta.json</code> <code>.passages.bin</code> <code>.passages.wal.jsonl</code> <code>.bm25.bin</code> <code>.vectors.bin</code> <code>.wal.jsonl</code>; <code>group</code> records ride beside them as <code>{name}.group</code>). <b>Always as a set.</b> The simplest way to have one continuously: set <code>TAGURU_REPLICATE_URL</code> and the server ships every family (both log lanes tailed, published files whole) to object storage with seconds of lag — recover with <code>taguru restore --out DIR</code>, then <code>taguru inspect DIR</code>; or start a server on an <b>empty</b> directory with the same URL and it boots from the bucket directly (while the previous writer still looks alive, that boot asks for <code>--take-over</code> first). For point-in-time copies: every writer is fsync+rename, so filesystem snapshots (ZFS/Btrfs/LVM) are safe at any instant. A naive <code>rsync</code>/<code>cp</code> against a live server does not guarantee cross-file consistency — stop the server, take a real snapshot, or replicate. <code>POST /flush</code> writes out everything dirty right before. Verify with <code>taguru inspect /path/to/data</code> (the same fully-validating load + WAL replay the server does; non-zero exit = corruption of acknowledged data).</li>
       <li><b>Exclusivity</b>: one process per data directory at a time (serve or import). The lock is advisory (flock-style — dependable on local disks, but <b>NFS/EFS/FUSE may grant it to both sides</b>). In a rolling deploy the new process correctly bows out while the old one lives — on a shared volume, deploy stop-then-start (<code>strategy: Recreate</code> on <a href="kubernetes.html">Kubernetes</a>).</li>
       <li><b>When something is slow, stuck, or the wrong shape</b>: the <a href="troubleshooting.html">troubleshooting guide</a> attributes the symptom to a layer — version skew, a stale image, Taguru's own latency vs. the LLM's, the semantic lane's silent degrade — before anything gets reset.</li>
     </ul>
     <div class="next-links">
       <a class="nav-card" href="concepts.html" style="flex:1 1 16rem">
         <span class="nc-title">Next: Concepts</span>
-        <p>Associations, contexts, the two lanes. What goes on the graph and what stays as text.</p>
+        <p>Associations, <code>contexts</code>, the two lanes. What goes on the graph and what stays as text.</p>
       </a>
       <a class="nav-card" href="mcp-rag-walkthrough.html" style="flex:1 1 16rem">
         <span class="nc-title">Walkthrough</span>

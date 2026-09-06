@@ -1,7 +1,7 @@
-//! `taguru compact`: rewrite context images without their dead
+//! `taguru compact`: rewrite `context` images without their dead
 //! weight. The image is append-only by design — retraction unlinks
 //! attribution records but never reclaims them, alias removal leaves
-//! arena bytes behind — so a long-lived context with heavy revision
+//! arena bytes behind — so a long-lived `context` with heavy revision
 //! traffic grows monotonically. Compaction rebuilds each image from
 //! its live content alone ([`taguru::context::Context::compacted`])
 //! and persists the result; a running server serves the same at
@@ -22,7 +22,7 @@
 //!
 //! `--dry-run` and `--json` (issue #371) answer "is compacting this
 //! worth it" without rewriting anything: `GET /contexts` (offline,
-//! `state.directory()`) already carries each context's standing
+//! `state.directory()`) already carries each `context`'s standing
 //! `dead_edges`/`arena_slack`/… — the same numbers `POST
 //! .../compact` would shed — so a preview needs no server-side
 //! simulation of the rebuild it isn't running. See [`DeadWeight`].
@@ -260,7 +260,7 @@ fn run_local(names: Vec<String>, parallel: usize, as_json: bool) -> i32 {
     if failures > 0 || !ok { 1 } else { 0 }
 }
 
-/// `compact --dry-run` (offline): each context's standing dead weight,
+/// `compact --dry-run` (offline): each `context`'s standing dead weight,
 /// read straight off `state.directory()` — the same live-for-hot,
 /// snapshot-for-cold stats `GET /contexts` serves — with nothing
 /// opened or rewritten.
@@ -307,7 +307,7 @@ fn run_local_dry_run(names: Vec<String>, as_json: bool) -> i32 {
     finish_dry_run(weights, rows.len(), failures, as_json)
 }
 
-/// Prints one context's outcome in the shape both the sequential and
+/// Prints one `context`'s outcome in the shape both the sequential and
 /// `--parallel` paths share, so the two can never drift apart. Returns
 /// whether it succeeded, for the caller's failure count. `--json`
 /// skips the print and accumulates into `reports` instead — collected
@@ -350,8 +350,8 @@ fn report_outcome(
     }
 }
 
-/// One context's report line — shared by the sequential path, the
-/// `--parallel` path, and both `--url` paths (per-context and the
+/// One `context`'s report line — shared by the sequential path, the
+/// `--parallel` path, and both `--url` paths (per-`context` and the
 /// maintenance sweep), so the four can never drift apart. `#[586]`:
 /// when the rebuilt image did not actually make it to disk (the
 /// caller already succeeded — the graph itself is compacted, only the
@@ -375,7 +375,7 @@ fn success_line(name: &str, outcome: &CompactOutcome) -> String {
     )
 }
 
-/// One context's standing dead weight — what `--dry-run` reports and
+/// One `context`'s standing dead weight — what `--dry-run` reports and
 /// `--dry-run --json` serializes. Deliberately NOT [`CompactOutcome`]:
 /// that type answers "what did the rewrite shed", this one answers
 /// "what is there to shed", and `bytes_after` (the rebuilt image size)
@@ -389,7 +389,7 @@ struct DeadWeight {
     dead_attributions: usize,
     arena_slack: usize,
     footprint_bytes: usize,
-    /// True when `entry.loaded` was false: a cold context's stats are
+    /// True when `entry.loaded` was false: a cold `context`'s stats are
     /// the last-saved snapshot, not a live recomputation
     /// (`describe_entry`, registry.rs) — never presented as live
     /// without saying so.
@@ -448,7 +448,7 @@ fn print_json<T: Serialize>(items: &[T]) -> bool {
 /// The shared tail of every `--dry-run` path (local and remote): print
 /// or serialize what was gathered, then report exit status the same
 /// way the real compaction paths do — failures from missing/unreadable
-/// contexts count same as a serialization failure.
+/// `contexts` count same as a serialization failure.
 fn finish_dry_run(weights: Vec<DeadWeight>, total: usize, failures: usize, as_json: bool) -> i32 {
     let mut ok = true;
     if as_json {
@@ -468,7 +468,7 @@ fn finish_dry_run(weights: Vec<DeadWeight>, total: usize, failures: usize, as_js
 /// The remote twin of [`run_local`]: CONTEXT arguments each call
 /// their own `POST /contexts/{name}/compact`; no arguments call the
 /// server's `POST /maintenance/compact` sweep instead, which picks
-/// its own candidates rather than enumerating every context first
+/// its own candidates rather than enumerating every `context` first
 /// (ADR 0002 §6).
 fn run_remote(base: &str, names: Vec<String>, parallel: usize, as_json: bool) -> i32 {
     // ADR 0002 §7: caught before any request leaves the process.
@@ -574,7 +574,7 @@ fn report_remote_outcome(
 
 /// `POST /maintenance/compact`: the server sweeps its own candidates
 /// (worst dead ratio first) instead of the CLI enumerating every
-/// context and calling each one — the one request this issues either
+/// `context` and calling each one — the one request this issues either
 /// succeeds as a whole or fails as a whole, so `--parallel` has
 /// nothing to parallelize here.
 fn run_remote_sweep(api: &Api, as_json: bool) -> i32 {
@@ -631,8 +631,8 @@ fn run_remote_sweep(api: &Api, as_json: bool) -> i32 {
 /// `compact --dry-run --url`: no CONTEXT arguments walks every row of
 /// `GET /contexts` (issue #371) rather than the server's own sweep —
 /// the sweep picks its own worst-first candidates, but a preview must
-/// answer for every context, since the point is deciding whether a
-/// context is worth compacting in the first place. CONTEXT arguments
+/// answer for every `context`, since the point is deciding whether a
+/// `context` is worth compacting in the first place. CONTEXT arguments
 /// each fetch their own `GET /contexts/{name}` instead.
 fn run_remote_dry_run(base: &str, names: Vec<String>, as_json: bool) -> i32 {
     if let Err(message) = crate::remote::reject_userinfo(base) {
@@ -704,7 +704,7 @@ mod tests {
     /// struct the local path already reports through — proof that the
     /// `#[serde(flatten)]` on [`crate::registry::MaintenanceCompactionEntry`]
     /// round-trips, and that `success_line`'s output for a sweep entry
-    /// cannot silently drift from the per-context report line.
+    /// cannot silently drift from the per-`context` report line.
     #[test]
     fn a_sweep_response_deserializes_into_the_same_report_line_as_a_per_context_one() {
         let body = serde_json::json!({

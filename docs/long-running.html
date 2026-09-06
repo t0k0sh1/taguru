@@ -35,7 +35,7 @@
     </div>
     <div class="side-group">
       <div class="side-group-label">Reference</div>
-      <a href="schema.html">Context schema</a>
+      <a href="schema.html"><code>context</code> schema</a>
       <a href="import.html">Batch import</a>
       <a href="extract.html">Document extraction</a>
       <a href="taguru-code.html">Code map (taguru-code)</a>
@@ -195,7 +195,7 @@
       Two <b>distinct</b> completion tests exist, one per stage — do not conflate them:
     </p>
     <ul>
-      <li><b>Extract stage</b>: a document is done when its entry in <code>.extract-manifest.json</code> matches the current compute-input fingerprint (content hash × model × prompt version × context × output-shaping flags). <code>taguru extract --dry-run</code> reports this without calling the model. A connector-driven run has its own two-layer version of this same test — see <a href="connectors.html#checkpoints">ingest connectors: checkpoints</a>.</li>
+      <li><b>Extract stage</b>: a document is done when its entry in <code>.extract-manifest.json</code> matches the current compute-input fingerprint (content hash × model × prompt version × <code>context</code> × output-shaping flags). <code>taguru extract --dry-run</code> reports this without calling the model. A connector-driven run has its own two-layer version of this same test — see <a href="connectors.html#checkpoints">ingest connectors: checkpoints</a>.</li>
       <li><b>Import stage</b>: querying a running server's <code>GET /contexts/{name}/sources</code> (or the SDK's <code>iter_sources()</code>, see <a href="#custom-runner">below</a>) tells you exactly which sources have landed. That test is sound only because a failed batch now writes <b>nothing</b> — a partially-applied source can no longer masquerade as a completed one (the fix that closed this gap is <a href="https://github.com/t0k0sh1/taguru/issues/187">issue #187</a>; before it, "source exists" was not a safe checkpoint test for a resumable client). Offline, there is no per-source listing (<code>taguru inspect</code> reports a source <b>count</b> and any surviving import markers, not individual ids) — but you rarely need one there: retract-then-apply makes <code>taguru import</code> idempotent, so simply re-importing the whole <code>--out</code> directory after every window is cheap and correct without first figuring out what already landed.</li>
     </ul>
     <p>

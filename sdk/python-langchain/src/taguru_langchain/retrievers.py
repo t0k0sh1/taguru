@@ -12,10 +12,10 @@ the only comparable currency. Hits landing in both lanes collapse into one
 Document tagged ``lane: "graph+text"``.
 
 The retriever addresses one ``context``, several ``contexts``, or ``groups``
-(each group reaches every member context, nested children included). Across
-several contexts the graph lane runs per context and interleaves by
-per-context rank — the posture the server itself takes for passage scores —
-and the text lane rides the server's own cross-context search.
+(each ``group`` reaches every member ``context``, nested children included). Across
+several ``contexts`` the graph lane runs per ``context`` and interleaves by
+per-``context`` rank — the posture the server itself takes for passage scores —
+and the text lane rides the server's own cross-``context`` search.
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ def _rrf(rank: int) -> float:
 
 
 class TaguruRetriever(BaseRetriever):
-    """Retrieve Documents from Taguru contexts, graph lane + text lane.
+    """Retrieve Documents from Taguru ``contexts``, graph lane + text lane.
 
     Passage-backed hits carry ``page_content`` = the verbatim paragraph and
     metadata ``{context, source, paragraph, section, lane, associations?,
@@ -56,7 +56,7 @@ class TaguruRetriever(BaseRetriever):
     ``include_graph_only_facts`` is on, so pure-graph deployments retrieve too.
 
     Name at least one target: ``context`` (one name), ``contexts`` (several),
-    or ``groups`` (group names — each searches every context it reaches).
+    or ``groups`` (``group`` names — each searches every ``context`` it reaches).
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -104,7 +104,7 @@ class TaguruRetriever(BaseRetriever):
         return self
 
     def _is_cross(self) -> bool:
-        """Whether retrieval spans several contexts (or a group's worth)."""
+        """Whether retrieval spans several ``contexts`` (or a ``group``'s worth)."""
         return bool(self.contexts) or bool(self.groups)
 
     def _direct_targets(self) -> list[str]:
@@ -118,7 +118,7 @@ class TaguruRetriever(BaseRetriever):
 
     @staticmethod
     def _with_members(targets: list[str], members: set[str]) -> list[str]:
-        """Direct contexts lead in declaration order; group-resolved members
+        """Direct ``contexts`` lead in declaration order; ``group``-resolved members
         follow in name order, overlaps deduped — the server's own
         cross-search tie order."""
         merged = list(targets)
@@ -551,9 +551,9 @@ def _graph_documents(
 
 
 def _interleave(per_target: list[list[Document]]) -> list[Document]:
-    """Per-context rank interleaving — activation strengths are ordinal
-    within one call only, so ranks are the currency across contexts (the
-    posture the server's own cross-context passage merge takes)."""
+    """Per-``context`` rank interleaving — activation strengths are ordinal
+    within one call only, so ranks are the currency across ``contexts`` (the
+    posture the server's own cross-``context`` passage merge takes)."""
     indexed = [
         (rank, index, document)
         for index, documents in enumerate(per_target)
@@ -564,7 +564,7 @@ def _interleave(per_target: list[list[Document]]) -> list[Document]:
 
 
 def _hit_context(hit: PassageHit, fallback: str | None) -> str | None:
-    """A cross-context hit names its context; a per-context hit inherits the
+    """A cross-``context`` hit names its ``context``; a per-``context`` hit inherits the
     retriever's own target."""
     return getattr(hit, "context", None) or fallback
 
@@ -595,7 +595,7 @@ def _merge_lanes(
     k: int,
     fallback_context: str | None = None,
 ) -> list[Document]:
-    """Reciprocal Rank Fusion across lanes; (context, source, paragraph) hits
+    """Reciprocal Rank Fusion across lanes; (``context``, source, paragraph) hits
     landing in both collapse into one Document tagged ``lane: "graph+text"``."""
     scored: dict[object, tuple[float, Document]] = {}
 

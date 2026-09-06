@@ -17,7 +17,7 @@ pub(super) struct ResolvedSystem {
 /// One extract run: the settled flags, the provider, and everything
 /// that accumulates across documents — the manifest, the label
 /// vocabulary offered to later prompts, and the output names already
-/// claimed. One run targets one context on purpose (docs/extract.html).
+/// claimed. One run targets one `context` on purpose (docs/extract.html).
 pub(super) struct Run {
     pub(super) context: String,
     pub(super) description: Option<String>,
@@ -92,7 +92,7 @@ pub(super) struct Run {
     /// an established one.
     pub(super) vocabulary: BTreeMap<String, usize>,
     /// Issue #758: every concept/label spelling an earlier document of
-    /// this run (or `--vocabulary`'s context) settled on, mapped to
+    /// this run (or `--vocabulary`'s `context`) settled on, mapped to
     /// what it resolves to — the set a later document's alias must not
     /// rewire. Grows exactly where `vocabulary` does: when a document
     /// lands, and when a skipped one's batch is absorbed.
@@ -124,11 +124,11 @@ pub(super) struct Run {
     /// report-only: the batch is unchanged, so unlike `candidates`
     /// this is never a fingerprint input.
     pub(super) coverage: bool,
-    /// `--vocabulary`'s harvested target-context concept names, capped
+    /// `--vocabulary`'s harvested target-`context` concept names, capped
     /// for the prompt (ADR 0015; empty = the control is off).
     pub(super) vocabulary_names: Vec<String>,
     /// The FULL harvested concept set, occurrence-normalized — the
-    /// ADR 0013 check's allowlist, uncapped on purpose: a context
+    /// ADR 0013 check's allowlist, uncapped on purpose: a `context`
     /// spelling is legitimate whether or not it fit the prompt list.
     pub(super) vocabulary_allowlist: HashSet<String>,
     /// Content digest of the harvested name sets (`""` = off) — a

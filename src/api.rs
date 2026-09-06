@@ -254,16 +254,16 @@ pub(crate) enum ErrorCode {
     NoSource,
     NoParagraph,
     NoGroup,
-    /// `GET /contexts/{name}/schema` on a context that exists but never
+    /// `GET /contexts/{name}/schema` on a `context` that exists but never
     /// installed one — distinct from `NoContext` (ADR 0009 §6.3
-    /// deliberately keeps "never had a schema" and "context itself is
+    /// deliberately keeps "never had a schema" and "`context` itself is
     /// missing" apart, the way `NoGroup` already stays apart from
     /// `NoContext`).
     NoSchema,
     UnknownPath,
     MethodNotAllowed,
     Timeout,
-    /// `PUT` on a resource — context or group — that already exists.
+    /// `PUT` on a resource — `context` or group — that already exists.
     AlreadyExists,
     /// Every other 409: alias conflicts, non-capacity partial writes,
     /// a real source colliding with a reserved export id.
@@ -478,7 +478,7 @@ impl Issue {
     /// The `closed_labels` (ADR 0009 §6.4) twin of [`Issue::unknown_reference`]:
     /// same `kind` token (the wire vocabulary §8.1 fixes is the token, not
     /// the constructor), but a truthful `actual` — the label was never
-    /// declared in this context's schema, which is a different fact from
+    /// declared in this `context`'s schema, which is a different fact from
     /// "not present in this request."
     pub(crate) fn undeclared_label(path: impl Into<String>, expected: impl Into<String>) -> Self {
         Self {
@@ -732,7 +732,7 @@ pub(crate) fn ok<T: Serialize>(result: T, started_at: Instant) -> Response {
 /// went ahead, and these ride out in the success envelope rather than
 /// refusing anything. `issues` is truncated to [`MAX_LISTED_ISSUES`]
 /// here, the same cap [`validation_error`] applies to a `strict`
-/// refusal's list, so a `warn` context sending a huge batch cannot
+/// refusal's list, so a `warn` `context` sending a huge batch cannot
 /// balloon the response either.
 pub(crate) fn ok_with_issues<T: Serialize>(
     result: T,
@@ -1014,7 +1014,7 @@ fn nesting_refusal(violation: NestingViolation, started_at: Instant) -> Response
 
 /// A group write whose RESULT would bundle more than
 /// [`MAX_GROUP_MEMBERS`] names in one set — `field` says which
-/// ("member contexts" / "child groups"). The delta caps already bound
+/// ("member `contexts`" / "child groups"). The delta caps already bound
 /// each request; this bounds what the deltas accumulate to.
 fn over_cap_refusal(field: &'static str, started_at: Instant) -> Response {
     error(
@@ -1039,7 +1039,7 @@ pub(crate) fn key_name(key: &Option<axum::Extension<crate::auth::AuthKey>>) -> &
 /// Pulls a named path parameter out of request parts by hand — a
 /// route's params can't ride a handler's signature as an ordinary
 /// extractor the way `MatchedPath` (which supports optional
-/// extraction) does. Shared by the auth middleware's per-context grant
+/// extraction) does. Shared by the auth middleware's per-`context` grant
 /// check and the access-log middleware's logged name, both of which
 /// run ahead of routing proper and so must extract by hand from the
 /// parts they hold. Goes through [`axum::extract::Path`] (the same
@@ -1047,7 +1047,7 @@ pub(crate) fn key_name(key: &Option<axum::Extension<crate::auth::AuthKey>>) -> &
 /// `RawPathParams`, so a percent-encoded segment decodes here exactly
 /// as it would in a handler — `RawPathParams` hands back the raw,
 /// still-encoded bytes, which would compare unequal to a handler's
-/// decoded value for a context name containing a percent-encoded
+/// decoded value for a `context` name containing a percent-encoded
 /// character.
 pub(crate) async fn path_param(
     parts: &mut axum::http::request::Parts,
@@ -1408,7 +1408,7 @@ const MAX_PATHS_LIMIT: usize = 100;
 pub(crate) const MAX_ASSOCIATIONS_PER_REQUEST: usize = 10_000;
 
 /// Per-request cap on list-shaped read inputs: origins, query terms,
-/// source lists. The per-item work happens under the context's lock,
+/// source lists. The per-item work happens under the `context`'s lock,
 /// and for `lookup_passages` the response body scales with the list
 /// too — the output-side clamps cannot bound what the request itself
 /// carries, so the input is refused up front like an oversized
@@ -1449,12 +1449,12 @@ pub(crate) const MAX_ASSOCIATION_WEIGHT: f64 = 1e6;
 /// the cache budget).
 pub(crate) const MAX_NAME_BYTES: usize = 1024;
 
-/// Byte cap on a context name: it becomes a file stem, percent-encoded
+/// Byte cap on a `context` name: it becomes a file stem, percent-encoded
 /// at up to 3× — 64 bytes keeps the longest sidecar filename well
 /// under every filesystem's 255-byte limit.
 pub(crate) const MAX_CONTEXT_NAME_BYTES: usize = 64;
 
-/// Byte cap on a context description — it too rides in every
+/// Byte cap on a `context` description — it too rides in every
 /// directory listing.
 pub(crate) const MAX_DESCRIPTION_BYTES: usize = 4096;
 
@@ -1495,7 +1495,7 @@ pub(crate) const MAX_TAGS_PER_SOURCE: usize = 32;
 
 /// Per-request cap on the number of passage sources one store may
 /// carry. Each source is a whole document tokenized and folded into the
-/// resident index under the context's lock — heavier per item than an
+/// resident index under the `context`'s lock — heavier per item than an
 /// association, so a tenth of [`MAX_ASSOCIATIONS_PER_REQUEST`] (issue
 /// #622 finding 7: a compiler-linked ratio, not just a matching
 /// literal). The body cap bounds the request's total bytes; this
@@ -1595,7 +1595,7 @@ pub struct MatchPage {
     pub plan: Option<MatchPlan>,
 }
 
-/// The response-level execution plan of a graph search: the contexts
+/// The response-level execution plan of a graph search: the `contexts`
 /// actually consulted, in effective order. For the cross variants that
 /// is the RESOLVED target list — groups expanded, the key's grants
 /// applied — which the tagged matches alone cannot reconstruct when a
@@ -1608,10 +1608,10 @@ pub struct MatchPlan {
     pub contexts: Vec<String>,
 }
 
-/// One cross-context result: the per-context wire shape, tagged with
-/// the context it came from — the tag is what makes the result
+/// One cross-`context` result: the per-`context` wire shape, tagged with
+/// the `context` it came from — the tag is what makes the result
 /// actionable, since every follow-up (citations, lookups, activate)
-/// is a per-context call.
+/// is a per-`context` call.
 #[derive(Serialize, Deserialize)]
 pub struct CrossMatch<T> {
     pub context: String,
@@ -1619,7 +1619,7 @@ pub struct CrossMatch<T> {
     pub inner: T,
 }
 
-/// [`MatchPage`], cross-context: same `total`-above-count truncation
+/// [`MatchPage`], cross-`context`: same `total`-above-count truncation
 /// contract, every match tagged.
 #[derive(Serialize, Deserialize)]
 pub struct CrossMatchPage {
@@ -1633,7 +1633,7 @@ pub struct CrossMatchPage {
 
 /// A match page's resume point: the rank key of the last item on the
 /// previous page. `(subject, label, object)` alone already uniquely
-/// identifies an edge within one context (the `edge_ids` bijection),
+/// identifies an edge within one `context` (the `edge_ids` bijection),
 /// so `weight` plus that triple is a total order with no possible tie
 /// — a client can always build the next `after` from the last match it
 /// received. (`Serialize` is for the retrieval cache's key, where the
@@ -1664,7 +1664,7 @@ fn rank(a: (f64, &str, &str, &str), b: (f64, &str, &str, &str)) -> std::cmp::Ord
 /// [`rank`], cut at the limit. Returns the raw library `Association`s,
 /// not yet resolved to their wire shape — callers still need to run
 /// them through `resolve_markers`/`association_out`, and `page` itself
-/// has no context name to resolve against.
+/// has no `context` name to resolve against.
 fn page(
     matches: Vec<Association>,
     limit: Option<usize>,
@@ -1681,7 +1681,7 @@ fn page(
 }
 
 /// [`page`]'s bound over any match shape, the rank key read through an
-/// accessor — the cross-context pages carry `(context, association)`
+/// accessor — the cross-`context` pages carry `(context, association)`
 /// pairs rather than bare associations. `total` is captured before the
 /// cursor filter and the truncate: it names the query's whole result
 /// set, not what remains past `after`, so it stays constant across
@@ -1815,8 +1815,8 @@ struct PanickedJob {
 /// Runs `job` for every index in `0..count` on the blocking thread
 /// pool, at most `permits` at once, and returns the results in index
 /// order (not completion order) — so callers can zip them back against
-/// whatever list `count` came from. Built for cross-context fan-out:
-/// each `job` call is one context's blocking read, and bounding
+/// whatever list `count` came from. Built for cross-`context` fan-out:
+/// each `job` call is one `context`'s blocking read, and bounding
 /// concurrency keeps a large `contexts`/`groups` list from opening one
 /// blocking thread per target at once.
 ///
@@ -1867,9 +1867,9 @@ async fn bounded_parallel_map<R: Send + 'static>(
 }
 
 /// Turns a [`bounded_parallel_map`] job's caught [`PanickedJob`] into
-/// the structured 500 every cross-context caller answers with — the
+/// the structured 500 every cross-`context` caller answers with — the
 /// target the panic came from is named in the response body (never on
-/// the span: ADR 0008 §8 forbids recording context names on any span,
+/// the span: ADR 0008 §8 forbids recording `context` names on any span,
 /// not just the `error`-named field §7 forbids), and the recovered
 /// panic payload is dropped rather than logged — it can carry
 /// arbitrary caller-controlled text, including the forbidden data ADR
@@ -1886,7 +1886,7 @@ pub(crate) fn cross_job_panic(state: &AppState, name: &str, started_at: Instant)
     )
 }
 
-/// Concurrency ceiling for [`bounded_parallel_map`]'s cross-context fan
+/// Concurrency ceiling for [`bounded_parallel_map`]'s cross-`context` fan
 /// out, `TAGURU_CROSS_SEARCH_CONCURRENCY`-overridable (default 4) —
 /// read once and cached, the same `OnceLock` shape as
 /// [`search_log_enabled`], since it governs a fan-out shape, not a
@@ -2100,11 +2100,11 @@ fn recollections_out(
         .collect()
 }
 
-/// [`associations_out`] for a cross-context page: section/locator
-/// markers resolve against the context each match came from — one
-/// `resolve_markers` call per distinct context on the page, not one
-/// per match. A context whose page entries carry no paragraph locator
-/// still gets called (every distinct context is registered in
+/// [`associations_out`] for a cross-`context` page: section/locator
+/// markers resolve against the `context` each match came from — one
+/// `resolve_markers` call per distinct `context` on the page, not one
+/// per match. A `context` whose page entries carry no paragraph locator
+/// still gets called (every distinct `context` is registered in
 /// `locators` up front), but `resolve_markers` short-circuits on the
 /// resulting empty key set, so that call costs nothing.
 fn cross_associations_out(
@@ -3286,7 +3286,7 @@ mod tests {
     /// issue #620: `bounded_parallel_map` must not let one job's panic
     /// discard every sibling's already-computed result — these exercise
     /// the caught-panic path directly, since driving a real panic
-    /// through a cross-context HTTP handler isn't otherwise reachable
+    /// through a cross-`context` HTTP handler isn't otherwise reachable
     /// deterministically.
     #[tokio::test]
     async fn bounded_parallel_map_returns_results_in_index_order() {

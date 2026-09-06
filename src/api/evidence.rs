@@ -8,7 +8,7 @@
 //! convention, or a range — ADR 0006 §2.2 documents this as already
 //! true of the existing wire types, not a new constraint this module
 //! invents. [`EvidenceCandidate`] carries every lane's provenance
-//! (context, source, paragraph, section, lane, lane rank, graph path,
+//! (`context`, source, paragraph, section, lane, lane rank, graph path,
 //! signed weight, attribution set) without ever comparing those four
 //! scales against each other; [`fuse`] is the one place cross-lane
 //! comparison is allowed, and it compares ranks, never raw scores

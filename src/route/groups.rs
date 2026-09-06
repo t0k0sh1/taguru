@@ -1,4 +1,4 @@
-//! Group verbs: every group exists on every shard, so directory reads
+//! `group` verbs: every `group` exists on every shard, so directory reads
 //! union the per-shard projections and writes broadcast sequentially,
 //! member lists projected per shard by the map.
 
@@ -73,7 +73,7 @@ pub(super) async fn merge_groups(
     router_ok(api::GroupPage { total, groups }, Vec::new(), started_at)
 }
 
-/// Unions one shard's row into the merged directory: member contexts
+/// Unions one shard's row into the merged directory: member `contexts`
 /// are per-shard projections (disjoint by the map), children are
 /// broadcast whole, the description is identical everywhere a
 /// non-drifted record lives. Fingerprints are folded together — each
@@ -110,9 +110,9 @@ pub(super) fn full_path(request: &Request) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Group verbs: projected broadcast
+// `group` verbs: projected broadcast
 
-/// Runs one group write against every shard IN ORDER, the request's
+/// Runs one `group` write against every shard IN ORDER, the request's
 /// member lists projected per shard by the map. The first refusal
 /// stops the broadcast and passes through as-is — shards before it
 /// have applied (deltas converge on retry; documented divergence).
@@ -157,7 +157,7 @@ where
 /// Projects the named member-list fields of a JSON body per shard.
 /// Members of a `checked` field (the create/add lists) that the map
 /// does not place are refused up front with the single-instance
-/// nonexistent-member message, since a context no shard owns cannot
+/// nonexistent-member message, since a `context` no shard owns cannot
 /// exist on any of them. `unchecked` fields (the remove lists) skip
 /// that gate: a single instance's `update_group` treats removals as an
 /// idempotent set difference and never validates their existence, so
@@ -344,7 +344,7 @@ pub(super) async fn update_group_broadcast(
     }
 }
 
-/// Sends an unparseable body to the group's first shard verbatim, so
+/// Sends an unparseable body to the `group`'s first shard verbatim, so
 /// the refusal (shape, status, message) is the single-instance
 /// extractor's own.
 #[allow(clippy::too_many_arguments)]
@@ -504,7 +504,7 @@ pub(super) async fn union_group(
 
 /// `GET /groups/{name}/export`: every shard's record line names its
 /// own projection; the union record — one line, importable — is what
-/// the group actually is.
+/// the `group` actually is.
 pub(super) async fn export_group_union(
     State(state): State<RouterState>,
     axum::extract::Path(name): axum::extract::Path<String>,

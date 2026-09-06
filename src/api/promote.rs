@@ -1,6 +1,6 @@
 //! `POST /contexts/{name}/promote` (ADR 0018): graph-path promotion —
 //! the named scratch sources move into an established destination
-//! context as export → filter → re-head → import → audit, one
+//! `context` as export → filter → re-head → import → audit, one
 //! request, built from the same machinery the manual runbook uses
 //! (docs/promotion.html). No LLM anywhere in the path: the scratch's
 //! structure is already right, so the transfer is the export/import
@@ -37,11 +37,11 @@ use super::{
 
 #[derive(Debug, Deserialize)]
 pub struct PromoteRequest {
-    /// The destination context — must already exist; promote never
+    /// The destination `context` — must already exist; promote never
     /// creates one.
     pub into: String,
     /// The scratch source ids to promote. Every one must exist in the
-    /// promoting context (a passage or a live attribution) or the
+    /// promoting `context` (a passage or a live attribution) or the
     /// request refuses whole — under retract-then-apply a mistyped
     /// session id would otherwise no-op silently.
     pub sources: Vec<String>,
@@ -505,10 +505,10 @@ fn render_refusal(message: String, deadline: Deadline, started_at: Instant) -> R
 /// the deep-write-path interceptor in the apply loop, which reaches
 /// the same condition mid-apply, after `quota_refusal`'s own pre-check
 /// window has passed. `import.rs`'s own `QUOTA_NEXT_STEP` says
-/// "context"/"re-POSTing the remaining stream"; this says
+/// "`context`"/"re-POSTing the remaining stream"; this says
 /// "destination"/"re-calling promote" — the two never merge into one
 /// shared constant since promote's target is never the source stream's
-/// own context.
+/// own `context`.
 const QUOTA_NEXT_STEP: (&str, &str) = (
     "re-running the preview against a shrunk destination is exact",
     "retracting or compacting the destination (or raising its quota), then \

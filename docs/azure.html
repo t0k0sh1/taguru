@@ -35,7 +35,7 @@
     </div>
     <div class="side-group">
       <div class="side-group-label">Reference</div>
-      <a href="schema.html">Context schema</a>
+      <a href="schema.html"><code>context</code> schema</a>
       <a href="import.html">Batch import</a>
       <a href="extract.html">Document extraction</a>
       <a href="taguru-code.html">Code map (taguru-code)</a>
@@ -159,7 +159,7 @@ mkdir -p /mnt/taguru/data &amp;&amp; chown 65532:65532 /mnt/taguru/data</code></
         <code>Restart=on-failure</code>) is the restart policy — restarts are the host's job,
         not the gateway's (see <a href="#network">the probe split</a>).</li>
       <li><b>VM size:</b> memory ≈ <code>TAGURU_CACHE_BYTES</code> (default 512 MiB) + pinned
-        contexts + headroom — a B2s runs the default profile; measure with
+        <code>contexts</code> + headroom — a B2s runs the default profile; measure with
         <code>taguru estimate</code> before scaling up.</li>
       <li><b>Zone recovery is a reattach if the disk is ZRS.</b> An LRS disk is zone-bound and
         recovery into another zone is a snapshot restore; a ZRS disk detaches from the dead
@@ -364,8 +364,8 @@ docker run --rm -v /mnt/restore/data:/data \
       <li><b>Keep a second, environment-independent lane:</b> <code>taguru export --url</code>
         against the running server writes portable JSONL batch streams — ship them to Blob
         Storage on a schedule. They restore anywhere through <code>taguru import</code>,
-        across versions and machines. Note the export's own caveat: each context's stream is
-        internally consistent, but a multi-context export is not one point in time — the
+        across versions and machines. Note the export's own caveat: each <code>context</code>'s stream is
+        internally consistent, but a multi-<code>context</code> export is not one point in time — the
         snapshot lane is.</li>
     </ol>
     <p class="note warn">
@@ -399,14 +399,14 @@ docker run --rm -v /mnt/restore/data:/data \
 
   <section id="scale-out">
     <h2>Scale-out: shards, not replicas</h2>
-    <p class="section-sub">Write scale is disjoint context sets on independent instances — the model is on the <a href="kubernetes.html#sharding">Kubernetes page</a>.</p>
+    <p class="section-sub">Write scale is disjoint <code>context</code> sets on independent instances — the model is on the <a href="kubernetes.html#sharding">Kubernetes page</a>.</p>
     <ul>
       <li>Each shard is a complete stack of this page: its own VM (or pod), its own managed
-        disk, its own snapshots. Contexts that must be searched together (groups,
-        cross-context search reach only their own shard) cohabit on one shard.</li>
+        disk, its own snapshots. <code>contexts</code> that must be searched together (<code>groups</code>,
+        cross-<code>context</code> search reach only their own shard) cohabit on one shard.</li>
       <li>In front, <code>taguru router</code> is stateless — run it anywhere, give clients one
         hostname. If clients address shards directly instead, give each shard <b>its own
-        hostname</b> (multi-site listeners on the gateway): context names live in the path,
+        hostname</b> (multi-site listeners on the gateway): <code>context</code> names live in the path,
         so path-based routing cannot split them.</li>
       <li>Read scale is the replica pool tailing a bucket
         (<a href="kubernetes.html#read-pool">the read pool</a>) — replicas are read-only and

@@ -13,11 +13,11 @@ use super::*;
 pub(super) const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
 
 /// One parsed stream: the batches, then the schema records, then the
-/// group records it carried, each in stream order within its own
+/// `group` records it carried, each in stream order within its own
 /// vector. The split IS the apply order — batches first, all of them,
-/// then schemas, then groups (ADR 0009 §13) — so a schema record can
-/// name a context a batch of the SAME stream just created, and a
-/// group record can name a context whose schema just landed.
+/// then schemas, then `groups` (ADR 0009 §13) — so a schema record can
+/// name a `context` a batch of the SAME stream just created, and a
+/// `group` record can name a `context` whose schema just landed.
 #[cfg_attr(test, derive(Debug))]
 pub(crate) struct Stream {
     pub(crate) batches: Vec<Batch>,
@@ -75,12 +75,12 @@ impl Batch {
     /// strips it from every batch of its re-headed stream so a
     /// destination deleted mid-request refuses (`NoContext`) instead
     /// of being resurrected under the scratch's meta — promotion lands
-    /// in an established context, never mints one.
+    /// in an established `context`, never mints one.
     pub(crate) fn strip_create(&mut self) {
         self.create = None;
     }
 
-    /// Whether applying this batch can grow the context: any passage
+    /// Whether applying this batch can grow the `context`: any passage
     /// or graph payload counts (questions/sections/locators ride the
     /// passage).
     /// A header-only batch is a pure source retraction — plus, at
@@ -133,7 +133,7 @@ impl Batch {
     /// subject/object, plus alias CANONICALS — never alias spellings,
     /// which are exactly the variants a canonical exists to fold.
     /// Extract's `--vocabulary` (ADR 0015, #496 S3) harvests these
-    /// from an exported context so a new document is steered toward
+    /// from an exported `context` so a new document is steered toward
     /// the spellings the graph already uses.
     pub(crate) fn concept_vocabulary(&self) -> BTreeSet<String> {
         self.associations
@@ -224,7 +224,7 @@ struct Header {
 }
 
 /// The header's optional create block — the same fields as
-/// PUT /contexts/{name}, applied only when the context does not exist.
+/// PUT /contexts/{name}, applied only when the `context` does not exist.
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 struct CreateBlock {
@@ -234,7 +234,7 @@ struct CreateBlock {
     semantic_floor: Option<f32>,
 }
 
-/// The `taguru_group` record line: one group's complete truth, the
+/// The `taguru_group` record line: one `group`'s complete truth, the
 /// same fields `GET /groups/{name}` serves. Absent fields read as
 /// empty — matching what export omits — so the round trip is exact.
 #[derive(Deserialize)]
@@ -250,7 +250,7 @@ struct GroupLine {
     groups: Vec<String>,
 }
 
-/// Validates one group record line into the shape the registry
+/// Validates one `group` record line into the shape the registry
 /// restores. List duplicates fold into the set silently — membership
 /// is a set, exactly as over the API — but structural trouble
 /// (version, sizes, an over-cap SET) refuses with the line number.
@@ -297,7 +297,7 @@ fn parse_group(value: serde_json::Value, number: usize) -> Result<(String, Group
     Ok((line.name, record))
 }
 
-/// The `taguru_schema` record line: one context's whole schema
+/// The `taguru_schema` record line: one `context`'s whole schema
 /// document, plus the `context` it installs onto. Unlike
 /// [`GroupLine`], NO field defaults — every field required mirrors
 /// [`schema::SchemaDocument`]'s own at-rest posture (a missing field
@@ -314,7 +314,7 @@ struct SchemaLine {
 }
 
 /// Validates one schema record line into the installed document its
-/// context restores to. Follows [`parse_group`]'s exact wording shape
+/// `context` restores to. Follows [`parse_group`]'s exact wording shape
 /// for the version refusal (ADR 0009 §13 bullet 4) — a
 /// `taguru_schema` this build cannot read refuses by line number,
 /// never a silent skip. Every other structural rule (type/relation
@@ -413,7 +413,7 @@ struct LocatorLine {
 
 /// Parses one single-batch file completely, or says which line refused
 /// and why — the shape `taguru extract` emits and re-validates. Streams
-/// that may carry several batches, or group records, go through
+/// that may carry several batches, or `group` records, go through
 /// [`parse_stream`].
 pub(crate) fn parse_batch(reader: impl BufRead) -> Result<Batch, String> {
     let mut stream = parse_stream(reader)?;
@@ -446,10 +446,10 @@ pub(crate) fn parse_batch(reader: impl BufRead) -> Result<Batch, String> {
 /// before it and opens the next; a `taguru_group` line closes it too
 /// and stands alone, so an op line after one needs a fresh header.
 /// Line numbers in errors count from the stream's first line. Two
-/// batches claiming one (context, source) pair — or two records
-/// claiming one group — refuse the whole stream, within a stream
+/// batches claiming one (`context`, source) pair — or two records
+/// claiming one `group` — refuse the whole stream, within a stream
 /// exactly as across import's files: one batch owns one source's
-/// truth, one record one group's.
+/// truth, one record one `group`'s.
 pub(crate) fn parse_stream(mut reader: impl BufRead) -> Result<Stream, String> {
     let mut batches: Vec<Batch> = Vec::new();
     let mut schemas: Vec<(String, schema::InstalledSchema)> = Vec::new();
@@ -602,7 +602,7 @@ pub(crate) fn parse_stream(mut reader: impl BufRead) -> Result<Stream, String> {
 /// Byte ranges of each batch in a stream [`parse_stream`] already
 /// validated: a batch runs from its `taguru_batch` header line to the
 /// next stream-level record (header, `taguru_schema`, or
-/// `taguru_group` line) or EOF. Schema- and group-record bytes belong
+/// `taguru_group` line) or EOF. Schema- and `group`-record bytes belong
 /// to no batch — they are re-rendered from the parsed records instead
 /// of sliced. Lives beside the parser because the boundary rule is a
 /// property of the stream FORMAT, not of either caller: `router`'s

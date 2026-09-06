@@ -11,7 +11,7 @@ use super::*;
 /// names in.
 pub(super) struct Scatter {
     pub(super) direct: Vec<String>,
-    /// direct contexts per shard, order preserved within each shard.
+    /// direct `contexts` per shard, order preserved within each shard.
     pub(super) per_shard: BTreeMap<usize, Vec<String>>,
     pub(super) shards: Vec<usize>,
 }
@@ -70,7 +70,7 @@ pub(super) fn plan_scatter(
 
 /// Sorts multi-shard failures into the single-instance refusal order:
 /// scope refusals over direct names come before existence, existence
-/// before group resolution — tie-broken by where each shard's first
+/// before `group` resolution — tie-broken by where each shard's first
 /// direct target sits in the request's own order.
 pub(super) fn abort_rank(code: Option<&str>) -> u8 {
     match code {
@@ -82,8 +82,8 @@ pub(super) fn abort_rank(code: Option<&str>) -> u8 {
 }
 
 /// The fan-out outcome, split three ways: HTTP-answered failures abort
-/// the whole request (a shard that answered an error is a context that
-/// failed, and one failing context fails a single instance's search
+/// the whole request (a shard that answered an error is a `context` that
+/// failed, and one failing `context` fails a single instance's search
 /// whole); transport failures become the labeled `unreached` partials;
 /// the rest merge.
 pub(super) struct Gathered {
@@ -138,7 +138,7 @@ pub(super) fn gather(
 
 /// Builds each shard's request body: the caller's own body with the
 /// `contexts` list cut down to what that shard owns. Everything else —
-/// groups, cue, limit, the verbatim `after` cursor — is forwarded
+/// `groups`, cue, limit, the verbatim `after` cursor — is forwarded
 /// untouched.
 pub(super) fn shard_body(base: &Value, targets: Option<&Vec<String>>) -> Bytes {
     let mut body = base.clone();

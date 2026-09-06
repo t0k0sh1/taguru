@@ -16,14 +16,14 @@ one lane of evidence there, never as the primary retrieval mechanism,
 and every hit says which lane found it.
 
 The intended client is an LLM. Everything that needs language
-understanding — decomposing documents into facts, choosing a context,
+understanding — decomposing documents into facts, choosing a `context`,
 recomposing results into prose — is the client's job; this server only
 stores and walks structure. The server distributes the complete
 playbook for clients itself: `GET /protocol` (the content of
 [src/llm-protocol.md](src/llm-protocol.md)).
 
 **Documentation: <https://t0k0sh1.github.io/taguru/>** — getting
-started, concepts, context & group modeling, the optional [context
+started, concepts, `context` & `group` modeling, the optional [`context`
 schema](https://t0k0sh1.github.io/taguru/schema.html), the
 import/extract/evaluate/evidence-assembly references, deployment
 guides (Docker Compose, Kubernetes, AWS, Azure, Amazon Bedrock), a
@@ -64,27 +64,27 @@ curl -X POST localhost:8248/contexts/sake/activate -H 'Content-Type: application
   -d '{"origins":["青嶺酒造"]}'
 ```
 
-Contexts can be bundled into **groups** (`PUT /groups/{name}`, nesting
+`contexts` can be bundled into **`groups`** (`PUT /groups/{name}`, nesting
 allowed), and the searches — `POST /recall`, `POST /query`,
 `POST /sources/search` — take `contexts` / `groups` lists to run one
-search across several contexts at once, every match tagged with the
-context it came from. Every search response also carries a `plan`:
-which contexts were actually searched and — for passage search — which
+search across several `contexts` at once, every match tagged with the
+`context` it came from. Every search response also carries a `plan`:
+which `contexts` were actually searched and — for passage search — which
 lanes ran there and why not when one was skipped, with the effective
 cosine floor. Deep dives (`activate`, `explore`, and `paths` — every
 simple path between two concepts, shortest first, each hop carrying
-its citations, for "how are these two related?") stay per-context:
+its citations, for "how are these two related?") stay per-`context`:
 search across, then pull the thread where it answered. How to draw
 those boundaries for real documents — which parts of a paper or a
-codebase become contexts, and which become groups — is the [modeling
-guide](https://t0k0sh1.github.io/taguru/modeling.html). A context can
+codebase become `contexts`, and which become `groups` — is the [modeling
+guide](https://t0k0sh1.github.io/taguru/modeling.html). A `context` can
 optionally declare a [schema](https://t0k0sh1.github.io/taguru/schema.html)
 — a closed set of entity types and domain/range constraints on
 relation labels — and enforce it on writes in `warn` or `strict` mode;
-`off` (the default) leaves a schema-free context byte-identical to
+`off` (the default) leaves a schema-free `context` byte-identical to
 before the feature existed.
 
-For clients that mirror or index a context — a local cache, an
+For clients that mirror or index a `context` — a local cache, an
 external search index, a recomputation trigger — `GET
 /contexts/{name}/changes` is a polling **change feed**: content-change
 events after an opaque cursor (one event per write call, a bulk import
@@ -102,7 +102,7 @@ documents tagged X from the last year" is a server-side eligibility
 set, not client-side post-filtering that silently starves `limit`.
 
 The same `since`/`until` window works on the **graph lanes** —
-`recall`, `query`, `explore`, and `activate`, one context at a time
+`recall`, `query`, `explore`, and `activate`, one `context` at a time
 (ADR 0011): an association is visible iff at least one in-window
 source attests it, with its weight and citations re-derived from the
 in-window attributions alone, and the walks neither report nor bridge
@@ -117,13 +117,13 @@ time axis with no migration at all.
 For corpus-overview questions ("what are the main themes here?") there
 is a third lane: `taguru communities` detects communities on the
 association graph server-side and derives an artifact of LLM summaries
-— an ordinary context, incremental by content fingerprint, so an
+— an ordinary `context`, incremental by content fingerprint, so an
 unchanged graph re-runs without a single LLM call — and
 `POST /contexts/{name}/communities/search` (MCP: `search_communities`)
 ranks those summaries with an honest staleness verdict when the graph
 has moved on since.
 
-Long-lived contexts accumulate spelling-twin concepts, conflicting
+Long-lived `contexts` accumulate spelling-twin concepts, conflicting
 facts, and assertions the corpus has moved past;
 `POST /contexts/{name}/consolidation/audit` (MCP:
 `audit_consolidation`, ADR 0012) surfaces them as **candidates, never
@@ -133,7 +133,7 @@ multi-object facts ranked by how one-object their label usually is
 sources, and facts trailing their own subject's newest assertion.
 `taguru consolidation` is the judging half, communities-patterned:
 each candidate carries a fingerprint over its own evidence, judgments
-(dismissals included) are stored in a derived context keyed by that
+(dismissals included) are stored in a derived `context` keyed by that
 fingerprint, and a re-run over an unchanged graph makes zero LLM
 calls. Applying an accepted proposal is always an ordinary write — an
 alias, a retraction, a negative-weight assertion, or a re-import —
@@ -185,7 +185,7 @@ claude mcp add taguru -e TAGURU_URL=http://127.0.0.1:8248 -- taguru-mcp
 ```
 
 With that in place, requests like "ingest the documents in this folder
-into the sake context" or "tell me what you know about 青嶺酒造, with
+into the sake `context`" or "tell me what you know about 青嶺酒造, with
 sources" just work, as the loop directory pick → resolve →
 describe/query/activate → passage lookup → cited answer. A real
 round trip, request by request, is traced in the
@@ -302,7 +302,7 @@ report = sync_references(["manuals/", "https://example.com/guide"],
 ```
 
 Full contracts:
-[context schema](https://t0k0sh1.github.io/taguru/schema.html) ·
+[`context` schema](https://t0k0sh1.github.io/taguru/schema.html) ·
 [batch import](https://t0k0sh1.github.io/taguru/import.html) ·
 [document extraction](https://t0k0sh1.github.io/taguru/extract.html) ·
 [ingest connectors](https://t0k0sh1.github.io/taguru/connectors.html) ·
@@ -333,14 +333,14 @@ load-bearing ones:
 | `TAGURU_DATA_DIR` | `./data` | Data directory |
 | `TAGURU_API_TOKEN` | — | Bearer token (everything but `/health`, `/live`, `/metrics`). Unset = unauthenticated, localhost only |
 | `TAGURU_API_TOKENS` | — | Named keys (`"ci:tokA,laptop:tokB"`): the access log says which key, a leak costs one revocation |
-| `TAGURU_KEY_SCOPES` | — | Per-key grants as one JSON object: roles `read` ⊂ `write` ⊂ `admin`, optionally restricted to named contexts. These three are the auth table, and it hot-reloads — SIGHUP, or just editing the `--config` file — so rotation never costs a restart (see production notes) |
+| `TAGURU_KEY_SCOPES` | — | Per-key grants as one JSON object: roles `read` ⊂ `write` ⊂ `admin`, optionally restricted to named `contexts`. These three are the auth table, and it hot-reloads — SIGHUP, or just editing the `--config` file — so rotation never costs a restart (see production notes) |
 | `TAGURU_WAL` | on | fsync every acknowledged write before applying it — a crash loses nothing |
 | `TAGURU_REPLICATE_URL` | — | Continuous replication to object storage (`s3://` / `gs://` / `az://` / `file://`), epoch-fenced; restore with `taguru restore`, or boot an empty directory straight from the bucket. Unset = off |
 | `TAGURU_TAKEOVER` | off | `1` (or `serve --take-over`) acknowledges deposing the bucket's newest writer while it still looks alive — starting a writer against a bucket IS the promotion act |
-| `TAGURU_REPLICA` | off | `1` (or `serve --replica`) serves the bucket lineage read-only, tailing it continuously: reads scale across replicas, writes answer 403 `read_only_replica` naming the writer, per-context lag on `/metrics` |
+| `TAGURU_REPLICA` | off | `1` (or `serve --replica`) serves the bucket lineage read-only, tailing it continuously: reads scale across replicas, writes answer 403 `read_only_replica` naming the writer, per-`context` lag on `/metrics` |
 | `TAGURU_WRITER_URL` | — | Where a replica's write-refusal points clients (the writer's base URL / LB name); unset = the refusal names only the bucket's fence holder |
-| `TAGURU_ROUTE_MAP` | — | `taguru router` only: the context→shard map file (`context = shard-url` per line, optional `* = shard-url` fallback); edits hot-reload via the file watch, or immediately on SIGHUP (unix) — no restart |
-| `TAGURU_CACHE_BYTES` | 512 MiB | Resident budget for unpinned contexts (LRU eviction) |
+| `TAGURU_ROUTE_MAP` | — | `taguru router` only: the `context`→shard map file (`context = shard-url` per line, optional `* = shard-url` fallback); edits hot-reload via the file watch, or immediately on SIGHUP (unix) — no restart |
+| `TAGURU_CACHE_BYTES` | 512 MiB | Resident budget for unpinned `contexts` (LRU eviction) |
 | `TAGURU_RETRIEVAL_CACHE_BYTES` | 32 MiB | Exact-match result cache for recall/query/passage search — an identical request against an unchanged corpus answers without re-running the search; invalidated by the revision counters (`0` = off; below ~16 KiB seats no response at all, so it is pure cost rather than a smaller cache — a boot-time warning fires under that floor) |
 | `TAGURU_SEMANTIC_CACHE_THRESHOLD` | unset (off) | Semantic tier over the exact cache, passage search only: a paraphrased query whose embedding cosine clears this floor (`[0,1]`; start at `0.94`) AND passes a negation/number/entity guard serves the equivalent earlier query's cached result. Needs the exact cache and `TAGURU_EMBED_PASSAGES` |
 | `TAGURU_EMBED_URL` / `_MODEL` / `_API_KEY` | — | Semantic entry tier: an OpenAI-compatible `/embeddings` endpoint, or `local` to run the model in-process — `local` also requires `TAGURU_EMBED_MODEL` naming one of `taguru-code models` (e.g. `TAGURU_EMBED_URL=local TAGURU_EMBED_MODEL=paraphrase-multilingual-minilm-l12-v2-q`; not in the Docker image); unset keeps the entrance purely lexical |
@@ -353,13 +353,13 @@ load-bearing ones:
 | `TAGURU_EMBED_TIMEOUT_SECS` | 60 | Per-attempt ceiling for one embedding provider round trip; a request's remaining budget bounds an attempt further, and transient failures (transport, 429, 5xx) retry twice with backoff |
 | `TAGURU_RERANK_URL` / `_MODEL` / `_API_KEY` | — | Optional reranker for `POST /contexts/{name}/evidence` (Cohere/Jina-compatible `/rerank`, #307); unset keeps evidence selection fully deterministic, at no network or credential cost |
 | `TAGURU_RERANK_TIMEOUT_SECS` | 5 | Per-attempt ceiling for one reranker round trip; a request's remaining budget bounds an attempt further, and one transient failure retries with backoff — any failure degrades to the deterministic order rather than erroring |
-| `TAGURU_MAX_CONCURRENT_HEAVY_OPS` | 2 | Shared ceiling for vocabulary audits and context compactions; excess calls get 503 + `Retry-After` (`0` disables) |
-| `TAGURU_AUTO_COMPACT` | on | Ratio-triggered auto-compaction: each flush tick rebuilds at most the one worst context whose dead ratio exceeds `TAGURU_AUTO_COMPACT_RATIO` (0.5 — dead weight outgrew live content), behind the heavy-ops ceiling; `0` keeps compaction manual-only |
-| `TAGURU_CONTEXT_QUOTAS` | — | Per-context ceilings as one JSON object (`{"sake": {"storage_bytes": …, "cache_bytes": …}}`): `storage_bytes` refuses growth writes at the ceiling with 507 `storage_full` (retract/compact/delete stay open), `cache_bytes` bounds the context's resident share — under cache pressure the over-share context is evicted first, so one hot `context` cannot evict the rest beyond its ceiling. A broken declaration refuses boot, like broken credentials |
+| `TAGURU_MAX_CONCURRENT_HEAVY_OPS` | 2 | Shared ceiling for vocabulary audits and `context` compactions; excess calls get 503 + `Retry-After` (`0` disables) |
+| `TAGURU_AUTO_COMPACT` | on | Ratio-triggered auto-compaction: each flush tick rebuilds at most the one worst `context` whose dead ratio exceeds `TAGURU_AUTO_COMPACT_RATIO` (0.5 — dead weight outgrew live content), behind the heavy-ops ceiling; `0` keeps compaction manual-only |
+| `TAGURU_CONTEXT_QUOTAS` | — | Per-`context` ceilings as one JSON object (`{"sake": {"storage_bytes": …, "cache_bytes": …}}`): `storage_bytes` refuses growth writes at the ceiling with 507 `storage_full` (retract/compact/delete stay open), `cache_bytes` bounds the `context`'s resident share — under cache pressure the over-share `context` is evicted first, so one hot `context` cannot evict the rest beyond its ceiling. A broken declaration refuses boot, like broken credentials |
 
 The full table — durability ceilings, observability (`RUST_LOG`,
 `TAGURU_LOG_FORMAT=json`, `OTEL_EXPORTER_OTLP_ENDPOINT`,
-`TAGURU_LOG_SEARCHES`, per-context capacity gauges via
+`TAGURU_LOG_SEARCHES`, per-`context` capacity gauges via
 `TAGURU_METRICS_PER_CONTEXT`), body/concurrency caps — is in
 [Getting started](https://t0k0sh1.github.io/taguru/getting-started.html)
 and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
@@ -397,8 +397,8 @@ and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
   process at a time (serve or import) via an advisory lock — dependable
   on local disks, *not* on NFS/EFS. Deploys are stop-then-start. Scale
   reads with replicas (below); scale writes by giving independent
-  shards disjoint sets of contexts and putting `taguru router` in front
-  (below) — contexts no longer need to cohabit to be searched or
+  shards disjoint sets of `contexts` and putting `taguru router` in front
+  (below) — `contexts` no longer need to cohabit to be searched or
   grouped together.
 - **Key rotation never costs a restart.** The auth table —
   `TAGURU_API_TOKEN(S)`, `TAGURU_KEY_SCOPES` — hot-reloads on the
@@ -426,8 +426,8 @@ and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
   retrieval verb works from the replica's own copy (reads scale
   ~linearly with the pool), every write answers 403
   `read_only_replica` naming the writer (`TAGURU_WRITER_URL`), and
-  each context is consistent at its applied watermark — staleness ≤
-  shipping lag + poll interval, cross-context skew possible, all of it
+  each `context` is consistent at its applied watermark — staleness ≤
+  shipping lag + poll interval, cross-`context` skew possible, all of it
   on `/metrics` (`taguru_replica_applied_seq` vs `_shipped_seq`,
   `_behind_seconds`). A replica doubles as the warm standby: losing
   the writer costs the **manual promotion** (drain the lag metric,
@@ -441,14 +441,14 @@ and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
 - **Sharding, with one front door.** `taguru router` is a stateless
   scatter-gather router over sharded instances: `TAGURU_ROUTE_MAP`
   names a file of `context = shard-url` lines (plus an optional
-  `* = shard-url` fallback), context verbs proxy to the owning shard,
-  and cross-context `recall`/`query`/`sources/search` and groups span
+  `* = shard-url` fallback), `context` verbs proxy to the owning shard,
+  and cross-`context` `recall`/`query`/`sources/search` and `groups` span
   every shard with the exact single-instance merge semantics — the
   equivalence is pinned by an integration test, cursors included
   (`after` anchors on the last match itself, so it forwards to every
-  shard verbatim). Groups exist on every shard with members projected
-  by the map; `/import` splits its batch stream by context and
-  dry-run-preflights batch chunks and projected group records alike,
+  shard verbatim). `groups` exist on every shard with members projected
+  by the map; `/import` splits its batch stream by `context` and
+  dry-run-preflights batch chunks and projected `group` records alike,
   so a stream one instance would refuse with nothing applied is
   refused the same way here; `/mcp` works unchanged. No data directory, no state — run any number of routers
   behind one LB. Auth passes through: shards enforce keys and scopes
@@ -456,12 +456,12 @@ and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
   answers an error fails the request whole; a shard that cannot be
   *reached* degrades fan-out reads to labeled partials (`unreached`
   in the envelope) and refuses routed verbs with 502
-  `shard_unreachable`. Moving a context, in order: quiesce its
+  `shard_unreachable`. Moving a `context`, in order: quiesce its
   writes → `taguru export` → DELETE it through the router (the old
-  shard also sweeps its group projections) → edit the map + rolling
+  shard also sweeps its `group` projections) → edit the map + rolling
   router restart → re-import through the router, which now routes it
   to the new shard. Delete before re-import — a leftover copy keeps
-  answering the old shard's slice of every group fan-out.
+  answering the old shard's slice of every `group` fan-out.
 - **Health and metrics.** `GET /health` is readiness (503 while the
   write path is degraded — route away, don't restart) and its `200`
   body names the server's own version (`{"status": "ok", "version":
@@ -475,9 +475,9 @@ and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
   worked, actually-run Prometheus + Grafana setup scraping it,
   `docker compose up -d` away from a dashboard.
   `TAGURU_METRICS_PER_CONTEXT=all` (or top-`N` by disk size) adds
-  per-context capacity gauges — disk bytes by file family, resident
+  per-`context` capacity gauges — disk bytes by file family, resident
   bytes, pinned, counts — measured at flush time, never by the scrape.
-  Every request lands in the access log with its key, context, and
+  Every request lands in the access log with its key, `context`, and
   latency; destructive operations additionally leave one
   self-contained `taguru::audit` line. Distributed tracing is opt-in
   via `OTEL_EXPORTER_OTLP_ENDPOINT`: the composed retrieval loop exports
@@ -494,26 +494,26 @@ and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
   a second accidental writer fail-stops loudly instead of corrupting
   the lineage. Recover with `taguru restore --out DIR` — or start a
   server on an **empty** directory with the same URL and it boots from
-  the bucket directly: shared files and pinned contexts hydrate before
+  the bucket directly: shared files and pinned `contexts` hydrate before
   the port opens, everything else on first touch, and local files that
   already match are reused without a download. That makes the volume a
   cache and recovery "start anywhere"; while the previous writer still
   looks alive, the boot demands `--take-over` / `TAGURU_TAKEOVER=1`
   first. Point-in-time alternatives, unchanged: `POST /flush` then
   snapshot the data directory (every writer is fsync+rename, so
-  filesystem snapshots are safe at any instant; back up each context's
+  filesystem snapshots are safe at any instant; back up each `context`'s
   file family as a set) — or take the portable JSONL stream with
   `taguru export` (or `taguru export --url` against a live server,
   which — without `CONTEXT` arguments — enumerates and streams every
-  context and group in one run; not a cross-context point-in-time
-  snapshot, but internally consistent per context) and restore
+  `context` and `group` in one run; not a cross-`context` point-in-time
+  snapshot, but internally consistent per `context`) and restore
   anywhere through `taguru import` /
   `POST /import`. Verify any of them with `taguru inspect` — images,
   passage snapshots, and WAL records carry CRC-32C checksums, so "ok"
   means the bytes were proven intact, not just parseable.
-  Revision-heavy contexts reclaim themselves: once a context's dead
+  Revision-heavy `contexts` reclaim themselves: once a `context`'s dead
   ratio passes `TAGURU_AUTO_COMPACT_RATIO`, the flusher rebuilds it on
-  an upcoming tick — worst ratio first, one context per tick, as the
+  an upcoming tick — worst ratio first, one `context` per tick, as the
   heavy-ops ceiling allows (audit line +
   `taguru_auto_compactions_total` on `/metrics`). `taguru compact` and `POST /contexts/{name}/compact`
   remain for opted-out deployments (`TAGURU_AUTO_COMPACT=0`) and
@@ -530,7 +530,7 @@ and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
   `UnaliasConcept`/`UnaliasLabel` op order, the `aliases registered`/
   `aliases removed` `taguru::audit` lines (who, when, which
   namespace), and the general access log (every request against the
-  context, by key and timestamp) — together they say precisely when
+  `context`, by key and timestamp) — together they say precisely when
   the alias existed. Cross-reference that window against your own
   ingestion record (or the `source retracted`/`import batch applied`
   audit lines, if the affected sources were re-imported rather than
@@ -538,11 +538,11 @@ and [Internal architecture](https://t0k0sh1.github.io/taguru/architecture.html).
   spelling, then retract each (`POST /contexts/{name}/sources/
   retract`) and re-import it under the correct one. There is no merge
   for two canonicals that already diverged before the alias was
-  caught — unify them the way `compact` itself rebuilds a context:
+  caught — unify them the way `compact` itself rebuilds a `context`:
   export both sides and re-import everything under the one you keep.
 - **Passage search stays fast at 10,000 rows and up, without any
   configuration.** The semantic lane switches from an exact cosine
-  sweep to a small hand-rolled IVF index the moment one context's
+  sweep to a small hand-rolled IVF index the moment one `context`'s
   paragraph vectors reach that count — a compiled-in threshold, not a
   knob. The response shape, the floor, and every explain verdict never
   change; what can differ is the result set itself, since a true

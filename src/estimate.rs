@@ -1,6 +1,6 @@
 //! `taguru estimate`: capacity planning by measurement, not by chart.
 //! The image is fixed-width records, so the honest way to answer
-//! "what does a corpus of N associations cost" is to BUILD a context
+//! "what does a corpus of N associations cost" is to BUILD a `context`
 //! of that shape and measure it — `footprint()` and `to_bytes()` here
 //! are the very numbers the running server budgets and reports. Past
 //! the synthesis cap the totals extrapolate linearly, which the
@@ -299,7 +299,7 @@ fn vocabulary_too_small(measured: &Context, requested: u64) -> bool {
     (measured.association_count() as u64) < requested
 }
 
-/// Builds a context of the requested shape. Subjects sweep the whole
+/// Builds a `context` of the requested shape. Subjects sweep the whole
 /// concept pool (`i % concepts`), so the arena and entry index carry
 /// every name.
 ///
@@ -365,7 +365,7 @@ fn synthetic_name(prefix: char, index: u64, width: usize) -> String {
 /// `vectors` above is computed) but the PARAGRAPH COUNT it multiplies
 /// is measured from that same sample, then capped at
 /// `DEFAULT_PASSAGE_VECTOR_LIMIT` — the ceiling the server itself
-/// enforces per context.
+/// enforces per `context`.
 struct PassageEstimate {
     store_bytes: u64,
     bm25_bytes: u64,

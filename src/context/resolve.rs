@@ -33,7 +33,7 @@ impl Context {
     }
 
     /// [`Context::resolve`] with an explicit fuzzy floor for this one
-    /// call, overriding the context's setting — the loosen-and-retry
+    /// call, overriding the `context`'s setting — the loosen-and-retry
     /// move after a miss, or a tightening when a cue is known-exact.
     /// Only the fuzzy tier is affected; exact and containment matches
     /// are never floored.

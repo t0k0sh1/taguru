@@ -20,7 +20,7 @@ use super::{
     nesting_refusal, ok, optional_body, over_cap_refusal, overlong, oversized,
 };
 
-/// A bounded group-directory page; `total` counts the whole directory,
+/// A bounded `group`-directory page; `total` counts the whole directory,
 /// cursor-independent, exactly as [`ContextPage`]'s does.
 #[derive(Serialize, Deserialize)]
 pub struct GroupPage {
@@ -28,28 +28,28 @@ pub struct GroupPage {
     pub groups: Vec<GroupEntry>,
 }
 
-/// One group as served — the directory row, the single GET, and the
+/// One `group` as served — the directory row, the single GET, and the
 /// PATCH response are all this one shape, as with [`DirectoryEntry`].
 #[derive(Serialize, Deserialize)]
 pub struct GroupEntry {
     pub name: String,
     pub description: String,
-    /// Member context names, sorted. For a context-scoped key this
+    /// Member `context` names, sorted. For a `context`-scoped key this
     /// carries only the members its grant allows.
     pub contexts: Vec<String>,
-    /// Child group names, sorted — never scope-filtered (so the set
-    /// moves straight from the record): like the row itself, a group's
-    /// name is an organizational label, not context content, and the
-    /// contexts BEHIND a child stay filtered wherever they are served.
+    /// Child `group` names, sorted — never scope-filtered (so the set
+    /// moves straight from the record): like the row itself, a `group`'s
+    /// name is an organizational label, not `context` content, and the
+    /// `contexts` BEHIND a child stay filtered wherever they are served.
     pub groups: BTreeSet<String>,
-    /// Change token over the group's transitive member contexts: a
+    /// Change token over the `group`'s transitive member `contexts`: a
     /// stable hash of each visible member's name and revision counters
-    /// (see `ContextRevision`), so a group-level cache invalidates
+    /// (see `ContextRevision`), so a `group`-level cache invalidates
     /// exactly when a relevant member changed — a member write, an
     /// embedding refresh, a rename, or a membership edit all move it;
     /// anything else leaves it alone. Computed over the slice the
     /// caller's key can see, so it leaks no change-signal about
-    /// contexts beyond a scoped grant. Compare for equality only, and
+    /// `contexts` beyond a scoped grant. Compare for equality only, and
     /// only against the same server process — the member revisions
     /// behind it carry the same restart caveats they do individually.
     /// `serde(default)` so a router merging rows from an older shard
@@ -58,10 +58,10 @@ pub struct GroupEntry {
     pub fingerprint: String,
 }
 
-/// Whether the key's grant lets it see the named context — no scope
+/// Whether the key's grant lets it see the named `context` — no scope
 /// means everything is visible. The one predicate behind every place
 /// that FILTERS to the grant rather than refusing ([`group_entry`],
-/// [`cross_targets`]'s group resolution), so "the slice a scoped key
+/// [`cross_targets`]'s `group` resolution), so "the slice a scoped key
 /// sees" is defined exactly once and the two surfaces cannot drift.
 pub(super) fn scope_allows(
     scope: &Option<axum::Extension<crate::auth::KeyScope>>,
@@ -72,11 +72,11 @@ pub(super) fn scope_allows(
         .is_none_or(|axum::Extension(scope)| scope.allows_context(name))
 }
 
-/// The scope cut on one group row. Deliberately different from
-/// `list_contexts`, which hides whole rows: a group is an
-/// organizational label over contexts, not context content, and hiding
+/// The scope cut on one `group` row. Deliberately different from
+/// `list_contexts`, which hides whole rows: a `group` is an
+/// organizational label over `contexts`, not `context` content, and hiding
 /// the row would also hide it from the very key that may still add or
-/// remove its own contexts there. The members are what a grant is
+/// remove its own `contexts` there. The members are what a grant is
 /// about, so the members are what gets filtered.
 ///
 /// Propagates [`DeadlineExceeded`] straight from [`group_fingerprint`]:
@@ -99,11 +99,11 @@ fn group_entry(
     })
 }
 
-/// A single group's [`group_entry`] response, gated on the deadline and
-/// kept off the async worker — the fingerprint walks the group's
+/// A single `group`'s [`group_entry`] response, gated on the deadline and
+/// kept off the async worker — the fingerprint walks the `group`'s
 /// transitive member closure, cost that scales with nesting/membership
 /// rather than with this being a single row. Shared by every handler
-/// that returns one group's entry after `list_groups`' own inline
+/// that returns one `group`'s entry after `list_groups`' own inline
 /// (page-of-many) version of the same gate.
 fn deadline_gated_group_entry(
     state: &AppState,
@@ -122,20 +122,20 @@ fn deadline_gated_group_entry(
     }
 }
 
-/// The change token on one group row: FNV-1a over the scope-visible
-/// transitive context closure, each member as its length-prefixed name
+/// The change token on one `group` row: FNV-1a over the scope-visible
+/// transitive `context` closure, each member as its length-prefixed name
 /// followed by the three revision counters — structurally unambiguous,
 /// so distinct closures cannot collide by concatenation. The closure
-/// (not the direct members) because a group search fans out through
+/// (not the direct members) because a `group` search fans out through
 /// nested children, and sorted iteration (the closure is a `BTreeSet`)
 /// makes the hash deterministic. A member registered but mid-delete
 /// contributes nothing, exactly as it answers no search.
 ///
 /// `deadline` is checked on EVERY iteration of the closure walk, not
 /// only once before the walk starts: each iteration takes a
-/// per-context revision lock, so cost scales with the group's nesting
+/// per-`context` revision lock, so cost scales with the `group`'s nesting
 /// and membership rather than with this being "one row" — a deeply
-/// nested or large group could otherwise run well past the point
+/// nested or large `group` could otherwise run well past the point
 /// where the HTTP client's own timeout gave up on the response,
 /// burning worker capacity on a result nobody will read (#318). A
 /// caller that must finish regardless (`update_group`, after its
@@ -215,7 +215,7 @@ fn injected_fingerprint_loop_expiry() -> bool {
 }
 
 /// [`group_entry`]'s member filter on its own — the one loop behind
-/// every surface that serves a group's members (the row, the export),
+/// every surface that serves a `group`'s members (the row, the export),
 /// generic over the collection each output shape wants, so the
 /// surfaces cannot drift in what a scoped key sees.
 pub(super) fn scoped_member_contexts<C: FromIterator<String>>(
@@ -228,14 +228,14 @@ pub(super) fn scoped_member_contexts<C: FromIterator<String>>(
         .collect()
 }
 
-/// The gate for a scoped key on any operation whose context names ride
-/// the body or the stored record rather than the path — group writes
+/// The gate for a scoped key on any operation whose `context` names ride
+/// the body or the stored record rather than the path — `group` writes
 /// (through [`scoped_group_refusal`], at membership granularity, the
-/// import gate's pre-apply judgement) and the cross-context searches:
-/// one involved context beyond the grant refuses the request whole.
+/// import gate's pre-apply judgement) and the cross-`context` searches:
+/// one involved `context` beyond the grant refuses the request whole.
 /// Checked BEFORE existence on purpose: existence-first would answer
 /// 404 for a missing out-of-scope name and 403 for a live one, handing
-/// a scoped key an oracle for which context names exist beyond its
+/// a scoped key an oracle for which `context` names exist beyond its
 /// grant.
 pub(super) fn scope_refusal<'a>(
     scope: &Option<axum::Extension<crate::auth::KeyScope>>,
@@ -259,10 +259,10 @@ pub(super) fn scope_refusal<'a>(
     ))
 }
 
-/// The gate every group write runs, wrapped around
+/// The gate every `group` write runs, wrapped around
 /// [`scope_refusal`]: resolves what the operation involves — the
-/// transitive context closures of the `closure_roots` groups plus the
-/// `direct` context names — and refuses if any of it sits beyond the
+/// transitive `context` closures of the `closure_roots` `groups` plus the
+/// `direct` `context` names — and refuses if any of it sits beyond the
 /// grant. An unscoped key passes immediately, without paying for the
 /// closure read.
 fn scoped_group_refusal<'r, 'd>(
@@ -281,11 +281,11 @@ fn scoped_group_refusal<'r, 'd>(
     scope_refusal(scope, key, &involved, started_at)
 }
 
-/// The group directory: every group's name, description, member
-/// contexts, and child groups, name-ordered and paged like
-/// `GET /contexts`. Groups bundle contexts and may nest child groups —
+/// The `group` directory: every `group`'s name, description, member
+/// `contexts`, and child `groups`, name-ordered and paged like
+/// `GET /contexts`. `groups` bundle `contexts` and may nest child `groups` —
 /// a shallow DAG, at most [`MAX_GROUP_DEPTH`] storeys and never cyclic
-/// — as the addressing unit that cross-context retrieval will build
+/// — as the addressing unit that cross-`context` retrieval will build
 /// on.
 pub async fn list_groups(
     State(state): State<AppState>,
@@ -344,11 +344,11 @@ pub async fn get_group(
 #[serde(default)]
 pub struct CreateGroupRequest {
     pub description: String,
-    /// Initial member context names; every one must already exist.
+    /// Initial member `context` names; every one must already exist.
     pub contexts: Vec<String>,
-    /// Initial child group names; every one must already exist, and
+    /// Initial child `group` names; every one must already exist, and
     /// the nesting that results must stay acyclic and at most
-    /// [`MAX_GROUP_DEPTH`] groups tall.
+    /// [`MAX_GROUP_DEPTH`] `groups` tall.
     pub groups: Vec<String>,
 }
 
@@ -443,12 +443,12 @@ pub async fn create_group(
 }
 
 /// Membership updates are DELTAS, not a replacement list: two clients
-/// adding different contexts concurrently must both land, and "add
-/// this context here" is the natural operation for an LLM client —
+/// adding different `contexts` concurrently must both land, and "add
+/// this `context` here" is the natural operation for an LLM client —
 /// the add/remove split aliases already use. A name in both lists ends
 /// up a member (removals apply first). Removing a non-member is an
-/// idempotent no-op; only additions demand the context — or, for
-/// `add_groups`, the child group — exists. Child additions must also
+/// idempotent no-op; only additions demand the `context` — or, for
+/// `add_groups`, the child `group` — exists. Child additions must also
 /// leave the nesting acyclic and within [`MAX_GROUP_DEPTH`] storeys.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
@@ -628,11 +628,11 @@ pub async fn delete_group(
     }
 }
 
-/// `POST /groups/{name}/rename` — the group's file moves to `to` and
-/// every OTHER group naming `name` as a child is rewritten to match.
+/// `POST /groups/{name}/rename` — the `group`'s file moves to `to` and
+/// every OTHER `group` naming `name` as a child is rewritten to match.
 /// Unlike `rename_context`, `{name}` here is a GROUP name, so it is
 /// one of the routes the authorization middleware exempts from its
-/// per-context grant check — the scope gate belongs to this handler,
+/// per-`context` grant check — the scope gate belongs to this handler,
 /// exactly as `delete_group`'s does.
 pub async fn rename_group(
     State(state): State<AppState>,
@@ -724,7 +724,7 @@ mod tests {
         AppState::boot(dir, usize::MAX, None).unwrap()
     }
 
-    /// A one-context group, ready for the deadline tests below.
+    /// A one-`context` `group`, ready for the deadline tests below.
     fn one_context_group(state: &AppState, group: &str, context: &str) {
         state.create(context, ContextMeta::default()).unwrap();
         state
@@ -750,7 +750,7 @@ mod tests {
     }
 
     /// Regression for #318: a deadline spent before `group_fingerprint`
-    /// is ever called must refuse without walking a single context —
+    /// is ever called must refuse without walking a single `context` —
     /// covers both `list_groups`' and `deadline_gated_group_entry`'s
     /// pre-loop gate (unchanged by this fix) and `group_fingerprint`
     /// itself now returning the same `Err` a caller that skipped the
@@ -765,7 +765,7 @@ mod tests {
         assert_eq!(result, Err(DeadlineExceeded));
     }
 
-    /// Regression for #318: the per-context deadline check inside
+    /// Regression for #318: the per-`context` deadline check inside
     /// `group_fingerprint`'s loop must fire on a LATER iteration, not
     /// only once before the whole walk starts. A real
     /// `Deadline::after(tiny duration)` cannot land this
@@ -830,7 +830,7 @@ mod tests {
         assert_eq!(body["code"], ErrorCode::Timeout.as_str(), "{body}");
     }
 
-    /// Regression for #318: on a page of several groups, a deadline
+    /// Regression for #318: on a page of several `groups`, a deadline
     /// that lands MID-PAGE — after the first row's fingerprint has
     /// already run to completion, before the second row's has even
     /// started — must answer the standard timeout envelope rather than

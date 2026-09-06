@@ -8,12 +8,12 @@ use super::{
 /// noise, not a near-miss spelling, and is dropped rather than surfacing
 /// distant concepts on every shared 2-gram. Vocabularies differ in how
 /// much fuzz they can afford, so this is only the default — tunable per
-/// context via [`Context::set_dice_floor`] and per call via
+/// `context` via [`Context::set_dice_floor`] and per call via
 /// [`Context::resolve_with_floor`].
 pub(super) const DICE_FLOOR: f64 = 0.3;
 
 impl Context {
-    /// The durability watermark stored in this context's image header
+    /// The durability watermark stored in this `context`'s image header
     /// — see the field's documentation; the `Context` never interprets
     /// it.
     pub fn applied_seq(&self) -> u64 {
@@ -26,18 +26,18 @@ impl Context {
         self.applied_seq = seq;
     }
 
-    /// The fuzzy-entry floor this context applies when a call does not
+    /// The fuzzy-entry floor this `context` applies when a call does not
     /// name one: bigram-Dice matches below it are dropped as noise.
     pub fn dice_floor(&self) -> f64 {
         self.dice_floor.unwrap_or(DICE_FLOOR)
     }
 
-    /// Tunes the fuzzy-entry floor for this context — lower admits more
+    /// Tunes the fuzzy-entry floor for this `context` — lower admits more
     /// distant near-miss spellings (vocabularies with heavy 表記ゆれ),
     /// higher keeps entry strict (curated glossaries). `None` returns to
     /// the default. Clamped into [0, 1]. Config, not knowledge: the
     /// value is not part of the persistent image, so whoever restores a
-    /// context from bytes must re-apply it.
+    /// `context` from bytes must re-apply it.
     pub fn set_dice_floor(&mut self, dice_floor: Option<f64>) {
         self.dice_floor = dice_floor.map(|floor| clamp_unit_or(floor, 1.0));
     }
@@ -82,14 +82,14 @@ impl Context {
     }
 
     /// Fraction of associations that are currently dead weight — the
-    /// signal for deciding whether a context is due for compaction.
+    /// signal for deciding whether a `context` is due for compaction.
     pub fn dead_ratio(&self) -> f64 {
         dead_ratio_of(self.dead_edges, self.association_count())
     }
 
     /// The most connected concepts — name plus total degree, most
     /// connected first, ties toward earlier interning. This is the
-    /// mechanical "what is this context about" signal: unlike a
+    /// mechanical "what is this `context` about" signal: unlike a
     /// hand-written summary it cannot go stale, so a routing directory
     /// can show it next to the prose description.
     ///

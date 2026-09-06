@@ -179,7 +179,7 @@ pub(crate) fn build(path: &str, symbols: &[SymbolNode]) -> FileFacts {
 
 /// Renders one file's batch as the JSONL `taguru import` reads:
 /// header, passage, sections, locators, associations. `create` adds
-/// the header's create block so the first sync can mint the context.
+/// the header's create block so the first sync can mint the `context`.
 pub(crate) fn render_batch(context: &str, facts: &FileFacts, create: Option<&str>) -> String {
     let mut lines = Vec::new();
     let mut header = serde_json::json!({

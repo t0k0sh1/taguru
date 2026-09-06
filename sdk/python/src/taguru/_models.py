@@ -187,7 +187,7 @@ class DirectoryEntry:
 
 @dataclass(slots=True, frozen=True)
 class ContextPage:
-    """One page of the context directory. ``total`` is the whole population."""
+    """One page of the ``context`` directory. ``total`` is the whole population."""
 
     total: int
     contexts: list[DirectoryEntry]
@@ -195,9 +195,9 @@ class ContextPage:
 
 @dataclass(slots=True, frozen=True)
 class GroupEntry:
-    """One group row: member contexts bundled many-to-many, plus child groups.
+    """One ``group`` row: member ``contexts`` bundled many-to-many, plus child ``groups``.
 
-    For a context-scoped key ``contexts`` carries only the members the grant
+    For a ``context``-scoped key ``contexts`` carries only the members the grant
     allows; ``groups`` (child names — labels, not content) is never filtered.
     """
 
@@ -205,7 +205,7 @@ class GroupEntry:
     description: str
     contexts: list[str]
     groups: list[str]
-    #: Change token over the transitive member contexts' revisions —
+    #: Change token over the transitive member ``contexts``' revisions —
     #: same equality-only contract as ``ContextRevision``. Empty only
     #: from a server that predates the field.
     fingerprint: str = ""
@@ -213,7 +213,7 @@ class GroupEntry:
 
 @dataclass(slots=True, frozen=True)
 class GroupPage:
-    """One page of the group directory. ``total`` is the whole population."""
+    """One page of the ``group`` directory. ``total`` is the whole population."""
 
     total: int
     groups: list[GroupEntry]
@@ -260,9 +260,9 @@ class Association:
 
 @dataclass(slots=True, frozen=True)
 class MatchPlan:
-    """The execution plan of a graph search (#151): the contexts actually
+    """The execution plan of a graph search (#151): the ``contexts`` actually
     consulted, in effective order. For the cross variants that is the
-    RESOLVED target list — groups expanded, the key's grants applied —
+    RESOLVED target list — ``groups`` expanded, the key's grants applied —
     which the tagged matches alone cannot reconstruct when a target came
     up empty. ``None`` from servers predating the field, and always for
     the non-search :class:`MatchPage` producers (``unreachable_from`` —
@@ -282,10 +282,10 @@ class MatchPage:
 
 @dataclass(slots=True, frozen=True)
 class CrossAssociation(Association):
-    """An :class:`Association` tagged with the context it came from.
+    """An :class:`Association` tagged with the ``context`` it came from.
 
-    The tag is what makes a cross-context match actionable — every follow-up
-    (citations, lookups, activate) is a per-context call.
+    The tag is what makes a cross-``context`` match actionable — every follow-up
+    (citations, lookups, activate) is a per-``context`` call.
     """
 
     context: str = ""
@@ -293,9 +293,9 @@ class CrossAssociation(Association):
 
 @dataclass(slots=True, frozen=True)
 class CrossMatchPage:
-    """:class:`MatchPage` across contexts: same truncation contract, every
+    """:class:`MatchPage` across ``contexts``: same truncation contract, every
     match tagged. Weights share one scale (evidence mass), so the cut past
-    ``total`` means the same thing across contexts."""
+    ``total`` means the same thing across ``contexts``."""
 
     total: int
     matches: list[CrossAssociation]
@@ -391,7 +391,7 @@ class TieredResolution:
     ``kind`` (lexical only) is ``"exact"``/``"alias"``/``"containment"``/
     ``"fuzzy"`` — never adopt a containment/fuzzy hit on score alone; read
     ``gloss`` first. ``types`` (top candidates only) are the candidate's
-    declared entity types, present only when the context has an installed
+    declared entity types, present only when the ``context`` has an installed
     schema and the candidate carries a type assertion.
     """
 
@@ -499,7 +499,7 @@ class ConceptDescription:
     concept: str
     as_subject: list[LabelUsage]
     as_object: list[LabelUsage]
-    #: The concept's declared types; empty for a schema-free context or an
+    #: The concept's declared types; empty for a schema-free ``context`` or an
     #: untyped concept (the two are indistinguishable here on purpose).
     types: list[str] = field(default_factory=list)
 
@@ -529,7 +529,7 @@ class RelationDef:
 
 @dataclass(slots=True, frozen=True)
 class SchemaDocument:
-    """A context's schema document — the same shape
+    """A ``context``'s schema document — the same shape
     `{stem}.schema.json`/`GET /contexts/{name}/schema` persist and
     serve, mirrored field-for-field from `src/schema.rs`'s
     `SchemaDocument` (ADR 0009 §5.3)."""
@@ -673,8 +673,8 @@ class PassageHit:
 
 @dataclass(slots=True, frozen=True)
 class CrossPassageHit(PassageHit):
-    """A :class:`PassageHit` tagged with its context. ``score`` compares
-    within one context only — the cross-context order is rank interleaving."""
+    """A :class:`PassageHit` tagged with its ``context``. ``score`` compares
+    within one ``context`` only — the cross-``context`` order is rank interleaving."""
 
     context: str = ""
 
@@ -683,7 +683,7 @@ class CrossPassageHit(PassageHit):
 class LanePlan:
     """One lane's verdict for a whole search call (#151): it ran (the vector
     lane also names the effective cosine ``floor`` it swept under — the
-    resolved override → context setting → server default chain), or it did
+    resolved override → ``context`` setting → server default chain), or it did
     not and ``reason`` says why, in the same prose ``explain_search`` uses."""
 
     ran: bool
@@ -701,8 +701,8 @@ class SearchLanesPlan:
 
 @dataclass(slots=True, frozen=True)
 class FilterPlan:
-    """The source filter's account for one searched context (#167): how
-    many sources were eligible to answer, out of how many the context
+    """The source filter's account for one searched ``context`` (#167): how
+    many sources were eligible to answer, out of how many the ``context``
     stores — present exactly when the request carried a filter."""
 
     eligible_sources: int
@@ -711,7 +711,7 @@ class FilterPlan:
 
 @dataclass(slots=True, frozen=True)
 class SearchContextPlan:
-    """One searched context's account within a :class:`SearchPlan`."""
+    """One searched ``context``'s account within a :class:`SearchPlan`."""
 
     context: str
     lanes: SearchLanesPlan
@@ -721,7 +721,7 @@ class SearchContextPlan:
 @dataclass(slots=True, frozen=True)
 class SearchPlan:
     """The execution plan of one passage search (#151): one entry per
-    context actually searched, in effective order. What the per-hit lane
+    ``context`` actually searched, in effective order. What the per-hit lane
     evidence cannot say — "the semantic lane never ran here, and this is
     why" — lives here, so a lexical-only answer is distinguishable from a
     fused one without a separate explain call."""
@@ -1082,7 +1082,7 @@ class GroupImportOutcome:
 @dataclass(slots=True, frozen=True)
 class ImportResult:
     """What ``POST /import`` accomplished: per-batch outcomes plus any
-    group restores and ``taguru_schema`` installs.
+    ``group`` restores and ``taguru_schema`` installs.
 
     ``issues``/``schema_violations`` are the response envelope's
     warn-mode carrier (ADR 0009 §8.3), stream-wide; each batch's own
@@ -1100,7 +1100,7 @@ class ImportResult:
 @dataclass(slots=True, frozen=True)
 class PromoteOutcome:
     """What ``POST /contexts/{name}/promote`` accomplished (ADR 0018):
-    each named source moved whole from this (scratch) context into
+    each named source moved whole from this (scratch) ``context`` into
     ``into``, ``/import``'s own per-batch outcome shape.
 
     ``audit`` mirrors :meth:`AsyncContext.audit_consolidation`'s own

@@ -356,7 +356,7 @@ fn spawn_route_map_reload_tasks(
 
 /// Every route the router answers. The two `/contexts/{name}` entries
 /// proxy ANY method so a shard's own 405/404 shapes pass through
-/// untouched — and so context verbs added to the server later route
+/// untouched — and so `context` verbs added to the server later route
 /// without touching this table.
 fn routes(state: RouterState) -> Router<RouterState> {
     Router::new()

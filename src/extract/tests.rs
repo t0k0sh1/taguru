@@ -1373,7 +1373,7 @@ fn mechanical_pass_names_every_foreign_field_of_an_item_in_one_record() {
 }
 
 /// ADR 0015's allowlist applies to a subject/object exactly as it does
-/// for the occurrence check — a spelling the target context already
+/// for the occurrence check — a spelling the target `context` already
 /// uses is not judged — but never to a label: the reuse vocabulary is
 /// an offer, not a whitelist.
 #[test]

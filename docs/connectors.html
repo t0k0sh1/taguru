@@ -35,7 +35,7 @@
     </div>
     <div class="side-group">
       <div class="side-group-label">Reference</div>
-      <a href="schema.html">Context schema</a>
+      <a href="schema.html"><code>context</code> schema</a>
       <a href="import.html">Batch import</a>
       <a href="extract.html">Document extraction</a>
       <a href="taguru-code.html">Code map (taguru-code)</a>
@@ -375,7 +375,7 @@ cached = checkpoint.load(source, fresh_fingerprint)  <span class="c"># None on a
       Deleted objects are never retracted by default: <code>report.deleted_detected</code> names
       them, but nothing changes in <code>taguru</code> until you opt in —
       <code>deletion_policy="retract"</code> withdraws exactly what this connector's own prior
-      listing no longer sees; <code>"mirror"</code> also reconciles against the context's actual
+      listing no longer sees; <code>"mirror"</code> also reconciles against the <code>context</code>'s actual
       source list, so it self-heals even on a first run with no prior listing to diff against.
     </p>
   </section>

@@ -35,7 +35,7 @@
     </div>
     <div class="side-group">
       <div class="side-group-label">Reference</div>
-      <a href="schema.html" aria-current="page">Context schema</a>
+      <a href="schema.html" aria-current="page"><code>context</code> schema</a>
       <a href="import.html">Batch import</a>
       <a href="extract.html">Document extraction</a>
       <a href="taguru-code.html">Code map (taguru-code)</a>
@@ -72,13 +72,13 @@
 <div class="page">
 
   <header class="hero">
-    <div class="eyebrow">reference · context schema</div>
-    <h1>The context schema — an optional type and relation ontology</h1>
+    <div class="eyebrow">reference · <code>context</code> schema</div>
+    <h1>The <code>context</code> schema — an optional type and relation ontology</h1>
     <p class="lede">
-      A schema is an opt-in contract layered on top of one context's ordinary associations: a
+      A schema is an opt-in contract layered on top of one <code>context</code>'s ordinary associations: a
       closed set of entity types, an <code>is_a</code> hierarchy between them, and domain/range
       constraints on relation labels. Installing one changes nothing by itself — <code>off</code>
-      is the default and a schema-free context behaves exactly as it always has. This reference
+      is the default and a schema-free <code>context</code> behaves exactly as it always has. This reference
       covers the document, the three modes, the reserved <code>schema:type</code> label, what
       happens at write time, the HTTP/MCP surface, type-aware reads, and the metrics that show
       whether <code>strict</code>/<code>warn</code> are actually doing anything.
@@ -87,7 +87,7 @@
 
   <section id="document">
     <h2>The document</h2>
-    <p class="section-sub">One JSON object per context, independent of the batch/group/image format versions.</p>
+    <p class="section-sub">One JSON object per <code>context</code>, independent of the batch/<code>group</code>/image format versions.</p>
     <pre><code>{<span class="k">"schema"</span>: <span class="nu">1</span>, <span class="k">"mode"</span>: <span class="s">"strict"</span>, <span class="k">"closed_labels"</span>: <span class="nu">false</span>,
  <span class="k">"types"</span>: {<span class="s">"Brewery"</span>: {<span class="k">"is_a"</span>: []}, <span class="s">"Person"</span>: {<span class="k">"is_a"</span>: []}},
  <span class="k">"relations"</span>: {<span class="s">"杜氏"</span>: {<span class="k">"domain"</span>: [<span class="s">"Brewery"</span>], <span class="k">"range"</span>: [<span class="s">"Person"</span>]}}}</code></pre>
@@ -99,7 +99,7 @@
       <code>"strict"</code> — see <a href="#modes">the three modes</a> below. Every top-level
       field is required and unknown fields are refused, both on the wire
       (<code>PUT /contexts/{name}/schema</code>) and at rest (the persisted
-      <code>{stem}.schema.json</code>): unlike a batch's group record, nothing here defaults,
+      <code>{stem}.schema.json</code>): unlike a batch's <code>group</code> record, nothing here defaults,
       because a silently-dropped field would be indistinguishable from under-enforcing
       <code>strict</code>. <code>types</code> maps a type name to its declared parents
       (<code>is_a</code>, possibly empty); <code>relations</code> maps a relation label to the
@@ -121,7 +121,7 @@
     <p class="note">
       A schema document that fails these checks — including a cycle in <code>is_a</code>, or a
       relation named the reserved <code>schema:type</code> label — refuses at
-      <code>PUT /contexts/{name}/schema</code> before anything installs; the context's previous
+      <code>PUT /contexts/{name}/schema</code> before anything installs; the <code>context</code>'s previous
       schema (if any) is untouched. A schema recorded on disk but currently unreadable is never
       treated as schema-free — every write entrance refuses conservatively rather than silently
       skipping enforcement.
@@ -130,7 +130,7 @@
 
   <section id="modes">
     <h2>Three modes, and what changing one does not do</h2>
-    <p class="section-sub"><code>off</code> / <code>warn</code> / <code>strict</code> — stored inside the document itself, not in the context's ordinary metadata.</p>
+    <p class="section-sub"><code>off</code> / <code>warn</code> / <code>strict</code> — stored inside the document itself, not in the <code>context</code>'s ordinary metadata.</p>
     <p>
       <code>mode</code> lives <b>inside</b> the schema document, not on
       <code>ContextMeta</code>: a mode without a document to enforce is meaningless, and
@@ -147,7 +147,7 @@
         anything lands.</li>
     </ul>
     <p class="note warn">
-      <b><code>strict</code> means "from now on," not "from the beginning."</b> Turning a context
+      <b><code>strict</code> means "from now on," not "from the beginning."</b> Turning a <code>context</code>
       strict never sweeps the graph — existing associations that would violate the new schema are
       grandfathered, untouched and unflagged. <code>PUT /contexts/{name}/schema</code> only ever
       changes what future writes are judged against; use
@@ -179,7 +179,7 @@
       Three guards keep <code>schema:type</code> from colliding with an ordinary label:
     </p>
     <ol>
-      <li>The label is inert with no schema installed — asserting it on a schema-free context is
+      <li>The label is inert with no schema installed — asserting it on a schema-free <code>context</code> is
         just another fact, judged by nothing.</li>
       <li>No alias path may ever resolve any spelling to <code>schema:type</code> once a schema
         exists — <code>add_label_alias</code>, an import batch's own inline <code>labels</code>
@@ -268,7 +268,7 @@
     <p>
       For routing without a second call, <code>GET /contexts</code>'s directory rows also carry a
       read-only <code>schema_mode</code> — the installed document's own <code>mode</code>, or
-      <code>null</code> for a context that never installed one (never a bare <code>off</code>
+      <code>null</code> for a <code>context</code> that never installed one (never a bare <code>off</code>
       standing in for "no document", the same distinction <code>GET /schema</code>'s own 404
       draws).
     </p>
@@ -312,19 +312,19 @@ taguru_context_schema_violations_total{context=<span class="s">"sake"</span>} <s
       (<code>ok</code> / <code>warned</code> / <code>refused</code>, always rendered even at
       zero) counted only at the entrances that actually gate a write —
       <code>POST /contexts/{name}/associations</code> and a real (non-preview)
-      <code>POST /import</code>/<code>taguru import</code> apply — for a context that has an
-      installed schema document. A schema-free context never touches it, so <code>ok</code>
+      <code>POST /import</code>/<code>taguru import</code> apply — for a <code>context</code> that has an
+      installed schema document. A schema-free <code>context</code> never touches it, so <code>ok</code>
       means "checked, no violation," not "no schema." <code>?dry_run=true</code>/preview and the
       <code>/schema/validate</code>/<code>/schema/audit</code> diagnostics are deliberately
       excluded: counting them too would let a validate-then-apply workflow double-count the same
       refusal.
     </p>
     <p>
-      <code>taguru_context_schema_violations_total{context}</code> is the per-context breakdown,
+      <code>taguru_context_schema_violations_total{context}</code> is the per-<code>context</code> breakdown,
       behind the same <code>TAGURU_METRICS_PER_CONTEXT</code> opt-in-and-bounded knob every other
       <code>taguru_context_*</code> family uses (<code>off</code> / <code>all</code> /
-      <code>N</code> largest by disk size) — client-minted context names never become metric
-      labels uninvited. A context with an installed schema that has never failed a check still
+      <code>N</code> largest by disk size) — client-minted <code>context</code> names never become metric
+      labels uninvited. A <code>context</code> with an installed schema that has never failed a check still
       renders zero here, the same zeros-included discipline the rest of this file's fixed
       families follow.
     </p>
@@ -335,7 +335,7 @@ taguru_context_schema_violations_total{context=<span class="s">"sake"</span>} <s
       <a href="#audit"><code>POST /contexts/{name}/schema/audit</code></a>, are for.
     </p>
     <p>
-      The schema document rides in <code>context_files</code> like every other per-context file
+      The schema document rides in <code>context_files</code> like every other per-<code>context</code> file
       (last in the array, so a lagging or missing schema file never blocks a rename), and travels
       through export/import as its own <code>taguru_schema</code> stream record — see
       <a href="import.html#format">Schema records</a> in the batch contract for the record shape,

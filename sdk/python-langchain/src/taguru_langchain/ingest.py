@@ -1,4 +1,4 @@
-"""TaguruIngester: LLM-driven document decomposition into a Taguru context.
+"""TaguruIngester: LLM-driven document decomposition into a Taguru ``context``.
 
 The LangChain twin of ``taguru extract``: a chat model decomposes each
 document into associations/aliases (and optional doc2query questions) under
@@ -7,7 +7,7 @@ the protocol's ingest discipline, and the result is applied through
 a document replaces its contribution instead of double-counting weights.
 
 Two improvements over the offline extractor, possible only against a live
-server: the context's existing relation vocabulary seeds the prompt (reuse
+server: the ``context``'s existing relation vocabulary seeds the prompt (reuse
 over synonym-coining), and embeddings refresh best-effort after each run.
 """
 
@@ -359,16 +359,16 @@ class _ChunkRecord:
 
 
 class TaguruIngester:
-    """Decompose LangChain Documents into one Taguru context via a chat model.
+    """Decompose LangChain Documents into one Taguru ``context`` via a chat model.
 
     Args:
-        context: Target context name.
+        context: Target ``context`` name.
         llm: Any LangChain chat model; asked for a single JSON object, with
             corrective turns on a malformed answer (see ``max_attempts``),
             mirroring taguru extract.
         client / async_client: Core-SDK clients; built from
             ``base_url``/``api_key`` (or env) when neither is given.
-        create_context: Stamp a create block on each batch so the context is
+        create_context: Stamp a create block on each batch so the ``context`` is
             created on first ingest (requires ``context_description``).
         source_key: Document metadata key holding the source id — REQUIRED on
             every document, no hashing fallback: the source id is the
@@ -1099,8 +1099,8 @@ class TaguruIngester:
         return outcomes
 
     def _fetch_vocabulary(self) -> list[str]:
-        """The context's live relation vocabulary — an advantage the offline
-        extractor structurally lacks. Best-effort: an absent context is fine."""
+        """The ``context``'s live relation vocabulary — an advantage the offline
+        extractor structurally lacks. Best-effort: an absent ``context`` is fine."""
         assert self.client is not None
         try:
             page = self.client.context(self.context).list_labels(limit=self.vocabulary_cap)
@@ -1109,9 +1109,9 @@ class TaguruIngester:
         return page.labels
 
     def _fetch_schema(self) -> SchemaDocument | None:
-        """The context's schema document (ADR 0009 §11.4), same
+        """The ``context``'s schema document (ADR 0009 §11.4), same
         best-effort posture as ``_fetch_vocabulary``: a schema-unaware
-        server or a schema-free context is fine, and this ingester works
+        server or a schema-free ``context`` is fine, and this ingester works
         unchanged either way."""
         assert self.client is not None
         try:

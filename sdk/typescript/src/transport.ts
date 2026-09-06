@@ -133,7 +133,7 @@ export function unwrapEnvelope(status: number, bodyText: string): unknown {
 /**
  * `unwrapEnvelope` plus the envelope's warn-mode carrier: `issues` and
  * `schema_violations` are ADR 0009 §8.3's fields, riding *beside* `result`
- * on a `warn`-mode write whose associations violated the context's schema.
+ * on a `warn`-mode write whose associations violated the `context`'s schema.
  * Both are empty/zero on every other response (and on servers predating the
  * fields), so result-only callers go through `unwrapEnvelope`.
  */
@@ -214,7 +214,7 @@ export function normalizeImportOutcomes(
   };
 }
 
-/** Percent-encode one path segment (context names may be any UTF-8). */
+/** Percent-encode one path segment (`context` names may be any UTF-8). */
 export function encodeName(name: string): string {
   return encodeURIComponent(name);
 }

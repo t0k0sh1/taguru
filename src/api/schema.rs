@@ -31,9 +31,9 @@ use super::{
 };
 
 /// One directory row by name's schema-document twin — the resident
-/// document as `install`ed, or a 404 distinguishing "this context has
+/// document as `install`ed, or a 404 distinguishing "this `context` has
 /// never installed a schema" ([`ErrorCode::NoSchema`]) from "this
-/// context does not exist" ([`ErrorCode::NoContext`]), the boundary ADR
+/// `context` does not exist" ([`ErrorCode::NoContext`]), the boundary ADR
 /// 0009 §6.3 requires stay load-bearing rather than collapsing both
 /// into one shape.
 pub async fn get_schema(
@@ -164,7 +164,7 @@ pub async fn put_schema(
 /// sections lists — `total` still reports the true count past this cap,
 /// the same "count everything, list a bounded prefix" contract
 /// [`crate::api::MAX_LISTED_ISSUES`] applies to a validation refusal's
-/// issue list, sized for a context whose live vocabulary can be far
+/// issue list, sized for a `context` whose live vocabulary can be far
 /// larger than one audit response should carry.
 const MAX_AUDIT_NAMES: usize = 100;
 
@@ -262,9 +262,9 @@ pub struct SchemaAudit {
     /// ADR 0009 §6.3 guard 2's install-time bullet, read back: every
     /// already-persisted label alias whose canonical spelling is the
     /// reserved `schema:type` label (`alias → canonical`). Only possible
-    /// for an alias created before this context ever had a schema — `PUT
+    /// for an alias created before this `context` ever had a schema — `PUT
     /// /schema` itself refuses to install over one, so this section
-    /// reads empty for any context whose schema installed cleanly;
+    /// reads empty for any `context` whose schema installed cleanly;
     /// non-empty here means the next `PUT /schema` (this document or any
     /// other) will refuse until the alias is renamed.
     pub reserved_alias_conflicts: AuditAliases,

@@ -26,7 +26,7 @@
 //!
 //! Exit codes: 0 = report produced (an overlap verdict is an honest
 //! success) · 1 = calibration impossible (server unreachable, unknown
-//! context, embeddings off or stale, every probe excluded) · 2 =
+//! `context`, embeddings off or stale, every probe excluded) · 2 =
 //! usage error.
 
 use std::path::PathBuf;
@@ -173,7 +173,7 @@ struct Report {
     /// every number below is tied to.
     model: String,
     width: usize,
-    /// The floor the server serves at today (context setting or server
+    /// The floor the server serves at today (`context` setting or server
     /// default; this command never passes an override to explain).
     effective_floor: f64,
     probes: usize,

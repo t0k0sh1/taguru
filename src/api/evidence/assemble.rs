@@ -684,7 +684,7 @@ mod tests {
     /// Forces `context`'s next passage read to fail with a genuine
     /// `io::Error` — the same trick `api::sources`'s own io-error
     /// tests use (issue #620): a snapshot file `PassageStore::load`
-    /// cannot parse, written before the context's first passage touch.
+    /// cannot parse, written before the `context`'s first passage touch.
     fn corrupt_passages_snapshot(dir: &std::path::Path, context: &str) {
         let stem = crate::registry::file_stem(context);
         let path = crate::registry::passages_path(dir, &stem);
@@ -781,9 +781,9 @@ mod tests {
     /// ever runs): none of the seven `deadline.expired()` early returns
     /// in this handler had a direct test — the two tests above only
     /// exercise `expire_deadline_race`'s io-error reclassification,
-    /// a different mechanism entirely. Naming a context that does not
+    /// a different mechanism entirely. Naming a `context` that does not
     /// exist makes the ordering observable without a fault-injection
-    /// hook: if this gate ran only after the context-existence check
+    /// hook: if this gate ran only after the `context`-existence check
     /// (the pre-fix order for a bug of this shape elsewhere in the
     /// tree, #620), this would answer 404 `no_context` instead of the
     /// timeout asserted below.

@@ -1,29 +1,29 @@
-//! `taguru export`: one context back out as the same JSONL batch
+//! `taguru export`: one `context` back out as the same JSONL batch
 //! stream `taguru import` and `POST /import` apply — the portable
 //! backup the raw file family cannot be (images are
 //! version-specific and must be copied as a consistent set; a batch
 //! stream is plain text with a documented contract, readable by any
 //! future taguru and by anything else that speaks JSON Lines).
 //!
-//! One context renders as one stream: one batch per source (sorted by
-//! source id), the first batch carrying the context's create block
+//! One `context` renders as one stream: one batch per source (sorted by
+//! source id), the first batch carrying the `context`'s create block
 //! (description, pinned, floors), the last batch carrying the alias
 //! table. Re-importing the stream is idempotent — each batch is one
 //! source's complete truth, applied retract-first, exactly like any
-//! other import. Restoring into a live context is therefore a
+//! other import. Restoring into a live `context` is therefore a
 //! per-source sync: sources present in the stream are replaced,
-//! sources that exist only in the context survive. A restore that
+//! sources that exist only in the `context` survive. A restore that
 //! must equal the snapshot exactly starts from a deleted (or fresh)
-//! context.
+//! `context`.
 //!
-//! A FULL export (no CONTEXT arguments) also writes every group as
+//! A FULL export (no CONTEXT arguments) also writes every `group` as
 //! `{out}/{group}.group.jsonl` — one `taguru_group` record each, the
-//! group's complete truth the way a batch is a source's. Import
-//! applies group records after every batch of its run, so the files
+//! `group`'s complete truth the way a batch is a source's. Import
+//! applies `group` records after every batch of its run, so the files
 //! restore in any order; re-importing one REPLACES the record, the
 //! same idempotence one storey up. A subset export (explicit CONTEXT
-//! arguments) writes no groups: a group's truth spans contexts the
-//! subset may not carry, and a partial truth would shrink the group
+//! arguments) writes no `groups`: a `group`'s truth spans `contexts` the
+//! subset may not carry, and a partial truth would shrink the `group`
 //! on restore.
 //!
 //! Fidelity notes, all deliberate:
@@ -37,7 +37,7 @@
 //!   in a reserved batch whose source id is `export:unsourced`; the
 //!   numbers survive, and the attribution says where they came from.
 //!   Import stamps that reserved id onto the batch's lines, so the
-//!   restored context carries a real `export:unsourced` attribution —
+//!   restored `context` carries a real `export:unsourced` attribution —
 //!   which the next export folds straight back into the sourceless
 //!   batch rather than refusing, making the stream an exact fixed
 //!   point across repeated round trips.
@@ -111,11 +111,11 @@ must not be running; the directory lock enforces it).
 ";
 
 /// Reserved source id for the header-only batch an otherwise-empty
-/// context exports — a batch stream must carry at least one header
+/// `context` exports — a batch stream must carry at least one header
 /// for the create block to ride on.
 pub(crate) const EMPTY_SOURCE: &str = "export:empty";
 
-/// Everything one context's stream is rendered from, materialized
+/// Everything one `context`'s stream is rendered from, materialized
 /// under a single registry fence so the graph half cannot shear
 /// against the passage half (see [`AppState::export_context`]).
 pub(crate) struct ExportSnapshot {
@@ -240,12 +240,12 @@ struct SchemaLine<'a> {
     relations: &'a BTreeMap<String, crate::schema::RelationDef>,
 }
 
-/// Renders one context's schema as its import-stream record: one
+/// Renders one `context`'s schema as its import-stream record: one
 /// `taguru_schema` line, newline-terminated. [`render`] calls this
 /// only for a schema whose `mode != off` (see [`ExportSnapshot::
 /// schema`]'s doc); `import --url`'s remote chunk packer
 /// (`src/ingest.rs`) calls it directly to re-render a parsed record
-/// for the wire, the same way it re-renders group records via
+/// for the wire, the same way it re-renders `group` records via
 /// [`render_group`].
 pub(crate) fn render_schema(context: &str, document: &crate::schema::SchemaDocument) -> String {
     let mut line = String::new();
@@ -278,8 +278,8 @@ struct GroupLine<'a> {
     groups: &'a BTreeSet<String>,
 }
 
-/// Renders one group as its import-stream record: one `taguru_group`
-/// line, newline-terminated — the group's complete truth, so
+/// Renders one `group` as its import-stream record: one `taguru_group`
+/// line, newline-terminated — the `group`'s complete truth, so
 /// re-importing REPLACES the record (a restore, never a merge).
 pub(crate) fn render_group(name: &str, record: &GroupRecord) -> String {
     let mut line = String::new();
@@ -379,14 +379,14 @@ struct Bucket<'a> {
     passage: Option<&'a PassageRecord>,
 }
 
-/// Renders one context's snapshot as the import batch stream. The
+/// Renders one `context`'s snapshot as the import batch stream. The
 /// only refusal is a real source colliding with a reserved id, or
 /// `deadline` running out partway through — checked once per
 /// association, passage, and alias, once per output batch, and (via
 /// [`DEADLINE_CHECK_STRIDE`]) periodically inside the two loops a
 /// single association's uncapped `count` can otherwise blow past all
 /// of those: [`push_assertions`]'s line expansion and this function's
-/// per-bucket line serialization. So a context large enough to make
+/// per-bucket line serialization. So a `context` large enough to make
 /// rendering itself slow cannot run past its budget, whether that size
 /// comes from many associations or one association corroborated many
 /// times over. `snapshot` is already fully materialized by the time
@@ -881,7 +881,7 @@ fn run_local(out: &std::path::Path, names: Vec<String>) -> i32 {
 }
 
 /// The remote twin of [`run_local`]: enumerates a running server's
-/// contexts and groups instead of reading `TAGURU_DATA_DIR`, and
+/// `contexts` and `groups` instead of reading `TAGURU_DATA_DIR`, and
 /// fetches each item's stream from its own export endpoint instead of
 /// rendering it in-process. Writes land under `out` in the identical
 /// layout `run_local` uses, so the two are interchangeable inputs to
@@ -1003,10 +1003,10 @@ fn run_remote(base: &str, out: &std::path::Path, names: Vec<String>) -> i32 {
     }
 }
 
-/// One context's stream, fetched whole from `GET
+/// One `context`'s stream, fetched whole from `GET
 /// /contexts/{name}/export` and written exactly like the local path
 /// writes its own render. A request that outlives `Api`'s 35s budget,
-/// or a context deleted between enumeration and this fetch, surfaces
+/// or a `context` deleted between enumeration and this fetch, surfaces
 /// as an `Err` here and is counted as a per-item failure by the
 /// caller — never a reason to abort the rest of the run.
 fn remote_export_one(api: &Api, name: &str, out: &std::path::Path) -> Result<String, String> {
@@ -1055,7 +1055,7 @@ fn remote_export_one(api: &Api, name: &str, out: &std::path::Path) -> Result<Str
     ))
 }
 
-/// One group's record, fetched from `GET /groups/{name}/export` — the
+/// One `group`'s record, fetched from `GET /groups/{name}/export` — the
 /// remote twin of [`export_group_file`].
 fn remote_export_group(api: &Api, name: &str, out: &std::path::Path) -> Result<String, String> {
     let stream = api.get_raw(&["groups", name, "export"])?;
@@ -1098,7 +1098,7 @@ fn remote_export_group(api: &Api, name: &str, out: &std::path::Path) -> Result<S
     ))
 }
 
-/// (batches, lines) counted back out of a fetched context stream — the
+/// (batches, lines) counted back out of a fetched `context` stream — the
 /// counts a remote fetch can honestly claim, since (unlike the local
 /// render) there is no in-process [`Rendered`] to report from. A
 /// batch is any line whose object carries `taguru_batch`; the key
@@ -1120,10 +1120,10 @@ fn stream_counts(stream: &str) -> (usize, usize) {
     (batches, lines)
 }
 
-/// The file names a full export claims in `--out`: every context's
-/// `{stem}.jsonl` plus every group's `{stem}.group.jsonl` — the set
+/// The file names a full export claims in `--out`: every `context`'s
+/// `{stem}.jsonl` plus every `group`'s `{stem}.group.jsonl` — the set
 /// [`prune_stale_streams`] preserves. Built from the run's full name
-/// lists (attempted, not just succeeded), so a context whose fetch
+/// lists (attempted, not just succeeded), so a `context` whose fetch
 /// failed keeps whatever file a previous run left for it.
 fn expected_file_names<'a>(
     contexts: &[String],
@@ -1136,8 +1136,8 @@ fn expected_file_names<'a>(
         .collect()
 }
 
-/// A FULL export owns its `--out` directory's stream files: a context
-/// or group deleted since the previous export into the same directory
+/// A FULL export owns its `--out` directory's stream files: a `context`
+/// or `group` deleted since the previous export into the same directory
 /// would otherwise leave its old file behind, and a later directory
 /// import (`taguru import DIR` expands every `*.jsonl`) would
 /// resurrect the deleted entity (issue #751). Removes every `*.jsonl`
@@ -1216,8 +1216,8 @@ fn summary_line(
     )
 }
 
-/// Writes one group's `taguru_group` record beside the context
-/// streams, `{out}/{stem}.group.jsonl` — a name a context stream can
+/// Writes one `group`'s `taguru_group` record beside the `context`
+/// streams, `{out}/{stem}.group.jsonl` — a name a `context` stream can
 /// never claim (stems percent-encode `.`), exactly the collision
 /// argument the data directory's own `.group` extension makes.
 fn export_group_file(
@@ -2012,8 +2012,8 @@ mod tests {
         );
     }
 
-    /// One group renders as one `taguru_group` line, empties omitted,
-    /// and the parser reads it back exactly — the group half of the
+    /// One `group` renders as one `taguru_group` line, empties omitted,
+    /// and the parser reads it back exactly — the `group` half of the
     /// stream's fixed point.
     #[test]
     fn a_group_renders_as_one_record_and_round_trips() {
@@ -2059,7 +2059,7 @@ mod tests {
 
     /// `render_schema`'s exact bytes, and the round trip back through
     /// `parse_stream` — [`a_group_renders_as_one_record_and_round_trips`]'s
-    /// `taguru_schema` twin (ADR 0009 §13). Unlike a group record, no
+    /// `taguru_schema` twin (ADR 0009 §13). Unlike a `group` record, no
     /// field is ever omitted: every one of `SchemaDocument`'s fields is
     /// required on the wire, matching its own at-rest posture.
     #[test]
@@ -2080,7 +2080,7 @@ mod tests {
 
     /// `render`'s own gate (ADR 0009 §13): a `taguru_schema` record
     /// rides first, before any batch header, but ONLY when the
-    /// context has a schema AND its mode is not `off` — the three
+    /// `context` has a schema AND its mode is not `off` — the three
     /// cases side by side so a regression in the gate shows up as an
     /// exact diff, not a missing assertion.
     #[test]

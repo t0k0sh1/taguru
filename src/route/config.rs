@@ -1,9 +1,9 @@
-//! `RouteMap`: parses and queries the context→shard map that
+//! `RouteMap`: parses and queries the `context`→shard map that
 //! `TAGURU_ROUTE_MAP` names.
 
 use super::*;
 
-/// The context→shard map, parsed from `TAGURU_ROUTE_MAP`. Shards are
+/// The `context`→shard map, parsed from `TAGURU_ROUTE_MAP`. Shards are
 /// deduped by URL in file order; `fallback` is the `*` entry.
 #[derive(Debug)]
 pub(crate) struct RouteMap {
@@ -114,7 +114,7 @@ impl RouteMap {
         &self.shards[shard]
     }
 
-    /// The map's member-list projection for one shard — what a group
+    /// The map's member-list projection for one shard — what a `group`
     /// write sends there. A member no shard owns keeps flowing to the
     /// owning-shard check downstream, which refuses it exactly as a
     /// single instance refuses a nonexistent member.

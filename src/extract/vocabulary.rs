@@ -1,4 +1,4 @@
-//! Issue #496 S3 (ADR 0015): the target context's own vocabulary,
+//! Issue #496 S3 (ADR 0015): the target `context`'s own vocabulary,
 //! loaded from exported batch streams and fed to the prompt so a new
 //! document is steered toward the spellings the graph already uses —
 //! the cross-document half of what the candidate block (ADR 0014)
@@ -9,13 +9,13 @@
 //!
 //! File-based on purpose: extract stays an offline producer with no
 //! server credential surface — the same ruling ADR 0009 §13 made for
-//! `--schema`, for the same reason. The operator exports the context
+//! `--schema`, for the same reason. The operator exports the `context`
 //! (`taguru export`, or GET /contexts/{name}/export) and points
 //! `--vocabulary` at the result.
 
 use super::*;
 
-/// The most context concept names one prompt offers — the same
+/// The most `context` concept names one prompt offers — the same
 /// bounded-prompt reasoning as [`VOCABULARY_CAP`] for labels. Over
 /// the cap, the ALPHABETICALLY first names survive (a `BTreeSet`'s
 /// iteration order): arbitrary but deterministic. Relevance-ranked
@@ -32,7 +32,7 @@ pub(super) struct ContextVocabulary {
     pub(super) concepts: BTreeSet<String>,
     pub(super) labels: BTreeSet<String>,
     /// [`normalize_for_occurrence`]d concept names: a subject/object
-    /// the model spells the context's way is NOT a fabrication even
+    /// the model spells the `context`'s way is NOT a fabrication even
     /// when the document spells the entity differently — the ADR 0013
     /// occurrence check consults this set before removing.
     pub(super) allowlist: HashSet<String>,
@@ -202,7 +202,7 @@ pub(super) fn load_vocabulary(path: &Path) -> Result<ContextVocabulary, String> 
     })
 }
 
-/// The system-prompt block the context names ride in on. Same
+/// The system-prompt block the `context` names ride in on. Same
 /// measured discipline as the candidate block (ADR 0014): prose list
 /// (re-encoding regressed the bench), data framing, the
 /// anti-checklist clause, and non-restriction in so many words. The

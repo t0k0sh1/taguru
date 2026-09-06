@@ -35,8 +35,8 @@ const LIST_PAGE_LIMIT: usize = 1000;
 /// its `MAX_BODY_SIZE`) is otherwise silent and easy to forget about.
 /// An envelope response (an association batch, an error body) is
 /// small; `export --url`'s raw stream (`Api::get_raw`) is the one
-/// exception — a whole context in one response, with no server-side
-/// ceiling on how large a context may grow — so this is sized as a
+/// exception — a whole `context` in one response, with no server-side
+/// ceiling on how large a `context` may grow — so this is sized as a
 /// generous safety net against a runaway/malicious server rather than
 /// a real business limit. `BodyExceedsLimit` (not a silent truncation)
 /// is what a caller sees past it.
@@ -211,8 +211,8 @@ impl Api {
     }
 
     /// Percent-encodes each path segment through the url crate —
-    /// context names are operator strings and 日本語 names must
-    /// address the same context the server stores.
+    /// `context` names are operator strings and 日本語 names must
+    /// address the same `context` the server stores.
     fn url(&self, segments: &[&str]) -> Result<String, String> {
         self.url_with_query(segments, &[])
     }
@@ -332,7 +332,7 @@ impl Api {
     /// test can walk several pages (including a short-but-nonempty
     /// page that must NOT end the walk, only an empty one does — and
     /// the non-advancing-cursor guard) without provisioning thousands
-    /// of contexts to cross the real ceiling.
+    /// of `contexts` to cross the real ceiling.
     ///
     /// The collection name doubles as the envelope's array key — both
     /// `GET /contexts` and `GET /groups` answer `{total, <collection>:
@@ -398,10 +398,10 @@ impl Api {
     /// a bare name throws away. `GET /contexts` already carries them
     /// per row, so no new server surface is required.
     ///
-    /// Contexts-only: `GET /groups` rows don't decode as
+    /// `contexts`-only: `GET /groups` rows don't decode as
     /// [`crate::registry::DirectoryEntry`] (no `stats`/`usage`), so
     /// this has no `collection` parameter the way `list_names` does —
-    /// a caller enumerating groups keeps using `list_names("groups")`.
+    /// a caller enumerating `groups` keeps using `list_names("groups")`.
     pub(crate) fn list_context_entries(
         &self,
     ) -> Result<Vec<crate::registry::DirectoryEntry>, String> {
@@ -654,9 +654,9 @@ impl Api {
     /// `export --url`'s ADR 0009 §13 preflight, run unconditionally
     /// (unlike [`Api::schema_import_refusal`], which only runs when the
     /// payload is known to carry a schema record) — a fetch cannot
-    /// know in advance whether the context it is about to pull carries
-    /// one, and probing each context first would cost a request per
-    /// context for no better an answer. An ABSENT `schema_formats` is
+    /// know in advance whether the `context` it is about to pull carries
+    /// one, and probing each `context` first would cost a request per
+    /// `context` for no better an answer. An ABSENT `schema_formats` is
     /// SAFE here, not fatal: a server that has never heard of the key
     /// cannot have emitted a `taguru_schema` line, so there is nothing
     /// for this CLI to fail to read — only a format this CLI does not
@@ -1426,7 +1426,7 @@ mod tests {
 
     /// [`a_shed_response_displays_its_retry_after_header`], but through
     /// the POST envelope path (`Api::post` → `finish`) instead of
-    /// `get_raw` — the one `compact --url`'s per-context and sweep
+    /// `get_raw` — the one `compact --url`'s per-`context` and sweep
     /// calls actually walk, so this is the path this PR's own new
     /// behavior needs proven, not just the pre-existing GET path.
     #[test]

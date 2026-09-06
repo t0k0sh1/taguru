@@ -76,9 +76,9 @@ export function matchCursor(match: MatchCursor): MatchCursor {
 }
 
 /**
- * `MatchCursor` plus `context`, for cross-context `recall`/`query`
+ * `MatchCursor` plus `context`, for cross-`context` `recall`/`query`
  * (`contexts`/`groups`). `context` is the tiebreak two different target
- * contexts can't share on their own: each can independently hold an edge at
+ * `contexts` can't share on their own: each can independently hold an edge at
  * the identical `(subject, label, object)`.
  */
 export interface CrossMatchCursor {
@@ -89,7 +89,7 @@ export interface CrossMatchCursor {
   object: string;
 }
 
-/** `matchCursor`, for the cross-context match shape (`context` included). */
+/** `matchCursor`, for the cross-`context` match shape (`context` included). */
 export function crossMatchCursor(match: CrossMatchCursor): CrossMatchCursor {
   return {
     weight: match.weight,
@@ -207,7 +207,7 @@ export interface DirectoryEntry {
   revision?: ContextRevision;
 }
 
-/** One page of the context directory. `total` is the whole population. */
+/** One page of the `context` directory. `total` is the whole population. */
 export interface ContextPage {
   total: number;
   contexts: DirectoryEntry[];
@@ -216,8 +216,8 @@ export interface ContextPage {
 // -- groups ---------------------------------------------------------------------
 
 /**
- * One group row: member contexts bundled many-to-many, plus child groups. For
- * a context-scoped key `contexts` carries only the members the grant allows;
+ * One `group` row: member `contexts` bundled many-to-many, plus child `groups`. For
+ * a `context`-scoped key `contexts` carries only the members the grant allows;
  * `groups` (child names — labels, not content) is never filtered.
  */
 export interface GroupEntry {
@@ -233,7 +233,7 @@ export interface GroupEntry {
   fingerprint?: string;
 }
 
-/** One page of the group directory. `total` is the whole population. */
+/** One page of the `group` directory. `total` is the whole population. */
 export interface GroupPage {
   total: number;
   groups: GroupEntry[];
@@ -275,9 +275,9 @@ export interface Association {
 }
 
 /**
- * The execution plan of a graph search (#151): the contexts actually
+ * The execution plan of a graph search (#151): the `contexts` actually
  * consulted, in effective order. For the cross variants that is the RESOLVED
- * target list — groups expanded, the key's grants applied — which the tagged
+ * target list — `groups` expanded, the key's grants applied — which the tagged
  * matches alone cannot reconstruct when a target came up empty. Absent from
  * servers predating the field, and always for the non-search `MatchPage`
  * producers (`unreachableFrom` — an audit, not a search).
@@ -294,18 +294,18 @@ export interface MatchPage {
 }
 
 /**
- * An `Association` tagged with the context it came from. The tag is what
- * makes a cross-context match actionable — every follow-up (citations,
- * lookups, activate) is a per-context call.
+ * An `Association` tagged with the `context` it came from. The tag is what
+ * makes a cross-`context` match actionable — every follow-up (citations,
+ * lookups, activate) is a per-`context` call.
  */
 export interface CrossAssociation extends Association {
   context: string;
 }
 
 /**
- * `MatchPage` across contexts: same truncation contract, every match tagged.
+ * `MatchPage` across `contexts`: same truncation contract, every match tagged.
  * Weights share one scale (evidence mass), so the cut past `total` means the
- * same thing across contexts.
+ * same thing across `contexts`.
  */
 export interface CrossMatchPage {
   total: number;
@@ -393,7 +393,7 @@ export interface ChangesPage {
  * One resolve candidate. `kind` (lexical tier only) is
  * "exact"/"alias"/"containment"/"fuzzy" — never adopt a containment/fuzzy hit
  * on score alone; read `gloss` first. `types` (top candidates only) are the
- * candidate's declared entity types, present only when the context has an
+ * candidate's declared entity types, present only when the `context` has an
  * installed schema and the candidate carries a type assertion.
  */
 export interface TieredResolution {
@@ -509,7 +509,7 @@ export interface ConceptDescription {
   as_subject: LabelUsage[];
   as_object: LabelUsage[];
   /**
-   * The concept's declared types; absent for a schema-free context or an
+   * The concept's declared types; absent for a schema-free `context` or an
    * untyped concept (the two are indistinguishable here on purpose).
    * Optional so a server one release behind — which omits the field
    * entirely — still decodes, the same tolerance the Python dataclass
@@ -543,7 +543,7 @@ export interface RelationDef {
 }
 
 /**
- * A context's schema document — the same shape `{stem}.schema.json`/
+ * A `context`'s schema document — the same shape `{stem}.schema.json`/
  * `GET /contexts/{name}/schema` persist and serve, mirrored
  * field-for-field from `src/schema.rs`'s `SchemaDocument` (ADR 0009 §5.3).
  */
@@ -682,8 +682,8 @@ export interface PassageHit {
 }
 
 /**
- * A `PassageHit` tagged with its context. `score` compares within one context
- * only — the cross-context order is rank interleaving.
+ * A `PassageHit` tagged with its `context`. `score` compares within one `context`
+ * only — the cross-`context` order is rank interleaving.
  */
 export interface CrossPassageHit extends PassageHit {
   context: string;
@@ -692,7 +692,7 @@ export interface CrossPassageHit extends PassageHit {
 /**
  * One lane's verdict for a whole search call (#151): it ran (the vector lane
  * also names the effective cosine `floor` it swept under — the resolved
- * override → context setting → server default chain), or it did not and
+ * override → `context` setting → server default chain), or it did not and
  * `reason` says why, in the same prose `explainSearchPassages` uses.
  */
 export interface LanePlan {
@@ -708,8 +708,8 @@ export interface SearchLanesPlan {
 }
 
 /**
- * The source filter's account for one searched context (#167): how many
- * sources were eligible to answer, out of how many the context stores —
+ * The source filter's account for one searched `context` (#167): how many
+ * sources were eligible to answer, out of how many the `context` stores —
  * present exactly when the request carried a filter.
  */
 export interface FilterPlan {
@@ -717,7 +717,7 @@ export interface FilterPlan {
   total_sources: number;
 }
 
-/** One searched context's account within a `SearchPlan`. */
+/** One searched `context`'s account within a `SearchPlan`. */
 export interface SearchContextPlan {
   context: string;
   lanes: SearchLanesPlan;
@@ -725,7 +725,7 @@ export interface SearchContextPlan {
 }
 
 /**
- * The execution plan of one passage search (#151): one entry per context
+ * The execution plan of one passage search (#151): one entry per `context`
  * actually searched, in effective order. What the per-hit lane evidence
  * cannot say — "the semantic lane never ran here, and this is why" — lives
  * here, so a lexical-only answer is distinguishable from a fused one without
@@ -741,7 +741,7 @@ export interface PassagePage {
   hits: PassageHit[];
 }
 
-/** `PassagePage` across contexts: the same wrap, every hit tagged. */
+/** `PassagePage` across `contexts`: the same wrap, every hit tagged. */
 export interface CrossPassagePage {
   plan: SearchPlan;
   hits: CrossPassageHit[];
@@ -1057,7 +1057,7 @@ export interface GroupImportOutcome {
 }
 
 /**
- * What `POST /import` accomplished: per-batch outcomes plus any group
+ * What `POST /import` accomplished: per-batch outcomes plus any `group`
  * restores and `taguru_schema` installs. `issues`/`schema_violations` are
  * the response envelope's warn-mode carrier (ADR 0009 §8.3), stream-wide;
  * each batch's own `ImportOutcome.schema_violations` breaks the count down
@@ -1073,7 +1073,7 @@ export interface ImportResult {
 
 /**
  * What `POST /contexts/{name}/promote` accomplished (ADR 0018): each named
- * source moved whole from this (scratch) context into `into`, `/import`'s
+ * source moved whole from this (scratch) `context` into `into`, `/import`'s
  * own per-batch outcome shape.
  *
  * `audit` mirrors `auditConsolidation`'s own untyped shape — absent on a

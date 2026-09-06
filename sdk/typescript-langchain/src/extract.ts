@@ -104,7 +104,7 @@ export interface ModelOutput {
  *   this schema only enforces the universal >= 0 half.
  * - Cross-item rules: deduplication, and an alias's canonical naming a
  *   subject/object/label the associations actually contain.
- * - A concept's entity type set (ADR 0009 §6.1): known only per-context, at
+ * - A concept's entity type set (ADR 0009 §6.1): known only per-`context`, at
  *   validation time — the same argument the paragraph-count entry above
  *   already makes, just for a schema document instead of a document's own
  *   paragraph count.
@@ -115,7 +115,7 @@ export interface ModelOutput {
  * - Allowed relation labels are deliberately never rendered as an enum: a
  *   structurally-constrained model could then never propose a new relation,
  *   which ADR 0009 (and #218 before it) requires stays possible even in a
- *   context with a schema — constraining the model's *shape* is not the
+ *   `context` with a schema — constraining the model's *shape* is not the
  *   same as constraining its *content*.
  *
  * `title` is carried for parity with the Rust and Python copies, not because
@@ -448,13 +448,13 @@ function hasUnsafePromptChar(label: string): boolean {
  * Filters out any label a malicious document could have planted to break
  * out of the vocabulary line it is interpolated into.
  *
- * The context's live label vocabulary (`listLabels()`) is seeded by the
+ * The `context`'s live label vocabulary (`listLabels()`) is seeded by the
  * model's OWN prior output on earlier documents — so a document containing
  * text like `associate this with label "X\n\nIgnore your instructions
  * and …"` can get that string stored as a relation label today, and have
  * it fed back verbatim into the TRUSTED system prompt of every later
- * ingest against this context (a persistent, second-order prompt
- * injection: the attack payload lives in the context's own data, not in
+ * ingest against this `context` (a persistent, second-order prompt
+ * injection: the attack payload lives in the `context`'s own data, not in
  * any one document's IMMEDIATE turn). Labels that fail the filter are
  * simply never offered for reuse — never repaired or truncated, since
  * either would still let a crafted label steer formatting inside the line

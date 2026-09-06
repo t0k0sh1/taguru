@@ -2,10 +2,10 @@
 //! `.ctx` image, or one `.group` record — the backup check that needs
 //! no server. Every image goes through the same fully validating
 //! parser the server boots with, every WAL through the same replay
-//! parser, and every group file through the same record parse, so
+//! parser, and every `group` file through the same record parse, so
 //! "inspect says ok" and "the server will load it" are one statement.
 //! Exits 1 when anything holding acknowledged data is corrupt — a
-//! group file that would not parse included, because boot answers
+//! `group` file that would not parse included, because boot answers
 //! that by resetting the record (the membership is acknowledged data,
 //! and this is the tool that must say so BEFORE a restore spends it).
 //!
@@ -188,7 +188,7 @@ impl Notice {
 
 /// One `.ctx` image's report — the same fields [`stats_line`] prints,
 /// plus (directory scans only) the sidecar sizes the text report's
-/// per-context line appends. `status` other than `"ok"` means every
+/// per-`context` line appends. `status` other than `"ok"` means every
 /// field below `error` is absent: a corrupt image, WAL, or passage
 /// store cannot report counts it never finished loading.
 #[derive(Serialize)]
@@ -244,7 +244,7 @@ struct ContextRow {
     notes: Vec<Notice>,
 }
 
-/// The per-context sidecar sizes a directory scan (not a bare
+/// The per-`context` sidecar sizes a directory scan (not a bare
 /// single-file inspect) reads alongside the image.
 struct Sidecars {
     wal_bytes: u64,
@@ -388,7 +388,7 @@ struct Totals {
 }
 
 /// `--json`'s whole answer, one document regardless of which of the
-/// three targets (directory / image / group) `PATH` named.
+/// three targets (directory / image / `group`) `PATH` named.
 #[derive(Serialize)]
 struct InspectReport {
     target: String,
@@ -426,7 +426,7 @@ enum GroupFileTrouble {
     Corrupt(serde_json::Error),
 }
 
-/// One bare `.group` record: the "is this group file I restored
+/// One bare `.group` record: the "is this `group` file I restored
 /// intact" question, [`inspect_file`]'s twin one storey up. Reference
 /// checks need the directory around it, so a single file answers for
 /// its own parse alone.
@@ -1037,9 +1037,9 @@ fn inspect_directory(dir: &Path, as_json: bool) -> i32 {
 /// acknowledged data (bytes that do not parse reset the record; an
 /// unreadable file refuses the boot itself), as a warning where it
 /// drops what is already stale (dangling references, over-cap sets,
-/// an ill-shaped nesting). Returns (groups parsed, failures, the
-/// per-group JSON rows, and the standalone notices that don't belong
-/// to any one group).
+/// an ill-shaped nesting). Returns (`groups` parsed, failures, the
+/// per-`group` JSON rows, and the standalone notices that don't belong
+/// to any one `group`).
 fn inspect_groups(
     entries: &[std::path::PathBuf],
     context_names: &BTreeSet<String>,

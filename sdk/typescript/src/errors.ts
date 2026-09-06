@@ -52,7 +52,7 @@ export class TaguruError extends Error {
 export class AuthenticationError extends TaguruError {}
 
 /**
- * 403 — the key's role or context scope does not cover this operation.
+ * 403 — the key's role or `context` scope does not cover this operation.
  * Also every write sent to a read replica: `code` is then
  * `"read_only_replica"`, and the message names the writer to send
  * writes to when the replica knows one (its configured writer URL, or
@@ -61,7 +61,7 @@ export class AuthenticationError extends TaguruError {}
  */
 export class PermissionDeniedError extends TaguruError {}
 
-/** 404 — unknown context, source, paragraph, or route. */
+/** 404 — unknown `context`, source, paragraph, or route. */
 export class NotFoundError extends TaguruError {}
 
 /** 409 — duplicate create, alias conflict, or partial-write conflict. */

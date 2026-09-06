@@ -3,7 +3,7 @@
 //! SERVER detects candidates and fingerprints their evidence; this
 //! verb judges each candidate with the extract LLM and writes the
 //! judgments back through `POST /import` as an ordinary derived
-//! context (`{name}::consolidation`), one source per candidate keyed
+//! `context` (`{name}::consolidation`), one source per candidate keyed
 //! by its fingerprint. Judgment identity IS the fingerprint: a re-run
 //! over an unchanged graph looks every candidate up, finds its stored
 //! judgment, and makes zero LLM calls; a candidate whose evidence
@@ -64,7 +64,7 @@ exit codes: 0 judgments up to date (or dry-run report) · 1 failed ·
 /// exist, so a different number is a different program).
 const CONSOLIDATION_FORMAT: u64 = 1;
 
-/// The manifest's reserved source id inside the judgment context.
+/// The manifest's reserved source id inside the judgment `context`.
 const MANIFEST_SOURCE: &str = "consolidation:manifest";
 
 /// One candidate's judgment source id: `judgment:{fingerprint}`.
@@ -363,7 +363,7 @@ fn flatten(audit: &ConsolidationAudit) -> Vec<Candidate> {
     candidates
 }
 
-/// The manifest's detector (None when the artifact context does not
+/// The manifest's detector (None when the artifact `context` does not
 /// exist yet) and the set of judgment sources already stored.
 fn stored_judgments(
     api: &Api,
@@ -473,7 +473,7 @@ fn parse_judgment(content: &str) -> Option<Value> {
 /// recording the verdict so the artifact is queryable as a graph too.
 /// Only the run's FIRST batch carries the create block (`create:
 /// true`) — the `taguru communities` pattern: create is consumed only
-/// when the artifact context does not exist yet, so repeating it on
+/// when the artifact `context` does not exist yet, so repeating it on
 /// every batch was pure payload (issue #752).
 fn judgment_batch(
     artifact: &str,
@@ -514,7 +514,7 @@ fn judgment_batch(
 /// The manifest batch — written LAST so its stamp attests a complete
 /// artifact, never a torn one. No create block: at least one judgment
 /// batch always precedes it in the same run (`fresh.is_empty()`
-/// returns before any import), so the artifact context exists by the
+/// returns before any import), so the artifact `context` exists by the
 /// time this lands.
 fn manifest_batch(artifact: &str, context: &str) -> String {
     let header = json!({

@@ -2,29 +2,29 @@
 //! a stateless scatter-gather router over sharded
 //! instances (issue #130) — the write-scaling leg beside the replica
 //! pool's read scaling. One URL serves the whole HTTP surface over a
-//! static context→shard map; groups and multi-context search span
+//! static `context`→shard map; `groups` and multi-`context` search span
 //! shards with the exact single-instance merge semantics.
 //!
 //! **What the router is.** A mode of the same binary with no data
 //! directory, no lock, and no durable state of any kind — run as many
 //! as the load balancer wants. Config is one file (`TAGURU_ROUTE_MAP`):
 //! `context = shard-url` lines plus an optional `* = shard-url`
-//! fallback for contexts the map does not name. The map hot-reloads
+//! fallback for `contexts` the map does not name. The map hot-reloads
 //! (issue #515) exactly like the keyring: SIGHUP, or the map file's
 //! own content-digest watch (~5s), swaps it at runtime — a broken
 //! edit is refused whole and the old map keeps serving; requests
 //! already in flight finish on the snapshot they started with.
-//! Moving a context between shards, in order: quiesce its writes,
+//! Moving a `context` between shards, in order: quiesce its writes,
 //! `taguru export` it, DELETE it through the router (the old shard
-//! drops it — and sweeps it from its group projections), edit the
+//! drops it — and sweeps it from its `group` projections), edit the
 //! map, then re-import through the router (which now routes it to
 //! the new shard). The delete must precede the re-import (a copy
 //! left on the old shard keeps answering that shard's slice of every
-//! group fan-out — duplicate hits, not just a stale listing), and
+//! `group` fan-out — duplicate hits, not just a stale listing), and
 //! EVERY router must have reloaded first too: one still holding the
 //! old map would route the re-import back to the old shard.
 //!
-//! **Routing.** Context-scoped verbs proxy verbatim (streamed both
+//! **Routing.** `context`-scoped verbs proxy verbatim (streamed both
 //! ways) to the owning shard, so their responses — including error
 //! shapes, 404s, and exports — are the shard's own bytes. `/import`
 //! splits the batch stream by each batch's `context` header, validates
@@ -33,28 +33,28 @@
 //! would refuse whole is refused whole here too, with nothing applied.
 //!
 //! **Scatter-gather.** `POST /recall`, `/query`, and `/sources/search`
-//! fan out to the shards owning the named contexts (all shards when
-//! groups are named) and merge exactly as one instance merges its own
-//! contexts: the graph verbs by [`crate::api::cross_rank`] (one weight
-//! scale, context/subject/label/object tiebreak) with `total` summed;
-//! the passage verb by per-context rank interleaving. Cursors need no
+//! fan out to the shards owning the named `contexts` (all shards when
+//! `groups` are named) and merge exactly as one instance merges its own
+//! `contexts`: the graph verbs by [`crate::api::cross_rank`] (one weight
+//! scale, `context`/subject/label/object tiebreak) with `total` summed;
+//! the passage verb by per-`context` rank interleaving. Cursors need no
 //! composition at all: the `after` cursor is anchored on the last
 //! match itself, not on any per-instance position, so the router
 //! forwards it verbatim and every shard resumes past the same point.
 //!
-//! **Groups.** Every group exists on every shard; each shard's copy
-//! holds the member contexts the map assigns to that shard, while
-//! child-group edges are broadcast whole — identical nesting structure
+//! **Groups.** Every `group` exists on every shard; each shard's copy
+//! holds the member `contexts` the map assigns to that shard, while
+//! child-`group` edges are broadcast whole — identical nesting structure
 //! everywhere, so cycle and depth verdicts cannot differ, and a
-//! group's transitive closure on one shard is exactly the global
-//! closure's slice for that shard. Group writes rewrite the member
+//! `group`'s transitive closure on one shard is exactly the global
+//! closure's slice for that shard. `group` writes rewrite the member
 //! lists per shard and broadcast sequentially; reads union the
-//! projections. A search naming a group therefore just names it to
+//! projections. A search naming a `group` therefore just names it to
 //! every shard — no expansion round trip.
 //!
 //! **Partial failure.** A shard that ANSWERS an error fails the whole
-//! request, exactly as one failing context fails a single instance's
-//! cross-context search. A shard that cannot be REACHED (connect,
+//! request, exactly as one failing `context` fails a single instance's
+//! cross-`context` search. A shard that cannot be REACHED (connect,
 //! timeout, mid-body) degrades the fan-out verbs to labeled partial
 //! results: the envelope gains `"unreached": [{shard, contexts,
 //! error}]`, omitted entirely when every shard answered — the same
@@ -187,7 +187,7 @@ struct RouterResponse<T: Serialize> {
 }
 
 /// One unreachable shard in a fan-out: its URL, the directly-named
-/// contexts that routed to it (group members it may also have held are
+/// `contexts` that routed to it (`group` members it may also have held are
 /// not enumerable while it is down), and the transport error.
 #[derive(Serialize, Clone)]
 struct Unreached {
@@ -222,11 +222,11 @@ fn passthrough(answer: ShardAnswer) -> Response {
         .into_response()
 }
 
-/// One broadcast outcome sorted into the three fates every group
+/// One broadcast outcome sorted into the three fates every `group`
 /// surface shares: a success to fold in, a 404 to remember (mixed
 /// answers are drift healing), or a whole-merge refusal — an error
 /// status passes through verbatim, and an unreachable shard refuses
-/// the union outright, because a partially-unioned group row would
+/// the union outright, because a partially-unioned `group` row would
 /// look complete.
 enum MergeFate {
     Success(ShardAnswer),

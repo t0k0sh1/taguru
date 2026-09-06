@@ -34,7 +34,7 @@ const MAX_ISSUE_TYPE_NAMES: usize = 8;
 /// two-argument function rather than tripping clippy's
 /// too-many-arguments lint.
 pub(crate) struct SchemaCheckInput<'a> {
-    /// The context's installed document, already validated (`super::install`).
+    /// The `context`'s installed document, already validated (`super::install`).
     pub(crate) schema: Arc<InstalledSchema>,
     /// The exact ops this write is about to apply — `corrected_associations`'
     /// output on the import path (ADR 0009 §7.2 step 2), the request's own
@@ -260,7 +260,7 @@ impl SchemaEnv {
 /// retracts — a plain union there). Scoped to exactly the spellings the
 /// caller cares about, never a general-purpose type index — an empty
 /// `concepts` costs one allocation, not a full scan (`Context::query_any`
-/// with all three positions empty returns every edge in the context,
+/// with all three positions empty returns every edge in the `context`,
 /// `src/context/query.rs:69-73`).
 pub(crate) fn live_type_assertions(
     context: &Context,

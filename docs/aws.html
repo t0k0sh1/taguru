@@ -35,7 +35,7 @@
     </div>
     <div class="side-group">
       <div class="side-group-label">Reference</div>
-      <a href="schema.html">Context schema</a>
+      <a href="schema.html"><code>context</code> schema</a>
       <a href="import.html">Batch import</a>
       <a href="extract.html">Document extraction</a>
       <a href="taguru-code.html">Code map (taguru-code)</a>
@@ -144,7 +144,7 @@ mkdir -p /mnt/taguru/data &amp;&amp; chown 65532:65532 /mnt/taguru/data</code></
         <code>Restart=on-failure</code>) is the restart policy — restarts are the host's job,
         not the load balancer's (see <a href="#network">the probe split</a>).</li>
       <li><b>Instance size:</b> memory ≈ <code>TAGURU_CACHE_BYTES</code> (default 512 MiB) +
-        pinned contexts + headroom — a t3.small runs the default profile; measure with
+        pinned <code>contexts</code> + headroom — a t3.small runs the default profile; measure with
         <code>taguru estimate</code> before scaling up.</li>
       <li><b>EBS is AZ-bound.</b> Replacing a dead instance means recreating in the same AZ and
         reattaching the volume — or restoring a snapshot into another AZ (snapshots are
@@ -250,7 +250,7 @@ docker run -d --restart unless-stopped -p 8248:8248 \
         only</b>. Nothing else reaches the server — a bearer token is the whole credential, and
         the token never travels unencrypted because TLS terminates at the ALB (ACM issues and
         renews the certificate).</li>
-      <li><b>Target group health check: <code>GET /health</code></b> — and understand what the
+      <li><b>Target <code>group</code> health check: <code>GET /health</code></b> — and understand what the
         ALB can and cannot do about a failure:
         <div class="tbl" style="margin-top:0.6rem">
           <table>
@@ -305,8 +305,8 @@ docker run --rm -v /mnt/restore/data:/data \
       <li><b>Keep a second, environment-independent lane:</b> <code>taguru export --url</code>
         against the running server writes portable JSONL batch streams — ship them to S3 on a
         schedule. They restore anywhere through <code>taguru import</code>, across versions and
-        machines. Note the export's own caveat: each context's stream is internally consistent,
-        but a multi-context export is not one point in time — the snapshot lane is.</li>
+        machines. Note the export's own caveat: each <code>context</code>'s stream is internally consistent,
+        but a multi-<code>context</code> export is not one point in time — the snapshot lane is.</li>
       <li><b>DR is a copy, not a mirror:</b> snapshots are regional and copy cross-region
         (DLM can schedule the copy); S3 replicates the export lane. EBS itself is AZ-bound —
         recovery into another AZ or region is always snapshot-restore, never reattach.</li>
@@ -341,14 +341,14 @@ docker run --rm -v /mnt/restore/data:/data \
 
   <section id="scale-out">
     <h2>Scale-out: shards, not replicas</h2>
-    <p class="section-sub">Write scale is disjoint context sets on independent instances — the model is on the <a href="kubernetes.html#sharding">Kubernetes page</a>.</p>
+    <p class="section-sub">Write scale is disjoint <code>context</code> sets on independent instances — the model is on the <a href="kubernetes.html#sharding">Kubernetes page</a>.</p>
     <ul>
       <li>Each shard is a complete stack of this page: its own instance (or pod), its own EBS
-        volume, its own snapshots. Contexts that must be searched together (groups, cross-context
+        volume, its own snapshots. <code>contexts</code> that must be searched together (<code>groups</code>, cross-<code>context</code>
         search reach only their own shard) cohabit on one shard.</li>
       <li>In front, <code>taguru router</code> is stateless — run it anywhere, give clients one
         hostname. If clients address shards directly instead, give each shard <b>its own
-        hostname and target group</b> (host-based ALB rules): context names live in the path, so
+        hostname and target group</b> (host-based ALB rules): <code>context</code> names live in the path, so
         path-based routing cannot split them.</li>
       <li>Read scale is the replica pool tailing an S3 bucket
         (<a href="kubernetes.html#read-pool">the read pool</a>) — replicas are read-only and
