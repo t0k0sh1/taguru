@@ -1,10 +1,10 @@
-//! The per-context change feed's ring (#422): a bounded, in-memory
+//! The per-`context` change feed's ring (#422): a bounded, in-memory
 //! record of recent content changes, serving `GET
 //! /contexts/{name}/changes?since=` so a polling client (a local cache,
 //! an external index, a communities/evidence recomputation trigger) can
 //! ask "what changed since my cursor" instead of re-listing everything.
 //!
-//! Deliberately NOT derived from the WAL: the per-context WAL truncates
+//! Deliberately NOT derived from the WAL: the per-`context` WAL truncates
 //! on every successful image flush (once a second by default), so it
 //! retains no history to serve. And deliberately not persisted: the
 //! ring is runtime state with an honest failure mode — a server
@@ -28,9 +28,9 @@ use super::{AccessError, AppState};
 use crate::wal::WalOp;
 
 impl AppState {
-    /// Serves one page of the context's change feed — see
+    /// Serves one page of the `context`'s change feed — see
     /// [`ChangeRing::read`] for the cursor contract. Touches nothing
-    /// but the ring: the context itself stays cold if it was cold,
+    /// but the ring: the `context` itself stays cold if it was cold,
     /// which is what makes a tight polling loop affordable.
     pub fn context_changes(
         &self,
@@ -46,7 +46,7 @@ impl AppState {
     }
 }
 
-/// How many events one context retains. A steady writer overflows this
+/// How many events one `context` retains. A steady writer overflows this
 /// eventually by design — the feed serves "poll every few seconds or
 /// minutes," not "replay last week" (the replication bucket is the
 /// durable history). 1024 events at one event per write CALL covers
@@ -72,7 +72,7 @@ const _: () = assert!(
 );
 
 /// Ring identities are process-unique: seeded from the wall clock once,
-/// then incremented per ring, so a context deleted and recreated under
+/// then incremented per ring, so a `context` deleted and recreated under
 /// the same name (same process or not) can never validate a cursor
 /// minted against its predecessor's ring.
 fn next_epoch() -> u64 {

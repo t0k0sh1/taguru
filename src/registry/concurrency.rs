@@ -120,13 +120,13 @@ const SLOT_POLL: Duration = Duration::from_millis(50);
 
 /// A counting semaphore bounding actual concurrent work below however
 /// many independent dispatch layers each think they alone own the
-/// ceiling. `embed_parallel` sizes both the outer per-context
+/// ceiling. `embed_parallel` sizes both the outer per-`context`
 /// `parallel_map` in the flush tick AND the inner
-/// `dispatch_chunks_concurrently` fan-out inside one context's own
+/// `dispatch_chunks_concurrently` fan-out inside one `context`'s own
 /// refresh — nested, those two ceilings would multiply into P × P
 /// concurrent provider calls. Every refresh chunk instead acquires a
 /// permit here before its provider call, so no matter how many threads
-/// across how many contexts attempt one at once, at most `embed_parallel`
+/// across how many `contexts` attempt one at once, at most `embed_parallel`
 /// are ever in flight process-wide. The permit is taken before the
 /// circuit breaker's own refusal check, so a chunk that the breaker
 /// turns away still consumes — and promptly frees — a slot; the

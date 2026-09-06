@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::hash::{FNV1A_OFFSET, fnv1a_fold};
 use crate::storage::write_atomic;
 
-/// Encodes a context name as a file stem: bytes outside [A-Za-z0-9_-]
+/// Encodes a `context` name as a file stem: bytes outside [A-Za-z0-9_-]
 /// become %XX. Context names arrive from URL paths and may contain path
 /// separators or dots; encoding them keeps every name inside the data
 /// directory (no traversal) and reversible.
@@ -23,7 +23,7 @@ pub(crate) fn file_stem(name: &str) -> String {
     stem
 }
 
-/// Decodes [`file_stem`]'s encoding back into a context name.
+/// Decodes [`file_stem`]'s encoding back into a `context` name.
 pub(crate) fn name_from_stem(stem: &str) -> Option<String> {
     let mut bytes = Vec::with_capacity(stem.len());
     let mut cursor = stem.bytes();
@@ -89,11 +89,11 @@ pub(crate) fn wal_path(dir: &Path, stem: &str) -> PathBuf {
 
 /// Both WAL lanes' on-disk sizes for `stem` — `0` for a lane with no
 /// file yet, not an error: a missing log is the healthy common case
-/// (a freshly created or never-written context), not one worth
+/// (a freshly created or never-written `context`), not one worth
 /// failing a boot or a rename over. The boot scan and a rename's
 /// re-register both seed a Cold entry with these so the residency
 /// gauge sees a leftover log from the first scrape, not only after
-/// the context's first touch post-restart. Order is `(graph, passages)`
+/// the `context`'s first touch post-restart. Order is `(graph, passages)`
 /// — the same order [`Entry::new`] takes `wal_bytes` /
 /// `passages_wal_bytes` in.
 pub(super) fn wal_lane_bytes(data_dir: &Path, stem: &str) -> (u64, u64) {
@@ -108,7 +108,7 @@ pub(super) fn wal_lane_bytes(data_dir: &Path, stem: &str) -> (u64, u64) {
     )
 }
 
-/// The optional per-context schema document (ADR 0009 §5.1). Built with
+/// The optional per-`context` schema document (ADR 0009 §5.1). Built with
 /// `format!`, not `path.with_extension`, on purpose: `{stem}.schema.json`
 /// is two dot segments, and `with_extension` would replace only the
 /// last one, mangling the `.schema` half. Never discovered by an
@@ -122,10 +122,10 @@ pub(crate) fn schema_path(dir: &Path, stem: &str) -> PathBuf {
 }
 
 /// Where a schema file's bytes are set aside when they read but do not
-/// parse — evidence for hand recovery, [`crate::groups::scan_groups`]'s
-/// `{stem}.group.corrupt` convention applied to schema (see
+/// parse — evidence for hand recovery, [`crate::`groups`::scan_groups`]'s
+/// `{stem}.`group`.corrupt` convention applied to schema (see
 /// `crate::schema`'s module doc for why the parallel stops there: a
-/// schema, unlike a group, never falls back to an empty record after
+/// schema, unlike a `group`, never falls back to an empty record after
 /// setting the bytes aside).
 pub(crate) fn schema_corrupt_path(dir: &Path, stem: &str) -> PathBuf {
     dir.join(format!("{stem}.schema.corrupt"))
@@ -134,14 +134,14 @@ pub(crate) fn schema_corrupt_path(dir: &Path, stem: &str) -> PathBuf {
 /// The durable-deletion marker: while it exists, boot resumes the
 /// unlinks (see `delete`/`scan_data_dir`). One builder so the writer,
 /// the boot sweep, and the create-time cleanup can never disagree
-/// about its name — a stale marker beside a freshly recreated context
-/// would otherwise make the next boot delete the new context.
+/// about its name — a stale marker beside a freshly recreated `context`
+/// would otherwise make the next boot delete the new `context`.
 pub(crate) fn deleted_marker_path(dir: &Path, stem: &str) -> PathBuf {
     dir.join(format!("{stem}.deleted"))
 }
 
 /// The durable-rename marker: while it exists, boot resumes the file
-/// move AND re-applies the group membership rewrite (`contexts`
+/// move AND re-applies the `group` membership rewrite (`contexts`
 /// entries naming `from`) before `reconcile_groups` runs — without
 /// that ordering, a crash between the move and the rewrite would have
 /// reconcile see `from` as dangling and drop it, losing the
@@ -168,10 +168,10 @@ pub(crate) const IMPORT_MARKER_EXTENSION: &str = "importing";
 /// retract-then-apply is idempotent, or retract the source).
 ///
 /// The source's name rides INSIDE the file (see [`ImportMarker`]); the
-/// file name only needs to be unique per (context, source) and safe,
+/// file name only needs to be unique per (`context`, source) and safe,
 /// which the hash gives without an encoding scheme. Stems contain no
 /// dots, so the `{stem}.` prefix plus the extension identifies a
-/// marker's context unambiguously.
+/// marker's `context` unambiguously.
 pub(crate) fn import_marker_path(dir: &Path, stem: &str, source: &str) -> PathBuf {
     dir.join(format!(
         "{stem}.{:016x}.{IMPORT_MARKER_EXTENSION}",
@@ -202,7 +202,7 @@ pub(crate) fn import_marker_paths(dir: &Path, stem: &str) -> Vec<PathBuf> {
 }
 
 /// What an import marker file says: which source's batch was open, in
-/// which context — self-describing, so boot and inspect report the
+/// which `context` — self-describing, so boot and inspect report the
 /// human-readable pair without decoding file names.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct ImportMarker {
@@ -211,10 +211,10 @@ pub(crate) struct ImportMarker {
 }
 
 /// What a rename marker file says: the source and destination names,
-/// self-describing so boot can resume the move and the group rewrite
-/// without any other input. Shared shape for contexts (`.renaming`)
-/// and groups (`.grouprenaming`) — the two use different extensions
-/// (a context and a group may share a name) but the same fields.
+/// self-describing so boot can resume the move and the `group` rewrite
+/// without any other input. Shared shape for `contexts` (`.renaming`)
+/// and `groups` (`.grouprenaming`) — the two use different extensions
+/// (a `context` and a `group` may share a name) but the same fields.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct RenameMarker {
     pub(crate) from: String,
@@ -227,8 +227,8 @@ pub(crate) struct RenameMarker {
 ///
 /// The two booleans decouple the two things a resume owes, because a
 /// half-done move must not do the second without the first:
-/// - `landed` — the destination's pivot file (a context's `.ctx`, a
-///   group's `.group`) is now in place, so the scan registered the
+/// - `landed` — the destination's pivot file (a `context`'s `.ctx`, a
+///   `group`'s `.group`) is now in place, so the scan registered the
 ///   entity under `to`. Group membership naming `from` must be
 ///   rewritten to `to`, or `reconcile_groups` — which has no notion of
 ///   a rename in flight — reads `from` as dangling and drops it.
@@ -265,11 +265,11 @@ pub(super) fn write_rename_marker(path: &Path, from: &str, to: &str) -> io::Resu
 /// parses the `(from, to)` pair, moves that pair's files via
 /// `move_files`, and returns every pair resumed (see [`ResumedRename`]
 /// for what the two per-rename booleans mean and why the caller needs
-/// both). `scan_data_dir` (`.renaming`, a ten-file context family) and
+/// both). `scan_data_dir` (`.renaming`, a ten-file `context` family) and
 /// `groups::scan_groups` (`.grouprenaming`, one file) share this exact
 /// shape and differ only in what "moving the files" means for their
-/// entity — `entity` names it for the log lines (`"context"` /
-/// `"group"`).
+/// entity — `entity` names it for the log lines (`"`context`"` /
+/// `"`group`"`).
 ///
 /// `destination_landed(to_stem)` answers "is the destination's pivot
 /// file now in place?" — checked whether or not `move_files` returned
@@ -379,7 +379,7 @@ pub(crate) fn resume_rename_markers(
 /// half-done rename that would otherwise have boot's resume move the
 /// source family over the fresh generation. Unreadable or unparseable
 /// markers are skipped — boot's own sweep reports them. Shared by the
-/// context (`renaming`) and group (`grouprenaming`) create paths.
+/// `context` (`renaming`) and `group` (`grouprenaming`) create paths.
 pub(super) fn rename_markers_targeting(dir: &Path, context: &str, extension: &str) -> Vec<PathBuf> {
     let Ok(entries) = fs::read_dir(dir) else {
         return Vec::new();
@@ -407,7 +407,7 @@ mod tests {
     /// complete (so the marker stays for the next boot to retry), and
     /// membership may only be rewritten once the destination pivot has
     /// landed. Deleting the marker on a failed move was the bug — the
-    /// retry vanished and the group association was lost with no way
+    /// retry vanished and the `group` association was lost with no way
     /// back.
     #[test]
     fn a_failed_resume_keeps_the_marker_and_defers_membership() {

@@ -57,7 +57,7 @@ pub struct Metrics {
     /// (method, route template) → stats, interned on first sight. The
     /// lazy `RwLock<HashMap<…, Arc<…>>>` mirrors the registry's own
     /// entry map idiom. Route templates keep cardinality bounded —
-    /// raw paths would mint one series per context name.
+    /// raw paths would mint one series per `context` name.
     http: RwLock<HashMap<(String, String), Arc<RouteStat>>>,
     cache_hits: AtomicU64,
     cache_loads_ok: AtomicU64,
@@ -104,7 +104,7 @@ pub struct Metrics {
     /// `[outcome]` per [`SchemaOutcome`] — counted only at the write
     /// entrances a schema actually gates, never at a dry-run or the
     /// audit/validate diagnostics (see [`SchemaOutcome`]'s own doc).
-    /// Stays entirely at zero for a server with no context ever
+    /// Stays entirely at zero for a server with no `context` ever
     /// carrying an installed schema document.
     schema_checks: [AtomicU64; SchemaOutcome::ALL.len()],
     /// Passage-search hits by which lane(s) surfaced them — the pulse
@@ -112,17 +112,17 @@ pub struct Metrics {
     passage_hits_bm25_only: AtomicU64,
     passage_hits_vector_only: AtomicU64,
     passage_hits_both_lanes: AtomicU64,
-    /// Set while ANY context's most recent flush attempt is unhealed;
-    /// cleared once every failing context has flushed clean again. A
+    /// Set while ANY `context`'s most recent flush attempt is unhealed;
+    /// cleared once every failing `context` has flushed clean again. A
     /// lock-free mirror of `flush_failing.is_empty()` so /health reads it
     /// without taking the lock. Drives /health: the flusher retries every
     /// tick, so this is a self-healing signal, never a latched one.
     flush_degraded: AtomicBool,
-    /// The contexts whose latest flush failed, by name. Tracked as a set,
-    /// not a single bit, so one context's success cannot mask another's
+    /// The `contexts` whose latest flush failed, by name. Tracked as a set,
+    /// not a single bit, so one `context`'s success cannot mask another's
     /// failure (last-write-wins would), and a lone transient failure among
-    /// many healthy contexts does not flip the whole server to 503. A
-    /// context leaves the set when its next flush succeeds.
+    /// many healthy `contexts` does not flip the whole server to 503. A
+    /// `context` leaves the set when its next flush succeeds.
     flush_failing: Mutex<HashSet<String>>,
     /// Unix seconds of the last successful image flush (0 = none since
     /// boot). `time() - this` on a dashboard says how stale images are
@@ -181,14 +181,14 @@ pub struct Metrics {
     /// hammering one already-full `context` should read as its own
     /// signal, not as server trouble.
     storage_quota_refusals: AtomicU64,
-    /// A per-context disk-usage `fs::metadata` call (issue #562 item
+    /// A per-`context` disk-usage `fs::metadata` call (issue #562 item
     /// 4) failing for a reason other than the file simply not existing
     /// yet — a permission error, EIO, or a rename racing the stat.
     /// `refresh_disk_usage` keeps the entry's last-known snapshot
     /// rather than silently substituting zero for the failed lane
     /// (which would understate a storage quota's `used` and let growth
     /// through it should have refused), so this counter is the only
-    /// signal that a context's disk gauges and quota accounting are
+    /// signal that a `context`'s disk gauges and quota accounting are
     /// running on stale data.
     disk_stat_failures: AtomicU64,
     /// `embed_provider_slots` (the process-wide cap on concurrent
@@ -231,25 +231,25 @@ pub struct Metrics {
     /// the DR restore's data loss window, the number this feature
     /// exists to shrink.
     replication_last_success_epoch: AtomicU64,
-    /// (context, lane) → how far the local log is beyond the shipped
+    /// (`context`, lane) → how far the local log is beyond the shipped
     /// one, refreshed by the shipper each cycle. BTreeMap so the
     /// rendered series come out sorted — render must stay
     /// deterministic.
     ///
-    /// The ONE deliberate exception to this file's "no context names
+    /// The ONE deliberate exception to this file's "no `context` names
     /// in labels" rule (see [`GaugeSnapshot`]): a restore's loss
     /// window is per lane by nature — an aggregate would hide exactly
-    /// the one stuck context an operator needs named. Cardinality
+    /// the one stuck `context` an operator needs named. Cardinality
     /// stays bounded the way the route map's does: one series per
     /// live lane, populated only while replication is on, and dropped
-    /// (`forget_replication_lane`) when the context's family leaves
+    /// (`forget_replication_lane`) when the `context`'s family leaves
     /// the disk. Values are escaped at render (`escape_label`) since
     /// names are client-minted text.
     replication_lag: Mutex<BTreeMap<(String, &'static str), ReplicationLag>>,
     /// Replica-side telemetry (issue #129), populated only under
     /// `serve --replica` — the whole family renders only then, so a
     /// writer's scrape stays exactly what it was. The lag map mirrors
-    /// `replication_lag`'s shape (and its deliberate context-name
+    /// `replication_lag`'s shape (and its deliberate `context`-name
     /// labels): per lane, the seq this replica has applied vs the
     /// newest the bucket ships, and since when the two diverge — the
     /// promotion-time RPO, on display.
@@ -288,10 +288,10 @@ mod tests {
         }
     }
 
-    /// The per-context families gate on the snapshot carrying rows —
+    /// The per-`context` families gate on the snapshot carrying rows —
     /// an opted-out scrape stays byte-free of them, like the breaker
     /// and replica families — and render every row's series with the
-    /// context name escaped, since names are client-minted text.
+    /// `context` name escaped, since names are client-minted text.
     #[test]
     fn the_per_context_families_gate_on_the_snapshot_and_escape_names() {
         let metrics = Metrics::default();
@@ -950,8 +950,8 @@ mod tests {
         );
     }
 
-    /// One context's successful flush must NOT mask another's still-failing
-    /// one: health tracks the SET of failing contexts, not the last
+    /// One `context`'s successful flush must NOT mask another's still-failing
+    /// one: health tracks the SET of failing `contexts`, not the last
     /// outcome. The old single global bit reported healthy after B here.
     #[test]
     fn flush_health_tracks_each_context_not_just_the_last() {

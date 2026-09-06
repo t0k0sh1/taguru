@@ -11,7 +11,7 @@ impl AppState {
         self.0.replica.is_some()
     }
 
-    /// Replica tailer: registers a context a newer manifest introduced
+    /// Replica tailer: registers a `context` a newer manifest introduced
     /// — the runtime twin of boot's hydrator registration. Idempotent;
     /// the sidecar meta is already local (the shared hydration pass
     /// lands every meta before families are touched).
@@ -145,12 +145,12 @@ impl AppState {
         }
     }
 
-    /// Replica tailer: deregisters a context the lineage no longer
+    /// Replica tailer: deregisters a `context` the lineage no longer
     /// carries. The in-memory teardown only — the files are the
     /// hydrator's business (its shared pass removes what the manifest
     /// does not know), and nothing here writes: no deletion marker, no
-    /// group sweep (the manifest's own group files arrive already
-    /// swept by the writer that deleted the context).
+    /// `group` sweep (the manifest's own `group` files arrive already
+    /// swept by the writer that deleted the `context`).
     pub(crate) fn replica_deregister(&self, name: &str) {
         let Some(entry) = self.0.registry.write().remove(name) else {
             return;
@@ -159,8 +159,8 @@ impl AppState {
         self.tombstone_locked(&mut inner, &entry);
     }
 
-    /// Replica tailer: re-reads group records from disk after a shared
-    /// refresh landed new group files. Read-only by design — no rename
+    /// Replica tailer: re-reads `group` records from disk after a shared
+    /// refresh landed new `group` files. Read-only by design — no rename
     /// resumption, no corrupt set-aside, no reconcile persistence: the
     /// manifest is the author here, and anything odd heals when the
     /// next diff refetches the file. A record that does not parse
@@ -247,7 +247,7 @@ mod tests {
     /// The retrieval cache's guard against a replica lineage switch: a
     /// tailed refresh `max`es the revision counters (they must never
     /// walk backward), so an upstream delete+recreate can change a
-    /// context's content while every lane reads unchanged — the fresh
+    /// `context`'s content while every lane reads unchanged — the fresh
     /// `cache_identity` is what makes keys minted against the old
     /// bytes unreachable. Recreate-on-a-writer needs no such hand:
     /// delete tears the entry down and create builds a new one, which
@@ -282,7 +282,7 @@ mod tests {
 
     /// On a replica the WAL grows by tailed file copies, never through
     /// the writer's live byte accounting — the refresh must re-stat
-    /// both WAL gauges itself, or a cold unpinned context the tailer
+    /// both WAL gauges itself, or a cold unpinned `context` the tailer
     /// keeps growing understates `taguru_wal_bytes` until some local
     /// read happens to run `ensure_hot`.
     #[test]
@@ -372,8 +372,8 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    /// A replica IS a replica, and its group reload actually reads the
-    /// manifest-delivered .group files into the served map.
+    /// A replica IS a replica, and its `group` reload actually reads the
+    /// manifest-delivered .`group` files into the served map.
     #[test]
     fn a_replica_reload_serves_the_group_files_on_disk() {
         let dir = scratch_dir("replica-group-reload");
@@ -408,7 +408,7 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    /// #617 item 2: a group naming a child that no longer has a
+    /// #617 item 2: a `group` naming a child that no longer has a
     /// (parseable) file must not carry that dangling reference into
     /// `repair_nesting` — its own doc comment requires callers to drop
     /// dangling children first, and the other two callers
@@ -455,11 +455,11 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    /// #617 item 3: a group whose file fails to parse THE FIRST TIME
+    /// #617 item 3: a `group` whose file fails to parse THE FIRST TIME
     /// this replica ever sees that name has no previous in-memory
     /// version to fall back to — it must stay absent rather than the
     /// fallback silently no-op-ing into an inconsistent state, and a
-    /// SIBLING group that already existed with a good previous record
+    /// SIBLING `group` that already existed with a good previous record
     /// must still be kept, unaffected.
     #[test]
     fn a_replica_reload_leaves_a_never_seen_unparseable_group_absent() {

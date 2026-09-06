@@ -59,7 +59,7 @@ mod tests {
     /// The mid-race view a delete leaves behind: the entry still
     /// reachable (a status request's `lookup` won the race) but its
     /// tombstone already planted. Every embeddings read must answer
-    /// "no such context" — the same 404 the context endpoint gives —
+    /// "no such `context`" — the same 404 the `context` endpoint gives —
     /// not a status built from unlinked (or a successor's) sidecars.
     #[test]
     fn a_tombstoned_entry_answers_none_on_every_embeddings_read() {
@@ -603,7 +603,7 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    /// Issue #677 item 2: a busy, gloss-stable context used to pay one
+    /// Issue #677 item 2: a busy, gloss-stable `context` used to pay one
     /// provider round trip (the width probe) on every single no-op
     /// refresh, forever — expensive under a write-driven auto-embed
     /// ticker. The real embed a pass just paid for already answers
@@ -779,9 +779,9 @@ mod tests {
     }
 
     /// The width observation is shared by the whole process, not scoped
-    /// to one context — because the width is the PROVIDER's property.
-    /// A context that has never itself embedded anything this boot
-    /// still skips its own ticker probe once some OTHER context's
+    /// to one `context` — because the width is the PROVIDER's property.
+    /// A `context` that has never itself embedded anything this boot
+    /// still skips its own ticker probe once some OTHER `context`'s
     /// ticker probe has already confirmed the width.
     #[test]
     fn a_probe_confirmed_by_one_context_lets_a_sibling_skip_its_own() {
@@ -1589,7 +1589,7 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    /// Two contexts refreshing at once (what the flush tick's outer
+    /// Two `contexts` refreshing at once (what the flush tick's outer
     /// `parallel_map` does) each also split into two chunks internally
     /// (what `dispatch_chunks_concurrently` does within one refresh) —
     /// nested, `embed_parallel=2` on both axes could reach 4 concurrent
@@ -1983,9 +1983,9 @@ mod tests {
     }
 
     /// TAGURU_SEMANTIC_FLOOR reaches boot as a server-wide default that
-    /// sits UNDER the per-context setting and the per-call override —
+    /// sits UNDER the per-`context` setting and the per-call override —
     /// it recalibrates the floor for the configured embedding model
-    /// without touching any context.
+    /// without touching any `context`.
     #[test]
     fn semantic_floor_server_default_recalibrates_under_context_and_call() {
         let dir = scratch_dir("semfloor-srv");
@@ -2684,7 +2684,7 @@ mod tests {
     }
 
     /// Issue #677 item 3: a genuine read failure on the vector sidecar
-    /// must not be cached as if the context were simply empty — that
+    /// must not be cached as if the `context` were simply empty — that
     /// would silently degrade semantic search for the rest of this
     /// residency even after the disk recovers. Mirrors
     /// `a_failed_passage_load_is_quarantined_like_the_image`

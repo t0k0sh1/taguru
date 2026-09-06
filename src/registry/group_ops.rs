@@ -17,17 +17,17 @@ use super::{
 };
 
 impl AppState {
-    /// Registers a group and persists it immediately — the create twin
-    /// for groups, without the `pending.creates` choreography: the one
-    /// fsync happens under the groups lock, which blocks only other
-    /// group writes (see the field's doc), so nothing here needs the
+    /// Registers a `group` and persists it immediately — the create twin
+    /// for `groups`, without the `pending.creates` choreography: the one
+    /// fsync happens under the `groups` lock, which blocks only other
+    /// `group` writes (see the field's doc), so nothing here needs the
     /// reservation dance.
     ///
     /// Member validation happens under both locks (`groups` before
     /// `registry` — the documented order): `contains_key` already
     /// answers false for a name mid-delete, because delete() removes
     /// the name and reserves it in `pending.deletes` inside one
-    /// critical section. Child groups are judged against the same map
+    /// critical section. Child `groups` are judged against the same map
     /// the write lock already holds.
     pub fn create_group(
         &self,
@@ -91,7 +91,7 @@ impl AppState {
         Ok(())
     }
 
-    /// Applies a delta to one group — context and child removals
+    /// Applies a delta to one `group` — `context` and child removals
     /// first, then additions (a name in both ends up a member), then
     /// the description — validates the nesting that results, and
     /// persists. Nothing applies unless everything does: a refused
@@ -179,12 +179,12 @@ impl AppState {
         Ok(groups[name].clone())
     }
 
-    /// Restores a set of group records — import's create-or-replace
+    /// Restores a set of `group` records — import's create-or-replace
     /// twin of [`Self::create_group`]/[`Self::update_group`]: each
     /// record replaces its whole row (description and both member
-    /// sets), and a group absent from the set is untouched, parents
-    /// naming a restored group included. The SET is judged before the
-    /// first write, under the groups write lock: every member context
+    /// sets), and a `group` absent from the set is untouched, parents
+    /// naming a restored `group` included. The SET is judged before the
+    /// first write, under the `groups` write lock: every member `context`
     /// registered, every child registered or in the set itself, both
     /// caps per record, and the nesting that results — the standing
     /// map overlaid with every record — acyclic and within
@@ -398,11 +398,11 @@ impl AppState {
         Ok(outcomes)
     }
 
-    /// Every context a scoped key must hold to restore `records`: the
-    /// closures of the named groups over the STANDING map (what the
+    /// Every `context` a scoped key must hold to restore `records`: the
+    /// closures of the named `groups` over the STANDING map (what the
     /// replace would release) unioned with their closures over the
     /// prospective one (what it would address). The import gate judges
-    /// group records with this — [`Self::group_context_closures`]'
+    /// `group` records with this — [`Self::group_context_closures`]'
     /// twin for the restore path, where children may be names the set
     /// itself brings.
     pub fn group_restore_involves(&self, records: &[(String, GroupRecord)]) -> BTreeSet<String> {
@@ -417,15 +417,15 @@ impl AppState {
         involved
     }
 
-    /// Removes a group — the bundling only, never the member contexts
-    /// nor the child groups. `None` for an unknown name, mirroring
-    /// [`AppState::delete`]. Parents naming the group are swept inside
+    /// Removes a `group` — the bundling only, never the member `contexts`
+    /// nor the child `groups`. `None` for an unknown name, mirroring
+    /// [`AppState::delete`]. Parents naming the `group` are swept inside
     /// the same critical section, so no reader ever observes a
     /// dangling child.
     ///
     /// One file, so no deletion marker: the memory drop and the unlink
     /// are it. The weaker guarantee is deliberate and priced in — if
-    /// the unlink fails, the surviving file re-registers the group at
+    /// the unlink fails, the surviving file re-registers the `group` at
     /// the next boot, and the error message says so.
     pub fn delete_group(&self, name: &str) -> Option<io::Result<()>> {
         let mut groups = self.0.groups.write();
@@ -443,10 +443,10 @@ impl AppState {
         ))
     }
 
-    /// Renames a group: its file moves to the new name and every OTHER
-    /// group's `groups` field naming it is rewritten to match.
+    /// Renames a `group`: its file moves to the new name and every OTHER
+    /// `group`'s `groups` field naming it is rewritten to match.
     /// `groups.write()` covers the whole operation, so — unlike a
-    /// context rename — no separate reservation is needed: no
+    /// `context` rename — no separate reservation is needed: no
     /// concurrent create, update, delete, or rename can observe a
     /// half-renamed state, only wait behind this lock.
     ///
@@ -504,14 +504,14 @@ impl AppState {
         Ok(())
     }
 
-    /// One group's record by name, or `None` for an unknown group.
+    /// One `group`'s record by name, or `None` for an unknown `group`.
     pub fn group(&self, name: &str) -> Option<GroupRecord> {
         self.0.groups.read().get(name).cloned()
     }
 
-    /// Union of every context reachable from the named groups — direct
+    /// Union of every `context` reachable from the named `groups` — direct
     /// members plus everything nested children bundle, transitively.
-    /// The scoped write gate judges a group by what it ADDRESSES, so
+    /// The scoped write gate judges a `group` by what it ADDRESSES, so
     /// this is its view; unknown names contribute nothing.
     pub fn group_context_closures<'a>(
         &self,
@@ -521,12 +521,12 @@ impl AppState {
     }
 
     /// [`group_context_closures`] with existence semantics: the first
-    /// name that is not a registered group comes back as the error
-    /// instead of contributing nothing. The cross-context searches
-    /// resolve their `groups` targets here — a caller who NAMES a group
+    /// name that is not a registered `group` comes back as the error
+    /// instead of contributing nothing. The cross-`context` searches
+    /// resolve their `groups` targets here — a caller who NAMES a `group`
     /// deserves a `no_group` refusal, not a silently empty search —
     /// checked and walked under one lock acquisition so a concurrent
-    /// group delete cannot slip between the two.
+    /// `group` delete cannot slip between the two.
     pub fn resolve_groups(&self, names: &[String]) -> Result<BTreeSet<String>, String> {
         let groups = self.0.groups.read();
         if let Some(missing) = first_missing(names, |name| groups.contains_key(name)) {
@@ -538,16 +538,16 @@ impl AppState {
         ))
     }
 
-    /// One name-ordered page of groups plus the cursor-independent
+    /// One name-ordered page of `groups` plus the cursor-independent
     /// total. Scope filtering is the API layer's business, as with
-    /// [`AppState::directory`] — but unlike the context directory,
+    /// [`AppState::directory`] — but unlike the `context` directory,
     /// which clones only `Arc` handles and can hand over the whole
-    /// map, a group's record IS its data, so the page is cut here
+    /// map, a `group`'s record IS its data, so the page is cut here
     /// under the read lock and only the survivors are cloned.
     /// `limit` is assumed at least 1: callers page through
     /// `api::clamp_page`, never the unfloored `api::clamp`, so a `0`
     /// that would otherwise `take(0)` into an empty page —
-    /// indistinguishable from "no more groups" to a client's paging
+    /// indistinguishable from "no more `groups`" to a client's paging
     /// loop — never reaches here.
     pub fn group_page(
         &self,
@@ -569,7 +569,7 @@ impl AppState {
         (groups.len(), page)
     }
 
-    /// Drops a deleted context out of every group, persisting each
+    /// Drops a deleted `context` out of every `group`, persisting each
     /// touched record. Called from [`AppState::delete`] with the
     /// deletion marker already durable; best effort past that point —
     /// a rewrite that fails leaves memory correct and the file stale,
@@ -582,10 +582,10 @@ impl AppState {
     }
 }
 
-/// The strict-membership gate shared by the group writes: the first
+/// The strict-membership gate shared by the `group` writes: the first
 /// requested name the given namespace does not have, if any. Strict on
 /// purpose — an add must never mint a dangling reference — and one
-/// function for both namespaces (member contexts, child groups): the
+/// function for both namespaces (member `contexts`, child `groups`): the
 /// caller supplies the existence test.
 fn first_missing<'a>(
     names: impl IntoIterator<Item = &'a String>,
@@ -598,7 +598,7 @@ fn first_missing<'a>(
 /// and [`AppState::restore_groups`] both need before durably writing a
 /// name that might be a half-finished rename's source or destination:
 /// an unswept marker would otherwise have the next boot's resume-sweep
-/// (`groups::scan_groups`) move a stale group file over the one just
+/// (`groups::scan_groups`) move a stale `group` file over the one just
 /// written, clobbering it. `update_group` and `rename_group` don't need
 /// this — the former only ever touches a name already standing (which
 /// implies no live marker can name it, since both `create_group` and
@@ -665,13 +665,13 @@ fn commit_group_mutation<E>(
     Ok(())
 }
 
-/// Shared body of the two membership sweeps — a deleted context out of
-/// every group's members, a deleted group out of every parent's
+/// Shared body of the two membership sweeps — a deleted `context` out of
+/// every `group`'s members, a deleted `group` out of every parent's
 /// children: removes `stale` from the chosen set field of every record
 /// and persists each touched one. Best effort by design — a rewrite
 /// that fails leaves memory correct and the file stale, which the next
 /// boot's reconciliation heals. Lock-free on purpose: every caller
-/// already holds the groups write lock.
+/// already holds the `groups` write lock.
 fn sweep_membership(
     data_dir: &Path,
     groups: &mut BTreeMap<String, GroupRecord>,
@@ -1639,7 +1639,7 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    /// The group twin of
+    /// The `group` twin of
     /// `a_rename_whose_membership_rewrite_cannot_persist_keeps_its_marker`:
     /// `rename_group` must keep its `.grouprenaming` marker whenever
     /// the parent's nesting rewrite (`rename_in_membership` on
@@ -1713,10 +1713,10 @@ mod tests {
         assert!(exhausted, "group rename exceeded the sweep bound");
     }
 
-    /// The group twin of
+    /// The `group` twin of
     /// `creating_a_context_abandons_a_rename_marker_at_its_own_stem`: a
-    /// `.grouprenaming` marker at the created group's own stem must be
-    /// abandoned so boot does not resume-move the fresh group onto the
+    /// `.grouprenaming` marker at the created `group`'s own stem must be
+    /// abandoned so boot does not resume-move the fresh `group` onto the
     /// rename's destination.
     #[test]
     fn creating_a_group_abandons_a_rename_marker_at_its_own_stem() {
@@ -1749,11 +1749,11 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    /// The group twin of
+    /// The `group` twin of
     /// `creating_a_context_abandons_a_rename_marker_naming_it_as_destination`:
     /// creating `spirits` must drop a `.grouprenaming` marker that names
     /// it as `to` (parked at `liquor`'s stem), or boot resume-moves the
-    /// stale `liquor` group file over the fresh `spirits` and drops
+    /// stale `liquor` `group` file over the fresh `spirits` and drops
     /// `liquor`.
     #[test]
     fn creating_a_group_abandons_a_rename_marker_naming_it_as_destination() {
@@ -1799,7 +1799,7 @@ mod tests {
     /// crashed after writing its marker but before its file move landed
     /// must not survive a `restore_groups` batch that lands a fresh
     /// record under the marker's destination name — otherwise the next
-    /// boot's resume-sweep moves the stale source group file over the
+    /// boot's resume-sweep moves the stale source `group` file over the
     /// just-restored record, destroying it.
     #[test]
     fn restoring_a_group_abandons_a_rename_marker_naming_it_as_destination() {
@@ -2193,7 +2193,7 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    /// The group-rename twin of
+    /// The `group`-rename twin of
     /// `an_unfinished_context_rename_is_resumed_at_boot_before_group_reconciliation`:
     /// a surviving `.grouprenaming` marker must resume the file move
     /// AND rewrite the PARENT's `groups` set to the new child name
@@ -2252,7 +2252,7 @@ mod tests {
 
     /// The boot-resume twin of
     /// `a_group_renames_membership_rewrite_that_cannot_persist_keeps_its_marker`:
-    /// `boot_with`'s OWN resume loop for group renames must keep the
+    /// `boot_with`'s OWN resume loop for `group` renames must keep the
     /// marker whenever the parent's nesting rewrite fails DURING that
     /// resume, not just when a live `rename_group` call hits the same
     /// fault.

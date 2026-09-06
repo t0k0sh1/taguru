@@ -110,9 +110,9 @@ mod tests {
         }
     }
 
-    /// The search tools target one context or several: `contexts`
-    /// and/or `groups` route to the cross-context path with the arrays
-    /// in the body; `context` keeps the historical per-context route,
+    /// The search tools target one `context` or several: `contexts`
+    /// and/or `groups` route to the cross-`context` path with the arrays
+    /// in the body; `context` keeps the historical per-`context` route,
     /// body unchanged.
     #[test]
     fn search_tools_route_to_the_cross_context_paths_on_contexts() {
@@ -160,7 +160,7 @@ mod tests {
         assert_eq!(body.unwrap(), json!({"cue": "x"}));
     }
 
-    /// The one-context form beside the cross-context form is ambiguous
+    /// The one-`context` form beside the cross-`context` form is ambiguous
     /// and no target at all is no search — each refusal says which way
     /// to fix the call, and an explicit null counts as an omission (the
     /// `pick` rule).
@@ -247,7 +247,7 @@ mod tests {
     /// Issue #732: every advertised tool's `inputSchema.required`
     /// list is cross-checked against `route_tool`'s own gates in both
     /// directions — with every schema-required property supplied (plus
-    /// the first branch of each anyOf constraint group), routing must
+    /// the first branch of each anyOf constraint `group`), routing must
     /// never claim a required argument is missing; and omitting any
     /// one schema-required property must refuse. This is the
     /// mechanical version of the per-tool spot checks around it, so a
@@ -279,7 +279,7 @@ mod tests {
                 _ => json!("x"),
             }
         }
-        /// The first alternative of every anyOf constraint group on
+        /// The first alternative of every anyOf constraint `group` on
         /// this schema (bare `anyOf`, or several under `allOf`).
         fn first_branches(schema: &Value) -> Vec<Vec<String>> {
             let groups: Vec<&Value> = match schema.get("allOf").and_then(Value::as_array) {
@@ -400,7 +400,7 @@ mod tests {
         );
     }
 
-    /// When both context and its payload are missing, the context — the
+    /// When both `context` and its payload are missing, the `context` — the
     /// path segment resolved first — is the one reported, so the caller
     /// fixes the outer error before the inner one.
     #[test]
@@ -483,7 +483,7 @@ mod tests {
     /// Tools with a second required argument still name `context` first
     /// when BOTH are missing — the ordering `add_associations`' own
     /// comment in route.rs states as the file's convention. These two
-    /// used to check their secondary argument ahead of the context.
+    /// used to check their secondary argument ahead of the `context`.
     #[test]
     fn multi_required_tools_name_the_missing_context_before_the_secondary() {
         for tool in ["audit_consolidation", "validate_schema"] {
@@ -810,8 +810,8 @@ mod tests {
     }
 
     /// `after` rides straight through to the request body, whatever
-    /// shape the caller sent — single-context `MatchCursor`,
-    /// cross-context `CrossMatchCursor` (an extra `context` field), or
+    /// shape the caller sent — single-`context` `MatchCursor`,
+    /// cross-`context` `CrossMatchCursor` (an extra `context` field), or
     /// explore's own `{distance, subject, label, object}`. `pick`
     /// forwards it verbatim; the downstream Rust struct is what
     /// actually validates the shape.
@@ -903,7 +903,7 @@ mod tests {
         );
     }
 
-    /// The three explain mirrors route beside their parents: per-context
+    /// The three explain mirrors route beside their parents: per-`context`
     /// POSTs, the addressing key peeled off, every override passed
     /// through — including `expected`, which no parent tool carries.
     #[test]

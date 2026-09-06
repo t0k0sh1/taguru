@@ -165,7 +165,7 @@ pub fn cancelled_request_id(message: &Value) -> Option<Value> {
     message.get("params")?.get("requestId").cloned()
 }
 
-/// The W3C trace context an MCP client may attach as
+/// The W3C trace `context` an MCP client may attach as
 /// `params._meta.traceparent` / `params._meta.tracestate` — stdio has
 /// no HTTP headers of its own to carry it. Rendered as an
 /// [`http::HeaderMap`] on purpose: it feeds `trace::extract_parent`

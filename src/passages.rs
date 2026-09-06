@@ -1,4 +1,4 @@
-//! Per-context passage store: the original text behind each source id,
+//! Per-`context` passage store: the original text behind each source id,
 //! resident in memory and durable through its own append-log.
 //!
 //! The predecessor kept passages in `{stem}.sources.json` and rewrote
@@ -13,7 +13,7 @@
 //! Compaction is self-triggered from inside the write path (imports
 //! have no flush ticker), and the trigger is a RATIO of the last
 //! snapshot's size, not a fixed byte threshold: with a fixed threshold
-//! K, a growing context compacts every K bytes and rewrites its whole
+//! K, a growing `context` compacts every K bytes and rewrites its whole
 //! (growing) snapshot each time — Σ i·K is the same O(N²) this store
 //! exists to remove, just with a friendlier constant. A ratio trigger
 //! amortizes exactly like `Vec` doubling: each compaction writes at
@@ -445,7 +445,7 @@ fn now_epoch_secs() -> u64 {
 const SOURCE_OVERHEAD: usize = 64;
 
 /// Compaction floor: below this much pending log, never compact — a
-/// young context should not rewrite its snapshot over every trickle.
+/// young `context` should not rewrite its snapshot over every trickle.
 const COMPACT_FLOOR_BYTES: u64 = 4 * 1024 * 1024;
 /// Compact when the pending log outgrows RATIO × the last snapshot
 /// (see the module doc for why a ratio, never a fixed threshold).
@@ -497,7 +497,7 @@ struct PassageStoreInner {
     snapshot_bytes_written: u64,
 }
 
-/// One context's passages. `writer` serializes mutators so log order
+/// One `context`'s passages. `writer` serializes mutators so log order
 /// equals seq order and a compaction never truncates under a
 /// concurrent append's feet; readers only ever take `inner`, so a
 /// search is never blocked by an fsync.
@@ -515,7 +515,7 @@ pub(crate) struct PassageStore {
     /// store compacts at RATIO × snapshot, so the log legitimately
     /// reaches that size; the ceiling exists for a compaction that is
     /// failing outright and engages only past BOTH this value and 2×
-    /// the last snapshot — a big context near its natural trigger is
+    /// the last snapshot — a big `context` near its natural trigger is
     /// never refused.
     max_log_bytes: u64,
 }
@@ -535,7 +535,7 @@ struct AppliedCounts {
 }
 
 impl PassageStore {
-    /// Loads a context's passages, `ensure_hot`-shaped: pick the base —
+    /// Loads a `context`'s passages, `ensure_hot`-shaped: pick the base —
     /// the snapshot if one exists, else the legacy `.sources.json`
     /// (watermark 0), else empty (watermark 0) — then UNCONDITIONALLY
     /// replay the log above the base's watermark. Legacy data thereby
@@ -963,7 +963,7 @@ impl PassageStore {
     }
 
     /// The last log sequence this store handed out (0 = nothing ever
-    /// logged) — the passage half of the context revision. Durable by
+    /// logged) — the passage half of the `context` revision. Durable by
     /// construction: appends are log-first and compaction bakes it
     /// into the snapshot, so a reload always resumes the numbering.
     pub(crate) fn watermark(&self) -> u64 {
@@ -3061,7 +3061,7 @@ mod tests {
 
         /// Recomputes the CRC-32C footer after a mutation tampers with
         /// an S4 snapshot's body — same discipline as `Context`'s
-        /// `resealed` test helper (context.rs), and for the same
+        /// `resealed` test helper (`context`.rs), and for the same
         /// reason: without resealing, every mutation stops at the
         /// checksum and the structural parser underneath goes
         /// unexercised.

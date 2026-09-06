@@ -34,7 +34,7 @@ impl AppState {
 }
 
 impl AppState {
-    /// Persists every dirty context and returns the names it flushed —
+    /// Persists every dirty `context` and returns the names it flushed —
     /// the periodic flusher feeds those into the auto embedding refresh
     /// when that is enabled. Called once more on graceful shutdown; a
     /// failed save is retried on the next tick (the entry stays dirty).
@@ -63,7 +63,7 @@ impl AppState {
     /// The image's disk work runs with the entry UNLOCKED: serialize a
     /// consistent snapshot under the lock, stage it (write + fsync,
     /// the megabytes half) without the lock, then re-take the lock to
-    /// publish. Readers and writers of the context proceed while the
+    /// publish. Readers and writers of the `context` proceed while the
     /// bytes land; before this, every flush stalled them for the whole
     /// write.
     pub(crate) fn flush_entry(&self, name: &str, entry: &Entry) -> bool {
@@ -236,7 +236,7 @@ impl AppState {
         published
     }
 
-    /// Truncates a context's log once an image covering everything in
+    /// Truncates a `context`'s log once an image covering everything in
     /// it has published. Failure is harmless — the image's watermark
     /// already makes the logged records replay-inert — so it warns and
     /// moves on.
@@ -267,12 +267,12 @@ impl AppState {
 
 impl AppState {
     /// The used-vs-ceiling read behind every storage-quota gate: the
-    /// context's whole on-disk family, summed the same way the
+    /// `context`'s whole on-disk family, summed the same way the
     /// `taguru_context_disk_bytes` gauges sum it — flush-refreshed
     /// snapshot lanes (image, passages, sidecars) plus the live WAL
     /// lanes — so enforcement and observability can never disagree
     /// about what "used" means. `Some((used, ceiling))` when the
-    /// context is AT or over a declared ceiling: at, because a line
+    /// `context` is AT or over a declared ceiling: at, because a line
     /// the next write would cross is a line that no longer admits
     /// growth (the WAL cap compares the same way). Content growth
     /// lands in the live lanes, so a burst inside one flush interval
@@ -308,7 +308,7 @@ impl AppState {
 
     /// [`Self::storage_quota_excess`] for a caller holding no entry
     /// lock — the import loop's per-batch pre-check. `None` for an
-    /// unknown context too: creation is never quota-gated (a declared
+    /// unknown `context` too: creation is never quota-gated (a declared
     /// name may not exist yet), and the growth gates inside the write
     /// path cover everything a fresh batch then writes.
     pub fn storage_quota_refusal(&self, name: &str) -> Option<(u64, u64)> {
@@ -318,7 +318,7 @@ impl AppState {
     }
 
     /// The write path of the HTTP mutators: stage the whole batch in
-    /// the context's WAL — one fsync, group commit at exactly the
+    /// the `context`'s WAL — one fsync, `group` commit at exactly the
     /// granularity the API already locks at — and only then run
     /// `operate` to apply it. An append that cannot be made durable
     /// refuses the write outright ([`AccessError::Unpersisted`],
@@ -332,7 +332,7 @@ impl AppState {
     /// looking exactly like an applied record: `ensure_hot`'s replay
     /// (`replay_op`) continues past a rejection where the live path
     /// stopped at the first one, so that tail would be tried
-    /// independently — and could succeed — next time this context
+    /// independently — and could succeed — next time this `context`
     /// goes cold. `applied` reports how many ops actually landed so
     /// the excess can be trimmed back out before this returns.
     pub(crate) fn logged_write<T>(
@@ -588,10 +588,10 @@ impl AppState {
         result
     }
 
-    /// Evicts least-recently-used, unpinned, hot contexts until their
-    /// resident estimate fits the budget. `except` (the context just
-    /// used) is never evicted, so a single oversized context cannot
-    /// thrash. Dirty contexts are persisted before eviction; if that
+    /// Evicts least-recently-used, unpinned, hot `contexts` until their
+    /// resident estimate fits the budget. `except` (the `context` just
+    /// used) is never evicted, so a single oversized `context` cannot
+    /// thrash. Dirty `contexts` are persisted before eviction; if that
     /// save fails they stay resident rather than losing writes. When
     /// `except` alone is bigger than the whole budget — or an eligible
     /// dirty candidate's save keeps failing and it stays resident —
@@ -757,14 +757,14 @@ impl AppState {
     /// it only to publish. Calling them here, instead of this function
     /// doing its own lock-held save the way it once did unconditionally,
     /// means an eviction no longer stalls every reader and writer of
-    /// the context for as long as the image takes to land — the same
+    /// the `context` for as long as the image takes to land — the same
     /// stall `flush_entry` was written to avoid in the first place.
     /// The lock-held save below still exists as the fallback for the
     /// rare case a rival flush is already mid-flight when this call
     /// starts: `flush_entry`'s own claim would just lose that race and
     /// no-op, and skipping the drop-to-Cold below in that case would
     /// mean the caller's eviction sweep might never make progress on a
-    /// context under sustained write pressure.
+    /// `context` under sustained write pressure.
     pub(crate) fn evict_entry(&self, name: &str, entry: &Entry) -> bool {
         // On a replica nothing is ever dirty (writes are refused), so
         // the flush attempts are structurally no-ops — skipped for
@@ -1097,7 +1097,7 @@ mod tests {
     /// the tail of the function entirely — the promotion `ensure_hot`
     /// just did (and `recount_entry` already counted) never reached the
     /// budget sweep, and the entry's `last_touch` stayed frozen, so a
-    /// repeatedly-refused context would look like the LRU's oldest
+    /// repeatedly-refused `context` would look like the LRU's oldest
     /// victim on the next sweep despite being the most recently hit.
     #[test]
     fn storage_quota_refusal_still_touches_and_sweeps() {
@@ -1306,13 +1306,13 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    /// #562 item 2: a single context bigger than the whole cache must
+    /// #562 item 2: a single `context` bigger than the whole cache must
     /// not wedge the cheap 1/64 gate open forever. Before the fix, once
-    /// the eviction loop ran out of candidates (the oversized context
+    /// the eviction loop ran out of candidates (the oversized `context`
     /// is `except`, so the loop always skips it) while `total` was
     /// still over budget, nothing ever brought `resident_estimate`
     /// back under `cache_bytes` on its own — every subsequent write
-    /// paid the full O(contexts) sweep, forever.
+    /// paid the full O(`contexts`) sweep, forever.
     #[test]
     fn a_context_bigger_than_the_cache_sets_and_clears_saturation() {
         let dir = scratch_dir("budget-saturation");
@@ -1505,8 +1505,8 @@ mod tests {
     }
 
     /// The cache ceiling's provability claim (issue #136): under
-    /// pressure, a context past its declared ceiling is evicted before
-    /// the LRU victim — so the eviction damage a saturating context
+    /// pressure, a `context` past its declared ceiling is evicted before
+    /// the LRU victim — so the eviction damage a saturating `context`
     /// can inflict on compliant residents is bounded by its ceiling,
     /// while recency still orders everything else.
     #[test]
@@ -1580,14 +1580,14 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    /// The counterpart to the test above: a context with a
+    /// The counterpart to the test above: a `context` with a
     /// STORAGE-only quota (`cache_bytes: None`) must read as
     /// `over_ceiling == false` and behave as an ordinary LRU
     /// candidate, not get reordered ahead of the true LRU victim.
     /// Every existing `cache_bytes: None` quota test boots with
     /// `cache_bytes = usize::MAX`, so the sweep's sort/eviction never
     /// actually runs under real pressure to prove this either way —
-    /// same three-context LRU shape, but under a real, tight budget.
+    /// same three-`context` LRU shape, but under a real, tight budget.
     #[test]
     fn a_storage_only_quota_context_is_not_prioritized_for_eviction() {
         let dir = scratch_dir("cache-ceiling-storage-only");
@@ -1659,7 +1659,7 @@ mod tests {
     }
 
     /// `over_ceiling`'s own comment calls the check "strictly over"
-    /// (`engine.rs:677`): a context sitting exactly AT its declared
+    /// (`engine.rs:677`): a `context` sitting exactly AT its declared
     /// `cache_bytes` ceiling must not be prioritized ahead of a plain
     /// LRU victim. Neither existing ceiling test pins this boundary —
     /// one is comfortably over (`cache_bytes: Some(1)`), the other has
@@ -1731,9 +1731,9 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    /// A context whose load failed answers the remembered refusal
+    /// A `context` whose load failed answers the remembered refusal
     /// without touching the disk until the retry window elapses — a
-    /// permanently corrupt context must not cost a read + full parse
+    /// permanently corrupt `context` must not cost a read + full parse
     /// per request under client retries — and heals by itself on the
     /// first retry after the files are restored.
     #[test]
@@ -2751,7 +2751,7 @@ mod tests {
     /// (`append_batch`'s double-fault leftover). The client is told
     /// the write failed — but the record sits in the log looking
     /// exactly like an acknowledged one, and replay's later-wins
-    /// seq-dedup only retires it if a LATER write to this context
+    /// seq-dedup only retires it if a LATER write to this `context`
     /// lands at the same seq before a crash. logged_write must not
     /// wait for either: the same immediate image flush the
     /// partial-apply faults get truncates the leaked tail right away.
@@ -2923,8 +2923,8 @@ mod tests {
     /// With the WAL off, an entry's image is its ONLY durable home. A
     /// flush must therefore not clear `dirty` before it has published that
     /// image: if it did, an eviction racing the flush would read "clean",
-    /// drop the hot context WITHOUT saving, and lose the acknowledged
-    /// write outright. Two contexts thrash a one-byte budget — each write
+    /// drop the hot `context` WITHOUT saving, and lose the acknowledged
+    /// write outright. Two `contexts` thrash a one-byte budget — each write
     /// evicts the other while it is still dirty — as a flusher runs flat
     /// out, so staging (unlocked) and eviction interleave every which way.
     /// Every acknowledged write must still be readable, with no restart
@@ -3791,7 +3791,7 @@ mod tests {
     /// `crate::metrics` copy of the same five-lane sum,
     /// `ContextDiskUsage`'s doc explains why it's a second
     /// independent computation, not a shared helper) agrees with this
-    /// one exactly, for the same context.
+    /// one exactly, for the same `context`.
     #[test]
     fn storage_quota_used_is_the_exact_five_lane_sum() {
         let dir = scratch_dir("quota-five-lanes");

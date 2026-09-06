@@ -75,15 +75,15 @@ use tracing::{error, info, warn};
 /// SIGHUP and when the `--config` file changes (see
 /// [`spawn_keyring_reload_tasks`]), so key rotation never costs the
 /// restart everything else legitimately does:
-/// - `TAGURU_DATA_DIR`: where context images and sidecars live (default
+/// - `TAGURU_DATA_DIR`: where `context` images and sidecars live (default
 ///   `data`). Disk is the source of truth; memory is a cache over it.
-/// - `TAGURU_CACHE_BYTES`: resident budget for unpinned loaded contexts
-///   (default 512 MiB). Past it, least-recently-used contexts are
-///   flushed and dropped; pinned contexts live outside the budget.
-/// - `TAGURU_FLUSH_SECS`: how often dirty contexts are persisted (default
+/// - `TAGURU_CACHE_BYTES`: resident budget for unpinned loaded `contexts`
+///   (default 512 MiB). Past it, least-recently-used `contexts` are
+///   flushed and dropped; pinned `contexts` live outside the budget.
+/// - `TAGURU_FLUSH_SECS`: how often dirty `contexts` are persisted (default
 ///   5). With the WAL on this is image-freshness cadence; writes also
 ///   persist on eviction and on graceful shutdown (SIGINT/SIGTERM).
-/// - `TAGURU_WAL`: per-context write-ahead log for acknowledged graph
+/// - `TAGURU_WAL`: per-`context` write-ahead log for acknowledged graph
 ///   writes (default on). `0`/`false` restores the flush-interval
 ///   crash-loss window.
 /// - `TAGURU_ADDR`: bind address (default 127.0.0.1:8248 — "TAGU" on a
@@ -95,32 +95,32 @@ use tracing::{error, info, warn};
 /// - `TAGURU_LOG_FORMAT`: `json` for one JSON object per log line;
 ///   anything else keeps the human-readable format. Logs go to stderr.
 /// - `TAGURU_LOG_SEARCHES`: `1` emits one `taguru::search` event line
-///   per retrieval (context, op, cue, hits) for keyword analysis in
+///   per retrieval (`context`, op, cue, hits) for keyword analysis in
 ///   the log pipeline. Off by default: cues are memory content, and
 ///   the standard log stream carries no content.
 /// - `TAGURU_METRICS_PER_CONTEXT`: adds the `taguru_context_*` gauge
 ///   families (disk bytes by file family, resident bytes, pinned,
-///   counts) to `/metrics` — `1`/`all` for every context, N ≥ 2 for
-///   the top-N by disk size. Off by default: per-context labels ×
-///   many contexts is a Prometheus cardinality cost an operator
+///   counts) to `/metrics` — `1`/`all` for every `context`, N ≥ 2 for
+///   the top-N by disk size. Off by default: per-`context` labels ×
+///   many `contexts` is a Prometheus cardinality cost an operator
 ///   should choose, not inherit.
 /// - `TAGURU_MAX_CONCURRENT_HEAVY_OPS`: shared ceiling for concurrent
 ///   vocabulary audits (including a drift audit's `include_twins`) and
-///   per-context compactions (default 2; 0 disables). Excess calls are
+///   per-`context` compactions (default 2; 0 disables). Excess calls are
 ///   shed immediately with 503 + `Retry-After`.
 /// - `TAGURU_AUTO_COMPACT`: ratio-triggered auto-compaction (default
-///   on) — each flusher tick rebuilds at most the one worst context
+///   on) — each flusher tick rebuilds at most the one worst `context`
 ///   whose dead ratio exceeds `TAGURU_AUTO_COMPACT_RATIO` (default
 ///   0.5, i.e. dead weight outgrew live content), behind the heavy-ops
 ///   ceiling above. `0`/`false` restores manual-only compaction for
 ///   operators who prefer scheduled quiet-window sweeps.
-/// - `TAGURU_CONTEXT_QUOTAS`: per-context ceilings, one JSON object in
+/// - `TAGURU_CONTEXT_QUOTAS`: per-`context` ceilings, one JSON object in
 ///   the `TAGURU_KEY_SCOPES` mold — `{"name": {"storage_bytes": N,
 ///   "cache_bytes": M}}`, each field optional but never both absent.
 ///   `storage_bytes` refuses growth writes (507 `storage_full`) once
-///   the context's on-disk family reaches it; retract/compact/delete
-///   stay open. `cache_bytes` bounds the context's resident share:
-///   under cache pressure a context past it is evicted first. A broken
+///   the `context`'s on-disk family reaches it; retract/compact/delete
+///   stay open. `cache_bytes` bounds the `context`'s resident share:
+///   under cache pressure a `context` past it is evicted first. A broken
 ///   declaration refuses boot, like broken credentials.
 /// - `OTEL_EXPORTER_OTLP_ENDPOINT` (or the `_TRACES_` variant): turns
 ///   on OTLP/HTTP span export — one span per request, parented from an
@@ -1184,10 +1184,10 @@ pub(crate) async fn stop_background_tasks(tasks: Vec<tokio::task::JoinHandle<()>
 
 /// The periodic flusher: every `flush_secs`, persist what is dirty —
 /// and, when auto embedding is on, refresh what just flushed; when
-/// auto-compaction is on, rebuild the worst dead-ratio context past
+/// auto-compaction is on, rebuild the worst dead-ratio `context` past
 /// its trigger (at most one per tick, behind a `heavy_ops` permit).
 /// Best effort: a failed refresh is retried the next time a write
-/// dirties the context (the gloss diff is idempotent), and the manual
+/// dirties the `context` (the gloss diff is idempotent), and the manual
 /// endpoint always remains.
 fn spawn_flusher(
     state: AppState,
@@ -1240,10 +1240,10 @@ fn spawn_flusher(
 }
 
 /// Ceiling on one auto-compaction inside the flusher tick. A rebuild
-/// is proportional to a single context's footprint and normally
+/// is proportional to a single `context`'s footprint and normally
 /// finishes in seconds; this is a backstop an order of magnitude
 /// above that (and above the request timeout manual compaction runs
-/// under), so hitting it means the context genuinely does not fit the
+/// under), so hitting it means the `context` genuinely does not fit the
 /// background path — not that the box was briefly busy.
 const AUTO_COMPACT_BUDGET: Duration = Duration::from_secs(60);
 
@@ -1251,7 +1251,7 @@ const AUTO_COMPACT_BUDGET: Duration = Duration::from_secs(60);
 /// can run behind `catch_unwind` as a plain synchronous call — the
 /// guarded closure must not straddle an `.await`, which rules out
 /// wrapping the loop body in place. `oversized` accumulates the
-/// contexts whose auto-compaction blew [`AUTO_COMPACT_BUDGET`]; they
+/// `contexts` whose auto-compaction blew [`AUTO_COMPACT_BUDGET`]; they
 /// are never re-selected for the life of the process.
 fn run_flush_tick(
     state: &AppState,

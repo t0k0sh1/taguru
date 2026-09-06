@@ -74,7 +74,7 @@ mod tests {
 
     /// Issue #677 item 2, passage side: the auto-embed ticker's variant
     /// skips its width probe when a recent embed (this pass or any
-    /// other context's) already confirmed the width — unlike an
+    /// other `context`'s) already confirmed the width — unlike an
     /// explicit `refresh_passage_embeddings` call, which always probes
     /// (see the test just above, and that function's own doc).
     #[test]
@@ -1035,10 +1035,10 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    /// A model change over a context that has no passages at all must
+    /// A model change over a `context` that has no passages at all must
     /// write nothing: `fresh_model` alone — with an EMPTY fresh table —
     /// is not a change, and minting a sidecar (or bumping config) for
-    /// it would churn every passage-less context on every model swap.
+    /// it would churn every passage-less `context` on every model swap.
     #[test]
     fn a_model_change_over_an_empty_passage_store_writes_no_sidecar() {
         let dir = scratch_dir("pvec-model-empty");
@@ -1139,7 +1139,7 @@ mod tests {
     /// Issue #677 item 3, passage side — mirrors gloss_tests.rs's
     /// `a_failed_vector_load_is_quarantined_then_recovers`: a genuine
     /// read failure on the paragraph vector sidecar must not be cached
-    /// as if the context had no passages embedded, or the vector lane
+    /// as if the `context` had no passages embedded, or the vector lane
     /// stays silently empty for the rest of this residency even after
     /// the disk recovers.
     #[test]

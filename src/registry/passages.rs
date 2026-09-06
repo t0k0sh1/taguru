@@ -50,7 +50,7 @@ pub enum PassagesWriteError {
     /// The store itself failed (load, append, fsync) — an operator
     /// problem, surfaced like every other io failure here.
     Io(io::Error),
-    /// The context is at or over its declared storage ceiling
+    /// The `context` is at or over its declared storage ceiling
     /// (`TAGURU_CONTEXT_QUOTAS`) — the same 507 `storage_full`
     /// contract as the graph side's
     /// [`super::AccessError::QuotaExceeded`].
@@ -136,10 +136,10 @@ impl AppState {
     /// (ADR 0011 §4 steps 1–2): every source name whose metadata the
     /// filter admits, read from the passage store — the one place
     /// `SourceMeta` lives — for a handler to resolve into a
-    /// [`taguru::context::SourceWindow`] inside its `read_context`
+    /// [`taguru::`context`::SourceWindow`] inside its `read_context`
     /// closure. Runs BEFORE `read_context`, like `hidden_label`: the
     /// store takes its own locks, and this keeps the join out of the
-    /// entry's read path. `None` when the context does not exist.
+    /// entry's read path. `None` when the `context` does not exist.
     /// Sources with no stored passage (associations-only imports) have
     /// no metadata and are absent by construction — ADR 0011 §4's
     /// documented rule for undatable sources, not an oversight.
@@ -161,7 +161,7 @@ impl AppState {
     /// join input (ADR 0012 §4 `staleness`, the ADR 0011 §4 layering:
     /// dates never enter the library, so the caller joins by name).
     /// Sources with neither field — and sources with no stored passage
-    /// at all — are simply absent. `None` when the context does not
+    /// at all — are simply absent. `None` when the `context` does not
     /// exist. Runs before `read_context`, like `window_source_names`.
     pub fn source_effective_times(
         &self,
@@ -247,7 +247,7 @@ impl AppState {
     /// (ADR 0007 §7) governing each, batching every pair an
     /// association-bearing response needs into one passage-store load
     /// rather than one per attribution. Best-effort: an unknown
-    /// context, a deleted entry, or a passage-store load failure all
+    /// `context`, a deleted entry, or a passage-store load failure all
     /// resolve to an empty map rather than an error. Association reads
     /// (recall, query, explore, activate, unreachable_from) are graph
     /// reads first; these markers are enrichment on top, not a hard
@@ -847,7 +847,7 @@ mod tests {
 
     /// #678: `resolve_markers`'s best-effort degrades — an empty key
     /// iterator skips the store load entirely (the "graph-only
-    /// response never touches passages" contract), an unknown context
+    /// response never touches passages" contract), an unknown `context`
     /// degrades to an empty map — and the null-means-nothing contract:
     /// a key with no covering marker simply never lands in the result,
     /// it is not fabricated as `Markers::default()`.

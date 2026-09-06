@@ -1,8 +1,8 @@
 use super::*;
 
 impl AppState {
-    /// One context's current revision counters, or `None` for an
-    /// unknown or deleted context — what the group fingerprint hashes
+    /// One `context`'s current revision counters, or `None` for an
+    /// unknown or deleted `context` — what the `group` fingerprint hashes
     /// per member, without loading anything.
     pub fn context_revision(&self, name: &str) -> Option<ContextRevision> {
         let entry = self.lookup(name)?;
@@ -10,7 +10,7 @@ impl AppState {
         Some(entry.revision_snapshot(&inner))
     }
 
-    /// The routing directory: every context's name, description, policy,
+    /// The routing directory: every `context`'s name, description, policy,
     /// residency, and stats, in name order. For large registries, prefer
     /// [`AppState::directory_page`], which seeks a page in O(log n + k)
     /// instead of describing every entry on every call.
@@ -26,10 +26,10 @@ impl AppState {
     /// `BTreeMap`-backed registry — the paged sibling of
     /// [`AppState::directory`]. Cuts the page under the registry lock
     /// (cloning only `Arc` handles, same as [`AppState::snapshot`]) and
-    /// describes the survivors after dropping it: a context's
+    /// describes the survivors after dropping it: a `context`'s
     /// `Entry::inner` lock must never be taken while the registry lock
     /// is held, the same ordering `directory`/`lookup` already keep.
-    /// A page can come back shorter than `limit` if a context in it is
+    /// A page can come back shorter than `limit` if a `context` in it is
     /// deleted in the instant between the seek and [`describe_entry`]
     /// reading its slot — the same race `directory` already tolerates.
     /// If EVERY entry in the seek window loses that race, re-seek past
@@ -80,16 +80,16 @@ impl AppState {
         }
     }
 
-    /// One directory row by name, or `None` for an unknown context.
+    /// One directory row by name, or `None` for an unknown `context`.
     pub fn directory_entry(&self, name: &str) -> Option<DirectoryEntry> {
         let entry = self.lookup(name)?;
         describe_entry(name.to_string(), &entry)
     }
 
-    /// Whether a context exists, by registry membership. The
-    /// cross-context search entrances vet their whole target list up
-    /// front, so a mistyped name refuses before any context is
-    /// searched; a context deleted between this check and its read is
+    /// Whether a `context` exists, by registry membership. The
+    /// cross-`context` search entrances vet their whole target list up
+    /// front, so a mistyped name refuses before any `context` is
+    /// searched; a `context` deleted between this check and its read is
     /// still caught by the read itself.
     pub fn context_exists(&self, name: &str) -> bool {
         self.lookup(name).is_some()
@@ -97,7 +97,7 @@ impl AppState {
 }
 
 impl AppState {
-    /// Materializes everything one context's export stream renders
+    /// Materializes everything one `context`'s export stream renders
     /// from — graph, aliases, meta, passages — under a single fence.
     /// The graph half is read under `inner` (shared when hot,
     /// exclusive across a cold load), which every graph write also
@@ -109,8 +109,8 @@ impl AppState {
     ///
     /// Cost note, like `compact_context`: the whole graph is walked and
     /// materialized into owned strings while the (shared) fence is held,
-    /// so on a large context writers to THAT context wait out the
-    /// materialization. It is a per-context stall, off the async runtime
+    /// so on a large `context` writers to THAT `context` wait out the
+    /// materialization. It is a per-`context` stall, off the async runtime
     /// (`block_in_place` at the HTTP layer); a streaming, lock-light
     /// export is future work, not a v1 promise.
     pub fn export_context(
@@ -221,13 +221,13 @@ impl AppState {
         })
     }
 
-    /// Rebuilds one context's image without its dead weight — the
+    /// Rebuilds one `context`'s image without its dead weight — the
     /// append-only storage's accumulated retracted edges, unlinked
     /// attributions, and arena slack (see [`Context::compacted`]) —
     /// then persists the fresh image immediately. Runs under the
-    /// context's exclusive lock for the rebuild: requests to THIS
-    /// context wait; every other context is untouched. Crash-safe by
-    /// construction: the fresh context carries the old WAL watermark,
+    /// `context`'s exclusive lock for the rebuild: requests to THIS
+    /// `context` wait; every other `context` is untouched. Crash-safe by
+    /// construction: the fresh `context` carries the old WAL watermark,
     /// so a crash before the flush lands simply boots the old image
     /// and replays the same log — compaction lost, nothing corrupted.
     pub fn compact_context(
@@ -327,7 +327,7 @@ impl AppState {
     }
 
     /// The passage-log half of [`Self::compact_context`] alone,
-    /// threshold-gated: folds the context's passage log into its
+    /// threshold-gated: folds the `context`'s passage log into its
     /// snapshot when the pending log outgrew both `floor_bytes` and
     /// the snapshot itself, and touches nothing else — no graph
     /// rebuild, no image rewrite. For short-lived offline hosts
@@ -359,7 +359,7 @@ impl AppState {
     /// The passage half of compaction, shared by
     /// [`Self::compact_context`] and [`Self::compact_passages_if_worthwhile`]
     /// so the watermark guard and both warning wordings cannot drift
-    /// the way they had (issue #588): a context with no passage
+    /// the way they had (issue #588): a `context` with no passage
     /// history ever must not get store files minted just to compact
     /// nothing, and `compact` failing warns rather than propagating —
     /// the caller's own work (a graph compaction, a write) already
@@ -401,7 +401,7 @@ impl AppState {
         }
     }
 
-    /// Every context whose dead ratio strictly exceeds
+    /// Every `context` whose dead ratio strictly exceeds
     /// `min_dead_ratio`, worst first — read from each entry's existing
     /// bookkeeping ([`Context::dead_ratio`] while hot, the cached
     /// sidecar snapshot's while cold); nothing is loaded or rebuilt
@@ -430,11 +430,11 @@ impl AppState {
     }
 
     /// The ratio-triggered auto-compaction's selection half (issue
-    /// #135): the worst-ratio context past the configured trigger that
+    /// #135): the worst-ratio `context` past the configured trigger that
     /// is not in `skip`, or `None` — always `None` while the feature
-    /// is off. `skip` holds the contexts whose rebuild already blew
+    /// is off. `skip` holds the `contexts` whose rebuild already blew
     /// the flusher's compaction budget: that failure cannot heal by
-    /// retrying (the context only grows), so re-selecting one would
+    /// retrying (the `context` only grows), so re-selecting one would
     /// burn a budget's worth of CPU every tick forever. The flusher
     /// asks this every pass and compacts at most one candidate, so the
     /// policy stays amortized like the passages store's own (the next
@@ -450,7 +450,7 @@ impl AppState {
             .find(|(name, _)| !skip.contains(name))
     }
 
-    /// Server-wide sweep: every context whose live dead ratio strictly
+    /// Server-wide sweep: every `context` whose live dead ratio strictly
     /// exceeds `min_dead_ratio` is rebuilt via [`Self::compact_context`],
     /// worst ratio first, so a deadline that cuts the sweep short still
     /// recovers the most it could. Candidates come from
@@ -458,8 +458,8 @@ impl AppState {
     /// Sequential by design: the caller
     /// (`POST /maintenance/compact`) has already drained ordinary
     /// traffic before calling this, so there is no concurrency to hide
-    /// behind parallelism, and one context at a time caps the sweep's
-    /// peak memory at a single context's footprint.
+    /// behind parallelism, and one `context` at a time caps the sweep's
+    /// peak memory at a single `context`'s footprint.
     pub fn run_maintenance_compaction(
         &self,
         min_dead_ratio: f64,
@@ -781,14 +781,14 @@ mod tests {
     }
 
     /// `export_context`'s hot path (#585): a repeatedly-failing export
-    /// against an already-resident context must not keep bumping its
+    /// against an already-resident `context` must not keep bumping its
     /// LRU recency OR run a budget sweep, exactly as the doc above the
     /// `Slot::Hot` arm and the slow path's own comment both promise.
     /// Regression for the gap where only the slow (cold-load) path
     /// actually honored it.
     ///
     /// `enforce_budget`'s own skip (`if name == except { continue; }`)
-    /// means the exported context is NEVER a candidate for its own
+    /// means the exported `context` is NEVER a candidate for its own
     /// call — watching "sake" stay resident would pass whether or not
     /// `enforce_budget("sake")` actually ran, so it cannot witness the
     /// skip. `budget_ops` is the one counter every `enforce_budget`
@@ -885,7 +885,7 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    /// An unknown context name is the second early return.
+    /// An unknown `context` name is the second early return.
     #[test]
     fn compact_passages_if_worthwhile_declines_an_unknown_context() {
         let dir = scratch_dir("compact-worthwhile-unknown");
@@ -894,7 +894,7 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    /// A deleted (tombstoned) context is the third early return —
+    /// A deleted (tombstoned) `context` is the third early return —
     /// `read_unless_deleted` must refuse it just as it does every other
     /// entry point.
     #[test]
@@ -914,7 +914,7 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    /// The watermark guard: a context whose passage log has never
+    /// The watermark guard: a `context` whose passage log has never
     /// received a single write must not get store files minted just to
     /// compact nothing.
     #[test]
@@ -1200,7 +1200,7 @@ mod tests {
     proptest! {
         #![proptest_config(proptest_config())]
 
-        /// The operator path installs the same canonical context as the
+        /// The operator path installs the same canonical `context` as the
         /// library rebuild, flushes it immediately, and re-applies state
         /// that lives outside the graph image when it is loaded again.
         #[test]
@@ -1350,7 +1350,7 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    /// A cold context's dead ratio comes from its persisted stats
+    /// A cold `context`'s dead ratio comes from its persisted stats
     /// snapshot, not a load — [`AppState::run_maintenance_compaction`]'s
     /// whole point is picking candidates without paying for residency.
     #[test]
@@ -1399,7 +1399,7 @@ mod tests {
     }
 
     /// [`AppState::auto_compact_candidate`] answers with the single
-    /// worst context strictly past the trigger, ignores everything at
+    /// worst `context` strictly past the trigger, ignores everything at
     /// or under it, steps to the next-worst when the worst is in the
     /// oversized skip set (without ever promoting anything from under
     /// the trigger), and — because compaction zeroes the winner's dead

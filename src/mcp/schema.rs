@@ -4,11 +4,11 @@ fn object_schema(properties: Value, required: &[&str]) -> Value {
     json!({ "type": "object", "properties": properties, "required": required })
 }
 
-/// [`object_schema`] for the search tools, which target one context or
+/// [`object_schema`] for the search tools, which target one `context` or
 /// several: `context`, `contexts`, and `groups` join the given
 /// properties, and an `anyOf` demands at least one (the `cite_passage`
 /// precedent). `contexts` and `groups` combine — both are the
-/// cross-context form — but `context` beside either is refused by
+/// cross-`context` form — but `context` beside either is refused by
 /// `route_tool`, where the message can say so; a schema can only say
 /// "invalid".
 pub(super) fn search_target_schema(properties: Value, required: &[&str]) -> Value {
@@ -70,7 +70,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
     let tools = vec![
         (
             "list_contexts",
-            "Routing directory: every context's name, description, stats (counts, top concepts, label sample), and usage counters (reads/empty_reads/writes, last-used times). Pick the search/ingest target here yourself.",
+            "Routing directory: every `context`'s name, description, stats (counts, top concepts, label sample), and usage counters (reads/empty_reads/writes, last-used times). Pick the search/ingest target here yourself.",
             object_schema(
                 json!({
                     "limit": { "type": "integer", "minimum": 0, "description": "page size, keyset-paged by name (default/ceiling 1000)" },
@@ -82,7 +82,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "create_context",
-            "Create a context. One context = one 文脈: one spelling, one referent — different things sharing a spelling get separate contexts. The description drives routing; say concretely what the context covers.",
+            "Create a `context`. One `context` = one 文脈: one spelling, one referent — different things sharing a spelling get separate `contexts`. The description drives routing; say concretely what the `context` covers.",
             object_schema(
                 json!({
                     "name": { "type": "string" },
@@ -110,12 +110,12 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "delete_context",
-            "Delete a context and its files (irreversible).",
+            "Delete a `context` and its files (irreversible).",
             object_schema(json!({ "name": { "type": "string" } }), &["name"]),
         ),
         (
             "rename_context",
-            "Rename a context (admin role): the whole file family moves to the new name and every group naming it is rewritten to match. Fails if the destination name is already taken.",
+            "Rename a `context` (admin role): the whole file family moves to the new name and every `group` naming it is rewritten to match. Fails if the destination name is already taken.",
             object_schema(
                 json!({
                     "name": { "type": "string" },
@@ -126,7 +126,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "list_groups",
-            "Group directory: every group's name, description, member context names, and child group names. A group bundles contexts (many-to-many) and may nest child groups up to 3 levels (cycles refused) — organize related contexts under one name. A group and a context may share the same name without conflict.",
+            "Group directory: every `group`'s name, description, member `context` names, and child `group` names. A `group` bundles `contexts` (many-to-many) and may nest child `groups` up to 3 levels (cycles refused) — organize related `contexts` under one name. A `group` and a `context` may share the same name without conflict.",
             object_schema(
                 json!({
                     "limit": { "type": "integer", "minimum": 0, "description": "page size, keyset-paged by name (default/ceiling 1000)" },
@@ -137,7 +137,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "create_group",
-            "Create a group bundling contexts and, optionally, child groups (nesting: at most 3 groups tall, never cyclic; each set holds at most 1000 names — past that, split into nested child groups). Every listed context and child group must already exist; membership never dangles — deleting a context or a group drops it from every group.",
+            "Create a `group` bundling `contexts` and, optionally, child `groups` (nesting: at most 3 `groups` tall, never cyclic; each set holds at most 1000 names — past that, split into nested child `groups`). Every listed `context` and child `group` must already exist; membership never dangles — deleting a `context` or a `group` drops it from every `group`.",
             object_schema(
                 json!({
                     "name": { "type": "string" },
@@ -158,7 +158,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "update_group",
-            "Update a group's description and/or membership. add_contexts/remove_contexts and add_groups/remove_groups are deltas against the current members, not a replacement list; a name in both ends up a member. Added contexts and child groups must exist; removing a non-member is a no-op; nesting stays at most 3 groups tall and acyclic, and the resulting membership at most 1000 member contexts and 1000 child groups (removals apply first, so one request can trade members within the cap).",
+            "Update a `group`'s description and/or membership. add_contexts/remove_contexts and add_groups/remove_groups are deltas against the current members, not a replacement list; a name in both ends up a member. Added `contexts` and child `groups` must exist; removing a non-member is a no-op; nesting stays at most 3 `groups` tall and acyclic, and the resulting membership at most 1000 member `contexts` and 1000 child `groups` (removals apply first, so one request can trade members within the cap).",
             object_schema(
                 json!({
                     "name": { "type": "string" },
@@ -173,12 +173,12 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "delete_group",
-            "Delete a group (irreversible). Only the bundling goes; the member contexts, the child groups, and their data are untouched — parents naming the group just drop the child.",
+            "Delete a `group` (irreversible). Only the bundling goes; the member `contexts`, the child `groups`, and their data are untouched — parents naming the `group` just drop the child.",
             object_schema(json!({ "name": { "type": "string" } }), &["name"]),
         ),
         (
             "rename_group",
-            "Rename a group (admin role): the group's file moves to the new name and every OTHER group naming it as a child is rewritten to match. Fails if the destination name is already taken.",
+            "Rename a `group` (admin role): the `group`'s file moves to the new name and every OTHER `group` naming it as a child is rewritten to match. Fails if the destination name is already taken.",
             object_schema(
                 json!({
                     "name": { "type": "string" },
@@ -189,7 +189,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "add_associations",
-            "Write facts as a batch (one document = one call, up to 10,000 associations; split larger documents), a source id on every element; single-fact calls cost a full durable write each, so collect a document's facts first. Discipline: check spellings with resolve/resolve_label and reuse before minting; don't re-assert paraphrases within one document; negation = positive label + negative weight; make implicit membership an explicit edge; weave ordered procedures with the three edges 最初の工程/次の工程/工程 (details in get_protocol). All-or-nothing: a rejected batch writes nothing (`integrity: \"nothing_written\"` in the error), and a rejection lists every offending `associations[i].field` as a path-addressed issue. Correct exactly those fields in your own copy of the batch and resend the COMPLETE batch — never delete an item to work around a rejection, never invent a fact that was not already there, and never call add_associations again for just the fixed items (that would silently omit everything else). If store_passages for the same source also runs, note it is a SEPARATE write — a document's facts can land while its passage store still fails, or vice versa; POST /import is the only all-or-nothing per-source call across both. If this context has an installed schema (get_schema) in strict mode, a batch violating a relation's domain/range also refuses this way — issues[].kind is 'domain' or 'range', naming which side; in warn mode the same batch writes and the violations ride along in the success result's issues instead.",
+            "Write facts as a batch (one document = one call, up to 10,000 associations; split larger documents), a source id on every element; single-fact calls cost a full durable write each, so collect a document's facts first. Discipline: check spellings with resolve/resolve_label and reuse before minting; don't re-assert paraphrases within one document; negation = positive label + negative weight; make implicit membership an explicit edge; weave ordered procedures with the three edges 最初の工程/次の工程/工程 (details in get_protocol). All-or-nothing: a rejected batch writes nothing (`integrity: \"nothing_written\"` in the error), and a rejection lists every offending `associations[i].field` as a path-addressed issue. Correct exactly those fields in your own copy of the batch and resend the COMPLETE batch — never delete an item to work around a rejection, never invent a fact that was not already there, and never call add_associations again for just the fixed items (that would silently omit everything else). If store_passages for the same source also runs, note it is a SEPARATE write — a document's facts can land while its passage store still fails, or vice versa; POST /import is the only all-or-nothing per-source call across both. If this `context` has an installed schema (get_schema) in strict mode, a batch violating a relation's domain/range also refuses this way — issues[].kind is 'domain' or 'range', naming which side; in warn mode the same batch writes and the violations ride along in the success result's issues instead.",
             object_schema(
                 json!({
                     "context": context,
@@ -308,7 +308,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "resolve",
-            "Resolve free wording to stored concept names (normalized entry, absorbs typos). The retrieval entry: use the canonical names it returns as origins for explore/activate. Each candidate says how it matched (kind: exact/alias = the cue IS a stored spelling; containment/fuzzy = it merely overlaps one) and carries a gloss of its heaviest facts — read the gloss before adopting a lookalike (京都 scores 0.67 against 東京都; the glosses tell them apart). Top candidates also carry their declared types when the context has an installed schema. Empty → reword, or lower dice_floor (e.g. 0.2) and retry.",
+            "Resolve free wording to stored concept names (normalized entry, absorbs typos). The retrieval entry: use the canonical names it returns as origins for explore/activate. Each candidate says how it matched (kind: exact/alias = the cue IS a stored spelling; containment/fuzzy = it merely overlaps one) and carries a gloss of its heaviest facts — read the gloss before adopting a lookalike (京都 scores 0.67 against 東京都; the glosses tell them apart). Top candidates also carry their declared types when the `context` has an installed schema. Empty → reword, or lower dice_floor (e.g. 0.2) and retry.",
             object_schema(
                 json!({
                     "context": context,
@@ -366,7 +366,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "describe",
-            "A concept's outline: which labels carry how many facts, per role, plus its declared types when the context has an installed schema. Check a hub here first, then query just the labels you need — never pull a whole profile blind.",
+            "A concept's outline: which labels carry how many facts, per role, plus its declared types when the `context` has an installed schema. Check a hub here first, then query just the labels you need — never pull a whole profile blind.",
             object_schema(
                 json!({ "context": context, "concept": { "type": "string" } }),
                 &["context", "concept"],
@@ -374,7 +374,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "query",
-            "Position-pinned search. subject/label/object each take a string or an array (array = match any); at least one of the three must be given — leaving all three out is refused rather than matching everything. subject_types/object_types further narrow by declared entity type (is_a-expanded) when the context has an installed schema — a filter, never a substitute for pinning a position, and an empty result on a schema-free context. Outline with describe, then narrow by label. Targets one context (context) or several at once (contexts and/or groups) — cross-context matches carry their context, and past the limit the strongest |weight| survives (weights share one scale).",
+            "Position-pinned search. subject/label/object each take a string or an array (array = match any); at least one of the three must be given — leaving all three out is refused rather than matching everything. subject_types/object_types further narrow by declared entity type (is_a-expanded) when the `context` has an installed schema — a filter, never a substitute for pinning a position, and an empty result on a schema-free `context`. Outline with describe, then narrow by label. Targets one `context` (`context`) or several at once (`contexts` and/or `groups`) — cross-`context` matches carry their `context`, and past the limit the strongest |weight| survives (weights share one scale).",
             require_any_of(
                 search_target_schema(
                     json!({
@@ -399,7 +399,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "recall",
-            "Every association touching the cue, whatever its position. Use query when the role matters. Targets one context (context) or several at once (contexts and/or groups) — cross-context matches carry their context, and past the limit the strongest |weight| survives (weights share one scale).",
+            "Every association touching the cue, whatever its position. Use query when the role matters. Targets one `context` (`context`) or several at once (`contexts` and/or `groups`) — cross-`context` matches carry their `context`, and past the limit the strongest |weight| survives (weights share one scale).",
             search_target_schema(
                 json!({
                     "cue": { "type": "string" },
@@ -468,7 +468,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "changes",
-            "What changed in this context since a cursor? Content-change events (associations_added, source_stored/retracted, aliases, schema_updated), aggregated per write call — a bulk import is one associations_added, never one event per line, though one call can emit several kinds. Omit since to start tailing (empty page + the cursor to poll from, right after a full sync). more=true means poll again immediately. A 410 stale_cursor means the position is gone (restart, recreate, or too far behind) — full resync, then tail from a fresh cursor.",
+            "What changed in this `context` since a cursor? Content-change events (associations_added, source_stored/retracted, aliases, schema_updated), aggregated per write call — a bulk import is one associations_added, never one event per line, though one call can emit several kinds. Omit since to start tailing (empty page + the cursor to poll from, right after a full sync). more=true means poll again immediately. A 410 stale_cursor means the position is gone (restart, recreate, or too far behind) — full resync, then tail from a fresh cursor.",
             object_schema(
                 json!({
                     "context": context,
@@ -530,7 +530,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "get_schema",
-            "The installed schema document (entity types, relation domain/range constraints, and enforcement mode), or a 404 distinguishing 'no schema installed' from 'no such context'.",
+            "The installed schema document (entity types, relation domain/range constraints, and enforcement mode), or a 404 distinguishing 'no schema installed' from 'no such `context`'.",
             object_schema(json!({ "context": context }), &["context"]),
         ),
         (
@@ -574,7 +574,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "promote",
-            "Graph-path memory promotion (docs/promotion.html, ADR 0018): move the named source ids from this (scratch) context into an established destination context, WITHOUT re-extraction — the transfer is the export/import round trip in one call. Each source moves whole (passage, date, tags, its share of every association's weight; aliases ride exactly when their canonical is live in the promoted slice, and aliases_dropped counts the rest), source ids survive so promoted citations still name the originating session, and applying is per-source retract-then-apply — re-promoting the same sources is idempotent. The destination must already exist (never created here) and its own schema judges the incoming batches. Every named source must exist in the scratch or the request refuses whole, path-addressed, nothing written. After a real apply the destination's consolidation audit (all three checks, default ceilings) rides back under `audit` — CANDIDATES to judge, never applied; `audit: false` skips it, and `audit_skipped` names why when it could not run (the batches are already durable by then). dry_run=true previews the same batches shape with nothing written and no audit. What stays yours: choosing WHICH sources to promote (review first), judging the audit's candidates, and retiring the promoted scratch afterwards (retract_source) — forgetting is always explicit.",
+            "Graph-path memory promotion (docs/promotion.html, ADR 0018): move the named source ids from this (scratch) `context` into an established destination `context`, WITHOUT re-extraction — the transfer is the export/import round trip in one call. Each source moves whole (passage, date, tags, its share of every association's weight; aliases ride exactly when their canonical is live in the promoted slice, and aliases_dropped counts the rest), source ids survive so promoted citations still name the originating session, and applying is per-source retract-then-apply — re-promoting the same sources is idempotent. The destination must already exist (never created here) and its own schema judges the incoming batches. Every named source must exist in the scratch or the request refuses whole, path-addressed, nothing written. After a real apply the destination's consolidation audit (all three checks, default ceilings) rides back under `audit` — CANDIDATES to judge, never applied; `audit: false` skips it, and `audit_skipped` names why when it could not run (the batches are already durable by then). dry_run=true previews the same batches shape with nothing written and no audit. What stays yours: choosing WHICH sources to promote (review first), judging the audit's candidates, and retiring the promoted scratch afterwards (retract_source) — forgetting is always explicit.",
             object_schema(
                 json!({
                     "context": context,
@@ -613,7 +613,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "search_passages",
-            "Paragraph search over registered passages: a lexical lane (bigram BM25) fused with a semantic lane (paragraph embeddings) where the server has them. The text lane for knowledge that never fit triples (order, conditions, discourse) — look here too when graph search comes up short. The semantic lane works best on declarative phrasing: rephrase the information need as a plausible ANSWER sentence, not a question (query \"SSO is included in the Enterprise plan\", not \"What plan includes SSO?\") — the guess only has to be shaped like the text you hope to find. Optional source filters run BEFORE the lanes: tags (any-of, on tags stored with the source) and a half-open time window [since, until) in epoch seconds over each source's date ?? stored_at — sources with neither timestamp, or no tags, never match the respective filter kind. The result is {plan, hits}: each hit names its paragraph (source + paragraph) and reports per-lane rank/score in `lanes` (a hit only the vector lane surfaced is exactly the paraphrase case the lexical lane cannot see), and `plan` says per searched context whether each lane actually ran — and why not when it did not (embeddings off, nothing embedded yet, model or vector width changed, provider refused) — plus the vector lane's effective cosine floor and, under a filter, how many sources were eligible of how many stored; check it before reading empty hits as \"not in the corpus\". Targets one context (context) or several at once (contexts and/or groups) — cross-context hits carry their context and interleave by per-context rank; scores compare within one context only.",
+            "Paragraph search over registered passages: a lexical lane (bigram BM25) fused with a semantic lane (paragraph embeddings) where the server has them. The text lane for knowledge that never fit triples (order, conditions, discourse) — look here too when graph search comes up short. The semantic lane works best on declarative phrasing: rephrase the information need as a plausible ANSWER sentence, not a question (query \"SSO is included in the Enterprise plan\", not \"What plan includes SSO?\") — the guess only has to be shaped like the text you hope to find. Optional source filters run BEFORE the lanes: tags (any-of, on tags stored with the source) and a half-open time window [since, until) in epoch seconds over each source's date ?? stored_at — sources with neither timestamp, or no tags, never match the respective filter kind. The result is {plan, hits}: each hit names its paragraph (source + paragraph) and reports per-lane rank/score in `lanes` (a hit only the vector lane surfaced is exactly the paraphrase case the lexical lane cannot see), and `plan` says per searched `context` whether each lane actually ran — and why not when it did not (embeddings off, nothing embedded yet, model or vector width changed, provider refused) — plus the vector lane's effective cosine floor and, under a filter, how many sources were eligible of how many stored; check it before reading empty hits as \"not in the corpus\". Targets one `context` (`context`) or several at once (`contexts` and/or `groups`) — cross-`context` hits carry their `context` and interleave by per-`context` rank; scores compare within one `context` only.",
             search_target_schema(
                 json!({
                     "query": { "type": "string" },
@@ -628,7 +628,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "search_communities",
-            "Global search over a context's community-summary artifact (built offline by `taguru communities`): ranked LLM summaries of densely connected concept clusters — for corpus-overview questions (\"what are the main themes?\") that passage and graph search answer poorly. Each hit names its community, the matched summary paragraph, hierarchy level (0 = finest), member concepts with strengths, and concept_count; the response's `stale` flag means the source graph moved since derivation — the summaries describe an older graph, served honestly rather than withheld. The artifact is an ordinary context (default '{context}::communities'; `derived` overrides, for artifacts built with --into); a missing artifact is a refusal naming the build command, never an empty result. One context per call.",
+            "Global search over a `context`'s community-summary artifact (built offline by `taguru communities`): ranked LLM summaries of densely connected concept clusters — for corpus-overview questions (\"what are the main themes?\") that passage and graph search answer poorly. Each hit names its community, the matched summary paragraph, hierarchy level (0 = finest), member concepts with strengths, and concept_count; the response's `stale` flag means the source graph moved since derivation — the summaries describe an older graph, served honestly rather than withheld. The artifact is an ordinary `context` (default '{`context`}::communities'; `derived` overrides, for artifacts built with --into); a missing artifact is a refusal naming the build command, never an empty result. One `context` per call.",
             object_schema(
                 json!({
                     "context": context,
@@ -686,7 +686,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "explain_search",
-            "Why didn't (or did) a source appear in search_passages — one call instead of orchestrating search, citations, and lowered limits by hand. Name the query AND the source (optionally which paragraph) you expected; the answer is the first verdict that applies: not_stored (never ingested here, or retracted), filtered_out (the request's tags/since/until filter excludes the source — the search never considered it), no_term_overlap (the query's terms and the paragraph's terms side by side, as strings — the spelling-mismatch case: stored under 酒蔵, you searched 酒造 — register an alias or reword), below_cutoff (its actual rank, the score cutoff at your limit, and a verified limit that reaches it), or served (its rank — it WAS there). Evidence carries per-term tf/df/BM25 contributions and the vector lane's cosine or the reason that lane never ran. Pass the SAME tags/since/until as the search being explained, or the explanation accounts for a call nobody made. One context per call.",
+            "Why didn't (or did) a source appear in search_passages — one call instead of orchestrating search, citations, and lowered limits by hand. Name the query AND the source (optionally which paragraph) you expected; the answer is the first verdict that applies: not_stored (never ingested here, or retracted), filtered_out (the request's tags/since/until filter excludes the source — the search never considered it), no_term_overlap (the query's terms and the paragraph's terms side by side, as strings — the spelling-mismatch case: stored under 酒蔵, you searched 酒造 — register an alias or reword), below_cutoff (its actual rank, the score cutoff at your limit, and a verified limit that reaches it), or served (its rank — it WAS there). Evidence carries per-term tf/df/BM25 contributions and the vector lane's cosine or the reason that lane never ran. Pass the SAME tags/since/until as the search being explained, or the explanation accounts for a call nobody made. One `context` per call.",
             object_schema(
                 json!({
                     "context": context,
@@ -753,7 +753,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "refresh_embeddings",
-            "After ingesting, re-embed what changed (servers with embeddings only): the glosses (name + graph context) of new or changed concepts and labels, and — where the server opted in — the stored paragraphs. Makes paraphrases and question-shaped cues land through resolve's semantic fallback and search_passages' vector lane.",
+            "After ingesting, re-embed what changed (servers with embeddings only): the glosses (name + graph `context`) of new or changed concepts and labels, and — where the server opted in — the stored paragraphs. Makes paraphrases and question-shaped cues land through resolve's semantic fallback and search_passages' vector lane.",
             object_schema(json!({ "context": context }), &["context"]),
         ),
         (
@@ -835,7 +835,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "audit_schema",
-            "ADR 0009 schema audit: judges every live association against the installed schema document, surfacing what a `strict` flip would refuse without waiting for one — the pre-existing violations `strict` itself can never show (it only judges a write as it happens). Four candidates-not-verdicts sections in one call: violations (domain/range mismatches, paginated, worst-first), untyped_concepts (asserted no schema:type of their own), undeclared_types (asserted type names absent from `types`, always reported), unknown_labels (relation labels absent from `relations`, only when closed_labels is set), and reserved_alias_conflicts (a persisted label alias resolving to the reserved schema:type label). Never auto-applies a fix. 404 if the context has no installed schema.",
+            "ADR 0009 schema audit: judges every live association against the installed schema document, surfacing what a `strict` flip would refuse without waiting for one — the pre-existing violations `strict` itself can never show (it only judges a write as it happens). Four candidates-not-verdicts sections in one call: violations (domain/range mismatches, paginated, worst-first), untyped_concepts (asserted no schema:type of their own), undeclared_types (asserted type names absent from `types`, always reported), unknown_labels (relation labels absent from `relations`, only when closed_labels is set), and reserved_alias_conflicts (a persisted label alias resolving to the reserved schema:type label). Never auto-applies a fix. 404 if the `context` has no installed schema.",
             object_schema(
                 json!({
                     "context": context,
@@ -857,7 +857,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "validate_schema",
-            "Dry-run of a PROPOSED schema document (same shape as put_schema's own arguments) against the live graph — never persisted, and reads the installed schema for no purpose (the proposed document alone drives the judgment, even in a context with none installed yet). The pre-flight before flipping mode to strict: run this first with the intended document to see every violations()/untyped_concepts/undeclared_types/unknown_labels finding it would produce once installed. Same response shape as audit_schema.",
+            "Dry-run of a PROPOSED schema document (same shape as put_schema's own arguments) against the live graph — never persisted, and reads the installed schema for no purpose (the proposed document alone drives the judgment, even in a `context` with none installed yet). The pre-flight before flipping mode to strict: run this first with the intended document to see every violations()/untyped_concepts/undeclared_types/unknown_labels finding it would produce once installed. Same response shape as audit_schema.",
             object_schema(
                 json!({
                     "context": context,
@@ -906,17 +906,17 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "flush",
-            "Persist every dirty context to disk now; answers the flushed names (admin role). The backup handshake's first half: flush, then snapshot the data directory — the same discipline the operator docs describe, reachable by an agent tending its own memory.",
+            "Persist every dirty `context` to disk now; answers the flushed names (admin role). The backup handshake's first half: flush, then snapshot the data directory — the same discipline the operator docs describe, reachable by an agent tending its own memory.",
             object_schema(json!({}), &[]),
         ),
         (
             "export_context",
-            "The whole context as an import batch stream (JSON Lines text) — one batch per source, create block first, aliases last; `taguru import` or POST /import restores it (per-source retract-then-apply, idempotent). The portable, version-independent backup of one context. The stream rides back as one text block: for very large contexts prefer GET /contexts/{name}/export over plain HTTP, or `taguru export` offline.",
+            "The whole `context` as an import batch stream (JSON Lines text) — one batch per source, create block first, aliases last; `taguru import` or POST /import restores it (per-source retract-then-apply, idempotent). The portable, version-independent backup of one `context`. The stream rides back as one text block: for very large `contexts` prefer GET /contexts/{name}/export over plain HTTP, or `taguru export` offline.",
             object_schema(json!({ "context": context }), &["context"]),
         ),
         (
             "export_group",
-            "One group as its import-stream record (a single `taguru_group` JSON line — the group's complete truth); importing it restores the group as a whole-record replace. A context-scoped key exports exactly the slice its grant can read.",
+            "One `group` as its import-stream record (a single `taguru_group` JSON line — the `group`'s complete truth); importing it restores the `group` as a whole-record replace. A `context`-scoped key exports exactly the slice its grant can read.",
             object_schema(
                 json!({ "name": { "type": "string", "description": "Group name (from list_groups)" } }),
                 &["name"],
@@ -929,7 +929,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "get_group",
-            "One group's name, description, member contexts, and child groups.",
+            "One `group`'s name, description, member `contexts`, and child `groups`.",
             object_schema(
                 json!({ "name": { "type": "string", "description": "Group name (from list_groups)" } }),
                 &["name"],
@@ -937,7 +937,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "compact",
-            "Rebuild one context's on-disk image without the dead weight the append-only format accumulates (retracted edges, unlinked attributions, arena slack); answers what was shed and the resulting footprint (admin role). Content is preserved — this is maintenance, not a knowledge change.",
+            "Rebuild one `context`'s on-disk image without the dead weight the append-only format accumulates (retracted edges, unlinked attributions, arena slack); answers what was shed and the resulting footprint (admin role). Content is preserved — this is maintenance, not a knowledge change.",
             object_schema(json!({ "context": context }), &["context"]),
         ),
         (

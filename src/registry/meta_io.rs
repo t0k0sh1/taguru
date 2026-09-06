@@ -8,7 +8,7 @@ use super::*;
 
 /// What `{name}.meta.json` holds: the meta inline plus the stats
 /// snapshot as of the last save, so a directory listing can describe a
-/// cold context without touching its image. `usage` rides along under
+/// cold `context` without touching its image. `usage` rides along under
 /// `#[serde(default)]`, so sidecars from before it existed load with
 /// zeroed counters.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -21,13 +21,13 @@ pub(super) struct MetaFile {
     /// The revision counters as of this save — what a cold entry (and
     /// a replica's tailed refresh) seeds from. Defaulted for sidecars
     /// from before the field existed, and for sidecars that simply do
-    /// not exist yet (a fresh context): those report zeros until their
+    /// not exist yet (a fresh `context`): those report zeros until their
     /// first load or flush catches them up. A sidecar that DOES exist
     /// but cannot be read or parsed is a different case — see
     /// [`MetaFile::degraded`].
     pub(super) revision: ContextRevision,
     /// `sha256_hex` of `{stem}.schema.json`'s bytes as of this save,
-    /// `None` for a schema-free context — ADR 0009 §5.2's boot-time
+    /// `None` for a schema-free `context` — ADR 0009 §5.2's boot-time
     /// consistency check. Written in the SAME `write_meta` call that
     /// bumps `config_revision` (never separately), so a crash between
     /// this field landing and the schema file's own `write_atomic`
@@ -35,7 +35,7 @@ pub(super) struct MetaFile {
     /// enforcement: [`crate::schema::load_schema`] refuses to load
     /// whenever the file on disk and this recorded value disagree, in
     /// either direction. Defaulted for sidecars from before the field
-    /// existed, exactly like `revision` above — a pre-#379 context has
+    /// existed, exactly like `revision` above — a pre-#379 `context` has
     /// no schema file either, so `None` is also the correct fact, not
     /// just a safe default.
     pub(super) schema_digest: Option<String>,
@@ -56,7 +56,7 @@ impl MetaFile {
     /// restored from is the very sidecar that just failed to read — so
     /// a time-based seed is the only way to guarantee this boot's value
     /// never collides with one a fingerprint consumer (`group_fingerprint`,
-    /// `src/api/groups.rs`) saw served under the same counter before the
+    /// `src/api/`groups`.rs`) saw served under the same counter before the
     /// corruption. Monotonic re-seeds elsewhere (`replica_refresh`'s
     /// `max()`) only ever pull a replica's counter forward from this
     /// value, never back down to a primary's smaller one, so the skew
@@ -121,7 +121,7 @@ pub(super) fn write_meta(
 /// missing or corrupt sidecar must not make the image unreachable.
 ///
 /// The fallback distinguishes two very different problems. A sidecar
-/// that simply is not there (`ErrorKind::NotFound` — a fresh context,
+/// that simply is not there (`ErrorKind::NotFound` — a fresh `context`,
 /// or one from before the file existed) is the ordinary, silent case:
 /// [`MetaFile::default`], no log line. A sidecar that IS there but
 /// could not be read (`EACCES`, `EIO`, a directory where a file should
@@ -133,7 +133,7 @@ pub(super) fn write_meta(
 /// sidecar already handed out (see `degraded`'s doc).
 ///
 /// That leniency has one more sharp edge: the fallback also zeroes
-/// `schema_digest` to `None`, which for a context that DOES have a
+/// `schema_digest` to `None`, which for a `context` that DOES have a
 /// live `{stem}.schema.json` collides with `schema::load_schema`'s own
 /// fail-closed posture (ADR 0009 §5.1/§5.2, issue #561's audit) — a
 /// corrupt sidecar plus a healthy schema file turns into a
@@ -141,7 +141,7 @@ pub(super) fn write_meta(
 /// one candidate, and the resulting message names a mismatch rather
 /// than the sidecar that caused it. The fix for that case is the
 /// sidecar's, not the schema check's: restore `{stem}.meta.json` (or
-/// delete it if the context has no schema) so its recorded digest
+/// delete it if the `context` has no schema) so its recorded digest
 /// agrees with the file on disk again.
 pub(super) fn read_meta_file(dir: &Path, stem: &str) -> MetaFile {
     match fs::read(meta_path(dir, stem)) {
@@ -162,13 +162,13 @@ pub(super) fn read_meta_file(dir: &Path, stem: &str) -> MetaFile {
 /// `MetaFile` (private to this module). Same lenient fallback as
 /// [`read_meta_file`]: an unreadable or corrupt sidecar reports `None`
 /// here exactly as it would seed a fresh [`MetaFile::default`] at boot,
-/// so inspect's schema check judges a context by the same recorded
+/// so inspect's schema check judges a `context` by the same recorded
 /// value boot itself would.
 pub(crate) fn schema_digest_of(dir: &Path, stem: &str) -> Option<String> {
     read_meta_file(dir, stem).schema_digest
 }
 
-/// One context's whole file family, by stem — the delete loop and the
+/// One `context`'s whole file family, by stem — the delete loop and the
 /// boot-time deletion sweep must never disagree about what "the whole
 /// family" means, so both read this one list.
 ///
@@ -201,12 +201,12 @@ pub(crate) fn context_files(stem: &str) -> [String; 10] {
     .map(|path| path.to_string_lossy().into_owned())
 }
 
-/// Moves one context's whole file family from `from_stem` to
+/// Moves one `context`'s whole file family from `from_stem` to
 /// `to_stem`, file by file, in the fixed order [`context_files`]
 /// defines — a missing source is skipped (an earlier, interrupted
 /// attempt already moved it; safe to retry at boot or from a fresh
 /// call). `.ctx` is index 0 and the pivot the boot scan registers a
-/// context by: if IT will not move, nothing else does either (the
+/// `context` by: if IT will not move, nothing else does either (the
 /// family stays wholly under `from_stem`, cleanly retried), and the
 /// call fails before touching a sidecar. Once the pivot has moved, a
 /// sidecar that still sticks is best-effort — the rest are moved anyway
@@ -264,7 +264,7 @@ mod tests {
     use crate::registry::test_support::scratch_dir;
 
     /// The ordinary, silent case: no sidecar has ever existed for this
-    /// stem (a brand new context, or one from before the file existed).
+    /// stem (a brand new `context`, or one from before the file existed).
     /// `revision` stays all-zero — nothing here has degraded, so there
     /// is nothing to shield a fingerprint consumer from.
     #[test]

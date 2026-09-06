@@ -336,7 +336,7 @@ mod tests {
     }
 
     /// parking_lot locks don't poison: a panic while holding one just
-    /// unwinds and releases it, so neither the context that panicked, nor
+    /// unwinds and releases it, so neither the `context` that panicked, nor
     /// a sibling, nor the registry's own listing bricks for the rest of
     /// the process.
     #[test]
@@ -585,13 +585,13 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    /// `ContextStats::dead_ratio`'s doc claims a hot context (recomputed
+    /// `ContextStats::dead_ratio`'s doc claims a hot `context` (recomputed
     /// live via `Context::dead_ratio`) and a cold one (this cached
     /// snapshot) "can never disagree about it" — pinned by the shared
     /// formula (`documented_defaults_and_helpers_hold_their_values` in
     /// `engine.rs`) and exercised end-to-end by
     /// `run_maintenance_compaction_selects_a_cold_candidate_from_its_saved_stats`,
-    /// but nothing captures the SAME context's hot value and its own
+    /// but nothing captures the SAME `context`'s hot value and its own
     /// cold value side by side to prove the claimed agreement directly.
     #[test]
     fn dead_ratio_agrees_between_a_hot_context_and_its_own_cold_snapshot() {

@@ -29,7 +29,7 @@ enum StemSweep<'a> {
 }
 
 impl AppState {
-    /// Registers an empty context and persists it immediately, so its
+    /// Registers an empty `context` and persists it immediately, so its
     /// existence (and description) survives a crash from the moment the
     /// create call returns. A persistence failure fails the create.
     ///
@@ -38,7 +38,7 @@ impl AppState {
     /// — the stem's on-disk family minus `meta_path`, which
     /// `save_files` overwrites instead — plus one per stale rename or
     /// import marker it finds, plus save_files' fsyncs — seconds on
-    /// slow storage, behind which every operation on every context
+    /// slow storage, behind which every operation on every `context`
     /// would otherwise stall). The name is reserved in
     /// `pending.creates` under the registry guard, the files are
     /// written unlocked, and the entry
@@ -115,7 +115,7 @@ impl AppState {
     /// A name can be reused after a delete, and a delete that failed
     /// partway (the name is unregistered first) or a half-restored
     /// backup leaves the old generation's files behind. Nothing may
-    /// bleed into the new context — a stale WAL would even replay
+    /// bleed into the new `context` — a stale WAL would even replay
     /// the old generation's acknowledged writes into the fresh image
     /// on its next cold load. Clear the slate — the OLD IMAGE INCLUDED —
     /// before writing the new one: `save_files` lands the image last, so
@@ -126,7 +126,7 @@ impl AppState {
     /// metadata. Durability of the unlinks rides on save_files'
     /// parent-directory fsync just below. A leftover that cannot be
     /// removed fails the create — registering on top of it would hand out
-    /// a haunted context.
+    /// a haunted `context`.
     fn create_files(
         &self,
         name: &str,
@@ -244,13 +244,13 @@ impl AppState {
         Ok(())
     }
 
-    /// Removes a context from the registry and deletes its files. The
+    /// Removes a `context` from the registry and deletes its files. The
     /// entry's lock is taken after the removal — waiting out any
     /// in-flight operation — and the slot becomes a tombstone under
     /// it: a flusher, evictor, or writer whose handle predates the
     /// removal finds [`Slot::Deleted`] when it finally locks, and
     /// backs off instead of recreating the files. Any unflushed writes
-    /// are discarded — deletion destroys the context.
+    /// are discarded — deletion destroys the `context`.
     ///
     /// The name enters `pending.deletes` in the same critical section
     /// that unregisters it and leaves only after the unlink loop: to a
@@ -371,8 +371,8 @@ impl AppState {
         Some(outcome.map_err(DeleteError::Io))
     }
 
-    /// Renames a context: its whole file family moves under the new
-    /// name and group membership follows, while the OLD name becomes a
+    /// Renames a `context`: its whole file family moves under the new
+    /// name and `group` membership follows, while the OLD name becomes a
     /// tombstone exactly as `delete` leaves one — so a flusher's or
     /// evictor's handle cloned before the rename backs off instead of
     /// recreating files a name no longer owns.
@@ -385,9 +385,9 @@ impl AppState {
     /// writes" and be silently lost the way `delete` allows.
     ///
     /// The marker (`renaming_marker_path`) is written and durable
-    /// BEFORE anything else moves, and only removed after the group
+    /// BEFORE anything else moves, and only removed after the `group`
     /// membership rewrite lands — stricter than `delete`'s best-effort
-    /// marker, because a rename whose files moved but whose group
+    /// marker, because a rename whose files moved but whose `group`
     /// membership rewrite did not would otherwise have boot's
     /// `reconcile_groups` see the old name as a dangling reference and
     /// silently drop it, rather than resuming the rewrite.
@@ -757,7 +757,7 @@ impl AppState {
 
 impl AppState {
     /// Updates the description and/or pin flag, persisting the sidecar
-    /// immediately. Pinning loads the context now (pinned means
+    /// immediately. Pinning loads the `context` now (pinned means
     /// resident); unpinning subjects it to the cache budget again.
     pub fn update_meta(
         &self,
@@ -846,8 +846,8 @@ impl AppState {
     }
 
     /// The resident schema for `name` — `Ok(None)` for a schema-free
-    /// context (`GET /contexts/{name}/schema`, #380, turns that into a
-    /// 404). Outer `None` means no such context.
+    /// `context` (`GET /contexts/{name}/schema`, #380, turns that into a
+    /// 404). Outer `None` means no such `context`.
     ///
     /// The common case is already resolved without touching disk: boot
     /// and every cold-load already ran `load_schema` (ADR 0009 §5.2's
@@ -900,8 +900,8 @@ impl AppState {
     /// drafting types has already committed to the reserved label
     /// meaning something — `off` only means "don't enforce domain/range
     /// yet," not "pretend the label is ordinary." `Some(SCHEMA_TYPE_LABEL)`
-    /// whenever this context has ever had a schema installed, in any
-    /// mode; `None` only for a context that never installed one (or an
+    /// whenever this `context` has ever had a schema installed, in any
+    /// mode; `None` only for a `context` that never installed one (or an
     /// unknown/deleted name). A schema recorded but currently unreadable
     /// (`schema_of`'s `Err` arm) maps CONSERVATIVELY to "hidden" — per
     /// [`schema`]'s own module doc, every trouble case there is a hard
@@ -955,7 +955,7 @@ impl AppState {
     /// caller too; deferred as the same kind of cross-cutting
     /// atomicity work #187 already owns, not attempted piecemeal here.
     /// Only meaningful once [`AppState::hidden_label`] says a schema
-    /// exists — a schema-free context's `schema:type` stays an ordinary
+    /// exists — a schema-free `context`'s `schema:type` stays an ordinary
     /// label (guard 1), so nothing here refuses anything for it.
     /// Deliberately does not chase a multi-hop alias chain: once a
     /// schema exists, no *live* alias can ever resolve to the reserved
@@ -987,7 +987,7 @@ impl AppState {
     /// (§12.3) returns, so a retrieval-cache key minted before this call
     /// must not keep answering with the old constraints.
     ///
-    /// Outer `None` means no such context. `Ok` carries the installed
+    /// Outer `None` means no such `context`. `Ok` carries the installed
     /// document back (including when the call was a no-op — see below)
     /// so the handler can answer `GET`-shaped without a second lookup.
     pub fn put_schema(
@@ -1119,8 +1119,8 @@ impl AppState {
 
 /// Restores `inner.meta` to `previous` after a load or persist failure
 /// partway through `update_meta`. Also un-applies the floor from any
-/// already-loaded context, matching the one place `update_meta` pushes
-/// a field straight into the hot context instead of just the sidecar.
+/// already-loaded `context`, matching the one place `update_meta` pushes
+/// a field straight into the hot `context` instead of just the sidecar.
 fn rollback_meta(inner: &mut EntryInner, previous: ContextMeta) {
     if let Slot::Hot(context) = &mut inner.slot {
         context.set_dice_floor(previous.dice_floor);
@@ -1134,7 +1134,7 @@ mod tests {
     use crate::registry::paths::RenameMarker;
     use crate::registry::test_support::{assoc_op, loaded_map, scratch_dir};
 
-    /// An empty context name is refused at the registry boundary — the
+    /// An empty `context` name is refused at the registry boundary — the
     /// last guard against a bare `.ctx` file that `scan_data_dir` (which
     /// keys on the file stem) would never rediscover, silently orphaning
     /// every write to it. Parse and API refuse it earlier; this locks
@@ -1150,7 +1150,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// Every stage/commit/unlink position in context deletion either
+    /// Every stage/commit/unlink position in `context` deletion either
     /// finishes immediately or leaves enough durable state for boot to
     /// finish it. The first index beyond the operation proves the sweep
     /// did not merely sample a few hand-picked failures.
@@ -1211,7 +1211,7 @@ mod tests {
 
     /// The dangerous interleaving: a delete leaves a marker behind
     /// (partial failure), the SAME running server recreates the
-    /// context, and a later restart must NOT let the stale marker
+    /// `context`, and a later restart must NOT let the stale marker
     /// destroy the freshly created files. create() clears the marker.
     #[test]
     fn recreating_a_context_clears_a_stale_deletion_marker() {
@@ -1262,7 +1262,7 @@ mod tests {
 
     /// `.deleted`'s recreate rule, for import markers: a marker the
     /// delete sweep could not remove must not survive into a freshly
-    /// created context of the same name — boot would report the new
+    /// created `context` of the same name — boot would report the new
     /// generation as carrying a tear it never ran.
     #[test]
     fn creating_a_context_clears_stale_import_markers() {
@@ -1579,7 +1579,7 @@ mod tests {
     /// (`floor.clamp(0.0, 1.0)`) have no test: every call site in the
     /// suite already passes an in-range value, so the clamp never
     /// actually clamps anything. It is also the ONLY guard on the PATCH
-    /// path — `api/contexts.rs`'s create handler clamps up front, but
+    /// path — `api/`contexts`.rs`'s create handler clamps up front, but
     /// its PATCH handler forwards `dice_floor`/`semantic_floor` raw.
     #[test]
     fn update_meta_clamps_out_of_range_floors_into_zero_to_one() {
@@ -1615,9 +1615,9 @@ mod tests {
     /// the only existing rollback test targets the sibling `write_meta`
     /// failure arm instead, with its `pinned` call made AFTER
     /// permissions are restored so `ensure_hot` there always succeeds.
-    /// Here a cold context with a corrupted image is pinned: the
+    /// Here a cold `context` with a corrupted image is pinned: the
     /// attempt must fail closed, `meta.pinned` must roll back to
-    /// `false` (not strand the context pinned-but-unloadable), and the
+    /// `false` (not strand the `context` pinned-but-unloadable), and the
     /// budget's `resident_estimate` must stay in sync with that
     /// rollback rather than the failed intermediate state.
     #[test]
@@ -1738,10 +1738,10 @@ mod tests {
 
     /// The pinned re-preload's `Err` arm (`lifecycle.rs`, inside
     /// `rename_context_locked`'s tail: `Err(error) => { tracing::warn!
-    /// ..."renamed context not preloaded; it stays cold until first
+    /// ..."renamed `context` not preloaded; it stays cold until first
     /// use" }`) has no test — the happy-path test above only proves
     /// the `Ok` arm. Corrupting the image between two boots (rather
-    /// than while the context is hot) is required: `drain_entry_for_rename`
+    /// than while the `context` is hot) is required: `drain_entry_for_rename`
     /// re-saves a HOT source's current in-memory state before the
     /// move, which would silently heal an in-place corruption.
     /// Preloading fails at boot instead, leaving "sake" cold with the
@@ -1877,7 +1877,7 @@ mod tests {
     /// `lookup(name)` regardless of Hot or Cold — nothing about them
     /// checks the slot. `drain_entry_for_rename` only ever hands its
     /// usage snapshot to `save_files` inside the `Slot::Hot` branch, so
-    /// a Cold context's usage — whatever was counted since its last
+    /// a Cold `context`'s usage — whatever was counted since its last
     /// flush, which for a Cold entry may be everything it has ever
     /// counted — was silently dropped on every rename before the fix:
     /// the new entry was seeded from whatever sidecar already happened
@@ -2034,8 +2034,8 @@ mod tests {
     }
 
     /// The crash-shaped state: `rename_context` wrote its marker but
-    /// died before the file move and the group rewrite landed. Boot
-    /// must finish both, and in the right order — rewrite group
+    /// died before the file move and the `group` rewrite landed. Boot
+    /// must finish both, and in the right order — rewrite `group`
     /// membership before `reconcile_groups` runs — or reconcile sees
     /// "sake" as a plain dangling reference (nothing registered under
     /// that name any more) and drops it instead of carrying it to
@@ -2284,7 +2284,7 @@ mod tests {
     /// deliberately independent booleans (`paths.rs`'s own doc), and
     /// `boot_with`'s resume loop keys membership on `landed` alone
     /// while keying marker retraction on `complete` alone. Every other
-    /// boot-resume test either has no group to rewrite
+    /// boot-resume test either has no `group` to rewrite
     /// (`delete_clears_a_stuck_rename_marker_at_its_own_stem`, pivot
     /// blocked so `landed` is false too) or completes cleanly (the
     /// happy-path resume tests). Here the pivot moves but a sidecar
@@ -2401,7 +2401,7 @@ mod tests {
     /// `delete`'s counterpart to
     /// `creating_a_context_abandons_a_rename_marker_naming_it_as_destination`:
     /// a stuck rename's marker sits under the SOURCE's stem but names
-    /// THIS context as its destination — a stem `delete("sake")` cannot
+    /// THIS `context` as its destination — a stem `delete("sake")` cannot
     /// derive from "sake" alone, so it must scan for markers naming it,
     /// same as `create`'s sweep does for a reused name.
     #[test]
@@ -2440,7 +2440,7 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    /// A stuck rename marker sitting at the deleted context's own stem
+    /// A stuck rename marker sitting at the deleted `context`'s own stem
     /// that CANNOT be removed (here: a directory wearing the marker's
     /// name, same technique as `a_marker_that_cannot_be_removed_fails_the_stem_sweep`)
     /// must surface through the delete, not be silently treated as
@@ -2527,9 +2527,9 @@ mod tests {
     ///
     /// Swept over every persistence fault point, following the same
     /// exhaustive-sweep shape as `every_context_delete_persistence_failure_recovers_at_boot`:
-    /// wherever the fault lands, the group must never end up empty (the
-    /// member lost) once the renamed context is registered — either
-    /// the rename never reached the point of no return (group still
+    /// wherever the fault lands, the `group` must never end up empty (the
+    /// member lost) once the renamed `context` is registered — either
+    /// the rename never reached the point of no return (`group` still
     /// names "sake", which still exists), or a single boot resume
     /// finishes rewriting membership to "shochu".
     #[test]
@@ -2878,8 +2878,8 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// `schema_of`'s two direct cases: a schema-free context answers
-    /// `Ok(None)` without touching disk, and a missing context answers
+    /// `schema_of`'s two direct cases: a schema-free `context` answers
+    /// `Ok(None)` without touching disk, and a missing `context` answers
     /// the outer `None` — both without a `PUT` ever having run.
     #[test]
     fn schema_of_reports_a_schema_free_context_and_a_missing_one() {
@@ -2905,7 +2905,7 @@ mod tests {
 
     /// `lookup` — the first step of both `schema_of` and `put_schema` —
     /// already answers `None` for a name `delete` has removed from the
-    /// registry, so both report the outer `None` for a deleted context
+    /// registry, so both report the outer `None` for a deleted `context`
     /// exactly like a never-created one, without either method needing
     /// its own tombstone-detection logic beyond the shared
     /// `read_unless_deleted`/`lock_unless_deleted` gate every other
@@ -2970,7 +2970,7 @@ mod tests {
     /// `ensure_hot` call fail, and `schema_of` itself returns `Err`.
     /// `hidden_label` must fail CLOSED on that — report hidden, the
     /// same as a schema actually present — rather than let a
-    /// resolution failure silently unhide a schema-gated context.
+    /// resolution failure silently unhide a schema-gated `context`.
     #[test]
     fn hidden_label_fails_closed_when_schema_resolution_errors() {
         let dir = scratch_dir("hidden-label-schema-err");
@@ -3138,7 +3138,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// A delete that cannot clear the context's import marker reports
+    /// A delete that cannot clear the `context`'s import marker reports
     /// the failure — the marker survives beside the tombstone and boot
     /// must get the chance to finish the job.
     #[test]
@@ -3200,11 +3200,11 @@ mod tests {
     }
 
     /// Regression for issue #561's item 8: a name mid-rename is a
-    /// refusal, not a failure — the context is untouched, so `delete`
+    /// refusal, not a failure — the `context` is untouched, so `delete`
     /// must report [`DeleteError::MidRename`] distinctly from
     /// [`DeleteError::Io`] (the API layer maps the two very
     /// differently: a 409 with no audit line, versus a 500 with one —
-    /// see `api::contexts::delete_context`).
+    /// see `api::`contexts`::delete_context`).
     #[test]
     fn a_mid_rename_delete_reports_mid_rename_not_io() {
         let dir = scratch_dir("delete-mid-rename");
