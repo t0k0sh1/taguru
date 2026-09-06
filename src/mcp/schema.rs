@@ -126,7 +126,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         ),
         (
             "list_groups",
-            "Group directory: every group's name, description, member context names, and child group names. A group bundles contexts (many-to-many) and may nest child groups up to 3 levels (cycles refused) — organize related contexts under one name. Groups and contexts are separate namespaces.",
+            "Group directory: every group's name, description, member context names, and child group names. A group bundles contexts (many-to-many) and may nest child groups up to 3 levels (cycles refused) — organize related contexts under one name. A group and a context may share the same name without conflict.",
             object_schema(
                 json!({
                     "limit": { "type": "integer", "minimum": 0, "description": "page size, keyset-paged by name (default/ceiling 1000)" },

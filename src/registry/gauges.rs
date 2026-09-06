@@ -1088,7 +1088,7 @@ mod tests {
     /// #562 item 3: a schema document's bytes must count toward a
     /// declared storage quota's `used`, not just the disk gauge —
     /// before the fix, `refresh_disk_usage` never stated the file, so
-    /// a tenant could grow past a ceiling that on-disk bytes alone
+    /// a `context` could grow past a ceiling that on-disk bytes alone
     /// would have crossed, as long as a schema file accounted for the
     /// difference.
     #[test]

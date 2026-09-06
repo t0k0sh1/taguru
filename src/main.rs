@@ -250,7 +250,7 @@ async fn serve(serve_args: cli::ServeArgs, auth_source: auth::AuthSource) {
     let keyring = auth::SharedKeyring::new(keyring);
 
     // Declared quotas share the credential story's failure posture: a
-    // ceiling that silently failed to arm is an unbounded tenant.
+    // ceiling that silently failed to arm is an unbounded `context`.
     config.context_quotas = match registry::parse_context_quotas(
         std::env::var("TAGURU_CONTEXT_QUOTAS").ok().as_deref(),
     ) {

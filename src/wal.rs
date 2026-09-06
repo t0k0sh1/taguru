@@ -69,7 +69,7 @@ impl WalOp {
     /// Whether applying this op grows the context's content — the
     /// storage-quota gate fires only for batches that carry at least
     /// one of these. The shrink ops (unalias, retract) stay allowed at
-    /// the ceiling: they are how a tenant gets back under it, the same
+    /// the ceiling: they are how a `context` gets back under it, the same
     /// line the passage store draws for its own cap ("retractions are
     /// how an operator shrinks the store").
     pub fn grows(&self) -> bool {

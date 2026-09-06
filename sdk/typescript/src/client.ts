@@ -569,7 +569,7 @@ export class Taguru {
   }
 }
 
-/** The context directory: collection-level CRUD. */
+/** The context directory: directory-level CRUD. */
 export class Contexts {
   constructor(private readonly client: Taguru) {}
 
@@ -739,8 +739,8 @@ export class Groups {
 
   /**
    * Create a group (409 ConflictError if it already exists). Every listed
-   * member — context or child group — must already exist; contexts and
-   * groups are separate namespaces.
+   * member — context or child group — must already exist; a group and a
+   * context may share the same name without conflict.
    */
   async create(
     name: string,

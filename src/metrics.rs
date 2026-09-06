@@ -177,9 +177,9 @@ pub struct Metrics {
     /// (`TAGURU_CONTEXT_QUOTAS`, issue #136) — every gate counts here:
     /// the graph write path, the passage store path, and the import
     /// loop's per-batch pre-check. Deliberately not an `errors_*`
-    /// counter: a refusal at the ceiling is the policy working, and a
-    /// tenant hammering a full context should read as its own signal,
-    /// not as server trouble.
+    /// counter: a refusal at the ceiling is the policy working, and
+    /// hammering one already-full `context` should read as its own
+    /// signal, not as server trouble.
     storage_quota_refusals: AtomicU64,
     /// A per-context disk-usage `fs::metadata` call (issue #562 item
     /// 4) failing for a reason other than the file simply not existing

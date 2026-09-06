@@ -247,10 +247,10 @@
     </p>
     <p>
       None of this needs a group that exists only to be searched. An ad-hoc cross-paper question
-      names the papers' groups directly in the request; a group is worth creating only for a
-      collection reused across many searches (a reading list, a chapter's sections). A root group
-      built solely so "search everything" has one name to type adds a namespace with no boundary
-      behind it.
+      names the papers' groups directly in the request; a group is worth creating only when the same
+      set of contexts gets searched together repeatedly (a reading list, a chapter's sections). A root group
+      built solely so "search everything" has one name to type adds a <code>group</code> with no
+      boundary behind it.
     </p>
   </section>
 
@@ -259,8 +259,8 @@
     <p class="section-sub">Membership is the only hierarchy the server acts on.</p>
     <p>
       <code>paper/bert</code> and <code>section/bert/2.1</code> are opaque strings, capped at 64
-      bytes, from a namespace the server never parses. Contexts and groups are separate
-      namespaces from each other, too. The <code>/</code> reads as a path to a person; to the
+      bytes, that the server never parses. A context and a group may share the same name without
+      conflict, too. The <code>/</code> reads as a path to a person; to the
       server it is one more byte. Writing <code>paper/chapter/section</code> into a
       <b>source</b> id is the same mistake one level down — a source is a provenance id scoped to
       one context, not an address, and the server never decomposes it into a location.

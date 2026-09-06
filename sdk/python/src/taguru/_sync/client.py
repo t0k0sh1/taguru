@@ -500,7 +500,7 @@ class Taguru:
 
 
 class Contexts:
-    """The context directory: collection-level CRUD."""
+    """The context directory: directory-level CRUD."""
 
     def __init__(self, client: Taguru) -> None:
         self._client = client
@@ -673,7 +673,7 @@ class Groups:
         """Create a group (409 ``ConflictError`` if it already exists).
 
         Every listed member — context or child group — must already exist;
-        contexts and groups are separate namespaces.
+        a group and a context may share the same name without conflict.
         """
         body = drop_none(
             {

@@ -367,7 +367,7 @@ impl AppState {
             // The policy ceiling, ahead of the failure backstop below and
             // WAL on or off: only batches that GROW the context are gated —
             // a retract/unalias batch always passes, because shrinking is
-            // how a tenant gets back under (the passage store's own cap
+            // how a `context` gets back under (the passage store's own cap
             // draws the same line). If both this and the WAL cap hold, the
             // refusal names the quota; the failing flush behind the cap is
             // already warned about from the flusher itself every tick.
@@ -961,21 +961,21 @@ mod tests {
 
     /// The `TAGURU_CONTEXT_QUOTAS` parser (issue #136) accepts the
     /// documented shape and refuses every trap — a declaration that
-    /// silently failed to arm is an unbounded tenant, so anything
+    /// silently failed to arm is an unbounded `context`, so anything
     /// short of exactly-as-documented must stop the boot.
     #[test]
     fn context_quota_parsing_accepts_the_shape_and_refuses_the_traps() {
         assert!(parse_context_quotas(None).unwrap().is_empty());
 
         let quotas = parse_context_quotas(Some(
-            r#"{"tenant-a": {"storage_bytes": 1024, "cache_bytes": 2048},
-                "tenant-b": {"storage_bytes": 512}}"#,
+            r#"{"context-a": {"storage_bytes": 1024, "cache_bytes": 2048},
+                "context-b": {"storage_bytes": 512}}"#,
         ))
         .unwrap();
-        assert_eq!(quotas["tenant-a"].storage_bytes, Some(1024));
-        assert_eq!(quotas["tenant-a"].cache_bytes, Some(2048));
-        assert_eq!(quotas["tenant-b"].storage_bytes, Some(512));
-        assert_eq!(quotas["tenant-b"].cache_bytes, None);
+        assert_eq!(quotas["context-a"].storage_bytes, Some(1024));
+        assert_eq!(quotas["context-a"].cache_bytes, Some(2048));
+        assert_eq!(quotas["context-b"].storage_bytes, Some(512));
+        assert_eq!(quotas["context-b"].cache_bytes, None);
 
         // Set-but-empty, broken JSON, a ceiling-less quota, a typo'd
         // field name, and a zero ceiling: each refuses loudly.

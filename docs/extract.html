@@ -842,8 +842,8 @@ taguru extract --context ops --out batches/ --redact --redact-rules redact-rules
       These are the <a href="#pipeline"><code>structure</code></a> and
       <a href="#pipeline"><code>annotate</code></a> steps (<a
       href="https://github.com/t0k0sh1/taguru/blob/main/adr/0033-chunk-context.md">ADR 0033</a>,
-      #782). "Context" here is what a reader needs in mind to read a chunk — never a Taguru
-      context, the namespace <code>--context NAME</code> targets. By default (<code>--chunk-context
+      #782). "Context" here is what a reader needs in mind to read a chunk — never the
+      <code>context</code> that <code>--context NAME</code> targets. By default (<code>--chunk-context
       off</code>, or <code>TAGURU_EXTRACT_CHUNK_CONTEXT</code>) a chunk is sent alone: part K of
       N, and the labeled text. It does not know the chapter it sits in, the definitions an
       earlier article gave, or which act <code>同法</code> names three chunks back — the gap the

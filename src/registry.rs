@@ -1331,7 +1331,7 @@ pub enum AccessError {
     /// 507 `storage_full`, the same client contract as the library's
     /// own capacity cap. Deliberately distinct from [`Self::Unpersisted`]:
     /// that 500 means the SERVER is failing to persist (an operator
-    /// problem); this means the TENANT's allotment is spent (retract,
+    /// problem); this means the `context`'s allotment is spent (retract,
     /// compact, or raise the quota).
     QuotaExceeded(String),
 }
@@ -1427,7 +1427,7 @@ pub struct ContextQuota {
     /// same sum `taguru_context_disk_bytes` serves. At or over it,
     /// growth writes are refused with 507 `storage_full`; shrink paths
     /// (retract, unalias, compact, delete) stay open — they are how a
-    /// tenant gets back under.
+    /// `context` gets back under.
     #[serde(default)]
     pub storage_bytes: Option<u64>,
     /// Maximum resident share within the global `TAGURU_CACHE_BYTES`:
