@@ -50,6 +50,37 @@ fn counter(metrics_text: &str, name: &str) -> u64 {
         .unwrap()
 }
 
+/// #898: a graceful stop with the periodic tasks running — the
+/// flusher and the config watch a `--config` file switches on —
+/// leaves no worker panic in the server's own log, and the final
+/// flush still lands after them. Five rounds, since the failure was a
+/// scheduling race between a tick and the runtime's drop.
+#[test]
+fn a_graceful_stop_with_the_periodic_tasks_running_leaves_no_worker_panic() {
+    let dir = scratch("stop-clean");
+    let config = dir.join("taguru.env");
+    std::fs::write(&config, "TAGURU_API_TOKENS=ci:sekrit\n").unwrap();
+    for round in 0..5 {
+        let stderr = dir.join(format!("stderr-{round}.log"));
+        let server = Server::start_with_config(
+            &format!("reload-stop-clean-{round}"),
+            &config,
+            &stderr,
+            &[("RUST_LOG", "info")],
+        );
+        let _ = server.stop_gracefully();
+        let log = std::fs::read_to_string(&stderr).unwrap();
+        assert!(
+            log.contains("flushed dirty contexts on shutdown"),
+            "round {round}: {log}"
+        );
+        assert!(
+            !log.contains("panicked") && !log.contains("being shutdown"),
+            "round {round}: {log}"
+        );
+    }
+}
+
 /// SIGHUP applies a rewritten config: the rotated key's NEW bytes
 /// authenticate, the removed key and the old bytes die, the reloaded
 /// scope demotes the key live, and the audit line carries names —
