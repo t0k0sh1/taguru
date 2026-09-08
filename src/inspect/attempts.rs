@@ -212,7 +212,7 @@ pub(super) fn build_report(target: &str, text: &str, filter: &Filter) -> Attempt
             continue;
         };
         match record.get("kind").and_then(Value::as_str) {
-            Some("document") => {
+            Some("segment") | Some("document") => {
                 let run_id = str_field(&record, "run_id");
                 report.runs.push(run_id.clone());
                 report.document = Some(DocumentRow {

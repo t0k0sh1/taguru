@@ -106,7 +106,7 @@ def load_documents(out_dirs: list[Path]) -> list[dict]:
             if not name.endswith(".jsonl") or name.endswith(".attempts.jsonl"):
                 continue
             trace = read_jsonl(trace_path)
-            header = next((r for r in trace if r.get("kind") == "document"), None)
+            header = next((r for r in trace if r.get("kind") in ("segment", "document")), None)
             if header is None:
                 print(f"warning: {trace_path} has no document record; skipped", file=sys.stderr)
                 continue
@@ -131,7 +131,7 @@ def load_documents(out_dirs: list[Path]) -> list[dict]:
             if stem in traced:
                 continue
             attempts_log = read_jsonl(attempts_path)
-            header = next((r for r in attempts_log if r.get("kind") == "document"), None)
+            header = next((r for r in attempts_log if r.get("kind") in ("segment", "document")), None)
             if header is None:
                 print(
                     f"warning: {attempts_path} has no trace and no document record; skipped",

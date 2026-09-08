@@ -10,6 +10,21 @@ fn temp_dir(tag: &str) -> PathBuf {
     dir
 }
 
+// ============================== #851/#904 document -> segment reader tolerance ==============================
+
+#[test]
+fn segment_id_field_prefers_the_new_name_but_falls_back_to_the_old_one() {
+    assert_eq!(
+        segment_id_field(&serde_json::json!({"segment_id": "a", "document_id": "b"})),
+        "a"
+    );
+    assert_eq!(
+        segment_id_field(&serde_json::json!({"document_id": "b"})),
+        "b"
+    );
+    assert_eq!(segment_id_field(&serde_json::json!({})), "");
+}
+
 // ============================== ordering & banned keys ==============================
 //
 // nearest-rank and Distribution/Ratio n==0-shape tests moved to

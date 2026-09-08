@@ -228,7 +228,7 @@ impl ReplayIndex {
                     continue;
                 };
                 match value["kind"].as_str() {
-                    Some("document") => {
+                    Some("segment") | Some("document") => {
                         current_run_id = value["run_id"].as_str().map(str::to_string);
                     }
                     Some("system") => {

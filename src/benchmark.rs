@@ -2240,7 +2240,9 @@ fn seed_counts_from_existing_runs_file(path: &Path) -> (usize, usize) {
         };
         match value.get("kind").and_then(Value::as_str) {
             Some("attempt") => attempts += 1,
-            Some("document") if value.get("phase").and_then(Value::as_str) == Some("end") => {
+            Some("segment") | Some("document")
+                if value.get("phase").and_then(Value::as_str) == Some("end") =>
+            {
                 documents_written += 1;
             }
             _ => {}
@@ -2725,6 +2727,27 @@ mod cell_runs_tests {
         );
         assert_eq!(outcome_for_exit_code(None, "m.run01"), Ok("interrupted"));
         assert!(outcome_for_exit_code(Some(42), "m.run01").is_err());
+    }
+
+    #[test]
+    fn seed_counts_reads_both_the_old_and_new_kind_value() {
+        let dir = std::env::temp_dir().join(format!(
+            "taguru-seed-counts-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("run01.jsonl");
+        std::fs::write(
+            &path,
+            "{\"kind\":\"attempt\"}\n\
+             {\"kind\":\"document\",\"phase\":\"end\"}\n\
+             {\"kind\":\"segment\",\"phase\":\"end\"}\n\
+             {\"kind\":\"segment\",\"phase\":\"start\"}\n",
+        )
+        .unwrap();
+        assert_eq!(seed_counts_from_existing_runs_file(&path), (1, 2));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

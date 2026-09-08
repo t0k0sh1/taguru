@@ -35,6 +35,19 @@ mod differences;
 
 const BENCHMARK_MEASUREMENTS_VERSION: u64 = 1;
 
+/// `segment_id` is the current field name (#851/#904); `document_id` is
+/// what every runs file written before the rename carries. Centralized
+/// so the two read sites treat both alike instead of one silently
+/// drifting from the other.
+fn segment_id_field(value: &Value) -> String {
+    value
+        .get("segment_id")
+        .or_else(|| value.get("document_id"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string()
+}
+
 const USAGE: &str = "\
 usage: taguru benchmark compare [--with-text] RESULTS_DIR
 
@@ -477,11 +490,7 @@ fn load_results(dir: &Path, manifest: &super::BenchManifest) -> Result<LoadedRes
             };
             match value.get("kind").and_then(Value::as_str) {
                 Some("attempt") => {
-                    let document_id = value
-                        .get("document_id")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string();
+                    let document_id = segment_id_field(&value);
                     let finish_reason = value
                         .pointer("/provider_metadata/finish_reason")
                         .and_then(Value::as_str)
@@ -536,12 +545,8 @@ fn load_results(dir: &Path, manifest: &super::BenchManifest) -> Result<LoadedRes
                             .is_some_and(|v| !v.is_null()),
                     });
                 }
-                Some("document") => {
-                    let document_id = value
-                        .get("document_id")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string();
+                Some("segment") | Some("document") => {
+                    let document_id = segment_id_field(&value);
                     let ts = value.get("ts").and_then(Value::as_f64).unwrap_or(0.0);
                     match value.get("phase").and_then(Value::as_str) {
                         // A resumed cell can log more than one `start`
