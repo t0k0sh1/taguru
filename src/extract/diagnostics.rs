@@ -7,7 +7,7 @@ use super::*;
 /// (issue #200, ADR 0001 §10): a tagged stream of records — `kind`
 /// discriminates `chunk` (once per chunk, before its first attempt),
 /// `attempt` (one per LLM attempt, the original and still the only
-/// `kind` most consumers need), and `document` (once per document
+/// `kind` most consumers need), and `segment` (once per segment
 /// written) — opt-in, metadata-only by default (issue #262, ADR 0003
 /// §7). `File::create` truncates on open — the sidecar describes THIS
 /// run, never a prior one appended to, so a skipped-everything rerun
@@ -118,7 +118,7 @@ impl DiagnosticsSink {
         });
     }
 
-    /// One `kind: "document"` record, built at the same call site as
+    /// One `kind: "segment"` record, built at the same call site as
     /// [`Run::report`] from the same `Extraction` value already in
     /// scope there (issue #262, ADR 0003 §7) — a structured version of
     /// what `report` only ever prints as one human-readable line.
@@ -138,7 +138,7 @@ impl DiagnosticsSink {
         out_path: &Path,
     ) {
         self.write_record(&DocumentRecord {
-            kind: "document",
+            kind: "segment",
             source: source.to_string(),
             associations: extraction.associations.len(),
             concepts: extraction.concepts.len(),
@@ -362,7 +362,7 @@ pub(super) struct ChunkRecord {
     pub(super) paragraph_last: u32,
 }
 
-/// One `kind: "document"` JSONL line (issue #262, ADR 0003 §7): the
+/// One `kind: "segment"` JSONL line (issue #262, ADR 0003 §7): the
 /// structured counterpart of [`Run::report`]'s single human-readable
 /// line, written once a document lands successfully.
 #[derive(serde::Serialize)]

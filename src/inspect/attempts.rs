@@ -732,6 +732,19 @@ mod tests {
     }
 
     #[test]
+    fn build_report_recognizes_the_post_851_segment_kind_the_same_as_document() {
+        let log = json!({"kind": "segment", "run_id": "r1", "source": "a.md", "document_sha256": "d", "resumed": false}).to_string();
+        let report = build_report("log", &log, &Filter::All);
+        let document = report.document.expect(
+            "a `kind: \"segment\"` record must populate `document` the same way `document` does",
+        );
+        assert_eq!(document.source, "a.md");
+        assert_eq!(document.run_id, "r1");
+        assert!(!document.resumed);
+        assert_eq!(report.runs, vec!["r1".to_string()]);
+    }
+
+    #[test]
     fn unfiltered_view_lists_every_attempt_with_its_paragraphs_and_the_moves() {
         let report = build_report("log", &sample_log(), &Filter::All);
         let text = render_text(&report, &Filter::All);

@@ -12,8 +12,12 @@ use super::*;
 /// `context` on import.
 #[derive(Default, serde::Serialize, Deserialize)]
 pub(super) struct Manifest {
-    #[serde(default)]
-    pub(super) documents: BTreeMap<String, ManifestEntry>,
+    /// `documents` is the pre-#851/#904 name — still read so a
+    /// manifest written before the rename doesn't read back empty and
+    /// force a spurious re-extraction of everything; `save` always
+    /// writes `segments`.
+    #[serde(default, alias = "documents")]
+    pub(super) segments: BTreeMap<String, ManifestEntry>,
 }
 
 #[derive(serde::Serialize, Deserialize)]
@@ -177,7 +181,7 @@ impl Manifest {
     /// — any mismatch treats the entry as absent, so a settings change
     /// can never silently reuse an incompatible output.
     pub(super) fn matches(&self, source: &str, inputs: &ComputationInputs) -> bool {
-        self.documents.get(source).is_some_and(|entry| {
+        self.segments.get(source).is_some_and(|entry| {
             entry.sha256 == inputs.sha256
                 && entry.model == inputs.model
                 && entry.prompt_version == PROMPT_VERSION
@@ -211,11 +215,11 @@ impl Manifest {
     /// skippable (and naming the stale file to remove once a changed
     /// document re-extracts under the new name).
     pub(super) fn output_of(&self, source: &str) -> Option<String> {
-        self.documents.get(source).map(|entry| entry.output.clone())
+        self.segments.get(source).map(|entry| entry.output.clone())
     }
 
     pub(super) fn record(&mut self, source: &str, inputs: &ComputationInputs, output: &str) {
-        self.documents.insert(
+        self.segments.insert(
             source.to_string(),
             ManifestEntry {
                 sha256: inputs.sha256.to_string(),

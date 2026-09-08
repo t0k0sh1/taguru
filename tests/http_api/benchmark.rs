@@ -213,7 +213,7 @@ fn a_happy_path_matrix_produces_the_full_layout_and_runs_kind_sequence() {
     assert_eq!(kinds.last(), Some(&"cell"));
     assert!(kinds.contains(&"attempt"), "{kinds:?}");
     assert_eq!(
-        kinds.iter().filter(|k| **k == "document").count(),
+        kinds.iter().filter(|k| **k == "segment").count(),
         2,
         "one start, one end: {kinds:?}"
     );
@@ -415,7 +415,7 @@ fn a_cell_that_fails_every_document_is_recorded_failed_with_a_synthesized_end() 
         .collect();
     let end = lines
         .iter()
-        .find(|line| line["kind"] == "document" && line["phase"] == "end")
+        .find(|line| line["kind"] == "segment" && line["phase"] == "end")
         .expect("a synthesized failed end must exist");
     assert_eq!(end["outcome"], "failed");
     assert!(end["associations"].is_null());

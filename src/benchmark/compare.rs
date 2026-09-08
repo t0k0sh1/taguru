@@ -242,7 +242,7 @@ struct AttemptRow {
     validation_rejected: bool,
 }
 
-/// One `kind: "document"` `phase: "end"` line's payload, before it is
+/// One `kind: "segment"` `phase: "end"` line's payload, before it is
 /// joined against its `phase: "start"` counterpart.
 #[derive(Debug, Default)]
 struct DocumentEndRaw {
@@ -1519,7 +1519,7 @@ fn build_definitions(observed_finish_reasons: &BTreeSet<String>) -> BTreeMap<Str
             "distribution",
             CMD_SCOPES,
             "Wall-clock span from a document's first phase=start record to its phase=end record.",
-            "runs/*.jsonl kind=document .ts at phase=start and phase=end",
+            "runs/*.jsonl kind=segment .ts at phase=start and phase=end",
             Some(
                 "A resumed cell can log more than one phase=start for the same document (ADR \
                  0003 §6); the earliest is used. A document with no phase=end (interrupted) is \
@@ -1536,7 +1536,7 @@ fn build_definitions(observed_finish_reasons: &BTreeSet<String>) -> BTreeMap<Str
             "A written document's total attempt time divided by the number of associations it \
              produced.",
             "sum of runs/*.jsonl kind=attempt .elapsed_seconds for a document, divided by that \
-             document's kind=document .associations",
+             document's kind=segment .associations",
             Some(
                 "Documents that were not written, or that produced zero associations, are \
                  excluded rather than reported as a divide-by-zero.",
@@ -1590,7 +1590,7 @@ fn build_definitions(observed_finish_reasons: &BTreeSet<String>) -> BTreeMap<Str
             CMD_SCOPES,
             "Associations produced per 1,000 input tokens spent, pooling every written \
              document's associations and every attempt's input tokens in scope.",
-            "kind=document .associations summed, divided by kind=attempt \
+            "kind=segment .associations summed, divided by kind=attempt \
              .provider_metadata.input_tokens summed / 1000",
             Some(
                 "The token denominator includes retries, so a document that needed several \
@@ -1730,7 +1730,7 @@ fn build_definitions(observed_finish_reasons: &BTreeSet<String>) -> BTreeMap<Str
             CM_SCOPES,
             "Share of documents in scope that reached outcome=written, over every document that \
              has at least a phase=start record.",
-            "runs/*.jsonl kind=document phase=end .outcome==written, over phase=start records",
+            "runs/*.jsonl kind=segment phase=end .outcome==written, over phase=start records",
             Some("A document with a start but no end this run (interrupted) counts in the denominator only."),
         ),
     );
@@ -1742,7 +1742,7 @@ fn build_definitions(observed_finish_reasons: &BTreeSet<String>) -> BTreeMap<Str
             CM_SCOPES,
             "Share of documents in scope that reached outcome=failed, over every document that \
              has at least a phase=start record.",
-            "runs/*.jsonl kind=document phase=end .outcome==failed, over phase=start records",
+            "runs/*.jsonl kind=segment phase=end .outcome==failed, over phase=start records",
             Some("A document with a start but no end this run (interrupted) counts in the denominator only."),
         ),
     );
@@ -1802,7 +1802,7 @@ fn build_definitions(observed_finish_reasons: &BTreeSet<String>) -> BTreeMap<Str
                 "distribution",
                 CMD_SCOPES,
                 description,
-                "runs/*.jsonl kind=document phase=end",
+                "runs/*.jsonl kind=segment phase=end",
                 Some(COUNT_SCOPE_CAVEAT),
             ),
         );
@@ -2081,7 +2081,7 @@ fn build_definitions(observed_finish_reasons: &BTreeSet<String>) -> BTreeMap<Str
             M_SCOPES,
             "One run's total written associations, summed across every document in that run — \
              one sample per run this model has a cell for.",
-            "runs/*.jsonl kind=document phase=end .associations, summed per run_index",
+            "runs/*.jsonl kind=segment phase=end .associations, summed per run_index",
             Some(
                 "A document that was not written contributes 0, not a missing sample — \
                  document.written_rate is where an incomplete document's failure is measured.",
@@ -2108,7 +2108,7 @@ fn build_definitions(observed_finish_reasons: &BTreeSet<String>) -> BTreeMap<Str
             M_SCOPES,
             "Number of documents that reached outcome=written in one run — one sample per run \
              this model has a cell for.",
-            "runs/*.jsonl kind=document phase=end .outcome==written, counted per run_index",
+            "runs/*.jsonl kind=segment phase=end .outcome==written, counted per run_index",
             None,
         ),
     );

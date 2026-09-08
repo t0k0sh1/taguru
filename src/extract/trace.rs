@@ -306,7 +306,7 @@ pub(super) fn render_trace(
         }
     };
     push(&TraceDocument {
-        kind: "document",
+        kind: "segment",
         run_id,
         source,
         document_sha256,

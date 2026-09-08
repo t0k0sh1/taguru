@@ -1160,7 +1160,7 @@ fn extract_coverage_reports_uncovered_candidate_pair_sentences() {
     );
     let document = read_diagnostics(&diagnostics)
         .into_iter()
-        .find(|record| record["kind"] == "document")
+        .find(|record| record["kind"] == "segment")
         .expect("a document record");
     assert_eq!(document["uncovered"], 1);
     requests.join().unwrap();
@@ -2789,7 +2789,7 @@ fn extract_redact_masks_the_document_before_the_prompt_and_every_record() {
     // The trace: three `redaction` records right after `document`, the
     // pre-existing one flagged, none with the text.
     let (_, records) = read_trace(&out);
-    assert_eq!(records[0]["kind"], "document");
+    assert_eq!(records[0]["kind"], "segment");
     let redactions: Vec<&Value> = records
         .iter()
         .filter(|record| record["kind"] == "redaction")
@@ -6455,7 +6455,7 @@ fn diagnostics_distinguishes_length_limited_empty_and_refusal_states() {
         assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
         let all = read_diagnostics(&diag);
         assert!(
-            !all.iter().any(|record| record["kind"] == "document"),
+            !all.iter().any(|record| record["kind"] == "segment"),
             "a document that never lands earns no summary record: {all:?}"
         );
         let records = read_attempt_records(&diag);
@@ -6494,7 +6494,7 @@ fn diagnostics_distinguishes_length_limited_empty_and_refusal_states() {
         assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
         let all = read_diagnostics(&diag);
         assert!(
-            !all.iter().any(|record| record["kind"] == "document"),
+            !all.iter().any(|record| record["kind"] == "segment"),
             "a document that never lands earns no summary record: {all:?}"
         );
         let records = read_attempt_records(&diag);
@@ -7136,7 +7136,7 @@ fn diagnostics_writes_one_chunk_record_per_chunk_before_any_attempt() {
     let _ = std::fs::remove_dir_all(&diag_dir);
 }
 
-/// Issue #262, ADR 0003 §7: one `kind: "document"` record per document
+/// Issue #262, ADR 0003 §7: one `kind: "segment"` record per document
 /// written, a structured twin of `Run::report`'s human-readable line —
 /// `concepts`/`labels` counted separately rather than combined into one
 /// "alias(es)" figure.
@@ -7187,13 +7187,13 @@ fn diagnostics_writes_a_document_record_whose_counts_match_the_written_batch() {
     let all = read_diagnostics(&diag);
     let documents: Vec<&Value> = all
         .iter()
-        .filter(|record| record["kind"] == "document")
+        .filter(|record| record["kind"] == "segment")
         .collect();
     assert_eq!(documents.len(), 1, "{all:?}");
     assert_eq!(
         all.last().unwrap()["kind"],
-        "document",
-        "the document record lands only once its document is fully written: {all:?}"
+        "segment",
+        "the segment record lands only once its document is fully written: {all:?}"
     );
     let record = documents[0];
     assert_eq!(record["source"], doc.to_str().unwrap());
@@ -8120,7 +8120,7 @@ fn trace_joins_every_batch_item_to_its_piece_and_the_sidecar_attempt() {
     assert!(run_id.chars().all(|c| c.is_ascii_hexdigit()), "{run_id:?}");
 
     let (batch_name, trace) = read_trace(&out);
-    assert_eq!(trace[0]["kind"], "document", "{trace:?}");
+    assert_eq!(trace[0]["kind"], "segment", "{trace:?}");
     assert_eq!(trace[0]["run_id"], run_id.as_str());
     assert_eq!(trace[0]["source"], doc.to_str().unwrap());
     assert_eq!(trace[0]["chunk_total"], 2);
@@ -8421,7 +8421,7 @@ fn trace_records_every_lost_item_with_its_original_text() {
     let losses: Vec<&Value> = trace.iter().filter(|r| r["kind"] == "loss").collect();
     let document = read_diagnostics(&diag)
         .into_iter()
-        .find(|r| r["kind"] == "document")
+        .find(|r| r["kind"] == "segment")
         .unwrap();
     let count = |reason: &str| losses.iter().filter(|l| l["reason"] == reason).count();
     assert_eq!(document["removed"], count("removed"), "{losses:?}");
@@ -8571,7 +8571,7 @@ fn attempts_log_keeps_every_completions_full_prompt_and_answer() {
         .collect();
     assert_eq!(
         kinds,
-        ["document", "settings", "system", "attempt", "attempt"],
+        ["segment", "settings", "system", "attempt", "attempt"],
         "{records:?}"
     );
 
@@ -8723,7 +8723,7 @@ fn attempts_log_survives_a_failure_and_is_appended_to_on_resume() {
     assert_eq!(
         kinds,
         [
-            "document", "settings", "system", "attempt", "attempt", "attempt"
+            "segment", "settings", "system", "attempt", "attempt", "attempt"
         ],
         "{after_failure:?}"
     );
@@ -8757,7 +8757,7 @@ fn attempts_log_survives_a_failure_and_is_appended_to_on_resume() {
     assert_eq!(
         kinds,
         [
-            "document", "settings", "system", "attempt", "attempt", "attempt", "document",
+            "segment", "settings", "system", "attempt", "attempt", "attempt", "segment",
             "settings", "system", "attempt"
         ],
         "{after_resume:?}"
@@ -8798,7 +8798,7 @@ fn attempts_log_survives_a_failure_and_is_appended_to_on_resume() {
     assert_eq!(
         after_force
             .iter()
-            .filter(|r| r["kind"] == "document")
+            .filter(|r| r["kind"] == "segment")
             .count(),
         1,
         "{after_force:?}"
@@ -8828,7 +8828,7 @@ fn attempts_log_can_be_switched_off() {
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     let (_, trace) = read_trace(&out);
-    assert_eq!(trace[0]["kind"], "document");
+    assert_eq!(trace[0]["kind"], "segment");
     let logs = std::fs::read_dir(out.join(".extract-trace"))
         .unwrap()
         .filter(|entry| {
@@ -9428,7 +9428,7 @@ fn replay_strict_reuses_a_recorded_run_with_no_model_endpoint_at_all() {
     let records_before = read_attempts_log(&out);
     let first_run_id = records_before
         .iter()
-        .find(|r| r["kind"] == "document")
+        .find(|r| r["kind"] == "segment")
         .unwrap()["run_id"]
         .as_str()
         .unwrap()
@@ -9494,7 +9494,7 @@ fn replay_strict_reuses_a_recorded_run_with_no_model_endpoint_at_all() {
         .iter()
         .map(|r| r["kind"].as_str().unwrap())
         .collect();
-    assert_eq!(kinds[0], "document");
+    assert_eq!(kinds[0], "segment");
     assert_eq!(second_run[0]["resumed"], true);
     assert!(kinds.contains(&"replay"), "{kinds:?}");
     assert!(kinds.contains(&"replay_summary"), "{kinds:?}");

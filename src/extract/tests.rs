@@ -260,7 +260,7 @@ fn chunk_and_document_records_serialize_their_fixed_key_sets() {
 
     let document_value: serde_json::Value = serde_json::from_str(
         &serde_json::to_string(&DocumentRecord {
-            kind: "document",
+            kind: "segment",
             source: "doc.md".to_string(),
             associations: 41,
             concepts: 6,
@@ -3593,7 +3593,7 @@ fn manifests_skip_only_exact_recomputations() {
 
     // A prompt bump invalidates entries recorded under the old one.
     manifest
-        .documents
+        .segments
         .get_mut("a.md")
         .expect("just recorded")
         .prompt_version = PROMPT_VERSION + 1;
@@ -3603,17 +3603,23 @@ fn manifests_skip_only_exact_recomputations() {
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     let path = dir.join(MANIFEST_NAME);
-    assert!(Manifest::load(&path).documents.is_empty());
+    assert!(Manifest::load(&path).segments.is_empty());
     let mut manifest = Manifest::default();
     manifest.record("a.md", &base_inputs("hash-1", "model-1"), "a.md.jsonl");
     manifest.save(&path).unwrap();
     assert!(Manifest::load(&path).matches("a.md", &base_inputs("hash-1", "model-1")));
+    // #851/#904: a fresh save always writes the current key, never the
+    // pre-rename one the alias below still reads.
+    let saved = fs::read_to_string(&path).unwrap();
+    assert!(saved.contains("\"segments\""), "{saved}");
+    assert!(!saved.contains("\"documents\""), "{saved}");
     fs::write(&path, "not json").unwrap();
-    assert!(Manifest::load(&path).documents.is_empty());
+    assert!(Manifest::load(&path).segments.is_empty());
 
     // An entry written before the context/no_passage/description/
-    // fact_budget fields existed still loads — and mismatches, so
-    // it re-extracts exactly once.
+    // fact_budget fields existed, AND before the #851/#904
+    // documents -> segments rename, still loads via #[serde(alias)] —
+    // and mismatches, so it re-extracts exactly once.
     fs::write(
         &path,
         r#"{"documents": {"a.md": {"sha256": "hash-1", "model": "model-1",
@@ -3621,7 +3627,7 @@ fn manifests_skip_only_exact_recomputations() {
     )
     .unwrap();
     let legacy = Manifest::load(&path);
-    assert_eq!(legacy.documents.len(), 1);
+    assert_eq!(legacy.segments.len(), 1);
     assert!(!legacy.matches("a.md", &base_inputs("hash-1", "model-1")));
 
     // An entry written before the structured_output/
@@ -6183,7 +6189,7 @@ fn render_trace_joins_items_to_pieces_across_a_split_and_a_reuse() {
     assert_eq!(
         kinds,
         [
-            "document", "steering", "chunk", "chunk", "piece", "piece", "piece", "item", "item",
+            "segment", "steering", "chunk", "chunk", "piece", "piece", "piece", "item", "item",
             "item", "item"
         ]
     );
@@ -8766,6 +8772,42 @@ fn replay_index_parses_normal_records_and_ignores_corrupt_lines() {
             assert_eq!(diagnostic.recorded, 0);
         }
         ReplayLookup::Hit(_) => panic!("a malformed record must never be offered for replay"),
+    }
+}
+
+#[test]
+fn replay_index_recognizes_the_post_851_segment_kind_the_same_as_document() {
+    let path = replay_fixture_path("segment-kind");
+    let system_sha = sha256_hex(b"you are a helpful extractor");
+    let mut text = String::new();
+    text.push_str(
+        &serde_json::json!({
+            "kind": "segment",
+            "run_id": "run-segment-fixture",
+        })
+        .to_string(),
+    );
+    text.push('\n');
+    text.push_str(
+        &serde_json::json!({
+            "kind": "system",
+            "sha256": system_sha,
+            "bytes": 27,
+            "content": "you are a helpful extractor",
+        })
+        .to_string(),
+    );
+    text.push('\n');
+    fs::write(&path, text).unwrap();
+
+    match ReplayIndex::load(&path).pinned_system() {
+        SystemPinDecision::Pin { content, run_id } => {
+            assert_eq!(content, "you are a helpful extractor");
+            assert_eq!(run_id, "run-segment-fixture");
+        }
+        _ => {
+            panic!("a `kind: \"segment\"` record must originate a run the same way `document` does")
+        }
     }
 }
 

@@ -712,6 +712,16 @@ fn parse_args_recognizes_with_text() {
 /// to exercise every metric family without a real `taguru extract`
 /// child process.
 fn synthetic_results_dir(tag: &str) -> PathBuf {
+    synthetic_results_dir_with_kind(tag, "document")
+}
+
+/// [`synthetic_results_dir`], with the runs file's per-segment record
+/// `kind` parameterized so #851/#904's `document` -> `segment` reader
+/// tolerance can be exercised against the exact same fixture shape
+/// (`compare::segment_id_field_prefers_the_new_name_but_falls_back_to_the_old_one`
+/// covers the field-name half of that fallback in isolation; this
+/// covers the `kind` half end to end).
+fn synthetic_results_dir_with_kind(tag: &str, kind: &str) -> PathBuf {
     let dir = temp_dir(tag);
     fs::create_dir_all(dir.join("runs")).unwrap();
     fs::create_dir_all(dir.join("cells/m/run01")).unwrap();
@@ -732,7 +742,7 @@ fn synthetic_results_dir(tag: &str) -> PathBuf {
             "run_index": 1, "prompt_version": 1,
         }),
         serde_json::json!({
-            "kind": "document", "ts": 100.0, "cell_id": "m.run01",
+            "kind": kind, "ts": 100.0, "cell_id": "m.run01",
             "document_id": "brewery", "source": "corpus/brewery.md",
             "document_sha256": "sha-brewery", "chunk_total": 1, "phase": "start",
         }),
@@ -748,14 +758,14 @@ fn synthetic_results_dir(tag: &str) -> PathBuf {
             "chunk_sha256": "sha-chunk0", "paragraph_first": 0, "paragraph_last": 0,
         }),
         serde_json::json!({
-            "kind": "document", "ts": 110.0, "cell_id": "m.run01",
+            "kind": kind, "ts": 110.0, "cell_id": "m.run01",
             "document_id": "brewery", "source": "corpus/brewery.md",
             "document_sha256": "sha-brewery", "phase": "end", "outcome": "written",
             "associations": 2, "concepts": 1, "labels": 0, "questions": 0,
             "duplicates": 0, "dropped": 0, "batch_path": "cells/m/run01/brewery.jsonl",
         }),
         serde_json::json!({
-            "kind": "document", "ts": 111.0, "cell_id": "m.run01",
+            "kind": kind, "ts": 111.0, "cell_id": "m.run01",
             "document_id": "sake", "source": "corpus/sake.md",
             "document_sha256": "sha-sake", "chunk_total": 1, "phase": "start",
         }),
@@ -769,7 +779,7 @@ fn synthetic_results_dir(tag: &str) -> PathBuf {
             "chunk_sha256": "sha-chunk0", "paragraph_first": 0, "paragraph_last": 0,
         }),
         serde_json::json!({
-            "kind": "document", "ts": 142.0, "cell_id": "m.run01",
+            "kind": kind, "ts": 142.0, "cell_id": "m.run01",
             "document_id": "sake", "source": "corpus/sake.md",
             "document_sha256": "sha-sake", "phase": "end", "outcome": "failed",
             "associations": null, "concepts": null, "labels": null, "questions": null,
@@ -1265,6 +1275,41 @@ fn compute_measurements_over_a_synthetic_results_directory() {
     assert_eq!(sake_associations.n(), 0);
 
     let _ = fs::remove_dir_all(&dir);
+}
+
+/// #851/#904 parity: a results directory whose runs file was written
+/// under the post-rename `kind: "segment"` record must compute the
+/// exact same metrics as [`compute_measurements_over_a_synthetic_results_directory`]'s
+/// pre-rename `kind: "document"` fixture — the write-side rename must
+/// not be observable from `compare`'s output, only from the raw bytes
+/// on disk.
+#[test]
+fn compute_measurements_is_identical_for_the_segment_kind_and_the_document_kind() {
+    let document_dir = synthetic_results_dir_with_kind("kind-parity-document", "document");
+    let segment_dir = synthetic_results_dir_with_kind("kind-parity-segment", "segment");
+
+    let document_measurements = compute_measurements(&document_dir).expect("computes");
+    let segment_measurements = compute_measurements(&segment_dir).expect("computes");
+
+    // `inputs.runs` embeds the results directory's own path (the tag),
+    // which deliberately differs between the two fixtures so they
+    // don't share a temp dir, and `generated_at` is a real-time
+    // timestamp independent of the fixture — normalize both away
+    // before comparing the rest of the artifact byte-for-byte.
+    let normalize = |mut json: serde_json::Value| {
+        json["inputs"]["runs"] = serde_json::Value::Null;
+        json["generated_at"] = serde_json::Value::Null;
+        json
+    };
+    let document_json = normalize(serde_json::to_value(&document_measurements).unwrap());
+    let segment_json = normalize(serde_json::to_value(&segment_measurements).unwrap());
+    assert_eq!(
+        document_json, segment_json,
+        "kind: \"segment\" must compute byte-identical measurements to kind: \"document\""
+    );
+
+    let _ = fs::remove_dir_all(&document_dir);
+    let _ = fs::remove_dir_all(&segment_dir);
 }
 
 #[test]

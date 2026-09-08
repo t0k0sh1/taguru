@@ -1805,7 +1805,13 @@ mod probe_model_tests {
 // an older shape still load, and a revision may only add a field.
 
 const BENCHMARK_MANIFEST_VERSION: u64 = 1;
-const BENCHMARK_RUNS_VERSION: u64 = 1;
+/// 2 (#851/#904): the per-cell `document`(`phase: start`/`end`) record
+/// this stamps every runs file with is now written as `kind: "segment"`
+/// — a repurposed value under ADR 0003 §10, not an added field, so the
+/// stamp bumps even though no reader currently gates on it (readers
+/// accept both spellings instead; see `seed_counts_from_existing_runs_file`
+/// and `compare::segment_id_field`).
+const BENCHMARK_RUNS_VERSION: u64 = 2;
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, PartialEq)]
 struct HarnessBlock {
@@ -2337,7 +2343,7 @@ fn transcribe_diagnostics_line(
     if !open.contains(&document_id) {
         open.insert(document_id.clone());
         writer.write_value(&serde_json::json!({
-            "kind": "document",
+            "kind": "segment",
             "ts": now,
             "cell_id": ctx.cell_id,
             "document_id": document_id,
@@ -2380,7 +2386,7 @@ fn transcribe_diagnostics_line(
             *attempts_total += 1;
             writer.write_value(&Value::Object(map));
         }
-        "document" => {
+        "segment" | "document" => {
             open.remove(&document_id);
             *documents_written += 1;
             let batch_path = map
@@ -2388,7 +2394,7 @@ fn transcribe_diagnostics_line(
                 .and_then(Value::as_str)
                 .map(|path| ctx.relativize_batch_path(path));
             writer.write_value(&serde_json::json!({
-                "kind": "document",
+                "kind": "segment",
                 "ts": now,
                 "cell_id": ctx.cell_id,
                 "document_id": document_id,
@@ -2424,7 +2430,7 @@ fn synthesize_failed_ends(
     for (source, doc) in dictionary {
         if open.contains(&doc.document_id) {
             writer.write_value(&serde_json::json!({
-                "kind": "document",
+                "kind": "segment",
                 "ts": now_unix_secs() as f64,
                 "cell_id": cell_id,
                 "document_id": doc.document_id,
@@ -2851,7 +2857,7 @@ mod cell_runs_tests {
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 2, "one synthesized start, one attempt");
         let start: Value = serde_json::from_str(lines[0]).unwrap();
-        assert_eq!(start["kind"], "document");
+        assert_eq!(start["kind"], "segment");
         assert_eq!(start["phase"], "start");
         assert_eq!(start["document_id"], "a");
         let attempt: Value = serde_json::from_str(lines[1]).unwrap();

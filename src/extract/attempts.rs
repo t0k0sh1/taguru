@@ -56,7 +56,7 @@ impl AttemptLog {
     /// Opens the log — truncating for a document starting fresh,
     /// appending for one resuming from a checkpoint (`resuming`), so
     /// the file spans exactly the runs that built the batch, as the
-    /// checkpoint does — and writes the `document` record.
+    /// checkpoint does — and writes the `segment` record.
     pub(super) fn open(
         path: PathBuf,
         resuming: bool,
@@ -79,7 +79,7 @@ impl AttemptLog {
             systems: Mutex::new(HashSet::new()),
         };
         log.write_record(&AttemptsDocumentRecord {
-            kind: "document",
+            kind: "segment",
             run_id,
             source,
             document_sha256,
@@ -210,7 +210,7 @@ struct AttemptsDocumentRecord<'a> {
 
 /// ADR 0031 §3.2/§3.9: the run's compute-input settings, as a
 /// diagnostic — never a gate. Written once per document, right after
-/// the `document` record. The same field set `CheckpointFingerprint`
+/// the `segment` record. The same field set `CheckpointFingerprint`
 /// checks (minus `sha256`/`context`/`no_passage`/`description`/
 /// `escalation_factor`, which name the document or a value that never
 /// reaches the model), plus `rung`. A later replay run compares its
