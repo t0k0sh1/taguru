@@ -46,7 +46,13 @@ use super::identity;
 // differently-split underscored model ids — a reader keyed on the old
 // format would otherwise silently fail to match a pair record it
 // should have found.
-const BENCHMARK_DIFFERENCES_VERSION: u64 = 2;
+//
+// 3 (#851/#904): the `kind: "document_coverage"` record is now
+// `kind: "segment_coverage"` — a repurposed value under ADR 0003 §10,
+// not an added field. No reader parses `differences.jsonl` back into
+// this type (`DifferenceRecord` is `Serialize`-only), so the bump is a
+// documented stamp rather than something any code gates on today.
+const BENCHMARK_DIFFERENCES_VERSION: u64 = 3;
 
 /// `locator.text`'s cap (ADR 0003 §9.4 names no number; this module
 /// picks one so a single pathological paragraph cannot inflate the
@@ -186,10 +192,10 @@ enum DifferenceRecord {
     /// excluded from every key-level record below and shows up only
     /// here, so "no differences on this document" and "this document
     /// was never comparable" stay distinguishable (a harness/model
-    /// completion failure is `document.written_rate`'s fact, not an
+    /// completion failure is `segment.written_rate`'s fact, not an
     /// extraction difference — the same posture `stability_metrics`
     /// already takes, ADR 0003 §9.3).
-    DocumentCoverage {
+    SegmentCoverage {
         pair_id: String,
         present_in: Vec<String>,
         sides: Sides<RunsBlock>,
@@ -545,7 +551,7 @@ pub(super) fn compute_differences(
         doc_ids.extend(side_a_docs.keys());
         doc_ids.extend(side_b_docs.keys());
 
-        // Pass 1: document_coverage for every document either side
+        // Pass 1: segment_coverage for every document either side
         // attempted, in document_id order.
         let mut eligible: Vec<&String> = Vec::new();
         for doc_id in &doc_ids {
@@ -565,7 +571,7 @@ pub(super) fn compute_differences(
                 (None, Some(_)) => vec![pair.b.clone()],
                 (None, None) => continue,
             };
-            let record = DifferenceRecord::DocumentCoverage {
+            let record = DifferenceRecord::SegmentCoverage {
                 pair_id: pair.pair_id.clone(),
                 present_in,
                 sides: Sides {

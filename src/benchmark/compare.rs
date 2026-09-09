@@ -33,7 +33,13 @@ use super::identity;
 #[path = "compare/differences.rs"]
 mod differences;
 
-const BENCHMARK_MEASUREMENTS_VERSION: u64 = 1;
+// 2 (#851/#904): the `documents` section is now `segments`, and every
+// `document.*`/`run.documents_written` metric name is now
+// `segment.*`/`run.segments_written` — repurposed keys under ADR 0003
+// §10, not added fields. `MeasurementsFile` is `Serialize`-only (no
+// reader parses measurements.json back into this type), so the bump
+// is a documented stamp rather than something any code gates on today.
+const BENCHMARK_MEASUREMENTS_VERSION: u64 = 2;
 
 /// `segment_id` is the current field name (#851/#904); `document_id` is
 /// what every runs file written before the rename carries. Centralized
@@ -182,7 +188,7 @@ fn parse_args(args: &[String]) -> Result<CompareArgs, i32> {
 // §10) — `benchmark::search` (#260) and `taguru evaluate` (#215) are
 // peer consumers, not owned by `benchmark::compare`.
 
-type DocumentsSection = BTreeMap<String, BTreeMap<String, BTreeMap<String, MetricsMap>>>;
+type SegmentsSection = BTreeMap<String, BTreeMap<String, BTreeMap<String, MetricsMap>>>;
 
 #[derive(Debug, Clone, Serialize)]
 struct CellBlock {
@@ -213,7 +219,7 @@ struct MeasurementsFile {
     definitions: BTreeMap<String, MetricDef>,
     cells: BTreeMap<String, CellBlock>,
     models: BTreeMap<String, MetricsMap>,
-    documents: DocumentsSection,
+    segments: SegmentsSection,
 }
 
 // ============================== Intermediate rows ==============================
@@ -777,15 +783,15 @@ fn measurements_from(manifest: &super::BenchManifest, loaded: &LoadedResults) ->
         models.insert(model_id.clone(), metrics);
     }
 
-    // ---- documents (run-level granularity: model -> document -> run_label) ----
-    let mut documents: DocumentsSection = BTreeMap::new();
+    // ---- segments (run-level granularity: model -> segment -> run_label) ----
+    let mut segments: SegmentsSection = BTreeMap::new();
     for doc in doc_rows {
         let attempts_for_doc = attempts_by_cell_doc
             .get(&(doc.cell_id.clone(), doc.document_id.clone()))
             .cloned()
             .unwrap_or_default();
         let metrics = document_scope_metrics(doc, &attempts_for_doc);
-        documents
+        segments
             .entry(doc.model_id.clone())
             .or_default()
             .entry(doc.document_id.clone())
@@ -810,7 +816,7 @@ fn measurements_from(manifest: &super::BenchManifest, loaded: &LoadedResults) ->
         definitions,
         cells,
         models,
-        documents,
+        segments,
     }
 }
 
@@ -1131,11 +1137,11 @@ fn document_outcome_rates(docs: &[&DocRow]) -> MetricsMap {
         .count() as u64;
     let mut m = MetricsMap::new();
     m.insert(
-        "document.written_rate".to_string(),
+        "segment.written_rate".to_string(),
         MetricValue::Ratio(ratio_metric(written, total)),
     );
     m.insert(
-        "document.failed_rate".to_string(),
+        "segment.failed_rate".to_string(),
         MetricValue::Ratio(ratio_metric(failed, total)),
     );
     m
@@ -1146,7 +1152,7 @@ fn document_outcome_rates(docs: &[&DocRow]) -> MetricsMap {
 /// `stability.*`/`run.*`: how much one model's own extraction varied
 /// from run to run (issue #258, ADR 0003 §9.4). Model scope only — a
 /// cell is a single run, so a cross-run value has nothing to mean at
-/// cell scope, and `documents`' `model -> document -> run_label` shape
+/// cell scope, and `segments`' `model -> document -> run_label` shape
 /// (§9.3) has no slot for a value spanning runs. `run_indexes` comes
 /// from `manifest.cells`, not from `docs`, so a run with zero document
 /// rows still contributes a `0` sample to the `run.*` distributions
@@ -1183,7 +1189,7 @@ fn stability_metrics(
         )),
     );
     m.insert(
-        "run.documents_written".to_string(),
+        "run.segments_written".to_string(),
         MetricValue::Distribution(Distribution::from_samples(
             written_by_run.values().map(|&v| v as f64).collect(),
         )),
@@ -1194,7 +1200,7 @@ fn stability_metrics(
     // DocRow carries a batch (outcome=written and the batch was
     // readable) — the same condition compute_measurements already uses
     // to gate extraction-shape metrics, so a harness/model completion
-    // failure (tracked separately by document.written_rate) never
+    // failure (tracked separately by segment.written_rate) never
     // masquerades as extraction instability here.
     let mut presence_table = identity::PresenceTable::default();
     let mut keys_by_run_and_doc: BTreeMap<(usize, String), BTreeSet<identity::AssocKey>> =
@@ -1468,7 +1474,7 @@ fn document_scope_metrics(doc: &DocRow, attempts_for_doc: &[&AttemptRow]) -> Met
 // (#260) builds its own `retrieval.json` `definitions` block from the
 // same function.
 
-const CMD_SCOPES: &[&str] = &["cell", "model", "document"];
+const CMD_SCOPES: &[&str] = &["cell", "model", "segment"];
 const CM_SCOPES: &[&str] = &["cell", "model"];
 const M_SCOPES: &[&str] = &["model"];
 
@@ -1523,7 +1529,7 @@ fn build_definitions(observed_finish_reasons: &BTreeSet<String>) -> BTreeMap<Str
             Some(
                 "A resumed cell can log more than one phase=start for the same document (ADR \
                  0003 §6); the earliest is used. A document with no phase=end (interrupted) is \
-                 excluded from this metric's sample — see document.written_rate for its count.",
+                 excluded from this metric's sample — see segment.written_rate for its count.",
             ),
         ),
     );
@@ -1723,27 +1729,27 @@ fn build_definitions(observed_finish_reasons: &BTreeSet<String>) -> BTreeMap<Str
         ),
     );
     d.insert(
-        "document.written_rate".to_string(),
+        "segment.written_rate".to_string(),
         def(
             "ratio",
             "ratio",
             CM_SCOPES,
-            "Share of documents in scope that reached outcome=written, over every document that \
+            "Share of segments in scope that reached outcome=written, over every segment that \
              has at least a phase=start record.",
             "runs/*.jsonl kind=segment phase=end .outcome==written, over phase=start records",
-            Some("A document with a start but no end this run (interrupted) counts in the denominator only."),
+            Some("A segment with a start but no end this run (interrupted) counts in the denominator only."),
         ),
     );
     d.insert(
-        "document.failed_rate".to_string(),
+        "segment.failed_rate".to_string(),
         def(
             "ratio",
             "ratio",
             CM_SCOPES,
-            "Share of documents in scope that reached outcome=failed, over every document that \
+            "Share of segments in scope that reached outcome=failed, over every segment that \
              has at least a phase=start record.",
             "runs/*.jsonl kind=segment phase=end .outcome==failed, over phase=start records",
-            Some("A document with a start but no end this run (interrupted) counts in the denominator only."),
+            Some("A segment with a start but no end this run (interrupted) counts in the denominator only."),
         ),
     );
     d.insert(
@@ -2084,7 +2090,7 @@ fn build_definitions(observed_finish_reasons: &BTreeSet<String>) -> BTreeMap<Str
             "runs/*.jsonl kind=segment phase=end .associations, summed per run_index",
             Some(
                 "A document that was not written contributes 0, not a missing sample — \
-                 document.written_rate is where an incomplete document's failure is measured.",
+                 segment.written_rate is where an incomplete document's failure is measured.",
             ),
         ),
     );
@@ -2101,12 +2107,12 @@ fn build_definitions(observed_finish_reasons: &BTreeSet<String>) -> BTreeMap<Str
         ),
     );
     d.insert(
-        "run.documents_written".to_string(),
+        "run.segments_written".to_string(),
         def(
-            "document",
+            "segment",
             "distribution",
             M_SCOPES,
-            "Number of documents that reached outcome=written in one run — one sample per run \
+            "Number of segments that reached outcome=written in one run — one sample per run \
              this model has a cell for.",
             "runs/*.jsonl kind=segment phase=end .outcome==written, counted per run_index",
             None,
@@ -2162,7 +2168,7 @@ fn append_metric_rows(
 /// re-runs of the same results directory. `definitions`, `inputs`,
 /// `run_id`, and `generated_at` stay JSON-only.
 fn render_csv(measurements: &MeasurementsFile) -> String {
-    let mut out = String::from("scope,model_id,run_index,document_id,metric,stat,value,unit,n\n");
+    let mut out = String::from("scope,model_id,run_index,segment_id,metric,stat,value,unit,n\n");
     for block in measurements.cells.values() {
         for (metric, value) in &block.metrics {
             append_metric_rows(
@@ -2191,14 +2197,14 @@ fn render_csv(measurements: &MeasurementsFile) -> String {
             );
         }
     }
-    for (model_id, by_document) in &measurements.documents {
+    for (model_id, by_document) in &measurements.segments {
         for (document_id, by_run) in by_document {
             for (run_label, metrics) in by_run {
                 let run_index = run_index_from_label(run_label);
                 for (metric, value) in metrics {
                     append_metric_rows(
                         &mut out,
-                        "document",
+                        "segment",
                         model_id,
                         run_index,
                         Some(document_id.as_str()),

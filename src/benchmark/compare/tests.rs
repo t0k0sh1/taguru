@@ -112,7 +112,7 @@ const STABILITY_METRIC_NAMES: [&str; 12] = [
     "stability.alias_canonical_variation_ratio",
     "run.associations_total",
     "run.elapsed_seconds_total",
-    "run.documents_written",
+    "run.segments_written",
 ];
 
 /// ADR 0003 §9.4's stricter lexicon is stated for `differences.jsonl`
@@ -179,7 +179,7 @@ fn every_emitted_metric_keys_definitions_and_units_match_csv() {
     for metrics in measurements.models.values() {
         all_metric_names.extend(metrics.keys().cloned());
     }
-    for by_doc in measurements.documents.values() {
+    for by_doc in measurements.segments.values() {
         for by_run in by_doc.values() {
             for metrics in by_run.values() {
                 all_metric_names.extend(metrics.keys().cloned());
@@ -258,8 +258,8 @@ fn csv_is_an_exact_value_projection_of_the_json() {
                 &measurements.cells[&cell_id].metrics[metric]
             }
             "model" => &measurements.models[model_id][metric],
-            "document" => {
-                &measurements.documents[model_id][document_id][&format!("run{:0>2}", run_index)]
+            "segment" => {
+                &measurements.segments[model_id][document_id][&format!("run{:0>2}", run_index)]
                     [metric]
             }
             other => panic!("unexpected scope {other}"),
@@ -313,8 +313,8 @@ fn csv_is_an_exact_value_projection_of_the_json_with_two_runs() {
                 &measurements.cells[&cell_id].metrics[metric]
             }
             "model" => &measurements.models[model_id][metric],
-            "document" => {
-                &measurements.documents[model_id][document_id][&format!("run{:0>2}", run_index)]
+            "segment" => {
+                &measurements.segments[model_id][document_id][&format!("run{:0>2}", run_index)]
                     [metric]
             }
             other => panic!("unexpected scope {other}"),
@@ -513,12 +513,12 @@ fn document_outcome_rates_counts_interrupted_in_the_denominator_only() {
     let rows = [doc(Some("written")), doc(Some("failed")), doc(None)];
     let refs: Vec<&DocRow> = rows.iter().collect();
     let rates = document_outcome_rates(&refs);
-    let MetricValue::Ratio(written) = &rates["document.written_rate"] else {
+    let MetricValue::Ratio(written) = &rates["segment.written_rate"] else {
         panic!()
     };
     assert_eq!(written.n(), 3);
     assert_eq!(written.numerator(), Some(1));
-    let MetricValue::Ratio(failed) = &rates["document.failed_rate"] else {
+    let MetricValue::Ratio(failed) = &rates["segment.failed_rate"] else {
         panic!()
     };
     assert_eq!(failed.numerator(), Some(1));
@@ -1196,7 +1196,7 @@ fn stability_metrics_over_two_runs_match_hand_computed_values() {
     );
     assert_eq!(run_assoc.max(), Some(4.0), "run01: 2 (brewery) + 2 (sake)");
 
-    let MetricValue::Distribution(run_written) = &model["run.documents_written"] else {
+    let MetricValue::Distribution(run_written) = &model["run.segments_written"] else {
         panic!()
     };
     assert_eq!(run_written.min(), Some(1.0), "run02: only brewery written");
@@ -1217,7 +1217,7 @@ fn compute_measurements_over_a_synthetic_results_directory() {
     let dir = synthetic_results_dir("smoke");
     let measurements = compute_measurements(&dir).expect("computes");
 
-    assert_eq!(measurements.taguru_benchmark_measurements, 1);
+    assert_eq!(measurements.taguru_benchmark_measurements, 2);
     assert_eq!(measurements.run_id, "run-1");
     assert_eq!(measurements.percentile_method, "nearest-rank");
     assert_eq!(
@@ -1237,7 +1237,7 @@ fn compute_measurements_over_a_synthetic_results_directory() {
         "both the written and the timed-out attempt count"
     );
 
-    let MetricValue::Ratio(written_rate) = &cell.metrics["document.written_rate"] else {
+    let MetricValue::Ratio(written_rate) = &cell.metrics["segment.written_rate"] else {
         panic!()
     };
     assert_eq!(written_rate.n(), 2);
@@ -1249,7 +1249,7 @@ fn compute_measurements_over_a_synthetic_results_directory() {
     };
     assert_eq!(complete_rate.value(), Some(1.0));
 
-    let brewery_run01 = &measurements.documents["m"]["brewery"]["run01"];
+    let brewery_run01 = &measurements.segments["m"]["brewery"]["run01"];
     let MetricValue::Count(associations) = &brewery_run01["extraction.associations"] else {
         panic!()
     };
@@ -1263,7 +1263,7 @@ fn compute_measurements_over_a_synthetic_results_directory() {
         "one distinct subject: 'beer co'"
     );
 
-    let sake_run01 = &measurements.documents["m"]["sake"]["run01"];
+    let sake_run01 = &measurements.segments["m"]["sake"]["run01"];
     let MetricValue::Count(sake_associations) = &sake_run01["extraction.associations"] else {
         panic!()
     };
@@ -1334,7 +1334,7 @@ fn a_reprocessed_documents_second_end_record_supersedes_the_first() {
     fs::write(&runs_path, runs).unwrap();
 
     let measurements = compute_measurements(&dir).expect("computes");
-    let brewery_run01 = &measurements.documents["m"]["brewery"]["run01"];
+    let brewery_run01 = &measurements.segments["m"]["brewery"]["run01"];
     let MetricValue::Count(associations) = &brewery_run01["extraction.associations"] else {
         panic!()
     };
@@ -1403,7 +1403,7 @@ fn stability_metrics_with_a_single_run_are_the_defined_zero_shape() {
         "brewery's 2 associations; sake failed and contributes 0"
     );
 
-    let MetricValue::Distribution(run_written) = &model["run.documents_written"] else {
+    let MetricValue::Distribution(run_written) = &model["run.segments_written"] else {
         panic!()
     };
     assert_eq!(run_written.sum(), Some(1.0), "only brewery was written");
@@ -1515,7 +1515,7 @@ fn a_manifest_naming_an_unreadable_runs_file_is_an_error() {
 /// `alias_resolution_difference`.
 ///
 /// Document `sake` completes only for `alpha` (`beta` has no cell entry
-/// for it at all) — `document_coverage` with `present_in: ["alpha"]`
+/// for it at all) — `segment_coverage` with `present_in: ["alpha"]`
 /// and no association-level records, the coverage-exclusion case.
 fn synthetic_two_model_results_dir(tag: &str) -> PathBuf {
     let dir = temp_dir(tag);
@@ -1806,7 +1806,7 @@ fn differences_header_matches_the_adr_shape() {
     let lines = compute_differences_lines(&dir, false).expect("computes");
     let header = &lines[0];
     assert_eq!(header["kind"], "header");
-    assert_eq!(header["taguru_benchmark_differences"], 2);
+    assert_eq!(header["taguru_benchmark_differences"], 3);
     assert_eq!(header["run_id"], "run-diff");
     assert_eq!(header["text_included"], false);
     assert_eq!(
@@ -1827,10 +1827,10 @@ fn differences_header_matches_the_adr_shape() {
 }
 
 #[test]
-fn differences_document_coverage_marks_a_document_only_one_side_completed() {
+fn differences_segment_coverage_marks_a_document_only_one_side_completed() {
     let dir = synthetic_two_model_results_dir("differences-coverage");
     let lines = compute_differences_lines(&dir, false).expect("computes");
-    let coverage = records_of_kind(&lines, "document_coverage");
+    let coverage = records_of_kind(&lines, "segment_coverage");
     assert_eq!(coverage.len(), 2, "brewery and sake, one record each");
 
     let brewery = coverage

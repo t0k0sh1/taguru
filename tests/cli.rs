@@ -1423,11 +1423,11 @@ fn benchmark_compare_derives_measurements_from_a_results_directory() {
 
     let json_text = std::fs::read_to_string(dir.join("measurements.json")).unwrap();
     let measurements: serde_json::Value = serde_json::from_str(&json_text).unwrap();
-    assert_eq!(measurements["taguru_benchmark_measurements"], 1);
+    assert_eq!(measurements["taguru_benchmark_measurements"], 2);
     assert_eq!(measurements["percentile_method"], "nearest-rank");
     assert!(measurements["cells"]["m.run01"].is_object());
     assert!(measurements["models"]["m"].is_object());
-    assert!(measurements["documents"]["m"]["brewery"]["run01"].is_object());
+    assert!(measurements["segments"]["m"]["brewery"]["run01"].is_object());
     assert_no_banned_keys(&measurements);
 
     // issue #258: the same-ness parameters every stability metric was
@@ -1442,7 +1442,7 @@ fn benchmark_compare_derives_measurements_from_a_results_directory() {
     let csv_text = std::fs::read_to_string(dir.join("measurements.csv")).unwrap();
     assert_eq!(
         csv_text.lines().next(),
-        Some("scope,model_id,run_index,document_id,metric,stat,value,unit,n")
+        Some("scope,model_id,run_index,segment_id,metric,stat,value,unit,n")
     );
 
     // Re-running is a pure function of the (unchanged) results
@@ -1664,7 +1664,7 @@ fn benchmark_compare_derives_differences_for_each_model_pair() {
 
     let lines = read_differences_lines(&dir);
     assert_eq!(lines[0]["kind"], "header");
-    assert_eq!(lines[0]["taguru_benchmark_differences"], 2);
+    assert_eq!(lines[0]["taguru_benchmark_differences"], 3);
     assert_eq!(lines[0]["text_included"], false);
     assert_eq!(
         lines[0]["pairs"],
