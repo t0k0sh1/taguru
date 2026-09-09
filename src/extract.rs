@@ -522,7 +522,15 @@ Contract and discipline: docs/extract.html.
 /// `## Abstract` with the fact one paragraph down), so locators made
 /// under it are one paragraph off and must not be silently reused.
 ///
-pub(crate) const PROMPT_VERSION: u32 = 5;
+/// 6 (#851/#904): every occurrence of "document" the model is shown —
+/// the system prompt's framing, the user turn's `Document '<path>'`
+/// preamble, and the candidates/vocabulary/chunk-context blocks — is
+/// now "segment" (#851's terminology split: `document` names the
+/// user's whole original file, `segment` the piece one extraction call
+/// sees). The wording the model reads changed, so an answer cached
+/// under 5 must not be silently reused.
+///
+pub(crate) const PROMPT_VERSION: u32 = 6;
 
 /// TAGURU_EXTRACT_REDACT's value: `Some(None)` for the off spellings
 /// (`0`, `false`, `off`, empty), `Some(Some(BOTH))` for `1`, `true`,

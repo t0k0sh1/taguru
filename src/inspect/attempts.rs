@@ -700,7 +700,7 @@ mod tests {
         doc: &str,
         answer: Option<&str>,
     ) -> String {
-        let user = format!("Document 'a.md', part {} of 2:\n\n{doc}", chunk + 1);
+        let user = format!("Segment 'a.md', part {} of 2:\n\n{doc}", chunk + 1);
         json!({
             "kind": "attempt", "run_id": "r1", "attempt_seq": seq, "piece_id": piece,
             "source": "a.md", "chunk_index": chunk, "stage": "item", "attempt": 1,
@@ -855,7 +855,7 @@ mod tests {
             "state": "stop_malformed", "length_limited": false, "transport_retries": 0,
             "elapsed_seconds": 1.0, "requested_max_tokens": null, "finish_reason": "stop",
             "input_tokens": null, "output_tokens": null,
-            "messages": [{"role": "user", "content": "Document 'a.md':\n\n[0] a"}],
+            "messages": [{"role": "user", "content": "Segment 'a.md':\n\n[0] a"}],
             "answer": "{}", "parse_error": null, "validation_issues": issues, "removed_items": null
         })
         .to_string();
@@ -914,7 +914,7 @@ mod tests {
             "input_tokens": null, "output_tokens": null,
             "messages": [
                 {"role": "system", "system_sha256": "s"},
-                {"role": "user", "content": "Document 'a.md':\n\n[0] alpha"},
+                {"role": "user", "content": "Segment 'a.md':\n\n[0] alpha"},
                 {"role": "assistant", "content": "nope"},
                 {"role": "user", "content": "Your previous answer was not JSON. Answer again."}
             ],

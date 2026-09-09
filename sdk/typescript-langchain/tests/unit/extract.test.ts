@@ -265,18 +265,19 @@ describe("chunking and paragraph split", () => {
 });
 
 describe("the producer parity contract", () => {
-  // PROMPT_VERSION equals src/extract.rs's (5: #812's citation rule; 4:
-  // #852's ground rules) and the wording that earned each bump is present.
+  // PROMPT_VERSION equals src/extract.rs's (6: #851/#904's document ->
+  // segment rename; 5: #812's citation rule; 4: #852's ground rules) and
+  // the wording that earned each bump is present.
   it("tracks extract.rs's PROMPT_VERSION and the wording behind it", () => {
-    expect(PROMPT_VERSION).toBe(5);
+    expect(PROMPT_VERSION).toBe(6);
     const prompt = systemPrompt([], 0);
     expect(prompt).toContain(
       "the paragraph whose sentences state it, never a heading-only paragraph",
     );
     expect(prompt).toContain('"[3] ## Abstract"');
-    expect(prompt).toContain("the document's text alone");
+    expect(prompt).toContain("the segment's text alone");
     expect(prompt).toContain(
-      "Never build a subject or object out of words the document does not contain",
+      "Never build a subject or object out of words the segment does not contain",
     );
     expect(prompt).toContain('empty "associations" array is the correct answer');
   });

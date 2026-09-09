@@ -1074,7 +1074,7 @@ fn extract_candidates_flag_folds_the_document_names_into_the_system_prompt() {
     let system = body["messages"][0]["content"].as_str().unwrap();
     assert_eq!(body["messages"][0]["role"], "system");
     let block = system
-        .split("Names appearing in this document")
+        .split("Names appearing in this segment")
         .nth(1)
         .unwrap_or_else(|| panic!("no candidate block in the system prompt: {system}"));
     assert!(block.contains("cargo-nextest"), "{block}");
@@ -1099,7 +1099,7 @@ fn extract_candidates_flag_folds_the_document_names_into_the_system_prompt() {
     let requests = requests.join().unwrap();
     assert_eq!(requests.len(), 1);
     assert!(
-        !requests[0].contains("Names appearing in this document"),
+        !requests[0].contains("Names appearing in this segment"),
         "{}",
         requests[0]
     );
@@ -1826,7 +1826,7 @@ fn chunk_context_structure_prefixes_chunks_and_is_a_computation_input() {
     let lines: Vec<&str> = preamble.lines().collect();
     assert_eq!(
         lines[0],
-        format!("Document '{}', part 2 of 2:", doc.display())
+        format!("Segment '{}', part 2 of 2:", doc.display())
     );
     assert!(lines[1].starts_with("Chunk context ("), "{preamble}");
     assert!(
@@ -1925,7 +1925,7 @@ fn chunk_context_structure_prefixes_chunks_and_is_a_computation_input() {
         "off sends today's prompt: {off}"
     );
     assert!(
-        off.starts_with(&format!("Document '{}', part 1 of ", doc.display())),
+        off.starts_with(&format!("Segment '{}', part 1 of ", doc.display())),
         "{off}"
     );
     let (_, trace) = read_trace(&out);
@@ -2072,8 +2072,8 @@ fn chunk_context_overview_runs_a_pass_first_and_feeds_cast_and_synopsis() {
     };
     // The first two requests are the overview pass, in chunk order,
     // each listing the units opening in its chunk.
-    assert!(system_of(&requests[0]).starts_with("You read one part of a document"));
-    assert!(system_of(&requests[1]).starts_with("You read one part of a document"));
+    assert!(system_of(&requests[0]).starts_with("You read one part of a segment"));
+    assert!(system_of(&requests[1]).starts_with("You read one part of a segment"));
     assert!(
         user_of(&requests[0]).contains("- unit 0: Alpha"),
         "{}",
@@ -3197,7 +3197,7 @@ fn extract_candidates_env_var_enables_the_block_and_rejects_bad_values() {
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     let requests = requests.join().unwrap();
     assert!(
-        requests[0].contains("Names appearing in this document"),
+        requests[0].contains("Names appearing in this segment"),
         "{}",
         requests[0]
     );
@@ -8582,11 +8582,11 @@ fn attempts_log_keeps_every_completions_full_prompt_and_answer() {
     assert_eq!(records[0]["resumed"], false);
     assert_eq!(records[0]["document_sha256"].as_str().unwrap().len(), 64);
 
-    // ADR 0031 §3.2/§3.9: one settings record right after `document`,
+    // ADR 0031 §3.2/§3.9: one settings record right after `segment`,
     // a diagnostic snapshot of this run's compute inputs.
     let settings = &records[1];
     assert_eq!(settings["model"], "stub-model");
-    assert_eq!(settings["prompt_version"], 5);
+    assert_eq!(settings["prompt_version"], 6);
     assert_eq!(settings["questions_n"], 0);
     assert_eq!(settings["fact_budget"], 0);
     assert_eq!(settings["structured_output"], "");
