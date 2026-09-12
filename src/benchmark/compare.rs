@@ -930,7 +930,7 @@ fn seconds_per_association(doc: &DocRow) -> Option<f64> {
 fn segment_pooled_metrics(docs: &[&DocRow]) -> MetricsMap {
     let mut m = MetricsMap::new();
     m.insert(
-        "latency.document_wall_seconds".to_string(),
+        "latency.segment_wall_seconds".to_string(),
         MetricValue::Distribution(distribution_metric(docs.iter().map(|d| wall_seconds(d)))),
     );
     m.insert(
@@ -1453,7 +1453,7 @@ fn segment_scope_metrics(doc: &DocRow, attempts_for_doc: &[&AttemptRow]) -> Metr
     let mut m = attempt_distribution_metrics(attempts_for_doc);
     let single = [doc];
     m.insert(
-        "latency.document_wall_seconds".to_string(),
+        "latency.segment_wall_seconds".to_string(),
         MetricValue::Distribution(distribution_metric(std::iter::once(wall_seconds(doc)))),
     );
     m.insert(
@@ -1519,7 +1519,7 @@ fn build_definitions(observed_finish_reasons: &BTreeSet<String>) -> BTreeMap<Str
         ),
     );
     d.insert(
-        "latency.document_wall_seconds".to_string(),
+        "latency.segment_wall_seconds".to_string(),
         def(
             "second",
             "distribution",

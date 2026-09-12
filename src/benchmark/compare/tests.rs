@@ -1237,6 +1237,17 @@ fn compute_measurements_over_a_synthetic_results_directory() {
         "both the written and the timed-out attempt count"
     );
 
+    let MetricValue::Distribution(wall) = &cell.metrics["latency.segment_wall_seconds"] else {
+        panic!()
+    };
+    assert_eq!(
+        wall.n(),
+        2,
+        "both segments logged a phase=start and a phase=end"
+    );
+    assert_eq!(wall.min(), Some(10.0), "brewery: ts 100.0 to 110.0");
+    assert_eq!(wall.max(), Some(31.0), "sake: ts 111.0 to 142.0");
+
     let MetricValue::Ratio(written_rate) = &cell.metrics["segment.written_rate"] else {
         panic!()
     };

@@ -1224,9 +1224,9 @@ mod segment_dictionary_tests {
     }
 
     #[test]
-    fn colliding_candidates_get_a_hash_suffix_unique_ones_do_not() {
+    fn distinct_candidates_never_get_a_hash_suffix() {
         let dir = corpus_dir(
-            "collide",
+            "distinct",
             &[
                 ("a.md", "first segment text."),
                 ("b.md", "second segment text."),
@@ -1236,9 +1236,37 @@ mod segment_dictionary_tests {
         let segments = build_segment_dictionary(corpus).expect("must build");
         assert_eq!(segments.len(), 2);
         // Distinct file stems never collide, so no suffix is added.
-        assert!(!segments[0].segment_id.contains('-') || segments[0].segment_id == "a");
         assert_eq!(segments[0].segment_id, "a");
         assert_eq!(segments[1].segment_id, "b");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn colliding_candidates_both_get_a_hash_suffix() {
+        // "a.md" and "a.txt" flatten to the same candidate ("a") once
+        // the extension is stripped — the exact collision
+        // `candidate_segment_id` is not injective against (ADR 0003
+        // §9.1's own doc comment), so BOTH occurrences (not just the
+        // second) must be suffixed: nothing about assignment order
+        // makes the first one safe to leave bare.
+        let dir = corpus_dir(
+            "collide",
+            &[
+                ("a.md", "first segment text."),
+                ("a.txt", "second segment text."),
+            ],
+        );
+        let corpus = dir.to_str().unwrap();
+        let segments = build_segment_dictionary(corpus).expect("must build");
+        assert_eq!(segments.len(), 2);
+        assert_ne!(segments[0].segment_id, "a");
+        assert_ne!(segments[1].segment_id, "a");
+        assert!(segments[0].segment_id.starts_with("a-"), "{segments:?}");
+        assert!(segments[1].segment_id.starts_with("a-"), "{segments:?}");
+        assert_ne!(
+            segments[0].segment_id, segments[1].segment_id,
+            "the hash suffix is over the full source path, so it still disambiguates"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -2111,6 +2139,45 @@ mod manifest_tests {
     }
 
     #[test]
+    fn a_segment_count_change_is_a_mismatch() {
+        let existing = BenchManifest {
+            segments: vec![SegmentInfo {
+                segment_id: "a".to_string(),
+                sha256: "s1".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let reason = consistency_mismatch(&existing, "", &ExtractionSettings::default(), &[], &[]);
+        assert!(
+            reason.is_some(),
+            "1 existing segment vs 0 now must mismatch"
+        );
+    }
+
+    #[test]
+    fn a_segment_sha256_change_is_a_mismatch() {
+        let existing = BenchManifest {
+            segments: vec![SegmentInfo {
+                segment_id: "a".to_string(),
+                sha256: "s1".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let now = [SegmentInfo {
+            segment_id: "a".to_string(),
+            sha256: "s2".to_string(),
+            ..Default::default()
+        }];
+        let reason = consistency_mismatch(&existing, "", &ExtractionSettings::default(), &now, &[]);
+        assert!(
+            reason.is_some(),
+            "same segment_id, changed sha256 (same count) must still mismatch"
+        );
+    }
+
+    #[test]
     fn matching_state_is_not_a_mismatch() {
         let settings = ExtractionSettings {
             context: "sake".to_string(),
@@ -2906,6 +2973,120 @@ mod cell_runs_tests {
             attempt["state"], "stop_valid",
             "Layer 1 carries the original field verbatim"
         );
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn transcription_writes_a_chunk_record_denormalized_from_the_dictionary() {
+        let mut dictionary = BTreeMap::new();
+        dictionary.insert(
+            "corpus/a.md".to_string(),
+            SegmentInfo {
+                segment_id: "a".to_string(),
+                path: "corpus/a.md".to_string(),
+                sha256: "docsha".to_string(),
+                ..Default::default()
+            },
+        );
+        let path = std::env::temp_dir().join(format!(
+            "taguru-benchmark-transcribe-chunk-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let mut writer = RunsWriter::open(&path, None).unwrap();
+        let mut open = BTreeSet::new();
+        let mut attempts = 0;
+        let mut segments_written = 0;
+        let ctx = CellRunsContext {
+            dictionary: &dictionary,
+            cell_id: "m.run01".to_string(),
+            model_id: "m".to_string(),
+            run_index: 1,
+            cell_dir: PathBuf::from("/out/cells/m/run01"),
+            cell_dir_rel: PathBuf::from("cells/m/run01"),
+        };
+        let chunk_line = r#"{"kind":"chunk","source":"corpus/a.md","chunk_index":0,"chunk_total":1,"chunk_sha256":"chunksha","chunk_bytes":10,"paragraph_first":0,"paragraph_last":0}"#;
+        transcribe_diagnostics_line(
+            chunk_line,
+            &ctx,
+            &mut writer,
+            &mut open,
+            &mut attempts,
+            &mut segments_written,
+        );
+        drop(writer);
+        let text = fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2, "one synthesized start, one chunk record");
+        let chunk: Value = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(
+            chunk["kind"], "chunk",
+            "deleting the \"chunk\" match arm would silently drop this record"
+        );
+        assert_eq!(chunk["cell_id"], "m.run01");
+        assert_eq!(chunk["segment_id"], "a");
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn transcription_closes_a_segment_on_its_segment_end_line() {
+        let mut dictionary = BTreeMap::new();
+        dictionary.insert(
+            "corpus/a.md".to_string(),
+            SegmentInfo {
+                segment_id: "a".to_string(),
+                path: "corpus/a.md".to_string(),
+                sha256: "docsha".to_string(),
+                ..Default::default()
+            },
+        );
+        let path = std::env::temp_dir().join(format!(
+            "taguru-benchmark-transcribe-end-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let mut writer = RunsWriter::open(&path, None).unwrap();
+        let mut open = BTreeSet::new();
+        open.insert("a".to_string());
+        let mut attempts = 0;
+        let mut segments_written = 0;
+        let ctx = CellRunsContext {
+            dictionary: &dictionary,
+            cell_id: "m.run01".to_string(),
+            model_id: "m".to_string(),
+            run_index: 1,
+            cell_dir: PathBuf::from("/out/cells/m/run01"),
+            cell_dir_rel: PathBuf::from("cells/m/run01"),
+        };
+        let end_line = r#"{"kind":"document","source":"corpus/a.md","phase":"end","associations":1,"concepts":0,"labels":0,"questions":0,"duplicates":0,"dropped":0,"batch_path":"cells/m/run01/a.jsonl"}"#;
+        transcribe_diagnostics_line(
+            end_line,
+            &ctx,
+            &mut writer,
+            &mut open,
+            &mut attempts,
+            &mut segments_written,
+        );
+        assert_eq!(
+            segments_written, 1,
+            "deleting the \"segment\" | \"document\" match arm would silently skip this counter"
+        );
+        assert!(
+            !open.contains("a"),
+            "the segment must close on its end line"
+        );
+        drop(writer);
+        let text = fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "the segment was already open, so no synthesized start"
+        );
+        let end: Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(end["kind"], "segment");
+        assert_eq!(end["phase"], "end");
+        assert_eq!(end["outcome"], "written");
         let _ = fs::remove_file(&path);
     }
 

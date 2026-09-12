@@ -730,3 +730,19 @@ fn no_verdict_word_appears_anywhere_in_the_artifact() {
     let value = serde_json::to_value(&retrieval).unwrap();
     assert_no_verdict_words(&value, "$");
 }
+
+#[test]
+fn build_definitions_names_every_metric_the_retrieval_file_can_carry() {
+    let definitions = build_definitions();
+    for name in [
+        "hits.count",
+        "hits.distinct_sources",
+        "lanes.bm25_only",
+        "pairs.unavailable_rate",
+    ] {
+        assert!(
+            definitions.contains_key(name),
+            "{name} must have a definition: {definitions:?}"
+        );
+    }
+}
