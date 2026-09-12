@@ -1,11 +1,11 @@
 //! The extraction manifest: what each batch file was computed from,
-//! and whether a document can be skipped as unchanged.
+//! and whether a segment can be skipped as unchanged.
 
 use super::*;
 
 /// What each batch file was computed from. Extraction is the
-/// expensive step, so unchanged documents skip; any input to the
-/// computation changing — document bytes, model, prompt, target
+/// expensive step, so unchanged segments skip; any input to the
+/// computation changing — segment bytes, model, prompt, target
 /// `context` — re-extracts. The `context` matters even though the model
 /// never sees its name: it is baked into the emitted header, and a
 /// skip that kept a stale header would send the batch to the wrong
@@ -126,7 +126,7 @@ pub(super) struct ManifestEntry {
     /// `--redact`'s version (`""` = off; `redact1`, `redact1:secrets`,
     /// `redact1:pii`) — ADR 0038 §3.5. Entries written before the
     /// control existed default to `""` and keep matching default runs;
-    /// the first `--redact` run over the document re-extracts.
+    /// the first `--redact` run over the segment re-extracts.
     #[serde(default)]
     pub(super) redaction: String,
     /// `--vocabulary`'s content digest (`""` = off) — ADR 0015: the
@@ -135,14 +135,14 @@ pub(super) struct ManifestEntry {
     /// computation input.
     #[serde(default)]
     pub(super) vocabulary_digest: String,
-    /// `--source-id`'s EFFECTIVE written source for this document
+    /// `--source-id`'s EFFECTIVE written source for this segment
     /// (`""` = off, the path was written) — #466 S1, ADR 0017: baked
     /// into the emitted header like `context`/`description`, so a
     /// change must rewrite the batch rather than skip with the old id
     /// in place. The effective value (suffix included), not the flag,
-    /// so a revision of the multi-document suffix scheme re-extracts
+    /// so a revision of the multi-segment suffix scheme re-extracts
     /// too. Prompt-neutral on purpose: the model is still shown the
-    /// document path, which is why this field is NOT in the checkpoint
+    /// segment path, which is why this field is NOT in the checkpoint
     /// fingerprint — cached chunk answers stay reusable across a
     /// source-id change.
     #[serde(default)]
@@ -211,9 +211,9 @@ impl Manifest {
     /// `source` — the skip path reads the batch from THERE (issue
     /// #730): identical to `batch_file_name(source)` for anything
     /// written since, while a manifest from before the naming change
-    /// names the old un-hashed file, keeping its unchanged documents
+    /// names the old un-hashed file, keeping its unchanged segments
     /// skippable (and naming the stale file to remove once a changed
-    /// document re-extracts under the new name).
+    /// segment re-extracts under the new name).
     pub(super) fn output_of(&self, source: &str) -> Option<String> {
         self.segments.get(source).map(|entry| entry.output.clone())
     }
@@ -255,11 +255,11 @@ impl Manifest {
     }
 }
 
-/// The computation inputs one document's extraction depends on — what
+/// The computation inputs one segment's extraction depends on — what
 /// [`Manifest::matches`] compares and [`Manifest::record`] stamps
 /// (issue #730: seventeen positional arguments, several sharing a
 /// type, made those call sites unreviewable — and `Run` passing the
-/// list twice let the two drift). Built once per document; field names
+/// list twice let the two drift). Built once per segment; field names
 /// mirror [`ManifestEntry`]'s, minus `prompt_version` (this build's
 /// own constant) and `output` (a result, not an input).
 pub(super) struct ComputationInputs<'a> {
@@ -313,21 +313,21 @@ fn flattened_hashed_name(source: &str, extension: &str) -> String {
 /// issue #730, the same injectivity fix [`checkpoint_file_name`] got
 /// in #227: one run's collisions were already caught by `Run::claimed`,
 /// but separate runs into the same `--out` know nothing of each other,
-/// so a later run's colliding document silently overwrote the earlier
+/// so a later run's colliding segment silently overwrote the earlier
 /// one's batch output. The skip path reads the file the MANIFEST
 /// recorded, so batches written under the pre-#730 naming stay
-/// skippable — see `Run::extract_document`.
+/// skippable — see `Run::extract_segment`.
 pub(super) fn batch_file_name(source: &str) -> String {
     flattened_hashed_name(source, "jsonl")
 }
 
 /// Directory (adjacent to `--out`, hidden like the manifest) holding
-/// one per-document chunk checkpoint file — issue #179's durable
+/// one per-segment chunk checkpoint file — issue #179's durable
 /// resume. Never created for `--dry-run` (which calls/writes nothing)
-/// or for a document with no checkpointable units yet.
+/// or for a segment with no checkpointable units yet.
 pub(super) const CHECKPOINT_DIR_NAME: &str = ".extract-checkpoints";
 
-/// One checkpoint file per document ([`flattened_hashed_name`],
+/// One checkpoint file per segment ([`flattened_hashed_name`],
 /// `.json`), named from its source path so a `--out` directory listing
 /// stays legible. The unconditional hash suffix arrived here first
 /// (issue #227): without it, distinct short source ids could collide

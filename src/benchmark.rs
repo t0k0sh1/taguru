@@ -65,11 +65,11 @@ cell against the model matrix --models names, every cell over the same
 corpus under the same task settings (ADR 0003). Writes, under --out:
 
   manifest.json                  reproduction record: resolved settings,
-                                  the document/chunk dictionary, per-model
+                                  the segment/chunk dictionary, per-model
                                   provider facts, per-cell outcomes
   models.lock.json                --models with defaults folded in, no
                                   secrets
-  runs/<model_id>.run<NN>.jsonl   one file per cell: header, document
+  runs/<model_id>.run<NN>.jsonl   one file per cell: header, segment
                                   start/end, chunk, attempt (the
                                   diagnostics sidecar's own records,
                                   carried through unmodified, plus
@@ -98,7 +98,7 @@ corpus under the same task settings (ADR 0003). Writes, under --out:
   --max-attempts N    forwarded to every cell's
                       TAGURU_EXTRACT_MAX_ATTEMPTS, 1-10 (2)
   CORPUS_DIR          exactly one directory (.md/.txt, sorted by name) —
-                      every cell sees the same document order, since
+                      every cell sees the same segment order, since
                       vocabulary accumulates across a run (ADR 0003 §6)
 
 Contract and discipline: docs/benchmark.html,
@@ -393,7 +393,7 @@ impl BenchArgs {
                 return Err(subcommand_usage_error(
                     "benchmark",
                     "exactly one corpus directory is accepted — every cell must see the same \
-                     document order (ADR 0003 §6)",
+                     segment order (ADR 0003 §6)",
                 ));
             }
         };
@@ -1083,7 +1083,7 @@ mod time_tests {
     }
 }
 
-// ============================ Document dictionary ============================
+// ============================= Segment dictionary =============================
 
 /// One chunk's provenance, mirroring `crate::extract::ChunkDescriptor`
 /// (ADR 0003 §7): a `crate::paragraph::split` index range, never a byte
@@ -1097,14 +1097,19 @@ struct ChunkInfo {
     paragraph_last: u32,
 }
 
-/// One corpus document's dictionary entry (ADR 0003 §9.1). `path` is
-/// the exact source string `crate::extract::expand_documents` would
+/// One corpus segment's dictionary entry (ADR 0003 §9.1). `path` is
+/// the exact source string `crate::extract::expand_segments` would
 /// hand `taguru extract` for this file — computed once here and reused
 /// verbatim by every cell, so a cell's own `source` field always joins
 /// against this dictionary by exact string match.
 #[derive(Debug, Serialize, Deserialize, Default, Clone, PartialEq)]
-struct DocumentInfo {
-    document_id: String,
+struct SegmentInfo {
+    /// `document_id` is the pre-#851/#904 name — still read via
+    /// `serde(alias)` so a `manifest.json` written before the rename
+    /// doesn't fail to join against `runs/*.jsonl`'s `source` field;
+    /// `save` always writes `segment_id`.
+    #[serde(alias = "document_id")]
+    segment_id: String,
     path: String,
     bytes: usize,
     sha256: String,
@@ -1113,12 +1118,12 @@ struct DocumentInfo {
     chunks: Vec<ChunkInfo>,
 }
 
-/// The relative-path candidate for a document id, before collision
+/// The relative-path candidate for a segment id, before collision
 /// dedup: `source` relative to `corpus_root`, `/`/`\` flattened to
 /// `__`, extension stripped. Collisions (distinct sources flattening to
 /// the same candidate) are resolved by the caller with a hash suffix —
 /// this function alone is not injective, by design (ADR 0003 §9.1).
-fn candidate_document_id(source: &str, corpus_root: &str) -> String {
+fn candidate_segment_id(source: &str, corpus_root: &str) -> String {
     let rel = Path::new(source)
         .strip_prefix(Path::new(corpus_root))
         .unwrap_or(Path::new(source));
@@ -1129,21 +1134,21 @@ fn candidate_document_id(source: &str, corpus_root: &str) -> String {
     }
 }
 
-/// Enumerates the corpus exactly as `crate::extract::expand_documents`
+/// Enumerates the corpus exactly as `crate::extract::expand_segments`
 /// will for every spawned cell (same function, same argument), then
-/// builds each document's hash/paragraph/chunk provenance in-process
+/// builds each segment's hash/paragraph/chunk provenance in-process
 /// via `crate::extract::chunk_plan` — the seam #262 added precisely so
 /// this dictionary never re-implements `paragraph::split`'s packing
 /// rule a second time.
-fn build_document_dictionary(corpus: &str) -> Result<Vec<DocumentInfo>, String> {
-    let files = crate::extract::expand_documents(&[corpus.to_string()])?;
+fn build_segment_dictionary(corpus: &str) -> Result<Vec<SegmentInfo>, String> {
+    let files = crate::extract::expand_segments(&[corpus.to_string()])?;
     let mut sources = Vec::with_capacity(files.len());
     let mut candidates: BTreeMap<String, usize> = BTreeMap::new();
     let mut rows = Vec::with_capacity(files.len());
     for path in &files {
         let source = path.to_string_lossy().into_owned();
         let text =
-            crate::extract::read_document(path).map_err(|error| format!("{source}: {error}"))?;
+            crate::extract::read_segment(path).map_err(|error| format!("{source}: {error}"))?;
         let sha256 = crate::sha256::sha256_hex(text.as_bytes());
         let paragraph_count = crate::paragraph::split(&text).len();
         let descriptors = crate::extract::chunk_plan(&text);
@@ -1158,16 +1163,16 @@ fn build_document_dictionary(corpus: &str) -> Result<Vec<DocumentInfo>, String> 
                 paragraph_last: descriptor.paragraph_last,
             })
             .collect();
-        let candidate = candidate_document_id(&source, corpus);
+        let candidate = candidate_segment_id(&source, corpus);
         *candidates.entry(candidate.clone()).or_insert(0) += 1;
         rows.push((source.clone(), text.len(), sha256, paragraph_count, chunks));
         sources.push(candidate);
     }
-    let mut documents = Vec::with_capacity(rows.len());
+    let mut segments = Vec::with_capacity(rows.len());
     for (candidate, (source, bytes, sha256, paragraph_count, chunks)) in
         sources.into_iter().zip(rows)
     {
-        let document_id = if candidates[&candidate] > 1 {
+        let segment_id = if candidates[&candidate] > 1 {
             format!(
                 "{candidate}-{}",
                 &crate::sha256::sha256_hex(source.as_bytes())[..16]
@@ -1175,8 +1180,8 @@ fn build_document_dictionary(corpus: &str) -> Result<Vec<DocumentInfo>, String> 
         } else {
             candidate
         };
-        documents.push(DocumentInfo {
-            document_id,
+        segments.push(SegmentInfo {
+            segment_id,
             path: source,
             bytes,
             sha256,
@@ -1185,11 +1190,11 @@ fn build_document_dictionary(corpus: &str) -> Result<Vec<DocumentInfo>, String> 
             chunks,
         });
     }
-    Ok(documents)
+    Ok(segments)
 }
 
 #[cfg(test)]
-mod document_dictionary_tests {
+mod segment_dictionary_tests {
     use super::*;
 
     fn corpus_dir(tag: &str, files: &[(&str, &str)]) -> PathBuf {
@@ -1209,11 +1214,11 @@ mod document_dictionary_tests {
     #[test]
     fn candidate_ids_flatten_and_strip_the_extension() {
         assert_eq!(
-            candidate_document_id("corpus/brewery.md", "corpus"),
+            candidate_segment_id("corpus/brewery.md", "corpus"),
             "brewery"
         );
         assert_eq!(
-            candidate_document_id("corpus/sub/dir/doc.md", "corpus"),
+            candidate_segment_id("corpus/sub/dir/doc.md", "corpus"),
             "sub__dir__doc"
         );
     }
@@ -1223,17 +1228,17 @@ mod document_dictionary_tests {
         let dir = corpus_dir(
             "collide",
             &[
-                ("a.md", "first document text."),
-                ("b.md", "second document text."),
+                ("a.md", "first segment text."),
+                ("b.md", "second segment text."),
             ],
         );
         let corpus = dir.to_str().unwrap();
-        let documents = build_document_dictionary(corpus).expect("must build");
-        assert_eq!(documents.len(), 2);
+        let segments = build_segment_dictionary(corpus).expect("must build");
+        assert_eq!(segments.len(), 2);
         // Distinct file stems never collide, so no suffix is added.
-        assert!(!documents[0].document_id.contains('-') || documents[0].document_id == "a");
-        assert_eq!(documents[0].document_id, "a");
-        assert_eq!(documents[1].document_id, "b");
+        assert!(!segments[0].segment_id.contains('-') || segments[0].segment_id == "a");
+        assert_eq!(segments[0].segment_id, "a");
+        assert_eq!(segments[1].segment_id, "b");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1244,19 +1249,19 @@ mod document_dictionary_tests {
             &[("only.md", "第一段落。\n\n第二段落。\n\n第三段落。")],
         );
         let corpus = dir.to_str().unwrap();
-        let documents = build_document_dictionary(corpus).expect("must build");
-        assert_eq!(documents.len(), 1);
+        let segments = build_segment_dictionary(corpus).expect("must build");
+        assert_eq!(segments.len(), 1);
         let text = fs::read_to_string(dir.join("only.md")).unwrap();
         assert_eq!(
-            documents[0].paragraph_count,
+            segments[0].paragraph_count,
             crate::paragraph::split(&text).len()
         );
         assert_eq!(
-            documents[0].chunk_total,
+            segments[0].chunk_total,
             crate::extract::chunk_plan(&text).len()
         );
         assert_eq!(
-            documents[0].sha256,
+            segments[0].sha256,
             crate::sha256::sha256_hex(text.as_bytes())
         );
         let _ = fs::remove_dir_all(&dir);
@@ -1819,10 +1824,14 @@ struct HarnessBlock {
     execution: String,
     #[serde(default)]
     runs_per_model: usize,
-    #[serde(default)]
-    documents_root: String,
-    #[serde(default)]
-    document_order: Vec<String>,
+    /// `documents_root` is the pre-#851/#904 name — still read via
+    /// `serde(alias)`; `save` always writes `segments_root`.
+    #[serde(default, alias = "documents_root")]
+    segments_root: String,
+    /// `document_order` is the pre-#851/#904 name — still read via
+    /// `serde(alias)`; `save` always writes `segment_order`.
+    #[serde(default, alias = "document_order")]
+    segment_order: Vec<String>,
     #[serde(default)]
     config_path: String,
     #[serde(default)]
@@ -1936,8 +1945,10 @@ struct BenchManifest {
     harness: HarnessBlock,
     #[serde(default)]
     extraction_settings: ExtractionSettings,
-    #[serde(default)]
-    documents: Vec<DocumentInfo>,
+    /// `documents` is the pre-#851/#904 name — still read via
+    /// `serde(alias)`; `save` always writes `segments`.
+    #[serde(default, alias = "documents")]
+    segments: Vec<SegmentInfo>,
     #[serde(default)]
     models: Vec<ManifestModel>,
     #[serde(default)]
@@ -1977,7 +1988,7 @@ fn consistency_mismatch(
     existing: &BenchManifest,
     config_sha256: &str,
     extraction_settings: &ExtractionSettings,
-    documents: &[DocumentInfo],
+    segments: &[SegmentInfo],
     models: &[ResolvedModel],
 ) -> Option<String> {
     if existing.harness.config_sha256 != config_sha256 {
@@ -1990,12 +2001,12 @@ fn consistency_mismatch(
             "benchmark flags differ from this results directory's original run".to_string(),
         );
     }
-    if existing.documents.len() != documents.len()
+    if existing.segments.len() != segments.len()
         || existing
-            .documents
+            .segments
             .iter()
-            .zip(documents)
-            .any(|(a, b)| a.document_id != b.document_id || a.sha256 != b.sha256)
+            .zip(segments)
+            .any(|(a, b)| a.segment_id != b.segment_id || a.sha256 != b.sha256)
     {
         return Some("the corpus has changed since this results directory was created".to_string());
     }
@@ -2055,7 +2066,33 @@ mod manifest_tests {
         fs::write(&path, r#"{"taguru_benchmark_manifest":1,"run_id":"abc"}"#).unwrap();
         let manifest = load_bench_manifest(&path).expect("must load with defaults");
         assert_eq!(manifest.run_id, "abc");
-        assert!(manifest.documents.is_empty());
+        assert!(manifest.segments.is_empty());
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_pre_851_manifest_loads_its_document_named_fields_as_segments() {
+        let path = std::env::temp_dir().join(format!(
+            "taguru-benchmark-manifest-pre-851-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        fs::write(
+            &path,
+            r#"{"taguru_benchmark_manifest":1,"run_id":"abc",
+                "harness":{"documents_root":"corpus","document_order":["corpus/a.md"]},
+                "documents":[{"document_id":"a","path":"corpus/a.md","bytes":1,"sha256":"s",
+                "paragraph_count":1,"chunk_total":1,"chunks":[]}]}"#,
+        )
+        .unwrap();
+        let manifest = load_bench_manifest(&path).expect("must load via serde(alias)");
+        assert_eq!(manifest.harness.segments_root, "corpus");
+        assert_eq!(
+            manifest.harness.segment_order,
+            vec!["corpus/a.md".to_string()]
+        );
+        assert_eq!(manifest.segments.len(), 1);
+        assert_eq!(manifest.segments[0].segment_id, "a");
         let _ = fs::remove_file(&path);
     }
 
@@ -2156,7 +2193,7 @@ impl DiagnosticsTail {
 /// immediately after creation, a resumed cell's existing lines are left
 /// untouched and new ones land after them (ADR 0003 §6's resume design
 /// — see `run_cell`'s doc comment for what that implies about a
-/// resumed document's records).
+/// resumed segment's records).
 struct RunsWriter {
     file: fs::File,
     path: PathBuf,
@@ -2164,7 +2201,7 @@ struct RunsWriter {
     /// reported exactly once. Independent of `io_warned` below: a
     /// serialization failure must not suppress a LATER, unrelated
     /// disk-full or permission error from being reported too — both
-    /// are real desyncs between `documents_written`/`attempts_total`
+    /// are real desyncs between `segments_written`/`attempts_total`
     /// (advisory counters that keep counting regardless) and the
     /// file's actual contents, and neither may silently mask the
     /// other.
@@ -2203,7 +2240,7 @@ impl RunsWriter {
                     self.serialize_warned = true;
                     eprintln!(
                         "taguru: benchmark: warning: {}: failed to serialize a record ({error}) \
-                         — it was dropped, so documents_written/attempts_total may now \
+                         — it was dropped, so segments_written/attempts_total may now \
                          overcount what this file holds",
                         self.path.display()
                     );
@@ -2222,7 +2259,7 @@ impl RunsWriter {
             self.io_warned = true;
             eprintln!(
                 "taguru: benchmark: warning: {}: write failed ({error}) — \
-                 documents_written/attempts_total may now overcount what this file holds",
+                 segments_written/attempts_total may now overcount what this file holds",
                 self.path.display()
             );
         }
@@ -2239,7 +2276,7 @@ fn seed_counts_from_existing_runs_file(path: &Path) -> (usize, usize) {
         return (0, 0);
     };
     let mut attempts = 0usize;
-    let mut documents_written = 0usize;
+    let mut segments_written = 0usize;
     for line in text.lines() {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -2249,12 +2286,12 @@ fn seed_counts_from_existing_runs_file(path: &Path) -> (usize, usize) {
             Some("segment") | Some("document")
                 if value.get("phase").and_then(Value::as_str) == Some("end") =>
             {
-                documents_written += 1;
+                segments_written += 1;
             }
             _ => {}
         }
     }
-    (attempts, documents_written)
+    (attempts, segments_written)
 }
 
 /// The token right after `"structured output: "` in one of the five
@@ -2277,7 +2314,7 @@ fn parse_structured_output_line(line: &str) -> Option<String> {
 /// `runs/*.jsonl` for one cell — grouped so the transcription function
 /// below does not carry eight separate parameters.
 struct CellRunsContext<'a> {
-    dictionary: &'a BTreeMap<String, DocumentInfo>,
+    dictionary: &'a BTreeMap<String, SegmentInfo>,
     cell_id: String,
     model_id: String,
     run_index: usize,
@@ -2303,13 +2340,13 @@ impl CellRunsContext<'_> {
 }
 
 /// Transcribes one child diagnostics line into `runs/*.jsonl` (ADR 0003
-/// §9.2): synthesizes a `document`(`phase: "start"`) the first time a
+/// §9.2): synthesizes a `segment`(`phase: "start"`) the first time a
 /// source is seen this session, denormalizes `chunk`/`attempt` records
 /// from the preflight-computed dictionary (never from a live `chunk`
 /// line — the dictionary is fully deterministic from the corpus alone,
-/// so this is robust to a resumed document's checkpointed chunks never
-/// re-emitting their own `chunk` line), and closes a document on its
-/// `document` line. `open` tracks document ids started but not yet
+/// so this is robust to a resumed segment's checkpointed chunks never
+/// re-emitting their own `chunk` line), and closes a segment on its
+/// `segment` line. `open` tracks segment ids started but not yet
 /// closed THIS invocation; whatever remains in it once the child exits
 /// is either left alone (interrupted) or closed with `outcome: "failed"`
 /// by the caller.
@@ -2319,7 +2356,7 @@ fn transcribe_diagnostics_line(
     writer: &mut RunsWriter,
     open: &mut BTreeSet<String>,
     attempts_total: &mut usize,
-    documents_written: &mut usize,
+    segments_written: &mut usize,
 ) {
     let Ok(mut map) = serde_json::from_str::<Map<String, Value>>(raw_line) else {
         return;
@@ -2337,18 +2374,18 @@ fn transcribe_diagnostics_line(
     let Some(doc) = ctx.dictionary.get(&source) else {
         return;
     };
-    let document_id = doc.document_id.clone();
+    let segment_id = doc.segment_id.clone();
     let now = now_unix_secs() as f64;
 
-    if !open.contains(&document_id) {
-        open.insert(document_id.clone());
+    if !open.contains(&segment_id) {
+        open.insert(segment_id.clone());
         writer.write_value(&serde_json::json!({
             "kind": "segment",
             "ts": now,
             "cell_id": ctx.cell_id,
-            "document_id": document_id,
+            "segment_id": segment_id,
             "source": source,
-            "document_sha256": doc.sha256,
+            "segment_sha256": doc.sha256,
             "chunk_total": doc.chunk_total,
             "phase": "start",
         }));
@@ -2358,7 +2395,7 @@ fn transcribe_diagnostics_line(
         "chunk" => {
             map.insert("ts".to_string(), serde_json::json!(now));
             map.insert("cell_id".to_string(), serde_json::json!(ctx.cell_id));
-            map.insert("document_id".to_string(), serde_json::json!(document_id));
+            map.insert("segment_id".to_string(), serde_json::json!(segment_id));
             writer.write_value(&Value::Object(map));
         }
         "attempt" => {
@@ -2367,8 +2404,8 @@ fn transcribe_diagnostics_line(
             map.insert("cell_id".to_string(), serde_json::json!(ctx.cell_id));
             map.insert("model_id".to_string(), serde_json::json!(ctx.model_id));
             map.insert("run_index".to_string(), serde_json::json!(ctx.run_index));
-            map.insert("document_id".to_string(), serde_json::json!(document_id));
-            map.insert("document_sha256".to_string(), serde_json::json!(doc.sha256));
+            map.insert("segment_id".to_string(), serde_json::json!(segment_id));
+            map.insert("segment_sha256".to_string(), serde_json::json!(doc.sha256));
             if let Some(chunk) = doc.chunks.get(chunk_index) {
                 map.insert(
                     "chunk_sha256".to_string(),
@@ -2387,8 +2424,8 @@ fn transcribe_diagnostics_line(
             writer.write_value(&Value::Object(map));
         }
         "segment" | "document" => {
-            open.remove(&document_id);
-            *documents_written += 1;
+            open.remove(&segment_id);
+            *segments_written += 1;
             let batch_path = map
                 .get("batch_path")
                 .and_then(Value::as_str)
@@ -2397,9 +2434,9 @@ fn transcribe_diagnostics_line(
                 "kind": "segment",
                 "ts": now,
                 "cell_id": ctx.cell_id,
-                "document_id": document_id,
+                "segment_id": segment_id,
                 "source": source,
-                "document_sha256": doc.sha256,
+                "segment_sha256": doc.sha256,
                 "phase": "end",
                 "outcome": "written",
                 "associations": map.get("associations"),
@@ -2415,27 +2452,27 @@ fn transcribe_diagnostics_line(
     }
 }
 
-/// Every document still open when the cell concludes cleanly (exit code
-/// 0 or 1) never reached a legitimate `document` line — its extraction
-/// did not complete, ordering-independent of which document that was or
+/// Every segment still open when the cell concludes cleanly (exit code
+/// 0 or 1) never reached a legitimate `segment` line — its extraction
+/// did not complete, ordering-independent of which segment that was or
 /// how many others succeeded around it. Not called on an interrupted
 /// cell: there, a bare `start` with no matching `end` IS the
 /// interruption signal (ADR 0003 §9.2), not a failure.
 fn synthesize_failed_ends(
     open: &BTreeSet<String>,
-    dictionary: &BTreeMap<String, DocumentInfo>,
+    dictionary: &BTreeMap<String, SegmentInfo>,
     writer: &mut RunsWriter,
     cell_id: &str,
 ) {
     for (source, doc) in dictionary {
-        if open.contains(&doc.document_id) {
+        if open.contains(&doc.segment_id) {
             writer.write_value(&serde_json::json!({
                 "kind": "segment",
                 "ts": now_unix_secs() as f64,
                 "cell_id": cell_id,
-                "document_id": doc.document_id,
+                "segment_id": doc.segment_id,
                 "source": source,
-                "document_sha256": doc.sha256,
+                "segment_sha256": doc.sha256,
                 "phase": "end",
                 "outcome": "failed",
                 "associations": Value::Null,
@@ -2478,8 +2515,8 @@ fn outcome_for_exit_code(exit_code: Option<i32>, cell_id: &str) -> Result<&'stat
 /// own fresh-or-resumed directory — R3. Resuming an interrupted cell
 /// re-invokes the exact same command into the exact same `cell_dir`,
 /// never `--force`, so `extract`'s own `.extract-manifest.json`/
-/// `.extract-checkpoints/` do the document/chunk-level resume (issue
-/// #179) — the accepted cost is that a document open at the moment of
+/// `.extract-checkpoints/` do the segment/chunk-level resume (issue
+/// #179) — the accepted cost is that a segment open at the moment of
 /// interruption may show a second `start` record and repeat some
 /// `chunk` records on this retry (ADR 0003 §6), since every consumer
 /// joins by key, never by line position.
@@ -2488,7 +2525,7 @@ fn run_cell(
     bench_args: &BenchArgs,
     model: &ResolvedModel,
     run_index: usize,
-    dictionary: &BTreeMap<String, DocumentInfo>,
+    dictionary: &BTreeMap<String, SegmentInfo>,
     run_id: &str,
 ) -> Result<ManifestCell, String> {
     let cell_id = cell_id_for(&model.id, run_index);
@@ -2504,7 +2541,7 @@ fn run_cell(
     let runs_file_path = bench_args.out.join(&runs_file_rel);
 
     let is_resume = runs_file_path.is_file();
-    let (mut attempts_total, mut documents_written) = if is_resume {
+    let (mut attempts_total, mut segments_written) = if is_resume {
         seed_counts_from_existing_runs_file(&runs_file_path)
     } else {
         (0, 0)
@@ -2648,7 +2685,7 @@ fn run_cell(
                 &mut writer,
                 &mut open,
                 &mut attempts_total,
-                &mut documents_written,
+                &mut segments_written,
             );
         }
         match child.try_wait() {
@@ -2664,7 +2701,7 @@ fn run_cell(
             &mut writer,
             &mut open,
             &mut attempts_total,
-            &mut documents_written,
+            &mut segments_written,
         );
     }
     let status = child
@@ -2686,7 +2723,7 @@ fn run_cell(
             "ts": now_unix_secs() as f64,
             "cell_id": cell_id,
             "outcome": outcome,
-            "documents_written": documents_written,
+            "segments_written": segments_written,
             "attempts_total": attempts_total,
             "exit_code": exit_code,
         }));
@@ -2803,12 +2840,12 @@ mod cell_runs_tests {
     }
 
     #[test]
-    fn transcription_opens_a_document_once_and_denormalizes_from_the_dictionary() {
+    fn transcription_opens_a_segment_once_and_denormalizes_from_the_dictionary() {
         let mut dictionary = BTreeMap::new();
         dictionary.insert(
             "corpus/a.md".to_string(),
-            DocumentInfo {
-                document_id: "a".to_string(),
+            SegmentInfo {
+                segment_id: "a".to_string(),
                 path: "corpus/a.md".to_string(),
                 bytes: 10,
                 sha256: "docsha".to_string(),
@@ -2850,7 +2887,7 @@ mod cell_runs_tests {
             &mut docs_written,
         );
         assert_eq!(attempts, 1);
-        assert_eq!(open.len(), 1, "the document opened but has not closed yet");
+        assert_eq!(open.len(), 1, "the segment opened but has not closed yet");
         drop(writer);
 
         let text = fs::read_to_string(&path).unwrap();
@@ -2859,12 +2896,12 @@ mod cell_runs_tests {
         let start: Value = serde_json::from_str(lines[0]).unwrap();
         assert_eq!(start["kind"], "segment");
         assert_eq!(start["phase"], "start");
-        assert_eq!(start["document_id"], "a");
+        assert_eq!(start["segment_id"], "a");
         let attempt: Value = serde_json::from_str(lines[1]).unwrap();
         assert_eq!(attempt["kind"], "attempt");
         assert_eq!(attempt["chunk_sha256"], "chunksha");
         assert_eq!(attempt["paragraph_first"], 0);
-        assert_eq!(attempt["document_id"], "a");
+        assert_eq!(attempt["segment_id"], "a");
         assert_eq!(
             attempt["state"], "stop_valid",
             "Layer 1 carries the original field verbatim"
@@ -2873,12 +2910,12 @@ mod cell_runs_tests {
     }
 
     #[test]
-    fn a_document_still_open_at_cleanup_is_closed_as_failed() {
+    fn a_segment_still_open_at_cleanup_is_closed_as_failed() {
         let mut dictionary = BTreeMap::new();
         dictionary.insert(
             "corpus/a.md".to_string(),
-            DocumentInfo {
-                document_id: "a".to_string(),
+            SegmentInfo {
+                segment_id: "a".to_string(),
                 path: "corpus/a.md".to_string(),
                 sha256: "docsha".to_string(),
                 ..Default::default()
@@ -2928,11 +2965,11 @@ fn run_extract(args: &[String]) -> i32 {
         eprintln!("taguru: benchmark: {warning}");
     }
 
-    let documents = match build_document_dictionary(&args.corpus) {
-        Ok(documents) => documents,
+    let segments = match build_segment_dictionary(&args.corpus) {
+        Ok(segments) => segments,
         Err(message) => return subcommand_usage_error("benchmark", &message),
     };
-    let dictionary: BTreeMap<String, DocumentInfo> = documents
+    let dictionary: BTreeMap<String, SegmentInfo> = segments
         .iter()
         .map(|doc| (doc.path.clone(), doc.clone()))
         .collect();
@@ -3002,7 +3039,7 @@ fn run_extract(args: &[String]) -> i32 {
             &existing,
             &config_sha256,
             &extraction_settings,
-            &documents,
+            &segments,
             &models,
         ) {
             eprintln!(
@@ -3045,13 +3082,13 @@ fn run_extract(args: &[String]) -> i32 {
             harness: HarnessBlock {
                 execution: "subprocess".to_string(),
                 runs_per_model: args.runs,
-                documents_root: args.corpus.clone(),
-                document_order: documents.iter().map(|doc| doc.path.clone()).collect(),
+                segments_root: args.corpus.clone(),
+                segment_order: segments.iter().map(|doc| doc.path.clone()).collect(),
                 config_path: args.models.display().to_string(),
                 config_sha256: config_sha256.clone(),
             },
             extraction_settings: extraction_settings.clone(),
-            documents: documents.clone(),
+            segments: segments.clone(),
             models: manifest_models,
             cells: Vec::new(),
             environment: environment_block(),

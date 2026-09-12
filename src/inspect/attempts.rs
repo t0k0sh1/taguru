@@ -20,7 +20,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::extract::{
-    paragraph_range, shell_quote, short_piece_id, user_message_document, user_message_part,
+    paragraph_range, shell_quote, short_piece_id, user_message_part, user_message_segment,
 };
 
 /// What `--piece`/`--paragraph` narrowed the view to.
@@ -102,7 +102,7 @@ pub(super) struct MoveRow {
 }
 
 #[derive(Serialize)]
-pub(super) struct DocumentRow {
+pub(super) struct SegmentRow {
     source: String,
     run_id: String,
     resumed: bool,
@@ -116,7 +116,7 @@ pub(super) struct AttemptsReport {
     /// The last `document` record — a resumed document appends a new
     /// one per run, and the latest run is the one whose attempts the
     /// tail of the file holds.
-    document: Option<DocumentRow>,
+    segment: Option<SegmentRow>,
     /// Every `document` record's `run_id`, oldest first.
     runs: Vec<String>,
     settings: Option<Value>,
@@ -143,7 +143,7 @@ pub(super) fn inspect_attempts_log(path: &Path, filter: &Filter, as_json: bool) 
         }
     };
     let report = build_report(&path.display().to_string(), &text, filter);
-    if report.document.is_none() && report.attempts.is_empty() && report.moves.is_empty() {
+    if report.segment.is_none() && report.attempts.is_empty() && report.moves.is_empty() {
         eprintln!(
             "{}: not an extract attempts log — no document or attempt record in it",
             path.display()
@@ -193,7 +193,7 @@ pub(super) fn build_report(target: &str, text: &str, filter: &Filter) -> Attempt
     let mut report = AttemptsReport {
         target: target.to_string(),
         kind: "attempts",
-        document: None,
+        segment: None,
         runs: Vec::new(),
         settings: None,
         filter: describe_filter(filter),
@@ -215,7 +215,7 @@ pub(super) fn build_report(target: &str, text: &str, filter: &Filter) -> Attempt
             Some("segment") | Some("document") => {
                 let run_id = str_field(&record, "run_id");
                 report.runs.push(run_id.clone());
-                report.document = Some(DocumentRow {
+                report.segment = Some(SegmentRow {
                     source: str_field(&record, "source"),
                     run_id,
                     resumed: record
@@ -303,7 +303,7 @@ fn attempt_row(record: &serde_json::Map<String, Value>) -> AttemptRow {
     // The first user turn carries the piece behind its preamble; a
     // corrective round adds the replayed answer and the ask after it.
     let first_user = user_turns.first().copied();
-    let piece_text = first_user.map(|user| user_message_document(user).to_string());
+    let piece_text = first_user.map(|user| user_message_segment(user).to_string());
     // A single-chunk document's turn carries no `part K of N` clause:
     // that is chunk 1 of 1. A Stage 2 correction's turn carries none
     // either, and is no chunk at all.
@@ -511,7 +511,7 @@ fn move_line(m: &MoveRow) -> String {
 
 pub(super) fn render_text(report: &AttemptsReport, filter: &Filter) -> String {
     let mut out = String::new();
-    match &report.document {
+    match &report.segment {
         Some(document) => {
             let runs = if report.runs.len() > 1 {
                 format!(
@@ -718,7 +718,7 @@ mod tests {
 
     fn sample_log() -> String {
         [
-            json!({"kind": "document", "run_id": "r1", "source": "a.md", "document_sha256": "d", "resumed": false}).to_string(),
+            json!({"kind": "document", "run_id": "r1", "source": "a.md", "segment_sha256": "d", "resumed": false}).to_string(),
             json!({"kind": "settings", "prompt_version": 4, "model": "stub", "questions_n": 0, "fact_budget": 0, "structured_output": "off", "max_output_tokens": 4000, "chunk_bytes": "", "chunk_context": "off", "lossy": false, "schema_digest": "", "candidates": "", "vocabulary_digest": ""}).to_string(),
             json!({"kind": "system", "sha256": "s", "bytes": 3, "content": "sys"}).to_string(),
             attempt(1, "aaaa1111bbbb2222cccc", 0, "length_limited", "[0] alpha\n\n[1] beta\n\n[2] gamma", Some("{\"associations\": [")),
@@ -733,14 +733,14 @@ mod tests {
 
     #[test]
     fn build_report_recognizes_the_post_851_segment_kind_the_same_as_document() {
-        let log = json!({"kind": "segment", "run_id": "r1", "source": "a.md", "document_sha256": "d", "resumed": false}).to_string();
+        let log = json!({"kind": "segment", "run_id": "r1", "source": "a.md", "segment_sha256": "d", "resumed": false}).to_string();
         let report = build_report("log", &log, &Filter::All);
-        let document = report.document.expect(
-            "a `kind: \"segment\"` record must populate `document` the same way `document` does",
+        let segment = report.segment.expect(
+            "a `kind: \"segment\"` record must populate `segment` the same way `document` did",
         );
-        assert_eq!(document.source, "a.md");
-        assert_eq!(document.run_id, "r1");
-        assert!(!document.resumed);
+        assert_eq!(segment.source, "a.md");
+        assert_eq!(segment.run_id, "r1");
+        assert!(!segment.resumed);
         assert_eq!(report.runs, vec!["r1".to_string()]);
     }
 
@@ -860,8 +860,8 @@ mod tests {
         })
         .to_string();
         let log = [
-            json!({"kind": "document", "run_id": "r1", "source": "a.md", "document_sha256": "d", "resumed": false}).to_string(),
-            json!({"kind": "document", "run_id": "r2", "source": "a.md", "document_sha256": "d", "resumed": true}).to_string(),
+            json!({"kind": "document", "run_id": "r1", "source": "a.md", "segment_sha256": "d", "resumed": false}).to_string(),
+            json!({"kind": "document", "run_id": "r2", "source": "a.md", "segment_sha256": "d", "resumed": true}).to_string(),
             json!({"kind": "settings", "prompt_version": 4, "model": "stub", "max_output_tokens": 0, "rung": "json_schema", "lossy": true, "chunk_bytes": ""}).to_string(),
             attempt(1, "cafe000000000000", 0, "length_limited", "[0] a", Some("{")),
             json!({"kind": "move", "move": "escalate", "run_id": "r2", "piece_id": "cafe000000000000", "chunk_index": 0, "reason": "the answer ended at the output cap", "from_max_tokens": 4000, "to_max_tokens": 8000}).to_string(),

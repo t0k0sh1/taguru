@@ -353,7 +353,7 @@ fn chunk_seconds_sums_retries_and_excludes_cross_chunk() {
         AttemptRow {
             cell_id: "m.run01".into(),
             model_id: "m".into(),
-            document_id: "doc".into(),
+            segment_id: "doc".into(),
             chunk_index: 0,
             stage: "item".into(),
             state: "stop_malformed".into(),
@@ -371,7 +371,7 @@ fn chunk_seconds_sums_retries_and_excludes_cross_chunk() {
         AttemptRow {
             cell_id: "m.run01".into(),
             model_id: "m".into(),
-            document_id: "doc".into(),
+            segment_id: "doc".into(),
             chunk_index: 0,
             stage: "item".into(),
             state: "stop_valid".into(),
@@ -389,7 +389,7 @@ fn chunk_seconds_sums_retries_and_excludes_cross_chunk() {
         AttemptRow {
             cell_id: "m.run01".into(),
             model_id: "m".into(),
-            document_id: "doc".into(),
+            segment_id: "doc".into(),
             chunk_index: 0,
             stage: "cross_chunk".into(),
             state: "stop_valid".into(),
@@ -431,7 +431,7 @@ fn wall_seconds_needs_both_start_and_end() {
         cell_id: "m.run01".into(),
         model_id: "m".into(),
         run_index: 1,
-        document_id: "doc".into(),
+        segment_id: "doc".into(),
         start_ts: Some(10.0),
         end_ts: None,
         outcome: None,
@@ -460,7 +460,7 @@ fn wall_seconds_drops_an_end_stamped_before_its_start() {
         cell_id: "m.run01".into(),
         model_id: "m".into(),
         run_index: 1,
-        document_id: "doc".into(),
+        segment_id: "doc".into(),
         start_ts: Some(10.0),
         end_ts: Some(9.0),
         outcome: None,
@@ -489,13 +489,13 @@ fn wall_seconds_drops_an_end_stamped_before_its_start() {
 }
 
 #[test]
-fn document_outcome_rates_counts_interrupted_in_the_denominator_only() {
+fn segment_outcome_rates_counts_interrupted_in_the_denominator_only() {
     fn doc(outcome: Option<&str>) -> DocRow {
         DocRow {
             cell_id: "m.run01".into(),
             model_id: "m".into(),
             run_index: 1,
-            document_id: "doc".into(),
+            segment_id: "doc".into(),
             start_ts: Some(0.0),
             end_ts: outcome.map(|_| 1.0),
             outcome: outcome.map(str::to_string),
@@ -512,7 +512,7 @@ fn document_outcome_rates_counts_interrupted_in_the_denominator_only() {
     }
     let rows = [doc(Some("written")), doc(Some("failed")), doc(None)];
     let refs: Vec<&DocRow> = rows.iter().collect();
-    let rates = document_outcome_rates(&refs);
+    let rates = segment_outcome_rates(&refs);
     let MetricValue::Ratio(written) = &rates["segment.written_rate"] else {
         panic!()
     };
@@ -616,7 +616,7 @@ fn attempts_with_no_provider_metadata_are_excluded_from_token_metrics() {
     let with_tokens = AttemptRow {
         cell_id: "m.run01".into(),
         model_id: "m".into(),
-        document_id: "doc".into(),
+        segment_id: "doc".into(),
         chunk_index: 0,
         stage: "item".into(),
         state: "stop_valid".into(),
@@ -664,7 +664,7 @@ fn clone_attempt(a: &AttemptRow) -> AttemptRow {
     AttemptRow {
         cell_id: a.cell_id.clone(),
         model_id: a.model_id.clone(),
-        document_id: a.document_id.clone(),
+        segment_id: a.segment_id.clone(),
         chunk_index: a.chunk_index,
         stage: a.stage.clone(),
         state: a.state.clone(),
@@ -744,7 +744,7 @@ fn synthetic_results_dir_with_kind(tag: &str, kind: &str) -> PathBuf {
         serde_json::json!({
             "kind": kind, "ts": 100.0, "cell_id": "m.run01",
             "document_id": "brewery", "source": "corpus/brewery.md",
-            "document_sha256": "sha-brewery", "chunk_total": 1, "phase": "start",
+            "segment_sha256": "sha-brewery", "chunk_total": 1, "phase": "start",
         }),
         serde_json::json!({
             "kind": "attempt", "source": "corpus/brewery.md", "stage": "item",
@@ -754,20 +754,20 @@ fn synthetic_results_dir_with_kind(tag: &str, kind: &str) -> PathBuf {
                 "output_tokens": 200, "total_tokens": 1200},
             "parse_error": null, "validation_issues": null,
             "ts": 101.0, "cell_id": "m.run01", "model_id": "m", "run_index": 1,
-            "document_id": "brewery", "document_sha256": "sha-brewery",
+            "document_id": "brewery", "segment_sha256": "sha-brewery",
             "chunk_sha256": "sha-chunk0", "paragraph_first": 0, "paragraph_last": 0,
         }),
         serde_json::json!({
             "kind": kind, "ts": 110.0, "cell_id": "m.run01",
             "document_id": "brewery", "source": "corpus/brewery.md",
-            "document_sha256": "sha-brewery", "phase": "end", "outcome": "written",
+            "segment_sha256": "sha-brewery", "phase": "end", "outcome": "written",
             "associations": 2, "concepts": 1, "labels": 0, "questions": 0,
             "duplicates": 0, "dropped": 0, "batch_path": "cells/m/run01/brewery.jsonl",
         }),
         serde_json::json!({
             "kind": kind, "ts": 111.0, "cell_id": "m.run01",
             "document_id": "sake", "source": "corpus/sake.md",
-            "document_sha256": "sha-sake", "chunk_total": 1, "phase": "start",
+            "segment_sha256": "sha-sake", "chunk_total": 1, "phase": "start",
         }),
         serde_json::json!({
             "kind": "attempt", "source": "corpus/sake.md", "stage": "item",
@@ -775,13 +775,13 @@ fn synthetic_results_dir_with_kind(tag: &str, kind: &str) -> PathBuf {
             "length_limited": false, "elapsed_seconds": 30.0,
             "provider_metadata": null, "parse_error": "timed out", "validation_issues": null,
             "ts": 141.0, "cell_id": "m.run01", "model_id": "m", "run_index": 1,
-            "document_id": "sake", "document_sha256": "sha-sake",
+            "document_id": "sake", "segment_sha256": "sha-sake",
             "chunk_sha256": "sha-chunk0", "paragraph_first": 0, "paragraph_last": 0,
         }),
         serde_json::json!({
             "kind": kind, "ts": 142.0, "cell_id": "m.run01",
             "document_id": "sake", "source": "corpus/sake.md",
-            "document_sha256": "sha-sake", "phase": "end", "outcome": "failed",
+            "segment_sha256": "sha-sake", "phase": "end", "outcome": "failed",
             "associations": null, "concepts": null, "labels": null, "questions": null,
             "duplicates": null, "dropped": null, "batch_path": null,
         }),
@@ -915,7 +915,7 @@ fn synthetic_multi_run_results_dir(tag: &str) -> PathBuf {
         cell_id: &str,
         run_index: usize,
         document_id: &str,
-        document_sha256: &str,
+        segment_sha256: &str,
         elapsed_seconds: f64,
         state: &str,
     ) -> Value {
@@ -932,15 +932,15 @@ fn synthetic_multi_run_results_dir(tag: &str) -> PathBuf {
             "parse_error": if state == "stop_valid" { Value::Null } else { Value::String("timed out".into()) },
             "validation_issues": null,
             "ts": 0.0, "cell_id": cell_id, "model_id": "m", "run_index": run_index,
-            "document_id": document_id, "document_sha256": document_sha256,
+            "document_id": document_id, "segment_sha256": segment_sha256,
             "chunk_sha256": "sha-chunk0", "paragraph_first": 0, "paragraph_last": 0,
         })
     }
-    fn doc_start(cell_id: &str, document_id: &str, source: &str, document_sha256: &str) -> Value {
+    fn doc_start(cell_id: &str, document_id: &str, source: &str, segment_sha256: &str) -> Value {
         serde_json::json!({
             "kind": "document", "ts": 0.0, "cell_id": cell_id,
             "document_id": document_id, "source": source,
-            "document_sha256": document_sha256, "chunk_total": 1, "phase": "start",
+            "segment_sha256": segment_sha256, "chunk_total": 1, "phase": "start",
         })
     }
     #[allow(clippy::too_many_arguments)]
@@ -948,14 +948,14 @@ fn synthetic_multi_run_results_dir(tag: &str) -> PathBuf {
         cell_id: &str,
         document_id: &str,
         source: &str,
-        document_sha256: &str,
+        segment_sha256: &str,
         associations: u64,
         batch_path: &str,
     ) -> Value {
         serde_json::json!({
             "kind": "document", "ts": 1.0, "cell_id": cell_id,
             "document_id": document_id, "source": source,
-            "document_sha256": document_sha256, "phase": "end", "outcome": "written",
+            "segment_sha256": segment_sha256, "phase": "end", "outcome": "written",
             "associations": associations, "concepts": 0, "labels": 0, "questions": 0,
             "duplicates": 0, "dropped": 0, "batch_path": batch_path,
         })
@@ -964,12 +964,12 @@ fn synthetic_multi_run_results_dir(tag: &str) -> PathBuf {
         cell_id: &str,
         document_id: &str,
         source: &str,
-        document_sha256: &str,
+        segment_sha256: &str,
     ) -> Value {
         serde_json::json!({
             "kind": "document", "ts": 1.0, "cell_id": cell_id,
             "document_id": document_id, "source": source,
-            "document_sha256": document_sha256, "phase": "end", "outcome": "failed",
+            "segment_sha256": segment_sha256, "phase": "end", "outcome": "failed",
             "associations": null, "concepts": null, "labels": null, "questions": null,
             "duplicates": null, "dropped": null, "batch_path": null,
         })
@@ -1324,7 +1324,7 @@ fn a_reprocessed_documents_second_end_record_supersedes_the_first() {
         &serde_json::json!({
             "kind": "document", "ts": 120.0, "cell_id": "m.run01",
             "document_id": "brewery", "source": "corpus/brewery.md",
-            "document_sha256": "sha-brewery", "phase": "end", "outcome": "written",
+            "segment_sha256": "sha-brewery", "phase": "end", "outcome": "written",
             "associations": 5, "concepts": 1, "labels": 0, "questions": 0,
             "duplicates": 0, "dropped": 0, "batch_path": "cells/m/run01/brewery.jsonl",
         })
@@ -1581,24 +1581,24 @@ fn synthetic_two_model_results_dir(tag: &str) -> PathBuf {
     )
     .unwrap();
 
-    fn doc_start(cell_id: &str, document_id: &str, source: &str, document_sha256: &str) -> Value {
+    fn doc_start(cell_id: &str, document_id: &str, source: &str, segment_sha256: &str) -> Value {
         serde_json::json!({
             "kind": "document", "ts": 0.0, "cell_id": cell_id,
             "document_id": document_id, "source": source,
-            "document_sha256": document_sha256, "chunk_total": 1, "phase": "start",
+            "segment_sha256": segment_sha256, "chunk_total": 1, "phase": "start",
         })
     }
     fn doc_end_written(
         cell_id: &str,
         document_id: &str,
         source: &str,
-        document_sha256: &str,
+        segment_sha256: &str,
         batch_path: &str,
     ) -> Value {
         serde_json::json!({
             "kind": "document", "ts": 1.0, "cell_id": cell_id,
             "document_id": document_id, "source": source,
-            "document_sha256": document_sha256, "phase": "end", "outcome": "written",
+            "segment_sha256": segment_sha256, "phase": "end", "outcome": "written",
             "associations": 1, "concepts": 0, "labels": 0, "questions": 0,
             "duplicates": 0, "dropped": 0, "batch_path": batch_path,
         })
@@ -2062,7 +2062,7 @@ fn differences_locator_selects_the_minimum_paragraph_and_derives_its_chunk() {
     let locator = &founded_in["locator"];
     assert_eq!(locator["document_id"], "brewery");
     assert_eq!(locator["source"], "corpus/brewery.md");
-    assert_eq!(locator["document_sha256"], "sha-brewery");
+    assert_eq!(locator["segment_sha256"], "sha-brewery");
     assert_eq!(locator["paragraph"], 2);
     assert_eq!(locator["chunk_index"], 0);
     assert_eq!(locator["chunk_sha256"], "sha-chunk0");
@@ -2233,7 +2233,7 @@ fn with_text_truncates_at_the_cap_on_a_char_boundary() {
 }
 
 #[test]
-fn with_text_refuses_a_document_sha256_drift() {
+fn with_text_refuses_a_segment_sha256_drift() {
     let dir = synthetic_two_model_results_dir("differences-with-text-drift");
     fs::create_dir_all(dir.join("corpus")).unwrap();
     fs::write(dir.join("corpus/brewery.md"), "drifted content").unwrap();

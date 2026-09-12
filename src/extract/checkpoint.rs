@@ -1,10 +1,10 @@
-//! Per-chunk checkpointing: resuming an interrupted document without
+//! Per-chunk checkpointing: resuming an interrupted segment without
 //! re-asking the model for units already answered.
 
 use super::*;
 
 /// The same compatibility inputs [`ManifestEntry`]/[`Manifest::matches`]
-/// already check, minus `output` — the per-document gate deciding
+/// already check, minus `output` — the per-segment gate deciding
 /// whether a checkpoint file's cached units are even consulted. Any
 /// field mismatch (content edited, model/prompt/`--questions`/
 /// `--fact-budget`/`--structured-output`/`--max-output-tokens`/`--lossy`
@@ -103,7 +103,7 @@ pub(super) struct CheckpointUnit {
     pub(super) user: String,
     pub(super) answer: String,
     /// ADR 0013's mechanical-removal records for this unit, so a
-    /// resumed document still reports every removal its reused units
+    /// resumed segment still reports every removal its reused units
     /// carried. `default` because a pre-0013 checkpoint file simply
     /// had no removals to record — its units validated fully.
     #[serde(default)]
@@ -114,20 +114,20 @@ pub(super) struct CheckpointUnit {
     pub(super) unparsed: Vec<Removal>,
 }
 
-/// One document's durable checkpoint state: the settings it was
+/// One segment's durable checkpoint state: the settings it was
 /// extracted under, and every unit completed so far, keyed by content
 /// hash. Persisted as one small JSON file, rewritten atomically
 /// (`storage::write_atomic`) after every new unit lands — small enough
 /// that a read-modify-write-whole-file is simpler and just as durable
 /// as an append-only log, the same shape `Manifest` itself already
-/// uses for a much larger (per-run, not per-document) equivalent.
+/// uses for a much larger (per-run, not per-segment) equivalent.
 #[derive(serde::Serialize, Deserialize)]
-pub(super) struct DocumentCheckpoints {
+pub(super) struct SegmentCheckpoints {
     pub(super) fingerprint: CheckpointFingerprint,
     #[serde(default)]
     pub(super) units: BTreeMap<String, CheckpointUnit>,
     /// ADR 0033 §3.5: the overview pass's answer per chunk (by
-    /// `chunk_sha256`), so a resumed document reuses the pass without
+    /// `chunk_sha256`), so a resumed segment reuses the pass without
     /// a call — an EMPTY answer for a chunk whose ask failed (ADR 0034
     /// §3.3: fixed for the checkpoint's life, never re-asked). Empty
     /// below `--chunk-context overview`.
@@ -155,7 +155,7 @@ pub(super) fn stale_checkpoint_notice(path: &Path, units: usize) -> Option<Strin
     })
 }
 
-impl DocumentCheckpoints {
+impl SegmentCheckpoints {
     /// Missing, unreadable, or fingerprint-mismatched checkpoints all
     /// degrade to "nothing cached" — never an error, and never a false
     /// reuse of an incompatible output. Mirrors [`Manifest::load`]'s
@@ -164,14 +164,14 @@ impl DocumentCheckpoints {
         // ADR 0037 §3.4 (#850): each of the three ways to "nothing
         // cached" is told apart on stderr where it costs something —
         // a damaged file and a settings change both re-bill every
-        // unit of the document, and were indistinguishable from a
+        // unit of the segment, and were indistinguishable from a
         // first run. A missing file IS the first run, and stays quiet.
         let loaded: Option<Self> = match fs::read(path) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => {
                 eprintln!(
                     "taguru: extract: ignoring an unreadable checkpoint at {}: {error} — \
-                     every unit of this document re-extracts",
+                     every unit of this segment re-extracts",
                     path.display()
                 );
                 None
@@ -181,7 +181,7 @@ impl DocumentCheckpoints {
                 Err(error) => {
                     eprintln!(
                         "taguru: extract: ignoring an unreadable checkpoint at {}: {error} — \
-                         every unit of this document re-extracts",
+                         every unit of this segment re-extracts",
                         path.display()
                     );
                     None
@@ -218,34 +218,34 @@ impl DocumentCheckpoints {
     }
 }
 
-/// The thread-safe handle threaded through one document's extraction —
-/// `--parallel` fans a document's own chunks out across threads (see
+/// The thread-safe handle threaded through one segment's extraction —
+/// `--parallel` fans a segment's own chunks out across threads (see
 /// `Run::extract_chunks_concurrently`), so lookups and writes need the
 /// same "shared, mutex-guarded, poisoning tolerated" treatment
-/// `DiagnosticsSink` already gives its writer, not `DocumentCheckpoints`
+/// `DiagnosticsSink` already gives its writer, not `SegmentCheckpoints`
 /// used bare.
 pub(super) struct CheckpointStore {
     pub(super) path: PathBuf,
-    pub(super) state: Mutex<DocumentCheckpoints>,
+    pub(super) state: Mutex<SegmentCheckpoints>,
 }
 
 impl CheckpointStore {
     pub(super) fn load(path: PathBuf, fingerprint: &CheckpointFingerprint) -> Self {
-        let state = DocumentCheckpoints::load(&path, fingerprint);
+        let state = SegmentCheckpoints::load(&path, fingerprint);
         Self {
             path,
             state: Mutex::new(state),
         }
     }
 
-    /// `--force`'s "start this document over" extended one level
+    /// `--force`'s "start this segment over" extended one level
     /// deeper: an empty store regardless of what a prior run's file
     /// holds, so a forced re-extraction never silently reuses cached
     /// units it was explicitly told to redo.
     pub(super) fn empty(path: PathBuf, fingerprint: CheckpointFingerprint) -> Self {
         Self {
             path,
-            state: Mutex::new(DocumentCheckpoints {
+            state: Mutex::new(SegmentCheckpoints {
                 fingerprint,
                 units: BTreeMap::new(),
                 overview: BTreeMap::new(),
@@ -353,10 +353,10 @@ impl CheckpointStore {
             .len()
     }
 
-    /// Best-effort delete once a document's batch has durably landed —
-    /// the checkpoint's whole purpose (resuming an INCOMPLETE document)
+    /// Best-effort delete once a segment's batch has durably landed —
+    /// the checkpoint's whole purpose (resuming an INCOMPLETE segment)
     /// no longer applies, and clearing it keeps `--dry-run`'s reuse
-    /// count honest for the next document that reuses this source path.
+    /// count honest for the next segment that reuses this source path.
     /// A failure here is silently ignored, exactly like `Manifest`'s
     /// "the batch is written; the next run just re-extracts" posture:
     /// nothing correctness-critical depends on this file disappearing

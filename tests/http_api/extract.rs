@@ -2123,7 +2123,7 @@ fn chunk_context_overview_runs_a_pass_first_and_feeds_cast_and_synopsis() {
         "{stdout}"
     );
     assert!(
-        stderr.contains("\"Ghost\" does not appear in the document text"),
+        stderr.contains("\"Ghost\" does not appear in the segment text"),
         "{stderr}"
     );
 
@@ -2247,7 +2247,7 @@ fn chunk_context_overview_is_checkpointed_and_a_cut_off_answer_is_skipped() {
     let (code, stdout, stderr) = run_extract(&out, &provider, &args);
     assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
     assert!(
-        stderr.contains("chunk 1/2: the overview answer was cut off at the output limit — this chunk contributes no synopsis or cast (recorded so for this document's resume; --force re-asks)"),
+        stderr.contains("chunk 1/2: the overview answer was cut off at the output limit — this chunk contributes no synopsis or cast (recorded so for this segment's resume; --force re-asks)"),
         "{stderr}"
     );
     let requests: Vec<String> = captured.lock().unwrap().clone();
@@ -2572,7 +2572,7 @@ fn chunk_context_names_pass_the_occurrence_check() {
         "{stdout}"
     );
     assert!(
-        stderr.contains("does not appear in the document text"),
+        stderr.contains("does not appear in the segment text"),
         "{stderr}"
     );
 
@@ -2587,7 +2587,7 @@ fn chunk_context_names_pass_the_occurrence_check() {
 /// and the directory imports whole. A rerun with a new document D
 /// claims A's names from A's skipped batch the same way.
 #[test]
-fn extract_prunes_an_alias_that_would_rewire_an_earlier_documents_concept() {
+fn extract_prunes_an_alias_that_would_rewire_an_earlier_segments_concept() {
     let docs = batch_dir("extract-claimed-docs");
     let a = docs.join("a.md");
     let c = docs.join("c.md");
@@ -2634,7 +2634,7 @@ fn extract_prunes_an_alias_that_would_rewire_an_earlier_documents_concept() {
     );
     let expected = format!(
         "taguru: extract: {}: removed: aliases[0]: alias \"東雲電機株式会社(架空)\" already \
-         names a concept an earlier document or the target context settled on; an alias \
+         names a concept an earlier segment or the target context settled on; an alias \
          cannot rewire it (import would refuse the batch)",
         c.display()
     );
@@ -2895,7 +2895,7 @@ fn extract_redact_refuses_a_batch_carrying_sensitive_content_and_drops_placehold
     );
     assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
     assert!(
-        stderr.contains("sensitive content the redacted document never showed"),
+        stderr.contains("sensitive content the redacted segment never showed"),
         "{stderr}"
     );
     // Line 3: the batch's context and source lines come first.
@@ -3001,7 +3001,7 @@ fn extract_redact_env_var_dry_run_note_and_endpoint_notice() {
 
     // The notice: a remote endpoint with redaction off, once per run;
     // a loopback endpoint or redaction on says nothing.
-    let notice = "note: --redact is off; document text is sent to model.example.com as written";
+    let notice = "note: --redact is off; segment text is sent to model.example.com as written";
     let (code, _, stderr) = run_extract(
         &out,
         &[("TAGURU_EXTRACT_URL", "https://model.example.com/v1")],
@@ -3138,7 +3138,7 @@ fn extract_redact_rules_file_extends_the_built_ins_and_joins_the_version() {
     // the label carries the masked name, the document fails on it.
     assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
     assert!(
-        stderr.contains("the answer carries sensitive content the redacted document never showed")
+        stderr.contains("the answer carries sensitive content the redacted segment never showed")
             && stderr.contains(": brewer"),
         "{stderr}"
     );
@@ -8124,7 +8124,7 @@ fn trace_joins_every_batch_item_to_its_piece_and_the_sidecar_attempt() {
     assert_eq!(trace[0]["run_id"], run_id.as_str());
     assert_eq!(trace[0]["source"], doc.to_str().unwrap());
     assert_eq!(trace[0]["chunk_total"], 2);
-    assert_eq!(trace[0]["document_sha256"].as_str().unwrap().len(), 64);
+    assert_eq!(trace[0]["segment_sha256"].as_str().unwrap().len(), 64);
     assert!(
         trace[0]["batch_path"]
             .as_str()
@@ -8580,7 +8580,7 @@ fn attempts_log_keeps_every_completions_full_prompt_and_answer() {
     assert_eq!(records[0]["run_id"], run_id);
     assert_eq!(records[0]["source"], doc.to_str().unwrap());
     assert_eq!(records[0]["resumed"], false);
-    assert_eq!(records[0]["document_sha256"].as_str().unwrap().len(), 64);
+    assert_eq!(records[0]["segment_sha256"].as_str().unwrap().len(), 64);
 
     // ADR 0031 §3.2/§3.9: one settings record right after `segment`,
     // a diagnostic snapshot of this run's compute inputs.
@@ -9110,7 +9110,7 @@ fn extract_metrics_script_aggregates_a_real_run() {
     let report: Value =
         serde_json::from_str(&std::fs::read_to_string(&report_path).unwrap()).unwrap();
     let metrics = &report["run"];
-    assert_eq!(metrics["documents"], 1);
+    assert_eq!(metrics["segments"], 1);
     // 2 chunks kept one "S rel value-N" each; the shared "ghost"
     // association was removed per chunk (fabricated subject) and the
     // duplicate of chunk 1's copy... ghost is removed mechanically in
@@ -9131,8 +9131,8 @@ fn extract_metrics_script_aggregates_a_real_run() {
     assert_eq!(metrics["cost"]["lost_input_tokens"], 40, "{metrics}");
     assert_eq!(metrics["cost"]["lost_output_tokens"], 7, "{metrics}");
     assert_eq!(metrics["cost"]["money"], 0.0454, "{metrics}");
-    assert_eq!(report["contexts"]["ch1"]["documents"], 1);
-    assert_eq!(report["groups"]["book"]["documents"], 1);
+    assert_eq!(report["contexts"]["ch1"]["segments"], 1);
+    assert_eq!(report["groups"]["book"]["segments"], 1);
 
     // Compare mode against itself: everything unchanged.
     let compared = std::process::Command::new("python3")
@@ -9221,7 +9221,7 @@ fn anchoring_command_rates_a_real_run_and_the_script_folds_it_in() {
     assert!(!table.contains("a.md: "), "{table}");
     let report: Value =
         serde_json::from_str(&std::fs::read_to_string(&report_path).unwrap()).unwrap();
-    let named = &report["documents"]["b.md"]["unanchored"];
+    let named = &report["segments"]["b.md"]["unanchored"];
     assert_eq!(named.as_array().map(Vec::len), Some(1), "{report}");
     assert_eq!(named[0]["line"], 3);
     assert_eq!(named[0]["subject"], "あおみね");
@@ -9238,7 +9238,7 @@ fn anchoring_command_rates_a_real_run_and_the_script_folds_it_in() {
         "uncited: nothing to validate"
     );
     assert_eq!(
-        report["documents"][doc.to_str().unwrap()]["unanchored"]
+        report["segments"][doc.to_str().unwrap()]["unanchored"]
             .as_array()
             .map(Vec::len),
         Some(0)
@@ -9255,13 +9255,10 @@ fn anchoring_command_rates_a_real_run_and_the_script_folds_it_in() {
     assert_eq!(totals["rate_with_aliases"], 1.0);
     assert_eq!(totals["cited"], 1, "only a.md's association cites");
     assert_eq!(totals["locator_valid"], 1);
-    assert_eq!(
-        report["documents"]["b.md"]["anchored_strict"], 0,
-        "{report}"
-    );
-    assert_eq!(report["documents"]["b.md"]["anchored_with_aliases"], 1);
+    assert_eq!(report["segments"]["b.md"]["anchored_strict"], 0, "{report}");
+    assert_eq!(report["segments"]["b.md"]["anchored_with_aliases"], 1);
     let a_key = doc.to_str().unwrap();
-    assert_eq!(report["documents"][a_key]["context"], "c");
+    assert_eq!(report["segments"][a_key]["context"], "c");
 
     // The aggregation script folds the matched document in and warns
     // about the trace-less one instead of inventing a row.
@@ -9610,10 +9607,10 @@ fn replay_auto_pins_the_system_prompt_across_a_settings_change_and_reports_both_
     let _ = std::fs::remove_dir_all(&out);
 }
 
-/// A genuine conversation change — the document text itself, which
+/// A genuine conversation change — the segment text itself, which
 /// drives the user turn the pin never touches (ADR 0031 §3.6) — still
 /// falls through to a live call under `--replay auto`, and still fails
-/// the document under `--replay strict`, with the miss diagnostic
+/// the segment under `--replay strict`, with the miss diagnostic
 /// (piece id, recorded count) on stderr.
 #[test]
 fn replay_strict_fails_on_a_changed_document_with_the_miss_reason_on_stderr() {
@@ -10419,7 +10416,7 @@ fn a_failed_overview_is_traced_as_an_empty_record_not_a_gap() {
 /// how many overview asks are in flight at once — serial can never
 /// exceed one — and the fan-out must not change a byte of what the run
 /// produces (the merged overview and its digest are collected back in
-/// document order, whatever order the answers arrive in).
+/// segment order, whatever order the answers arrive in).
 #[test]
 fn the_overview_pass_fans_out_under_parallel_and_matches_the_sequential_run() {
     use std::sync::Arc;
@@ -10789,7 +10786,7 @@ fn inspect_reads_a_failed_documents_attempts_log_down_to_the_piece_text() {
     assert_eq!(code, 0);
     let report: Value = serde_json::from_str(&json).unwrap();
     assert_eq!(report["kind"], "attempts");
-    assert_eq!(report["document"]["source"], doc.to_str().unwrap());
+    assert_eq!(report["segment"]["source"], doc.to_str().unwrap());
     assert_eq!(report["attempts"][0]["paragraph_first"], 0);
     assert_eq!(report["attempts"][0]["paragraph_last"], 1);
     assert_eq!(report["attempts"][0]["state"], "stop_malformed");
@@ -10880,7 +10877,7 @@ fn extract_says_when_a_checkpoint_is_unreadable_or_from_other_settings() {
         stderr.contains(&format!(
             "taguru: extract: ignoring an unreadable checkpoint at {}: ",
             checkpoint.display()
-        )) && stderr.contains("— every unit of this document re-extracts"),
+        )) && stderr.contains("— every unit of this segment re-extracts"),
         "{stderr}"
     );
 
@@ -10976,7 +10973,7 @@ fn anchoring_skips_an_unparseable_file_and_still_reports_the_rest() {
     let failed = report["failed"].as_object().unwrap();
     assert_eq!(failed.len(), 1, "{report}");
     assert!(failed.keys().next().unwrap().ends_with("broken.jsonl"));
-    let named = &report["documents"]["good.md"]["unanchored"];
+    let named = &report["segments"]["good.md"]["unanchored"];
     assert_eq!(
         named.as_array().map(Vec::len),
         Some(1),

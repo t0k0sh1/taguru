@@ -131,9 +131,9 @@ pub(super) fn system_prompt(
             prompt.push_str(&schema_block(document, vocabulary));
         }
     }
-    // ADR 0014 (#496 S2): the document's own candidate names, last —
+    // ADR 0014 (#496 S2): the segment's own candidate names, last —
     // after the run-wide vocabulary and schema blocks, since it is the
-    // only per-document block. Empty (candidates off, or a document
+    // only per-segment block. Empty (candidates off, or a segment
     // with no names) appends nothing, keeping the prompt byte-for-byte
     // pre-S2.
     prompt.push_str(&candidates_block(candidates));
@@ -238,7 +238,7 @@ pub(super) fn user_message(
     };
     // ADR 0033 §3.6: the chunk context block rides in the preamble
     // section — single newlines only, so the first blank line is
-    // still where the segment starts (`user_message_document`).
+    // still where the segment starts (`user_message_segment`).
     if let Some(block) = block {
         preamble.push('\n');
         preamble.push_str(&block_preamble(index, total));
@@ -250,10 +250,10 @@ pub(super) fn user_message(
 
 /// The text the occurrence check (ADR 0013) judges names against:
 /// the chunk context block when there is one (ADR 0033 §3.6.2: a name
-/// the block states is the document's own, never a fabrication) and
+/// the block states is the segment's own, never a fabrication) and
 /// the chunk. Never the first line — it embeds the source path — and
 /// never the block's own preamble sentence, which is taguru's
-/// instruction, not the document's text: a name that occurs only in
+/// instruction, not the segment's text: a name that occurs only in
 /// it (`segment`, `paragraph`) must not pass on that account.
 pub(super) fn user_message_occurrence_text(user: &str) -> Cow<'_, str> {
     let rest = user.split_once('\n').map(|(_, rest)| rest).unwrap_or(user);
@@ -262,9 +262,9 @@ pub(super) fn user_message_occurrence_text(user: &str) -> Cow<'_, str> {
     };
     let body = after.split_once('\n').map(|(_, rest)| rest).unwrap_or("");
     // ADR 0033 §3.5: the cast and synopsis lines are the overview
-    // model's words, not the document's — a name that occurs only
+    // model's words, not the segment's — a name that occurs only
     // there is not attested. Everything else in the block is
-    // document text and stays.
+    // segment text and stays.
     let (preamble, chunk) = body.split_once("\n\n").unwrap_or((body, ""));
     let model_or_export = |line: &str| {
         line.starts_with(CAST_PREFIX)
@@ -281,16 +281,16 @@ pub(super) fn user_message_occurrence_text(user: &str) -> Cow<'_, str> {
     Cow::Owned(format!("{}\n\n{chunk}", kept.join("\n")))
 }
 
-/// [`user_message`]'s inverse: the document text a user turn carried,
+/// [`user_message`]'s inverse: the segment text a user turn carried,
 /// with the one-line preamble stripped. The occurrence check (ADR
 /// 0013) must judge names against the DOCUMENT alone — the preamble
 /// embeds the source path, and letting a name pass because it happens
 /// to appear in a directory name would make validation depend on
 /// where the file lives. A preamble holds no blank line (its one line,
 /// or ADR 0033's block joined by single newlines), so the first blank
-/// line is always the boundary, even when the document's own text
+/// line is always the boundary, even when the segment's own text
 /// contains more of them.
-pub(crate) fn user_message_document(user: &str) -> &str {
+pub(crate) fn user_message_segment(user: &str) -> &str {
     user.split_once("\n\n")
         .map(|(_, text)| text)
         .unwrap_or(user)
@@ -298,7 +298,7 @@ pub(crate) fn user_message_document(user: &str) -> &str {
 
 /// [`user_message`]'s other inverse: the `part K of N` a user turn's
 /// first line announces, as `(K, N)` (1-based, as printed), or `None`
-/// for a single-chunk document's `Segment '…':` line — and for any
+/// for a single-chunk segment's `Segment '…':` line — and for any
 /// text that is not a user turn at all. Read by `taguru inspect` off
 /// an attempts log, where the record carries `chunk_index` but not
 /// the chunk count.

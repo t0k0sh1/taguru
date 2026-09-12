@@ -1299,7 +1299,7 @@ fn write_benchmark_results_dir(tag: &str) -> PathBuf {
         serde_json::json!({
             "kind": "document", "ts": 100.0, "cell_id": "m.run01",
             "document_id": "brewery", "source": "corpus/brewery.md",
-            "document_sha256": "sha-brewery", "chunk_total": 1, "phase": "start",
+            "segment_sha256": "sha-brewery", "chunk_total": 1, "phase": "start",
         }),
         serde_json::json!({
             "kind": "attempt", "source": "corpus/brewery.md", "stage": "item",
@@ -1309,13 +1309,13 @@ fn write_benchmark_results_dir(tag: &str) -> PathBuf {
                 "output_tokens": 200, "total_tokens": 1200},
             "parse_error": null, "validation_issues": null,
             "ts": 101.0, "cell_id": "m.run01", "model_id": "m", "run_index": 1,
-            "document_id": "brewery", "document_sha256": "sha-brewery",
+            "document_id": "brewery", "segment_sha256": "sha-brewery",
             "chunk_sha256": "sha-chunk0", "paragraph_first": 0, "paragraph_last": 0,
         }),
         serde_json::json!({
             "kind": "document", "ts": 110.0, "cell_id": "m.run01",
             "document_id": "brewery", "source": "corpus/brewery.md",
-            "document_sha256": "sha-brewery", "phase": "end", "outcome": "written",
+            "segment_sha256": "sha-brewery", "phase": "end", "outcome": "written",
             "associations": 1, "concepts": 0, "labels": 0, "questions": 0,
             "duplicates": 0, "dropped": 0, "batch_path": "cells/m/run01/brewery.jsonl",
         }),
@@ -1558,12 +1558,12 @@ fn write_two_model_benchmark_results_dir(tag: &str) -> PathBuf {
             serde_json::json!({
                 "kind": "document", "ts": 100.0, "cell_id": cell_id,
                 "document_id": "brewery", "source": "corpus/brewery.md",
-                "document_sha256": "sha-brewery", "chunk_total": 1, "phase": "start",
+                "segment_sha256": "sha-brewery", "chunk_total": 1, "phase": "start",
             }),
             serde_json::json!({
                 "kind": "document", "ts": 110.0, "cell_id": cell_id,
                 "document_id": "brewery", "source": "corpus/brewery.md",
-                "document_sha256": "sha-brewery", "phase": "end", "outcome": "written",
+                "segment_sha256": "sha-brewery", "phase": "end", "outcome": "written",
                 "associations": 1, "concepts": 0, "labels": 0, "questions": 0,
                 "duplicates": 0, "dropped": 0, "batch_path": batch_path,
             }),

@@ -46,12 +46,12 @@ pub(super) struct ModelQuestion {
     pub(super) question: Option<String>,
 }
 
-/// The rules one document's items are checked against — the two
-/// pieces of per-document context [`interpret_model_output`] needs
+/// The rules one segment's items are checked against — the two
+/// pieces of per-segment context [`interpret_model_output`] needs
 /// that no single item carries on its own.
 #[derive(Clone, Copy)]
 pub(super) struct ItemRules {
-    /// The document's canonical paragraph count (`--questions`'
+    /// The segment's canonical paragraph count (`--questions`'
     /// `paragraph` citations and, informationally only, associations'
     /// own `paragraph` tag are checked against this).
     pub(super) paragraph_count: usize,
@@ -605,15 +605,15 @@ pub(super) fn quote_for_issue(text: &str) -> String {
 ///   cannot mirror these precisely.
 /// - An association's weight must be finite, non-zero, and within
 ///   `MAX_ASSOCIATION_WEIGHT` — a magnitude/business check, not a shape.
-/// - A paragraph index must be less than the document's paragraph count —
-///   known only per-document at merge time, never at schema-authoring
+/// - A paragraph index must be less than the segment's paragraph count —
+///   known only per-segment at merge time, never at schema-authoring
 ///   time; this schema only enforces the universal `>= 0` half.
 /// - Cross-item rules: deduplication, and an alias's `canonical` naming a
 ///   subject/object/label the associations actually contain.
 /// - A concept's entity type set (ADR 0009 §6.1): known only per-`context`,
 ///   at validation time — the same argument the paragraph-count entry
 ///   above already makes, just for a schema document instead of a
-///   document's own paragraph count.
+///   segment's own paragraph count.
 /// - "The object of relation R must be a concept some other item in this
 ///   answer typed as T" (ADR 0009 §7.2): a cross-item rule exactly like
 ///   deduplication and dangling-canonical above, checked by

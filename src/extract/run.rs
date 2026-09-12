@@ -1,5 +1,5 @@
 //! `Run`: one extraction run's settled configuration plus everything
-//! that accumulates across documents, and the per-document/per-chunk
+//! that accumulates across segments, and the per-segment/per-chunk
 //! pipeline (`impl Run`) that drives it.
 
 use super::*;
@@ -15,7 +15,7 @@ pub(super) struct ResolvedSystem {
 }
 
 /// One extract run: the settled flags, the provider, and everything
-/// that accumulates across documents — the manifest, the label
+/// that accumulates across segments — the manifest, the label
 /// vocabulary offered to later prompts, and the output names already
 /// claimed. One run targets one `context` on purpose (docs/extract.html).
 pub(super) struct Run {
@@ -23,8 +23,8 @@ pub(super) struct Run {
     pub(super) description: Option<String>,
     /// `--source-id` (#466 S1, ADR 0017): the promotion runbook's
     /// session source id, written into the batch header in place of
-    /// the document path. `None` = the path, today's batch byte for
-    /// byte. The MANIFEST stays keyed by the document path either way
+    /// the segment path. `None` = the path, today's batch byte for
+    /// byte. The MANIFEST stays keyed by the segment path either way
     /// — the path names the input, this names the output.
     pub(super) source_id: Option<String>,
     /// `--date` (#466 S1): epoch seconds for the passage line's
@@ -32,13 +32,13 @@ pub(super) struct Run {
     pub(super) date: Option<u64>,
     /// `--tag` (#466 S1): tags for the passage line (empty = no field).
     pub(super) tags: Vec<String>,
-    /// Whether this run extracts more than one document — under
+    /// Whether this run extracts more than one segment — under
     /// `--source-id` that appends the runbook's `/{doc}` suffix
     /// (the file stem) so per-source retract-then-apply cannot make
-    /// two documents silently replace each other.
-    pub(super) multi_document: bool,
+    /// two segments silently replace each other.
+    pub(super) multi_segment: bool,
     /// Written-source claims (the batch HEADER's source), mirroring
-    /// `claimed`'s file-name check one level up: two documents whose
+    /// `claimed`'s file-name check one level up: two segments whose
     /// effective source ids collide would clobber each other at import
     /// (retract-then-apply is per source id), so the second one fails
     /// here instead.
@@ -91,15 +91,15 @@ pub(super) struct Run {
     /// `system_prompt` so a one-off label isn't indistinguishable from
     /// an established one.
     pub(super) vocabulary: BTreeMap<String, usize>,
-    /// Issue #758: every concept/label spelling an earlier document of
+    /// Issue #758: every concept/label spelling an earlier segment of
     /// this run (or `--vocabulary`'s `context`) settled on, mapped to
-    /// what it resolves to — the set a later document's alias must not
-    /// rewire. Grows exactly where `vocabulary` does: when a document
+    /// what it resolves to — the set a later segment's alias must not
+    /// rewire. Grows exactly where `vocabulary` does: when a segment
     /// lands, and when a skipped one's batch is absorbed.
     pub(super) claimed_names: ClaimedNames,
     pub(super) claimed: BTreeMap<String, String>,
-    /// Chunk completions to run concurrently within one document (1 =
-    /// today's sequential loop). Documents themselves always run
+    /// Chunk completions to run concurrently within one segment (1 =
+    /// today's sequential loop). Segments themselves always run
     /// sequentially — see [`Run::extract_chunks`].
     pub(super) parallel: usize,
     /// Resolved from `--lossy`/TAGURU_EXTRACT_LOSSY (`false`, the
@@ -110,13 +110,13 @@ pub(super) struct Run {
     pub(super) lossy: bool,
     /// Resolved from `--candidates`/TAGURU_EXTRACT_CANDIDATES (`false`,
     /// the default — ADR 0001 §12.2's default-off discipline). `true`
-    /// appends the document's own candidate names to the system prompt
+    /// appends the segment's own candidate names to the system prompt
     /// (ADR 0014, #496 S2) and stamps `candidates_manifest_value` into
     /// the manifest/checkpoint fingerprints.
     pub(super) candidates: bool,
     /// `--redact`/TAGURU_EXTRACT_REDACT, resolved: the groups and the
     /// compiled rule set when on, `None` when off (ADR 0038 §3.3). The
-    /// redacted text is the document from `read_document` onward.
+    /// redacted text is the segment from `read_segment` onward.
     pub(super) redaction: Option<(crate::sensitive::Groups, crate::sensitive::RuleSet)>,
     /// Resolved from `--coverage`/TAGURU_EXTRACT_COVERAGE (`false`,
     /// the default). `true` reports every sentence holding a candidate
@@ -155,9 +155,9 @@ pub(super) struct Run {
     /// as changing any other computation input does.
     pub(super) schema_digest: String,
     /// Issue #179's cooperative stop flag, checked between chunks and
-    /// between documents.
+    /// between segments.
     pub(super) stop: StopSignal,
-    /// ADR 0025 (#788): whether each document's attempts log (full
+    /// ADR 0025 (#788): whether each segment's attempts log (full
     /// prompts and answers) is written — `true` unless
     /// `TAGURU_EXTRACT_TRACE_ATTEMPTS` is `off`.
     pub(super) attempts_log: bool,
@@ -166,8 +166,8 @@ pub(super) struct Run {
     pub(super) replay_mode: ReplayMode,
     /// `true` exactly for `Auto`/`Strict` — the manifest skip and the
     /// checkpoint store both go inert under this (ADR 0031 §3.5), and
-    /// [`Run::extract_document`] loads a [`ReplayIndex`] for every
-    /// document instead of none.
+    /// [`Run::extract_segment`] loads a [`ReplayIndex`] for every
+    /// segment instead of none.
     pub(super) replaying: bool,
     /// `--replay-from`/TAGURU_EXTRACT_REPLAY_FROM, resolved even when
     /// `!replaying` (`out/.extract-trace` by default) — ADR 0031 §3.7.
@@ -202,7 +202,7 @@ impl Run {
             .unwrap_or_default()
     }
 
-    /// ADR 0025: the per-document attempts log, unless
+    /// ADR 0025: the per-segment attempts log, unless
     /// `TAGURU_EXTRACT_TRACE_ATTEMPTS` turned it off (resolved once
     /// into `attempts_log`). Failure to open is reported, not fatal.
     pub(super) fn open_attempt_log(
@@ -211,7 +211,7 @@ impl Run {
         resuming: bool,
         run_id: &str,
         source: &str,
-        document_sha256: &str,
+        segment_sha256: &str,
     ) -> Option<AttemptLog> {
         if !self.attempts_log {
             return None;
@@ -219,13 +219,13 @@ impl Run {
         let dir = self.out.join(TRACE_DIR_NAME);
         let path = dir.join(attempts_file_name(batch_file_name));
         let opened = fs::create_dir_all(&dir).and_then(|()| {
-            AttemptLog::open(path.clone(), resuming, run_id, source, document_sha256)
+            AttemptLog::open(path.clone(), resuming, run_id, source, segment_sha256)
         });
         match opened {
             Ok(log) => Some(log),
             Err(error) => {
                 eprintln!(
-                    "taguru: extract: attempts log: opening {}: {error} — this document's \
+                    "taguru: extract: attempts log: opening {}: {error} — this segment's \
                      attempts are not recorded",
                     path.display()
                 );
@@ -234,11 +234,11 @@ impl Run {
         }
     }
 
-    /// ADR 0027 (#789): the trace's `steering` record for one document
+    /// ADR 0027 (#789): the trace's `steering` record for one segment
     /// — every list computed by the same function that renders its
     /// prompt block, so the record is what the model was actually
-    /// shown. Document-scoped (`chunk_index: null`): all of a
-    /// document's chunks share one prompt. Exception: when
+    /// shown. Segment-scoped (`chunk_index: null`): all of a
+    /// segment's chunks share one prompt. Exception: when
     /// `resolved_system.pinned_from` is `Some` (ADR 0031 §3.6), the
     /// system prompt actually sent is the pinned, verbatim recorded
     /// text — only `system_sha256` describes it exactly.
@@ -301,7 +301,7 @@ impl Run {
         }
     }
 
-    /// ADR 0031 §3.6: this document's system prompt — pinned verbatim
+    /// ADR 0031 §3.6: this segment's system prompt — pinned verbatim
     /// from the attempts log when [`Completions::pinned_system`] names
     /// exactly one distinct recorded system, recomputed from this
     /// run's own settings otherwise. Always recomputes when not
@@ -359,7 +359,7 @@ impl Run {
         }
     }
 
-    /// The Stage 1 item rules for one document, or `None` under
+    /// The Stage 1 item rules for one segment, or `None` under
     /// `--lossy` — see [`evaluate_answer`]/[`ItemRules`].
     pub(super) fn item_rules(&self, paragraph_count: usize) -> Option<ItemRules> {
         (!self.lossy).then_some(ItemRules {
@@ -368,16 +368,16 @@ impl Run {
         })
     }
 
-    /// The source id the batch header carries: the document path
+    /// The source id the batch header carries: the segment path
     /// (today's behavior), or `--source-id`'s override — verbatim for
-    /// a single document, with the runbook's `/{doc}` suffix (the file
+    /// a single segment, with the runbook's `/{doc}` suffix (the file
     /// stem) when the run extracts several, since one session id
-    /// covering two documents would make import's per-source
+    /// covering two segments would make import's per-source
     /// retract-then-apply fold them into one another.
     pub(super) fn written_source(&self, path: &Path, source: &str) -> String {
         match &self.source_id {
             None => source.to_string(),
-            Some(id) if !self.multi_document => id.clone(),
+            Some(id) if !self.multi_segment => id.clone(),
             Some(id) => {
                 let stem = path
                     .file_stem()
@@ -412,7 +412,7 @@ impl Run {
         }
     }
 
-    /// The checkpoint compatibility fingerprint for one document — the
+    /// The checkpoint compatibility fingerprint for one segment — the
     /// same fields [`Manifest::matches`]/[`Manifest::record`] already
     /// carry, minus `output`. Any mismatch against a loaded file's own
     /// fingerprint treats every cached unit as absent (issue #179).
@@ -455,8 +455,8 @@ impl Run {
         }
     }
 
-    /// Loads one document's checkpoint store. `--force` — already "redo
-    /// this document over" at the manifest level — extends the same
+    /// Loads one segment's checkpoint store. `--force` — already "redo
+    /// this segment over" at the manifest level — extends the same
     /// intent one level deeper: an empty store, ignoring whatever units
     /// a prior run cached, rather than comparing them against today's
     /// fingerprint (which would often still match and silently defeat
@@ -479,15 +479,11 @@ impl Run {
         }
     }
 
-    /// The whole per-document pipeline: caps, the manifest skip, the
+    /// The whole per-segment pipeline: caps, the manifest skip, the
     /// chunk loop, merge, self-validation, the atomic write, the
-    /// report line. `Err` is one document failing — the caller prints
+    /// report line. `Err` is one segment failing — the caller prints
     /// it after `taguru: extract: {source}: ` and the run continues.
-    pub(super) fn extract_document(
-        &mut self,
-        path: &Path,
-        source: &str,
-    ) -> Result<Outcome, String> {
+    pub(super) fn extract_segment(&mut self, path: &Path, source: &str) -> Result<Outcome, String> {
         if source.len() > MAX_NAME_BYTES {
             return Err(format!(
                 "the path is {} bytes, over the {MAX_NAME_BYTES}-byte source cap",
@@ -497,7 +493,7 @@ impl Run {
         let file_name = batch_file_name(source);
         if let Some(other) = self.claimed.get(&file_name) {
             return Err(format!(
-                "its batch file name collides with '{other}' — rename one of the documents"
+                "its batch file name collides with '{other}' — rename one of the segments"
             ));
         }
         self.claimed.insert(file_name.clone(), source.to_string());
@@ -515,28 +511,28 @@ impl Run {
             return Err(format!(
                 "its source id '{written_source}' collides with '{other}' — import's \
                  retract-then-apply is per source id, so one would silently replace the \
-                 other; rename one of the documents"
+                 other; rename one of the segments"
             ));
         }
         self.claimed_source_ids
             .insert(written_source.clone(), source.to_string());
 
-        let text = read_document(path)?;
+        let text = read_segment(path)?;
         // The manifest's hash is the FILE's (did it change); the
         // redaction version below is the reading's (ADR 0038 §3.3).
         let hash = sha256_hex(text.as_bytes());
         // ADR 0038 §3.3: with `--redact` on, the redacted text IS the
-        // document from here on — prompt, chunks, candidates, passage,
+        // segment from here on — prompt, chunks, candidates, passage,
         // checkpoint, trace, attempts log, coverage all read it.
         let (text, redactions) = match &self.redaction {
             Some((_, rules)) => crate::sensitive::mask(&text, &hash, rules),
             None => (text, Vec::new()),
         };
         let redaction_value = self.redaction_manifest_value();
-        // ADR 0038 §3.6: one line per document, rule and paragraph,
+        // ADR 0038 §3.6: one line per segment, rule and paragraph,
         // never content — a pre-existing placeholder counted apart.
         // Said here, before the plan and before any completion, so a
-        // dry run and a document that later fails both account for
+        // dry run and a segment that later fails both account for
         // what the read masked.
         if let Some(line) = redaction_stderr_line(&redactions) {
             eprintln!("taguru: extract: {source}: {line}");
@@ -549,11 +545,11 @@ impl Run {
         } else {
             ""
         };
-        // The batch an unchanged document skips FROM is the file the
+        // The batch an unchanged segment skips FROM is the file the
         // manifest recorded — identical to `out_path` for anything
         // written under the post-#730 naming, but a manifest from
         // before the naming change records the old un-hashed name, and
-        // re-extracting an unchanged document just because its file
+        // re-extracting an unchanged segment just because its file
         // name scheme moved would spend real model calls.
         let recorded_output = self.manifest.output_of(source);
         // Built ONCE for the skip check and the post-write record
@@ -587,11 +583,11 @@ impl Run {
             tags: &self.tags,
         };
         // ADR 0031 §3.5: the skip exists to avoid paying for model
-        // calls on an unchanged document — under replay a completion is
+        // calls on an unchanged segment — under replay a completion is
         // free whether or not it hits, so the skip's reason to exist is
         // gone. #822 extends the same reasoning to `--resume-from`
         // whatever step it names: it is a deliberate ask to redo this
-        // document, and "unchanged, skipped" would silently answer
+        // segment, and "unchanged, skipped" would silently answer
         // that ask with nothing at all — even for `read`/`plan`/`steer`,
         // where nothing is satisfied from a record either.
         if !self.force
@@ -605,8 +601,8 @@ impl Run {
         {
             let batch = self.absorb_vocabulary(source, &recorded);
             println!("{source}: unchanged, skipped (--force re-extracts)");
-            // ADR 0016: coverage is a pure function of (document text,
-            // written associations), so a skipped document is judged
+            // ADR 0016: coverage is a pure function of (segment text,
+            // written associations), so a skipped segment is judged
             // too, from the batch it already has — no model call, and
             // a past run's recall ceiling stays measurable for free.
             if self.coverage
@@ -625,7 +621,7 @@ impl Run {
         // itself validates against.
         let paragraph_spans = crate::paragraph::split(&text);
         let canonical_paragraphs = paragraph_spans.len();
-        // ADR 0014: candidate names come from the WHOLE document, once
+        // ADR 0014: candidate names come from the WHOLE segment, once
         // — every chunk is offered the same list (the vocabulary
         // discipline's reasoning, one level down), and the corrective
         // path rebuilds the identical prompt.
@@ -634,7 +630,7 @@ impl Run {
         } else {
             Vec::new()
         };
-        // ADR 0033 (#782): the `structure` step — the document's
+        // ADR 0033 (#782): the `structure` step — the segment's
         // headings, articles, and speakers, from its own lines — and
         // the chunk boundaries it makes `plan` prefer. Off: no units,
         // no preferred breaks, today's plan byte for byte.
@@ -694,11 +690,11 @@ impl Run {
             .then(|| ReplayIndex::load(&self.replay_from.join(attempts_file_name(&file_name))));
         // ADR 0025 (#788): the attempts log — every completion's full
         // prompt and answer — opens here, appending when the checkpoint
-        // says this document is being resumed, truncating otherwise,
+        // says this segment is being resumed, truncating otherwise,
         // so the file spans exactly the runs that built the batch. A
         // log that cannot open is one stderr line, never a failure.
         // ADR 0031 §3.4: a replay run always appends, even on an
-        // otherwise-fresh document (whose checkpoint holds nothing) —
+        // otherwise-fresh segment (whose checkpoint holds nothing) —
         // truncating the very file replay is about to read from would
         // destroy its own input.
         let run_id = self.run_id();
@@ -709,8 +705,8 @@ impl Run {
             source,
             &hash,
         );
-        // ADR 0031 §3.2/§3.9: right after the `document` record, once
-        // per document — a diagnostic snapshot of this run's settings,
+        // ADR 0031 §3.2/§3.9: right after the `segment` record, once
+        // per segment — a diagnostic snapshot of this run's settings,
         // never a manifest/checkpoint computation input.
         if let Some(log) = attempt_log.as_ref() {
             log.write_record(&SettingsRecord {
@@ -742,7 +738,7 @@ impl Run {
         }
         // ADR 0031 §3.2/§3.9: a settings mismatch is a hint, never a
         // gate — matching is still decided completion by completion,
-        // by conversation content. Reported once per document, before
+        // by conversation content. Reported once per segment, before
         // any completion of it is attempted.
         if let Some(recorded) = replay_index.as_ref().and_then(ReplayIndex::settings) {
             let current = RecordedSettings {
@@ -770,10 +766,10 @@ impl Run {
             }
         }
         if let Some(completions) = self.completions.as_mut() {
-            completions.begin_document(replay_index, self.replay_mode);
+            completions.begin_segment(replay_index, self.replay_mode);
         }
-        // ADR 0031 §3.6: resolved once per document, after the replay
-        // index is installed — every chunk (and Stage 2) of a document
+        // ADR 0031 §3.6: resolved once per segment, after the replay
+        // index is installed — every chunk (and Stage 2) of a segment
         // shares one prompt, pin or not (ADR 0014's same reasoning).
         let resolved_system = self.resolve_system(source, &candidates);
         let observers = Observers {
@@ -849,7 +845,7 @@ impl Run {
                 &observers,
             )
             .map_err(|message| {
-                document_failure(
+                segment_failure(
                     &checkpoints,
                     attempt_log.as_ref(),
                     self.diagnostics.as_ref(),
@@ -885,7 +881,7 @@ impl Run {
                     &observers,
                 )
                 .map_err(|message| {
-                    document_failure(
+                    segment_failure(
                         &checkpoints,
                         attempt_log.as_ref(),
                         self.diagnostics.as_ref(),
@@ -895,7 +891,7 @@ impl Run {
             }
             prune_unresolvable_aliases(&mut outputs);
             // #758: an alias that would rewire a name an EARLIER
-            // document (or the target context) already settled on is
+            // segment (or the target context) already settled on is
             // import's Conflict refusal — mechanical, on the same
             // terms as the dangling prune: nothing the model could
             // correct, so nothing a corrective turn is spent on.
@@ -941,20 +937,20 @@ impl Run {
         // cleared only once the batch has landed), so they carry the
         // same resume hint as a chunk or Stage 2 failure.
         if let Err(message) = crate::ingest::parse_batch(Cursor::new(body.as_bytes())) {
-            return Err(document_failure(
+            return Err(segment_failure(
                 &checkpoints,
                 attempt_log.as_ref(),
                 self.diagnostics.as_ref(),
                 format!(
                     "the emitted batch failed self-validation \
-                     ({message}) — a bug in taguru, not in the document"
+                     ({message}) — a bug in taguru, not in the segment"
                 ),
             ));
         }
         // ADR 0038 §3.3: the batch is scanned with the same rule set
         // before it is written — a label or question carrying what the
         // masked text never showed (labels are not occurrence-checked)
-        // fails the document with the batch line and the rule, the
+        // fails the segment with the batch line and the rule, the
         // "extract cannot produce a file import would reject" invariant
         // extended to this gate.
         // The answer is what was wrong, so its checkpoint goes with it:
@@ -968,7 +964,7 @@ impl Run {
                 attempt_log.as_ref(),
                 self.diagnostics.as_ref(),
                 format!(
-                    "the answer carries sensitive content the redacted document never showed \
+                    "the answer carries sensitive content the redacted segment never showed \
                      — batch line {}: {} — nothing was written, and the checkpointed answers \
                      were discarded (a rerun asks the model again)",
                     hit.0, hit.1
@@ -976,7 +972,7 @@ impl Run {
             ));
         }
         if let Err(error) = crate::storage::write_atomic(&out_path, body.as_bytes()) {
-            return Err(document_failure(
+            return Err(segment_failure(
                 &checkpoints,
                 attempt_log.as_ref(),
                 self.diagnostics.as_ref(),
@@ -987,7 +983,7 @@ impl Run {
         // before the trace, so the trace's `uncovered` records (ADR
         // 0026, #787) are the same gaps stderr names below: every
         // sentence whose candidate pair no accepted association
-        // covers. Pure over (document text, accepted associations).
+        // covers. Pure over (segment text, accepted associations).
         let uncovered = if self.coverage {
             let triples: Vec<[&str; 3]> = extraction
                 .associations
@@ -1043,8 +1039,8 @@ impl Run {
             let _ = fs::remove_file(self.out.join(previous));
         }
         // The batch is durably written and manifest-recorded — the
-        // checkpoint's only purpose (resuming an incomplete document)
-        // no longer applies. A document that fails Stage 2/merge/
+        // checkpoint's only purpose (resuming an incomplete segment)
+        // no longer applies. A segment that fails Stage 2/merge/
         // self-validation above instead keeps its checkpoint file: the
         // per-chunk outputs already extracted are still good.
         checkpoints.clear();
@@ -1063,10 +1059,10 @@ impl Run {
             eprintln!("taguru: extract: {source}: uncovered: {}", gap.describe());
         }
         // ADR 0031 §3.4: the `replay_summary` record and its stderr
-        // echo — a replaying document's own account of what it did.
+        // echo — a replaying segment's own account of what it did.
         if self.replaying
             && let Some((replayed, live)) =
-                self.completions.as_ref().map(Completions::document_counts)
+                self.completions.as_ref().map(Completions::segment_counts)
         {
             eprintln!(
                 "taguru: extract: {source}: replayed {replayed}/{} completions ({live} live)",
@@ -1089,7 +1085,7 @@ impl Run {
             &out_path,
         );
         if let Some(sink) = self.diagnostics.as_ref() {
-            sink.emit_document(
+            sink.emit_segment(
                 source,
                 &extraction,
                 removed.len(),
@@ -1101,17 +1097,17 @@ impl Run {
     }
 
     /// Every chunk through the model, in order. The system prompt is
-    /// fixed for the whole document: the vocabulary grows only when a
-    /// document lands, so all of one document's chunks are offered the
+    /// fixed for the whole segment: the vocabulary grows only when a
+    /// segment lands, so all of one segment's chunks are offered the
     /// same spellings. `--parallel` only ever fans out within this one
-    /// document — see [`Run::extract_chunks_concurrently`] — never
-    /// across documents, since the vocabulary above accumulates
-    /// document-to-document and concurrent documents could diverge on
+    /// segment — see [`Run::extract_chunks_concurrently`] — never
+    /// across segments, since the vocabulary above accumulates
+    /// segment-to-segment and concurrent segments could diverge on
     /// label spellings.
     ///
     /// ADR 0033 §3.5 as ADR 0034 amends it: the overview pass. One
     /// completion per chunk — dispatched `--parallel` at a time, the
-    /// answers always collected back in document order, so the merged
+    /// answers always collected back in segment order, so the merged
     /// overview and its digest do not depend on the fan-out — asking
     /// for a synopsis of each unit opening in the chunk and the cast
     /// it introduces;
@@ -1120,9 +1116,9 @@ impl Run {
     /// the same capped resend Stage 1 gets; there is no piece to
     /// split): a chunk whose answer the pass cannot land is reported
     /// once and recorded as an EMPTY answer (ADR 0034 §3.3) — the
-    /// block carries no synopsis from it, and a resumed document
+    /// block carries no synopsis from it, and a resumed segment
     /// neither re-asks nor re-binds its extraction units — never a
-    /// failed document, since context is advisory. Every completion
+    /// failed segment, since context is advisory. Every completion
     /// is a `stage: "overview"` attempt record.
     pub(super) fn overview_pass(
         &self,
@@ -1149,7 +1145,7 @@ impl Run {
             .ladder
             .as_ref()
             .and_then(|ladder| ladder.max_output_tokens);
-        // `--parallel` fans out within one document (see the help text
+        // `--parallel` fans out within one segment (see the help text
         // and `extract_chunks_concurrently`), and an overview call is a
         // chunk completion like any other — leaving this loop serial
         // made it the whole phase's floor: eight workers finished the
@@ -1160,7 +1156,7 @@ impl Run {
             // The stop flag is deliberately not polled per chunk here,
             // the same way the concurrent extraction path does not poll
             // it: under `--parallel` the interrupt is honoured between
-            // documents, and `extract_document` checks it the moment
+            // segments, and `extract_segment` checks it the moment
             // this pass returns.
             let outcomes = crate::registry::dispatch_chunks_concurrently(
                 &indexed,
@@ -1298,12 +1294,12 @@ impl Run {
         };
         eprintln!(
             "taguru: extract: {source}: chunk {}/{chunk_total}: {why} — this chunk contributes \
-             no synopsis or cast (recorded so for this document's resume; --force re-asks)",
+             no synopsis or cast (recorded so for this segment's resume; --force re-asks)",
             index + 1
         );
         checkpoints.record_overview(source, descriptor.sha256.clone(), OverviewAnswer::default());
         // The empty answer travels as `Some`, not as a gap: it is what
-        // the checkpoint now holds, so a resumed document — which reads
+        // the checkpoint now holds, so a resumed segment — which reads
         // that record back as a cache hit — describes this chunk
         // exactly as this run does. `None` stays reserved for a chunk
         // with no record at all (the stop check in the caller), which
@@ -1446,7 +1442,7 @@ impl Run {
     /// Issue #179: the cooperative stop flag is checked between
     /// top-level chunks here (sequential path only — see
     /// [`Run::extract_chunks_concurrently`]'s doc comment for why
-    /// `--parallel` is scoped to between-documents instead). A stop
+    /// `--parallel` is scoped to between-segments instead). A stop
     /// observed mid-loop returns [`ChunkLoopResult::Interrupted`]
     /// immediately, keeping whatever units already landed.
     #[allow(clippy::too_many_arguments)] // one call site; the blocks ride beside the chunks
@@ -1513,7 +1509,7 @@ impl Run {
     /// (a worker claiming an index past a just-recorded failure must
     /// actually observe it) lives in exactly one place. This is the
     /// all-or-nothing fold: the lowest-indexed failure fails the whole
-    /// document, formatted with its position, and nothing after it is
+    /// segment, formatted with its position, and nothing after it is
     /// intentionally dispatched — calls already in flight when the
     /// failure lands simply finish and are discarded.
     ///
@@ -1522,7 +1518,7 @@ impl Run {
     /// unrelated embedding-refresh code, and threading a stop flag
     /// through it would widen that primitive's contract for one caller.
     /// Under `--parallel`, a stop request only takes effect between
-    /// documents — every already-claimed chunk in this document runs to
+    /// segments — every already-claimed chunk in this segment runs to
     /// completion (and gets checkpointed) before the run notices the
     /// request.
     #[allow(clippy::too_many_arguments)] // mirrors `extract_chunks`
@@ -1580,7 +1576,7 @@ impl Run {
 
     /// Issue #199 Stage 2: one targeted corrective turn per output
     /// `cross_output_issues` flagged, rebuilding THAT output's own
-    /// conversation base (never the whole document's) and replaying
+    /// conversation base (never the whole segment's) and replaying
     /// its own final answer as the prior bad turn — Stage 1's
     /// rebuild-not-accumulate discipline, at the output level. Bounded
     /// to exactly one extra call per offending output regardless of
@@ -1745,15 +1741,15 @@ impl Run {
         Ok(())
     }
 
-    /// A skipped document still contributes its labels, so later
-    /// documents keep reusing the same vocabulary — and its names to
-    /// the claim set (#758), so a later document's alias cannot rewire
+    /// A skipped segment still contributes its labels, so later
+    /// segments keep reusing the same vocabulary — and its names to
+    /// the claim set (#758), so a later segment's alias cannot rewire
     /// what a skipped one already wrote. Its batch file
     /// already exists and the manifest says it matches this source, but
     /// the file itself could still be unreadable or corrupt (truncated
     /// by an interrupted write from an older version, hand-edited,
     /// bit-rotted) — that failure is reported, not swallowed: a silent
-    /// miss here would shrink every LATER document's "relation labels
+    /// miss here would shrink every LATER segment's "relation labels
     /// already in use" prompt with no diagnostic at all, degrading
     /// label reuse for the rest of the run without a trace. The parsed
     /// batch is returned (`None` on that failure) so the caller's
@@ -1786,7 +1782,7 @@ impl Run {
         }
     }
 
-    /// The one report line a written document earns.
+    /// The one report line a written segment earns.
     pub(super) fn report(
         &self,
         source: &str,
@@ -1846,7 +1842,7 @@ impl Run {
     }
 }
 
-/// The document re-rendered for question prompts: every canonical
+/// The segment re-rendered for question prompts: every canonical
 /// paragraph (the server's own split) prefixed with its bracketed
 /// number, so the model's `paragraph` references land on exactly the
 /// indexes the server validates against. A paragraph too large to fit a
@@ -1854,8 +1850,8 @@ impl Run {
 /// number — otherwise the byte split in [`chunk`] would carry a
 /// paragraph's continuation to the model as unlabeled text, and any
 /// `paragraph` reference the model drew from it would be a guess. Prompt
-/// input only — the passage stays the verbatim document.
-pub(super) fn labeled_document(text: &str, cap: usize) -> String {
+/// input only — the passage stays the verbatim segment.
+pub(super) fn labeled_segment(text: &str, cap: usize) -> String {
     let mut blocks = Vec::new();
     for span in crate::paragraph::split(text) {
         let label = format!("[{}] ", span.index);
@@ -1877,7 +1873,7 @@ pub(super) fn labeled_document(text: &str, cap: usize) -> String {
     blocks.join("\n\n")
 }
 
-/// A failing document keeps its checkpoint file, so the failure line
+/// A failing segment keeps its checkpoint file, so the failure line
 /// says what a plain rerun resumes from (#763) — the operator's reflex
 /// after a late-chunk failure was `--force`, which is exactly the flag
 /// that discards those units.
@@ -1891,7 +1887,7 @@ pub(super) fn with_resume_hint(checkpoints: &CheckpointStore, message: String) -
     }
 }
 
-/// ADR 0037 §3.2 (#850): the document's failure line ends by pointing
+/// ADR 0037 §3.2 (#850): the segment's failure line ends by pointing
 /// at the records the run left — the attempts log (with the one
 /// `taguru inspect` command that opens the piece the message named,
 /// when it named one) and the diagnostics sidecar when there is one.
@@ -1954,9 +1950,9 @@ pub(super) fn named_piece(message: &str) -> Option<&str> {
 }
 
 /// ADR 0022's resume hint and ADR 0037's records hint together, in
-/// that order — how every document-level failure leaves
-/// `extract_document`.
-pub(super) fn document_failure(
+/// that order — how every segment-level failure leaves
+/// `extract_segment`.
+pub(super) fn segment_failure(
     checkpoints: &CheckpointStore,
     attempt_log: Option<&AttemptLog>,
     diagnostics: Option<&DiagnosticsSink>,
@@ -2125,7 +2121,7 @@ impl CrossChunkRound<'_> {
         match evaluate_answer(
             &response.content,
             self.rules,
-            user_message_document(self.user),
+            user_message_segment(self.user),
             self.vocabulary,
         ) {
             Ok(evaluated) => {

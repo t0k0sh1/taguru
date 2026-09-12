@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """Aggregate `taguru extract`'s trace records into metric tables (#792).
 
-Reads the per-document records extract writes beside every batch
+Reads the per-segment records extract writes beside every batch
 (ADR 0023-0029: `<out>/.extract-trace/<batch>.jsonl` and
 `<batch stem>.attempts.jsonl`) and rolls the #784 metrics up through
-the granularities: document -> context -> group -> run.
+the granularities: segment -> context -> group -> run.
 
     python3 scripts/extract_metrics.py OUT_DIR [OUT_DIR ...]
         [--ledger ledger.json]        # source -> context/groups mapping
         [--price-in N] [--price-out N]  # cost per 1M tokens (default 0)
         [--anchoring report.json]     # `taguru anchoring --json` output (#793)
         [--json out.json] [--markdown out.md]  # default: markdown to stdout
-        [--compare baseline.json]     # per-document deltas vs an earlier run
+        [--compare baseline.json]     # per-segment deltas vs an earlier run
 
-The ledger (the scenario-set's own record, #780) maps each document's
-`source` (exactly as the trace's `document` record spells it) to its
+The ledger (the scenario-set's own record, #780) maps each segment's
+`source` (exactly as the trace's `segment` record spells it) to its
 context and group memberships:
 
     {"sources": {"docs/a.md": {"context": "ch1", "groups": ["book", "law"]}}}
@@ -42,8 +42,8 @@ Metric definitions (ADR 0024 SS3.5, ADR 0026, ADR 0028 SS4, ADR 0029):
 - cost: seconds (sum, per call, lost to non-`stop_valid` attempts,
   per KB of chunk text), input/output tokens (and the tokens those
   lost attempts spent), and money at the given per-1M-token prices.
-- failed: documents with an attempts log but no trace (ADR 0025 keeps
-  the log of a document that failed) — counted apart from `documents`,
+- failed: segments with an attempts log but no trace (ADR 0025 keeps
+  the log of a segment that failed) — counted apart from `segments`,
   with their attempts, moves, and cost rolled into every scope's sums
   and their quality metrics left empty (#807).
 
@@ -77,24 +77,24 @@ def read_jsonl(path: Path) -> list[dict]:
     return records
 
 
-def load_documents(out_dirs: list[Path]) -> list[dict]:
-    """One entry per document the out-dirs hold records for: its
+def load_segments(out_dirs: list[Path]) -> list[dict]:
+    """One entry per segment the out-dirs hold records for: its
     records, split by kind.
 
-    A traced document (a `<batch>.jsonl` trace, written only when the
+    A traced segment (a `<batch>.jsonl` trace, written only when the
     batch was) carries its attempts log beside it. An attempts log
     with NO trace is one of two things, told apart by whether the
     batch it names — `<out>/<stem>.jsonl`, the trace's own file name
     one directory up — exists: if it does, the batch landed and only
-    the trace write failed (advisory, ADR 0023 §3.6), so the document
-    counts as a document with an empty trace (`untraced: True`, its
+    the trace write failed (advisory, ADR 0023 §3.6), so the segment
+    counts as a segment with an empty trace (`untraced: True`, its
     quality metrics empty, its cost real); if it does not, the
-    document never produced a batch — it failed, or the run was
+    segment never produced a batch — it failed, or the run was
     interrupted before it finished — and the log was kept exactly so
     its cost is visible (ADR 0025 §3.2): `failed: True`. Either way
-    the attempts log's own `document` record names the source (#807).
+    the attempts log's own `segment` record names the source (#807).
     """
-    documents = []
+    segments = []
     for out_dir in out_dirs:
         trace_dir = out_dir / TRACE_DIR
         if not trace_dir.is_dir():
@@ -108,13 +108,13 @@ def load_documents(out_dirs: list[Path]) -> list[dict]:
             trace = read_jsonl(trace_path)
             header = next((r for r in trace if r.get("kind") in ("segment", "document")), None)
             if header is None:
-                print(f"warning: {trace_path} has no document record; skipped", file=sys.stderr)
+                print(f"warning: {trace_path} has no segment record; skipped", file=sys.stderr)
                 continue
             stem = name[: -len(".jsonl")]
             traced.add(stem)
             attempts_path = trace_dir / f"{stem}.attempts.jsonl"
             attempts_log = read_jsonl(attempts_path) if attempts_path.is_file() else []
-            documents.append(
+            segments.append(
                 {
                     "source": header["source"],
                     "out_dir": out_dir,
@@ -134,7 +134,7 @@ def load_documents(out_dirs: list[Path]) -> list[dict]:
             header = next((r for r in attempts_log if r.get("kind") in ("segment", "document")), None)
             if header is None:
                 print(
-                    f"warning: {attempts_path} has no trace and no document record; skipped",
+                    f"warning: {attempts_path} has no trace and no segment record; skipped",
                     file=sys.stderr,
                 )
                 continue
@@ -142,11 +142,11 @@ def load_documents(out_dirs: list[Path]) -> list[dict]:
             if batch_landed:
                 print(
                     f"warning: {attempts_path} has no trace but its batch exists; "
-                    "counted as a document with no quality metrics (the trace write "
+                    "counted as a segment with no quality metrics (the trace write "
                     "failed — see the run's stderr)",
                     file=sys.stderr,
                 )
-            documents.append(
+            segments.append(
                 {
                     "source": header["source"],
                     "out_dir": out_dir,
@@ -156,10 +156,10 @@ def load_documents(out_dirs: list[Path]) -> list[dict]:
                     "untraced": batch_landed,
                 }
             )
-    return documents
+    return segments
 
 
-# ------------------------------------------------------------- per-document
+# -------------------------------------------------------------- per-segment
 
 
 def entropy_bits(counts: list[int]) -> float:
@@ -171,9 +171,9 @@ def entropy_bits(counts: list[int]) -> float:
 
 def blank_metrics() -> dict:
     return {
-        "documents": 0,
-        # attempts-only documents (no batch, no trace): counted apart
-        # from `documents` so the quality rates stay over what landed
+        "segments": 0,
+        # attempts-only segments (no batch, no trace): counted apart
+        # from `segments` so the quality rates stay over what landed
         # while cost/attempts/moves include what it took to fail.
         "failed": 0,
         "kept": Counter(),
@@ -195,12 +195,12 @@ def blank_metrics() -> dict:
     }
 
 
-def absorb_document(bucket: dict, document: dict) -> None:
-    if document.get("failed"):
+def absorb_segment(bucket: dict, segment: dict) -> None:
+    if segment.get("failed"):
         bucket["failed"] += 1
     else:
-        bucket["documents"] += 1
-    for record in document["trace"]:
+        bucket["segments"] += 1
+    for record in segment["trace"]:
         kind = record.get("kind")
         if kind == "item":
             bucket["kept"][record["item"]] += 1
@@ -222,10 +222,10 @@ def absorb_document(bucket: dict, document: dict) -> None:
                 bucket["offered_labels"], len(record.get("vocabulary") or [])
             )
     by_id = {}
-    for record in document["attempts_log"]:
+    for record in segment["attempts_log"]:
         if record.get("kind") == "attempt":
             by_id[(record["run_id"], record["attempt_seq"])] = record
-    for record in document["attempts_log"]:
+    for record in segment["attempts_log"]:
         kind = record.get("kind")
         if kind == "move":
             bucket["moves"][record["move"]] += 1
@@ -349,7 +349,7 @@ def summarize(bucket: dict, prices: tuple[float, float]) -> dict:
         bucket["lost_input_tokens"] * price_in + bucket["lost_output_tokens"] * price_out
     ) / 1_000_000
     return {
-        "documents": bucket["documents"],
+        "segments": bucket["segments"],
         "failed": bucket["failed"],
         "loss": loss_rates,
         "coverage": {
@@ -404,32 +404,32 @@ def summarize(bucket: dict, prices: tuple[float, float]) -> dict:
     }
 
 
-def aggregate(documents: list[dict], ledger: dict, prices: tuple[float, float]) -> dict:
-    per_document, contexts, groups, run = {}, {}, {}, blank_metrics()
-    for document in documents:
+def aggregate(segments: list[dict], ledger: dict, prices: tuple[float, float]) -> dict:
+    per_segment, contexts, groups, run = {}, {}, {}, blank_metrics()
+    for segment in segments:
         bucket = blank_metrics()
-        absorb_document(bucket, document)
-        source = document["source"]
+        absorb_segment(bucket, segment)
+        source = segment["source"]
         entry = ledger.get(source, {})
         context = entry.get("context", "(unassigned)")
-        memberships = entry.get("groups") or [document["out_dir"].name]
-        # Two out-dirs can hold the same source (the same document
+        memberships = entry.get("groups") or [segment["out_dir"].name]
+        # Two out-dirs can hold the same source (the same segment
         # extracted twice); the run/context/group sums count both, so
-        # the document table must too — disambiguate by directory
+        # the segment table must too — disambiguate by directory
         # rather than silently overwriting. The rule is deterministic,
         # so --compare keys still match when both runs collide alike.
         key = source
-        if key in per_document:
-            key = f"{source} ({document['out_dir'].name})"
+        if key in per_segment:
+            key = f"{source} ({segment['out_dir'].name})"
             print(
                 f"warning: {source} appears in more than one OUT_DIR; "
                 f"listed again as {key!r}",
                 file=sys.stderr,
             )
-        per_document[key] = {
+        per_segment[key] = {
             "context": context,
             "groups": memberships,
-            "failed": bool(document.get("failed")),
+            "failed": bool(segment.get("failed")),
             "metrics": summarize(bucket, prices),
         }
         for name, store in [(context, contexts)] + [(g, groups) for g in memberships]:
@@ -439,7 +439,7 @@ def aggregate(documents: list[dict], ledger: dict, prices: tuple[float, float]) 
         "run": summarize(run, prices),
         "contexts": {name: summarize(b, prices) for name, b in sorted(contexts.items())},
         "groups": {name: summarize(b, prices) for name, b in sorted(groups.items())},
-        "documents": per_document,
+        "segments": per_segment,
     }
 
 
@@ -474,9 +474,9 @@ def attach_anchoring(report: dict, anchoring: dict) -> None:
     run = Counter()
     contexts: dict[str, Counter] = defaultdict(Counter)
     groups: dict[str, Counter] = defaultdict(Counter)
-    for source, row in anchoring.get("documents", {}).items():
+    for source, row in anchoring.get("segments", anchoring.get("documents", {})).items():
         counts = {key: row.get(key, 0) for key in ANCHOR_COUNT_KEYS}
-        entry = report["documents"].get(source)
+        entry = report["segments"].get(source)
         if entry is None:
             print(
                 f"warning: anchoring report covers {source!r}, which the trace "
@@ -523,16 +523,16 @@ def dig(mapping: dict, path: tuple) -> float | None:
 
 
 def compare(current: dict, baseline: dict) -> dict:
-    shared = sorted(set(current["documents"]) & set(baseline["documents"]))
-    only_current = sorted(set(current["documents"]) - set(baseline["documents"]))
-    only_baseline = sorted(set(baseline["documents"]) - set(current["documents"]))
+    shared = sorted(set(current["segments"]) & set(baseline["segments"]))
+    only_current = sorted(set(current["segments"]) - set(baseline["segments"]))
+    only_baseline = sorted(set(baseline["segments"]) - set(current["segments"]))
     rows, verdicts = {}, {}
     for path, direction, label in COMPARE_KEYS:
         improved = worsened = unchanged = 0
         deltas = {}
         for source in shared:
-            now = dig(current["documents"][source]["metrics"], path)
-            was = dig(baseline["documents"][source]["metrics"], path)
+            now = dig(current["segments"][source]["metrics"], path)
+            was = dig(baseline["segments"][source]["metrics"], path)
             if now is None or was is None:
                 continue
             delta = now - was
@@ -550,11 +550,11 @@ def compare(current: dict, baseline: dict) -> dict:
             "unchanged": unchanged,
         }
     return {
-        "shared_documents": len(shared),
+        "shared_segments": len(shared),
         "only_in_current": only_current,
         "only_in_baseline": only_baseline,
         "verdicts": verdicts,
-        "per_document": rows,
+        "per_segment": rows,
     }
 
 
@@ -572,7 +572,7 @@ def fmt(value) -> str:
 def metric_row(name: str, metrics: dict) -> str:
     loss = dig(metrics, ("loss", "association", "rate"))
     return (
-        f"| {name} | {metrics['documents']} | {metrics.get('failed', 0)} | {fmt(loss)} "
+        f"| {name} | {metrics['segments']} | {metrics.get('failed', 0)} | {fmt(loss)} "
         f"| {fmt(dig(metrics, ('coverage', 'covered_byte_rate')))} "
         f"| {fmt(dig(metrics, ('corrections', 'success_rate')))} "
         f"| {fmt(dig(metrics, ('attempts', 'stop_valid_rate')))} "
@@ -583,7 +583,7 @@ def metric_row(name: str, metrics: dict) -> str:
 
 
 HEADER = (
-    "| scope | docs | failed | assoc loss | coverage(B) | corr. success | stop_valid "
+    "| scope | segs | failed | assoc loss | coverage(B) | corr. success | stop_valid "
     "| moves | in tok | out tok | secs | lost secs |\n"
     "|---|---|---|---|---|---|---|---|---|---|---|---|"
 )
@@ -595,21 +595,21 @@ def markdown(report: dict) -> str:
         if report[section]:
             lines += ["", f"## {title}", "", HEADER]
             lines += [metric_row(name, m) for name, m in report[section].items()]
-    lines += ["", "## Documents", "", HEADER]
+    lines += ["", "## Segments", "", HEADER]
     lines += [
         metric_row(f"{source} (failed)" if entry.get("failed") else source, entry["metrics"])
-        for source, entry in report["documents"].items()
+        for source, entry in report["segments"].items()
     ]
-    if any(entry.get("failed") for entry in report["documents"].values()):
+    if any(entry.get("failed") for entry in report["segments"].values()):
         lines += [
             "",
-            "`failed`: documents with an attempts log but no trace — no batch was "
+            "`failed`: segments with an attempts log but no trace — no batch was "
             "written (the extraction failed, or the run stopped before it finished); "
             "quality columns are `-`, cost/attempts/moves are what it took.",
         ]
     anchored = [("run", report["run"])] + [
         (name, m) for section in ("contexts", "groups") for name, m in report[section].items()
-    ] + [(source, entry["metrics"]) for source, entry in report["documents"].items()]
+    ] + [(source, entry["metrics"]) for source, entry in report["segments"].items()]
     anchored = [(name, m["anchoring"]) for name, m in anchored if "anchoring" in m]
     if anchored:
         lines += [
@@ -631,7 +631,7 @@ def markdown(report: dict) -> str:
             "",
             "## Compared to baseline",
             "",
-            f"shared documents: {cmp['shared_documents']}"
+            f"shared segments: {cmp['shared_segments']}"
             + (
                 f"; only in current: {', '.join(cmp['only_in_current'])}"
                 if cmp["only_in_current"]
@@ -663,7 +663,7 @@ def self_test() -> int:
         trace_dir.mkdir(parents=True)
         run_id = "0" * 16
         trace = [
-            {"kind": "document", "run_id": run_id, "source": "a.md", "document_sha256": "d" * 64,
+            {"kind": "document", "run_id": run_id, "source": "a.md", "segment_sha256": "d" * 64,
              "batch_path": "out/a.jsonl", "chunk_total": 1},
             {"kind": "steering", "chunk_index": None, "candidates": [],
              "vocabulary": [{"label": "rel", "count": 2}], "context_names": [], "schema": None},
@@ -687,7 +687,7 @@ def self_test() -> int:
         ]
         attempts = [
             {"kind": "document", "run_id": run_id, "source": "a.md",
-             "document_sha256": "d" * 64, "resumed": False},
+             "segment_sha256": "d" * 64, "resumed": False},
             {"kind": "system", "sha256": "s" * 64, "bytes": 3, "content": "sys"},
             {"kind": "attempt", "run_id": run_id, "attempt_seq": 1, "piece_id": "c" * 64,
              "source": "a.md", "chunk_index": 0, "stage": "item", "attempt": 1,
@@ -737,12 +737,12 @@ def self_test() -> int:
         (trace_dir / "a.attempts.jsonl").write_text(
             "".join(json.dumps(r) + "\n" for r in attempts), encoding="utf-8"
         )
-        # A document that FAILED: an attempts log and no trace (#807).
+        # A segment that FAILED: an attempts log and no trace (#807).
         # Two length-limited rounds, a split, then the run gave up —
         # every second and token of it must reach the run's sums.
         failed_attempts = [
             {"kind": "document", "run_id": "2" * 16, "source": "f.md",
-             "document_sha256": "f" * 64, "resumed": False},
+             "segment_sha256": "f" * 64, "resumed": False},
             {"kind": "system", "sha256": "s" * 64, "bytes": 3, "content": "sys"},
             {"kind": "attempt", "run_id": "2" * 16, "attempt_seq": 1, "piece_id": "e" * 64,
              "source": "f.md", "chunk_index": 0, "stage": "item", "attempt": 1,
@@ -769,13 +769,13 @@ def self_test() -> int:
         )
         # A batch that landed but whose trace write failed (advisory,
         # ADR 0023 §3.6): attempts log, no trace, batch present — a
-        # document, not a failure; its cost counts, its quality is empty.
+        # segment, not a failure; its cost counts, its quality is empty.
         (trace_dir / "h.attempts.jsonl").write_text(
             "".join(
                 json.dumps(r) + "\n"
                 for r in [
                     {"kind": "document", "run_id": "3" * 16, "source": "h.md",
-                     "document_sha256": "h" * 64, "resumed": False},
+                     "segment_sha256": "h" * 64, "resumed": False},
                     {"kind": "attempt", "run_id": "3" * 16, "attempt_seq": 1,
                      "piece_id": "b" * 64, "source": "h.md", "chunk_index": 0,
                      "stage": "item", "attempt": 1, "max_attempts": 2,
@@ -792,14 +792,14 @@ def self_test() -> int:
         (out / "h.jsonl").write_text(
             '{"taguru_batch":1,"context":"c","source":"h.md"}\n', encoding="utf-8"
         )
-        # An attempts log with no document record is neither: skipped.
+        # An attempts log with no segment record is neither: skipped.
         (trace_dir / "g.attempts.jsonl").write_text(
             json.dumps({"kind": "system", "sha256": "s" * 64, "bytes": 3, "content": "sys"})
             + "\n",
             encoding="utf-8",
         )
         # The same source in a second out-dir must not overwrite the
-        # first document-table row.
+        # first segment-table row.
         twin = Path(tmp) / "twin"
         twin_trace = twin / TRACE_DIR
         twin_trace.mkdir(parents=True)
@@ -808,39 +808,39 @@ def self_test() -> int:
                 trace_dir.joinpath(name).read_text(encoding="utf-8"), encoding="utf-8"
             )
         report = aggregate(
-            load_documents([out, twin]),
+            load_segments([out, twin]),
             {"sources": {"a.md": {"context": "ch1", "groups": ["book"]}}}["sources"],
             (100.0, 200.0),
         )
-        if sorted(report["documents"]) != ["a.md", "a.md (twin)", "f.md", "h.md"]:
-            print(f"self-test collision keys failed: {sorted(report['documents'])}")
+        if sorted(report["segments"]) != ["a.md", "a.md (twin)", "f.md", "h.md"]:
+            print(f"self-test collision keys failed: {sorted(report['segments'])}")
             return 1
-        if report["run"]["documents"] != 3:
+        if report["run"]["segments"] != 3:
             print("self-test collision run count failed")
             return 1
         report = aggregate(
-            load_documents([out]),
+            load_segments([out]),
             {"sources": {"a.md": {"context": "ch1", "groups": ["book"]},
                          "f.md": {"context": "ch2", "groups": ["book"]}}}["sources"],
             (100.0, 200.0),
         )
         run = report["run"]
-        failed = report["documents"]["f.md"]
-        untraced = report["documents"]["h.md"]
+        failed = report["segments"]["f.md"]
+        untraced = report["segments"]["h.md"]
         checks = [
-            # a.md traced, h.md landed without a trace: both documents.
-            (run["documents"], 2),
+            # a.md traced, h.md landed without a trace: both segments.
+            (run["segments"], 2),
             (untraced["failed"], False),
-            (untraced["metrics"]["documents"], 1),
+            (untraced["metrics"]["segments"], 1),
             (untraced["metrics"]["failed"], 0),
             (untraced["metrics"]["loss"], {}),
             (untraced["metrics"]["cost"]["seconds"], 5.0),
-            # The failed document (#807): apart from `documents`, its
+            # The failed segment (#807): apart from `segments`, its
             # attempts/moves/cost in the sums, its quality metrics empty.
             (run["failed"], 1),
             (failed["failed"], True),
             (failed["context"], "ch2"),
-            (failed["metrics"]["documents"], 0),
+            (failed["metrics"]["segments"], 0),
             (failed["metrics"]["failed"], 1),
             (failed["metrics"]["loss"], {}),
             (failed["metrics"]["coverage"]["covered_byte_rate"], None),
@@ -849,9 +849,9 @@ def self_test() -> int:
             (failed["metrics"]["cost"]["seconds"], 30.0),
             (failed["metrics"]["cost"]["lost_seconds"], 30.0),
             (failed["metrics"]["cost"]["lost_output_tokens"], 900),
-            (report["contexts"]["ch2"]["documents"], 0),
+            (report["contexts"]["ch2"]["segments"], 0),
             (report["contexts"]["ch2"]["failed"], 1),
-            (report["groups"]["book"]["documents"], 1),
+            (report["groups"]["book"]["segments"], 1),
             (report["groups"]["book"]["failed"], 1),
             (report["groups"]["book"]["cost"]["seconds"], 35.0),
             (run["loss"]["association"]["kept"], 3),
@@ -887,9 +887,9 @@ def self_test() -> int:
             # 1200 in * 100/1M + 1200 out * 200/1M
             (run["cost"]["money"], 0.36),
             (run["cost"]["seconds_per_kb"], 20.0),
-            (report["contexts"]["ch1"]["documents"], 1),
-            (report["groups"]["book"]["documents"], 1),
-            (report["documents"]["a.md"]["context"], "ch1"),
+            (report["contexts"]["ch1"]["segments"], 1),
+            (report["groups"]["book"]["segments"], 1),
+            (report["segments"]["a.md"]["context"], "ch1"),
         ]
         for index, (got, want) in enumerate(checks):
             if got != want:
@@ -898,7 +898,7 @@ def self_test() -> int:
         # anchoring attachment: counts roll up with the same assignments.
         attach_anchoring(
             report,
-            {"documents": {"a.md": {"context": "ch1", "associations": 4,
+            {"segments": {"a.md": {"context": "ch1", "associations": 4,
                                     "anchored_strict": 2, "anchored_with_aliases": 3,
                                     "cited": 3, "locator_valid": 3},
                            "ghost.md": {"context": "x", "associations": 1,
@@ -914,7 +914,7 @@ def self_test() -> int:
             (anchor["locator_validity"], 1.0),
             (report["contexts"]["ch1"]["anchoring"]["associations"], 4),
             (report["groups"]["book"]["anchoring"]["associations"], 4),
-            ("anchoring" in report["documents"]["a.md"]["metrics"], True),
+            ("anchoring" in report["segments"]["a.md"]["metrics"], True),
         ]
         for index, (got, want) in enumerate(anchor_checks):
             if got != want:
@@ -922,8 +922,8 @@ def self_test() -> int:
                 return 1
         # compare: a baseline where the loss rate was worse and seconds lower
         baseline = json.loads(json.dumps(report))
-        baseline["documents"]["a.md"]["metrics"]["loss"]["association"]["rate"] = 0.5
-        baseline["documents"]["a.md"]["metrics"]["cost"]["seconds"] = 1.0
+        baseline["segments"]["a.md"]["metrics"]["loss"]["association"]["rate"] = 0.5
+        baseline["segments"]["a.md"]["metrics"]["cost"]["seconds"] = 1.0
         verdicts = compare(report, baseline)["verdicts"]
         if verdicts["assoc loss"]["improved"] != 1 or verdicts["seconds"]["worsened"] != 1:
             print(f"self-test compare failed: {verdicts}")
@@ -960,14 +960,14 @@ def main() -> int:
     ledger = {}
     if args.ledger:
         ledger = json.loads(args.ledger.read_text(encoding="utf-8")).get("sources", {})
-    documents = load_documents(args.out_dirs)
-    if not documents:
+    segments = load_segments(args.out_dirs)
+    if not segments:
         print(
-            "no documents found: no trace, and no attempts log with a document record",
+            "no segments found: no trace, and no attempts log with a segment record",
             file=sys.stderr,
         )
         return 1
-    report = aggregate(documents, ledger, (args.price_in, args.price_out))
+    report = aggregate(segments, ledger, (args.price_in, args.price_out))
     if args.anchoring:
         attach_anchoring(
             report, json.loads(args.anchoring.read_text(encoding="utf-8"))

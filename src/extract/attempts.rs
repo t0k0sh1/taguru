@@ -62,7 +62,7 @@ impl AttemptLog {
         resuming: bool,
         run_id: &str,
         source: &str,
-        document_sha256: &str,
+        segment_sha256: &str,
     ) -> std::io::Result<Self> {
         let file = if resuming {
             fs::OpenOptions::new()
@@ -78,11 +78,11 @@ impl AttemptLog {
             warned: AtomicBool::new(false),
             systems: Mutex::new(HashSet::new()),
         };
-        log.write_record(&AttemptsDocumentRecord {
+        log.write_record(&AttemptsSegmentRecord {
             kind: "segment",
             run_id,
             source,
-            document_sha256,
+            segment_sha256,
             resumed: resuming,
         });
         Ok(log)
@@ -196,13 +196,13 @@ pub(super) fn first_failure(warned: &AtomicBool) -> bool {
     !warned.swap(true, Ordering::Relaxed)
 }
 
-/// The log's first line per run over this document.
+/// The log's first line per run over this segment.
 #[derive(serde::Serialize)]
-struct AttemptsDocumentRecord<'a> {
+struct AttemptsSegmentRecord<'a> {
     kind: &'static str,
     run_id: &'a str,
     source: &'a str,
-    document_sha256: &'a str,
+    segment_sha256: &'a str,
     /// `true` when this run appended to a log an earlier, incomplete
     /// run started (checkpoint resume).
     resumed: bool,

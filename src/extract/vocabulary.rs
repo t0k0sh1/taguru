@@ -1,8 +1,8 @@
 //! Issue #496 S3 (ADR 0015): the target `context`'s own vocabulary,
 //! loaded from exported batch streams and fed to the prompt so a new
-//! document is steered toward the spellings the graph already uses —
-//! the cross-document half of what the candidate block (ADR 0014)
-//! does within one document. `cargo-nextest` written in session 1 and
+//! segment is steered toward the spellings the graph already uses —
+//! the cross-segment half of what the candidate block (ADR 0014)
+//! does within one segment. `cargo-nextest` written in session 1 and
 //! `nextest` in session 2 stop being a twin the consolidation audit
 //! (ADR 0012 §4) has to detect later: the second extraction is told
 //! the first one's spelling up front.

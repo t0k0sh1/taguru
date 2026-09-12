@@ -13,10 +13,10 @@ use serde_json::{Value, json};
 
 use crate::support::*;
 
-/// A synthetic two-model results directory, one run each, one document
-/// each: `m1`'s document names "青嶺酒造" (the concept an `eval.jsonl`
+/// A synthetic two-model results directory, one run each, one segment
+/// each: `m1`'s segment names "青嶺酒造" (the concept an `eval.jsonl`
 /// case below expects) and lives at `corpus/brewery.md`; `m2`'s is a
-/// different document at a different source that also contains the
+/// different segment at a different source that also contains the
 /// query term "青嶺" but not the expected concept — so recall/MRR and
 /// pair overlap have something real, asymmetric, and non-vacuous to
 /// measure instead of two identical corpora.
@@ -53,10 +53,10 @@ fn write_results_dir(tag: &str) -> PathBuf {
         "sdk_versions": {},
         "harness": {},
         "extraction_settings": {"context": "sake"},
-        "documents": [
-            {"document_id": "brewery", "path": "corpus/brewery.md", "bytes": 10,
+        "segments": [
+            {"segment_id": "brewery", "path": "corpus/brewery.md", "bytes": 10,
              "sha256": "sha-brewery", "paragraph_count": 1, "chunk_total": 1, "chunks": []},
-            {"document_id": "history", "path": "corpus/history.md", "bytes": 10,
+            {"segment_id": "history", "path": "corpus/history.md", "bytes": 10,
              "sha256": "sha-history", "paragraph_count": 1, "chunk_total": 1, "chunks": []},
         ],
         "models": [
@@ -92,7 +92,7 @@ fn write_results_dir(tag: &str) -> PathBuf {
     dir
 }
 
-/// One case: `expected_sources` names `m1`'s document (any paragraph),
+/// One case: `expected_sources` names `m1`'s segment (any paragraph),
 /// `expected_concepts` names a string only `m1`'s passage text
 /// contains — `m1` should score full recall/MRR, `m2` zero.
 fn write_eval_file(dir: &Path) -> PathBuf {
@@ -158,8 +158,8 @@ fn write_two_run_results_dir(tag: &str) -> PathBuf {
         "sdk_versions": {},
         "harness": {},
         "extraction_settings": {"context": "sake"},
-        "documents": [
-            {"document_id": "brewery", "path": "corpus/brewery.md", "bytes": 10,
+        "segments": [
+            {"segment_id": "brewery", "path": "corpus/brewery.md", "bytes": 10,
              "sha256": "sha-brewery", "paragraph_count": 1, "chunk_total": 1, "chunks": []},
         ],
         "models": [model_entry("m1", "m1-model"), model_entry("m2", "m2-model")],
@@ -251,7 +251,7 @@ fn benchmark_search_builds_corpora_searches_them_and_writes_retrieval_json() {
     assert_eq!(m2["recall"]["mrr"], 0.0, "{m2}");
 
     // Both models found exactly one hit for "青嶺", but at disjoint
-    // sources (each corpus holds one, different, document) — a real,
+    // sources (each corpus holds one, different, segment) — a real,
     // non-vacuous overlap value, not the `None` two empty hit lists
     // would produce.
     let pair = &case["pairs"]["2:m1__m2"];

@@ -273,7 +273,7 @@ fn resolve_chains(raw: &BTreeMap<String, String>) -> BTreeMap<String, String> {
 /// in this module, however differently the model spelled them.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub(crate) struct AssocKey {
-    pub(crate) document_id: String,
+    pub(crate) segment_id: String,
     pub(crate) subject: String,
     pub(crate) label: String,
     pub(crate) object: String,
@@ -322,7 +322,7 @@ pub(crate) struct KeyObservation {
 /// through the label namespace.
 pub(crate) fn keyed_associations(
     matching: &Matching,
-    document_id: &str,
+    segment_id: &str,
     associations: &[RawAssociation],
     aliases: &AliasMap,
 ) -> BTreeMap<AssocKey, KeyObservation> {
@@ -335,7 +335,7 @@ pub(crate) fn keyed_associations(
         let label = aliases.resolve(AliasKind::Label, &normalize_term(matching, &assoc.label));
         let object = aliases.resolve(AliasKind::Concept, &normalize_term(matching, &assoc.object));
         let key = AssocKey {
-            document_id: document_id.to_string(),
+            segment_id: segment_id.to_string(),
             subject,
             label,
             object,
@@ -493,9 +493,9 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
-    fn key(document_id: &str, subject: &str, label: &str, object: &str) -> AssocKey {
+    fn key(segment_id: &str, subject: &str, label: &str, object: &str) -> AssocKey {
         AssocKey {
-            document_id: document_id.to_string(),
+            segment_id: segment_id.to_string(),
             subject: subject.to_string(),
             label: label.to_string(),
             object: object.to_string(),

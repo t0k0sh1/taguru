@@ -62,7 +62,7 @@ pub(super) fn unblock_stop_signals_on_this_thread() {
 #[cfg(not(unix))]
 pub(super) fn unblock_stop_signals_on_this_thread() {}
 
-/// Issue #179's cooperative stop, checked between chunks/documents
+/// Issue #179's cooperative stop, checked between chunks/segments
 /// rather than interrupting a call in flight. `extract` otherwise never
 /// starts a runtime at all (`run`'s own SAFETY comment); this is the one
 /// exception, confined to a dedicated background thread that does
@@ -127,7 +127,7 @@ impl StopSignal {
     }
 
     /// Never blocks: a plain atomic load, safe to call between every
-    /// chunk and every document without measurable overhead.
+    /// chunk and every segment without measurable overhead.
     pub(crate) fn check(&self) -> bool {
         self.requested.load(Ordering::SeqCst)
     }

@@ -26,9 +26,9 @@ fn locator(rank: usize, source: &str, paragraph: u32) -> HitLocator {
     }
 }
 
-fn doc(document_id: &str, path: &str) -> DocumentInfo {
-    DocumentInfo {
-        document_id: document_id.to_string(),
+fn doc(segment_id: &str, path: &str) -> SegmentInfo {
+    SegmentInfo {
+        segment_id: segment_id.to_string(),
         path: path.to_string(),
         ..Default::default()
     }
@@ -378,7 +378,7 @@ fn resolve_expected_source_path_warns_and_falls_back_literally_when_unresolved()
     let docs = [doc("d1", "corpus/a.md")];
     let (resolved, warning) = resolve_expected_source_path("corpus/does-not-exist.md", &docs);
     assert_eq!(resolved, "corpus/does-not-exist.md");
-    assert!(warning.unwrap().contains("matches no document"));
+    assert!(warning.unwrap().contains("matches no segment"));
 }
 
 #[test]
@@ -444,7 +444,7 @@ fn compute_recall_excludes_zero_relevance_entries_from_the_denominator() {
 #[test]
 fn compute_recall_matches_a_concept_by_folded_substring_in_hit_text() {
     let matching = identity::Matching::default();
-    let docs: [DocumentInfo; 0] = [];
+    let docs: [SegmentInfo; 0] = [];
     // Fullwidth + uppercase in the expectation, halfwidth + lowercase
     // in the hit text — only matches if NFKC and case folding both run
     // (identity::normalize_term, ADR 0003 §9.4's own precedent).

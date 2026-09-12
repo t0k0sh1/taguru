@@ -495,7 +495,7 @@ fn reference_key(heading: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(super) struct ContextBlock {
     /// The block text as placed in the user turn: one preamble
-    /// section, no blank line inside (so `user_message_document`'s
+    /// section, no blank line inside (so `user_message_segment`'s
     /// first-blank-line rule still finds the chunk).
     #[serde(skip)]
     pub(super) text: String,
@@ -514,11 +514,11 @@ pub(super) struct ContextBlock {
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub(super) known: Vec<String>,
     /// ADR 0033 §3.5: the units whose synopsis the block carries —
-    /// those wholly before the chunk — in document order.
+    /// those wholly before the chunk — in segment order.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub(super) synopsis: Vec<usize>,
     /// The preceding paragraphs carried as overlap, inclusive, or
-    /// absent when the chunk opens the document.
+    /// absent when the chunk opens the segment.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) overlap_paragraphs: Option<(u32, u32)>,
 }

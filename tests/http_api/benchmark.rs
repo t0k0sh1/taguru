@@ -183,8 +183,8 @@ fn a_happy_path_matrix_produces_the_full_layout_and_runs_kind_sequence() {
         serde_json::from_str(&std::fs::read_to_string(out.join("manifest.json")).unwrap()).unwrap();
     assert_eq!(manifest["taguru_benchmark_manifest"], 1);
     assert_eq!(manifest["harness"]["execution"], "subprocess");
-    assert_eq!(manifest["documents"].as_array().unwrap().len(), 1);
-    assert_eq!(manifest["documents"][0]["document_id"], "brewery");
+    assert_eq!(manifest["segments"].as_array().unwrap().len(), 1);
+    assert_eq!(manifest["segments"][0]["segment_id"], "brewery");
     assert_eq!(manifest["cells"].as_array().unwrap().len(), 1);
     assert_eq!(manifest["cells"][0]["outcome"], "complete");
     assert!(manifest["finished_at"].is_string());
@@ -219,7 +219,7 @@ fn a_happy_path_matrix_produces_the_full_layout_and_runs_kind_sequence() {
     );
 
     let attempt = lines.iter().find(|line| line["kind"] == "attempt").unwrap();
-    assert_eq!(attempt["document_id"], "brewery");
+    assert_eq!(attempt["segment_id"], "brewery");
     assert_eq!(attempt["model_id"], "stub-a");
     assert_eq!(attempt["cell_id"], "stub-a.run01");
     assert!(attempt["chunk_sha256"].is_string());

@@ -1,17 +1,17 @@
 //! Issue #496 S4 (ADR 0016): coverage verification — the recall-side
 //! twin of ADR 0013's precision-side accounting. The mechanical pass
-//! removes what the model asserted and the document never said; this
-//! pass reports what the document said and the model never asserted.
+//! removes what the model asserted and the segment never said; this
+//! pass reports what the segment said and the model never asserted.
 //! A sentence dense enough to hold a candidate pair (two of ADR
 //! 0014's deterministic terms) states something extractable; when no
 //! accepted association lands at least two of its three parts in that
 //! sentence, the sentence is flagged as uncovered — the systematic
 //! recall ceiling (the 2026-08-08 bench's same-fact-dropped-every-run
-//! failures) made visible, per document, with the sentence quoted.
+//! failures) made visible, per segment, with the sentence quoted.
 //!
 //! Report-first on purpose: the batch is never changed and nothing is
 //! re-asked, so the check is free of LLM calls, fingerprint-neutral,
-//! and equally applicable to a manifest-skipped document's
+//! and equally applicable to a manifest-skipped segment's
 //! already-written batch. Re-extracting the flagged sentences is ADR
 //! 0016 §4's staged upgrade, bought only when measured gap rates
 //! justify the extra calls.
@@ -33,7 +33,7 @@ pub(super) const COVERAGE_MIN_TERMS: usize = 2;
 pub(super) const COVERAGE_MIN_PARTS: usize = 2;
 
 /// Byte cap on the sentence quote a gap line carries — enough to find
-/// the sentence, never a second copy of the document on stderr.
+/// the sentence, never a second copy of the segment on stderr.
 pub(super) const GAP_QUOTE_MAX_BYTES: usize = 120;
 
 /// One sentence that held a candidate pair and never became a triple.
