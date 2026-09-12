@@ -72,14 +72,21 @@ use crate::remote::default_base_url;
 use crate::remote::{Api, ApiFailure};
 
 use super::identity;
-use super::{BenchManifest, DocumentInfo, ManifestModel, load_bench_manifest};
+use super::{BenchManifest, ManifestModel, SegmentInfo, load_bench_manifest};
 
 // Bumped from 1: the `pairs` map's keys changed shape from
 // `"{a}__{b}"` to a length-prefixed `"{len}:{a}__{b}"` to close a
 // collision between differently-split underscored model ids — see
 // `compare::differences::BENCHMARK_DIFFERENCES_VERSION`, bumped for
 // the same reason.
-const BENCHMARK_RETRIEVAL_VERSION: u64 = 2;
+//
+// 3 (#851/#904): `CorpusBlock`'s `documents_imported`/`documents_failed`
+// are now `segments_imported`/`segments_failed` — a repurposed key
+// under ADR 0003 §10, not an added field. `RetrievalFile` is
+// `Serialize`-only (no reader parses `retrieval.json` back into this
+// type), so the bump is a documented stamp rather than something any
+// code gates on today.
+const BENCHMARK_RETRIEVAL_VERSION: u64 = 3;
 const DEFAULT_LIMIT: usize = 10;
 /// Mirrors the server's own `MAX_MATCH_LIMIT` (src/api.rs) — a
 /// `--limit`/`options.limit` above this could never be honored anyway.
@@ -288,7 +295,7 @@ pub(super) fn run_search(args: &[String]) -> i32 {
     let context = SearchContext {
         api: &api,
         matching: &matching,
-        documents: &manifest.documents,
+        segments: &manifest.segments,
         availability: &availability,
         default_limit: DEFAULT_LIMIT,
     };
@@ -466,7 +473,7 @@ const OWNER_DESCRIPTION_PREFIX: &str = "taguru benchmark search corpus";
 /// extract` invocation, not one `--run N` within it, so a marker
 /// without `run_index` would pass the ownership check unchanged
 /// across `--run 1` then `--run 2` against the same results
-/// directory — silently mixing two runs' documents into one corpus,
+/// directory — silently mixing two runs' segments into one corpus,
 /// since import never removes a source absent from the current
 /// import's batch set.
 fn ownership_marker(run_id: &str, model_id: &str, run_index: usize) -> String {
@@ -478,8 +485,8 @@ fn corpus_block(context: &str, outcome: &str, reason: Option<String>) -> CorpusB
         context: context.to_string(),
         outcome: outcome.to_string(),
         reason,
-        documents_imported: 0,
-        documents_failed: 0,
+        segments_imported: 0,
+        segments_failed: 0,
         passage_vectors: None,
     }
 }
@@ -580,8 +587,8 @@ fn build_corpus(
         context: context.to_string(),
         outcome: if imported == 0 { "failed" } else { "built" }.to_string(),
         reason: (!failures.is_empty()).then(|| failures.join("; ")),
-        documents_imported: imported,
-        documents_failed: failed,
+        segments_imported: imported,
+        segments_failed: failed,
         passage_vectors: fetch_passage_vectors(api, context),
     }
 }
@@ -592,8 +599,8 @@ fn search_only_probe(api: &Api, context: &str) -> CorpusBlock {
             context: context.to_string(),
             outcome: "search_only".to_string(),
             reason: None,
-            documents_imported: 0,
-            documents_failed: 0,
+            segments_imported: 0,
+            segments_failed: 0,
             passage_vectors: fetch_passage_vectors(api, context),
         },
         Err(ApiFailure::NotFound { .. }) => corpus_block(
@@ -627,7 +634,7 @@ fn fetch_passage_vectors(api: &Api, context: &str) -> Option<PassageVectorInfo> 
 }
 
 /// Every `*.jsonl` batch file in a cell directory, `diagnostics.jsonl`
-/// excluded — the same layout `taguru benchmark extract` documents
+/// excluded — the same layout `taguru benchmark extract` segments
 /// (`src/benchmark.rs`'s own USAGE text: batch files, diagnostics.jsonl,
 /// stdout.log, stderr.log, exit_code, sit side by side).
 fn list_batch_files(cell_dir: &Path) -> Result<Vec<PathBuf>, String> {
@@ -700,7 +707,7 @@ fn rewrite_batch_header(text: &str, context: &str, marker: &str) -> Result<Strin
 struct SearchContext<'a> {
     api: &'a Api,
     matching: &'a identity::Matching,
-    documents: &'a [DocumentInfo],
+    segments: &'a [SegmentInfo],
     /// model_id -> (`context`, available). `available` is false when
     /// the model's corpus was never built or rejected — such a model
     /// is recorded as a per-case failure without an HTTP call.
@@ -723,7 +730,7 @@ fn build_case_block(context: &SearchContext, case: &EvalCase) -> (CaseBlock, Vec
             &case.case_id,
             &case.expected_sources,
             &case.expected_concepts,
-            context.documents,
+            context.segments,
         );
         warnings.append(&mut resolve_warnings);
         items
@@ -944,7 +951,7 @@ impl ExpectedItem {
 }
 
 /// Resolves one `expected_sources[].source` string against the
-/// manifest's document dictionary: (a) an exact `path` match, (b) a
+/// manifest's segment dictionary: (a) an exact `path` match, (b) a
 /// `document_id` match, (c) a unique path-suffix match. A hit's own
 /// `source` is always exactly a manifest `path` (the corpus rewrite
 /// leaves `source` untouched — only `context` changes), so (a) is the
@@ -957,15 +964,15 @@ impl ExpectedItem {
 /// silent.
 fn resolve_expected_source_path(
     expected: &str,
-    documents: &[DocumentInfo],
+    segments: &[SegmentInfo],
 ) -> (String, Option<String>) {
-    if documents.iter().any(|doc| doc.path == expected) {
+    if segments.iter().any(|doc| doc.path == expected) {
         return (expected.to_string(), None);
     }
-    if let Some(doc) = documents.iter().find(|doc| doc.document_id == expected) {
+    if let Some(doc) = segments.iter().find(|doc| doc.segment_id == expected) {
         return (doc.path.clone(), None);
     }
-    let matches: Vec<&str> = documents
+    let matches: Vec<&str> = segments
         .iter()
         .filter(|doc| doc.path.ends_with(expected))
         .map(|doc| doc.path.as_str())
@@ -975,7 +982,7 @@ fn resolve_expected_source_path(
         [] => (
             expected.to_string(),
             Some(format!(
-                "expected_sources source '{expected}' matches no document path, document_id, \
+                "expected_sources source '{expected}' matches no segment path, document_id, \
                  or unique path suffix in this results directory's manifest — it can never \
                  match a hit"
             )),
@@ -983,7 +990,7 @@ fn resolve_expected_source_path(
         several => (
             expected.to_string(),
             Some(format!(
-                "expected_sources source '{expected}' matches {} document paths by suffix — \
+                "expected_sources source '{expected}' matches {} segment paths by suffix — \
                  ambiguous, so it is compared literally and will likely never match a hit",
                 several.len()
             )),
@@ -993,7 +1000,7 @@ fn resolve_expected_source_path(
 
 /// Resolves a case's `expected_sources`/`expected_concepts` into one
 /// item list, with the resolution warnings — depends only on the
-/// case and the results directory's document dictionary, never on any
+/// case and the results directory's segment dictionary, never on any
 /// model's hits, so a caller searching several models for one case
 /// must call this exactly once and reuse the result (matching this
 /// module's own "warn once per case, not once per model" posture) —
@@ -1003,7 +1010,7 @@ fn resolve_expected_items(
     case_id: &str,
     expected_sources: &[ExpectedSource],
     expected_concepts: &[String],
-    documents: &[DocumentInfo],
+    segments: &[SegmentInfo],
 ) -> (Vec<ExpectedItem>, Vec<String>) {
     let mut warnings = Vec::new();
     let mut items = Vec::new();
@@ -1011,7 +1018,7 @@ fn resolve_expected_items(
         if expected.relevance == 0 {
             continue;
         }
-        let (path, warning) = resolve_expected_source_path(&expected.source, documents);
+        let (path, warning) = resolve_expected_source_path(&expected.source, segments);
         if let Some(message) = warning {
             warnings.push(format!("case '{case_id}': {message}"));
         }
@@ -1086,7 +1093,7 @@ fn compute_recall(
     case_id: &str,
     expected_sources: &[ExpectedSource],
     expected_concepts: &[String],
-    documents: &[DocumentInfo],
+    segments: &[SegmentInfo],
     hits: &[PassageHit],
 ) -> (RecallResult, Vec<String>) {
     let (items, warnings) = resolve_expected_items(
@@ -1094,7 +1101,7 @@ fn compute_recall(
         case_id,
         expected_sources,
         expected_concepts,
-        documents,
+        segments,
     );
     let result = score_recall(matching, &items, hits);
     (result, warnings)
@@ -1346,7 +1353,7 @@ fn build_definitions() -> BTreeMap<String, MetricDef> {
             "count",
             "distribution",
             &["model"],
-            "Number of distinct source documents among a case's hits — a coarse diversity \
+            "Number of distinct source segments among a case's hits — a coarse diversity \
              signal.",
             "POST /contexts/{name}/sources/search",
             None,
@@ -1438,7 +1445,7 @@ fn build_definitions() -> BTreeMap<String, MetricDef> {
             "eval.jsonl expected_sources/expected_concepts",
             Some(
                 "expected_sources match by (source, paragraph) resolved against the results \
-                 directory's document dictionary; expected_concepts match by a case/NFKC-folded \
+                 directory's segment dictionary; expected_concepts match by a case/NFKC-folded \
                  substring test against a hit's own text.",
             ),
         ),
@@ -1555,8 +1562,8 @@ struct CorpusBlock {
     outcome: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
-    documents_imported: usize,
-    documents_failed: usize,
+    segments_imported: usize,
+    segments_failed: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     passage_vectors: Option<PassageVectorInfo>,
 }

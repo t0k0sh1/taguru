@@ -1074,7 +1074,7 @@ fn extract_candidates_flag_folds_the_document_names_into_the_system_prompt() {
     let system = body["messages"][0]["content"].as_str().unwrap();
     assert_eq!(body["messages"][0]["role"], "system");
     let block = system
-        .split("Names appearing in this document")
+        .split("Names appearing in this segment")
         .nth(1)
         .unwrap_or_else(|| panic!("no candidate block in the system prompt: {system}"));
     assert!(block.contains("cargo-nextest"), "{block}");
@@ -1099,7 +1099,7 @@ fn extract_candidates_flag_folds_the_document_names_into_the_system_prompt() {
     let requests = requests.join().unwrap();
     assert_eq!(requests.len(), 1);
     assert!(
-        !requests[0].contains("Names appearing in this document"),
+        !requests[0].contains("Names appearing in this segment"),
         "{}",
         requests[0]
     );
@@ -1160,7 +1160,7 @@ fn extract_coverage_reports_uncovered_candidate_pair_sentences() {
     );
     let document = read_diagnostics(&diagnostics)
         .into_iter()
-        .find(|record| record["kind"] == "document")
+        .find(|record| record["kind"] == "segment")
         .expect("a document record");
     assert_eq!(document["uncovered"], 1);
     requests.join().unwrap();
@@ -1826,7 +1826,7 @@ fn chunk_context_structure_prefixes_chunks_and_is_a_computation_input() {
     let lines: Vec<&str> = preamble.lines().collect();
     assert_eq!(
         lines[0],
-        format!("Document '{}', part 2 of 2:", doc.display())
+        format!("Segment '{}', part 2 of 2:", doc.display())
     );
     assert!(lines[1].starts_with("Chunk context ("), "{preamble}");
     assert!(
@@ -1925,7 +1925,7 @@ fn chunk_context_structure_prefixes_chunks_and_is_a_computation_input() {
         "off sends today's prompt: {off}"
     );
     assert!(
-        off.starts_with(&format!("Document '{}', part 1 of ", doc.display())),
+        off.starts_with(&format!("Segment '{}', part 1 of ", doc.display())),
         "{off}"
     );
     let (_, trace) = read_trace(&out);
@@ -2072,8 +2072,8 @@ fn chunk_context_overview_runs_a_pass_first_and_feeds_cast_and_synopsis() {
     };
     // The first two requests are the overview pass, in chunk order,
     // each listing the units opening in its chunk.
-    assert!(system_of(&requests[0]).starts_with("You read one part of a document"));
-    assert!(system_of(&requests[1]).starts_with("You read one part of a document"));
+    assert!(system_of(&requests[0]).starts_with("You read one part of a segment"));
+    assert!(system_of(&requests[1]).starts_with("You read one part of a segment"));
     assert!(
         user_of(&requests[0]).contains("- unit 0: Alpha"),
         "{}",
@@ -2123,7 +2123,7 @@ fn chunk_context_overview_runs_a_pass_first_and_feeds_cast_and_synopsis() {
         "{stdout}"
     );
     assert!(
-        stderr.contains("\"Ghost\" does not appear in the document text"),
+        stderr.contains("\"Ghost\" does not appear in the segment text"),
         "{stderr}"
     );
 
@@ -2247,7 +2247,7 @@ fn chunk_context_overview_is_checkpointed_and_a_cut_off_answer_is_skipped() {
     let (code, stdout, stderr) = run_extract(&out, &provider, &args);
     assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
     assert!(
-        stderr.contains("chunk 1/2: the overview answer was cut off at the output limit — this chunk contributes no synopsis or cast (recorded so for this document's resume; --force re-asks)"),
+        stderr.contains("chunk 1/2: the overview answer was cut off at the output limit — this chunk contributes no synopsis or cast (recorded so for this segment's resume; --force re-asks)"),
         "{stderr}"
     );
     let requests: Vec<String> = captured.lock().unwrap().clone();
@@ -2572,7 +2572,7 @@ fn chunk_context_names_pass_the_occurrence_check() {
         "{stdout}"
     );
     assert!(
-        stderr.contains("does not appear in the document text"),
+        stderr.contains("does not appear in the segment text"),
         "{stderr}"
     );
 
@@ -2587,7 +2587,7 @@ fn chunk_context_names_pass_the_occurrence_check() {
 /// and the directory imports whole. A rerun with a new document D
 /// claims A's names from A's skipped batch the same way.
 #[test]
-fn extract_prunes_an_alias_that_would_rewire_an_earlier_documents_concept() {
+fn extract_prunes_an_alias_that_would_rewire_an_earlier_segments_concept() {
     let docs = batch_dir("extract-claimed-docs");
     let a = docs.join("a.md");
     let c = docs.join("c.md");
@@ -2634,7 +2634,7 @@ fn extract_prunes_an_alias_that_would_rewire_an_earlier_documents_concept() {
     );
     let expected = format!(
         "taguru: extract: {}: removed: aliases[0]: alias \"東雲電機株式会社(架空)\" already \
-         names a concept an earlier document or the target context settled on; an alias \
+         names a concept an earlier segment or the target context settled on; an alias \
          cannot rewire it (import would refuse the batch)",
         c.display()
     );
@@ -2789,7 +2789,7 @@ fn extract_redact_masks_the_document_before_the_prompt_and_every_record() {
     // The trace: three `redaction` records right after `document`, the
     // pre-existing one flagged, none with the text.
     let (_, records) = read_trace(&out);
-    assert_eq!(records[0]["kind"], "document");
+    assert_eq!(records[0]["kind"], "segment");
     let redactions: Vec<&Value> = records
         .iter()
         .filter(|record| record["kind"] == "redaction")
@@ -2895,7 +2895,7 @@ fn extract_redact_refuses_a_batch_carrying_sensitive_content_and_drops_placehold
     );
     assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
     assert!(
-        stderr.contains("sensitive content the redacted document never showed"),
+        stderr.contains("sensitive content the redacted segment never showed"),
         "{stderr}"
     );
     // Line 3: the batch's context and source lines come first.
@@ -3001,7 +3001,7 @@ fn extract_redact_env_var_dry_run_note_and_endpoint_notice() {
 
     // The notice: a remote endpoint with redaction off, once per run;
     // a loopback endpoint or redaction on says nothing.
-    let notice = "note: --redact is off; document text is sent to model.example.com as written";
+    let notice = "note: --redact is off; segment text is sent to model.example.com as written";
     let (code, _, stderr) = run_extract(
         &out,
         &[("TAGURU_EXTRACT_URL", "https://model.example.com/v1")],
@@ -3138,7 +3138,7 @@ fn extract_redact_rules_file_extends_the_built_ins_and_joins_the_version() {
     // the label carries the masked name, the document fails on it.
     assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
     assert!(
-        stderr.contains("the answer carries sensitive content the redacted document never showed")
+        stderr.contains("the answer carries sensitive content the redacted segment never showed")
             && stderr.contains(": brewer"),
         "{stderr}"
     );
@@ -3197,7 +3197,7 @@ fn extract_candidates_env_var_enables_the_block_and_rejects_bad_values() {
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     let requests = requests.join().unwrap();
     assert!(
-        requests[0].contains("Names appearing in this document"),
+        requests[0].contains("Names appearing in this segment"),
         "{}",
         requests[0]
     );
@@ -6455,7 +6455,7 @@ fn diagnostics_distinguishes_length_limited_empty_and_refusal_states() {
         assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
         let all = read_diagnostics(&diag);
         assert!(
-            !all.iter().any(|record| record["kind"] == "document"),
+            !all.iter().any(|record| record["kind"] == "segment"),
             "a document that never lands earns no summary record: {all:?}"
         );
         let records = read_attempt_records(&diag);
@@ -6494,7 +6494,7 @@ fn diagnostics_distinguishes_length_limited_empty_and_refusal_states() {
         assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
         let all = read_diagnostics(&diag);
         assert!(
-            !all.iter().any(|record| record["kind"] == "document"),
+            !all.iter().any(|record| record["kind"] == "segment"),
             "a document that never lands earns no summary record: {all:?}"
         );
         let records = read_attempt_records(&diag);
@@ -7136,7 +7136,7 @@ fn diagnostics_writes_one_chunk_record_per_chunk_before_any_attempt() {
     let _ = std::fs::remove_dir_all(&diag_dir);
 }
 
-/// Issue #262, ADR 0003 §7: one `kind: "document"` record per document
+/// Issue #262, ADR 0003 §7: one `kind: "segment"` record per document
 /// written, a structured twin of `Run::report`'s human-readable line —
 /// `concepts`/`labels` counted separately rather than combined into one
 /// "alias(es)" figure.
@@ -7187,13 +7187,13 @@ fn diagnostics_writes_a_document_record_whose_counts_match_the_written_batch() {
     let all = read_diagnostics(&diag);
     let documents: Vec<&Value> = all
         .iter()
-        .filter(|record| record["kind"] == "document")
+        .filter(|record| record["kind"] == "segment")
         .collect();
     assert_eq!(documents.len(), 1, "{all:?}");
     assert_eq!(
         all.last().unwrap()["kind"],
-        "document",
-        "the document record lands only once its document is fully written: {all:?}"
+        "segment",
+        "the segment record lands only once its document is fully written: {all:?}"
     );
     let record = documents[0];
     assert_eq!(record["source"], doc.to_str().unwrap());
@@ -8120,11 +8120,11 @@ fn trace_joins_every_batch_item_to_its_piece_and_the_sidecar_attempt() {
     assert!(run_id.chars().all(|c| c.is_ascii_hexdigit()), "{run_id:?}");
 
     let (batch_name, trace) = read_trace(&out);
-    assert_eq!(trace[0]["kind"], "document", "{trace:?}");
+    assert_eq!(trace[0]["kind"], "segment", "{trace:?}");
     assert_eq!(trace[0]["run_id"], run_id.as_str());
     assert_eq!(trace[0]["source"], doc.to_str().unwrap());
     assert_eq!(trace[0]["chunk_total"], 2);
-    assert_eq!(trace[0]["document_sha256"].as_str().unwrap().len(), 64);
+    assert_eq!(trace[0]["segment_sha256"].as_str().unwrap().len(), 64);
     assert!(
         trace[0]["batch_path"]
             .as_str()
@@ -8421,7 +8421,7 @@ fn trace_records_every_lost_item_with_its_original_text() {
     let losses: Vec<&Value> = trace.iter().filter(|r| r["kind"] == "loss").collect();
     let document = read_diagnostics(&diag)
         .into_iter()
-        .find(|r| r["kind"] == "document")
+        .find(|r| r["kind"] == "segment")
         .unwrap();
     let count = |reason: &str| losses.iter().filter(|l| l["reason"] == reason).count();
     assert_eq!(document["removed"], count("removed"), "{losses:?}");
@@ -8571,7 +8571,7 @@ fn attempts_log_keeps_every_completions_full_prompt_and_answer() {
         .collect();
     assert_eq!(
         kinds,
-        ["document", "settings", "system", "attempt", "attempt"],
+        ["segment", "settings", "system", "attempt", "attempt"],
         "{records:?}"
     );
 
@@ -8580,13 +8580,13 @@ fn attempts_log_keeps_every_completions_full_prompt_and_answer() {
     assert_eq!(records[0]["run_id"], run_id);
     assert_eq!(records[0]["source"], doc.to_str().unwrap());
     assert_eq!(records[0]["resumed"], false);
-    assert_eq!(records[0]["document_sha256"].as_str().unwrap().len(), 64);
+    assert_eq!(records[0]["segment_sha256"].as_str().unwrap().len(), 64);
 
-    // ADR 0031 §3.2/§3.9: one settings record right after `document`,
+    // ADR 0031 §3.2/§3.9: one settings record right after `segment`,
     // a diagnostic snapshot of this run's compute inputs.
     let settings = &records[1];
     assert_eq!(settings["model"], "stub-model");
-    assert_eq!(settings["prompt_version"], 5);
+    assert_eq!(settings["prompt_version"], 6);
     assert_eq!(settings["questions_n"], 0);
     assert_eq!(settings["fact_budget"], 0);
     assert_eq!(settings["structured_output"], "");
@@ -8723,7 +8723,7 @@ fn attempts_log_survives_a_failure_and_is_appended_to_on_resume() {
     assert_eq!(
         kinds,
         [
-            "document", "settings", "system", "attempt", "attempt", "attempt"
+            "segment", "settings", "system", "attempt", "attempt", "attempt"
         ],
         "{after_failure:?}"
     );
@@ -8757,7 +8757,7 @@ fn attempts_log_survives_a_failure_and_is_appended_to_on_resume() {
     assert_eq!(
         kinds,
         [
-            "document", "settings", "system", "attempt", "attempt", "attempt", "document",
+            "segment", "settings", "system", "attempt", "attempt", "attempt", "segment",
             "settings", "system", "attempt"
         ],
         "{after_resume:?}"
@@ -8798,7 +8798,7 @@ fn attempts_log_survives_a_failure_and_is_appended_to_on_resume() {
     assert_eq!(
         after_force
             .iter()
-            .filter(|r| r["kind"] == "document")
+            .filter(|r| r["kind"] == "segment")
             .count(),
         1,
         "{after_force:?}"
@@ -8828,7 +8828,7 @@ fn attempts_log_can_be_switched_off() {
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     let (_, trace) = read_trace(&out);
-    assert_eq!(trace[0]["kind"], "document");
+    assert_eq!(trace[0]["kind"], "segment");
     let logs = std::fs::read_dir(out.join(".extract-trace"))
         .unwrap()
         .filter(|entry| {
@@ -9110,7 +9110,7 @@ fn extract_metrics_script_aggregates_a_real_run() {
     let report: Value =
         serde_json::from_str(&std::fs::read_to_string(&report_path).unwrap()).unwrap();
     let metrics = &report["run"];
-    assert_eq!(metrics["documents"], 1);
+    assert_eq!(metrics["segments"], 1);
     // 2 chunks kept one "S rel value-N" each; the shared "ghost"
     // association was removed per chunk (fabricated subject) and the
     // duplicate of chunk 1's copy... ghost is removed mechanically in
@@ -9131,8 +9131,8 @@ fn extract_metrics_script_aggregates_a_real_run() {
     assert_eq!(metrics["cost"]["lost_input_tokens"], 40, "{metrics}");
     assert_eq!(metrics["cost"]["lost_output_tokens"], 7, "{metrics}");
     assert_eq!(metrics["cost"]["money"], 0.0454, "{metrics}");
-    assert_eq!(report["contexts"]["ch1"]["documents"], 1);
-    assert_eq!(report["groups"]["book"]["documents"], 1);
+    assert_eq!(report["contexts"]["ch1"]["segments"], 1);
+    assert_eq!(report["groups"]["book"]["segments"], 1);
 
     // Compare mode against itself: everything unchanged.
     let compared = std::process::Command::new("python3")
@@ -9221,7 +9221,7 @@ fn anchoring_command_rates_a_real_run_and_the_script_folds_it_in() {
     assert!(!table.contains("a.md: "), "{table}");
     let report: Value =
         serde_json::from_str(&std::fs::read_to_string(&report_path).unwrap()).unwrap();
-    let named = &report["documents"]["b.md"]["unanchored"];
+    let named = &report["segments"]["b.md"]["unanchored"];
     assert_eq!(named.as_array().map(Vec::len), Some(1), "{report}");
     assert_eq!(named[0]["line"], 3);
     assert_eq!(named[0]["subject"], "あおみね");
@@ -9238,7 +9238,7 @@ fn anchoring_command_rates_a_real_run_and_the_script_folds_it_in() {
         "uncited: nothing to validate"
     );
     assert_eq!(
-        report["documents"][doc.to_str().unwrap()]["unanchored"]
+        report["segments"][doc.to_str().unwrap()]["unanchored"]
             .as_array()
             .map(Vec::len),
         Some(0)
@@ -9255,13 +9255,10 @@ fn anchoring_command_rates_a_real_run_and_the_script_folds_it_in() {
     assert_eq!(totals["rate_with_aliases"], 1.0);
     assert_eq!(totals["cited"], 1, "only a.md's association cites");
     assert_eq!(totals["locator_valid"], 1);
-    assert_eq!(
-        report["documents"]["b.md"]["anchored_strict"], 0,
-        "{report}"
-    );
-    assert_eq!(report["documents"]["b.md"]["anchored_with_aliases"], 1);
+    assert_eq!(report["segments"]["b.md"]["anchored_strict"], 0, "{report}");
+    assert_eq!(report["segments"]["b.md"]["anchored_with_aliases"], 1);
     let a_key = doc.to_str().unwrap();
-    assert_eq!(report["documents"][a_key]["context"], "c");
+    assert_eq!(report["segments"][a_key]["context"], "c");
 
     // The aggregation script folds the matched document in and warns
     // about the trace-less one instead of inventing a row.
@@ -9428,7 +9425,7 @@ fn replay_strict_reuses_a_recorded_run_with_no_model_endpoint_at_all() {
     let records_before = read_attempts_log(&out);
     let first_run_id = records_before
         .iter()
-        .find(|r| r["kind"] == "document")
+        .find(|r| r["kind"] == "segment")
         .unwrap()["run_id"]
         .as_str()
         .unwrap()
@@ -9494,7 +9491,7 @@ fn replay_strict_reuses_a_recorded_run_with_no_model_endpoint_at_all() {
         .iter()
         .map(|r| r["kind"].as_str().unwrap())
         .collect();
-    assert_eq!(kinds[0], "document");
+    assert_eq!(kinds[0], "segment");
     assert_eq!(second_run[0]["resumed"], true);
     assert!(kinds.contains(&"replay"), "{kinds:?}");
     assert!(kinds.contains(&"replay_summary"), "{kinds:?}");
@@ -9610,10 +9607,10 @@ fn replay_auto_pins_the_system_prompt_across_a_settings_change_and_reports_both_
     let _ = std::fs::remove_dir_all(&out);
 }
 
-/// A genuine conversation change — the document text itself, which
+/// A genuine conversation change — the segment text itself, which
 /// drives the user turn the pin never touches (ADR 0031 §3.6) — still
 /// falls through to a live call under `--replay auto`, and still fails
-/// the document under `--replay strict`, with the miss diagnostic
+/// the segment under `--replay strict`, with the miss diagnostic
 /// (piece id, recorded count) on stderr.
 #[test]
 fn replay_strict_fails_on_a_changed_document_with_the_miss_reason_on_stderr() {
@@ -10419,7 +10416,7 @@ fn a_failed_overview_is_traced_as_an_empty_record_not_a_gap() {
 /// how many overview asks are in flight at once — serial can never
 /// exceed one — and the fan-out must not change a byte of what the run
 /// produces (the merged overview and its digest are collected back in
-/// document order, whatever order the answers arrive in).
+/// segment order, whatever order the answers arrive in).
 #[test]
 fn the_overview_pass_fans_out_under_parallel_and_matches_the_sequential_run() {
     use std::sync::Arc;
@@ -10789,7 +10786,7 @@ fn inspect_reads_a_failed_documents_attempts_log_down_to_the_piece_text() {
     assert_eq!(code, 0);
     let report: Value = serde_json::from_str(&json).unwrap();
     assert_eq!(report["kind"], "attempts");
-    assert_eq!(report["document"]["source"], doc.to_str().unwrap());
+    assert_eq!(report["segment"]["source"], doc.to_str().unwrap());
     assert_eq!(report["attempts"][0]["paragraph_first"], 0);
     assert_eq!(report["attempts"][0]["paragraph_last"], 1);
     assert_eq!(report["attempts"][0]["state"], "stop_malformed");
@@ -10880,7 +10877,7 @@ fn extract_says_when_a_checkpoint_is_unreadable_or_from_other_settings() {
         stderr.contains(&format!(
             "taguru: extract: ignoring an unreadable checkpoint at {}: ",
             checkpoint.display()
-        )) && stderr.contains("— every unit of this document re-extracts"),
+        )) && stderr.contains("— every unit of this segment re-extracts"),
         "{stderr}"
     );
 
@@ -10976,7 +10973,7 @@ fn anchoring_skips_an_unparseable_file_and_still_reports_the_rest() {
     let failed = report["failed"].as_object().unwrap();
     assert_eq!(failed.len(), 1, "{report}");
     assert!(failed.keys().next().unwrap().ends_with("broken.jsonl"));
-    let named = &report["documents"]["good.md"]["unanchored"];
+    let named = &report["segments"]["good.md"]["unanchored"];
     assert_eq!(
         named.as_array().map(Vec::len),
         Some(1),

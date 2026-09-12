@@ -181,10 +181,10 @@ fn a_happy_path_matrix_produces_the_full_layout_and_runs_kind_sequence() {
 
     let manifest: Value =
         serde_json::from_str(&std::fs::read_to_string(out.join("manifest.json")).unwrap()).unwrap();
-    assert_eq!(manifest["taguru_benchmark_manifest"], 1);
+    assert_eq!(manifest["taguru_benchmark_manifest"], 2);
     assert_eq!(manifest["harness"]["execution"], "subprocess");
-    assert_eq!(manifest["documents"].as_array().unwrap().len(), 1);
-    assert_eq!(manifest["documents"][0]["document_id"], "brewery");
+    assert_eq!(manifest["segments"].as_array().unwrap().len(), 1);
+    assert_eq!(manifest["segments"][0]["segment_id"], "brewery");
     assert_eq!(manifest["cells"].as_array().unwrap().len(), 1);
     assert_eq!(manifest["cells"][0]["outcome"], "complete");
     assert!(manifest["finished_at"].is_string());
@@ -213,13 +213,13 @@ fn a_happy_path_matrix_produces_the_full_layout_and_runs_kind_sequence() {
     assert_eq!(kinds.last(), Some(&"cell"));
     assert!(kinds.contains(&"attempt"), "{kinds:?}");
     assert_eq!(
-        kinds.iter().filter(|k| **k == "document").count(),
+        kinds.iter().filter(|k| **k == "segment").count(),
         2,
         "one start, one end: {kinds:?}"
     );
 
     let attempt = lines.iter().find(|line| line["kind"] == "attempt").unwrap();
-    assert_eq!(attempt["document_id"], "brewery");
+    assert_eq!(attempt["segment_id"], "brewery");
     assert_eq!(attempt["model_id"], "stub-a");
     assert_eq!(attempt["cell_id"], "stub-a.run01");
     assert!(attempt["chunk_sha256"].is_string());
@@ -365,7 +365,7 @@ fn a_models_json_edited_after_the_fact_refuses_to_resume() {
 }
 
 #[test]
-fn a_cell_that_fails_every_document_is_recorded_failed_with_a_synthesized_end() {
+fn a_cell_that_fails_every_segment_is_recorded_failed_with_a_synthesized_end() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     std::thread::spawn(move || {
@@ -400,7 +400,7 @@ fn a_cell_that_fails_every_document_is_recorded_failed_with_a_synthesized_end() 
     ]);
     assert_eq!(
         code, 0,
-        "a cell recording failed documents is still a clean matrix run"
+        "a cell recording failed segments is still a clean matrix run"
     );
     let _ = (stdout, stderr);
 
@@ -415,7 +415,7 @@ fn a_cell_that_fails_every_document_is_recorded_failed_with_a_synthesized_end() 
         .collect();
     let end = lines
         .iter()
-        .find(|line| line["kind"] == "document" && line["phase"] == "end")
+        .find(|line| line["kind"] == "segment" && line["phase"] == "end")
         .expect("a synthesized failed end must exist");
     assert_eq!(end["outcome"], "failed");
     assert!(end["associations"].is_null());

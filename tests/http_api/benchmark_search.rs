@@ -13,10 +13,10 @@ use serde_json::{Value, json};
 
 use crate::support::*;
 
-/// A synthetic two-model results directory, one run each, one document
-/// each: `m1`'s document names "青嶺酒造" (the concept an `eval.jsonl`
+/// A synthetic two-model results directory, one run each, one segment
+/// each: `m1`'s segment names "青嶺酒造" (the concept an `eval.jsonl`
 /// case below expects) and lives at `corpus/brewery.md`; `m2`'s is a
-/// different document at a different source that also contains the
+/// different segment at a different source that also contains the
 /// query term "青嶺" but not the expected concept — so recall/MRR and
 /// pair overlap have something real, asymmetric, and non-vacuous to
 /// measure instead of two identical corpora.
@@ -53,10 +53,10 @@ fn write_results_dir(tag: &str) -> PathBuf {
         "sdk_versions": {},
         "harness": {},
         "extraction_settings": {"context": "sake"},
-        "documents": [
-            {"document_id": "brewery", "path": "corpus/brewery.md", "bytes": 10,
+        "segments": [
+            {"segment_id": "brewery", "path": "corpus/brewery.md", "bytes": 10,
              "sha256": "sha-brewery", "paragraph_count": 1, "chunk_total": 1, "chunks": []},
-            {"document_id": "history", "path": "corpus/history.md", "bytes": 10,
+            {"segment_id": "history", "path": "corpus/history.md", "bytes": 10,
              "sha256": "sha-history", "paragraph_count": 1, "chunk_total": 1, "chunks": []},
         ],
         "models": [
@@ -92,7 +92,7 @@ fn write_results_dir(tag: &str) -> PathBuf {
     dir
 }
 
-/// One case: `expected_sources` names `m1`'s document (any paragraph),
+/// One case: `expected_sources` names `m1`'s segment (any paragraph),
 /// `expected_concepts` names a string only `m1`'s passage text
 /// contains — `m1` should score full recall/MRR, `m2` zero.
 fn write_eval_file(dir: &Path) -> PathBuf {
@@ -158,8 +158,8 @@ fn write_two_run_results_dir(tag: &str) -> PathBuf {
         "sdk_versions": {},
         "harness": {},
         "extraction_settings": {"context": "sake"},
-        "documents": [
-            {"document_id": "brewery", "path": "corpus/brewery.md", "bytes": 10,
+        "segments": [
+            {"segment_id": "brewery", "path": "corpus/brewery.md", "bytes": 10,
              "sha256": "sha-brewery", "paragraph_count": 1, "chunk_total": 1, "chunks": []},
         ],
         "models": [model_entry("m1", "m1-model"), model_entry("m2", "m2-model")],
@@ -221,7 +221,7 @@ fn benchmark_search_builds_corpora_searches_them_and_writes_retrieval_json() {
     let retrieval: Value =
         serde_json::from_str(&std::fs::read_to_string(results_dir.join("retrieval.json")).unwrap())
             .unwrap();
-    assert_eq!(retrieval["taguru_benchmark_retrieval"], 2);
+    assert_eq!(retrieval["taguru_benchmark_retrieval"], 3);
     assert_eq!(retrieval["run_id"], "run-search-1");
     assert_eq!(retrieval["corpus"]["m1"]["outcome"], "built", "{retrieval}");
     assert_eq!(retrieval["corpus"]["m2"]["outcome"], "built", "{retrieval}");
@@ -251,7 +251,7 @@ fn benchmark_search_builds_corpora_searches_them_and_writes_retrieval_json() {
     assert_eq!(m2["recall"]["mrr"], 0.0, "{m2}");
 
     // Both models found exactly one hit for "青嶺", but at disjoint
-    // sources (each corpus holds one, different, document) — a real,
+    // sources (each corpus holds one, different, segment) — a real,
     // non-vacuous overlap value, not the `None` two empty hit lists
     // would produce.
     let pair = &case["pairs"]["2:m1__m2"];
@@ -489,4 +489,52 @@ fn benchmark_search_requires_eval_and_exactly_one_results_dir() {
 
     let output_missing_dir = run_cli(&["benchmark", "search", "--eval", "e.jsonl"], &[]);
     assert_eq!(output_missing_dir.0, 2);
+}
+
+#[test]
+fn benchmark_search_builds_a_corpus_and_still_names_a_batch_that_failed_to_import() {
+    let server = Server::start("search-partial-failure");
+    let results_dir = write_results_dir("partial-failure");
+    let eval_path = write_eval_file(&results_dir);
+
+    // A second, malformed batch file dropped into m1's cell dir:
+    // `rewrite_batch_header` refuses it before any HTTP call, so
+    // `build_corpus` must still import the good file (outcome
+    // "built") while naming this one's failure in `reason` — proving
+    // `reason` is set on a MIXED success/failure run, not only when
+    // every file in the cell fails.
+    std::fs::write(
+        results_dir.join("cells/m1/run01/broken.jsonl"),
+        "not a json header at all\n",
+    )
+    .unwrap();
+
+    let (code, _stdout, stderr) = run_cli(
+        &[
+            "benchmark",
+            "search",
+            "--eval",
+            eval_path.to_str().unwrap(),
+            "--url",
+            &server.base,
+            results_dir.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+
+    let retrieval: Value =
+        serde_json::from_str(&std::fs::read_to_string(results_dir.join("retrieval.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        retrieval["corpus"]["m1"]["outcome"], "built",
+        "one of two batch files still imported: {retrieval}"
+    );
+    let reason = retrieval["corpus"]["m1"]["reason"].as_str().unwrap_or("");
+    assert!(
+        reason.contains("broken.jsonl") && reason.contains("header is not JSON"),
+        "{reason}"
+    );
+
+    let _ = std::fs::remove_dir_all(&results_dir);
 }

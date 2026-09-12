@@ -1,4 +1,4 @@
-//! The per-document trace file (ADR 0023): `--out/.extract-trace/
+//! The per-segment trace file (ADR 0023): `--out/.extract-trace/
 //! <batch name>`, one JSONL line per chunk, piece, and batch item,
 //! joining every item of the written batch to the piece of text and
 //! the completion that produced it. Written in the same step as the
@@ -24,20 +24,20 @@ struct TraceRedaction<'a> {
     preexisting: bool,
 }
 
-/// ADR 0023 §3.4's `document` record — the file's first line.
+/// ADR 0023 §3.4's `segment` record — the file's first line.
 #[derive(serde::Serialize)]
-pub(super) struct TraceDocument<'a> {
+pub(super) struct TraceSegment<'a> {
     pub(super) kind: &'static str,
     pub(super) run_id: &'a str,
     pub(super) source: &'a str,
-    pub(super) document_sha256: &'a str,
+    pub(super) segment_sha256: &'a str,
     pub(super) batch_path: String,
     pub(super) chunk_total: usize,
 }
 
 /// ADR 0023 §3.4's `chunk` record: exactly the diagnostics `chunk`
 /// record's provenance fields (ADR 0003 §7), minus `source` (the file
-/// is already one document's).
+/// is already one segment's).
 #[derive(serde::Serialize)]
 pub(super) struct TraceChunk<'a> {
     pub(super) kind: &'static str,
@@ -143,17 +143,17 @@ pub(super) struct TraceLoss<'a> {
 /// the answer, exactly as prompted (each list carries the prompt's own
 /// ranking and caps — computed by the same functions that render the
 /// blocks, so record and prompt cannot drift). One record per
-/// document today, `chunk_index: null`: every chunk of a document sees
+/// segment today, `chunk_index: null`: every chunk of a segment sees
 /// the same steering (ADR 0014: candidates come from the whole
-/// document, once; the vocabulary grows only between documents). When
+/// segment, once; the vocabulary grows only between segments). When
 /// #782 adds per-chunk context, its records set `chunk_index` — a
-/// chunk's steering is the document-wide record plus its own.
+/// chunk's steering is the segment-wide record plus its own.
 #[derive(serde::Serialize)]
 pub(super) struct TraceSteering<'a> {
     pub(super) kind: &'static str,
     pub(super) chunk_index: Option<usize>,
     /// ADR 0014's candidate names, as offered (empty: `--candidates`
-    /// off, or a document with none).
+    /// off, or a segment with none).
     pub(super) candidates: &'a [String],
     /// The system prompt actually sent, by hash — always present,
     /// pinned or recomputed alike (ADR 0031 §3.6).
@@ -165,7 +165,7 @@ pub(super) struct TraceSteering<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) pinned_from: Option<&'a str>,
     /// #759's reuse list, in prompt order with the prompted counts
-    /// (empty: first document of a run with no `--vocabulary`).
+    /// (empty: first segment of a run with no `--vocabulary`).
     pub(super) vocabulary: Vec<VocabularyEntry<'a>>,
     /// ADR 0015's target-`context` concept names, as prompted.
     pub(super) context_names: &'a [String],
@@ -189,7 +189,7 @@ pub(super) struct SteeringSchema<'a> {
 /// ADR 0026 (#787): one canonical paragraph's coverage — `covered`
 /// when at least one kept item cites it — with the paragraph's own
 /// text exactly when it is NOT covered, so the unreflected side of
-/// the document is listable in the original without re-splitting the
+/// the segment is listable in the original without re-splitting the
 /// batch passage. `bytes` weights the coverage rate.
 #[derive(serde::Serialize)]
 pub(super) struct TraceParagraph<'a> {
@@ -243,13 +243,13 @@ pub(super) struct PieceOrigin {
 
 impl PieceOrigin {
     /// Read off a [`ChunkOutput`] before it is consumed: the piece text
-    /// is the user turn's document part, byte for byte
-    /// (`user_message_document` is `user_message`'s inverse). `reused`
+    /// is the user turn's segment part, byte for byte
+    /// (`user_message_segment` is `user_message`'s inverse). `reused`
     /// is derived from the attempt's run: an output this run produced
     /// carries this run's id; a checkpointed one carries the producing
     /// run's (or none, pre-0023).
     pub(super) fn of(output: &ChunkOutput, run_id: &str) -> Self {
-        let piece = user_message_document(&output.user);
+        let piece = user_message_segment(&output.user);
         Self {
             piece_id: output.piece_id.clone(),
             chunk_index: output.chunk_index,
@@ -267,8 +267,8 @@ impl PieceOrigin {
     }
 }
 
-/// Renders one document's trace (ADR 0023 §3.4), in file order:
-/// `document`, every `chunk`, every `piece`, every `item` in batch
+/// Renders one segment's trace (ADR 0023 §3.4), in file order:
+/// `segment`, every `chunk`, every `piece`, every `item` in batch
 /// order, then (ADR 0024) every `loss` — removals piece by piece, then
 /// merge's drops and duplicates — then (ADR 0026) one `paragraph`
 /// record per canonical paragraph (text attached exactly when no kept
@@ -276,13 +276,13 @@ impl PieceOrigin {
 /// with the full sentence. `chunks` is the plan's descriptors;
 /// `pieces` the chunk loop's outputs in `merge`'s input order, so
 /// [`Extraction::origins`] and [`Loss::origin`] index straight into
-/// it; `paragraphs` the document's canonical paragraphs' text, the
+/// it; `paragraphs` the segment's canonical paragraphs' text, the
 /// coordinate every `paragraph` field cites.
 #[allow(clippy::too_many_arguments)] // one call site; a struct would only rename the eight
 pub(super) fn render_trace(
     run_id: &str,
     source: &str,
-    document_sha256: &str,
+    segment_sha256: &str,
     batch_path: &Path,
     redactions: &[crate::sensitive::Redaction],
     chunks: &[ChunkDescriptor],
@@ -299,23 +299,23 @@ pub(super) fn render_trace(
     let mut push = |record: &dyn erased_serialize::Serialize| {
         // Every record here is plain, always-serializable fields — a
         // failure would be a taguru bug; the line is skipped rather
-        // than the document failed (ADR 0023 §3.6: the trace is
+        // than the segment failed (ADR 0023 §3.6: the trace is
         // advisory).
         if let Ok(line) = record.to_json_line() {
             lines.push(line);
         }
     };
-    push(&TraceDocument {
-        kind: "document",
+    push(&TraceSegment {
+        kind: "segment",
         run_id,
         source,
-        document_sha256,
+        segment_sha256,
         batch_path: batch_path.display().to_string(),
         chunk_total: chunks.len(),
     });
     // ADR 0038 §3.6: one `redaction` record per match the read masked
     // (and per placeholder the input already carried), right after the
-    // document record — rule, paragraph, placeholder, bytes; never the
+    // segment record — rule, paragraph, placeholder, bytes; never the
     // matched text (no `raw`, on purpose).
     for redaction in redactions {
         push(&TraceRedaction {
@@ -327,10 +327,10 @@ pub(super) fn render_trace(
             preexisting: redaction.preexisting,
         });
     }
-    // ADR 0027: the prompt's steering lists, right after the document
+    // ADR 0027: the prompt's steering lists, right after the segment
     // record — they hold for every chunk below.
     push(steering);
-    // ADR 0033 §3.4: the document's structural units, before the
+    // ADR 0033 §3.4: the segment's structural units, before the
     // chunks that cite them by index.
     for unit in units {
         push(&TraceStructure {
@@ -532,7 +532,7 @@ pub(super) fn render_trace(
 }
 
 /// How many characters of a `piece_id` a human-facing line prints
-/// (ADR 0037): enough to tell a document's pieces apart and to paste
+/// (ADR 0037): enough to tell a segment's pieces apart and to paste
 /// back into `taguru inspect --piece`, which accepts any prefix.
 pub(crate) const PIECE_ID_SHORT: usize = 12;
 
@@ -547,7 +547,7 @@ pub(crate) fn short_piece_id(piece_id: &str) -> &str {
 }
 
 /// The `[N] ` labels' range of a labeled piece, or `None` when the
-/// text is not a [`labeled_document`] rendering — the lenient twin of
+/// text is not a [`labeled_segment`] rendering — the lenient twin of
 /// [`leading_paragraph_number`], for a record that prefers `null` to a
 /// panic.
 pub(crate) fn paragraph_range(piece: &str) -> Option<(u32, u32)> {
@@ -564,7 +564,7 @@ pub(crate) fn paragraph_range(piece: &str) -> Option<(u32, u32)> {
 
 /// Writes the trace beside the batch: `--out/.extract-trace/<batch
 /// name>`, atomically. A failure is reported once on stderr and never
-/// fails the document (ADR 0023 §3.6).
+/// fails the segment (ADR 0023 §3.6).
 pub(super) fn write_trace(out: &Path, file_name: &str, body: &str) {
     let dir = out.join(TRACE_DIR_NAME);
     let result = fs::create_dir_all(&dir)

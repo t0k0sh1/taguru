@@ -31,7 +31,7 @@
 //! `crate::paragraph::split` index; `--with-text` (default off)
 //! recomputes the paragraph's byte range and text from the corpus file
 //! on disk, after verifying it against `manifest.json`'s pinned
-//! `document_sha256` — the same "recomputed, not persisted" posture
+//! `segment_sha256` — the same "recomputed, not persisted" posture
 //! `src/paragraph.rs`'s own module doc states (ADR 0003 §7).
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -46,7 +46,13 @@ use super::identity;
 // differently-split underscored model ids — a reader keyed on the old
 // format would otherwise silently fail to match a pair record it
 // should have found.
-const BENCHMARK_DIFFERENCES_VERSION: u64 = 2;
+//
+// 3 (#851/#904): the `kind: "document_coverage"` record is now
+// `kind: "segment_coverage"` — a repurposed value under ADR 0003 §10,
+// not an added field. No reader parses `differences.jsonl` back into
+// this type (`DifferenceRecord` is `Serialize`-only), so the bump is a
+// documented stamp rather than something any code gates on today.
+const BENCHMARK_DIFFERENCES_VERSION: u64 = 3;
 
 /// `locator.text`'s cap (ADR 0003 §9.4 names no number; this module
 /// picks one so a single pathological paragraph cannot inflate the
@@ -170,7 +176,7 @@ struct KeyBlock {
 struct Locator {
     document_id: String,
     source: String,
-    document_sha256: String,
+    segment_sha256: String,
     paragraph: Option<u64>,
     chunk_index: Option<usize>,
     chunk_sha256: Option<String>,
@@ -186,10 +192,10 @@ enum DifferenceRecord {
     /// excluded from every key-level record below and shows up only
     /// here, so "no differences on this document" and "this document
     /// was never comparable" stay distinguishable (a harness/model
-    /// completion failure is `document.written_rate`'s fact, not an
+    /// completion failure is `segment.written_rate`'s fact, not an
     /// extraction difference — the same posture `stability_metrics`
     /// already takes, ADR 0003 §9.3).
-    DocumentCoverage {
+    SegmentCoverage {
         pair_id: String,
         present_in: Vec<String>,
         sides: Sides<RunsBlock>,
@@ -264,14 +270,14 @@ fn presence_by_model_and_document(
         let entry = out
             .entry(doc.model_id.clone())
             .or_default()
-            .entry(doc.document_id.clone())
+            .entry(doc.segment_id.clone())
             .or_default();
         entry.completed_runs.insert(doc.run_index);
 
         let aliases = identity::AliasMap::from_batch(matching, &batch.rows.aliases);
         let keyed = identity::keyed_associations(
             matching,
-            &doc.document_id,
+            &doc.segment_id,
             &batch.rows.associations,
             &aliases,
         );
@@ -319,7 +325,7 @@ fn collect_surfaces(presence: &identity::KeyPresence) -> BTreeSet<(String, Strin
 /// is empty (an older `manifest.json` predating issue #262's
 /// provenance, or a document `--no-passage` stripped locators from).
 fn derive_chunk(
-    document: &super::super::DocumentInfo,
+    document: &super::super::SegmentInfo,
     paragraph: Option<u64>,
 ) -> (Option<usize>, Option<String>) {
     let Some(paragraph) = paragraph else {
@@ -369,7 +375,7 @@ impl TextResolver {
 
     fn resolve(
         &mut self,
-        document: &super::super::DocumentInfo,
+        document: &super::super::SegmentInfo,
         paragraph: Option<u64>,
     ) -> Result<(Option<String>, bool), String> {
         if !self.with_text {
@@ -380,7 +386,7 @@ impl TextResolver {
         };
         let loaded = self
             .cache
-            .entry(document.document_id.clone())
+            .entry(document.segment_id.clone())
             .or_insert_with(|| Self::load(document));
         let (text, spans) = match loaded.as_ref() {
             Ok(pair) => pair,
@@ -400,19 +406,19 @@ impl TextResolver {
     }
 
     fn load(
-        document: &super::super::DocumentInfo,
+        document: &super::super::SegmentInfo,
     ) -> Result<(String, Vec<crate::paragraph::ParagraphSpan>), String> {
-        let text = crate::extract::read_document(Path::new(&document.path)).map_err(|error| {
+        let text = crate::extract::read_segment(Path::new(&document.path)).map_err(|error| {
             format!(
                 "--with-text: cannot read {} for document {}: {error}",
-                document.path, document.document_id
+                document.path, document.segment_id
             )
         })?;
         let sha256 = crate::sha256::sha256_hex(text.as_bytes());
         if sha256 != document.sha256 {
             return Err(format!(
                 "--with-text: {} has changed since this results directory was created \
-                 (manifest.json pins document_sha256 {}, found {sha256})",
+                 (manifest.json pins segment_sha256 {}, found {sha256})",
                 document.path, document.sha256
             ));
         }
@@ -422,7 +428,7 @@ impl TextResolver {
 }
 
 fn build_locator(
-    document: &super::super::DocumentInfo,
+    document: &super::super::SegmentInfo,
     document_id: &str,
     a_presence: Option<&identity::KeyPresence>,
     b_presence: Option<&identity::KeyPresence>,
@@ -446,7 +452,7 @@ fn build_locator(
     Ok(Locator {
         document_id: document_id.to_string(),
         source: document.path.clone(),
-        document_sha256: document.sha256.clone(),
+        segment_sha256: document.sha256.clone(),
         paragraph,
         chunk_index,
         chunk_sha256,
@@ -458,11 +464,11 @@ fn build_locator(
 /// Alias lines carry no paragraph locator of their own (`render_batch`
 /// never attaches one) — `alias_resolution_difference` records point at
 /// the document only.
-fn alias_locator(document: &super::super::DocumentInfo, document_id: &str) -> Locator {
+fn alias_locator(document: &super::super::SegmentInfo, document_id: &str) -> Locator {
     Locator {
         document_id: document_id.to_string(),
         source: document.path.clone(),
-        document_sha256: document.sha256.clone(),
+        segment_sha256: document.sha256.clone(),
         paragraph: None,
         chunk_index: None,
         chunk_sha256: None,
@@ -479,10 +485,10 @@ pub(super) fn compute_differences(
     options: &DifferencesOptions,
 ) -> Result<String, String> {
     let matching = identity::Matching::default();
-    let documents_by_id: BTreeMap<&str, &super::super::DocumentInfo> = manifest
-        .documents
+    let documents_by_id: BTreeMap<&str, &super::super::SegmentInfo> = manifest
+        .segments
         .iter()
-        .map(|doc| (doc.document_id.as_str(), doc))
+        .map(|doc| (doc.segment_id.as_str(), doc))
         .collect();
 
     let presence = presence_by_model_and_document(&matching, doc_rows);
@@ -545,7 +551,7 @@ pub(super) fn compute_differences(
         doc_ids.extend(side_a_docs.keys());
         doc_ids.extend(side_b_docs.keys());
 
-        // Pass 1: document_coverage for every document either side
+        // Pass 1: segment_coverage for every document either side
         // attempted, in document_id order.
         let mut eligible: Vec<&String> = Vec::new();
         for doc_id in &doc_ids {
@@ -565,7 +571,7 @@ pub(super) fn compute_differences(
                 (None, Some(_)) => vec![pair.b.clone()],
                 (None, None) => continue,
             };
-            let record = DifferenceRecord::DocumentCoverage {
+            let record = DifferenceRecord::SegmentCoverage {
                 pair_id: pair.pair_id.clone(),
                 present_in,
                 sides: Sides {

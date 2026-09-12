@@ -75,6 +75,34 @@ Entries that change an on-disk format or a response shape say so.
 
 ### Changed
 
+- **Breaking**: `extract`/`benchmark` renamed every occurrence of
+  "document" that meant the single input file one `extract` call
+  reads to "segment"/"segment file" (#851, #904; ADR 0040) — the
+  general English word "document" now means only the user's whole
+  original file, never one of Taguru's own units. `PROMPT_VERSION`
+  5 → 6: the system prompt, the user turn's `Segment '<path>'`
+  preamble, and the candidates/vocabulary/chunk-context/overview
+  blocks all say "segment" now, so every already-extracted segment
+  re-extracts once. Trace/diagnostics/attempts sidecars write
+  `kind: "segment"` (reading both `"segment"` and the old
+  `"document"`), and their `segment_id`/`segment_sha256` fields read
+  the old `document_id`/`document_sha256` names too.
+  `taguru benchmark`'s public contract renamed in step:
+  `segment.written_rate`/`segment.failed_rate`,
+  `run.segments_written`, `latency.segment_wall_seconds`, the CSV
+  `segment_id` column, `measurements.json`'s `segments` section,
+  `manifest.json`'s `segments`/`segment_id`, `differences.jsonl`'s
+  `segment_coverage`, and `retrieval.json`'s
+  `segments_imported`/`segments_failed` — each reads a file written
+  under the old names too.
+  `BENCHMARK_MANIFEST_VERSION`/`_RUNS_VERSION`/`_MEASUREMENTS_VERSION`/
+  `_DIFFERENCES_VERSION`/`_RETRIEVAL_VERSION` each bump one, per ADR
+  0003 §10's range-acceptance posture (a repurposed key, not an added
+  field) — no reader currently gates on the stamp. Measured
+  before/after with a local model over 8 documents, one run each: zero
+  regressions in write success, corrective turns, or citation validity
+  (see ADR 0040 §5 for the numbers).
+
 - `evaluate`: failed cases are named, not just counted (#865, the
   `evaluate` share of ADR 0037's survey). Under the summary line, one
   line per failing lane and case — `passage failed — case 'c1': …`, a

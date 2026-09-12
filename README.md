@@ -16,7 +16,7 @@ one lane of evidence there, never as the primary retrieval mechanism,
 and every hit says which lane found it.
 
 The intended client is an LLM. Everything that needs language
-understanding — decomposing documents into facts, choosing a `context`,
+understanding — decomposing segments into facts, choosing a `context`,
 recomposing results into prose — is the client's job; this server only
 stores and walks structure. The server distributes the complete
 playbook for clients itself: `GET /protocol` (the content of
@@ -93,12 +93,12 @@ gone (restart, or further behind than the bounded feed retains) —
 resync fully, then tail again.
 
 Sources carry **metadata**: a server-stamped `stored_at`, an optional
-user-supplied document `date`, and `tags` — accepted at store and
+user-supplied segment `date`, and `tags` — accepted at store and
 import time, listed back by `GET /contexts/{name}/sources`, and
 filterable at search time: passage search takes `tags` (any-of) and a
 half-open `since`/`until` window (epoch seconds, over `date ??
 stored_at`), applied *before* the retrieval lanes run, so "only
-documents tagged X from the last year" is a server-side eligibility
+segments tagged X from the last year" is a server-side eligibility
 set, not client-side post-filtering that silently starves `limit`.
 
 The same `since`/`until` window works on the **graph lanes** —
@@ -175,7 +175,7 @@ Six entrances, depending on what you're building:
 
 `taguru-mcp` is an MCP stdio bridge to a running HTTP server. Agents
 (Claude Code / Claude Desktop, and so on) ingest and retrieve through
-it — decomposing documents into facts and composing answers out of
+it — decomposing segments into facts and composing answers out of
 results is the agent's job, and the discipline rides along
 automatically as the tool definitions and the MCP instructions (the
 content of `/protocol`).
@@ -184,7 +184,7 @@ content of `/protocol`).
 claude mcp add taguru -e TAGURU_URL=http://127.0.0.1:8248 -- taguru-mcp
 ```
 
-With that in place, requests like "ingest the documents in this folder
+With that in place, requests like "ingest the segments in this folder
 into the sake `context`" or "tell me what you know about 青嶺酒造, with
 sources" just work, as the loop directory pick → resolve →
 describe/query/activate → passage lookup → cited answer. A real
@@ -271,9 +271,9 @@ curl -X POST localhost:8248/import -H 'Authorization: Bearer <key>' \
 
 Where do batch files come from? Any pipeline that speaks the format —
 or the packaged producer: `taguru extract` reads `.md`/`.txt`
-documents, has any OpenAI-compatible chat model decompose each into
+segments, has any OpenAI-compatible chat model decompose each into
 associations under the /protocol discipline, and writes one batch
-file per document, ready for either import entrance:
+file per segment, ready for either import entrance:
 
 ```sh
 TAGURU_EXTRACT_URL=https://api.openai.com/v1/chat/completions \
@@ -304,7 +304,7 @@ report = sync_references(["manuals/", "https://example.com/guide"],
 Full contracts:
 [`context` schema](https://t0k0sh1.github.io/taguru/schema.html) ·
 [batch import](https://t0k0sh1.github.io/taguru/import.html) ·
-[document extraction](https://t0k0sh1.github.io/taguru/extract.html) ·
+[segment extraction](https://t0k0sh1.github.io/taguru/extract.html) ·
 [ingest connectors](https://t0k0sh1.github.io/taguru/connectors.html) ·
 [long-running ingestion](https://t0k0sh1.github.io/taguru/long-running.html)
 (interrupt, checkpoint, resume).

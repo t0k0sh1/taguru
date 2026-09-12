@@ -1,8 +1,8 @@
 //! `ReplayIndex` (ADR 0031 §3.2/§3.4): an in-memory index over one
-//! document's attempts log, built once at load time so a later run can
+//! segment's attempts log, built once at load time so a later run can
 //! satisfy a completion from a recorded conversation instead of a live
 //! model call — read by `Completions::complete` and diffed against a
-//! document's own settings in `Run::extract_document` (#819).
+//! segment's own settings in `Run::extract_segment` (#819).
 
 use super::*;
 use std::collections::{HashMap, VecDeque};
@@ -116,12 +116,12 @@ impl StoredAttempt {
 /// miss, so an operator sees *why* nothing matched instead of a bare
 /// "not found" (ADR 0031 §3.2). Carries a `sha256` of each side's
 /// turn, never the text itself: this diagnostic reaches stderr and a
-/// failed document's `ChatError` message (and, from there, the
+/// failed segment's `ChatError` message (and, from there, the
 /// diagnostics sidecar's `parse_error`), which are metadata by design
-/// (ADR 0001 §10) — the document text belongs to the attempts log's
+/// (ADR 0001 §10) — the segment text belongs to the attempts log's
 /// own `messages` alone. A digest still lets an operator confirm
 /// *which* recorded turn a candidate string matches without this
-/// diagnostic ever carrying document content itself.
+/// diagnostic ever carrying segment content itself.
 pub(super) struct TurnDifference {
     pub(super) turn_index: usize,
     pub(super) recorded_role: Option<String>,
@@ -160,7 +160,7 @@ struct PieceRecords {
 }
 
 /// One `system` record: its text, and the run_id in effect (the
-/// nearest preceding `document` record) when it was first seen —
+/// nearest preceding `segment` record) when it was first seen —
 /// [`ReplayIndex::pinned_system`]'s `pinned_from`.
 struct RecordedSystem {
     content: String,
@@ -173,14 +173,14 @@ pub(super) enum SystemPinDecision<'a> {
     /// run_id it was originally recorded under.
     Pin { content: &'a str, run_id: &'a str },
     /// More than one distinct text recorded (a checkpoint-resumed
-    /// document whose log spans a run where the vocabulary differed)
+    /// segment whose log spans a run where the vocabulary differed)
     /// — ambiguity is never resolved by guessing.
     Ambiguous { distinct: usize },
     /// No `system` record at all — nothing to pin.
     NoRecord,
 }
 
-/// The recorded conversations of one document's attempts log, indexed
+/// The recorded conversations of one segment's attempts log, indexed
 /// for replay (ADR 0031 §3.1–§3.4). Built once, read-only except for
 /// the FIFO queues a hit consumes from — those are the only mutation,
 /// guarded by [`Mutex`] so `--parallel` workers (each pinned to a
@@ -191,7 +191,7 @@ pub(super) struct ReplayIndex {
     /// reads this for the pin decision (ADR 0031 §3.6).
     systems: HashMap<String, RecordedSystem>,
     /// The last `kind: "settings"` record seen in file order (ADR
-    /// 0031 §3.9): a checkpoint-resumed document's log can hold one
+    /// 0031 §3.9): a checkpoint-resumed segment's log can hold one
     /// per run it spans, and the most recent is the closest baseline
     /// to diff a replay run's own settings against. Diagnostic only —
     /// never consulted by matching itself.
@@ -209,12 +209,12 @@ impl ReplayIndex {
         let mut pieces: HashMap<String, PieceRecords> = HashMap::new();
         let mut systems: HashMap<String, RecordedSystem> = HashMap::new();
         let mut settings: Option<RecordedSettings> = None;
-        // The `document` record most recently seen in file order —
+        // The `segment` record most recently seen in file order —
         // `system`'s own record carries no run_id (ADR 0025 §3.3: it
-        // is written once per document, not once per run), so this is
+        // is written once per segment, not once per run), so this is
         // how a system record's ORIGINATING run is recovered for
         // `pinned_from` (ADR 0031 §3.6). `None` until a valid
-        // `document` record is seen — a `system` record with no
+        // `segment` record is seen — a `system` record with no
         // preceding one (a truncated or malformed log) names no real
         // origin and must never be registered as pinnable.
         let mut current_run_id: Option<String> = None;
@@ -228,7 +228,7 @@ impl ReplayIndex {
                     continue;
                 };
                 match value["kind"].as_str() {
-                    Some("document") => {
+                    Some("segment") | Some("document") => {
                         current_run_id = value["run_id"].as_str().map(str::to_string);
                     }
                     Some("system") => {
@@ -310,7 +310,7 @@ impl ReplayIndex {
         })
     }
 
-    /// Whether to pin this document's system prompt verbatim from the
+    /// Whether to pin this segment's system prompt verbatim from the
     /// log, and why not when it declines (ADR 0031 §3.6).
     pub(super) fn pinned_system(&self) -> SystemPinDecision<'_> {
         let mut systems = self.systems.values();
@@ -342,7 +342,7 @@ impl ReplayIndex {
 /// it off the matching key for the same reason). `SettingsRecord`
 /// already excludes `CheckpointFingerprint`'s `sha256`/`context`/
 /// `no_passage`/`description`/`escalation_factor` — values that name
-/// the document or never reach the model — so `settings_differences`
+/// the segment or never reach the model — so `settings_differences`
 /// never reports on those either; that is inherited from
 /// `SettingsRecord`'s own contract, not a gap here.
 pub(super) struct RecordedSettings {

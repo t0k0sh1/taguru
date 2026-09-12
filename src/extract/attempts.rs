@@ -56,13 +56,13 @@ impl AttemptLog {
     /// Opens the log — truncating for a document starting fresh,
     /// appending for one resuming from a checkpoint (`resuming`), so
     /// the file spans exactly the runs that built the batch, as the
-    /// checkpoint does — and writes the `document` record.
+    /// checkpoint does — and writes the `segment` record.
     pub(super) fn open(
         path: PathBuf,
         resuming: bool,
         run_id: &str,
         source: &str,
-        document_sha256: &str,
+        segment_sha256: &str,
     ) -> std::io::Result<Self> {
         let file = if resuming {
             fs::OpenOptions::new()
@@ -78,11 +78,11 @@ impl AttemptLog {
             warned: AtomicBool::new(false),
             systems: Mutex::new(HashSet::new()),
         };
-        log.write_record(&AttemptsDocumentRecord {
-            kind: "document",
+        log.write_record(&AttemptsSegmentRecord {
+            kind: "segment",
             run_id,
             source,
-            document_sha256,
+            segment_sha256,
             resumed: resuming,
         });
         Ok(log)
@@ -196,13 +196,13 @@ pub(super) fn first_failure(warned: &AtomicBool) -> bool {
     !warned.swap(true, Ordering::Relaxed)
 }
 
-/// The log's first line per run over this document.
+/// The log's first line per run over this segment.
 #[derive(serde::Serialize)]
-struct AttemptsDocumentRecord<'a> {
+struct AttemptsSegmentRecord<'a> {
     kind: &'static str,
     run_id: &'a str,
     source: &'a str,
-    document_sha256: &'a str,
+    segment_sha256: &'a str,
     /// `true` when this run appended to a log an earlier, incomplete
     /// run started (checkpoint resume).
     resumed: bool,
@@ -210,7 +210,7 @@ struct AttemptsDocumentRecord<'a> {
 
 /// ADR 0031 §3.2/§3.9: the run's compute-input settings, as a
 /// diagnostic — never a gate. Written once per document, right after
-/// the `document` record. The same field set `CheckpointFingerprint`
+/// the `segment` record. The same field set `CheckpointFingerprint`
 /// checks (minus `sha256`/`context`/`no_passage`/`description`/
 /// `escalation_factor`, which name the document or a value that never
 /// reaches the model), plus `rung`. A later replay run compares its

@@ -7,7 +7,7 @@ use super::*;
 /// (issue #200, ADR 0001 §10): a tagged stream of records — `kind`
 /// discriminates `chunk` (once per chunk, before its first attempt),
 /// `attempt` (one per LLM attempt, the original and still the only
-/// `kind` most consumers need), and `document` (once per document
+/// `kind` most consumers need), and `segment` (once per segment
 /// written) — opt-in, metadata-only by default (issue #262, ADR 0003
 /// §7). `File::create` truncates on open — the sidecar describes THIS
 /// run, never a prior one appended to, so a skipped-everything rerun
@@ -17,7 +17,7 @@ use super::*;
 /// (`crate::registry::dispatch_chunks_concurrently`); each emitted
 /// record is one `write_all` + `flush` so a killed run keeps every
 /// completed line — no fsync, unlike `wal.rs`'s crash-durable records:
-/// this sidecar is advisory, and a document's own batch file and the
+/// this sidecar is advisory, and a segment's own batch file and the
 /// manifest are what "written" actually means.
 pub(super) struct DiagnosticsSink {
     pub(super) writer: Mutex<std::io::BufWriter<fs::File>>,
@@ -34,7 +34,7 @@ pub(super) struct DiagnosticsSink {
 impl DiagnosticsSink {
     /// Opens (truncating) and writes the `kind: "run"` record first
     /// (ADR 0023 §3.3): `run_id` is what joins this run's `attempt`
-    /// records to the per-document trace files it wrote.
+    /// records to the per-segment trace files it wrote.
     pub(super) fn open(
         path: PathBuf,
         raw_cap: Option<usize>,
@@ -118,18 +118,18 @@ impl DiagnosticsSink {
         });
     }
 
-    /// One `kind: "document"` record, built at the same call site as
+    /// One `kind: "segment"` record, built at the same call site as
     /// [`Run::report`] from the same `Extraction` value already in
     /// scope there (issue #262, ADR 0003 §7) — a structured version of
     /// what `report` only ever prints as one human-readable line.
     /// Unlike `report`, `concepts` and `labels` are counted separately
     /// rather than combined into one "alias(es)" figure, since both
     /// `BTreeMap`s are already in scope at no extra cost. Written only
-    /// once a document lands successfully — a document that fails
+    /// once a segment lands successfully — a segment that fails
     /// never reaches this call site, so its absence here marks exactly
     /// that, the same "absence marks incomplete" convention `kind:
     /// "cell"` uses at the harness's cell scope (ADR 0003 §9.2).
-    pub(super) fn emit_document(
+    pub(super) fn emit_segment(
         &self,
         source: &str,
         extraction: &Extraction,
@@ -137,8 +137,8 @@ impl DiagnosticsSink {
         uncovered: usize,
         out_path: &Path,
     ) {
-        self.write_record(&DocumentRecord {
-            kind: "document",
+        self.write_record(&SegmentRecord {
+            kind: "segment",
             source: source.to_string(),
             associations: extraction.associations.len(),
             concepts: extraction.concepts.len(),
@@ -153,7 +153,7 @@ impl DiagnosticsSink {
     }
 
     /// Serializes and appends one record, shared by [`Self::emit`],
-    /// [`Self::emit_chunk`], and [`Self::emit_document`] — the
+    /// [`Self::emit_chunk`], and [`Self::emit_segment`] — the
     /// serialize-then-append-then-warn-once mechanics are identical
     /// across all three `kind`s; only the record shape differs.
     pub(super) fn write_record(&self, record: &impl serde::Serialize) {
@@ -344,7 +344,7 @@ pub(super) struct ProviderMetadataRecord {
 
 /// One `kind: "chunk"` JSONL line (issue #262, ADR 0003 §7): the
 /// provenance a benchmark harness or any other `--diagnostics-out`
-/// consumer needs to point an attempt back at the original document —
+/// consumer needs to point an attempt back at the original segment —
 /// `paragraph_first`/`paragraph_last` are a `crate::paragraph::split`
 /// index range, never a byte offset (see [`ChunkDescriptor`]).
 /// `AttemptRecord` gains no field for this; the two stay joinable by
@@ -362,11 +362,11 @@ pub(super) struct ChunkRecord {
     pub(super) paragraph_last: u32,
 }
 
-/// One `kind: "document"` JSONL line (issue #262, ADR 0003 §7): the
+/// One `kind: "segment"` JSONL line (issue #262, ADR 0003 §7): the
 /// structured counterpart of [`Run::report`]'s single human-readable
-/// line, written once a document lands successfully.
+/// line, written once a segment lands successfully.
 #[derive(serde::Serialize)]
-pub(super) struct DocumentRecord {
+pub(super) struct SegmentRecord {
     pub(super) kind: &'static str,
     pub(super) source: String,
     pub(super) associations: usize,
@@ -376,7 +376,7 @@ pub(super) struct DocumentRecord {
     pub(super) duplicates: usize,
     pub(super) dropped: usize,
     /// ADR 0013: how many items the mechanical pass removed across the
-    /// document's accepted answers (Stage 1 and the Stage 2 alias
+    /// segment's accepted answers (Stage 1 and the Stage 2 alias
     /// prune together) — the count `Run::report` prints as "removed
     /// (mechanical validation)".
     pub(super) removed: usize,

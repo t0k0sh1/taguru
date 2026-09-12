@@ -37,7 +37,7 @@
       <div class="side-group-label">Reference</div>
       <a href="schema.html"><code>context</code> schema</a>
       <a href="import.html">Batch import</a>
-      <a href="extract.html">Document extraction</a>
+      <a href="extract.html">Segment extraction</a>
       <a href="taguru-code.html">Code map (taguru-code)</a>
       <a href="connectors.html" aria-current="page">Ingest connectors</a>
       <a href="benchmark.html">Extraction benchmark</a>
@@ -214,7 +214,7 @@ print(report.to_dict())  <span class="c"># one JSON object: counts, duration_ms,
   <section id="boundary">
     <h2>The credential boundary survives</h2>
     <p class="section-sub">
-      The same posture <a href="extract.html#boundary">document extraction</a> holds for chat
+      The same posture <a href="extract.html#boundary">segment extraction</a> holds for chat
       model credentials applies here to storage credentials.
     </p>
     <ul>
@@ -263,7 +263,7 @@ print(report.to_dict())  <span class="c"># one JSON object: counts, duration_ms,
     <h2>What a connector produces</h2>
     <p>
       A connector never numbers its own paragraphs — it produces <code>text</code> and lets the
-      same splitter <a href="extract.html#chunking">document extraction</a> uses decide where
+      same splitter <a href="extract.html#chunking">segment extraction</a> uses decide where
       paragraphs begin and end, so a connector's <code>locators</code>/<code>sections</code> stay
       addressed against whatever the server's own canonical paragraph numbering turns out to be.
       <code>ConnectorDocument.sections</code>/<code>.locators</code> round-trip losslessly through
@@ -487,7 +487,7 @@ document = PdfConnector(ocr_adapter=MyOcrAdapter()).read(<span class="s">"docs/s
     <h2>Where to go next</h2>
     <div class="next-links">
       <a class="nav-card" href="extract.html" style="flex:1 1 16rem">
-        <span class="nc-title">Document extraction reference</span>
+        <span class="nc-title">Segment extraction reference</span>
         <p>The .md/.txt CLI producer this SDK module complements — manifest, checkpoints, diagnostics.</p>
       </a>
       <a class="nav-card" href="long-running.html" style="flex:1 1 16rem">

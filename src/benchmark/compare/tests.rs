@@ -10,6 +10,21 @@ fn temp_dir(tag: &str) -> PathBuf {
     dir
 }
 
+// ============================== #851/#904 document -> segment reader tolerance ==============================
+
+#[test]
+fn segment_id_field_prefers_the_new_name_but_falls_back_to_the_old_one() {
+    assert_eq!(
+        segment_id_field(&serde_json::json!({"segment_id": "a", "document_id": "b"})),
+        "a"
+    );
+    assert_eq!(
+        segment_id_field(&serde_json::json!({"document_id": "b"})),
+        "b"
+    );
+    assert_eq!(segment_id_field(&serde_json::json!({})), "");
+}
+
 // ============================== ordering & banned keys ==============================
 //
 // nearest-rank and Distribution/Ratio n==0-shape tests moved to
@@ -97,7 +112,7 @@ const STABILITY_METRIC_NAMES: [&str; 12] = [
     "stability.alias_canonical_variation_ratio",
     "run.associations_total",
     "run.elapsed_seconds_total",
-    "run.documents_written",
+    "run.segments_written",
 ];
 
 /// ADR 0003 §9.4's stricter lexicon is stated for `differences.jsonl`
@@ -164,7 +179,7 @@ fn every_emitted_metric_keys_definitions_and_units_match_csv() {
     for metrics in measurements.models.values() {
         all_metric_names.extend(metrics.keys().cloned());
     }
-    for by_doc in measurements.documents.values() {
+    for by_doc in measurements.segments.values() {
         for by_run in by_doc.values() {
             for metrics in by_run.values() {
                 all_metric_names.extend(metrics.keys().cloned());
@@ -243,8 +258,8 @@ fn csv_is_an_exact_value_projection_of_the_json() {
                 &measurements.cells[&cell_id].metrics[metric]
             }
             "model" => &measurements.models[model_id][metric],
-            "document" => {
-                &measurements.documents[model_id][document_id][&format!("run{:0>2}", run_index)]
+            "segment" => {
+                &measurements.segments[model_id][document_id][&format!("run{:0>2}", run_index)]
                     [metric]
             }
             other => panic!("unexpected scope {other}"),
@@ -298,8 +313,8 @@ fn csv_is_an_exact_value_projection_of_the_json_with_two_runs() {
                 &measurements.cells[&cell_id].metrics[metric]
             }
             "model" => &measurements.models[model_id][metric],
-            "document" => {
-                &measurements.documents[model_id][document_id][&format!("run{:0>2}", run_index)]
+            "segment" => {
+                &measurements.segments[model_id][document_id][&format!("run{:0>2}", run_index)]
                     [metric]
             }
             other => panic!("unexpected scope {other}"),
@@ -338,7 +353,7 @@ fn chunk_seconds_sums_retries_and_excludes_cross_chunk() {
         AttemptRow {
             cell_id: "m.run01".into(),
             model_id: "m".into(),
-            document_id: "doc".into(),
+            segment_id: "doc".into(),
             chunk_index: 0,
             stage: "item".into(),
             state: "stop_malformed".into(),
@@ -356,7 +371,7 @@ fn chunk_seconds_sums_retries_and_excludes_cross_chunk() {
         AttemptRow {
             cell_id: "m.run01".into(),
             model_id: "m".into(),
-            document_id: "doc".into(),
+            segment_id: "doc".into(),
             chunk_index: 0,
             stage: "item".into(),
             state: "stop_valid".into(),
@@ -374,7 +389,7 @@ fn chunk_seconds_sums_retries_and_excludes_cross_chunk() {
         AttemptRow {
             cell_id: "m.run01".into(),
             model_id: "m".into(),
-            document_id: "doc".into(),
+            segment_id: "doc".into(),
             chunk_index: 0,
             stage: "cross_chunk".into(),
             state: "stop_valid".into(),
@@ -416,7 +431,7 @@ fn wall_seconds_needs_both_start_and_end() {
         cell_id: "m.run01".into(),
         model_id: "m".into(),
         run_index: 1,
-        document_id: "doc".into(),
+        segment_id: "doc".into(),
         start_ts: Some(10.0),
         end_ts: None,
         outcome: None,
@@ -445,7 +460,7 @@ fn wall_seconds_drops_an_end_stamped_before_its_start() {
         cell_id: "m.run01".into(),
         model_id: "m".into(),
         run_index: 1,
-        document_id: "doc".into(),
+        segment_id: "doc".into(),
         start_ts: Some(10.0),
         end_ts: Some(9.0),
         outcome: None,
@@ -474,13 +489,13 @@ fn wall_seconds_drops_an_end_stamped_before_its_start() {
 }
 
 #[test]
-fn document_outcome_rates_counts_interrupted_in_the_denominator_only() {
+fn segment_outcome_rates_counts_interrupted_in_the_denominator_only() {
     fn doc(outcome: Option<&str>) -> DocRow {
         DocRow {
             cell_id: "m.run01".into(),
             model_id: "m".into(),
             run_index: 1,
-            document_id: "doc".into(),
+            segment_id: "doc".into(),
             start_ts: Some(0.0),
             end_ts: outcome.map(|_| 1.0),
             outcome: outcome.map(str::to_string),
@@ -497,13 +512,13 @@ fn document_outcome_rates_counts_interrupted_in_the_denominator_only() {
     }
     let rows = [doc(Some("written")), doc(Some("failed")), doc(None)];
     let refs: Vec<&DocRow> = rows.iter().collect();
-    let rates = document_outcome_rates(&refs);
-    let MetricValue::Ratio(written) = &rates["document.written_rate"] else {
+    let rates = segment_outcome_rates(&refs);
+    let MetricValue::Ratio(written) = &rates["segment.written_rate"] else {
         panic!()
     };
     assert_eq!(written.n(), 3);
     assert_eq!(written.numerator(), Some(1));
-    let MetricValue::Ratio(failed) = &rates["document.failed_rate"] else {
+    let MetricValue::Ratio(failed) = &rates["segment.failed_rate"] else {
         panic!()
     };
     assert_eq!(failed.numerator(), Some(1));
@@ -601,7 +616,7 @@ fn attempts_with_no_provider_metadata_are_excluded_from_token_metrics() {
     let with_tokens = AttemptRow {
         cell_id: "m.run01".into(),
         model_id: "m".into(),
-        document_id: "doc".into(),
+        segment_id: "doc".into(),
         chunk_index: 0,
         stage: "item".into(),
         state: "stop_valid".into(),
@@ -649,7 +664,7 @@ fn clone_attempt(a: &AttemptRow) -> AttemptRow {
     AttemptRow {
         cell_id: a.cell_id.clone(),
         model_id: a.model_id.clone(),
-        document_id: a.document_id.clone(),
+        segment_id: a.segment_id.clone(),
         chunk_index: a.chunk_index,
         stage: a.stage.clone(),
         state: a.state.clone(),
@@ -697,6 +712,16 @@ fn parse_args_recognizes_with_text() {
 /// to exercise every metric family without a real `taguru extract`
 /// child process.
 fn synthetic_results_dir(tag: &str) -> PathBuf {
+    synthetic_results_dir_with_kind(tag, "document")
+}
+
+/// [`synthetic_results_dir`], with the runs file's per-segment record
+/// `kind` parameterized so #851/#904's `document` -> `segment` reader
+/// tolerance can be exercised against the exact same fixture shape
+/// (`compare::segment_id_field_prefers_the_new_name_but_falls_back_to_the_old_one`
+/// covers the field-name half of that fallback in isolation; this
+/// covers the `kind` half end to end).
+fn synthetic_results_dir_with_kind(tag: &str, kind: &str) -> PathBuf {
     let dir = temp_dir(tag);
     fs::create_dir_all(dir.join("runs")).unwrap();
     fs::create_dir_all(dir.join("cells/m/run01")).unwrap();
@@ -717,9 +742,9 @@ fn synthetic_results_dir(tag: &str) -> PathBuf {
             "run_index": 1, "prompt_version": 1,
         }),
         serde_json::json!({
-            "kind": "document", "ts": 100.0, "cell_id": "m.run01",
+            "kind": kind, "ts": 100.0, "cell_id": "m.run01",
             "document_id": "brewery", "source": "corpus/brewery.md",
-            "document_sha256": "sha-brewery", "chunk_total": 1, "phase": "start",
+            "segment_sha256": "sha-brewery", "chunk_total": 1, "phase": "start",
         }),
         serde_json::json!({
             "kind": "attempt", "source": "corpus/brewery.md", "stage": "item",
@@ -729,20 +754,20 @@ fn synthetic_results_dir(tag: &str) -> PathBuf {
                 "output_tokens": 200, "total_tokens": 1200},
             "parse_error": null, "validation_issues": null,
             "ts": 101.0, "cell_id": "m.run01", "model_id": "m", "run_index": 1,
-            "document_id": "brewery", "document_sha256": "sha-brewery",
+            "document_id": "brewery", "segment_sha256": "sha-brewery",
             "chunk_sha256": "sha-chunk0", "paragraph_first": 0, "paragraph_last": 0,
         }),
         serde_json::json!({
-            "kind": "document", "ts": 110.0, "cell_id": "m.run01",
+            "kind": kind, "ts": 110.0, "cell_id": "m.run01",
             "document_id": "brewery", "source": "corpus/brewery.md",
-            "document_sha256": "sha-brewery", "phase": "end", "outcome": "written",
+            "segment_sha256": "sha-brewery", "phase": "end", "outcome": "written",
             "associations": 2, "concepts": 1, "labels": 0, "questions": 0,
             "duplicates": 0, "dropped": 0, "batch_path": "cells/m/run01/brewery.jsonl",
         }),
         serde_json::json!({
-            "kind": "document", "ts": 111.0, "cell_id": "m.run01",
+            "kind": kind, "ts": 111.0, "cell_id": "m.run01",
             "document_id": "sake", "source": "corpus/sake.md",
-            "document_sha256": "sha-sake", "chunk_total": 1, "phase": "start",
+            "segment_sha256": "sha-sake", "chunk_total": 1, "phase": "start",
         }),
         serde_json::json!({
             "kind": "attempt", "source": "corpus/sake.md", "stage": "item",
@@ -750,13 +775,13 @@ fn synthetic_results_dir(tag: &str) -> PathBuf {
             "length_limited": false, "elapsed_seconds": 30.0,
             "provider_metadata": null, "parse_error": "timed out", "validation_issues": null,
             "ts": 141.0, "cell_id": "m.run01", "model_id": "m", "run_index": 1,
-            "document_id": "sake", "document_sha256": "sha-sake",
+            "document_id": "sake", "segment_sha256": "sha-sake",
             "chunk_sha256": "sha-chunk0", "paragraph_first": 0, "paragraph_last": 0,
         }),
         serde_json::json!({
-            "kind": "document", "ts": 142.0, "cell_id": "m.run01",
+            "kind": kind, "ts": 142.0, "cell_id": "m.run01",
             "document_id": "sake", "source": "corpus/sake.md",
-            "document_sha256": "sha-sake", "phase": "end", "outcome": "failed",
+            "segment_sha256": "sha-sake", "phase": "end", "outcome": "failed",
             "associations": null, "concepts": null, "labels": null, "questions": null,
             "duplicates": null, "dropped": null, "batch_path": null,
         }),
@@ -890,7 +915,7 @@ fn synthetic_multi_run_results_dir(tag: &str) -> PathBuf {
         cell_id: &str,
         run_index: usize,
         document_id: &str,
-        document_sha256: &str,
+        segment_sha256: &str,
         elapsed_seconds: f64,
         state: &str,
     ) -> Value {
@@ -907,15 +932,15 @@ fn synthetic_multi_run_results_dir(tag: &str) -> PathBuf {
             "parse_error": if state == "stop_valid" { Value::Null } else { Value::String("timed out".into()) },
             "validation_issues": null,
             "ts": 0.0, "cell_id": cell_id, "model_id": "m", "run_index": run_index,
-            "document_id": document_id, "document_sha256": document_sha256,
+            "document_id": document_id, "segment_sha256": segment_sha256,
             "chunk_sha256": "sha-chunk0", "paragraph_first": 0, "paragraph_last": 0,
         })
     }
-    fn doc_start(cell_id: &str, document_id: &str, source: &str, document_sha256: &str) -> Value {
+    fn doc_start(cell_id: &str, document_id: &str, source: &str, segment_sha256: &str) -> Value {
         serde_json::json!({
             "kind": "document", "ts": 0.0, "cell_id": cell_id,
             "document_id": document_id, "source": source,
-            "document_sha256": document_sha256, "chunk_total": 1, "phase": "start",
+            "segment_sha256": segment_sha256, "chunk_total": 1, "phase": "start",
         })
     }
     #[allow(clippy::too_many_arguments)]
@@ -923,14 +948,14 @@ fn synthetic_multi_run_results_dir(tag: &str) -> PathBuf {
         cell_id: &str,
         document_id: &str,
         source: &str,
-        document_sha256: &str,
+        segment_sha256: &str,
         associations: u64,
         batch_path: &str,
     ) -> Value {
         serde_json::json!({
             "kind": "document", "ts": 1.0, "cell_id": cell_id,
             "document_id": document_id, "source": source,
-            "document_sha256": document_sha256, "phase": "end", "outcome": "written",
+            "segment_sha256": segment_sha256, "phase": "end", "outcome": "written",
             "associations": associations, "concepts": 0, "labels": 0, "questions": 0,
             "duplicates": 0, "dropped": 0, "batch_path": batch_path,
         })
@@ -939,12 +964,12 @@ fn synthetic_multi_run_results_dir(tag: &str) -> PathBuf {
         cell_id: &str,
         document_id: &str,
         source: &str,
-        document_sha256: &str,
+        segment_sha256: &str,
     ) -> Value {
         serde_json::json!({
             "kind": "document", "ts": 1.0, "cell_id": cell_id,
             "document_id": document_id, "source": source,
-            "document_sha256": document_sha256, "phase": "end", "outcome": "failed",
+            "segment_sha256": segment_sha256, "phase": "end", "outcome": "failed",
             "associations": null, "concepts": null, "labels": null, "questions": null,
             "duplicates": null, "dropped": null, "batch_path": null,
         })
@@ -1171,7 +1196,7 @@ fn stability_metrics_over_two_runs_match_hand_computed_values() {
     );
     assert_eq!(run_assoc.max(), Some(4.0), "run01: 2 (brewery) + 2 (sake)");
 
-    let MetricValue::Distribution(run_written) = &model["run.documents_written"] else {
+    let MetricValue::Distribution(run_written) = &model["run.segments_written"] else {
         panic!()
     };
     assert_eq!(run_written.min(), Some(1.0), "run02: only brewery written");
@@ -1192,7 +1217,7 @@ fn compute_measurements_over_a_synthetic_results_directory() {
     let dir = synthetic_results_dir("smoke");
     let measurements = compute_measurements(&dir).expect("computes");
 
-    assert_eq!(measurements.taguru_benchmark_measurements, 1);
+    assert_eq!(measurements.taguru_benchmark_measurements, 2);
     assert_eq!(measurements.run_id, "run-1");
     assert_eq!(measurements.percentile_method, "nearest-rank");
     assert_eq!(
@@ -1212,7 +1237,18 @@ fn compute_measurements_over_a_synthetic_results_directory() {
         "both the written and the timed-out attempt count"
     );
 
-    let MetricValue::Ratio(written_rate) = &cell.metrics["document.written_rate"] else {
+    let MetricValue::Distribution(wall) = &cell.metrics["latency.segment_wall_seconds"] else {
+        panic!()
+    };
+    assert_eq!(
+        wall.n(),
+        2,
+        "both segments logged a phase=start and a phase=end"
+    );
+    assert_eq!(wall.min(), Some(10.0), "brewery: ts 100.0 to 110.0");
+    assert_eq!(wall.max(), Some(31.0), "sake: ts 111.0 to 142.0");
+
+    let MetricValue::Ratio(written_rate) = &cell.metrics["segment.written_rate"] else {
         panic!()
     };
     assert_eq!(written_rate.n(), 2);
@@ -1224,7 +1260,7 @@ fn compute_measurements_over_a_synthetic_results_directory() {
     };
     assert_eq!(complete_rate.value(), Some(1.0));
 
-    let brewery_run01 = &measurements.documents["m"]["brewery"]["run01"];
+    let brewery_run01 = &measurements.segments["m"]["brewery"]["run01"];
     let MetricValue::Count(associations) = &brewery_run01["extraction.associations"] else {
         panic!()
     };
@@ -1238,7 +1274,7 @@ fn compute_measurements_over_a_synthetic_results_directory() {
         "one distinct subject: 'beer co'"
     );
 
-    let sake_run01 = &measurements.documents["m"]["sake"]["run01"];
+    let sake_run01 = &measurements.segments["m"]["sake"]["run01"];
     let MetricValue::Count(sake_associations) = &sake_run01["extraction.associations"] else {
         panic!()
     };
@@ -1250,6 +1286,41 @@ fn compute_measurements_over_a_synthetic_results_directory() {
     assert_eq!(sake_associations.n(), 0);
 
     let _ = fs::remove_dir_all(&dir);
+}
+
+/// #851/#904 parity: a results directory whose runs file was written
+/// under the post-rename `kind: "segment"` record must compute the
+/// exact same metrics as [`compute_measurements_over_a_synthetic_results_directory`]'s
+/// pre-rename `kind: "document"` fixture — the write-side rename must
+/// not be observable from `compare`'s output, only from the raw bytes
+/// on disk.
+#[test]
+fn compute_measurements_is_identical_for_the_segment_kind_and_the_document_kind() {
+    let document_dir = synthetic_results_dir_with_kind("kind-parity-document", "document");
+    let segment_dir = synthetic_results_dir_with_kind("kind-parity-segment", "segment");
+
+    let document_measurements = compute_measurements(&document_dir).expect("computes");
+    let segment_measurements = compute_measurements(&segment_dir).expect("computes");
+
+    // `inputs.runs` embeds the results directory's own path (the tag),
+    // which deliberately differs between the two fixtures so they
+    // don't share a temp dir, and `generated_at` is a real-time
+    // timestamp independent of the fixture — normalize both away
+    // before comparing the rest of the artifact byte-for-byte.
+    let normalize = |mut json: serde_json::Value| {
+        json["inputs"]["runs"] = serde_json::Value::Null;
+        json["generated_at"] = serde_json::Value::Null;
+        json
+    };
+    let document_json = normalize(serde_json::to_value(&document_measurements).unwrap());
+    let segment_json = normalize(serde_json::to_value(&segment_measurements).unwrap());
+    assert_eq!(
+        document_json, segment_json,
+        "kind: \"segment\" must compute byte-identical measurements to kind: \"document\""
+    );
+
+    let _ = fs::remove_dir_all(&document_dir);
+    let _ = fs::remove_dir_all(&segment_dir);
 }
 
 #[test]
@@ -1264,7 +1335,7 @@ fn a_reprocessed_documents_second_end_record_supersedes_the_first() {
         &serde_json::json!({
             "kind": "document", "ts": 120.0, "cell_id": "m.run01",
             "document_id": "brewery", "source": "corpus/brewery.md",
-            "document_sha256": "sha-brewery", "phase": "end", "outcome": "written",
+            "segment_sha256": "sha-brewery", "phase": "end", "outcome": "written",
             "associations": 5, "concepts": 1, "labels": 0, "questions": 0,
             "duplicates": 0, "dropped": 0, "batch_path": "cells/m/run01/brewery.jsonl",
         })
@@ -1274,7 +1345,7 @@ fn a_reprocessed_documents_second_end_record_supersedes_the_first() {
     fs::write(&runs_path, runs).unwrap();
 
     let measurements = compute_measurements(&dir).expect("computes");
-    let brewery_run01 = &measurements.documents["m"]["brewery"]["run01"];
+    let brewery_run01 = &measurements.segments["m"]["brewery"]["run01"];
     let MetricValue::Count(associations) = &brewery_run01["extraction.associations"] else {
         panic!()
     };
@@ -1343,7 +1414,7 @@ fn stability_metrics_with_a_single_run_are_the_defined_zero_shape() {
         "brewery's 2 associations; sake failed and contributes 0"
     );
 
-    let MetricValue::Distribution(run_written) = &model["run.documents_written"] else {
+    let MetricValue::Distribution(run_written) = &model["run.segments_written"] else {
         panic!()
     };
     assert_eq!(run_written.sum(), Some(1.0), "only brewery was written");
@@ -1455,7 +1526,7 @@ fn a_manifest_naming_an_unreadable_runs_file_is_an_error() {
 /// `alias_resolution_difference`.
 ///
 /// Document `sake` completes only for `alpha` (`beta` has no cell entry
-/// for it at all) — `document_coverage` with `present_in: ["alpha"]`
+/// for it at all) — `segment_coverage` with `present_in: ["alpha"]`
 /// and no association-level records, the coverage-exclusion case.
 fn synthetic_two_model_results_dir(tag: &str) -> PathBuf {
     let dir = temp_dir(tag);
@@ -1521,24 +1592,24 @@ fn synthetic_two_model_results_dir(tag: &str) -> PathBuf {
     )
     .unwrap();
 
-    fn doc_start(cell_id: &str, document_id: &str, source: &str, document_sha256: &str) -> Value {
+    fn doc_start(cell_id: &str, document_id: &str, source: &str, segment_sha256: &str) -> Value {
         serde_json::json!({
             "kind": "document", "ts": 0.0, "cell_id": cell_id,
             "document_id": document_id, "source": source,
-            "document_sha256": document_sha256, "chunk_total": 1, "phase": "start",
+            "segment_sha256": segment_sha256, "chunk_total": 1, "phase": "start",
         })
     }
     fn doc_end_written(
         cell_id: &str,
         document_id: &str,
         source: &str,
-        document_sha256: &str,
+        segment_sha256: &str,
         batch_path: &str,
     ) -> Value {
         serde_json::json!({
             "kind": "document", "ts": 1.0, "cell_id": cell_id,
             "document_id": document_id, "source": source,
-            "document_sha256": document_sha256, "phase": "end", "outcome": "written",
+            "segment_sha256": segment_sha256, "phase": "end", "outcome": "written",
             "associations": 1, "concepts": 0, "labels": 0, "questions": 0,
             "duplicates": 0, "dropped": 0, "batch_path": batch_path,
         })
@@ -1746,7 +1817,7 @@ fn differences_header_matches_the_adr_shape() {
     let lines = compute_differences_lines(&dir, false).expect("computes");
     let header = &lines[0];
     assert_eq!(header["kind"], "header");
-    assert_eq!(header["taguru_benchmark_differences"], 2);
+    assert_eq!(header["taguru_benchmark_differences"], 3);
     assert_eq!(header["run_id"], "run-diff");
     assert_eq!(header["text_included"], false);
     assert_eq!(
@@ -1767,10 +1838,10 @@ fn differences_header_matches_the_adr_shape() {
 }
 
 #[test]
-fn differences_document_coverage_marks_a_document_only_one_side_completed() {
+fn differences_segment_coverage_marks_a_document_only_one_side_completed() {
     let dir = synthetic_two_model_results_dir("differences-coverage");
     let lines = compute_differences_lines(&dir, false).expect("computes");
-    let coverage = records_of_kind(&lines, "document_coverage");
+    let coverage = records_of_kind(&lines, "segment_coverage");
     assert_eq!(coverage.len(), 2, "brewery and sake, one record each");
 
     let brewery = coverage
@@ -2002,7 +2073,7 @@ fn differences_locator_selects_the_minimum_paragraph_and_derives_its_chunk() {
     let locator = &founded_in["locator"];
     assert_eq!(locator["document_id"], "brewery");
     assert_eq!(locator["source"], "corpus/brewery.md");
-    assert_eq!(locator["document_sha256"], "sha-brewery");
+    assert_eq!(locator["segment_sha256"], "sha-brewery");
     assert_eq!(locator["paragraph"], 2);
     assert_eq!(locator["chunk_index"], 0);
     assert_eq!(locator["chunk_sha256"], "sha-chunk0");
@@ -2173,7 +2244,7 @@ fn with_text_truncates_at_the_cap_on_a_char_boundary() {
 }
 
 #[test]
-fn with_text_refuses_a_document_sha256_drift() {
+fn with_text_refuses_a_segment_sha256_drift() {
     let dir = synthetic_two_model_results_dir("differences-with-text-drift");
     fs::create_dir_all(dir.join("corpus")).unwrap();
     fs::write(dir.join("corpus/brewery.md"), "drifted content").unwrap();
