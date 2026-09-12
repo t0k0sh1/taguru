@@ -490,3 +490,51 @@ fn benchmark_search_requires_eval_and_exactly_one_results_dir() {
     let output_missing_dir = run_cli(&["benchmark", "search", "--eval", "e.jsonl"], &[]);
     assert_eq!(output_missing_dir.0, 2);
 }
+
+#[test]
+fn benchmark_search_builds_a_corpus_and_still_names_a_batch_that_failed_to_import() {
+    let server = Server::start("search-partial-failure");
+    let results_dir = write_results_dir("partial-failure");
+    let eval_path = write_eval_file(&results_dir);
+
+    // A second, malformed batch file dropped into m1's cell dir:
+    // `rewrite_batch_header` refuses it before any HTTP call, so
+    // `build_corpus` must still import the good file (outcome
+    // "built") while naming this one's failure in `reason` — proving
+    // `reason` is set on a MIXED success/failure run, not only when
+    // every file in the cell fails.
+    std::fs::write(
+        results_dir.join("cells/m1/run01/broken.jsonl"),
+        "not a json header at all\n",
+    )
+    .unwrap();
+
+    let (code, _stdout, stderr) = run_cli(
+        &[
+            "benchmark",
+            "search",
+            "--eval",
+            eval_path.to_str().unwrap(),
+            "--url",
+            &server.base,
+            results_dir.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+
+    let retrieval: Value =
+        serde_json::from_str(&std::fs::read_to_string(results_dir.join("retrieval.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        retrieval["corpus"]["m1"]["outcome"], "built",
+        "one of two batch files still imported: {retrieval}"
+    );
+    let reason = retrieval["corpus"]["m1"]["reason"].as_str().unwrap_or("");
+    assert!(
+        reason.contains("broken.jsonl") && reason.contains("header is not JSON"),
+        "{reason}"
+    );
+
+    let _ = std::fs::remove_dir_all(&results_dir);
+}
