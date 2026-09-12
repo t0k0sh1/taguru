@@ -37,7 +37,7 @@
       <div class="side-group-label">Reference</div>
       <a href="schema.html"><code>context</code> schema</a>
       <a href="import.html">Batch import</a>
-      <a href="extract.html">Document extraction</a>
+      <a href="extract.html">Segment extraction</a>
       <a href="taguru-code.html">Code map (taguru-code)</a>
       <a href="connectors.html">Ingest connectors</a>
       <a href="benchmark.html">Extraction benchmark</a>
@@ -104,7 +104,7 @@
           <tr>
             <td>source</td>
             <td>an opaque provenance id inside one <code>context</code>, chosen by the caller</td>
-            <td>idempotent replacement — retracting and re-importing swaps exactly this document's contribution, nothing else</td>
+            <td>idempotent replacement — retracting and re-importing swaps exactly this segment's contribution, nothing else</td>
             <td>your ingest, at write time</td>
           </tr>
           <tr>
@@ -124,7 +124,7 @@
     </div>
     <p class="note">
       <b>Chunk is not a server concept.</b> Taguru never reads or stores a "chunk" — it appears
-      only inside <code>taguru extract</code>, the offline producer that turns documents into
+      only inside <code>taguru extract</code>, the offline producer that turns segments into
       batch files, as a bound on how much text one model call can see. Once ingest happens, the
       unit that exists on the server is the passage (a source's full text) split into paragraphs.
       A chunk boundary that survives into the graph as a <code>context</code> boundary is an accident of the

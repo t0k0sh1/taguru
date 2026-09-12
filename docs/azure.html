@@ -37,7 +37,7 @@
       <div class="side-group-label">Reference</div>
       <a href="schema.html"><code>context</code> schema</a>
       <a href="import.html">Batch import</a>
-      <a href="extract.html">Document extraction</a>
+      <a href="extract.html">Segment extraction</a>
       <a href="taguru-code.html">Code map (taguru-code)</a>
       <a href="connectors.html">Ingest connectors</a>
       <a href="benchmark.html">Extraction benchmark</a>
@@ -283,7 +283,7 @@ TAGURU_EMBED_API_KEY=…   # from Key Vault, like the API tokens</code></pre>
         <code>min(TAGURU_EMBED_TIMEOUT_SECS, remaining request budget)</code> and repeated
         provider failures trip the breaker — the knobs and the metrics to alert on are on the
         <a href="bedrock.html#embeddings">Bedrock page</a>.</li>
-      <li><b>Document extraction</b> (<code>taguru extract</code>) speaks to Azure OpenAI chat
+      <li><b>Segment extraction</b> (<code>taguru extract</code>) speaks to Azure OpenAI chat
         models over the same v1 surface; its credentials live in the offline producer's
         environment only, never on the server — see <a href="extract.html">Document
         extraction</a>.</li>

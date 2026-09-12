@@ -79,7 +79,14 @@ use super::{BenchManifest, ManifestModel, SegmentInfo, load_bench_manifest};
 // collision between differently-split underscored model ids — see
 // `compare::differences::BENCHMARK_DIFFERENCES_VERSION`, bumped for
 // the same reason.
-const BENCHMARK_RETRIEVAL_VERSION: u64 = 2;
+//
+// 3 (#851/#904): `CorpusBlock`'s `documents_imported`/`documents_failed`
+// are now `segments_imported`/`segments_failed` — a repurposed key
+// under ADR 0003 §10, not an added field. `RetrievalFile` is
+// `Serialize`-only (no reader parses `retrieval.json` back into this
+// type), so the bump is a documented stamp rather than something any
+// code gates on today.
+const BENCHMARK_RETRIEVAL_VERSION: u64 = 3;
 const DEFAULT_LIMIT: usize = 10;
 /// Mirrors the server's own `MAX_MATCH_LIMIT` (src/api.rs) — a
 /// `--limit`/`options.limit` above this could never be honored anyway.
@@ -478,8 +485,8 @@ fn corpus_block(context: &str, outcome: &str, reason: Option<String>) -> CorpusB
         context: context.to_string(),
         outcome: outcome.to_string(),
         reason,
-        documents_imported: 0,
-        documents_failed: 0,
+        segments_imported: 0,
+        segments_failed: 0,
         passage_vectors: None,
     }
 }
@@ -580,8 +587,8 @@ fn build_corpus(
         context: context.to_string(),
         outcome: if imported == 0 { "failed" } else { "built" }.to_string(),
         reason: (!failures.is_empty()).then(|| failures.join("; ")),
-        documents_imported: imported,
-        documents_failed: failed,
+        segments_imported: imported,
+        segments_failed: failed,
         passage_vectors: fetch_passage_vectors(api, context),
     }
 }
@@ -592,8 +599,8 @@ fn search_only_probe(api: &Api, context: &str) -> CorpusBlock {
             context: context.to_string(),
             outcome: "search_only".to_string(),
             reason: None,
-            documents_imported: 0,
-            documents_failed: 0,
+            segments_imported: 0,
+            segments_failed: 0,
             passage_vectors: fetch_passage_vectors(api, context),
         },
         Err(ApiFailure::NotFound { .. }) => corpus_block(
@@ -1555,8 +1562,8 @@ struct CorpusBlock {
     outcome: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
-    documents_imported: usize,
-    documents_failed: usize,
+    segments_imported: usize,
+    segments_failed: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     passage_vectors: Option<PassageVectorInfo>,
 }

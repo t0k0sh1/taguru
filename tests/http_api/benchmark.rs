@@ -181,7 +181,7 @@ fn a_happy_path_matrix_produces_the_full_layout_and_runs_kind_sequence() {
 
     let manifest: Value =
         serde_json::from_str(&std::fs::read_to_string(out.join("manifest.json")).unwrap()).unwrap();
-    assert_eq!(manifest["taguru_benchmark_manifest"], 1);
+    assert_eq!(manifest["taguru_benchmark_manifest"], 2);
     assert_eq!(manifest["harness"]["execution"], "subprocess");
     assert_eq!(manifest["segments"].as_array().unwrap().len(), 1);
     assert_eq!(manifest["segments"][0]["segment_id"], "brewery");
@@ -365,7 +365,7 @@ fn a_models_json_edited_after_the_fact_refuses_to_resume() {
 }
 
 #[test]
-fn a_cell_that_fails_every_document_is_recorded_failed_with_a_synthesized_end() {
+fn a_cell_that_fails_every_segment_is_recorded_failed_with_a_synthesized_end() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     std::thread::spawn(move || {
@@ -400,7 +400,7 @@ fn a_cell_that_fails_every_document_is_recorded_failed_with_a_synthesized_end() 
     ]);
     assert_eq!(
         code, 0,
-        "a cell recording failed documents is still a clean matrix run"
+        "a cell recording failed segments is still a clean matrix run"
     );
     let _ = (stdout, stderr);
 

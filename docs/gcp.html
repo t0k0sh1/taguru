@@ -37,7 +37,7 @@
       <div class="side-group-label">Reference</div>
       <a href="schema.html"><code>context</code> schema</a>
       <a href="import.html">Batch import</a>
-      <a href="extract.html">Document extraction</a>
+      <a href="extract.html">Segment extraction</a>
       <a href="taguru-code.html">Code map (taguru-code)</a>
       <a href="connectors.html">Ingest connectors</a>
       <a href="benchmark.html">Extraction benchmark</a>
@@ -413,14 +413,14 @@ spec:
         refuse to paper over — see <a href="bedrock.html#floor">the calibration walkthrough</a>.
         <b>Run it against your own, larger corpus</b> before picking
         <code>TAGURU_SEMANTIC_FLOOR</code>; no table entry here would be honest.</li>
-      <li><b>Document extraction</b> (<code>taguru extract</code>) can use Vertex's
+      <li><b>Segment extraction</b> (<code>taguru extract</code>) can use Vertex's
         OpenAI-compatible <code>/chat/completions</code> directly for one-shot runs —
         <code>TAGURU_EXTRACT_API_KEY=$(gcloud auth print-access-token)</code> — since that
         surface works and the credential only needs to last one run. Steady use should still
         go through the same LiteLLM bridge, since a raw access token expires in about an hour
         and <code>TAGURU_EXTRACT_API_KEY</code> is read once at process start. Model
         credentials stay in the offline producer's environment, never on the server — see
-        <a href="extract.html">Document extraction</a>.</li>
+        <a href="extract.html">Segment extraction</a>.</li>
     </ul>
     <p class="note">
       The agent side needs none of this: Claude on Vertex AI

@@ -1837,7 +1837,13 @@ mod probe_model_tests {
 // writes and re-reads this file, so `#[serde(default)]` everywhere lets
 // an older shape still load, and a revision may only add a field.
 
-const BENCHMARK_MANIFEST_VERSION: u64 = 1;
+/// 2 (#851/#904): `documents`/`documents_root`/`document_order` are now
+/// written as `segments`/`segments_root`/`segment_order`, and each
+/// segment's own `document_id` is now `segment_id` — repurposed keys
+/// under ADR 0003 §10, not added fields, so the stamp bumps even
+/// though `#[serde(alias)]` keeps an old manifest loading either way
+/// (see `SegmentInfo`, `HarnessBlock`).
+const BENCHMARK_MANIFEST_VERSION: u64 = 2;
 /// 2 (#851/#904): the per-cell `document`(`phase: start`/`end`) record
 /// this stamps every runs file with is now written as `kind: "segment"`
 /// — a repurposed value under ADR 0003 §10, not an added field, so the
@@ -2078,7 +2084,7 @@ mod manifest_tests {
             std::process::id(),
             line!()
         ));
-        fs::write(&path, r#"{"taguru_benchmark_manifest":2}"#).unwrap();
+        fs::write(&path, r#"{"taguru_benchmark_manifest":3}"#).unwrap();
         let error = load_bench_manifest(&path).unwrap_err();
         assert!(error.contains("taguru_benchmark_manifest"), "{error}");
         let _ = fs::remove_file(&path);
