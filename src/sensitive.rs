@@ -20,7 +20,7 @@
 //!   redaction and `user:secret@host` loses its secret, not its host.
 //! - [`mask`]: the redacted text and one [`Redaction`] per accepted
 //!   match. The placeholder is `«redacted <rule> <hex>»` — the rule's
-//!   name and a prefix of `SHA-256(document_sha256 ‖ matched bytes)`,
+//!   name and a prefix of `SHA-256(segment_sha256 ‖ matched bytes)`,
 //!   four hex digits unless two distinct matches of one rule collide
 //!   on that prefix, in which case every placeholder of that rule in
 //!   the document uses the shortest prefix that tells them all apart.
@@ -521,13 +521,13 @@ pub(crate) struct Redaction {
 
 /// The redacted text and its redactions (ADR 0038 §3.2). Each accepted
 /// match is replaced by `«redacted <rule> <hex>»`, the hex a prefix of
-/// `SHA-256(document_sha256 ‖ matched bytes)`: four digits, or per
+/// `SHA-256(segment_sha256 ‖ matched bytes)`: four digits, or per
 /// rule the shortest prefix that tells that rule's distinct matches
 /// apart, so the same secret reads as one placeholder throughout and
 /// two secrets never share one. A pre-existing placeholder is kept
 /// byte for byte and recorded with itself as the placeholder. The
 /// replacement holds no newline, so paragraph numbering is unchanged.
-pub(crate) fn mask(text: &str, document_sha256: &str, rules: &RuleSet) -> (String, Vec<Redaction>) {
+pub(crate) fn mask(text: &str, segment_sha256: &str, rules: &RuleSet) -> (String, Vec<Redaction>) {
     let matches = scan(text, rules);
     // Digest every distinct matched string per rule, then choose the
     // prefix length per rule from the complete set.
@@ -539,7 +539,7 @@ pub(crate) fn mask(text: &str, document_sha256: &str, rules: &RuleSet) -> (Strin
             .or_default()
             .entry(matched)
             .or_insert_with(|| {
-                let mut salted = document_sha256.as_bytes().to_vec();
+                let mut salted = segment_sha256.as_bytes().to_vec();
                 salted.extend_from_slice(matched.as_bytes());
                 crate::sha256::sha256_hex(&salted)
             });

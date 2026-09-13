@@ -37,7 +37,7 @@
       <div class="side-group-label">Reference</div>
       <a href="schema.html"><code>context</code> schema</a>
       <a href="import.html">Batch import</a>
-      <a href="extract.html">Document extraction</a>
+      <a href="extract.html">Segment extraction</a>
       <a href="taguru-code.html">Code map (taguru-code)</a>
       <a href="connectors.html">Ingest connectors</a>
       <a href="benchmark.html" aria-current="page">Extraction benchmark</a>
@@ -108,15 +108,15 @@
 --max-attempts N     forwarded to every cell's TAGURU_EXTRACT_MAX_ATTEMPTS,
                     1-10 (default 2)
 CORPUS_DIR           exactly one directory (.md/.txt, sorted by name) — every
-                    cell sees the same document order, since a document's
+                    cell sees the same segment order, since a segment's
                     relation-label vocabulary is offered to the next
-                    document's prompt (see <a href="extract.html#chunking">chunking</a>)</code></pre>
+                    segment's prompt (see <a href="extract.html#chunking">chunking</a>)</code></pre>
     <p>
       Every one of these settings is <b>global to the matrix</b>, never per model — the fairness
       invariant below is why. Only what a provider <i>is</i> or <i>can do</i> — its endpoint,
       credential, name, and structured-output rung — lives in <code>models.json</code>. Exit
       codes match <code>taguru extract</code>'s own convention: <code>0</code> every cell
-      completed · <code>1</code> a harness failure (a cell's own document failures still count as
+      completed · <code>1</code> a harness failure (a cell's own segment failures still count as
       <code>0</code> at this level — see <a href="#outcomes">cell outcomes</a> below) ·
       <code>2</code> usage error · <code>130</code> stopped (Ctrl+C), resumable.
     </p>
@@ -223,7 +223,7 @@ CORPUS_DIR           exactly one directory (.md/.txt, sorted by name) — every
   <section id="layout">
     <h2>Results directory layout</h2>
     <pre><code>&lt;out&gt;/
-  manifest.json                          # reproduction record, document/chunk dictionary
+  manifest.json                          # reproduction record, segment/chunk dictionary
   models.lock.json                       # models.json fully resolved, no secrets
   runs/&lt;model_id&gt;.run&lt;NN&gt;.jsonl          # one file per cell, the AttemptRecord superset
   cells/&lt;model_id&gt;/run&lt;NN&gt;/              # passed verbatim as `taguru extract --out`
@@ -251,10 +251,10 @@ CORPUS_DIR           exactly one directory (.md/.txt, sorted by name) — every
       probed) and updated after every cell concludes. Carries: <code>run_id</code>,
       <code>started_at</code>/<code>finished_at</code> (the latter <code>null</code> until every
       cell in the matrix has run), <code>taguru_version</code>, <code>harness</code> (execution
-      mode, runs per model, the corpus root, the resolved document order, the models file's path
+      mode, runs per model, the corpus root, the resolved segment order, the models file's path
       and hash), <code>extraction_settings</code> (every task setting above, plus
       <code>prompt_version</code>/<code>chunk_bytes</code> and a hash of the canonical structured-
-      output schema), the <code>documents[]</code> dictionary (one entry per corpus document: its
+      output schema), the <code>segments[]</code> dictionary (one entry per corpus segment: its
       id, path, byte length, content hash, paragraph count, and its chunk-by-chunk provenance —
       hash and paragraph range per chunk, computed once here and reused verbatim by every cell),
       <code>models[]</code> (each model's provider-probe facts — digest/quantization/context
@@ -265,8 +265,8 @@ CORPUS_DIR           exactly one directory (.md/.txt, sorted by name) — every
     <p>
       A probe-dependent field (a model's digest, an environment's CPU model) is present and
       <code>null</code> when unavailable, never omitted — a reader can tell "asked, nothing came
-      back" from "this build never records such a field." The document dictionary lives here and
-      only here: chunking depends on the document and <code>chunk_bytes</code> alone, never on the
+      back" from "this build never records such a field." The segment dictionary lives here and
+      only here: chunking depends on the segment and <code>chunk_bytes</code> alone, never on the
       model, so repeating it per cell would be N×M copies of one fact.
     </p>
     <p>
@@ -285,13 +285,13 @@ CORPUS_DIR           exactly one directory (.md/.txt, sorted by name) — every
     </p>
     <ul>
       <li><code>header</code> — line 1 only: version stamp, <code>run_id</code>, cell identity.</li>
-      <li><code>document</code> — two per document attempted: <code>phase: "start"</code> (identity
-        only, written the moment the document's first record is seen) and
+      <li><code>segment</code> — two per segment attempted: <code>phase: "start"</code> (identity
+        only, written the moment the segment's first record is seen) and
         <code>phase: "end"</code> (counts once it finishes — <code>outcome: "written"</code> from
         <code>extract</code>'s own successful-completion record, or a synthesized
         <code>outcome: "failed"</code> with every count <code>null</code> when the cell concludes
-        with that document still open). A <code>start</code> with no matching <code>end</code>
-        marks a document abandoned mid-cell — the same signal one level down from
+        with that segment still open). A <code>start</code> with no matching <code>end</code>
+        marks a segment abandoned mid-cell — the same signal one level down from
         <code>kind: "cell"</code>'s own absence.</li>
       <li><code>chunk</code> — one per chunk, <code>extract</code>'s own provenance record
         (<a href="extract.html#diagnostics">chunk_sha256, paragraph_first/paragraph_last</a>)
@@ -300,8 +300,8 @@ CORPUS_DIR           exactly one directory (.md/.txt, sorted by name) — every
         <code>AttemptRecord</code> field <a href="extract.html#diagnostics">extract's own sidecar</a>
         would have written, unrenamed and unmodified; the harness envelope
         (<code>ts</code>, <code>cell_id</code>, <code>model_id</code>, <code>run_index</code>,
-        <code>document_id</code>); and, denormalized from the document dictionary,
-        <code>document_sha256</code>/<code>chunk_sha256</code>/<code>paragraph_first</code>/
+        <code>segment_id</code>); and, denormalized from the segment dictionary,
+        <code>segment_sha256</code>/<code>chunk_sha256</code>/<code>paragraph_first</code>/
         <code>paragraph_last</code> — so any single line is dereferenceable without a
         cross-<code>kind</code> join. <code>ts</code> is the harness's own observation time (the
         sidecar carries no wall clock); an attempt's true duration is
@@ -311,8 +311,8 @@ CORPUS_DIR           exactly one directory (.md/.txt, sorted by name) — every
         cell</b> — the top-level "was this cell actually finished" signal.</li>
     </ul>
     <p>
-      Every consumer joins by key — <code>(document_id, chunk_index)</code> — never by line
-      position: <code>--parallel &gt; 1</code> interleaves a document's own chunk lines, and a
+      Every consumer joins by key — <code>(segment_id, chunk_index)</code> — never by line
+      position: <code>--parallel &gt; 1</code> interleaves a segment's own chunk lines, and a
       resumed cell's retry segment is appended after whatever the interrupted attempt already
       wrote.
     </p>
@@ -323,7 +323,7 @@ CORPUS_DIR           exactly one directory (.md/.txt, sorted by name) — every
     <p>
       A cell's outcome comes straight from its child's exit code: <code>0</code> →
       <code>complete</code>, <code>1</code> → <code>failed</code> (the cell ran the whole corpus;
-      some documents did not extract — that failure rate is itself a measurement, not a
+      some segments did not extract — that failure rate is itself a measurement, not a
       harness error), <code>130</code> or a signal → <code>interrupted</code>. <code>complete</code>
       and <code>failed</code> are both terminal: re-running the same <code>--out</code> skips
       every cell already recorded as either, so a rerun costs nothing for work already done.
@@ -332,9 +332,9 @@ CORPUS_DIR           exactly one directory (.md/.txt, sorted by name) — every
       An <code>interrupted</code> cell is retried on the next invocation, into the exact same
       <code>cells/&lt;model_id&gt;/run&lt;NN&gt;/</code> directory, never with <code>--force</code>
       — <code>extract</code>'s own <code>.extract-manifest.json</code>/
-      <code>.extract-checkpoints/</code> then resume at the document and chunk level exactly as
+      <code>.extract-checkpoints/</code> then resume at the segment and chunk level exactly as
       they would for a bare rerun of <code>taguru extract</code> (see
-      <a href="extract.html#checkpoints">chunk checkpoints</a>). The accepted cost: a document
+      <a href="extract.html#checkpoints">chunk checkpoints</a>). The accepted cost: a segment
       that was in flight at the moment of interruption may show a second <code>start</code> record
       on retry, and a chunk that was already checkpointed may repeat its own <code>chunk</code>
       line — both harmless, since every join is by key, never by line position.
@@ -342,7 +342,7 @@ CORPUS_DIR           exactly one directory (.md/.txt, sorted by name) — every
     <p>
       Resuming an existing results directory re-validates that nothing about the matrix definition
       has drifted: the hash of <code>models.json</code>, every task setting, and the corpus'
-      document dictionary must all still match what <code>manifest.json</code> recorded when the
+      segment dictionary must all still match what <code>manifest.json</code> recorded when the
       directory was created. A mismatch is a usage error naming what changed, pointing at a new
       <code>--out</code> — two differently-configured runs must never share a directory
       (the same reasoning behind giving every cell its own fresh directory in the first place).
@@ -367,7 +367,7 @@ CORPUS_DIR           exactly one directory (.md/.txt, sorted by name) — every
     </p>
     <p class="section-sub">measurements.json</p>
     <pre><code>{
-  "taguru_benchmark_measurements": 1,
+  "taguru_benchmark_measurements": 2,
   "run_id": "...",
   "generated_at": "2026-07-26T10:05:12Z",
   "percentile_method": "nearest-rank",
@@ -375,13 +375,13 @@ CORPUS_DIR           exactly one directory (.md/.txt, sorted by name) — every
       "unicode_normalization": "NFKC", "alias_expansion": "batch-local", "weight_tolerance": 0.0 },
   "inputs": { "runs": ["runs/qwen25-7b-q4.run01.jsonl"], "cells": "cells/" },
   "definitions": { "latency.attempt_seconds": { "unit": "second", "statistic": "distribution",
-      "scopes": ["cell", "model", "document"], "description": "...", "source": "...",
+      "scopes": ["cell", "model", "segment"], "description": "...", "source": "...",
       "caveat": null }, ... },
   "cells": { "qwen25-7b-q4.run01": { "model_id": "qwen25-7b-q4", "run_index": 1,
       "latency.attempt_seconds": { "n": 31, "min": 4.12, "p50": 12.44, "p90": 31.87,
         "p99": 58.10, "max": 61.02, "mean": 15.23, "sum": 472.1 }, ... } },
   "models": { "qwen25-7b-q4": { "...": "same metric keys, pooled over that model's cells" } },
-  "documents": { "qwen25-7b-q4": { "brewery": { "run01": { "...": "the same document's own
+  "segments": { "qwen25-7b-q4": { "brewery": { "run01": { "...": "the same segment's own
         metrics at run granularity" } } } }
 }</code></pre>
     <p>
@@ -400,7 +400,7 @@ CORPUS_DIR           exactly one directory (.md/.txt, sorted by name) — every
       <code>runs/*.jsonl</code> alone cannot supply the extraction-shape metrics that need a
       batch's full item list (the association weight split, distinct subjects/relations, alias
       orphans, out-of-range paragraph locators) — <code>compare</code> re-reads the
-      <code>cells/**</code> batch a written document's own <code>kind: "document"</code> record
+      <code>cells/**</code> batch a written segment's own <code>kind: "segment"</code> record
       names, classifying each line leniently rather than with <code>taguru import</code>'s
       fail-fast batch reader, since counting malformed lines requires reading past the first one.
       <code>measurements.json</code>'s own <code>inputs</code> block names both sources, so the
@@ -418,16 +418,16 @@ CORPUS_DIR           exactly one directory (.md/.txt, sorted by name) — every
       anywhere in either artifact to put a rank in.
     </p>
     <p class="section-sub">measurements.csv</p>
-    <pre><code>scope,model_id,run_index,document_id,metric,stat,value,unit,n
+    <pre><code>scope,model_id,run_index,segment_id,metric,stat,value,unit,n
 cell,qwen25-7b-q4,1,,latency.attempt_seconds,p50,12.44,second,31
 model,qwen25-7b-q4,,,latency.attempt_seconds,p50,12.91,second,93
-document,qwen25-7b-q4,1,brewery,extraction.associations,value,41,association,1</code></pre>
+segment,qwen25-7b-q4,1,brewery,extraction.associations,value,41,association,1</code></pre>
     <div class="tbl">
       <table>
         <thead><tr><th>Column</th><th>Meaning</th></tr></thead>
         <tbody>
-          <tr><td><code>scope</code></td><td><code>cell</code> | <code>model</code> | <code>document</code></td></tr>
-          <tr><td><code>model_id</code>, <code>run_index</code>, <code>document_id</code></td><td>the key that scope needs; blank where a scope has no such axis (a <code>model</code> row has no <code>run_index</code>)</td></tr>
+          <tr><td><code>scope</code></td><td><code>cell</code> | <code>model</code> | <code>segment</code></td></tr>
+          <tr><td><code>model_id</code>, <code>run_index</code>, <code>segment_id</code></td><td>the key that scope needs; blank where a scope has no such axis (a <code>model</code> row has no <code>run_index</code>)</td></tr>
           <tr><td><code>metric</code></td><td>a dotted name keying <code>definitions</code></td></tr>
           <tr><td><code>stat</code></td><td><code>value</code> | <code>min</code> | <code>p50</code> | <code>p90</code> | <code>p99</code> | <code>max</code> | <code>mean</code> | <code>sum</code> | <code>n</code> | <code>numerator</code> — whichever fields that metric's shape has</td></tr>
           <tr><td><code>value</code></td><td>empty exactly where the corresponding JSON field is <code>null</code></td></tr>
@@ -456,31 +456,31 @@ document,qwen25-7b-q4,1,brewery,extraction.associations,value,41,association,1</
       <table>
       <thead><tr><th>Metric family</th><th>Scopes</th><th>What it measures</th></tr></thead>
       <tbody>
-        <tr><td><code>latency.attempt_seconds</code></td><td>cell, model, document</td><td>Wall time of one completion call.</td></tr>
-        <tr><td><code>latency.chunk_seconds</code></td><td>cell, model, document</td><td>One chunk's total time across every retry (cross-chunk correction excluded).</td></tr>
-        <tr><td><code>latency.document_wall_seconds</code></td><td>cell, model, document</td><td>A document's <code>phase: "start"</code> to <code>phase: "end"</code> span.</td></tr>
-        <tr><td><code>latency.seconds_per_association</code></td><td>cell, model, document</td><td>A written document's total attempt time per association produced.</td></tr>
-        <tr><td><code>throughput.output_tokens_per_second</code></td><td>cell, model, document</td><td>One attempt's output tokens over its elapsed time.</td></tr>
-        <tr><td><code>tokens.input_per_attempt</code>, <code>tokens.output_per_attempt</code>, <code>tokens.total_per_attempt</code></td><td>cell, model, document</td><td>Provider-reported token counts per completion call.</td></tr>
-        <tr><td><code>extraction.associations_per_1k_input_tokens</code></td><td>cell, model, document</td><td>Associations produced per 1,000 input tokens spent, retries included.</td></tr>
+        <tr><td><code>latency.attempt_seconds</code></td><td>cell, model, segment</td><td>Wall time of one completion call.</td></tr>
+        <tr><td><code>latency.chunk_seconds</code></td><td>cell, model, segment</td><td>One chunk's total time across every retry (cross-chunk correction excluded).</td></tr>
+        <tr><td><code>latency.segment_wall_seconds</code></td><td>cell, model, segment</td><td>A segment's <code>phase: "start"</code> to <code>phase: "end"</code> span.</td></tr>
+        <tr><td><code>latency.seconds_per_association</code></td><td>cell, model, segment</td><td>A written segment's total attempt time per association produced.</td></tr>
+        <tr><td><code>throughput.output_tokens_per_second</code></td><td>cell, model, segment</td><td>One attempt's output tokens over its elapsed time.</td></tr>
+        <tr><td><code>tokens.input_per_attempt</code>, <code>tokens.output_per_attempt</code>, <code>tokens.total_per_attempt</code></td><td>cell, model, segment</td><td>Provider-reported token counts per completion call.</td></tr>
+        <tr><td><code>extraction.associations_per_1k_input_tokens</code></td><td>cell, model, segment</td><td>Associations produced per 1,000 input tokens spent, retries included.</td></tr>
         <tr><td><code>attempt.state_rate.*</code></td><td>cell, model</td><td>Share of attempts in each of ADR 0001 §7's terminal states (<code>stop_valid</code>, <code>stop_malformed</code>, <code>length_limited</code>, <code>empty</code>, <code>refusal</code>, <code>timeout</code>, <code>transport</code>).</td></tr>
         <tr><td><code>attempt.length_limited_rate</code>, <code>attempt.retry_rate</code>, <code>attempt.parse_error_rate</code>, <code>attempt.validation_rejected_rate</code>, <code>attempt.provider_metadata_missing_rate</code></td><td>cell, model</td><td>Attempt-level failure/retry signals independent of, or complementary to, <code>state</code>.</td></tr>
         <tr><td><code>attempt.finish_reason_rate.&lt;reason&gt;</code></td><td>cell, model</td><td>Share of attempts reporting each provider-specific finish reason actually observed in this run.</td></tr>
-        <tr><td><code>document.written_rate</code>, <code>document.failed_rate</code></td><td>cell, model</td><td>Share of started documents that reached each terminal outcome.</td></tr>
+        <tr><td><code>segment.written_rate</code>, <code>segment.failed_rate</code></td><td>cell, model</td><td>Share of started segments that reached each terminal outcome.</td></tr>
         <tr><td><code>cell.complete_rate</code></td><td>model</td><td>Share of a model's cells that completed, read from <code>manifest.json</code>.</td></tr>
-        <tr><td><code>extraction.associations</code>, <code>.concepts</code>, <code>.labels</code>, <code>.questions</code>, <code>.duplicates</code>, <code>.dropped</code></td><td>cell, model, document</td><td>Per-document extraction volume, from <code>kind: "document"</code>'s own counts.</td></tr>
-        <tr><td><code>extraction.weight_positive</code>, <code>.weight_negative</code></td><td>cell, model, document</td><td>Association lines with positive vs. negative <code>weight</code>.</td></tr>
-        <tr><td><code>extraction.subjects_distinct</code>, <code>.relations_distinct</code></td><td>cell, model, document</td><td>Distinct <code>subject</code>/<code>label</code> values within a document's own batch.</td></tr>
-        <tr><td><code>extraction.paragraph_attributed_rate</code></td><td>cell, model, document</td><td>Share of association lines carrying a paragraph locator.</td></tr>
-        <tr><td><code>extraction.relation_reuse_ratio</code></td><td>cell, model, document</td><td>Share of association lines whose label was not that document's first use of it.</td></tr>
-        <tr><td><code>extraction.alias_orphans</code>, <code>.paragraph_out_of_range</code>, <code>.batch_lines_invalid</code></td><td>cell, model, document</td><td>Batch-writer health checks: aliases with no matching canonical, locators past a document's paragraph count, and lines matching none of the batch format's known shapes.</td></tr>
-        <tr><td><code>stability.run_pair_jaccard</code></td><td>model</td><td>Association-key overlap between two of a model's own runs, one sample per unordered run pair, restricted to documents both runs completed.</td></tr>
-        <tr><td><code>stability.keys_distinct</code></td><td>model</td><td>Distinct association keys observed across every run a model completed at least one document in.</td></tr>
-        <tr><td><code>stability.keys_in_all_runs_ratio</code>, <code>.keys_in_single_run_ratio</code></td><td>model</td><td>Among keys whose document completed in 2+ runs, the share present in every one of those runs vs. in exactly one.</td></tr>
-        <tr><td><code>stability.key_presence_ratio</code></td><td>model</td><td>Per key (document completed in 2+ runs), the share of that document's completed runs the key appeared in.</td></tr>
+        <tr><td><code>extraction.associations</code>, <code>.concepts</code>, <code>.labels</code>, <code>.questions</code>, <code>.duplicates</code>, <code>.dropped</code></td><td>cell, model, segment</td><td>Per-segment extraction volume, from <code>kind: "segment"</code>'s own counts.</td></tr>
+        <tr><td><code>extraction.weight_positive</code>, <code>.weight_negative</code></td><td>cell, model, segment</td><td>Association lines with positive vs. negative <code>weight</code>.</td></tr>
+        <tr><td><code>extraction.subjects_distinct</code>, <code>.relations_distinct</code></td><td>cell, model, segment</td><td>Distinct <code>subject</code>/<code>label</code> values within a segment's own batch.</td></tr>
+        <tr><td><code>extraction.paragraph_attributed_rate</code></td><td>cell, model, segment</td><td>Share of association lines carrying a paragraph locator.</td></tr>
+        <tr><td><code>extraction.relation_reuse_ratio</code></td><td>cell, model, segment</td><td>Share of association lines whose label was not that segment's first use of it.</td></tr>
+        <tr><td><code>extraction.alias_orphans</code>, <code>.paragraph_out_of_range</code>, <code>.batch_lines_invalid</code></td><td>cell, model, segment</td><td>Batch-writer health checks: aliases with no matching canonical, locators past a segment's paragraph count, and lines matching none of the batch format's known shapes.</td></tr>
+        <tr><td><code>stability.run_pair_jaccard</code></td><td>model</td><td>Association-key overlap between two of a model's own runs, one sample per unordered run pair, restricted to segments both runs completed.</td></tr>
+        <tr><td><code>stability.keys_distinct</code></td><td>model</td><td>Distinct association keys observed across every run a model completed at least one segment in.</td></tr>
+        <tr><td><code>stability.keys_in_all_runs_ratio</code>, <code>.keys_in_single_run_ratio</code></td><td>model</td><td>Among keys whose segment completed in 2+ runs, the share present in every one of those runs vs. in exactly one.</td></tr>
+        <tr><td><code>stability.key_presence_ratio</code></td><td>model</td><td>Per key (segment completed in 2+ runs), the share of that segment's completed runs the key appeared in.</td></tr>
         <tr><td><code>stability.polarity_variation_ratio</code>, <code>.weight_variation_ratio</code>, <code>.attribution_variation_ratio</code></td><td>model</td><td>Among keys observed in 2+ runs, the share whose weight sign, weight value (past <code>matching.weight_tolerance</code>), or paragraph locator set disagreed across runs.</td></tr>
-        <tr><td><code>stability.alias_canonical_variation_ratio</code></td><td>model</td><td>Among (document, alias-kind, spelling) triples declared in 2+ completed runs, the share whose resolved canonical was not the same in every declaring run.</td></tr>
-        <tr><td><code>run.associations_total</code>, <code>.elapsed_seconds_total</code>, <code>.documents_written</code></td><td>model</td><td>One run's own totals — one sample per run a model has a cell for, including a run that completed zero documents.</td></tr>
+        <tr><td><code>stability.alias_canonical_variation_ratio</code></td><td>model</td><td>Among (segment, alias-kind, spelling) triples declared in 2+ completed runs, the share whose resolved canonical was not the same in every declaring run.</td></tr>
+        <tr><td><code>run.associations_total</code>, <code>.elapsed_seconds_total</code>, <code>.segments_written</code></td><td>model</td><td>One run's own totals — one sample per run a model has a cell for, including a run that completed zero segments.</td></tr>
       </tbody>
       </table>
     </div>
@@ -488,7 +488,7 @@ document,qwen25-7b-q4,1,brewery,extraction.associations,value,41,association,1</
     <p>
       <code>stability.*</code> (issue #258) measures how much a model's own extraction varied
       across its <code>N</code> runs — model scope only, since a cell is a single run and
-      <code>documents</code>' own <code>model → document → run_label</code> shape has no slot for
+      <code>segments</code>' own <code>model → segment → run_label</code> shape has no slot for
       a value that spans runs. Two association lines count as "the same association" once
       normalized (case folding, Unicode NFKC) and resolved through that batch's own alias
       declarations (<code>alias_expansion: "batch-local"</code> — only the declaring batch's
@@ -503,9 +503,9 @@ document,qwen25-7b-q4,1,brewery,extraction.associations,value,41,association,1</
       The parameters that judgment was made under are recorded verbatim in
       <code>measurements.json</code>'s own top-level <code>matching</code> block, shown above —
       so the artifact stays re-derivable without reading <code>benchmark::identity</code>'s
-      source. A document only ever contributes to these metrics through a run in which it
+      source. A segment only ever contributes to these metrics through a run in which it
       <i>completed</i> (<code>outcome: "written"</code> and its batch was readable); a harness or
-      model completion failure is <code>document.written_rate</code>'s concern, not folded into
+      model completion failure is <code>segment.written_rate</code>'s concern, not folded into
       extraction instability here. <a href="#differences"><code>differences.jsonl</code></a>'s
       model-pair diff reuses this same module and records the identical <code>matching</code>
       block in its own header (ADR 0003 §9.4), so a same-ness judgment about "did two runs agree"
@@ -545,7 +545,7 @@ document,qwen25-7b-q4,1,brewery,extraction.associations,value,41,association,1</
       <code>b</code>, bound to a <code>model_id</code> — never <code>baseline</code>/
       <code>candidate</code> — and an absent side serializes <code>null</code>, never a count.
     </p>
-    <pre><code>{"kind":"header","taguru_benchmark_differences":1,"run_id":"...",
+    <pre><code>{"kind":"header","taguru_benchmark_differences":3,"run_id":"...",
  "pairs":[{"pair_id":"hosted-120b__qwen25-7b-q4","a":"hosted-120b","b":"qwen25-7b-q4"}],
  "matching":{"module":"benchmark::identity","case_fold":true,"unicode_normalization":"NFKC",
    "alias_expansion":"batch-local","weight_tolerance":0.0},
@@ -554,7 +554,7 @@ document,qwen25-7b-q4,1,brewery,extraction.associations,value,41,association,1</
  "present_in":["hosted-120b","qwen25-7b-q4"],
  "key":{"subject":"beer co","label":"brews","object":"lager"},
  "sides":{"a":{"runs":[1,2,3],"n_present":3},"b":{"runs":[1,2],"n_present":2}},
- "locator":{"document_id":"brewery","source":"corpus/brewery.md","document_sha256":"9c2e...",
+ "locator":{"segment_id":"brewery","source":"corpus/brewery.md","segment_sha256":"9c2e...",
    "paragraph":1,"chunk_index":0,"chunk_sha256":"41ab...","text":null,"text_truncated":false}}</code></pre>
     <p>
       One file covers every model pair — each record carries its own <code>pair_id</code>, and the
@@ -570,12 +570,12 @@ document,qwen25-7b-q4,1,brewery,extraction.associations,value,41,association,1</
       <table>
       <thead><tr><th>kind</th><th>Fires when</th></tr></thead>
       <tbody>
-        <tr><td><code>document_coverage</code></td><td>Once per (pair, document) either side attempted. Marks whether a document is eligible for the record kinds below at all — a document only one side ever completed a run for is excluded from every one of them, since a harness or model completion failure is <code>document.written_rate</code>'s fact, not an extraction difference.</td></tr>
-        <tr><td><code>association_shared</code></td><td>An association key both sides observed in at least one completed run, for a document both sides completed.</td></tr>
-        <tr><td><code>association_single_side</code></td><td>A key only one side ever observed, on a document both sides completed.</td></tr>
+        <tr><td><code>segment_coverage</code></td><td>Once per (pair, segment) either side attempted. Marks whether a segment is eligible for the record kinds below at all — a segment only one side ever completed a run for is excluded from every one of them, since a harness or model completion failure is <code>segment.written_rate</code>'s fact, not an extraction difference.</td></tr>
+        <tr><td><code>association_shared</code></td><td>An association key both sides observed in at least one completed run, for a segment both sides completed.</td></tr>
+        <tr><td><code>association_single_side</code></td><td>A key only one side ever observed, on a segment both sides completed.</td></tr>
         <tr><td><code>polarity_difference</code></td><td>A shared key whose two sides' observed weight-sign sets share no element — e.g. side <code>a</code> always positive, side <code>b</code> always negative. Within-side sign disagreement across a model's own runs is <code>stability.polarity_variation_ratio</code>'s concern, not this.</td></tr>
         <tr><td><code>attribution_difference</code></td><td>A shared key whose two sides' observed paragraph-locator sets (<code>None</code> counts as its own value, not "no signal") share no element.</td></tr>
-        <tr><td><code>alias_resolution_difference</code></td><td>A (document, alias-kind, spelling) triple both sides declared in at least one completed run, whose resolved-canonical sets share no element.</td></tr>
+        <tr><td><code>alias_resolution_difference</code></td><td>A (segment, alias-kind, spelling) triple both sides declared in at least one completed run, whose resolved-canonical sets share no element.</td></tr>
         <tr><td><code>surface_form_variation</code></td><td>A key (shared or single-side) that two or more distinct raw <code>subject</code>/<code>label</code>/<code>object</code> spellings folded into — a normalization candidate, surfaced whether the variation is between the two models or entirely within one model's own runs.</td></tr>
       </tbody>
       </table>
@@ -600,7 +600,7 @@ document,qwen25-7b-q4,1,brewery,extraction.associations,value,41,association,1</
       <code>--no-passage</code> having stripped every locator upstream). <code>text</code> stays
       <code>null</code> unless <code>--with-text</code> was given; when it is,
       <code>compare</code> re-reads the corpus file <code>manifest.json</code> names, verifies it
-      against the pinned <code>document_sha256</code>, and slices out the paragraph — a <b>loud
+      against the pinned <code>segment_sha256</code>, and slices out the paragraph — a <b>loud
       refusal</b> (naming the file and the mismatched hash, exit code <code>1</code>, nothing
       written) if the file is unreadable or the hash no longer matches, since text the models never
       saw must never be embedded silently. Embedded text is capped at 4096 bytes (floored to a
@@ -658,7 +658,7 @@ RESULTS_DIR            a directory `taguru benchmark extract` wrote</code></pre>
       invocation, the same across every <code>--run N</code> within it — without
       <code>run_index</code> in the marker, running <code>--run 1</code> then <code>--run 2</code>
       against the same directory would pass the ownership check unchanged and silently mix both
-      runs' documents into one corpus (import never removes a source absent from the current
+      runs' segments into one corpus (import never removes a source absent from the current
       import's own batch set). Re-running the exact same <code>--run</code> against the same
       results directory is safe: import is a per-<code>(context, source)</code> create-or-replace,
       so a second run neither duplicates associations nor loses them. Before importing into an
@@ -691,8 +691,8 @@ RESULTS_DIR            a directory `taguru benchmark extract` wrote</code></pre>
       <code>evaluate</code> itself interprets and validates them. The fields this
       command reads: <code>case_id</code> (a stable, unique join key), <code>query</code> (sent to
       <code>sources/search</code> verbatim), <code>expected_sources[]</code> (<code>source</code>
-      matched against the results directory's own document dictionary — an exact path, then a
-      <code>document_id</code>, then a unique path suffix, in that order; empty
+      matched against the results directory's own segment dictionary — an exact path, then a
+      <code>segment_id</code>, then a unique path suffix, in that order; empty
       <code>paragraphs</code> means any paragraph of that source counts; <code>relevance 0</code>
       excludes the entry), <code>expected_concepts[]</code>, and <code>options.limit</code> (the
       per-case search limit; omitted means <code>10</code>). <code>cues</code> and
@@ -703,7 +703,7 @@ RESULTS_DIR            a directory `taguru benchmark extract` wrote</code></pre>
     </p>
     <p class="section-sub">retrieval.json</p>
     <pre><code>{
-  "taguru_benchmark_retrieval": 1,
+  "taguru_benchmark_retrieval": 3,
   "run_id": "...", "generated_at": "2026-07-26T10:05:12Z",
   "matching": { "module": "benchmark::identity", "case_fold": true,
       "unicode_normalization": "NFKC", "alias_expansion": "batch-local", "weight_tolerance": 0.0 },
@@ -713,7 +713,7 @@ RESULTS_DIR            a directory `taguru benchmark extract` wrote</code></pre>
   "definitions": { "hits.count": { "unit": "count", "statistic": "distribution", "...": "..." }, ... },
   "warnings": [],
   "corpus": { "qwen25-7b-q4": { "context": "sake::qwen25-7b-q4", "outcome": "built",
-      "documents_imported": 5, "documents_failed": 0,
+      "segments_imported": 5, "segments_failed": 0,
       "passage_vectors": { "model": null, "rows": 0 } } },
   "cases": [ { "case_id": "brand-origin-001", "query": "青嶺はどこの蔵の酒か", "cues": ["青嶺"],
       "limit": 10, "has_expectations": true,
@@ -741,7 +741,7 @@ RESULTS_DIR            a directory `taguru benchmark extract` wrote</code></pre>
       folded into <b>one</b> recall@k/MRR computation, computed from the very
       <code>sources/search</code> hits already fetched for that case — never a second retrieval
       call. A hit satisfies an <code>expected_sources</code> entry when its <code>source</code>
-      matches (resolved against the document dictionary as above) and, when <code>paragraphs</code>
+      matches (resolved against the segment dictionary as above) and, when <code>paragraphs</code>
       is non-empty, its <code>paragraph</code> is among them. A hit satisfies an
       <code>expected_concepts</code> entry when a case-folded, NFKC-normalized copy of the concept
       string is a substring of a case-folded, NFKC-normalized copy of the hit's own <code>text</code>.
@@ -789,7 +789,7 @@ RESULTS_DIR            a directory `taguru benchmark extract` wrote</code></pre>
       <tbody>
         <tr><td><code>hits.count</code></td><td>model</td><td>Passage hits <code>sources/search</code> returned for a case, truncated to that case's limit.</td></tr>
         <tr><td><code>hits.empty_rate</code></td><td>model</td><td>Share of successfully searched cases whose search returned zero hits.</td></tr>
-        <tr><td><code>hits.distinct_sources</code></td><td>model</td><td>Distinct source documents among a case's hits — a coarse diversity signal.</td></tr>
+        <tr><td><code>hits.distinct_sources</code></td><td>model</td><td>Distinct source segments among a case's hits — a coarse diversity signal.</td></tr>
         <tr><td><code>lanes.bm25_only</code>, <code>.vector_only</code>, <code>.both</code>, <code>.neither</code></td><td>model</td><td>Hits a case's search found via the lexical lane only, the semantic lane only, both agreeing, or (readable but) neither.</td></tr>
         <tr><td><code>lanes.unknown</code></td><td>model</td><td>Hits whose per-hit lane evidence could not be read at all (an older or otherwise non-conforming server) — kept apart from the four above so a legacy response's hits are never misread as evidencing zero lane activity.</td></tr>
         <tr><td><code>cases.error_rate</code></td><td>model</td><td>Share of cases whose search request failed outright — a network/HTTP failure, or the model's corpus was never available.</td></tr>

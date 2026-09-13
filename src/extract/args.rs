@@ -71,7 +71,7 @@ pub(super) struct Args {
     pub(super) coverage: Option<bool>,
     /// `None` defers to TAGURU_EXTRACT_DIAGNOSTICS, and then to no
     /// sidecar at all (today's behavior: one stderr line per failed
-    /// document, nothing else) — resolved in [`run`], same pattern as
+    /// segment, nothing else) — resolved in [`run`], same pattern as
     /// `parallel`. Issue #200.
     pub(super) diagnostics_out: Option<PathBuf>,
     /// `None` defers to TAGURU_EXTRACT_SCHEMA, and then to no schema at
@@ -95,7 +95,7 @@ pub(super) struct Args {
     pub(super) context: String,
     pub(super) description: Option<String>,
     /// #466 S1 (ADR 0017): the promotion runbook's `session:{agent}:{id}`
-    /// source id, replacing the document path in the written batch
+    /// source id, replacing the segment path in the written batch
     /// header. `None` keeps the path (today's batch, byte for byte).
     pub(super) source_id: Option<String>,
     /// #466 S1: the session's own date (epoch seconds), emitted on the
@@ -737,7 +737,7 @@ pub(super) fn parse_date(text: &str) -> Option<u64> {
     }
 }
 
-/// What one document's pipeline concluded; [`run`] only counts these
+/// What one segment's pipeline concluded; [`run`] only counts these
 /// into the summary line.
 pub(super) enum Outcome {
     /// A fresh batch file is on disk and recorded in the manifest.
@@ -748,7 +748,7 @@ pub(super) enum Outcome {
     /// `--dry-run` reported what would happen without calling anything.
     Planned,
     /// Issue #179: a cooperative stop request was observed between
-    /// chunks or between documents. Whatever units already landed stay
+    /// chunks or between segments. Whatever units already landed stay
     /// checkpointed on disk; nothing was merged, imported, or recorded
     /// in the manifest — a rerun resumes exactly where this stopped.
     Interrupted,
@@ -787,7 +787,7 @@ pub(crate) enum StructuredOutputMode {
     /// JSON.
     Auto,
     /// Pin schema-constrained decoding without probing; a backend that
-    /// rejects the parameter surfaces its 400 on the first document
+    /// rejects the parameter surfaces its 400 on the first segment
     /// rather than being silently downgraded.
     JsonSchema,
     /// Pin JSON mode (syntax forced, shape not) without probing.
@@ -830,7 +830,7 @@ impl StructuredOutputMode {
 pub(super) enum ReplayMode {
     /// A request with no matching record falls through to a live call.
     Auto,
-    /// A request with no matching record fails the document instead —
+    /// A request with no matching record fails the segment instead —
     /// for a run with no model endpoint at all (ADR 0031 §3.8).
     Strict,
     Off,
@@ -959,7 +959,7 @@ impl Rung {
 ///
 /// The rung is the one thing here that can change after startup —
 /// ADR 0021 (#760): a probe-verified rung can still loop on a real
-/// document, and when a piece exhausts the ladder under a constrained
+/// segment, and when a piece exhausts the ladder under a constrained
 /// rung the run demotes one rung and restarts that piece. Run-wide on
 /// purpose (the finding is about the backend, not the piece), so the
 /// rung sits behind a mutex that `--parallel` workers share; a worker

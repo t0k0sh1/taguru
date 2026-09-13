@@ -44,7 +44,7 @@
 //! `DEFAULT_MAX_ATTEMPTS`, `MAX_EXTRACT_ATTEMPTS`) — `benchmark.rs` and
 //! `communities.rs` consume those plus `StructuredOutputMode`,
 //! `StopSignal`, `block_stop_signals_on_this_thread`, `chunk_plan`,
-//! `read_document`, `expand_documents`, `json_schema_response_format`,
+//! `read_segment`, `expand_segments`, `json_schema_response_format`,
 //! `ChatClient`, and `RequestOptions` via `crate::extract::`,
 //! re-exported here unchanged.
 
@@ -88,8 +88,6 @@ mod completions;
 mod coverage;
 #[path = "extract/diagnostics.rs"]
 mod diagnostics;
-#[path = "extract/documents.rs"]
-mod documents;
 #[path = "extract/jis_x0208.rs"]
 mod jis_x0208;
 #[path = "extract/manifest.rs"]
@@ -106,6 +104,8 @@ mod render;
 mod replay;
 #[path = "extract/run.rs"]
 mod run;
+#[path = "extract/segments.rs"]
+mod segments;
 #[path = "extract/signals.rs"]
 mod signals;
 #[path = "extract/structured_output.rs"]
@@ -131,10 +131,10 @@ use structured_output::resolve_rung;
 
 pub(crate) use args::StructuredOutputMode;
 pub(crate) use chat_client::{AttemptRef, ChatClient, RequestOptions};
-pub(crate) use documents::{ChunkDescriptor, chunk_plan, expand_documents, read_document};
-use documents::{chunk_bytes_manifest_value, chunk_plan_preferring};
+pub(crate) use segments::{ChunkDescriptor, chunk_plan, expand_segments, read_segment};
+use segments::{chunk_bytes_manifest_value, chunk_plan_preferring};
 #[cfg(test)]
-use documents::{chunk_plan_with_cap, leading_paragraph_number};
+use segments::{chunk_plan_with_cap, leading_paragraph_number};
 pub(crate) use signals::{StopSignal, block_stop_signals_on_this_thread};
 use structured_output::json_object_response_format;
 pub(crate) use structured_output::json_schema_response_format;
@@ -142,9 +142,9 @@ use vocabulary::KnownRelation;
 pub(crate) use vocabulary::vocabulary_digest;
 // `taguru inspect` reads an attempts log (ADR 0037, #850) with the
 // same inverses extract's own trace uses, so the two never disagree
-// about where a user turn's document starts or which paragraphs a
+// about where a user turn's segment starts or which paragraphs a
 // piece spans.
-pub(crate) use prompt::{user_message_document, user_message_part};
+pub(crate) use prompt::{user_message_part, user_message_segment};
 pub(crate) use trace::{PIECE_ID_SHORT, paragraph_range, short_piece_id};
 
 // Cross-submodule wiring: each of these is private to the one
@@ -213,7 +213,7 @@ use replay::{
     MissDiagnostic, RecordedSettings, ReplayIndex, ReplayLookup, SystemPinDecision,
     settings_differences,
 };
-use run::labeled_document;
+use run::labeled_segment;
 use structured_output::{jittered_backoff, parse_retry_after, read_capped_chat_body, snippet};
 use trace::{
     PieceOrigin, SteeringSchema, TRACE_DIR_NAME, TraceSteering, VocabularyEntry, render_trace,
@@ -246,7 +246,7 @@ use chunking::{
 #[cfg(test)]
 use coverage::GAP_QUOTE_MAX_BYTES;
 #[cfg(test)]
-use diagnostics::{AttemptRecord, ChunkRecord, DocumentRecord, ProviderMetadataRecord};
+use diagnostics::{AttemptRecord, ChunkRecord, ProviderMetadataRecord, SegmentRecord};
 #[cfg(test)]
 use mechanical::alias_issue_index;
 #[cfg(test)]
@@ -522,7 +522,15 @@ Contract and discipline: docs/extract.html.
 /// `## Abstract` with the fact one paragraph down), so locators made
 /// under it are one paragraph off and must not be silently reused.
 ///
-pub(crate) const PROMPT_VERSION: u32 = 5;
+/// 6 (#851/#904): every occurrence of "document" the model is shown —
+/// the system prompt's framing, the user turn's `Document '<path>'`
+/// preamble, and the candidates/vocabulary/chunk-context blocks — is
+/// now "segment" (#851's terminology split: `document` names the
+/// user's whole original file, `segment` the piece one extraction call
+/// sees). The wording the model reads changed, so an answer cached
+/// under 5 must not be silently reused.
+///
+pub(crate) const PROMPT_VERSION: u32 = 6;
 
 /// TAGURU_EXTRACT_REDACT's value: `Some(None)` for the off spellings
 /// (`0`, `false`, `off`, empty), `Some(Some(BOTH))` for `1`, `true`,
@@ -563,7 +571,7 @@ pub(crate) fn non_loopback_host(url: &str) -> Option<String> {
     (!loopback).then(|| host.to_string())
 }
 
-/// Document bytes per model call. Chunks split at paragraph
+/// Segment bytes per model call. Chunks split at paragraph
 /// boundaries; facts spanning a boundary can be missed, so the cap
 /// leans large.
 ///
@@ -620,7 +628,7 @@ pub fn run(args: &[String]) -> i32 {
         crate::config::load_config(path);
     }
 
-    let files = match expand_documents(&args.paths) {
+    let files = match expand_segments(&args.paths) {
         Ok(files) => files,
         Err(message) => return crate::config::subcommand_usage_error("extract", &message),
     };
@@ -654,7 +662,7 @@ pub fn run(args: &[String]) -> i32 {
     };
     let replaying = !matches!(replay_mode, ReplayMode::Off);
 
-    // The provider is demanded up front even when every document ends
+    // The provider is demanded up front even when every segment ends
     // up skipped: a run whose environment cannot extract should say so
     // before it reports success. --dry-run alone calls nothing and
     // needs nothing. `--replay strict` (ADR 0031 §3.7/§3.8) is the one
@@ -965,18 +973,18 @@ pub fn run(args: &[String]) -> i32 {
     };
     // ADR 0038 §3.7: with redaction off and a model endpoint that is
     // not this machine, say once where the text goes — before any
-    // document is read, so a dry run says it too.
+    // segment is read, so a dry run says it too.
     if redaction.is_none()
         && let Ok(url) = std::env::var("TAGURU_EXTRACT_URL")
         && let Some(host) = non_loopback_host(&url)
     {
         eprintln!(
-            "taguru: extract: note: --redact is off; document text is sent to {host} as written"
+            "taguru: extract: note: --redact is off; segment text is sent to {host} as written"
         );
     }
     // ADR 0038 §3.1 (#884): the user's rules file joins the built-ins
     // — read, parsed, and refused with a line number BEFORE any
-    // document is read, and only ever with redaction on (a rules file
+    // segment is read, and only ever with redaction on (a rules file
     // that runs nothing is text that reaches the model).
     let redact_rules_path = args.redact_rules.or_else(|| {
         std::env::var("TAGURU_EXTRACT_REDACT_RULES")
@@ -1021,7 +1029,7 @@ pub fn run(args: &[String]) -> i32 {
     // Flag-over-env, same pattern as --schema below. ADR 0015: the
     // named file/directory must load and yield names, or the run stops
     // — silently extracting without the vocabulary the operator asked
-    // for would let every new document drift.
+    // for would let every new segment drift.
     let vocabulary_path = args.vocabulary.or_else(|| {
         std::env::var("TAGURU_EXTRACT_VOCABULARY")
             .ok()
@@ -1115,7 +1123,7 @@ pub fn run(args: &[String]) -> i32 {
     // TAGURU_EXTRACT_* environment), so --schema/TAGURU_EXTRACT_SCHEMA is
     // the only way one reaches the prompt. Unlike the "best effort,
     // degrade quietly" postures elsewhere in this file (an unreadable
-    // manifest, a skipped document's unreadable batch), a document the
+    // manifest, a skipped segment's unreadable batch), a document the
     // operator explicitly named that fails to parse or fails
     // `schema::install`'s own checks is a hard startup error: silently
     // extracting under no schema when one was asked for would let a
@@ -1198,7 +1206,7 @@ pub fn run(args: &[String]) -> i32 {
         manifest: Manifest::load(&manifest_path),
         // ADR 0015: the exported context's label spellings seed the
         // run vocabulary, so the existing "relation labels already in
-        // use" block carries them from the first document — no new
+        // use" block carries them from the first segment — no new
         // prompt machinery for labels. The export carries no per-label
         // occurrence count (#759), so each seeded label starts at 1 —
         // "established", not "unknown" — and grows from there as this
@@ -1214,7 +1222,7 @@ pub fn run(args: &[String]) -> i32 {
             })
             .unwrap_or_default(),
         // #758: the context's settled spellings are claimed from the
-        // first document, the way its labels seed the prompt above.
+        // first segment, the way its labels seed the prompt above.
         claimed_names: context_vocabulary
             .as_ref()
             .map(|vocabulary| ClaimedNames::seeded(&vocabulary.concepts, &vocabulary.labels))
@@ -1222,7 +1230,7 @@ pub fn run(args: &[String]) -> i32 {
         source_id: args.source_id,
         date: args.date,
         tags: args.tags,
-        multi_document: files.len() > 1,
+        multi_segment: files.len() > 1,
         claimed_source_ids: BTreeMap::new(),
         claimed: BTreeMap::new(),
         parallel,
@@ -1266,9 +1274,9 @@ pub fn run(args: &[String]) -> i32 {
     let mut planned = 0usize;
     let mut skipped = 0usize;
     let mut failures = 0usize;
-    // Issue #179: a stop request is checked between documents (and,
-    // inside extract_document, between top-level chunks) — never mid
-    // model-call. Whichever document was in flight when it landed keeps
+    // Issue #179: a stop request is checked between segments (and,
+    // inside extract_segment, between top-level chunks) — never mid
+    // model-call. Whichever segment was in flight when it landed keeps
     // every unit already checkpointed; nothing after it is attempted.
     let mut interrupted = false;
     for path in &files {
@@ -1277,15 +1285,15 @@ pub fn run(args: &[String]) -> i32 {
             break;
         }
         let source = path.to_string_lossy().into_owned();
-        match run.extract_document(path, &source) {
+        match run.extract_segment(path, &source) {
             Ok(Outcome::Written) => {
                 written += 1;
-                // Persisted per document, not just once after the loop: a
-                // run this size is LLM-bound (seconds per document), so an
+                // Persisted per segment, not just once after the loop: a
+                // run this size is LLM-bound (seconds per segment), so an
                 // interruption (Ctrl+C, a CI timeout's SIGKILL, a panic on
-                // a later document) would otherwise strand the manifest
+                // a later segment) would otherwise strand the manifest
                 // behind every batch file it should already credit,
-                // making the next run re-extract documents that already
+                // making the next run re-extract segments that already
                 // succeeded.
                 if let Err(error) = run.manifest.save(&manifest_path) {
                     eprintln!(
@@ -1316,23 +1324,23 @@ pub fn run(args: &[String]) -> i32 {
         );
     }
     // `written` and `planned` are mutually exclusive across a whole run
-    // (dry_run is one flag for every document), so the line reports
+    // (dry_run is one flag for every segment), so the line reports
     // whichever one actually applies instead of always printing a
     // count that is guaranteed zero.
     if run.dry_run {
         println!(
-            "extract: {planned} planned, {skipped} unchanged, {failures} failed of {} document(s)",
+            "extract: {planned} planned, {skipped} unchanged, {failures} failed of {} segment(s)",
             files.len()
         );
     } else if interrupted {
         println!(
             "extract: {written} written, {skipped} unchanged, {failures} failed of {} \
-             document(s) — stopped early, chunk checkpoints saved; rerun to resume",
+             segment(s) — stopped early, chunk checkpoints saved; rerun to resume",
             files.len()
         );
     } else {
         println!(
-            "extract: {written} written, {skipped} unchanged, {failures} failed of {} document(s)",
+            "extract: {written} written, {skipped} unchanged, {failures} failed of {} segment(s)",
             files.len()
         );
     }

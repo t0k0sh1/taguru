@@ -21,7 +21,7 @@ pub(super) const PROBE_MAX_TOKENS: usize = 256;
 /// What the run's structured-output rung resolved to, reported once on
 /// stderr so a log shows which rung actually carried the run. Pinned
 /// modes trust the operator (a backend that rejects the parameter
-/// surfaces its 400 on the first document); `auto` verifies against
+/// surfaces its 400 on the first segment); `auto` verifies against
 /// the live endpoint before relying on anything, because a backend may
 /// accept a parameter without honoring it (ADR 0001 §6).
 pub(super) fn resolve_rung(client: &ChatClient, mode: StructuredOutputMode) -> Rung {

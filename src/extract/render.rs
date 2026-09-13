@@ -3,7 +3,7 @@
 
 use super::*;
 
-/// Serializes the batch: header, passage (the document itself), the
+/// Serializes the batch: header, passage (the segment itself), the
 /// facts, then aliases. serde_json strings never contain raw newlines,
 /// so every `to_string` is one line by construction.
 pub(super) fn render_batch(
@@ -76,11 +76,11 @@ pub(super) fn render_batch(
     lines.join("\n") + "\n"
 }
 
-/// Splits a document at paragraph boundaries into chunks of at most
+/// Splits a segment at paragraph boundaries into chunks of at most
 /// `cap` bytes (an oversized paragraph splits at line, then char
 /// boundaries). Chunks are prompt input only — the passage stays the
-/// verbatim document — so exact reassembly does not matter; keeping
-/// sentences whole does. A blank document yields no chunks.
+/// verbatim segment — so exact reassembly does not matter; keeping
+/// sentences whole does. A blank segment yields no chunks.
 pub(super) fn chunk(text: &str, cap: usize) -> Vec<String> {
     chunk_preferring(text, cap, &|_| false)
 }
@@ -89,7 +89,7 @@ pub(super) fn chunk(text: &str, cap: usize) -> Vec<String> {
 /// which `break_before` holds (a paragraph that opens an outermost
 /// structural unit) ends the current chunk when that chunk is already
 /// past half the cap — so boundaries fall on chapters when they can,
-/// no chunk exceeds the cap, and a document with no such block chunks
+/// no chunk exceeds the cap, and a segment with no such block chunks
 /// exactly as [`chunk`] does.
 pub(super) fn chunk_preferring(
     text: &str,
@@ -119,7 +119,7 @@ pub(super) fn chunk_preferring(
 /// Re-chunks one already-labeled piece to a smaller cap for the
 /// ladder's split rung. [`chunk`] alone would carry an oversized
 /// block's continuation to the model unlabeled — exactly what
-/// [`labeled_document`] exists to prevent — so oversized blocks are
+/// [`labeled_segment`] exists to prevent — so oversized blocks are
 /// pre-split here with their `[N] ` label repeated on every piece:
 /// the same discipline, at a smaller cap.
 pub(super) fn split_labeled_piece(piece: &str, cap: usize) -> Vec<String> {

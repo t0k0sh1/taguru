@@ -3,7 +3,7 @@
 You (an LLM) are the intended client. This is the discipline for
 ingesting knowledge into, and retrieving it from, an association
 network. The server handles structure only — understanding language,
-choosing contexts, decomposing documents into facts, and composing
+choosing contexts, decomposing segments into facts, and composing
 answers back into prose are your job.
 
 ## Model
@@ -127,7 +127,7 @@ answers back into prose are your job.
      lower it to let weak ones through. It floors only that lane:
      BM25-only hits still return (the fused score is rank arithmetic
      and has no floorable scale).
-   - "Only documents tagged X", "only documents from the last year":
+   - "Only segments tagged X", "only segments from the last year":
      pass `tags` (any-of, matched against tags stored with each
      source) and/or `since`/`until` (epoch seconds, half-open, over
      each source's `date ?? stored_at`) — the filter runs BEFORE the
@@ -147,21 +147,21 @@ answers back into prose are your job.
 
 ## Ingest loop
 
-1. Decompose the document into (subject, label, object, weight).
+1. Decompose the segment into (subject, label, object, weight).
    - **Check before mint**: `resolve` / `resolve_label` before coining
      any spelling; reuse what exists. `GET /contexts/{name}/labels`
      lists the relation vocabulary. A near-hit whose gloss shows a
      DIFFERENT thing (a lookalike, not your entity) → keep your own
      spelling and record the distinction (step 5), so the collision
      warns instead of confusing from then on.
-   - Don't re-assert paraphrases within one document (inflates
-     weight). DO re-assert across documents (that's corroboration).
+   - Don't re-assert paraphrases within one segment (inflates
+     weight). DO re-assert across segments (that's corroboration).
    - Negation: positive label, negative weight.
    - Make implicit membership explicit (whose 杜氏 is 高瀬? — add the
      edge).
-2. `POST /contexts/{name}/associations` in batches — one document per
+2. `POST /contexts/{name}/associations` in batches — one segment per
    request, up to 10,000 associations, with a `source` on every element.
-   Split a larger document across requests; for corpus-scale ingestion,
+   Split a larger segment across requests; for corpus-scale ingestion,
    use `POST /import` or `taguru import` instead.
    A single-association request still pays for a full durable write —
    roughly two orders of magnitude more per association than a batched
@@ -169,17 +169,17 @@ answers back into prose are your job.
    Batching, not concurrency, is the lever: writes to one context
    serialize by design; writes to different contexts run in parallel.
    Atomicity boundary: this call and step 3's `sources` call are
-   SEPARATE writes — a document's facts can land while its passage
+   SEPARATE writes — a segment's facts can land while its passage
    store still fails, or vice versa. When a single all-or-nothing
    write across facts, aliases, and passage for one source matters,
    use `POST /import`/`taguru import` instead (retract-then-apply,
    whole batch or nothing).
 3. Register originals: `POST /contexts/{name}/sources` (source id →
-   passage). Store the document's full text as-is: the server splits it
+   passage). Store the segment's full text as-is: the server splits it
    into paragraphs internally (blank-line boundaries) and searches at
-   paragraph granularity, so a long document does not bury its best
+   paragraph granularity, so a long segment does not bury its best
    paragraph. Blank lines between logical units are what make that
-   split work — keep them. Declare `dates` whenever the document has
+   split work — keep them. Declare `dates` whenever the segment has
    one: a source's `date ?? stored_at` is what time-windowed search —
    passage AND graph lanes alike — filters on, so a dated corpus
    answers "as of 2023" for free, and a source with no stored passage
@@ -191,7 +191,7 @@ answers back into prose are your job.
    provider), and on servers with passage embedding they also embed
    beside the paragraph and catch what its own vector misses.
 4. Audit reachability: `POST /contexts/{name}/unreachable_from` with
-   the document's main entities. Non-empty = membership edges are
+   the segment's main entities. Non-empty = membership edges are
    missing. If embeddings are configured, finish with
    `POST /contexts/{name}/embeddings/refresh` (diff-only, idempotent;
    unnecessary when the server runs `TAGURU_EMBED_AUTO`).
@@ -216,7 +216,7 @@ answers back into prose are your job.
    mis-registered spelling is withdrawn with `DELETE` on the same
    path (exact spellings; canonical names are refused — removal
    cannot unname a record), which frees it to point elsewhere.
-7. **Document updated? Sync the diff**:
+7. **Segment updated? Sync the diff**:
    `POST /contexts/{name}/sources/retract` withdraws the old version's
    contributions (weights, attributions, passage), then ingest the new
    version normally. Concepts and edges remain; only weights come
@@ -226,7 +226,7 @@ answers back into prose are your job.
    have been asserted — is withdrawn outright with
    `POST /contexts/{name}/associations/retract` `{subject, label,
    object}` (every source's contribution to that one edge; the rest of
-   each document stays). A fact the world CONTESTS is asserted with
+   each segment stays). A fact the world CONTESTS is asserted with
    negative weight instead, which preserves the dispute as evidence.
 
 ## Procedures (ordered knowledge)
@@ -343,7 +343,7 @@ Source code takes the same discipline; only the naming changes.
 | GET | `/contexts/{name}/labels` | `?limit=1000&after=label` → `{total, labels:[...]}` relation vocabulary (canonical only, keyset-paged by label) |
 | GET | `/contexts/{name}/changes` | `?since=&limit=100` → `{events:[{seq, kind, ...}], next, more}` the polling change feed: content-change events after the opaque cursor `since` (kinds: `associations_added{count}`, `association_retracted{subject,label,object}`, `aliases_added{count}`, `aliases_removed{count}`, `source_stored{source}`, `source_retracted{source}`, `schema_updated{mode}` — events aggregate per write call, so a bulk import is one `associations_added` however many lines it carried, never one event per line; one call can still emit several KINDS, e.g. an import's per-source replace is `source_retracted` + `associations_added` + `source_stored`). Omit `since` to start tailing: an empty page whose `next` is the current position — the bootstrap after a full sync. `more: true` means events past `limit` are already waiting; poll again immediately. The feed is a bounded in-memory ring, deliberately not persisted history: a server restart, a delete-and-recreate, or falling further behind than the ring retains answers 410 `stale_cursor` — run a full resync, then tail again from a fresh cursor. Cursors are opaque and node-local (a replica mints its own) |
 | GET/POST/DELETE | `/contexts/{name}/aliases` | `?limit=1000&after=concept:x\|label:x` → `{total, concepts:{alias:canonical}, labels:{...}}` (one page across both namespaces, concepts first; `after` = the last entry shown) / register `{concepts:{alias:canonical}, labels:{...}}` / withdraw `{concepts:[alias], labels:[...]}` |
-| GET/POST | `/contexts/{name}/sources` | `?limit=1000&after=id` → `{total, sources:[...], entries:[{name, stored_at?, date?, tags?}]}` registered source ids with their metadata (keyset-paged; absent metadata omits its key) / `{passages:{source:text}, questions?:{source:[{paragraph, question}]}, sections?:{source:[{paragraph, section}]}, locators?:{source:[{paragraph, locator:{kind, value}}]}, tags?:{source:[tag]}, dates?:{source:epoch_secs}}` → `{stored, questions_stored, questions_dropped, sections_stored, sections_dropped, locators_stored, locators_dropped}` (a dropped question, section, or locator named a paragraph its text's blank-line split does not have; a locator is independent of `section` and does not extend to the next paragraph; `stored_at` is stamped by the server, `date` is the document's own time; storage replaces per source wholesale, metadata included) |
+| GET/POST | `/contexts/{name}/sources` | `?limit=1000&after=id` → `{total, sources:[...], entries:[{name, stored_at?, date?, tags?}]}` registered source ids with their metadata (keyset-paged; absent metadata omits its key) / `{passages:{source:text}, questions?:{source:[{paragraph, question}]}, sections?:{source:[{paragraph, section}]}, locators?:{source:[{paragraph, locator:{kind, value}}]}, tags?:{source:[tag]}, dates?:{source:epoch_secs}}` → `{stored, questions_stored, questions_dropped, sections_stored, sections_dropped, locators_stored, locators_dropped}` (a dropped question, section, or locator named a paragraph its text's blank-line split does not have; a locator is independent of `section` and does not extend to the next paragraph; `stored_at` is stamped by the server, `date` is the segment's own time; storage replaces per source wholesale, metadata included) |
 | POST | `/contexts/{name}/sources/lookup` | `{sources:[...]}` → `{passages, missing}` |
 | POST | `/contexts/{name}/sources/search` | `{query, limit?=5, semantic_floor?, tags?, since?, until?}` → `{plan, hits:[{source, paragraph, score, text, lanes}]}` best PARAGRAPHS across passages (`paragraph` = its position in the source; `text` = that paragraph alone; `lanes.bm25`/`lanes.vector` = per-lane `{rank, score}`; `score` is rank-fused when the vector lane ran, raw BM25 otherwise; `semantic_floor` (0–1) overrides the vector lane's cosine floor for this call — context setting, then server default, otherwise — flooring only that lane; `tags` (any-of) and the half-open `[since, until)` epoch-second window over each source's `date ?? stored_at` pre-filter which sources may answer BEFORE the lanes run — a source with no tags, or with neither timestamp, never matches the respective filter kind). `plan.contexts` = one `{context, lanes:{bm25:{ran, reason?}, vector:{ran, reason?, floor?}}, filter?:{eligible_sources, total_sources}}` per context actually searched: whether each lane ran there and why not when it did not (the same wording `search/explain` uses), the vector lane's effective floor when it did, and — under a filter — how many sources were eligible of how many stored, so zero hits under a narrow filter no longer looks like "nothing matched" |
 | POST | `/sources/search` | `{contexts?:[name], groups?:[group], query, limit?=5, semantic_floor?, tags?, since?, until?}` → the same `{plan, hits}` wrap, each hit tagged with its `context`, across several contexts at once (groups resolve as in `POST /recall`) — merged by per-context rank (every context's best hit first); `score` compares within one context only; the filter applies identically to every target; `plan.contexts` carries one entry per resolved target in effective order (per-context floors and filter counts included — a context's own `semantic_floor` setting shows here) |

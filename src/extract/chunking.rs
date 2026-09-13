@@ -1,11 +1,11 @@
 //! The chunk/piece/round extraction loop: turning one chunk of
-//! document text into a validated `ChunkOutput`, including the
+//! segment text into a validated `ChunkOutput`, including the
 //! corrective-turn and ladder-splitting machinery.
 
 use super::*;
 
 /// The ladder's split rung halves a length-limited piece's cap, but
-/// never below this floor: a pathological single-line document (a
+/// never below this floor: a pathological single-line segment (a
 /// base64 blob, minified markup) would otherwise degrade toward
 /// per-character pieces. A piece at the floor that still overruns the
 /// escalated budget fails the source instead.
@@ -38,7 +38,7 @@ pub(super) struct ChunkOutput {
     /// ADR 0013: every item removed from `output` — the Stage 1
     /// mechanical pass's, and (#786) the Stage 2 prunes', each with the
     /// item the model wrote — carried here (and through the checkpoint)
-    /// so the document-level report can account for the removals of
+    /// so the segment-level report can account for the removals of
     /// reused units too, and the trace can show each loss in the
     /// original.
     pub(super) removed: Vec<Removal>,
@@ -324,7 +324,7 @@ pub(super) fn extract_chunk(
 /// (`extract_chunk_or_ladder`'s `None` branch) and every level of
 /// `extract_piece`'s split recursion: a unit is identified by its OWN
 /// text's content hash, never `chunk_index` alone, so a split
-/// sub-piece (ADR 0001 §7's Option D, which can change a document's
+/// sub-piece (ADR 0001 §7's Option D, which can change a segment's
 /// unit boundaries mid-run) is a correct, distinct cache key regardless
 /// of how it came to exist.
 pub(super) fn checkpointed_unit(checkpoints: &CheckpointStore, piece: &str) -> Option<ChunkOutput> {
@@ -438,7 +438,7 @@ pub(super) fn extract_chunk_or_ladder(
 /// recursion doesn't thread eight arguments through every level.
 /// `chunk_index`/`chunk_total` stay the ORIGINAL chunk's coordinates
 /// all the way down: a split sub-piece is still "part K of N" of the
-/// same document as far as the model is told.
+/// same segment as far as the model is told.
 pub(super) struct PieceContext<'a> {
     pub(super) completions: &'a Completions,
     pub(super) system: &'a str,
@@ -596,7 +596,7 @@ pub(super) fn extract_piece(
             // ADR 0021 (#760): under an `auto`-resolved constrained
             // rung, a piece that exhausts the ladder is first read as
             // the rung looping (a probe that passed on a tiny ask says
-            // nothing about a real document) — demote the RUN one
+            // nothing about a real segment) — demote the RUN one
             // rung and restart this piece at the ladder's top. Only a
             // piece that exhausts the ladder with nothing left to
             // demote splits. A runaway still demotes (ADR 0035 §3.3:
@@ -1143,7 +1143,7 @@ pub(super) enum AttemptOutcome {
 pub(super) fn classify_attempt(
     response: &ChatCompletion,
     rules: Option<&ItemRules>,
-    document: &str,
+    segment: &str,
     vocabulary: &HashSet<String>,
 ) -> AttemptOutcome {
     let finish_reason = response.finish_reason.as_deref();
@@ -1158,7 +1158,7 @@ pub(super) fn classify_attempt(
     if is_empty_answer(&response.content) {
         return AttemptOutcome::Empty;
     }
-    match evaluate_answer(&response.content, rules, document, vocabulary) {
+    match evaluate_answer(&response.content, rules, segment, vocabulary) {
         Ok(evaluated) => AttemptOutcome::Valid(evaluated),
         Err(AnswerFault::Syntax(error)) => AttemptOutcome::Malformed(error),
         Err(AnswerFault::Invalid(issues)) => AttemptOutcome::Invalid(issues),
@@ -1314,7 +1314,7 @@ pub(super) fn non_object_elements(value: &serde_json::Value) -> Vec<Removal> {
 /// (ADR 0013): items that cannot import as answered are removed with
 /// accounting, and only the issues removal cannot judge (a present but
 /// wrong-typed or out-of-range value) still fail the answer into a
-/// corrective turn. `document` is the document text this answer replied
+/// corrective turn. `segment` is the segment text this answer replied
 /// to — the occurrence check's haystack. `rules: None` (lossy mode)
 /// parses only and discards whatever `interpret_model_output` would
 /// have flagged, reproducing the pre-#199 behavior byte for byte: the
@@ -1323,7 +1323,7 @@ pub(super) fn non_object_elements(value: &serde_json::Value) -> Vec<Removal> {
 pub(super) fn evaluate_answer(
     content: &str,
     rules: Option<&ItemRules>,
-    document: &str,
+    segment: &str,
     vocabulary: &HashSet<String>,
 ) -> Result<EvaluatedAnswer, AnswerFault> {
     let value = candidate_json(content).map_err(AnswerFault::Syntax)?;
@@ -1341,7 +1341,7 @@ pub(super) fn evaluate_answer(
             })
         }
         Some(rules) => {
-            let evaluation = mechanical_interpret(&value, rules, document, vocabulary);
+            let evaluation = mechanical_interpret(&value, rules, segment, vocabulary);
             if evaluation.issues.is_empty() {
                 Ok(EvaluatedAnswer {
                     output: evaluation.output,

@@ -2,10 +2,10 @@
 //! parsing and the corrective turn. Items the graph could never import
 //! as answered — a required field missing or empty, an alias that maps
 //! a spelling to itself, a subject/object that never appears in the
-//! document text — are removed here, mechanically and with explicit
+//! segment text — are removed here, mechanically and with explicit
 //! accounting, instead of spending LLM corrective turns that measurably
 //! flail on exactly these shapes (the 2026-08-08 bench: five attempts,
-//! zero corrections, 53–63 s per document). The corrective turn stays,
+//! zero corrections, 53–63 s per segment). The corrective turn stays,
 //! demoted to the last resort for what removal cannot judge: a present
 //! but wrong-typed or out-of-range value is content the model can
 //! actually fix, so it keeps the ADR 0001 §8 bucket-2 path.
@@ -84,7 +84,7 @@ impl std::fmt::Display for Removal {
 /// A checkpoint written before #786 recorded each removal as its
 /// display string only; it still loads — as a `Removal` with the
 /// string split back into path/reason and no item (`Null`) — so a
-/// resumed document keeps its accounting.
+/// resumed segment keeps its accounting.
 impl<'de> Deserialize<'de> for Removal {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
@@ -116,18 +116,18 @@ impl<'de> Deserialize<'de> for Removal {
 /// same lenient walk and the same issue texts, but items whose
 /// departure is mechanically judgeable are removed (recorded in
 /// `removed`) instead of flagged, so only genuinely corrective issues
-/// survive into `issues`. `document` is the document (chunk) text the
+/// survive into `issues`. `segment` is the segment (chunk) text the
 /// model was shown — callers strip `user_message`'s preamble first
-/// (`user_message_document`), so occurrence never depends on the
+/// (`user_message_segment`), so occurrence never depends on the
 /// source path. `--lossy` never calls this (its contract is
 /// byte-for-byte the pre-#199 behavior).
 pub(super) fn mechanical_interpret(
     value: &serde_json::Value,
     rules: &ItemRules,
-    document: &str,
+    segment: &str,
     vocabulary: &HashSet<String>,
 ) -> MechanicalEvaluation {
-    let haystack = normalize_for_occurrence(document);
+    let haystack = normalize_for_occurrence(segment);
     let mut issues = Vec::new();
     let mut removed: Vec<Removal> = Vec::new();
     let empty_map = serde_json::Map::new();
@@ -193,7 +193,7 @@ pub(super) fn mechanical_interpret(
 /// item cannot carry a fact as answered. A non-object element and a
 /// missing/empty required field assert nothing (merge would drop them
 /// wholesale); a complete, issue-free item whose subject or object
-/// never appears in the document is a fabrication the corrective turn
+/// never appears in the segment is a fabrication the corrective turn
 /// cannot un-invent. Everything else — wrong-typed or oversized
 /// fields, weight/paragraph business rules — keeps its Stage 1 issue
 /// and the corrective path.
@@ -251,11 +251,11 @@ fn association_mechanically(
         return None;
     }
     // ADR 0039: a label or name written with an ideograph from another
-    // language's repertoire (`适用法律` for a document that says
+    // language's repertoire (`适用法律` for a segment that says
     // `適用法律`) is a second spelling of one term that `query`,
     // `resolve`, and the reuse vocabulary (#778) would all treat as a
     // different label — removed before it can be offered back to a
-    // later document. Every offending field of the item is named in the
+    // later segment. Every offending field of the item is named in the
     // one record, as the occurrence check below names both positions.
     // Subject and object keep ADR 0015's allowlist exactly as the
     // occurrence check applies it; a label has no allowlist.
@@ -317,12 +317,12 @@ fn association_mechanically(
                 .as_deref()
                 .expect("no absence and no issue means the field parsed");
             // ADR 0015: a spelling the target context already uses is
-            // not a fabrication, however the document spells the entity
+            // not a fabrication, however the segment spells the entity
             // — the vocabulary allowlist is consulted before removal.
             (!name_occurs(haystack, name) && !vocabulary.contains(&normalize_for_occurrence(name)))
                 .then(|| {
                     format!(
-                        "{field} {} does not appear in the document text",
+                        "{field} {} does not appear in the segment text",
                         quote_for_issue(name)
                     )
                 })
@@ -393,7 +393,7 @@ fn alias_mechanically(
         return None;
     }
     // ADR 0039, the alias-spelling half: a spelling in another
-    // language's repertoire records a form the document never uses.
+    // language's repertoire records a form the segment never uses.
     // The canonical is judged where it is asserted — the association
     // it must match.
     if let Some(spelling) = parsed.alias.as_deref() {
@@ -414,11 +414,11 @@ fn alias_mechanically(
 }
 
 /// ADR 0039 §3.1–3.2: the ideographs of `name` that are outside JIS X
-/// 0208's repertoire AND do not occur in the document — in first-
+/// 0208's repertoire AND do not occur in the segment — in first-
 /// appearance order, each once. `haystack` is the occurrence check's
 /// normal form, which leaves ideographs untouched, so containment is
-/// by character. Empty for a name in the document's own script, for a
-/// Chinese or Korean document (every character it uses is in the
+/// by character. Empty for a name in the segment's own script, for a
+/// Chinese or Korean segment (every character it uses is in the
 /// text), and for anything that is not an ideograph at all.
 pub(super) fn foreign_ideographs(name: &str, haystack: &str) -> Vec<char> {
     let mut found: Vec<char> = Vec::new();
@@ -436,7 +436,7 @@ pub(super) fn foreign_ideographs(name: &str, haystack: &str) -> Vec<char> {
 
 /// The one removal reason for every field of an item ADR 0039 flags:
 /// `label "适用法律" uses 适, object "处分" uses 处 — ideographs outside
-/// the document's script` (singular when one character in all).
+/// the segment's script` (singular when one character in all).
 fn foreign_script_reason(fields: &[(&str, &str, Vec<char>)]) -> String {
     let parts: Vec<String> = fields
         .iter()
@@ -455,10 +455,7 @@ fn foreign_script_reason(fields: &[(&str, &str, Vec<char>)]) -> String {
     } else {
         "ideographs"
     };
-    format!(
-        "{} — {noun} outside the document's script",
-        parts.join(", ")
-    )
+    format!("{} — {noun} outside the segment's script", parts.join(", "))
 }
 
 /// A required field that is mechanically absent: missing (or null —
@@ -479,7 +476,7 @@ fn field_absence(
 /// The occurrence check's normal form: every Unicode whitespace
 /// character dropped, everything lowercased. Whitespace-blind because
 /// spacing is exactly what an extractor legitimately normalizes
-/// (`"CI テストランナー"` for a document that says `"CI の テストランナー"`),
+/// (`"CI テストランナー"` for a segment that says `"CI の テストランナー"`),
 /// and language-independent by construction — no tokenizer, no
 /// dictionary (that is S2's territory).
 pub(super) fn normalize_for_occurrence(text: &str) -> String {
@@ -491,7 +488,7 @@ pub(super) fn normalize_for_occurrence(text: &str) -> String {
 
 /// A covering run shorter than this asserts nothing — single shared
 /// characters would let any name assemble itself out of an unrelated
-/// document's alphabet.
+/// segment's alphabet.
 const OCCURRENCE_MIN_RUN: usize = 2;
 
 /// Below this many characters a name must appear verbatim — a short
@@ -501,7 +498,7 @@ const OCCURRENCE_VERBATIM_MAX: usize = 3;
 
 /// Coverage threshold, as a ratio: at least 3/4 of the name's
 /// characters must be covered by runs of [`OCCURRENCE_MIN_RUN`]+
-/// characters that appear in the document. High enough that a
+/// characters that appear in the segment. High enough that a
 /// fabricated entity sharing one fragment fails, low enough that a
 /// particle dropped from a Japanese compound (`"プール最大接続数"` built
 /// from `"プールの最大接続数"`) still passes.
@@ -517,7 +514,7 @@ const OCCURRENCE_COVERAGE_DEN: usize = 4;
 const SPARSE_WORD_MIN_RUN: usize = 3;
 
 /// … or as a stem at least this long inside a longer word — the
-/// inflected or pluralized form the document has (`selects` for
+/// inflected or pluralized form the segment has (`selects` for
 /// `selection`, `recommendation` for `recommendations`). Two-letter
 /// runs are [`OCCURRENCE_MIN_RUN`]'s unit for ideographs, where each
 /// character is a morpheme; in a sparse script the morpheme is the
@@ -586,11 +583,11 @@ fn is_dense_script(c: char) -> bool {
         )
 }
 
-/// Where a run of a sparse-script name's characters that the document
+/// Where a run of a sparse-script name's characters that the segment
 /// contains must stop (ADR 0036 §3.2): a run of letters never crosses
 /// a word boundary of the name, so it is cut after the first word end
 /// inside it — the cover then takes the longest run WITHIN the word
-/// (`prediction` still counts when the document goes on with `heads`
+/// (`prediction` still counts when the segment goes on with `heads`
 /// and the name with `head insertion`), and letters of two adjacent
 /// words never assemble a stem neither word has (`ab cd ef` against
 /// `abcde`). A run holding a digit or symbol is left whole, as under
@@ -605,7 +602,7 @@ fn clip_at_word_end(run: &[OccurrenceGlyph]) -> usize {
 }
 
 /// Whether a run of a sparse-script name's characters that the
-/// document contains counts toward coverage (ADR 0036): any run
+/// segment contains counts toward coverage (ADR 0036): any run
 /// holding a digit or symbol does, as under ADR 0013 (`20→100`,
 /// `v1.2`); a run of letters only as a whole word of the name of
 /// [`SPARSE_WORD_MIN_RUN`]+ letters or a stem of
@@ -618,9 +615,9 @@ fn sparse_run_counts(run: &[OccurrenceGlyph]) -> bool {
         || (run.len() >= SPARSE_WORD_MIN_RUN && run[0].word_start && run[run.len() - 1].word_end)
 }
 
-/// Whether a subject/object name plausibly appears in the document:
+/// Whether a subject/object name plausibly appears in the segment:
 /// verbatim substring after normalization, or — for names long enough
-/// to judge — greedy coverage by document substrings. Deterministic,
+/// to judge — greedy coverage by segment substrings. Deterministic,
 /// dictionary-free, same answer every attempt; the corrective loop's
 /// nondeterminism is exactly what this replaces (#496). A name with
 /// no dense-script character is judged by words and stems, not
@@ -641,7 +638,7 @@ pub(super) fn name_occurs(haystack: &str, name: &str) -> bool {
     }
     let sparse_script = !glyphs.iter().any(|glyph| is_dense_script(glyph.ch));
     // Greedy left-to-right cover: at each position take the longest
-    // run that appears in the document (containment is monotone in
+    // run that appears in the segment (containment is monotone in
     // run length, so the longest run binary-searches), count it if it
     // meets the minimum, then continue after it.
     let mut covered = 0usize;
@@ -729,7 +726,7 @@ pub(super) fn prune_unresolvable_aliases(outputs: &mut [ChunkOutput]) -> usize {
     count
 }
 
-/// Issue #758: the names earlier documents of this run — and the
+/// Issue #758: the names earlier segments of this run — and the
 /// `--vocabulary` `context` — already settled on, per namespace, each
 /// spelling mapped to the record it resolves to: a subject/object or
 /// alias canonical to itself, an alias spelling to its canonical.
@@ -767,7 +764,7 @@ impl ClaimedNames {
         }
     }
 
-    /// Records what a document this run just wrote will intern.
+    /// Records what a segment this run just wrote will intern.
     pub(super) fn absorb_extraction(&mut self, extraction: &Extraction) {
         for fact in &extraction.associations {
             claim_name(&mut self.concepts, &fact.subject);
@@ -778,9 +775,9 @@ impl ClaimedNames {
         claim_aliases(&mut self.labels, &extraction.labels);
     }
 
-    /// Records what a manifest-skipped document's already-written
+    /// Records what a manifest-skipped segment's already-written
     /// batch interns — the same names `absorb_vocabulary` rereads for
-    /// the label prompt, so a skipped document claims exactly what a
+    /// the label prompt, so a skipped segment claims exactly what a
     /// freshly written one does.
     pub(super) fn absorb_batch(&mut self, batch: &crate::ingest::Batch) {
         for [subject, label, object] in batch.association_triples() {
@@ -825,14 +822,14 @@ fn claim_aliases(namespace: &mut BTreeMap<String, String>, aliases: &BTreeMap<St
     }
 }
 
-/// Issue #758: an alias whose spelling an EARLIER document of this run
+/// Issue #758: an alias whose spelling an EARLIER segment of this run
 /// (or the `--vocabulary` `context`) already interned as a different
 /// record cannot import — `add_alias` refuses the rewire, and the 409
 /// stops the whole import stream — so it is removed with accounting,
 /// alongside [`prune_unresolvable_aliases`]. Mechanical, not
-/// corrective: the in-document shadowing check stays corrective
+/// corrective: the in-segment shadowing check stays corrective
 /// because the model can re-judge its OWN associations, but it can
-/// never un-claim a name a previous document settled on. The same
+/// never un-claim a name a previous segment settled on. The same
 /// mapping claimed twice (spelling already resolving to this very
 /// canonical) is import's idempotent no-op and survives.
 pub(super) fn prune_claimed_aliases(outputs: &mut [ChunkOutput], claimed: &ClaimedNames) -> usize {
@@ -863,7 +860,7 @@ pub(super) fn prune_claimed_aliases(outputs: &mut [ChunkOutput], claimed: &Claim
             removed.push(Removal::new(
                 path,
                 format!(
-                    "alias {} already names a {kind} an earlier document or the target \
+                    "alias {} already names a {kind} an earlier segment or the target \
                      context settled on; an alias cannot rewire it (import would refuse the \
                      batch)",
                     quote_for_issue(spelling)
@@ -892,9 +889,9 @@ pub(super) fn alias_issue_index(issue: &str) -> Option<usize> {
 /// that still names the reserved type label — are removed here with
 /// accounting, the ADR 0013 way: an alias records a spelling variant,
 /// never a fact, so losing it loses nothing the consolidation audit
-/// cannot propose later (the same ruling #758 made for cross-document
+/// cannot propose later (the same ruling #758 made for cross-segment
 /// shadowing), while failing the whole source over it lost every fact
-/// the document held. Anything that is NOT an alias item (a schema
+/// the segment held. Anything that is NOT an alias item (a schema
 /// domain/range violation on an association) is content, and keeps
 /// ADR 0001 §8's ruling: `Err` with that output's issues, the caller
 /// fails the source. Indices are removed highest-first within an

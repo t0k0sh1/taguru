@@ -2,8 +2,8 @@
 //! (ADR 0031 §3.1). Holds the run's identity and attempt counter —
 //! moved off `ChatClient`, which stays a thin `/chat/completions`
 //! transport that `taguru communities`/`consolidation` also use
-//! directly and unaffected by any of this — plus, per document
-//! (`Completions::begin_document`), the `ReplayIndex` a replay run
+//! directly and unaffected by any of this — plus, per segment
+//! (`Completions::begin_segment`), the `ReplayIndex` a replay run
 //! consults before ever reaching `client`.
 
 use super::*;
@@ -24,14 +24,14 @@ pub(super) struct Completions {
     /// Shared across `--parallel` workers through the `&Completions`
     /// they already share.
     attempts: std::sync::atomic::AtomicU64,
-    /// This document's index (ADR 0031 §3.1/§3.4), set by
-    /// [`Completions::begin_document`] before its pieces are
+    /// This segment's index (ADR 0031 §3.1/§3.4), set by
+    /// [`Completions::begin_segment`] before its pieces are
     /// dispatched — `None` off `--replay` and, briefly, before the
-    /// first document of a replaying run begins.
+    /// first segment of a replaying run begins.
     replay: Option<ReplayIndex>,
     replay_mode: ReplayMode,
-    /// This document's completion counts (reset by
-    /// [`Completions::begin_document`]) — the source of the
+    /// This segment's completion counts (reset by
+    /// [`Completions::begin_segment`]) — the source of the
     /// `replayed N/M completions (K live)` line and the
     /// `replay_summary` record.
     replayed: std::sync::atomic::AtomicU64,
@@ -55,20 +55,20 @@ impl Completions {
         &self.run_id
     }
 
-    /// Resets this value for the document about to run: installs its
+    /// Resets this value for the segment about to run: installs its
     /// `ReplayIndex` (or none, off `--replay`) and zeroes the
-    /// replayed/live counters. Called from `Run::extract_document`
-    /// (`&mut self` there — sequential across documents, so no
-    /// `--parallel` worker of a PRIOR document can still be reading
+    /// replayed/live counters. Called from `Run::extract_segment`
+    /// (`&mut self` there — sequential across segments, so no
+    /// `--parallel` worker of a PRIOR segment can still be reading
     /// the index it replaces).
-    pub(super) fn begin_document(&mut self, replay: Option<ReplayIndex>, mode: ReplayMode) {
+    pub(super) fn begin_segment(&mut self, replay: Option<ReplayIndex>, mode: ReplayMode) {
         self.replay = replay;
         self.replay_mode = mode;
         self.replayed.store(0, std::sync::atomic::Ordering::Relaxed);
         self.live.store(0, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// ADR 0031 §3.6: this document's system-prompt pin decision —
+    /// ADR 0031 §3.6: this segment's system-prompt pin decision —
     /// `NoRecord` off `--replay` (nothing recorded to pin from).
     pub(super) fn pinned_system(&self) -> SystemPinDecision<'_> {
         self.replay
@@ -77,8 +77,8 @@ impl Completions {
             .unwrap_or(SystemPinDecision::NoRecord)
     }
 
-    /// This document's `(replayed, live)` counts so far.
-    pub(super) fn document_counts(&self) -> (u64, u64) {
+    /// This segment's `(replayed, live)` counts so far.
+    pub(super) fn segment_counts(&self) -> (u64, u64) {
         (
             self.replayed.load(std::sync::atomic::Ordering::Relaxed),
             self.live.load(std::sync::atomic::Ordering::Relaxed),
@@ -102,7 +102,7 @@ impl Completions {
         }
     }
 
-    /// Tries this document's `ReplayIndex` first (a hit needs no HTTP
+    /// Tries this segment's `ReplayIndex` first (a hit needs no HTTP
     /// call at all); on a miss, `--replay auto` falls through to
     /// `client` exactly as an unreplayed run would, and `--replay
     /// strict` fails this completion instead — reported on stderr with
@@ -151,10 +151,10 @@ impl Completions {
 /// recorded attempts, none match" plus the first turn that differs,
 /// when a comparison was possible (ADR 0031 §3.2's diagnosability
 /// point). Names each side's turn by role and `sha256` only, never by
-/// content: this message reaches stderr, a failed document's
+/// content: this message reaches stderr, a failed segment's
 /// `ChatError`, and from there the diagnostics sidecar's
 /// `parse_error` — all metadata by design (ADR 0001 §10). The
-/// document text stays exclusively in the attempts log's own
+/// segment text stays exclusively in the attempts log's own
 /// `messages`.
 fn describe_miss(diagnostic: &MissDiagnostic) -> String {
     let piece_id = &diagnostic.piece_id;

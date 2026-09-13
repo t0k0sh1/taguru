@@ -37,7 +37,7 @@
       <div class="side-group-label">Reference</div>
       <a href="schema.html"><code>context</code> schema</a>
       <a href="import.html">Batch import</a>
-      <a href="extract.html">Document extraction</a>
+      <a href="extract.html">Segment extraction</a>
       <a href="taguru-code.html">Code map (taguru-code)</a>
       <a href="connectors.html">Ingest connectors</a>
       <a href="benchmark.html">Extraction benchmark</a>
@@ -178,7 +178,7 @@ curl -X POST localhost:8248/contexts/sake/activate -H 'Content-Type: application
     </p>
     <p class="note warn">
       The one-fact request above is only the smallest example. In an ingest loop, collect one
-      document's facts and send them in one <code>/associations</code> request (up to 10,000
+      segment's facts and send them in one <code>/associations</code> request (up to 10,000
       associations): every request pays for a durable write and stalls that <code>context</code>'s readers
       while its fsync lands, making single-fact calls roughly two orders of magnitude more
       expensive per association than batches. More concurrency does not help one <code>context</code> — its
@@ -251,11 +251,11 @@ curl -X POST localhost:8248/import -H 'Authorization: Bearer &lt;key&gt;' \
       concurrency rules — is in the <a href="import.html">batch import reference</a>.
     </p>
 
-    <h3>Producing batch files from documents — <code>taguru extract</code></h3>
+    <h3>Producing batch files from segments — <code>taguru extract</code></h3>
     <p>
       <code>taguru extract</code> is an offline producer: it has an OpenAI-compatible chat model
       read <code>.md</code>/<code>.txt</code> files, decompose them into associations under the
-      <code>/protocol</code> discipline, and writes one batch file per document.
+      <code>/protocol</code> discipline, and writes one batch file per segment.
       The server still never holds model credentials — <code>TAGURU_EXTRACT_*</code> lives only in
       the extraction process's environment.
     </p>
@@ -264,7 +264,7 @@ TAGURU_EXTRACT_MODEL=gpt-4.1 TAGURU_EXTRACT_API_KEY=$KEY \
 taguru extract --context sake --description "酒蔵の知識" --out batches/ docs/
 taguru import batches/</code></pre>
     <ul>
-      <li>The manifest in <code>--out</code> records "content × model × prompt version × <code>context</code>" and skips unchanged documents (<code>--force</code> overrides). A nightly extract→import run pays model calls only for what changed.</li>
+      <li>The manifest in <code>--out</code> records "content × model × prompt version × <code>context</code>" and skips unchanged segments (<code>--force</code> overrides). A nightly extract→import run pays model calls only for what changed.</li>
       <li><code>--questions N</code> is doc2query: up to N retrieval questions per paragraph ride along. Their terms index into the paragraph's BM25 postings on every server, and a server with <code>TAGURU_EMBED_PASSAGES</code> also embeds them next to their paragraphs — either way, question-shaped searches land on answer-shaped text.</li>
       <li>Model output is not trusted; the contract is enforced on this side of the wire — invalid items are dropped and counted, and every file is re-validated with the import parser before it is written. Extract cannot produce a file import would reject.</li>
       <li>Running against a local model (Ollama etc.): <b>thinking mode OFF</b> (reasoning tokens devour the time budget), <b>a real context window</b> (<code>num_ctx 16384</code> — leaving 4k silently truncates and only quality drops), a timeout matched to the hardware via <code>TAGURU_EXTRACT_TIMEOUT_SECS</code>, and <code>--force</code> after re-pointing a serving alias — the manifest trusts the <b>model name</b>.</li>
@@ -272,7 +272,7 @@ taguru import batches/</code></pre>
     <p>
       What the prompt asks and what is enforced, chunking, manifest details, the trust model,
       and measured quality per model class are in the
-      <a href="extract.html">document extraction reference</a>. For a corpus large enough that
+      <a href="extract.html">segment extraction reference</a>. For a corpus large enough that
       one run spans hours or several short-lived instances, see
       <a href="long-running.html">long-running ingestion</a>: bounded run windows, interrupt and
       resume, and torn-import recovery.
@@ -289,7 +289,7 @@ taguru import batches/</code></pre>
     <h3>Local (stdio bridge)</h3>
     <pre><code>claude mcp add taguru -e TAGURU_URL=http://127.0.0.1:8248 -- taguru-mcp</code></pre>
     <p>
-      That alone makes "ingest the documents in this folder into the sake <code>context</code>" and
+      That alone makes "ingest the segments in this folder into the sake <code>context</code>" and
       "tell me about 青嶺酒造, with sources" work as the loop of directory pick → resolve →
       describe/query/activate → citation. A real round trip is traced in the
       <a href="mcp-rag-walkthrough.html">walkthrough</a>.

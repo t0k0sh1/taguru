@@ -154,7 +154,7 @@ pub(crate) fn run(args: &[String]) -> i32 {
         }
     };
 
-    let mut documents: BTreeMap<String, DocumentReport> = BTreeMap::new();
+    let mut segments: BTreeMap<String, SegmentReport> = BTreeMap::new();
     let mut skipped = 0usize;
     // A file that cannot be read or parsed no longer stops the run
     // (#864): it is named, counted, and the other files are judged.
@@ -208,13 +208,13 @@ pub(crate) fn run(args: &[String]) -> i32 {
                 }
             })
             .collect();
-        // Two inputs can hold the same source (the same document
+        // Two inputs can hold the same source (the same segment
         // extracted into two out-dirs); totals count both, so the
         // table must list both — disambiguate by the batch file's
         // directory, with a warning, exactly as
         // scripts/extract_metrics.py does for its trace aggregation.
         let mut key = batch.source.clone();
-        if documents.contains_key(&key) {
+        if segments.contains_key(&key) {
             let parent = file
                 .parent()
                 .and_then(Path::file_name)
@@ -228,27 +228,27 @@ pub(crate) fn run(args: &[String]) -> i32 {
                 batch.source
             );
         }
-        documents.insert(
+        segments.insert(
             key,
-            DocumentReport {
+            SegmentReport {
                 context: batch.context.clone(),
                 counts: judged.counts,
                 unanchored,
             },
         );
     }
-    if documents.is_empty() {
+    if segments.is_empty() {
         eprintln!("taguru: anchoring: no batch with a passage to judge");
         return 1;
     }
 
     let mut totals = Counts::default();
-    for document in documents.values() {
-        totals.add(&document.counts);
+    for segment in segments.values() {
+        totals.add(&segment.counts);
     }
-    print_table(&documents, &totals, skipped);
-    for (source, document) in &documents {
-        for line in listing_lines(source, document, list) {
+    print_table(&segments, &totals, skipped);
+    for (source, segment) in &segments {
+        for line in listing_lines(source, segment, list) {
             println!("{line}");
         }
     }
@@ -260,7 +260,7 @@ pub(crate) fn run(args: &[String]) -> i32 {
     }
     if let Some(path) = json_out {
         let report = Report {
-            documents: &documents,
+            segments: &segments,
             totals: &totals,
             skipped_no_passage: skipped,
             failed: &failed,
@@ -274,7 +274,7 @@ pub(crate) fn run(args: &[String]) -> i32 {
     if failed.is_empty() { 0 } else { 1 }
 }
 
-/// How many named associations stdout lists per document by default —
+/// How many named associations stdout lists per segment by default —
 /// `evaluate`'s "first three, then a count" precedent; `--json` is
 /// never capped.
 const DEFAULT_LIST: usize = 3;
@@ -305,16 +305,16 @@ fn association_lines(path: &Path) -> Vec<usize> {
         .collect()
 }
 
-/// One document's named associations for stdout: a header line with
+/// One segment's named associations for stdout: a header line with
 /// the counts by reason, then the first `cap` associations as
 /// `  line N: subject —[label]→ object (paragraph P): reason`, then
-/// `  … and M more` when the cap cut the list. Nothing for a document
+/// `  … and M more` when the cap cut the list. Nothing for a segment
 /// with nothing to name, or when `cap` is 0.
-fn listing_lines(source: &str, document: &DocumentReport, cap: usize) -> Vec<String> {
-    if cap == 0 || document.unanchored.is_empty() {
+fn listing_lines(source: &str, segment: &SegmentReport, cap: usize) -> Vec<String> {
+    if cap == 0 || segment.unanchored.is_empty() {
         return Vec::new();
     }
-    let items = &document.unanchored;
+    let items = &segment.unanchored;
     let unanchored = items.iter().filter(|item| !item.with_aliases).count();
     let alias_only = items
         .iter()
@@ -423,7 +423,7 @@ fn harvest_aliases(path: &Path) -> Result<Vec<(String, String)>, String> {
     Ok(aliases)
 }
 
-/// The judged counts for one document. Rates are derived at
+/// The judged counts for one segment. Rates are derived at
 /// serialization so the JSON carries both counts and rates.
 #[derive(Default, Serialize)]
 struct Counts {
@@ -467,7 +467,7 @@ impl Counts {
 }
 
 #[derive(Serialize)]
-struct DocumentReport {
+struct SegmentReport {
     context: String,
     #[serde(flatten)]
     counts: Counts,
@@ -559,7 +559,7 @@ struct Judged {
 
 #[derive(Serialize)]
 struct Report<'a> {
-    documents: &'a BTreeMap<String, DocumentReport>,
+    segments: &'a BTreeMap<String, SegmentReport>,
     totals: &'a Counts,
     skipped_no_passage: usize,
     /// Batch files that could not be read or parsed, by path (#864) —
@@ -638,7 +638,7 @@ impl AliasGroups {
     }
 }
 
-/// One document's counts (see the module doc for the definitions).
+/// One segment's counts (see the module doc for the definitions).
 fn judge(
     passage: &str,
     associations: &[crate::registry::AssocOp],
@@ -705,7 +705,7 @@ fn judge(
     Judged { counts, verdicts }
 }
 
-fn print_table(documents: &BTreeMap<String, DocumentReport>, totals: &Counts, skipped: usize) {
+fn print_table(segments: &BTreeMap<String, SegmentReport>, totals: &Counts, skipped: usize) {
     let rate = |numerator: usize, denominator: usize| -> String {
         if denominator == 0 {
             "-".to_string()
@@ -714,8 +714,8 @@ fn print_table(documents: &BTreeMap<String, DocumentReport>, totals: &Counts, sk
         }
     };
     println!("source\tassocs\tstrict\twith_aliases\tlocator_validity");
-    for (source, document) in documents {
-        let counts = &document.counts;
+    for (source, segment) in segments {
+        let counts = &segment.counts;
         println!(
             "{source}\t{}\t{}\t{}\t{}",
             counts.associations,
@@ -983,12 +983,12 @@ mod tests {
         );
     }
 
-    /// The per-document block: a header counting each reason, the
+    /// The per-segment block: a header counting each reason, the
     /// first `cap` items, and the remainder line only past the cap;
-    /// nothing at all for a clean document or a cap of 0.
+    /// nothing at all for a clean segment or a cap of 0.
     #[test]
     fn listing_lines_cap_and_count_by_reason() {
-        let document = DocumentReport {
+        let segment = SegmentReport {
             context: "c".to_string(),
             counts: Counts::default(),
             unanchored: vec![
@@ -998,7 +998,7 @@ mod tests {
                 named(Some(5), false, false, None),
             ],
         };
-        let lines = listing_lines("a.md", &document, 2);
+        let lines = listing_lines("a.md", &segment, 2);
         assert_eq!(
             lines,
             vec![
@@ -1009,14 +1009,14 @@ mod tests {
             ]
         );
         assert_eq!(
-            listing_lines("a.md", &document, 4).len(),
+            listing_lines("a.md", &segment, 4).len(),
             5,
             "exactly at the cap: no remainder"
         );
-        assert!(listing_lines("a.md", &document, 0).is_empty());
+        assert!(listing_lines("a.md", &segment, 0).is_empty());
         // A reason with a zero count is left out of the header, not
         // printed as "0 alias-only".
-        let one_reason = DocumentReport {
+        let one_reason = SegmentReport {
             context: "c".to_string(),
             counts: Counts::default(),
             unanchored: vec![named(Some(2), false, false, None)],
@@ -1025,7 +1025,7 @@ mod tests {
             listing_lines("a.md", &one_reason, 3)[0],
             "a.md: 1 unanchored"
         );
-        let alias_and_locator = DocumentReport {
+        let alias_and_locator = SegmentReport {
             context: "c".to_string(),
             counts: Counts::default(),
             unanchored: vec![named(Some(2), false, true, Some(false))],
@@ -1034,7 +1034,7 @@ mod tests {
             listing_lines("a.md", &alias_and_locator, 3)[0],
             "a.md: 1 alias-only, 1 invalid locator(s)"
         );
-        let clean = DocumentReport {
+        let clean = SegmentReport {
             context: "c".to_string(),
             counts: Counts::default(),
             unanchored: Vec::new(),
