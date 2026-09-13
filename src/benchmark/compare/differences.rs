@@ -174,7 +174,7 @@ struct KeyBlock {
 /// unless `--with-text` was given.
 #[derive(Clone, Serialize)]
 struct Locator {
-    document_id: String,
+    segment_id: String,
     source: String,
     segment_sha256: String,
     paragraph: Option<u64>,
@@ -429,7 +429,7 @@ impl TextResolver {
 
 fn build_locator(
     document: &super::super::SegmentInfo,
-    document_id: &str,
+    segment_id: &str,
     a_presence: Option<&identity::KeyPresence>,
     b_presence: Option<&identity::KeyPresence>,
     text_resolver: &mut TextResolver,
@@ -450,7 +450,7 @@ fn build_locator(
     let (chunk_index, chunk_sha256) = derive_chunk(document, paragraph);
     let (text, text_truncated) = text_resolver.resolve(document, paragraph)?;
     Ok(Locator {
-        document_id: document_id.to_string(),
+        segment_id: segment_id.to_string(),
         source: document.path.clone(),
         segment_sha256: document.sha256.clone(),
         paragraph,
@@ -464,9 +464,9 @@ fn build_locator(
 /// Alias lines carry no paragraph locator of their own (`render_batch`
 /// never attaches one) — `alias_resolution_difference` records point at
 /// the document only.
-fn alias_locator(document: &super::super::SegmentInfo, document_id: &str) -> Locator {
+fn alias_locator(document: &super::super::SegmentInfo, segment_id: &str) -> Locator {
     Locator {
-        document_id: document_id.to_string(),
+        segment_id: segment_id.to_string(),
         source: document.path.clone(),
         segment_sha256: document.sha256.clone(),
         paragraph: None,
@@ -552,7 +552,7 @@ pub(super) fn compute_differences(
         doc_ids.extend(side_b_docs.keys());
 
         // Pass 1: segment_coverage for every document either side
-        // attempted, in document_id order.
+        // attempted, in segment_id order.
         let mut eligible: Vec<&String> = Vec::new();
         for doc_id in &doc_ids {
             if !documents_by_id.contains_key(doc_id.as_str()) {
@@ -744,7 +744,7 @@ pub(super) fn compute_differences(
         }
 
         // Pass 3: alias_resolution_difference across every eligible
-        // document, sorted by (document_id, alias_kind, spelling).
+        // document, sorted by (segment_id, alias_kind, spelling).
         for doc_id in &eligible {
             let document = documents_by_id[doc_id.as_str()];
             let a_side = &side_a_docs[doc_id.as_str()];

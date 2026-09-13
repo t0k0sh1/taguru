@@ -358,7 +358,7 @@ fn resolve_expected_source_path_prefers_an_exact_path_match() {
 }
 
 #[test]
-fn resolve_expected_source_path_falls_back_to_a_document_id_match() {
+fn resolve_expected_source_path_falls_back_to_a_segment_id_match() {
     let docs = [doc("brand-001", "corpus/a.md")];
     let (resolved, warning) = resolve_expected_source_path("brand-001", &docs);
     assert_eq!(resolved, "corpus/a.md");

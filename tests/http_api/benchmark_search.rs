@@ -45,7 +45,7 @@ fn write_results_dir(tag: &str) -> PathBuf {
     .unwrap();
 
     let manifest = json!({
-        "taguru_benchmark_manifest": 1,
+        "taguru_benchmark_manifest": 2,
         "run_id": "run-search-1",
         "started_at": "2026-07-26T09:00:00Z",
         "finished_at": "2026-07-26T09:05:00Z",
@@ -150,7 +150,7 @@ fn write_two_run_results_dir(tag: &str) -> PathBuf {
     };
 
     let manifest = json!({
-        "taguru_benchmark_manifest": 1,
+        "taguru_benchmark_manifest": 2,
         "run_id": "run-search-two-run",
         "started_at": "2026-07-26T09:00:00Z",
         "finished_at": "2026-07-26T09:05:00Z",

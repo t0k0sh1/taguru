@@ -1332,7 +1332,7 @@ taguru extract --context ops --out batches/ --redact --redact-rules redact-rules
       with <code>--compare</code> for run-to-run deltas); <code>--help</code> documents the
       ledger and price inputs. A segment that failed leaves an attempts log and no trace
       (there was no batch to trace); the tables count it under <code>failed</code>, apart
-      from <code>docs</code>, with its attempts, moves, and cost in every scope's sums and its
+      from <code>segments</code>, with its attempts, moves, and cost in every scope's sums and its
       quality columns empty — so the cost of failing is part of the run's cost, not invisible.
       Joins: item → piece by <code>piece_id</code>; piece → chunk by <code>chunk_index</code> or
       <code>chunk_sha256</code>; piece → the sidecar's <code>attempt</code> record by

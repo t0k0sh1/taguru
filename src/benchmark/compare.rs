@@ -41,7 +41,7 @@ mod differences;
 // is a documented stamp rather than something any code gates on today.
 const BENCHMARK_MEASUREMENTS_VERSION: u64 = 2;
 
-/// `segment_id` is the current field name (#851/#904); `segment_id` is
+/// `segment_id` is the current field name (#851/#904); `document_id` is
 /// what every runs file written before the rename carries. Centralized
 /// so the two read sites treat both alike instead of one silently
 /// drifting from the other.

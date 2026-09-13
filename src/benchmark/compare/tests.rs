@@ -1870,7 +1870,7 @@ fn differences_segment_coverage_marks_a_document_only_one_side_completed() {
         "surface_form_variation",
     ] {
         for record in records_of_kind(&lines, kind) {
-            assert_ne!(record["locator"]["document_id"], "sake", "kind={kind}");
+            assert_ne!(record["locator"]["segment_id"], "sake", "kind={kind}");
         }
     }
 
@@ -2071,7 +2071,7 @@ fn differences_locator_selects_the_minimum_paragraph_and_derives_its_chunk() {
         .find(|r| r["key"]["label"] == "founded in")
         .unwrap();
     let locator = &founded_in["locator"];
-    assert_eq!(locator["document_id"], "brewery");
+    assert_eq!(locator["segment_id"], "brewery");
     assert_eq!(locator["source"], "corpus/brewery.md");
     assert_eq!(locator["segment_sha256"], "sha-brewery");
     assert_eq!(locator["paragraph"], 2);

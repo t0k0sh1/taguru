@@ -231,7 +231,7 @@
       <table>
         <thead><tr><th>Stop</th><th>What survives</th><th>What a rerun does</th></tr></thead>
         <tbody>
-          <tr><td>First signal (safe stop)</td><td>every chunk checkpointed before the signal, plus every segment/source already imported</td><td>resumes the in-flight segment mid-chunk; re-attempts nothing already checkpointed or imported</td></tr>
+          <tr><td>First signal (safe stop)</td><td>every chunk completed and checkpointed before the process stops, including the in-flight chunk, plus every segment/source already imported</td><td>resumes the in-flight segment from the next uncheckpointed chunk; re-attempts nothing already checkpointed or imported</td></tr>
           <tr><td>Second signal (immediate stop)</td><td>same as above, minus whatever chunk was in flight at that exact instant (discarded, not partially checkpointed)</td><td>re-attempts only that one in-flight chunk; everything earlier still resumes</td></tr>
           <tr><td><code>kill -9</code> (no cooperation possible)</td><td>same as the second signal — the process never sees the request to stop, but nothing durable was ever written mid-chunk in the first place</td><td>identical to the second-signal case above</td></tr>
         </tbody>

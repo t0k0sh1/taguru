@@ -952,7 +952,7 @@ impl ExpectedItem {
 
 /// Resolves one `expected_sources[].source` string against the
 /// manifest's segment dictionary: (a) an exact `path` match, (b) a
-/// `document_id` match, (c) a unique path-suffix match. A hit's own
+/// `segment_id` match, (c) a unique path-suffix match. A hit's own
 /// `source` is always exactly a manifest `path` (the corpus rewrite
 /// leaves `source` untouched — only `context` changes), so (a) is the
 /// common case; (b)/(c) exist for a hand-written `eval.jsonl` that
@@ -982,7 +982,7 @@ fn resolve_expected_source_path(
         [] => (
             expected.to_string(),
             Some(format!(
-                "expected_sources source '{expected}' matches no segment path, document_id, \
+                "expected_sources source '{expected}' matches no segment path, segment_id, \
                  or unique path suffix in this results directory's manifest — it can never \
                  match a hit"
             )),

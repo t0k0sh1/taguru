@@ -523,16 +523,22 @@ def dig(mapping: dict, path: tuple) -> float | None:
 
 
 def compare(current: dict, baseline: dict) -> dict:
-    shared = sorted(set(current["segments"]) & set(baseline["segments"]))
-    only_current = sorted(set(current["segments"]) - set(baseline["segments"]))
-    only_baseline = sorted(set(baseline["segments"]) - set(current["segments"]))
+    # `baseline` may be a --json report a pre-#851/#904 build wrote,
+    # with its per-segment table still keyed "documents" at the top
+    # level — read via the old name too so an existing baseline file
+    # keeps comparing instead of a KeyError.
+    current_segments = current.get("segments", current.get("documents", {}))
+    baseline_segments = baseline.get("segments", baseline.get("documents", {}))
+    shared = sorted(set(current_segments) & set(baseline_segments))
+    only_current = sorted(set(current_segments) - set(baseline_segments))
+    only_baseline = sorted(set(baseline_segments) - set(current_segments))
     rows, verdicts = {}, {}
     for path, direction, label in COMPARE_KEYS:
         improved = worsened = unchanged = 0
         deltas = {}
         for source in shared:
-            now = dig(current["segments"][source]["metrics"], path)
-            was = dig(baseline["segments"][source]["metrics"], path)
+            now = dig(current_segments[source]["metrics"], path)
+            was = dig(baseline_segments[source]["metrics"], path)
             if now is None or was is None:
                 continue
             delta = now - was
@@ -927,6 +933,15 @@ def self_test() -> int:
         verdicts = compare(report, baseline)["verdicts"]
         if verdicts["assoc loss"]["improved"] != 1 or verdicts["seconds"]["worsened"] != 1:
             print(f"self-test compare failed: {verdicts}")
+            return 1
+        # compare: a pre-#851/#904 baseline whose per-segment table is
+        # still keyed "documents" must compare the same as one already
+        # renamed to "segments".
+        old_baseline = json.loads(json.dumps(baseline))
+        old_baseline["documents"] = old_baseline.pop("segments")
+        old_verdicts = compare(report, old_baseline)["verdicts"]
+        if old_verdicts != verdicts:
+            print(f"self-test compare old-format baseline failed: {old_verdicts}")
             return 1
         rendered = markdown(report)
         if "| f.md (failed) | 0 | 1 |" not in rendered or "`failed`:" not in rendered:
