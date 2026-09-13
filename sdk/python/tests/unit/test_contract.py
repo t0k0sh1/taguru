@@ -16,7 +16,12 @@ import pytest
 
 import taguru
 from taguru import IncompatibleServerError, TransportError
-from taguru._contract import SUPPORTED_HTTP_CONTRACTS, ServerContract, incompatibility
+from taguru._contract import (
+    SUPPORTED_HTTP_CONTRACTS,
+    ServerContract,
+    incompatibility,
+    parse_version_body,
+)
 
 from .conftest import async_client, ok_response, sync_client
 
@@ -412,3 +417,17 @@ def test_incompatibility_generic_remedy_when_neither_side_is_plainly_older() -> 
         "Upgrade or downgrade one side to a pair that shares a contract version; "
         "this SDK's range is declared as taguru.SUPPORTED_HTTP_CONTRACTS."
     )
+
+
+def test_parse_version_body_normalizes_a_non_string_server_to_none() -> None:
+    seen = parse_version_body({"server": 6, "http_contract": {"current": 1, "supported": [1]}})
+    assert seen is not None
+    assert seen.server is None
+
+
+def test_parse_version_body_keeps_a_string_server_as_is() -> None:
+    seen = parse_version_body(
+        {"server": "0.6.0", "http_contract": {"current": 1, "supported": [1]}}
+    )
+    assert seen is not None
+    assert seen.server == "0.6.0"
