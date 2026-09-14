@@ -311,12 +311,41 @@ pub(crate) fn commit_staged(staged: &Path, path: &Path) -> io::Result<()> {
 /// left behind means nothing. Advisory: it binds taguru processes,
 /// not arbitrary tools, and network filesystems honor it unreliably.
 pub(crate) fn lock_data_dir(dir: &Path) -> io::Result<fs::File> {
-    let file = fs::File::create(dir.join(".taguru.lock"))?;
+    lock_dir(
+        dir,
+        ".taguru.lock",
+        "data directory",
+        "a running serve, or an import",
+    )
+}
+
+/// The same advisory lock for an `extract --out` directory
+/// (`.extract.lock`): two `taguru extract` runs on one `--out` each
+/// hold their own in-memory copy of a segment's checkpoint file and
+/// of the manifest, and each save rewrites the whole file — the
+/// second writer silently discards what the first recorded (a unit
+/// re-extracted on the next resume, a segment credited to the wrong
+/// batch), with no error on either side. The lock makes the second
+/// run a named refusal instead. `--dry-run` writes nothing and does
+/// not take it.
+pub(crate) fn lock_extract_out_dir(dir: &Path) -> io::Result<fs::File> {
+    lock_dir(
+        dir,
+        ".extract.lock",
+        "output directory",
+        "another extract on the same --out",
+    )
+}
+
+/// One exclusive `flock`-style lock on `dir/<file_name>`; `WouldBlock`
+/// becomes a refusal naming `what` (the directory's role) and `who`
+/// (the process that plausibly holds it).
+fn lock_dir(dir: &Path, file_name: &str, what: &str, who: &str) -> io::Result<fs::File> {
+    let file = fs::File::create(dir.join(file_name))?;
     match file.try_lock() {
         Ok(()) => Ok(file),
         Err(fs::TryLockError::WouldBlock) => Err(io::Error::other(format!(
-            "data directory {} is held by another taguru process \
-             (a running serve, or an import) — stop that one first",
+            "{what} {} is held by another taguru process ({who}) — stop that one first",
             dir.display()
         ))),
         Err(fs::TryLockError::Error(error)) => Err(error),
@@ -741,6 +770,36 @@ mod tests {
 
         drop(held);
         lock_data_dir(&dir).expect("once the first lock drops, a fresh lock must succeed");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The extract `--out` lock is the same mechanism on its own file
+    /// (`.extract.lock`), so a data directory and an `--out` that
+    /// happen to coincide do not contend with each other, and the
+    /// refusal names the output directory and the plausible holder.
+    #[test]
+    fn lock_extract_out_dir_refuses_a_second_lock_and_is_independent_of_the_data_lock() {
+        let dir = std::env::temp_dir().join(format!(
+            "taguru-storage-lock-out-dir-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+
+        let held = lock_extract_out_dir(&dir).expect("the first lock must succeed");
+        let error = lock_extract_out_dir(&dir).expect_err("a second lock must be refused");
+        let message = error.to_string();
+        assert!(
+            message.starts_with(&format!("output directory {} is held", dir.display()))
+                && message.contains("another extract on the same --out"),
+            "{message}"
+        );
+        assert!(dir.join(".extract.lock").is_file());
+        // A different lock file: the data-directory lock is unaffected.
+        let _data = lock_data_dir(&dir).expect("the data lock is a different file");
+
+        drop(held);
+        lock_extract_out_dir(&dir).expect("once the first lock drops, a fresh lock must succeed");
 
         let _ = fs::remove_dir_all(&dir);
     }
