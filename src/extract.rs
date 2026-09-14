@@ -121,15 +121,15 @@ mod vocabulary;
 #[cfg(test)]
 use args::STEP_NAMES;
 use args::{
-    Args, CorrectionPolicy, DEFAULT_ESCALATION_FACTOR, DEFAULT_RUNAWAY_RATIO, LadderConfig,
-    Outcome, ReplayMode, Rung, escalation_manifest_value, resume_from_fold, runaway_manifest_value,
+    Args, CorrectionPolicy, LadderConfig, Outcome, ReplayMode, Rung, escalation_manifest_value,
+    resume_from_fold, runaway_manifest_value,
 };
 use diagnostics::DiagnosticsSink;
 use manifest::{ComputationInputs, Manifest};
 use run::Run;
 use structured_output::resolve_rung;
 
-pub(crate) use args::StructuredOutputMode;
+pub(crate) use args::{DEFAULT_ESCALATION_FACTOR, DEFAULT_RUNAWAY_RATIO, StructuredOutputMode};
 pub(crate) use chat_client::{AttemptRef, ChatClient, RequestOptions};
 pub(crate) use segments::{ChunkDescriptor, chunk_plan, expand_segments, read_segment};
 use segments::{chunk_bytes_manifest_value, chunk_plan_preferring};

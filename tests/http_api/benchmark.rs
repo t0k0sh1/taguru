@@ -423,3 +423,75 @@ fn a_cell_that_fails_every_segment_is_recorded_failed_with_a_synthesized_end() {
     assert_eq!(cell_line["kind"], "cell");
     assert_eq!(cell_line["outcome"], "failed");
 }
+
+/// `--redact` reaches every cell: with it, the secret in the corpus
+/// never reaches the model endpoint (the placeholder does), and the
+/// manifest's `extraction_settings.redact` says so; without it the
+/// document goes verbatim — and an ambient `TAGURU_EXTRACT_REDACT=1`
+/// in the launching shell changes nothing, because a cell's
+/// environment is the benchmark's own flags, never the shell's.
+#[test]
+fn redact_is_forwarded_to_every_cell_and_never_inherited_from_the_shell() {
+    let corpus = corpus_dir(
+        "redact",
+        &[("creds.md", "青嶺酒造の設定。\n\npassword = hunter2xyz\n")],
+    );
+
+    let (url, captured) = stub_provider(vec![]);
+    let out = results_dir("redact-on");
+    let models = write_models_json(&out, &[("stub-a", &url)]);
+    let (code, stdout, stderr) = run_benchmark(&[
+        "--models",
+        models.to_str().unwrap(),
+        "--context",
+        "bench",
+        "--out",
+        out.to_str().unwrap(),
+        "--redact",
+        "secrets",
+        corpus.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let bodies = captured.lock().unwrap().clone();
+    assert!(!bodies.is_empty(), "the cell must have called the model");
+    for body in &bodies {
+        assert!(
+            !body.contains("hunter2xyz"),
+            "the secret reached the model: {body}"
+        );
+        assert!(
+            body.contains("redacted credential_assignment"),
+            "the placeholder must stand in for the secret: {body}"
+        );
+    }
+    let manifest: Value =
+        serde_json::from_str(&std::fs::read_to_string(out.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest["extraction_settings"]["redact"], "secrets");
+    assert_eq!(manifest["extraction_settings"]["redact_rules_sha256"], "");
+
+    // Off, with the shell asking for redaction: the flag decides.
+    let (url, captured) = stub_provider(vec![]);
+    let out = results_dir("redact-off");
+    let models = write_models_json(&out, &[("stub-a", &url)]);
+    let mut full = vec!["benchmark", "extract"];
+    full.extend_from_slice(&[
+        "--models",
+        models.to_str().unwrap(),
+        "--context",
+        "bench",
+        "--out",
+        out.to_str().unwrap(),
+        corpus.to_str().unwrap(),
+    ]);
+    let (code, stdout, stderr) = run_cli(&full, &[("TAGURU_EXTRACT_REDACT", "1")]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let bodies = captured.lock().unwrap().clone();
+    assert!(!bodies.is_empty());
+    assert!(
+        bodies.iter().any(|body| body.contains("hunter2xyz")),
+        "without --redact the document goes verbatim: {bodies:?}"
+    );
+    let manifest: Value =
+        serde_json::from_str(&std::fs::read_to_string(out.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest["extraction_settings"]["redact"], "0");
+}

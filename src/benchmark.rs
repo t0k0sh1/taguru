@@ -97,6 +97,12 @@ corpus under the same task settings (ADR 0003). Writes, under --out:
   --max-output-tokens N  forwarded to every cell's --max-output-tokens
   --max-attempts N    forwarded to every cell's
                       TAGURU_EXTRACT_MAX_ATTEMPTS, 1-10 (2)
+  --redact [secrets|pii]  forwarded to every cell's --redact (ADR 0038):
+                      mask sensitive content before any model sees a
+                      segment; without it every cell runs unredacted,
+                      whatever TAGURU_EXTRACT_REDACT the shell sets
+  --redact-rules FILE forwarded to every cell's --redact-rules (needs
+                      --redact)
   CORPUS_DIR          exactly one directory (.md/.txt, sorted by name) —
                       every cell sees the same segment order, since
                       vocabulary accumulates across a run (ADR 0003 §6)
@@ -145,6 +151,11 @@ struct BenchArgs {
     parallel: usize,
     max_output_tokens: Option<usize>,
     max_attempts: usize,
+    /// `--redact [secrets|pii]`: `None` is off — explicitly, in every
+    /// cell's environment (issue #734's pinning), never inherited.
+    redact: Option<crate::sensitive::Groups>,
+    /// `--redact-rules FILE`, needs `--redact` like extract's own.
+    redact_rules: Option<PathBuf>,
     corpus: String,
 }
 
@@ -164,6 +175,8 @@ impl BenchArgs {
         let mut parallel: Option<usize> = None;
         let mut max_output_tokens: Option<usize> = None;
         let mut max_attempts: Option<usize> = None;
+        let mut redact: Option<crate::sensitive::Groups> = None;
+        let mut redact_rules: Option<PathBuf> = None;
         let mut corpus: Vec<String> = Vec::new();
 
         let mut rest = args.iter();
@@ -330,6 +343,42 @@ impl BenchArgs {
                         ));
                     }
                 },
+                "--redact" => {
+                    if redact.is_some() {
+                        return Err(subcommand_usage_error("benchmark", "--redact given twice"));
+                    }
+                    // The same optional group extract takes: `--redact`
+                    // alone means both, `secrets`/`pii` one; anything
+                    // else is the next argument.
+                    let group = match rest.clone().next().map(String::as_str) {
+                        Some(value @ ("secrets" | "pii")) => {
+                            rest.next();
+                            Some(value)
+                        }
+                        _ => None,
+                    };
+                    redact = Some(
+                        crate::sensitive::Groups::parse(group)
+                            .map_err(|message| subcommand_usage_error("benchmark", &message))?,
+                    );
+                }
+                "--redact-rules" => match rest.next() {
+                    Some(path) if redact_rules.is_none() => {
+                        redact_rules = Some(PathBuf::from(path));
+                    }
+                    Some(_) => {
+                        return Err(subcommand_usage_error(
+                            "benchmark",
+                            "--redact-rules given twice",
+                        ));
+                    }
+                    None => {
+                        return Err(subcommand_usage_error(
+                            "benchmark",
+                            "--redact-rules needs a file path",
+                        ));
+                    }
+                },
                 other if other.starts_with('-') => {
                     return Err(subcommand_usage_error(
                         "benchmark",
@@ -381,6 +430,13 @@ impl BenchArgs {
                  would attach to)",
             ));
         }
+        if redact_rules.is_some() && redact.is_none() {
+            return Err(subcommand_usage_error(
+                "benchmark",
+                "--redact-rules needs --redact — a rules file with redaction off would run \
+                 nothing",
+            ));
+        }
         let corpus = match corpus.len() {
             0 => {
                 return Err(subcommand_usage_error(
@@ -418,6 +474,8 @@ impl BenchArgs {
             parallel: parallel.unwrap_or(1),
             max_output_tokens,
             max_attempts: max_attempts.unwrap_or(crate::extract::DEFAULT_MAX_ATTEMPTS),
+            redact,
+            redact_rules,
             corpus,
         })
     }
@@ -435,6 +493,114 @@ mod args_tests {
     fn required_flags_are_enforced() {
         assert_eq!(args(&[]).unwrap_err(), 2);
         assert_eq!(args(&["--context", "c"]).unwrap_err(), 2);
+    }
+
+    /// `--redact` takes an optional group like extract's own;
+    /// `--redact-rules` without it is the usage error extract answers.
+    #[test]
+    fn redact_flags_parse_like_extracts_own() {
+        let dir = std::env::temp_dir();
+        let corpus = dir.to_str().unwrap();
+        let base = ["--models", "m.json", "--context", "c", "--out", "o"];
+        let with = |extra: &[&str]| {
+            let mut words: Vec<&str> = base.to_vec();
+            words.extend_from_slice(extra);
+            words.push(corpus);
+            args(&words)
+        };
+        assert_eq!(with(&[]).unwrap().redact, None);
+        assert_eq!(
+            with(&["--redact"]).unwrap().redact,
+            Some(crate::sensitive::Groups::BOTH)
+        );
+        assert_eq!(
+            with(&["--redact", "secrets"]).unwrap().redact,
+            Some(crate::sensitive::Groups::parse(Some("secrets")).unwrap())
+        );
+        assert_eq!(
+            with(&["--redact", "pii", "--redact-rules", "r.txt"])
+                .unwrap()
+                .redact_rules,
+            Some(PathBuf::from("r.txt"))
+        );
+        assert_eq!(with(&["--redact", "--redact"]).unwrap_err(), 2);
+        assert_eq!(with(&["--redact-rules", "r.txt"]).unwrap_err(), 2);
+        assert_eq!(with(&["--redact", "--redact-rules"]).unwrap_err(), 2);
+    }
+
+    /// The cell's environment names every TAGURU_EXTRACT_* knob
+    /// config.rs knows — no more (a stale key), no less (the gap that
+    /// dropped `--redact` from every cell). Redaction rides as
+    /// extract's own env spellings.
+    #[test]
+    fn the_cell_env_covers_the_extract_inventory_exactly() {
+        let dir = std::env::temp_dir();
+        let corpus = dir.to_str().unwrap();
+        let parsed = args(&[
+            "--models",
+            "m.json",
+            "--context",
+            "c",
+            "--out",
+            "o",
+            "--redact",
+            "secrets",
+            "--redact-rules",
+            "rules.tsv",
+            corpus,
+        ])
+        .unwrap();
+        let model = ResolvedModel {
+            id: "m".to_string(),
+            label: None,
+            model: "m-model".to_string(),
+            url: "http://127.0.0.1:1/v1/chat/completions".to_string(),
+            api_key_env: None,
+            structured_output: "off".to_string(),
+            timeout_secs: 30,
+            note: None,
+        };
+        let env = cell_extract_env(&parsed, &model);
+        let pinned: std::collections::BTreeSet<&str> = env.iter().map(|(key, _)| *key).collect();
+        let inventory: std::collections::BTreeSet<&str> = crate::config::KNOWN_KEYS
+            .iter()
+            .copied()
+            .filter(|key| key.starts_with("TAGURU_EXTRACT_"))
+            .collect();
+        assert_eq!(
+            pinned, inventory,
+            "the pinned keys must be config.rs's inventory"
+        );
+        assert_eq!(pinned.len(), env.len(), "no key may repeat");
+        let value = |key: &str| {
+            env.iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| v.clone())
+                .expect("key present")
+        };
+        assert_eq!(value("TAGURU_EXTRACT_REDACT"), Some("secrets".to_string()));
+        assert_eq!(
+            value("TAGURU_EXTRACT_REDACT_RULES"),
+            Some("rules.tsv".to_string())
+        );
+        // No key: left unset, never an empty bearer.
+        assert_eq!(value("TAGURU_EXTRACT_API_KEY"), None);
+        // Every other value is set (Some), the defaults included, so the
+        // shell's copy can never leak through.
+        for (key, v) in &env {
+            if *key != "TAGURU_EXTRACT_API_KEY"
+                && *key != "TAGURU_EXTRACT_FACT_BUDGET"
+                && *key != "TAGURU_EXTRACT_MAX_OUTPUT_TOKENS"
+            {
+                assert!(v.is_some(), "{key} must be pinned");
+            }
+        }
+        assert_eq!(redact_env_value(None), "0");
+        assert_eq!(redact_env_value(Some(crate::sensitive::Groups::BOTH)), "1");
+        assert_eq!(
+            redact_env_value(crate::sensitive::Groups::parse(Some("pii")).ok()),
+            "pii"
+        );
     }
 
     #[test]
@@ -1919,10 +2085,11 @@ struct ExtractionSettings {
     #[serde(default)]
     vocabulary_sha256: String,
     /// Issue #734 (ADR 0003 §5): the remaining TAGURU_EXTRACT_* knobs
-    /// `run_cell` pins explicitly — today all at extract's own
-    /// defaults, recorded so the manifest names every resolved value
-    /// the cells ran under, defaults included. Keep these five in
-    /// step with `run_cell`'s scrub-then-pin env block.
+    /// [`cell_extract_env`] pins explicitly — recorded so the manifest
+    /// names every resolved value the cells ran under, defaults
+    /// included. `cell_extract_env`'s test holds its key set equal to
+    /// config.rs's TAGURU_EXTRACT_* inventory; keep these fields in
+    /// step with that function.
     #[serde(default)]
     corrective_context_bytes: Option<usize>,
     #[serde(default)]
@@ -1933,6 +2100,30 @@ struct ExtractionSettings {
     diagnostics_raw_bytes: Option<usize>,
     #[serde(default)]
     context_schema: String,
+    /// `--redact`, as the cell's TAGURU_EXTRACT_REDACT value: `"0"`
+    /// off, `"1"` both groups, `"secrets"`/`"pii"` one (ADR 0038).
+    /// Entries written before the flag existed default to `""`, which
+    /// extract reads as off too — so an old results directory still
+    /// matches an unredacted resume.
+    #[serde(default)]
+    redact: String,
+    /// `--redact-rules`' content digest (`""` = none), the same
+    /// fingerprint extract folds into its own manifests.
+    #[serde(default)]
+    redact_rules_sha256: String,
+    /// The knobs added to extract after #734 (chunk context, the
+    /// ladder's escalation factor and runaway ratio, the attempts log,
+    /// replay), pinned at extract's defaults like the five above.
+    #[serde(default)]
+    chunk_context: String,
+    #[serde(default)]
+    escalation_factor: usize,
+    #[serde(default)]
+    runaway_ratio: usize,
+    #[serde(default)]
+    trace_attempts: String,
+    #[serde(default)]
+    replay: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
@@ -2580,6 +2771,133 @@ fn outcome_for_exit_code(exit_code: Option<i32>, cell_id: &str) -> Result<&'stat
     }
 }
 
+/// The cell's `TAGURU_EXTRACT_REDACT` value for `--redact`: `"0"` off,
+/// `"1"` both groups, `"secrets"`/`"pii"` one — extract's own
+/// spellings (`redact_env_value`), so the manifest's mirror and the
+/// child's environment say the same thing.
+fn redact_env_value(groups: Option<crate::sensitive::Groups>) -> &'static str {
+    match groups {
+        None => "0",
+        Some(crate::sensitive::Groups {
+            secrets: true,
+            pii: true,
+        }) => "1",
+        Some(crate::sensitive::Groups {
+            secrets: true,
+            pii: false,
+        }) => "secrets",
+        Some(_) => "pii",
+    }
+}
+
+/// Every `TAGURU_EXTRACT_*` variable a cell's `extract` child runs
+/// under, in one place (ADR 0003 §5, issue #734): the launching shell's
+/// namespace is scrubbed and THIS list is set, so a cell's whole
+/// extraction environment is the benchmark's flags plus extract's own
+/// defaults — never an operator's ambient `TAGURU_EXTRACT_REDACT=1`
+/// silently dropped, never an ambient `TAGURU_EXTRACT_CHUNK_BYTES`
+/// silently kept. `None` is a variable deliberately left unset
+/// (`TAGURU_EXTRACT_API_KEY` with no key: an empty value would send an
+/// empty bearer). The test below holds this list's key set equal to
+/// config.rs's inventory, so a knob added to extract cannot be missed
+/// here again — the gap that let `--redact` be stripped from every
+/// cell with no way to turn it back on.
+fn cell_extract_env(
+    bench_args: &BenchArgs,
+    model: &ResolvedModel,
+) -> Vec<(&'static str, Option<String>)> {
+    let api_key = model
+        .api_key_env
+        .as_ref()
+        .and_then(|env_name| std::env::var(env_name).ok());
+    let flag = |on: bool| Some(if on { "1" } else { "0" }.to_string());
+    vec![
+        ("TAGURU_EXTRACT_URL", Some(model.url.clone())),
+        ("TAGURU_EXTRACT_MODEL", Some(model.model.clone())),
+        (
+            "TAGURU_EXTRACT_TIMEOUT_SECS",
+            Some(model.timeout_secs.to_string()),
+        ),
+        ("TAGURU_EXTRACT_API_KEY", api_key),
+        (
+            "TAGURU_EXTRACT_PARALLEL",
+            Some(bench_args.parallel.to_string()),
+        ),
+        (
+            "TAGURU_EXTRACT_FACT_BUDGET",
+            bench_args.fact_budget.map(|budget| budget.to_string()),
+        ),
+        (
+            "TAGURU_EXTRACT_MAX_ATTEMPTS",
+            Some(bench_args.max_attempts.to_string()),
+        ),
+        (
+            "TAGURU_EXTRACT_STRUCTURED_OUTPUT",
+            Some(model.structured_output.clone()),
+        ),
+        (
+            "TAGURU_EXTRACT_MAX_OUTPUT_TOKENS",
+            bench_args
+                .max_output_tokens
+                .map(|tokens| tokens.to_string()),
+        ),
+        ("TAGURU_EXTRACT_LOSSY", flag(bench_args.lossy)),
+        ("TAGURU_EXTRACT_CANDIDATES", flag(bench_args.candidates)),
+        (
+            "TAGURU_EXTRACT_REDACT",
+            Some(redact_env_value(bench_args.redact).to_string()),
+        ),
+        (
+            "TAGURU_EXTRACT_REDACT_RULES",
+            Some(
+                bench_args
+                    .redact_rules
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            ),
+        ),
+        (
+            "TAGURU_EXTRACT_VOCABULARY",
+            Some(
+                bench_args
+                    .vocabulary
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            ),
+        ),
+        // Extract's own defaults, pinned explicitly ("" = unset where
+        // extract reads "" as unset; the default's own spelling where
+        // it does not — an empty TAGURU_EXTRACT_CHUNK_BYTES is a usage
+        // error, not a default).
+        (
+            "TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES",
+            Some(String::new()),
+        ),
+        ("TAGURU_EXTRACT_COVERAGE", Some("0".to_string())),
+        ("TAGURU_EXTRACT_DIAGNOSTICS", Some(String::new())),
+        ("TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES", Some(String::new())),
+        ("TAGURU_EXTRACT_SCHEMA", Some(String::new())),
+        (
+            "TAGURU_EXTRACT_CHUNK_BYTES",
+            Some(crate::extract::CHUNK_BYTES.to_string()),
+        ),
+        ("TAGURU_EXTRACT_CHUNK_CONTEXT", Some("off".to_string())),
+        (
+            "TAGURU_EXTRACT_ESCALATION_FACTOR",
+            Some(crate::extract::DEFAULT_ESCALATION_FACTOR.to_string()),
+        ),
+        (
+            "TAGURU_EXTRACT_RUNAWAY_RATIO",
+            Some(crate::extract::DEFAULT_RUNAWAY_RATIO.to_string()),
+        ),
+        ("TAGURU_EXTRACT_TRACE_ATTEMPTS", Some(String::new())),
+        ("TAGURU_EXTRACT_REPLAY", Some("off".to_string())),
+        ("TAGURU_EXTRACT_REPLAY_FROM", Some(String::new())),
+    ]
+}
+
 /// Builds and runs one (model, run) cell's `taguru extract` subprocess
 /// (ADR 0003 §5/§6): the `TAGURU_EXTRACT_*` namespace is scrubbed from
 /// the child's inherited environment, then set explicitly (every
@@ -2647,53 +2965,11 @@ fn run_cell(
     {
         cmd.env_remove(key);
     }
-    cmd.env("TAGURU_EXTRACT_URL", &model.url);
-    cmd.env("TAGURU_EXTRACT_MODEL", &model.model);
-    cmd.env(
-        "TAGURU_EXTRACT_TIMEOUT_SECS",
-        model.timeout_secs.to_string(),
-    );
-    if let Some(env_name) = &model.api_key_env
-        && let Ok(key) = std::env::var(env_name)
-    {
-        cmd.env("TAGURU_EXTRACT_API_KEY", key);
+    for (key, value) in cell_extract_env(bench_args, model) {
+        if let Some(value) = value {
+            cmd.env(key, value);
+        }
     }
-    cmd.env("TAGURU_EXTRACT_PARALLEL", bench_args.parallel.to_string());
-    if let Some(budget) = bench_args.fact_budget {
-        cmd.env("TAGURU_EXTRACT_FACT_BUDGET", budget.to_string());
-    }
-    cmd.env(
-        "TAGURU_EXTRACT_MAX_ATTEMPTS",
-        bench_args.max_attempts.to_string(),
-    );
-    cmd.env("TAGURU_EXTRACT_STRUCTURED_OUTPUT", &model.structured_output);
-    if let Some(tokens) = bench_args.max_output_tokens {
-        cmd.env("TAGURU_EXTRACT_MAX_OUTPUT_TOKENS", tokens.to_string());
-    }
-    cmd.env(
-        "TAGURU_EXTRACT_LOSSY",
-        if bench_args.lossy { "1" } else { "0" },
-    );
-    cmd.env(
-        "TAGURU_EXTRACT_CANDIDATES",
-        if bench_args.candidates { "1" } else { "0" },
-    );
-    match &bench_args.vocabulary {
-        Some(path) => cmd.env("TAGURU_EXTRACT_VOCABULARY", path),
-        None => cmd.env("TAGURU_EXTRACT_VOCABULARY", ""),
-    };
-    // ADR 0003 §5 (issue #734): the remaining TAGURU_EXTRACT_* knobs,
-    // pinned EXPLICITLY at extract's own defaults ("" = unset for
-    // every one of them) so a cell's whole extraction environment is
-    // this block — never the launching shell — and the manifest's
-    // `extraction_settings` mirror of these values stays honest.
-    // (Keep this block and `ExtractionSettings`' matching fields in
-    // step with config.rs's TAGURU_EXTRACT_* inventory.)
-    cmd.env("TAGURU_EXTRACT_CORRECTIVE_CONTEXT_BYTES", "");
-    cmd.env("TAGURU_EXTRACT_COVERAGE", "0");
-    cmd.env("TAGURU_EXTRACT_DIAGNOSTICS", "");
-    cmd.env("TAGURU_EXTRACT_DIAGNOSTICS_RAW_BYTES", "");
-    cmd.env("TAGURU_EXTRACT_SCHEMA", "");
 
     cmd.arg("--context").arg(&bench_args.context);
     if bench_args.questions > 0 {
@@ -3177,6 +3453,22 @@ fn run_extract(args: &[String]) -> i32 {
         },
         None => String::new(),
     };
+    // The rules file's content digest, the same fingerprint extract
+    // folds into its own manifests (ADR 0038 §3.5): a changed file is
+    // a changed setting, so a resume under it mismatches.
+    let redact_rules_sha256 = match &args.redact_rules {
+        Some(path) => match fs::read(path) {
+            Ok(bytes) => crate::sha256::sha256_hex(&bytes),
+            Err(error) => {
+                eprintln!(
+                    "taguru: benchmark: --redact-rules: {}: {error}",
+                    path.display()
+                );
+                return 1;
+            }
+        },
+        None => String::new(),
+    };
     let extraction_settings = ExtractionSettings {
         prompt_version: crate::extract::PROMPT_VERSION,
         chunk_bytes: crate::extract::CHUNK_BYTES,
@@ -3194,14 +3486,21 @@ fn run_extract(args: &[String]) -> i32 {
         lossy: args.lossy,
         candidates: args.candidates,
         vocabulary_sha256,
-        // The five knobs run_cell pins at extract's defaults (issue
-        // #734) — mirrored here verbatim; "" / None / false all mean
-        // "explicitly the default".
+        // The knobs `cell_extract_env` pins at extract's defaults
+        // (issue #734) — mirrored here verbatim; "" / None / false all
+        // mean "explicitly the default".
         corrective_context_bytes: None,
         coverage: false,
         diagnostics: String::new(),
         diagnostics_raw_bytes: None,
         context_schema: String::new(),
+        redact: redact_env_value(args.redact).to_string(),
+        redact_rules_sha256,
+        chunk_context: "off".to_string(),
+        escalation_factor: crate::extract::DEFAULT_ESCALATION_FACTOR,
+        runaway_ratio: crate::extract::DEFAULT_RUNAWAY_RATIO,
+        trace_attempts: String::new(),
+        replay: "off".to_string(),
     };
 
     if let Err(error) = fs::create_dir_all(&args.out) {

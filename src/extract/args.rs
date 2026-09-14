@@ -992,7 +992,7 @@ pub(super) struct LadderConfig {
 /// budget — enough headroom that an honestly-longer answer lands, small
 /// enough that a looping model hits `length` within a couple of the
 /// original budget's wall-clock instead of the timeout's.
-pub(super) const DEFAULT_ESCALATION_FACTOR: usize = 2;
+pub(crate) const DEFAULT_ESCALATION_FACTOR: usize = 2;
 
 /// The default for `TAGURU_EXTRACT_RUNAWAY_RATIO` (ADR 0035 §3.1):
 /// above every legitimate answer/piece byte ratio the verification
@@ -1000,7 +1000,7 @@ pub(super) const DEFAULT_ESCALATION_FACTOR: usize = 2;
 /// headroom for answer encodings that inflate bytes (a model that
 /// `\u`-escapes non-ASCII roughly doubles a Japanese answer), and
 /// below every observed runaway (10–23×).
-pub(super) const DEFAULT_RUNAWAY_RATIO: usize = 8;
+pub(crate) const DEFAULT_RUNAWAY_RATIO: usize = 8;
 
 impl LadderConfig {
     pub(super) fn new(

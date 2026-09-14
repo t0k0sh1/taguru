@@ -107,6 +107,14 @@
 --max-output-tokens N  forwarded to every cell's --max-output-tokens
 --max-attempts N     forwarded to every cell's TAGURU_EXTRACT_MAX_ATTEMPTS,
                     1-10 (default 2)
+--redact [secrets|pii]  forwarded to every cell's --redact (ADR 0038): mask
+                    sensitive content before any model sees a segment.
+                    Without it every cell runs unredacted, whatever
+                    TAGURU_EXTRACT_REDACT the launching shell sets — a
+                    cell's environment is this command's flags, never
+                    the shell's
+--redact-rules FILE  forwarded to every cell's --redact-rules (needs
+                    --redact)
 CORPUS_DIR           exactly one directory (.md/.txt, sorted by name) — every
                     cell sees the same segment order, since a segment's
                     relation-label vocabulary is offered to the next
