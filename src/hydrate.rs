@@ -996,10 +996,22 @@ impl Hydrator {
                             .map(|(stem, _)| stem.clone())
                             .collect()
                     };
-                    let mut failed = false;
-                    for stem in pending {
-                        failed |= hydrator.ensure_context(&stem).is_err();
-                    }
+                    // In parallel, like the boot preload of pinned
+                    // contexts (`preload_pinned`): every family is an
+                    // independent fetch on its own scoped thread, and
+                    // `ensure_context` coalesces concurrent callers of
+                    // one stem — so N families cost about N/workers
+                    // fetch latencies, not N. This is the fill's whole
+                    // purpose (closing the window in which a bucket's
+                    // only complete generation is the predecessor's).
+                    let workers = std::thread::available_parallelism()
+                        .map(|n| n.get())
+                        .unwrap_or(1);
+                    let failed = crate::registry::parallel_map(pending, workers, |stem| {
+                        hydrator.ensure_context(&stem).is_err()
+                    })
+                    .into_iter()
+                    .any(|failed| failed);
                     if hydrator.drained() {
                         tracing::info!(
                             ms = started.elapsed().as_millis() as u64,
@@ -2441,6 +2453,79 @@ mod tests {
     /// 200ms forever instead of backing off. Counting attempts over a
     /// window well under 30s but well over a few 200ms ticks tells the
     /// two cadences apart without needing to observe the sleep itself.
+    /// Several pending families land in one fill pass, fetched in
+    /// parallel (the same `parallel_map` shape the boot preload uses):
+    /// every family's image is local and the hydrator drains, whatever
+    /// order the workers finished in.
+    #[tokio::test]
+    async fn spawn_background_fill_lands_several_pending_families_in_parallel() {
+        let bucket = scratch("bgfill-many-bucket");
+        let writer = scratch("bgfill-many-writer");
+        for stem in ["ctx_a", "ctx_b", "ctx_c", "ctx_d"] {
+            std::fs::write(writer.join(format!("{stem}.ctx")), format!("image-{stem}")).unwrap();
+            std::fs::write(
+                writer.join(format!("{stem}.meta.json")),
+                br#"{"description":"d","pinned":false}"#,
+            )
+            .unwrap();
+            wal::append_batch(
+                &writer.join(format!("{stem}.wal.jsonl")),
+                1,
+                &[associate("a")],
+            )
+            .unwrap();
+        }
+        let state = AppState::boot(writer.clone(), 64 * 1024 * 1024, None).unwrap();
+        let mut shipper = Shipper::claim(
+            local_store(&bucket),
+            StorePath::default(),
+            url_of("bgfill-many"),
+            writer.clone(),
+            Arc::new(ShipProgress::new(crate::registry::DEFAULT_WAL_MAX_BYTES)),
+            state,
+            None,
+        )
+        .await
+        .unwrap();
+        shipper.cycle().await.unwrap();
+        shipper.retire_generation().await;
+
+        let target = scratch("bgfill-many-target");
+        let store = local_store(&bucket);
+        let hydrator = prepare(
+            &store,
+            &StorePath::default(),
+            &url_of("bgfill-many"),
+            &target,
+            false,
+        )
+        .await
+        .unwrap()
+        .expect("an empty directory against a complete generation hydrates");
+        assert!(!hydrator.drained());
+
+        hydrator.spawn_background_fill();
+        for _ in 0..300 {
+            if hydrator.drained() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(hydrator.drained(), "every pending family must land");
+        for stem in ["ctx_a", "ctx_b", "ctx_c", "ctx_d"] {
+            assert_eq!(
+                std::fs::read(target.join(format!("{stem}.ctx"))).unwrap(),
+                format!("image-{stem}").as_bytes(),
+                "{stem}"
+            );
+            assert!(target.join(format!("{stem}.wal.jsonl")).exists(), "{stem}");
+        }
+
+        let _ = std::fs::remove_dir_all(&bucket);
+        let _ = std::fs::remove_dir_all(&writer);
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
     #[tokio::test]
     async fn spawn_background_fill_backs_off_after_a_failed_attempt_not_every_200ms() {
         let (bucket, writer) = shipped_bucket("bgfill-fail", false).await;

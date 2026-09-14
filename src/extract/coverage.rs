@@ -64,6 +64,18 @@ impl CoverageGap {
 /// what counts as present, so all three controls agree on both
 /// questions by construction.
 pub(super) fn coverage_gaps(text: &str, triples: &[[&str; 3]]) -> Vec<CoverageGap> {
+    // Subjects, labels, and objects repeat heavily across a document's
+    // triples (a hub concept is the subject of dozens), so each
+    // sentence tests every DISTINCT name once and the triples are then
+    // judged by lookup: O(sentences × names) occurrence checks instead
+    // of O(sentences × 3 × triples). Same answer by construction —
+    // `name_occurs` depends on the name and the sentence alone.
+    let names: Vec<&str> = {
+        let mut names: Vec<&str> = triples.iter().flatten().copied().collect();
+        names.sort_unstable();
+        names.dedup();
+        names
+    };
     let mut gaps = Vec::new();
     for span in crate::paragraph::split(text) {
         let content = &text[span.start as usize..span.end as usize];
@@ -72,12 +84,13 @@ pub(super) fn coverage_gaps(text: &str, triples: &[[&str; 3]]) -> Vec<CoverageGa
                 continue;
             }
             let haystack = normalize_for_occurrence(sentence);
+            let present: std::collections::HashSet<&str> = names
+                .iter()
+                .copied()
+                .filter(|name| name_occurs(&haystack, name))
+                .collect();
             let covered = triples.iter().any(|parts| {
-                parts
-                    .iter()
-                    .filter(|part| name_occurs(&haystack, part))
-                    .count()
-                    >= COVERAGE_MIN_PARTS
+                parts.iter().filter(|part| present.contains(*part)).count() >= COVERAGE_MIN_PARTS
             });
             if !covered {
                 gaps.push(CoverageGap {

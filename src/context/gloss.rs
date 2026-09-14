@@ -63,14 +63,29 @@ impl Context {
         let mut edges: Vec<EdgeId> = edges
             .filter(|&id| self.edges[id as usize].count > 0)
             .collect();
-        edges.sort_by(|&a, &b| {
+        let order = |&a: &EdgeId, &b: &EdgeId| {
             self.edges[b as usize]
                 .sum
                 .abs()
                 .total_cmp(&self.edges[a as usize].sum.abs())
                 .then_with(|| a.cmp(&b))
-        });
+        };
+        // `keep` is a small constant (a gloss's few facts or examples)
+        // while a hub concept's live degree is unbounded, and this runs
+        // per resolve candidate and per vocabulary entry on an
+        // embedding refresh: partition around the `keep`th element in
+        // O(d) and sort only the kept prefix, the same shape as
+        // `stats.rs`'s `top_concepts`. The `(id)` tiebreak makes
+        // `order` total, so the kept set is exactly a full sort's
+        // first `keep`.
+        let keep = keep.min(edges.len());
+        if keep == 0 {
+            edges.clear();
+            return edges;
+        }
+        edges.select_nth_unstable_by(keep - 1, order);
         edges.truncate(keep);
+        edges.sort_by(order);
         edges
     }
 
@@ -245,6 +260,48 @@ mod tests {
         assert_eq!(
             context.concept_gloss("蒼月堂", 3).unwrap(),
             "蒼月堂。自称は蒼月堂。創業地は京都。看板商品は朝霧。"
+        );
+    }
+
+    /// `heaviest` is a top-k selection, not a full sort: with more live
+    /// edges than `keep`, the kept set and its order are exactly a
+    /// full sort's first `keep` (heaviest |sum| first, ties toward the
+    /// earlier edge), and `keep` of zero keeps nothing. A hub with
+    /// dozens of facts is the shape this runs on for every resolve.
+    #[test]
+    fn heaviest_selects_the_top_k_exactly_as_a_full_sort_would() {
+        let mut context = Context::default();
+        // Weights chosen so insertion order and weight order disagree,
+        // with a tie (2.0 twice) to exercise the id tiebreak.
+        for (object, weight) in [
+            ("a", 1.0),
+            ("b", 5.0),
+            ("c", 2.0),
+            ("d", 4.0),
+            ("e", 2.0),
+            ("f", 3.0),
+            ("g", 0.5),
+        ] {
+            context.associate("hub", "rel", object, weight).unwrap();
+        }
+        let id = context.concept_ids["hub"];
+        let all: Vec<EdgeId> = context.heaviest(context.outgoing(id), usize::MAX);
+        let weights = |edges: &[EdgeId]| -> Vec<f64> {
+            edges
+                .iter()
+                .map(|&e| context.edges[e as usize].sum)
+                .collect()
+        };
+        assert_eq!(weights(&all), vec![5.0, 4.0, 3.0, 2.0, 2.0, 1.0, 0.5]);
+        for keep in 0..=7 {
+            let kept = context.heaviest(context.outgoing(id), keep);
+            assert_eq!(kept, all[..keep.min(all.len())], "keep {keep}");
+        }
+        // The tie keeps the earlier edge first: c (inserted before e).
+        let top4 = context.heaviest(context.outgoing(id), 4);
+        assert_eq!(
+            context.concept_name(context.edges[top4[3] as usize].object),
+            "c"
         );
     }
 

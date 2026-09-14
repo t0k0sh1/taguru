@@ -20,7 +20,7 @@
 //! rebuild itself needs).
 
 use std::collections::HashMap;
-use std::hash::{BuildHasherDefault, Hasher};
+use std::hash::{BuildHasher, Hasher};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -63,14 +63,34 @@ fn avalanche(mut x: u64) -> u64 {
     x
 }
 
-/// Hasher over already-avalanched `u64` term keys. Only `write_u64` is
-/// meaningful; any other key type is a bug.
-#[derive(Default)]
-pub(crate) struct TermHasher(u64);
+/// Hasher over `u64` term keys: the key, XOR a per-index seed, through
+/// [`avalanche`]. Only `write_u64` is meaningful; any other key type is
+/// a bug.
+///
+/// The seed is what `HashMap`'s default `RandomState` gives for free
+/// and a fixed finalizer alone gives up: with none, the bucket of every
+/// term is a public function of its bytes, so whoever can write text
+/// into the index (ordinary source ingestion) can pick bigrams and
+/// words whose finalized low bits collide and rebuild #606's ~1000×
+/// lookup degradation on purpose, for the resident life of the index.
+/// XOR with a seed keeps the finalizer a bijection (no new collisions
+/// among distinct keys) while making the bucket layout unguessable
+/// from outside. Nothing reads the map in hash order: `to_bytes`
+/// sorts terms, `search`/`explain` look keys up.
+pub(crate) struct TermHasher {
+    seed: u64,
+    state: u64,
+}
+
+impl Default for TermHasher {
+    fn default() -> Self {
+        TermHasherBuilder::default().build_hasher()
+    }
+}
 
 impl Hasher for TermHasher {
     fn finish(&self) -> u64 {
-        self.0
+        self.state
     }
 
     fn write(&mut self, _: &[u8]) {
@@ -78,11 +98,37 @@ impl Hasher for TermHasher {
     }
 
     fn write_u64(&mut self, key: u64) {
-        self.0 = avalanche(key);
+        self.state = avalanche(key ^ self.seed);
     }
 }
 
-type TermMap<V> = HashMap<u64, V, BuildHasherDefault<TermHasher>>;
+/// One seed per index (per map instance), drawn from the standard
+/// library's own per-process/per-thread random hashing keys —
+/// no new dependency, and unpredictable to a writer of index content.
+#[derive(Clone)]
+pub(crate) struct TermHasherBuilder {
+    seed: u64,
+}
+
+impl Default for TermHasherBuilder {
+    fn default() -> Self {
+        let seed = std::collections::hash_map::RandomState::new().hash_one(0u64);
+        Self { seed }
+    }
+}
+
+impl BuildHasher for TermHasherBuilder {
+    type Hasher = TermHasher;
+
+    fn build_hasher(&self) -> TermHasher {
+        TermHasher {
+            seed: self.seed,
+            state: 0,
+        }
+    }
+}
+
+type TermMap<V> = HashMap<u64, V, TermHasherBuilder>;
 
 /// One indexed paragraph. `alive: false` is the tombstone — the slot
 /// stays so postings need no eager rewrite.
@@ -1086,6 +1132,37 @@ mod tests {
              buckets, got {} distinct buckets out of 2000 keys",
             buckets.len()
         );
+    }
+
+    /// Two indexes draw two seeds, so a key's bucket is not a public
+    /// function of its bytes; and any seed keeps the spread (XOR before
+    /// a bijective finalizer adds no collisions among distinct keys).
+    #[test]
+    fn term_hasher_seeds_differ_per_builder_and_any_seed_still_spreads() {
+        let a = TermHasherBuilder::default();
+        let b = TermHasherBuilder::default();
+        assert_ne!(a.seed, b.seed, "two maps must not share a bucket layout");
+        let key = ('本' as u64) << 32 | ('の' as u64);
+        let mut ha = a.build_hasher();
+        let mut hb = b.build_hasher();
+        ha.write_u64(key);
+        hb.write_u64(key);
+        assert_ne!(ha.finish(), hb.finish());
+        for seed in [0u64, 1, u64::MAX, 0x9E37_79B9_7F4A_7C15] {
+            let builder = TermHasherBuilder { seed };
+            let mask = (1u64 << 19) - 1;
+            let mut buckets = std::collections::HashSet::new();
+            for prev in 0x4E00u64..0x4E00 + 2000 {
+                let mut hasher = builder.build_hasher();
+                hasher.write_u64((prev << 32) | ('の' as u64));
+                buckets.insert(hasher.finish() & mask);
+            }
+            assert!(
+                buckets.len() > 1900,
+                "seed {seed:#x}: {} buckets",
+                buckets.len()
+            );
+        }
     }
 
     #[test]
