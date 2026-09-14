@@ -441,7 +441,7 @@ fn router_panic_response(payload: Box<dyn std::any::Any + Send>, state: &RouterS
     state.inner.metrics.record_http("<panic>", 500);
     api::error(
         ErrorCode::Internal,
-        "internal error: the handler panicked (this is a bug worth reporting)",
+        api::PANIC_RESPONSE_MESSAGE,
         Instant::now(),
     )
 }
