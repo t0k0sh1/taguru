@@ -526,6 +526,18 @@ mod args_tests {
         assert_eq!(with(&["--redact", "--redact"]).unwrap_err(), 2);
         assert_eq!(with(&["--redact-rules", "r.txt"]).unwrap_err(), 2);
         assert_eq!(with(&["--redact", "--redact-rules"]).unwrap_err(), 2);
+        // Twice is a usage error, never a silent last-wins.
+        assert_eq!(
+            with(&[
+                "--redact",
+                "--redact-rules",
+                "a.txt",
+                "--redact-rules",
+                "b.txt"
+            ])
+            .unwrap_err(),
+            2
+        );
     }
 
     /// The cell's environment names every TAGURU_EXTRACT_* knob
