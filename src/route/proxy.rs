@@ -27,6 +27,34 @@ fn hop_headers(headers: &HeaderMap) -> HeaderMap {
     forwarded
 }
 
+/// Whether `path` carries a dot segment — `.` or `..`, raw or with
+/// either dot percent-encoded (`%2e`, `%2E`), which the URL parser on
+/// the outbound side decodes and resolves alike. The proxy forwards
+/// the inbound path verbatim, and the shard-side URL parse applies
+/// RFC 3986 dot-segment removal to it: without this check,
+/// `POST /contexts/sake/../../import` matches the `{*rest}` wildcard,
+/// picks shard-of(`sake`), and reaches that shard as `POST /import` —
+/// past the router's own routing of every batch to its owning shard,
+/// and onto any endpoint or unmapped context the shard hosts. A dot
+/// segment has no legitimate reading here (no context-scoped verb's
+/// path contains one), so it is refused whole rather than resolved.
+fn has_dot_segment(path: &str) -> bool {
+    path.split('/').any(|segment| {
+        let decoded = segment.replace("%2E", ".").replace("%2e", ".");
+        decoded == "." || decoded == ".."
+    })
+}
+
+/// The refusal for a dot segment: the single-instance `invalid_argument`
+/// shape, naming what was refused but never resolving it.
+fn dot_segment_refusal(path: &str, started_at: Instant) -> Response {
+    api::error(
+        ErrorCode::InvalidArgument,
+        format!("path '{path}' carries a dot segment ('.' or '..'); not proxied"),
+        started_at,
+    )
+}
+
 pub(super) async fn proxy_context_root(
     State(state): State<RouterState>,
     axum::extract::Path(name): axum::extract::Path<String>,
@@ -56,6 +84,12 @@ async fn proxy_context(
     request: Request,
 ) -> Response {
     let started_at = Instant::now();
+    // Before the map is consulted: a dot segment is refused whatever
+    // shard the context name would pick, and the refusal names the
+    // path as received, encoded segments included.
+    if has_dot_segment(request.uri().path()) {
+        return dot_segment_refusal(request.uri().path(), started_at);
+    }
     let map = state.map();
     let Some(shard) = map.shard_of(&name) else {
         // No entry and no fallback: for a read this context cannot
@@ -172,5 +206,62 @@ async fn proxy_context(
                 started_at,
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A dot segment, raw or percent-encoded in either case, is one;
+    /// a segment that merely contains dots (`.well-known`, `a..b`,
+    /// `..foo`) is not.
+    #[test]
+    fn a_dot_segment_is_a_whole_segment_raw_or_percent_encoded() {
+        for path in [
+            "/contexts/sake/..",
+            "/contexts/sake/../../import",
+            "/contexts/../x",
+            "/contexts/sake/./recall",
+            "/contexts/sake/%2e%2e/flush",
+            "/contexts/sake/%2E%2E/flush",
+            "/contexts/sake/.%2e/flush",
+            "/contexts/%2e/x",
+            "/contexts/sake/associations/..",
+        ] {
+            assert!(has_dot_segment(path), "{path}");
+        }
+        for path in [
+            "/contexts/sake",
+            "/contexts/sake/recall",
+            "/contexts/.well-known/x",
+            "/contexts/a..b/recall",
+            "/contexts/..foo/recall",
+            "/contexts/foo../recall",
+            "/contexts/sake/associations",
+            "/contexts/sake//recall",
+            "/contexts/%E6%97%A5%E6%9C%AC%E9%85%92/recall",
+        ] {
+            assert!(!has_dot_segment(path), "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_refusal_is_the_invalid_argument_shape_naming_the_path() {
+        let response = dot_segment_refusal("/contexts/sake/../../import", Instant::now());
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["status"], "error");
+        assert_eq!(body["code"], "invalid_argument");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("/contexts/sake/../../import"),
+            "{body}"
+        );
     }
 }
