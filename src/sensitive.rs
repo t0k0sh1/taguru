@@ -5,7 +5,7 @@
 //! same matches and the same placeholders on every run (manifests
 //! and checkpoints key on that, §3.5).
 //!
-//! - [`RuleSet`]: the versioned built-in rule set `redact1` in two
+//! - [`RuleSet`]: the versioned built-in rule set (`redact2`) in two
 //!   selectable groups (`secrets`, `pii`), in the order ADR 0038 §3.1
 //!   lists them, optionally extended by a user's rules (#884).
 //! - [`scan`]: every accepted match, paragraph by paragraph (ADR 0003
@@ -27,7 +27,7 @@
 //!   A placeholder the input already carries is recognised as rule
 //!   `preexisting`, left byte for byte, and counted apart.
 //!
-//! What `redact1` deliberately does not judge (§3.1): high-entropy
+//! What the built-in set deliberately does not judge (§3.1): high-entropy
 //! strings (every SHA-256 in a technical document is one), names,
 //! postal addresses, dates of birth, account numbers without a check
 //! digit, IP addresses, and hostnames.
@@ -40,7 +40,12 @@ use regex::Regex;
 /// The built-in rule set's version — a manifest input (ADR 0038 §3.5):
 /// changing any built-in pattern is a new version, so an already
 /// extracted document re-extracts instead of being reused.
-pub(crate) const RULESET_VERSION: &str = "redact1";
+///
+/// History: `redact1` (#881) — the initial set; `redact2` —
+/// `credential_assignment` also takes the keyword as the tail of a
+/// longer identifier (`DB_PASSWORD=`) and `secret`'s `_key` family,
+/// and `url_userinfo` matches the scheme case-insensitively.
+pub(crate) const RULESET_VERSION: &str = "redact2";
 
 /// The rule name the scanner gives a placeholder the input already
 /// carries (§3.2) — never a built-in's or a user rule's name.
@@ -174,9 +179,16 @@ const BUILTINS: &[Builtin] = &[
         validate: None,
     },
     Builtin {
+        // The keyword may end a longer identifier (`DB_PASSWORD=`,
+        // `GITHUB_TOKEN=`, `client_secret=`): `\b` alone never matched
+        // those, since `_` is a word character. It may NOT continue
+        // into one (`max_tokens:`, `tokenizer:`, `password_min_length:`
+        // are settings, not secrets) — the only suffixes admitted are
+        // `secret`'s `_key` family (`SECRET_KEY`, `AWS_SECRET_ACCESS_KEY`,
+        // `SECRET_KEY_BASE`). redact2.
         name: "credential_assignment",
         group: Group::Secrets,
-        pattern: r#"(?i)\b(?:password|passwd|secret|token|api[_-]?key)\s*[=:]\s*["']?([^\s"',;]+)"#,
+        pattern: r#"(?i)\b[a-z0-9_]*(?:password|passwd|secret(?:_access)?_key(?:_base)?|secret|token|api[_-]?key)\s*[=:]\s*["']?([^\s"',;]+)"#,
         value_group: Some(1),
         validate: None,
     },
@@ -190,9 +202,14 @@ const BUILTINS: &[Builtin] = &[
     Builtin {
         // The secret only; the whole `scheme://user:secret@` match is
         // owned, so the e-mail shape `secret@host` never takes the host.
+        // Case-insensitive like its siblings: `HTTPS://u:p@h` carries
+        // the same secret as `https://` (redact2). No `-` in the
+        // scheme: with case folding, `KEY-----https://` would otherwise
+        // read as one scheme reaching back into a private-key block's
+        // closing line, and no scheme that carries userinfo has one.
         name: "url_userinfo",
         group: Group::Secrets,
-        pattern: r"\b[a-z][a-z0-9+.-]*://[^\s/:@]+:([^\s/@]+)@",
+        pattern: r"(?i)\b[a-z][a-z0-9+.]*://[^\s/:@]+:([^\s/@]+)@",
         value_group: Some(1),
         validate: None,
     },
@@ -337,7 +354,7 @@ impl RuleSet {
     }
 
     /// The manifest/checkpoint value of this set under `groups` (§3.5):
-    /// `redact1`, the group suffix, and `+<sha256>` of the user file
+    /// [`RULESET_VERSION`], the group suffix, and `+<sha256>` of the user file
     /// when there is one — the whole digest, so two files never share
     /// a version by a truncated prefix.
     pub(crate) fn version(&self, groups: Groups) -> String {
@@ -700,7 +717,7 @@ mod tests {
             ":secrets"
         );
         assert_eq!(Groups::parse(Some("pii")).unwrap().version_suffix(), ":pii");
-        assert_eq!(RULESET_VERSION, "redact1");
+        assert_eq!(RULESET_VERSION, "redact2");
     }
 
     #[test]
@@ -908,6 +925,61 @@ mod tests {
         // Paragraph numbering: a match in the third paragraph says so.
         let text = "one\n\ntwo\n\nmail me@example.com";
         assert_eq!(scan(text, &rules)[0].paragraph, 2);
+    }
+
+    /// redact2: the assignment keyword is usually the tail of an
+    /// environment-variable name (`DB_PASSWORD=`, `AWS_SECRET_ACCESS_KEY=`)
+    /// — `\b` alone never matched those, `_` being a word character —
+    /// and `secret`'s `_key` family counts. A keyword that continues
+    /// into a longer identifier (`max_tokens:`, `tokenizer:`,
+    /// `password_min_length:`) is a setting, not a secret, and stays.
+    #[test]
+    fn credential_assignment_takes_identifier_prefixes_but_not_suffixes() {
+        let rules = RuleSet::builtin(Groups::parse(Some("secrets")).unwrap());
+        let text = "DB_PASSWORD=hunter2\nAWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI\nGITHUB_TOKEN=notreal\n\
+                    SECRET_KEY=k1\nSECRET_KEY_BASE=k2\nclient_secret: cs\nrefresh_token = rt\n\
+                    X-Api-Key: ak";
+        let found = scan(text, &rules);
+        let pairs: Vec<(&str, &str)> = found
+            .iter()
+            .map(|f| (f.rule.as_str(), matched(text, f)))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![
+                ("credential_assignment", "hunter2"),
+                ("credential_assignment", "wJalrXUtnFEMI"),
+                ("credential_assignment", "notreal"),
+                ("credential_assignment", "k1"),
+                ("credential_assignment", "k2"),
+                ("credential_assignment", "cs"),
+                ("credential_assignment", "rt"),
+                ("credential_assignment", "ak"),
+            ]
+        );
+        let text = "max_tokens: 4096\ntokenizer: bert\ntoken_count = 5\n\
+                    password_min_length: 8\nsecrets_dir: /etc/x\npasswordless: true";
+        assert!(
+            scan(text, &rules).is_empty(),
+            "{:?}",
+            names_of(&scan(text, &rules))
+        );
+    }
+
+    /// redact2: the URL scheme is case-insensitive like every other
+    /// keyword rule — `HTTPS://user:secret@host` carries the same
+    /// secret as `https://`.
+    #[test]
+    fn url_userinfo_matches_an_uppercase_scheme() {
+        let rules = RuleSet::builtin(Groups::parse(Some("secrets")).unwrap());
+        for text in [
+            "HTTPS://user:s3cr3t@example.com/",
+            "Https://user:s3cr3t@example.com/",
+        ] {
+            let found = scan(text, &rules);
+            assert_eq!(names_of(&found), vec!["url_userinfo"], "{text}");
+            assert_eq!(matched(text, &found[0]), "s3cr3t", "{text}");
+        }
     }
 
     /// Two value-only rules whose owned spans overlap do not shadow
@@ -1132,14 +1204,14 @@ mod tests {
         assert_eq!(redactions[0].rule, "emp_id");
         // The version carries the file's whole digest after the group.
         let digest = crate::sha256::sha256_hex(file.as_bytes());
-        assert_eq!(rules.version(Groups::BOTH), format!("redact1+{digest}"));
+        assert_eq!(rules.version(Groups::BOTH), format!("redact2+{digest}"));
         assert_eq!(
             rules.version(Groups::parse(Some("pii")).unwrap()),
-            format!("redact1:pii+{digest}")
+            format!("redact2:pii+{digest}")
         );
         assert_eq!(
             RuleSet::builtin(Groups::BOTH).version(Groups::BOTH),
-            "redact1"
+            "redact2"
         );
         // A user rule cannot outrank a built-in on the same span: the
         // built-in comes first in rule order.

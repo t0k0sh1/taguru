@@ -259,6 +259,20 @@ Entries that change an on-disk format or a response shape say so.
   No response-shape or on-disk format change — the manifest and the
   attempts log's `settings` record simply carry the new number.
 
+### Fixed
+
+- `extract --redact` / `import --refuse-sensitive`: the built-in
+  `credential_assignment` rule never matched the environment-variable
+  form of a secret (`DB_PASSWORD=…`, `AWS_SECRET_ACCESS_KEY=…`,
+  `GITHUB_TOKEN=…`, `client_secret: …`) — its `\b` treated the `_`
+  before the keyword as word-internal — and `url_userinfo` skipped an
+  uppercase scheme (`HTTPS://user:secret@host`). Both now match; a
+  keyword continuing into a longer identifier (`max_tokens:`,
+  `tokenizer:`) still does not. The rule set is now `redact2` (ADR
+  0038 §3.1/§3.5), so every document extracted under `--redact`
+  re-extracts on its next run instead of reusing `redact1` output.
+  No response-shape or on-disk format change.
+
 ## [0.9.6] - 2026-08-31
 
 An `extract` context-and-replay release. A chunk no longer arrives at
