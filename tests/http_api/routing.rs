@@ -1457,3 +1457,64 @@ fn a_dot_segment_in_a_context_path_never_reaches_a_shard() {
     assert_eq!(status, 200, "{body}");
     assert_eq!(shard.requests().len(), 1, "{:?}", shard.requests());
 }
+
+/// A group write whose body the single-instance extractor would refuse
+/// gets that refusal through the router — a non-object body, a member
+/// that is not a string — instead of a router panic (500) or a silent
+/// drop; and the per-request member cap is judged on the whole list
+/// before it is split per shard, so it cannot scale with the shard
+/// count. Nothing lands in either case.
+#[test]
+fn group_writes_refuse_unshaped_bodies_and_overlong_lists_as_one_instance_would() {
+    let shard_a = Server::start("gcap-a");
+    let shard_b = Server::start("gcap-b");
+    let router = Server::start_router(
+        "gcap",
+        &format!("sake = {}\n* = {}\n", shard_a.base, shard_b.base),
+        &[],
+    );
+    router.ok("PUT", "/contexts/sake", None);
+
+    // A JSON array is valid JSON and not a group request. (A single
+    // instance reads it as a positional struct — serde's doing — and
+    // would create the group; the router refuses instead, since a
+    // probe to one shard would create it there alone.)
+    let (status, refusal) = router.call("PUT", "/groups/g", Some(json!([])));
+    assert_eq!(status, 400, "{refusal}");
+    assert_eq!(refusal["code"], "invalid_argument", "{refusal}");
+    assert_eq!(router.call("GET", "/groups/g", None).0, 404);
+    for shard in [&shard_a, &shard_b] {
+        assert_eq!(shard.call("GET", "/groups/g", None).0, 404);
+    }
+
+    // A non-string member is refused whole, not dropped — in the
+    // shard's own extractor shape (its 422), since the body went to
+    // one shard verbatim.
+    router.ok("PUT", "/groups/g", Some(json!({"description": "対象"})));
+    let (status, refusal) = router.call(
+        "PATCH",
+        "/groups/g",
+        Some(json!({"add_contexts": ["sake", 42]})),
+    );
+    assert_eq!(status, 422, "{refusal}");
+    assert_eq!(refusal["code"], "malformed_request", "{refusal}");
+    assert!(
+        refusal["error"]
+            .as_str()
+            .unwrap()
+            .contains("add_contexts[1]"),
+        "{refusal}"
+    );
+    let entry = router.ok("GET", "/groups/g", None);
+    assert_eq!(entry["contexts"], json!([]), "{entry}");
+
+    // 1001 members over two shards: each shard's slice would pass its
+    // own cap, so the router judges the whole list.
+    let members: Vec<String> = (0..1001).map(|i| format!("c{i}")).collect();
+    let (status, refusal) =
+        router.call("PATCH", "/groups/g", Some(json!({"add_contexts": members})));
+    assert_eq!(status, 400, "{refusal}");
+    assert_eq!(refusal["code"], "over_limit", "{refusal}");
+    let entry = router.ok("GET", "/groups/g", None);
+    assert_eq!(entry["contexts"], json!([]), "{entry}");
+}
