@@ -744,7 +744,7 @@ mod tests {
         let rules = RuleSet::builtin(Groups::BOTH);
         let text = "key AKIAIOSFODNN7EXAMPLE and ghp_abcdefghijklmnopqrstuvwxyz0123456789 \
                     and sk-abcdefghijklmnopqrstuvwxyz and xoxb-1234567890-abcdef \
-                    and AIzaSyA1234567890abcdefghijklmnopqrstuv";
+                    and AIzaEXAMPLE_NOT_A_REAL_KEY_000000000000";
         let found = scan(text, &rules);
         assert_eq!(
             names_of(&found),
