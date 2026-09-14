@@ -43,6 +43,11 @@ pub(super) enum Filter {
 /// line per attempt.
 #[derive(Serialize)]
 pub(super) struct AttemptRow {
+    /// The run the attempt belongs to. `seq` restarts at 1 for every
+    /// run of a resumed segment (each `taguru extract` invocation mints
+    /// its own), so `(run_id, seq)` is the attempt's identity in a log
+    /// several runs appended to — `seq` alone is not.
+    run_id: String,
     seq: u64,
     chunk_index: usize,
     chunk_total: Option<usize>,
@@ -75,9 +80,13 @@ pub(super) struct AttemptRow {
 }
 
 /// One ladder move (ADR 0029), placed in the report after the attempt
-/// it followed.
+/// it followed — identified by that attempt's `(run_id, seq)`, since a
+/// resumed segment's later run restarts `seq` at 1 and a join on the
+/// number alone hung the second run's moves under the first run's
+/// rows.
 #[derive(Serialize)]
 pub(super) struct MoveRow {
+    after_run: Option<String>,
     after_seq: Option<u64>,
     action: String,
     piece_id: String,
@@ -202,7 +211,7 @@ pub(super) fn build_report(target: &str, text: &str, filter: &Filter) -> Attempt
         unreadable_lines: 0,
         matched: 0,
     };
-    let mut last_seq: Option<u64> = None;
+    let mut last_attempt: Option<(String, u64)> = None;
     for line in text.lines() {
         if line.trim().is_empty() {
             continue;
@@ -233,11 +242,12 @@ pub(super) fn build_report(target: &str, text: &str, filter: &Filter) -> Attempt
             }
             Some("attempt") => {
                 let row = attempt_row(&record);
-                last_seq = Some(row.seq);
+                last_attempt = Some((row.run_id.clone(), row.seq));
                 report.attempts.push(row);
             }
             Some("move") => report.moves.push(MoveRow {
-                after_seq: last_seq,
+                after_run: last_attempt.as_ref().map(|(run, _)| run.clone()),
+                after_seq: last_attempt.as_ref().map(|(_, seq)| *seq),
                 action: str_field(&record, "move"),
                 piece_id: str_field(&record, "piece_id"),
                 chunk_index: u64_field(&record, "chunk_index").unwrap_or(0) as usize,
@@ -318,6 +328,7 @@ fn attempt_row(record: &serde_json::Map<String, Value>) -> AttemptRow {
         .map(str::to_string);
     let range = piece_text.as_deref().and_then(paragraph_range);
     AttemptRow {
+        run_id: str_field(record, "run_id"),
         seq: u64_field(record, "attempt_seq").unwrap_or(0),
         chunk_index: u64_field(record, "chunk_index").unwrap_or(0) as usize,
         chunk_total,
@@ -445,12 +456,12 @@ fn summary_lines(row: &AttemptRow) -> Vec<String> {
     if let Some(corrects) = &row.corrects
         && let Some(seq) = corrects.get("attempt_seq").and_then(Value::as_u64)
     {
-        line.push_str(&format!("  corrects #{seq}"));
+        line.push_str(&format!("  corrects #{seq}{}", other_run(row, corrects)));
     }
     if let Some(from) = &row.replayed_from
         && let Some(seq) = from.get("attempt_seq").and_then(Value::as_u64)
     {
-        line.push_str(&format!("  replayed from #{seq}"));
+        line.push_str(&format!("  replayed from #{seq}{}", other_run(row, from)));
     }
     let mut lines = vec![line];
     if let Some(error) = &row.parse_error {
@@ -473,6 +484,16 @@ fn summary_lines(row: &AttemptRow) -> Vec<String> {
         ));
     }
     lines
+}
+
+/// ` (run <id>)` when an attempt reference (`corrects`, `replayed_from`)
+/// names a run other than the row's own — `#3` alone would read as
+/// this run's #3, which a resumed segment's log also has.
+fn other_run(row: &AttemptRow, reference: &Value) -> String {
+    match reference.get("run_id").and_then(Value::as_str) {
+        Some(run) if run != row.run_id => format!(" (run {run})"),
+        _ => String::new(),
+    }
 }
 
 fn move_line(m: &MoveRow) -> String {
@@ -570,7 +591,14 @@ pub(super) fn render_text(report: &AttemptsReport, filter: &Filter) -> String {
     }
     let mut shown_pieces: std::collections::BTreeMap<String, u64> =
         std::collections::BTreeMap::new();
+    // With several runs in one log, `#N` restarts per run: a marker
+    // names each run where its rows begin, so a `#1` reads as its run's.
+    let mut current_run: Option<&str> = None;
     for row in &report.attempts {
+        if report.runs.len() > 1 && current_run != Some(row.run_id.as_str()) {
+            current_run = Some(row.run_id.as_str());
+            out.push_str(&format!("  — run {} —\n", row.run_id));
+        }
         for line in summary_lines(row) {
             out.push_str(&line);
             out.push('\n');
@@ -613,6 +641,7 @@ pub(super) fn render_text(report: &AttemptsReport, filter: &Filter) -> String {
         }
         while let Some(m) = moves.peek()
             && m.after_seq == Some(row.seq)
+            && m.after_run.as_deref() == Some(row.run_id.as_str())
         {
             out.push_str(&move_line(m));
             out.push('\n');
@@ -844,6 +873,85 @@ mod tests {
     /// resumed document's second run, a settings line with a zero
     /// budget (hidden) and a rung (shown), an overflowing issue list,
     /// and a log with no torn tail.
+    /// A resumed segment's second run restarts `attempt_seq` at 1 in
+    /// the same appended log. A move is placed after the attempt it
+    /// followed by `(run_id, seq)`, never by `seq` alone — which hung
+    /// run 2's move under run 1's `#1` and left run 2's `#1` bare —
+    /// and a reference into another run says which.
+    #[test]
+    fn moves_and_references_stay_with_their_own_run_when_seqs_collide() {
+        let run2_attempt = json!({
+            "kind": "attempt", "run_id": "r2", "attempt_seq": 1, "piece_id": "dddd000000000000",
+            "source": "a.md", "chunk_index": 1, "stage": "item", "attempt": 1, "max_attempts": 2,
+            "state": "length_limited", "length_limited": true, "transport_retries": 0,
+            "elapsed_seconds": 1.0, "requested_max_tokens": 4000, "finish_reason": "length",
+            "input_tokens": 1, "output_tokens": 2,
+            "messages": [{"role": "user", "content": "Segment 'a.md', part 2 of 2:\n\n[3] d"}],
+            "answer": "{", "parse_error": null, "validation_issues": null, "removed_items": null
+        })
+        .to_string();
+        let run2_retry = json!({
+            "kind": "attempt", "run_id": "r2", "attempt_seq": 2, "piece_id": "dddd000000000000",
+            "corrects": {"run_id": "r1", "attempt_seq": 1},
+            "source": "a.md", "chunk_index": 1, "stage": "item", "attempt": 2, "max_attempts": 2,
+            "state": "stop_valid", "length_limited": false, "transport_retries": 0,
+            "elapsed_seconds": 1.0, "requested_max_tokens": 8000, "finish_reason": "stop",
+            "input_tokens": 1, "output_tokens": 2,
+            "messages": [{"role": "user", "content": "Segment 'a.md', part 2 of 2:\n\n[3] d"}],
+            "answer": "{}", "parse_error": null, "validation_issues": null, "removed_items": null
+        })
+        .to_string();
+        let log = [
+            json!({"kind": "document", "run_id": "r1", "source": "a.md", "segment_sha256": "d", "resumed": false}).to_string(),
+            attempt(1, "aaaa000000000000", 0, "length_limited", "[0] a", Some("{")),
+            json!({"kind": "move", "move": "split", "run_id": "r1", "piece_id": "aaaa000000000000", "chunk_index": 0, "reason": "the first pass's move", "piece_bytes": 5, "split_cap": 3, "sub_pieces": 2}).to_string(),
+            attempt(2, "bbbb000000000000", 0, "stop_valid", "[0] a", Some("{}")),
+            json!({"kind": "document", "run_id": "r2", "source": "a.md", "segment_sha256": "d", "resumed": true}).to_string(),
+            run2_attempt,
+            json!({"kind": "move", "move": "escalate", "run_id": "r2", "piece_id": "dddd000000000000", "chunk_index": 1, "reason": "the second pass's move", "from_max_tokens": 4000, "to_max_tokens": 8000}).to_string(),
+            run2_retry,
+        ]
+        .join("\n");
+        let report = build_report("log", &log, &Filter::All);
+        assert_eq!(report.runs, ["r1", "r2"]);
+        assert_eq!(report.moves.len(), 2);
+        assert_eq!(report.moves[0].after_run.as_deref(), Some("r1"));
+        assert_eq!(report.moves[0].after_seq, Some(1));
+        assert_eq!(report.moves[1].after_run.as_deref(), Some("r2"));
+        assert_eq!(report.moves[1].after_seq, Some(1));
+        let text = render_text(&report, &Filter::All);
+        // Run 1's #1 carries run 1's move only; run 2's #1 carries its own.
+        assert!(
+            text.contains("  — run r1 —\n  #1  chunk 1/2  piece aaaa00000000  paragraph 0 (5 B)  attempt 1/2  length_limited (finish length)  cap 4000 tok  1.5 s  10→20 tok\n      ↳ split  2 sub-piece(s), cap 3 B — the first pass's move\n  #2  "),
+            "{text}"
+        );
+        assert!(
+            text.contains("  — run r2 —\n  #1  chunk 2/2  piece dddd00000000  paragraph 3 (5 B)  attempt 1/2  length_limited (finish length)  cap 4000 tok  1.0 s  1→2 tok\n      ↳ escalate  max_tokens 4000 → 8000 — the second pass's move\n  #2  "),
+            "{text}"
+        );
+        assert!(
+            !text.contains("the first pass's move\n      ↳ escalate"),
+            "{text}"
+        );
+        // A reference into another run names it; one into its own does not.
+        assert!(text.contains("  corrects #1 (run r1)\n"), "{text}");
+        assert_eq!(text.matches("— run ").count(), 2, "{text}");
+        // One run: no markers.
+        let single = [
+            json!({"kind": "document", "run_id": "r1", "source": "a.md", "segment_sha256": "d", "resumed": false}).to_string(),
+            attempt(1, "aaaa000000000000", 0, "stop_valid", "[0] a", Some("{}")),
+        ]
+        .join("\n");
+        let text = render_text(&build_report("log", &single, &Filter::All), &Filter::All);
+        assert!(!text.contains("— run "), "{text}");
+        // JSON: the additive fields ride along.
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["attempts"][0]["run_id"], "r1");
+        assert_eq!(json["attempts"][2]["run_id"], "r2");
+        assert_eq!(json["moves"][1]["after_run"], "r2");
+        assert_eq!(json["moves"][1]["after_seq"], 1);
+    }
+
     #[test]
     fn every_move_kind_a_second_run_and_the_overflow_lines_render() {
         let issues: Vec<String> = (0..4)
@@ -881,7 +989,8 @@ mod tests {
             text.contains("  settings: model stub, prompt_version 4, rung json_schema\n"),
             "{text}"
         );
-        assert!(text.contains("      ↳ escalate  max_tokens 4000 → 8000 — the answer ended at the output cap\n      ↳ demote  json_schema → json_object — the rung looped\n      ↳ runaway  21745 B answered for a 50 B piece — outgrew the piece\n  #2  "), "{text}");
+        assert!(text.contains("      ↳ escalate  max_tokens 4000 → 8000 — the answer ended at the output cap\n      ↳ demote  json_schema → json_object — the rung looped\n      ↳ runaway  21745 B answered for a 50 B piece — outgrew the piece\n  — run r2 —\n  #2  "), "{text}");
+        assert!(text.contains("\n  — run r1 —\n  #1  "), "{text}");
         assert!(
             text.contains("        associations[2].weight: bad\n        … and 1 more issue(s)\n"),
             "{text}"
@@ -930,7 +1039,7 @@ mod tests {
             text.starts_with("log: attempts log (no document record)\n"),
             "{text}"
         );
-        assert!(text.contains("  #2  chunk 1/1  piece abcdef012345  paragraph 0 (9 B)  attempt 2/2  stop_valid  0.5 s  corrects #1  replayed from #3\n        associations[0].weight: expected a number\n        1 item(s) removed (mechanical validation)\n        (piece text as sent: same as #1)\n--- corrective ask (#2, 48 B) ---\nYour previous answer was not JSON. Answer again.\n--- answer (#2, 20 B) ---"), "{text}");
+        assert!(text.contains("  #2  chunk 1/1  piece abcdef012345  paragraph 0 (9 B)  attempt 2/2  stop_valid  0.5 s  corrects #1  replayed from #3 (run r0)\n        associations[0].weight: expected a number\n        1 item(s) removed (mechanical validation)\n        (piece text as sent: same as #1)\n--- corrective ask (#2, 48 B) ---\nYour previous answer was not JSON. Answer again.\n--- answer (#2, 20 B) ---"), "{text}");
     }
 
     #[test]
