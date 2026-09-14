@@ -300,6 +300,56 @@ fn a_newly_gitignored_file_is_retracted_not_reimported() {
     assert_eq!(code, 0, "the untouched file must survive the sweep: {out}");
 }
 
+/// The sync anchor in `.taguru/code-sync.json` is a working-tree file
+/// a hostile branch can rewrite, and it used to ride into `git diff`
+/// as a positional argument verbatim: `--output=.git/hooks/pre-commit`
+/// made git write the diff to the hook. Now anything but an object
+/// name is refused before git sees it, and the sync degrades to the
+/// full re-sync a garbage-collected anchor already takes.
+#[test]
+fn a_planted_sync_anchor_never_reaches_git_as_an_argument() {
+    let repo = Repo::new();
+    repo.write("src/lib.rs", "pub fn survives() {}\n");
+    repo.commit("base");
+    let (code, out) = repo.run(&["sync", "."]);
+    assert_eq!(code, 0, "{out}");
+
+    let state_path = repo.dir.join(".taguru/code-sync.json");
+    let mut state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
+    let hook = repo.dir.join(".git/hooks/pre-commit");
+    let _ = fs::remove_file(&hook);
+    state["commit"] = serde_json::Value::String(format!("--output={}", hook.display()));
+    fs::write(&state_path, state.to_string()).unwrap();
+    // Something to diff, so an unrefused anchor would have output.
+    repo.write("src/lib.rs", "pub fn survives() {}\npub fn added() {}\n");
+    repo.commit("edit");
+
+    let (code, out) = repo.run(&["sync", "."]);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("is not a commit id") && out.contains("full re-sync"),
+        "the refusal must be named and degrade to a full re-sync: {out}"
+    );
+    assert!(
+        !hook.exists(),
+        "git must never have run with the planted argument"
+    );
+    let (code, out) = repo.run(&["find", "added"]);
+    assert_eq!(
+        code, 0,
+        "the full re-sync must still import the edit: {out}"
+    );
+    // The next sync records a real anchor again.
+    let state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
+    let commit = state["commit"].as_str().unwrap();
+    assert!(
+        commit.len() >= 4 && commit.bytes().all(|b| b.is_ascii_hexdigit()),
+        "{commit}"
+    );
+}
+
 /// A repo with nothing to import must still complete its first sync
 /// (the state file needs its directory created without the boot).
 #[test]
