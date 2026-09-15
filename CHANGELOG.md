@@ -259,27 +259,14 @@ Entries that change an on-disk format or a response shape say so.
   No response-shape or on-disk format change — the manifest and the
   attempts log's `settings` record simply carry the new number.
 
-### Fixed
+- Performance, no behavior change: `resolve`/embedding-refresh
+  glosses select their few heaviest facts in O(degree) instead of
+  sorting a hub concept's whole edge list; the background hydration
+  fill fetches pending families in parallel like the boot preload
+  instead of one at a time; `extract --coverage` tests each distinct
+  name once per sentence instead of once per triple.
 
-- `extract --redact` / `import --refuse-sensitive`: the built-in
-  `credential_assignment` rule never matched the environment-variable
-  form of a secret (`DB_PASSWORD=…`, `AWS_SECRET_ACCESS_KEY=…`,
-  `GITHUB_TOKEN=…`, `client_secret: …`) — its `\b` treated the `_`
-  before the keyword as word-internal — and `url_userinfo` skipped an
-  uppercase scheme (`HTTPS://user:secret@host`). Both now match; a
-  keyword continuing into a longer identifier (`max_tokens:`,
-  `tokenizer:`) still does not. The rule set is now `redact2` (ADR
-  0038 §3.1/§3.5), so every document extracted under `--redact`
-  re-extracts on its next run instead of reusing `redact1` output.
-  No response-shape or on-disk format change.
-- `taguru router`: a dot segment in a context-scoped path
-  (`POST /contexts/sake/../../import`, raw or percent-encoded) is
-  refused with `invalid_argument` before any shard is consulted. The
-  proxy forwarded the inbound path verbatim and the outbound URL parse
-  resolved the dot segments, so the request reached shard-of(`sake`)
-  as `POST /import` — past the router's per-batch routing, onto any
-  endpoint or unmapped context that shard hosts. No change for paths
-  without a dot segment.
+### Fixed
 
 - `taguru router`: group writes (`PUT`/`PATCH /groups/{name}`) now
   judge the per-request member cap (1000) on the whole
@@ -292,32 +279,6 @@ Entries that change an on-disk format or a response shape say so.
   the one deliberate divergence from a single instance, which reads a
   JSON array as a positional struct (a serde artefact); refusing is
   what lands nothing on any shard.
-
-- `taguru-code sync`/`watch`: the sync anchor read from
-  `.taguru/code-sync.json` is refused unless it is a git object name
-  (4–64 hex digits) before it reaches `git diff` as a positional
-  argument. A hostile branch that committed a `code-sync.json` with
-  `"commit": "--output=.git/hooks/pre-commit"` could otherwise make
-  git write a diff of its own choosing to any path the process can —
-  a hook included. A refused anchor degrades to the full re-sync a
-  garbage-collected anchor already takes, and says so.
-
-- `taguru benchmark extract`: `--redact [secrets|pii]` and
-  `--redact-rules FILE` (ADR 0038), forwarded to every cell. Every
-  cell's `TAGURU_EXTRACT_*` environment is scrubbed and re-pinned on
-  purpose (issue #734), but `TAGURU_EXTRACT_REDACT`/`_REDACT_RULES` —
-  and the seven knobs added to extract since (`CHUNK_BYTES`,
-  `CHUNK_CONTEXT`, `ESCALATION_FACTOR`, `RUNAWAY_RATIO`,
-  `TRACE_ATTEMPTS`, `REPLAY`, `REPLAY_FROM`) — were scrubbed without
-  being re-pinned, so an operator's `TAGURU_EXTRACT_REDACT=1` was
-  silently dropped from the one command that sends real documents to
-  several external model endpoints, with no flag to turn it back on.
-  The pinned list is now one function whose key set a test holds equal
-  to `config.rs`'s inventory. The manifest's `extraction_settings`
-  gains `redact`, `redact_rules_sha256`, `chunk_context`,
-  `escalation_factor`, `runaway_ratio`, `trace_attempts`, and `replay`
-  (all default-valued for an unredacted run; an existing results
-  directory still resumes). No response-shape change.
 
 - `taguru inspect <stem>.attempts.jsonl`: a resumed segment's later run
   restarts `attempt_seq` at 1 in the same appended log, and the text
@@ -348,6 +309,56 @@ Entries that change an on-disk format or a response shape say so.
   sit in the live store as a row every similarity ranked at one
   extreme, served as the top match until a disk reload refused it; it
   is now a named embedding failure.
+
+### Security
+
+- `extract --redact` / `import --refuse-sensitive`: the built-in
+  `credential_assignment` rule never matched the environment-variable
+  form of a secret (`DB_PASSWORD=…`, `AWS_SECRET_ACCESS_KEY=…`,
+  `GITHUB_TOKEN=…`, `client_secret: …`) — its `\b` treated the `_`
+  before the keyword as word-internal — and `url_userinfo` skipped an
+  uppercase scheme (`HTTPS://user:secret@host`). Both now match; a
+  keyword continuing into a longer identifier (`max_tokens:`,
+  `tokenizer:`) still does not. The rule set is now `redact2` (ADR
+  0038 §3.1/§3.5), so every document extracted under `--redact`
+  re-extracts on its next run instead of reusing `redact1` output.
+  No response-shape or on-disk format change.
+
+- `taguru router`: a dot segment in a context-scoped path
+  (`POST /contexts/sake/../../import`, raw or percent-encoded) is
+  refused with `invalid_argument` before any shard is consulted. The
+  proxy forwarded the inbound path verbatim and the outbound URL parse
+  resolved the dot segments, so the request reached shard-of(`sake`)
+  as `POST /import` — past the router's per-batch routing, onto any
+  endpoint or unmapped context that shard hosts. No change for paths
+  without a dot segment.
+
+- `taguru-code sync`/`watch`: the sync anchor read from
+  `.taguru/code-sync.json` is refused unless it is a git object name
+  (4–64 hex digits) before it reaches `git diff` as a positional
+  argument. A hostile branch that committed a `code-sync.json` with
+  `"commit": "--output=.git/hooks/pre-commit"` could otherwise make
+  git write a diff of its own choosing to any path the process can —
+  a hook included. A refused anchor degrades to the full re-sync a
+  garbage-collected anchor already takes, and says so.
+
+- `taguru benchmark extract`: `--redact [secrets|pii]` and
+  `--redact-rules FILE` (ADR 0038), forwarded to every cell. Every
+  cell's `TAGURU_EXTRACT_*` environment is scrubbed and re-pinned on
+  purpose (issue #734), but `TAGURU_EXTRACT_REDACT`/`_REDACT_RULES` —
+  and the seven knobs added to extract since (`CHUNK_BYTES`,
+  `CHUNK_CONTEXT`, `ESCALATION_FACTOR`, `RUNAWAY_RATIO`,
+  `TRACE_ATTEMPTS`, `REPLAY`, `REPLAY_FROM`) — were scrubbed without
+  being re-pinned, so an operator's `TAGURU_EXTRACT_REDACT=1` was
+  silently dropped from the one command that sends real documents to
+  several external model endpoints, with no flag to turn it back on.
+  The pinned list is now one function whose key set a test holds equal
+  to `config.rs`'s inventory. The manifest's `extraction_settings`
+  gains `redact`, `redact_rules_sha256`, `chunk_context`,
+  `escalation_factor`, `runaway_ratio`, `trace_attempts`, and `replay`
+  (all default-valued for an unredacted run; an existing results
+  directory still resumes). No response-shape change.
+
 - BM25 term hashing: the per-term bucket is no longer a public
   function of the term's bytes. The #606 finalizer is kept (it fixed
   accidental bigram clustering) and XORed with a per-index random
@@ -355,12 +366,6 @@ Entries that change an on-disk format or a response shape say so.
   that collide on purpose and rebuild the ~1000× lookup degradation
   deliberately. Nothing reads the map in hash order; results are
   unchanged.
-- Performance, no behavior change: `resolve`/embedding-refresh
-  glosses select their few heaviest facts in O(degree) instead of
-  sorting a hub concept's whole edge list; the background hydration
-  fill fetches pending families in parallel like the boot preload
-  instead of one at a time; `extract --coverage` tests each distinct
-  name once per sentence instead of once per triple.
 
 - HTTP API: a handler panic's 500 no longer echoes the panic payload
   in the response body (`internal error: <panic message>`). The
