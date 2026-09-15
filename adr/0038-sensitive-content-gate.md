@@ -98,19 +98,9 @@ secrets` or `--redact pii` selects one.
 - a credential assignment — `password`, `passwd`, `secret`, `token`,
   `api_key` / `api-key` / `apikey`, case-insensitive, followed by
   `=` or `:` — masking the **value only**, so `password = «…»` still
-  reads as a configuration line. Since `redact2` the keyword may end
-  a longer identifier (`DB_PASSWORD=`, `client_secret:`) and `secret`
-  may carry its `_key` family (`SECRET_KEY`, `AWS_SECRET_ACCESS_KEY`,
-  `SECRET_KEY_BASE`); it may not continue into one (`max_tokens:` is a
-  setting). `redact1`'s `\b` never matched the environment-variable
-  form at all, `_` being a word character;
+  reads as a configuration line;
 - an `Authorization: Bearer|Basic <value>` header, value only;
-- URL userinfo (`scheme://user:secret@host`), the secret only — the
-  scheme case-insensitive since `redact2` (`redact1` missed `HTTPS://`).
-
-The version string names the rule set as shipped: `redact1` was the
-initial set, `redact2` the two corrections above. A bump re-extracts
-every already-redacted document (§3.5), which is the point.
+- URL userinfo (`scheme://user:secret@host`), the secret only.
 
 `pii` — patterns with a shape or a check digit:
 

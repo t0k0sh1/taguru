@@ -203,13 +203,14 @@ const BUILTINS: &[Builtin] = &[
         // The secret only; the whole `scheme://user:secret@` match is
         // owned, so the e-mail shape `secret@host` never takes the host.
         // Case-insensitive like its siblings: `HTTPS://u:p@h` carries
-        // the same secret as `https://` (redact2). No `-` in the
-        // scheme: with case folding, `KEY-----https://` would otherwise
-        // read as one scheme reaching back into a private-key block's
-        // closing line, and no scheme that carries userinfo has one.
+        // the same secret as `https://` (redact2). A `-` in the scheme
+        // (`git-2fa://`) must be followed by a scheme character: with
+        // case folding, `KEY-----https://` would otherwise read as one
+        // scheme reaching back into a private-key block's closing
+        // line, and the URL's owned span would shadow the key block.
         name: "url_userinfo",
         group: Group::Secrets,
-        pattern: r"(?i)\b[a-z][a-z0-9+.]*://[^\s/:@]+:([^\s/@]+)@",
+        pattern: r"(?i)\b[a-z][a-z0-9+.]*(?:-[a-z0-9+.]+)*://[^\s/:@]+:([^\s/@]+)@",
         value_group: Some(1),
         validate: None,
     },
@@ -975,10 +976,33 @@ mod tests {
         for text in [
             "HTTPS://user:s3cr3t@example.com/",
             "Https://user:s3cr3t@example.com/",
+            "git-2fa://user:s3cr3t@host",
+            "GIT-2FA://user:s3cr3t@host",
+            "svn+ssh://user:s3cr3t@host",
         ] {
             let found = scan(text, &rules);
             assert_eq!(names_of(&found), vec!["url_userinfo"], "{text}");
             assert_eq!(matched(text, &found[0]), "s3cr3t", "{text}");
+        }
+        // A private-key block's closing dashes running straight into a
+        // URL, in either case: the key block and the userinfo secret are
+        // both masked — the dashes never become part of the scheme.
+        for scheme in ["https", "HTTPS"] {
+            let text = format!(
+                "-----BEGIN PRIVATE KEY-----\nX\n-----END PRIVATE KEY-----{scheme}://u:p@h"
+            );
+            let found = scan(&text, &rules);
+            assert_eq!(
+                names_of(&found),
+                vec!["private_key", "url_userinfo"],
+                "{text}"
+            );
+            assert_eq!(matched(&text, &found[1]), "p", "{text}");
+            let (masked, _) = mask(&text, "d", &rules);
+            assert!(
+                !masked.contains("X\n") && !masked.contains("u:p@"),
+                "{masked}"
+            );
         }
     }
 
