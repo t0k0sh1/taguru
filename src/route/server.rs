@@ -441,7 +441,7 @@ fn router_panic_response(payload: Box<dyn std::any::Any + Send>, state: &RouterS
     state.inner.metrics.record_http("<panic>", 500);
     api::error(
         ErrorCode::Internal,
-        "internal error: the handler panicked (this is a bug worth reporting)",
+        api::PANIC_RESPONSE_MESSAGE,
         Instant::now(),
     )
 }
@@ -500,4 +500,58 @@ async fn track_router_http(
 pub(super) fn budget(deadline: Deadline) -> Option<Duration> {
     let remaining = deadline.remaining();
     (remaining != Duration::MAX).then_some(remaining)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state() -> RouterState {
+        RouterState {
+            inner: Arc::new(RouterInner {
+                map: parking_lot::RwLock::new(Arc::new(
+                    RouteMap::parse("sake = http://a:1\n").unwrap(),
+                )),
+                client: reqwest::Client::new(),
+                metrics: RouterMetrics::default(),
+                instructions: OnceLock::new(),
+            }),
+        }
+    }
+
+    /// The router's panic handler answers the shared 500 envelope with
+    /// the fixed sentence — never the payload's text — and counts the
+    /// panic in the router's own HTTP metrics; a non-string payload
+    /// takes the same path.
+    #[tokio::test]
+    async fn a_router_panic_answers_the_fixed_sentence_and_is_counted() {
+        let state = state();
+        let payloads: Vec<Box<dyn std::any::Any + Send>> = vec![
+            Box::new("kaboom-string".to_string()),
+            Box::new("kaboom-str"),
+            Box::new(42u32),
+        ];
+        for payload in payloads {
+            let response = router_panic_response(payload, &state);
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            let bytes = axum::body::to_bytes(response.into_body(), 1 << 16)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["status"], "error");
+            assert_eq!(body["code"], "internal");
+            assert_eq!(body["error"], api::PANIC_RESPONSE_MESSAGE, "{body}");
+            assert!(!bytes.windows(6).any(|w| w == b"kaboom"), "{body}");
+        }
+        assert_eq!(
+            state
+                .inner
+                .metrics
+                .http
+                .lock()
+                .get(&("<panic>".to_string(), 500))
+                .copied(),
+            Some(3)
+        );
+    }
 }

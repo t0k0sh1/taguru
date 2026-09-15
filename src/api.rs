@@ -921,6 +921,13 @@ fn coded(
 /// resulting 500 never becomes the outer HTTP response — the JSON-RPC
 /// envelope answers 200 either way, so `taguru_errors_total` is the
 /// only signal that call ever left behind.
+///
+/// The payload's text goes to the log only. A panic message is
+/// whatever the failing code formatted — an `expect` string, an
+/// index and a length, an `assert!` that interpolated the request's
+/// own data — and an HTTP client is not the audience for any of it;
+/// the router's `router_panic_response` and `cross_job_panic` below
+/// already answer a fixed sentence for the same reason.
 pub(crate) fn panic_response(payload: Box<dyn std::any::Any + Send>, state: &AppState) -> Response {
     let message = panic_payload_message(payload);
     // A bug surfacing at runtime, not one of the foreseen degraded
@@ -931,10 +938,15 @@ pub(crate) fn panic_response(payload: Box<dyn std::any::Any + Send>, state: &App
     coded(
         StatusCode::INTERNAL_SERVER_ERROR,
         ErrorCode::Internal,
-        format!("internal error: {message}"),
+        PANIC_RESPONSE_MESSAGE,
         Instant::now(),
     )
 }
+
+/// What a panicking handler answers — fixed text, never the payload
+/// (shared with the router's own panic handler).
+pub(crate) const PANIC_RESPONSE_MESSAGE: &str =
+    "internal error: the handler panicked (this is a bug worth reporting) — see server logs";
 
 /// Recovers a panic payload's text the same way `std::panic`'s default
 /// hook does (a `String` or `&str` payload, which covers
@@ -2397,7 +2409,12 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["status"], "error");
         assert_eq!(body["code"], ErrorCode::Internal.as_str());
-        assert!(body["error"].as_str().unwrap().contains("kaboom"), "{body}");
+        // The payload stays in the log: a client gets the fixed sentence.
+        assert_eq!(body["error"], PANIC_RESPONSE_MESSAGE, "{body}");
+        assert!(
+            !body["error"].as_str().unwrap().contains("kaboom"),
+            "{body}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
