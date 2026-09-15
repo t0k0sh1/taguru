@@ -2200,7 +2200,7 @@ fn manifests_reextract_when_the_redaction_version_changes() {
     manifest.record(
         "a.md",
         &ComputationInputs {
-            redaction: "redact1",
+            redaction: "redact2",
             ..base_inputs("hash-1", "model-1")
         },
         "a.md.jsonl",
@@ -2208,14 +2208,14 @@ fn manifests_reextract_when_the_redaction_version_changes() {
     assert!(manifest.matches(
         "a.md",
         &ComputationInputs {
-            redaction: "redact1",
+            redaction: "redact2",
             ..base_inputs("hash-1", "model-1")
         }
     ));
     assert!(!manifest.matches(
         "a.md",
         &ComputationInputs {
-            redaction: "redact1:secrets",
+            redaction: "redact2:secrets",
             ..base_inputs("hash-1", "model-1")
         }
     ));
@@ -2226,7 +2226,7 @@ fn manifests_reextract_when_the_redaction_version_changes() {
     assert!(!legacy.matches(
         "b.md",
         &ComputationInputs {
-            redaction: "redact1",
+            redaction: "redact2",
             ..base_inputs("hash-2", "model-1")
         }
     ));
