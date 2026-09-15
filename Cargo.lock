@@ -2981,7 +2981,7 @@ dependencies = [
 
 [[package]]
 name = "taguru"
-version = "0.9.6"
+version = "0.9.7"
 dependencies = [
  "async-trait",
  "axum",
