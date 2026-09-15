@@ -340,14 +340,19 @@ fn a_planted_sync_anchor_never_reaches_git_as_an_argument() {
         code, 0,
         "the full re-sync must still import the edit: {out}"
     );
-    // The next sync records a real anchor again.
+    // The planted value never reaches the terminal, and the next sync
+    // records the real anchor again: exactly HEAD.
+    assert!(!out.contains("--output="), "{out}");
+    let head = Command::new("git")
+        .arg("-C")
+        .arg(&repo.dir)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    let head = String::from_utf8(head.stdout).unwrap().trim().to_string();
     let state: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
-    let commit = state["commit"].as_str().unwrap();
-    assert!(
-        commit.len() >= 4 && commit.bytes().all(|b| b.is_ascii_hexdigit()),
-        "{commit}"
-    );
+    assert_eq!(state["commit"].as_str().unwrap(), head);
 }
 
 /// A repo with nothing to import must still complete its first sync

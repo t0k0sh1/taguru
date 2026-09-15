@@ -112,10 +112,14 @@ impl RepoWalk {
     /// hooks/pre-commit` included. A refusal degrades the caller to
     /// a full re-sync, the same path a garbage-collected anchor takes.
     pub(crate) fn changes_since(&self, commit: &str) -> Result<Vec<Change>, String> {
+        // The value itself stays out of the message: it is attacker-
+        // shaped by construction, and `sync` prints this to a terminal.
         if !is_object_name(commit) {
-            return Err(format!(
-                "sync anchor '{commit}' is not a commit id (expected 4 to 64 hex digits)"
-            ));
+            return Err(
+                "sync anchor in code-sync.json is not a commit id (expected 4 to 64 hex \
+                 digits)"
+                    .to_string(),
+            );
         }
         let out = self.git(&["diff", "--name-status", "-z", "-M", commit, "HEAD"])?;
         let mut fields = split_nul(&out)?.into_iter();
@@ -573,6 +577,11 @@ mod tests {
                 .changes_since(anchor)
                 .expect_err("a non-hex anchor must be refused");
             assert!(error.contains("not a commit id"), "{anchor:?}: {error}");
+            // Never echoed: the value is attacker-shaped and reaches a
+            // terminal through `sync`'s stderr.
+            if !anchor.is_empty() {
+                assert!(!error.contains(anchor), "{anchor:?}: {error}");
+            }
         }
         assert!(
             !planted.exists(),
