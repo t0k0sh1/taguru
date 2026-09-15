@@ -2114,10 +2114,12 @@ struct ExtractionSettings {
     context_schema: String,
     /// `--redact`, as the cell's TAGURU_EXTRACT_REDACT value: `"0"`
     /// off, `"1"` both groups, `"secrets"`/`"pii"` one (ADR 0038).
-    /// Entries written before the flag existed default to `""`, which
-    /// extract reads as off too — so an old results directory still
-    /// matches an unredacted resume.
-    #[serde(default)]
+    /// A manifest written before the field existed reads as `"0"` —
+    /// the value an unredacted run computes today — so `consistency_
+    /// mismatch` lets that results directory resume (the serde default
+    /// is the CURRENT default, not the type's empty value; the same
+    /// for every field below that has a non-empty default).
+    #[serde(default = "default_redact")]
     redact: String,
     /// `--redact-rules`' content digest (`""` = none), the same
     /// fingerprint extract folds into its own manifests.
@@ -2126,16 +2128,39 @@ struct ExtractionSettings {
     /// The knobs added to extract after #734 (chunk context, the
     /// ladder's escalation factor and runaway ratio, the attempts log,
     /// replay), pinned at extract's defaults like the five above.
-    #[serde(default)]
+    #[serde(default = "default_chunk_context")]
     chunk_context: String,
-    #[serde(default)]
+    #[serde(default = "default_escalation_factor")]
     escalation_factor: usize,
-    #[serde(default)]
+    #[serde(default = "default_runaway_ratio")]
     runaway_ratio: usize,
     #[serde(default)]
     trace_attempts: String,
-    #[serde(default)]
+    #[serde(default = "default_replay")]
     replay: String,
+}
+
+/// The serde defaults for the post-#734 fields: what an unredacted,
+/// default-knobbed run records today, so a `manifest.json` written
+/// before the fields existed compares equal to that run's settings.
+fn default_redact() -> String {
+    redact_env_value(None).to_string()
+}
+
+fn default_chunk_context() -> String {
+    "off".to_string()
+}
+
+fn default_escalation_factor() -> usize {
+    crate::extract::DEFAULT_ESCALATION_FACTOR
+}
+
+fn default_runaway_ratio() -> usize {
+    crate::extract::DEFAULT_RUNAWAY_RATIO
+}
+
+fn default_replay() -> String {
+    "off".to_string()
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
@@ -2384,6 +2409,55 @@ mod manifest_tests {
             reason.is_some(),
             "same segment_id, changed sha256 (same count) must still mismatch"
         );
+    }
+
+    /// A `manifest.json` written before the post-#734 fields existed
+    /// has none of them; it must still resume under an unredacted,
+    /// default-knobbed run — the serde defaults are today's values,
+    /// not the types' empty ones (which would refuse every existing
+    /// results directory as "benchmark flags differ").
+    #[test]
+    fn a_manifest_without_the_newer_fields_matches_a_default_run() {
+        let old: ExtractionSettings = serde_json::from_str(
+            r#"{"prompt_version": 6, "chunk_bytes": 24576, "context": "sake", "max_attempts": 2,
+                "parallel": 1, "timeout_secs": 300, "coverage": false}"#,
+        )
+        .unwrap();
+        let current = ExtractionSettings {
+            prompt_version: 6,
+            chunk_bytes: 24576,
+            context: "sake".to_string(),
+            max_attempts: 2,
+            parallel: 1,
+            timeout_secs: 300,
+            redact: redact_env_value(None).to_string(),
+            chunk_context: default_chunk_context(),
+            escalation_factor: default_escalation_factor(),
+            runaway_ratio: default_runaway_ratio(),
+            replay: default_replay(),
+            ..Default::default()
+        };
+        assert_eq!(old, current);
+        assert_eq!(old.redact, "0");
+        assert_eq!(old.chunk_context, "off");
+        assert_eq!(old.escalation_factor, 2);
+        assert_eq!(old.runaway_ratio, 8);
+        assert_eq!(old.replay, "off");
+        let existing = BenchManifest {
+            harness: HarnessBlock {
+                config_sha256: "same".to_string(),
+                ..Default::default()
+            },
+            extraction_settings: old,
+            ..Default::default()
+        };
+        assert!(consistency_mismatch(&existing, "same", &current, &[], &[]).is_none());
+        // A redacted resume against that old directory IS a mismatch.
+        let redacted = ExtractionSettings {
+            redact: "secrets".to_string(),
+            ..current
+        };
+        assert!(consistency_mismatch(&existing, "same", &redacted, &[], &[]).is_some());
     }
 
     #[test]
@@ -3508,11 +3582,11 @@ fn run_extract(args: &[String]) -> i32 {
         context_schema: String::new(),
         redact: redact_env_value(args.redact).to_string(),
         redact_rules_sha256,
-        chunk_context: "off".to_string(),
-        escalation_factor: crate::extract::DEFAULT_ESCALATION_FACTOR,
-        runaway_ratio: crate::extract::DEFAULT_RUNAWAY_RATIO,
+        chunk_context: default_chunk_context(),
+        escalation_factor: default_escalation_factor(),
+        runaway_ratio: default_runaway_ratio(),
         trace_attempts: String::new(),
-        replay: "off".to_string(),
+        replay: default_replay(),
     };
 
     if let Err(error) = fs::create_dir_all(&args.out) {
