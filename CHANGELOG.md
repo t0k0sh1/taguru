@@ -7,6 +7,35 @@ Entries that change an on-disk format or a response shape say so.
 
 ## [Unreleased]
 
+## [0.9.7] - 2026-09-15
+
+A sensitive-content gate release. `extract --redact` masks secrets and
+pattern-recognisable personal data before anything reads the segment —
+the prompt, the passage, every checkpoint, trace, and attempts-log
+record see the same masked text — `import --refuse-sensitive` refuses a
+batch that carries a match, naming the path and the rule but never the
+text, and `--redact-rules FILE` extends the built-in rule set with your
+own (ADR 0038, #881–#884; the built-ins are `redact2` after #917 closed
+the environment-variable form of a secret). Around it: `taguru inspect`
+reads an attempts log piece by piece (ADR 0037, #850); `extract` detects
+runaway output (ADR 0035), grounds its prompt in the segment's own text
+and allows an empty answer, cites the paragraph that states a fact,
+removes a name written with an ideograph the segment never uses (ADR
+0039), judges Latin-script names by whole words (ADR 0036), and names
+the failed piece; `import`, `evaluate`, and `anchoring` refusals name
+what they are about. **Breaking**: `extract`/`benchmark` say "segment"
+where they used to say "document" for the one input file a call reads
+(ADR 0040, #903/#904); `PROMPT_VERSION` 5 → 6. A codebase-wide audit's
+fixes ship alongside (#917–#925): a router path-traversal and a
+group-cap bypass closed, `taguru-code sync`'s anchor validated before
+it reaches git, `benchmark` forwarding `--redact` to every cell, one
+`extract` per `--out`, the attempts inspector joining moves by run, a
+seeded BM25 hasher, and a handler panic's 500 no longer echoing its
+payload. **On-disk format change**: additive only — new manifest,
+checkpoint, and sidecar fields, sidecars written as `kind: "segment"`
+with the old spelling still read — older files load; the prompt and
+rule-set version bumps re-extract already-extracted segments once.
+
 ### Added
 
 - `--redact-rules FILE` for `extract --redact` and `import
