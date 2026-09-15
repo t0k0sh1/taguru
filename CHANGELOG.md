@@ -272,6 +272,14 @@ Entries that change an on-disk format or a response shape say so.
   0038 §3.1/§3.5), so every document extracted under `--redact`
   re-extracts on its next run instead of reusing `redact1` output.
   No response-shape or on-disk format change.
+- `taguru router`: a dot segment in a context-scoped path
+  (`POST /contexts/sake/../../import`, raw or percent-encoded) is
+  refused with `invalid_argument` before any shard is consulted. The
+  proxy forwarded the inbound path verbatim and the outbound URL parse
+  resolved the dot segments, so the request reached shard-of(`sake`)
+  as `POST /import` — past the router's per-batch routing, onto any
+  endpoint or unmapped context that shard hosts. No change for paths
+  without a dot segment.
 
 ## [0.9.6] - 2026-08-31
 

@@ -1382,3 +1382,78 @@ fn group_delete_broadcasts_and_a_malformed_body_gets_the_shards_refusal() {
         "the shard's own refusal shape must pass through: {refusal}"
     );
 }
+
+/// One HTTP/1.1 request over a bare socket, the request-target sent
+/// byte for byte — an HTTP client library resolves `..` in a path
+/// before sending, which is exactly what this test must not do.
+/// Returns (status, body).
+fn raw_request(base: &str, method: &str, target: &str) -> (u16, Value) {
+    use std::io::{Read, Write};
+    let authority = base.trim_start_matches("http://");
+    let mut stream = std::net::TcpStream::connect(authority).expect("router must accept");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    write!(
+        stream,
+        "{method} {target} HTTP/1.1\r\nHost: {authority}\r\nContent-Length: 0\r\n\
+         Connection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).expect("router must answer");
+    let text = String::from_utf8_lossy(&raw);
+    let status: u16 = text
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or_else(|| panic!("no status line in {text:?}"));
+    let body = text
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body)
+        .unwrap_or("");
+    let body = serde_json::from_str(body).unwrap_or_else(|_| Value::String(body.to_string()));
+    (status, body)
+}
+
+/// A dot segment in a context-scoped path is refused by the router
+/// itself, before any shard is consulted. The proxy forwards the path
+/// verbatim and the outbound URL parse resolves dot segments, so
+/// `POST /contexts/sake/../../import` would otherwise reach
+/// shard-of(`sake`) as `POST /import` — past the router's own
+/// per-batch routing, onto any endpoint the shard hosts. Raw and
+/// percent-encoded forms alike; a plain context verb still proxies.
+#[test]
+fn a_dot_segment_in_a_context_path_never_reaches_a_shard() {
+    let shard = FakeShard::start(json!({"status": "ok", "result": true, "time": 0.0}));
+    let router = Server::start_router(
+        "router-dot-segment",
+        &format!("sake = {}\n", shard.endpoint),
+        &[],
+    );
+
+    for target in [
+        "/contexts/sake/../../import",
+        "/contexts/sake/%2e%2e/%2e%2e/flush",
+        "/contexts/sake/./recall",
+        "/contexts/../import",
+    ] {
+        let (status, body) = raw_request(&router.base, "POST", target);
+        assert_eq!(status, 400, "{target}: {body}");
+        assert_eq!(body["code"], "invalid_argument", "{target}: {body}");
+        assert!(
+            body["error"].as_str().unwrap_or("").contains(target),
+            "{target}: {body}"
+        );
+    }
+    assert!(
+        shard.requests().is_empty(),
+        "no dot-segment request may reach the shard: {:?}",
+        shard.requests()
+    );
+
+    // The same verb without a dot segment is the ordinary hop.
+    let (status, body) = raw_request(&router.base, "POST", "/contexts/sake/recall");
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(shard.requests().len(), 1, "{:?}", shard.requests());
+}
